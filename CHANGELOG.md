@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-22
 
+### Documentation
+
+- **LLM instructions: "NEVER READ .cs/.ts/.tsx FILES DIRECTLY" rule** — Substantially strengthened the MCP `instructions` field to prevent LLMs from defaulting to `read_file` for C#/TS files when `search_definitions includeBody=true` is faster. The previous "BEFORE reading, try X first" wording was too soft and lost to Roo's built-in "read all related files together" guidance. New approach uses 4 reinforcement mechanisms: (1) **Absolute prohibition**: `"NEVER READ .cs/.ts/.tsx FILES DIRECTLY"` in ALL CAPS. (2) **Decision trigger**: `"before ANY file read, check each file's extension"` — forces the LLM to evaluate extensions before choosing the tool. (3) **Batch split rule**: `"if you need both .cs and .md files, make TWO calls"` — explicitly resolves the conflict with Roo's "batch all files in one read" advice. (4) **Single exception**: only for editing (need exact line numbers for diffs). Also added anti-pattern in Architecture Exploration strategy and expanded the "Read method source" tip. Root cause: LLMs have a "convenience bias" toward built-in tools (`read_file`) over MCP tools (`search_definitions`), especially when batch reading mixes indexed and non-indexed file types.
+
 ### Features
 
 - **Angular Template Metadata** — Enriched Angular `@Component` definitions with template metadata. `search_definitions` now returns `selector` and `templateChildren` for Angular components. `search_callers` supports component tree navigation — `direction='down'` shows child components from HTML templates (recursive), `direction='up'` with a selector finds parent components. Custom elements (tags with hyphens) are extracted from external `.html` templates.

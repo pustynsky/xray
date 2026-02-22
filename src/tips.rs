@@ -87,9 +87,9 @@ pub fn tips() -> Vec<Tip> {
             example: "MCP: search_definitions file='UserService.cs', containsLine=42",
         },
         Tip {
-            rule: "Read method source: use includeBody=true",
-            why: "search_definitions with includeBody=true returns method body inline, eliminating read_file round-trips. Use maxBodyLines/maxTotalBodyLines for budget.",
-            example: "MCP: search_definitions parent='UserService', includeBody=true, maxBodyLines=20",
+            rule: "Read method source: use includeBody=true instead of reading files",
+            why: "search_definitions with includeBody=true returns method body inline, eliminating read_file round-trips. BEFORE reading any .cs/.ts file, try search_definitions with includeBody=true first. Use maxBodyLines/maxTotalBodyLines for budget. Only read files directly for non-C#/TS content (markdown, JSON, XML) or when you need exact line numbers for editing.",
+            example: "MCP: search_definitions parent='UserService', includeBody=true, maxBodyLines=20. Also: search_definitions name='Program,Startup,OrderService' includeBody=true -> reads multiple classes at once, faster than multiple read_file calls",
         },
         Tip {
             rule: "Body budgets: 0 means unlimited",
@@ -156,6 +156,7 @@ pub fn strategies() -> Vec<Strategy> {
             ],
             anti_patterns: &[
                 "Don't use list_files + read_file to explore architecture -- search_definitions returns classes, methods, file paths, and source code in ONE call",
+                "Don't read .cs/.ts files to see source code -- search_definitions includeBody=true returns it directly. read_file is ONLY for non-indexed files (markdown, JSON, XML, config) or for editing (need exact line numbers)",
                 "Don't search one kind at a time (class, then interface, then enum) -- omit kind filter to get everything at once",
                 "Don't use countOnly first then re-query with body -- go straight to includeBody=true with maxBodyLines",
                 "Don't search for file names separately if search_definitions already found them (results include file paths)",
@@ -413,8 +414,15 @@ pub fn render_instructions() -> String {
     out.push_str("   search_definitions -- classes, methods, source code, file paths in ONE call. DO NOT browse directories then read files.\n");
     out.push_str("   search_callers -- full call trees in <1ms. DO NOT search for callers manually.\n");
     out.push_str("   search_grep -- content search across 100K+ files instantly. DO NOT use regex-based file search.\n");
-    out.push_str("   search_fast -- file name lookup in ~35ms. DO NOT walk the filesystem.\n");
-    out.push_str("   ONLY read files directly when search tools can't help -- for editing, non-C#/TS content, or full file context.\n\n");
+    out.push_str("   search_fast -- file name lookup in ~35ms. DO NOT walk the filesystem.\n\n");
+
+    // --- FILE READING RULE (strongest possible: NEVER + decision trigger + batch split) ---
+    out.push_str("NEVER READ .cs/.ts/.tsx FILES DIRECTLY. ALWAYS use search_definitions includeBody=true instead.\n");
+    out.push_str("   DECISION TRIGGER: before ANY file read, check each file's extension.\n");
+    out.push_str("   If the file is .cs, .ts, or .tsx -> use search_definitions name='ClassName' includeBody=true maxBodyLines=30 (or file='path' containsLine=N includeBody=true). Use maxBodyLines to control output size for large classes.\n");
+    out.push_str("   If the file is .md, .json, .xml, .config, .csproj, or other non-C#/TS -> reading directly is OK.\n");
+    out.push_str("   BATCH SPLIT: if you need both .cs and .md files, make TWO calls: search_definitions for .cs files, direct read for .md files. Do NOT batch them into one direct read.\n");
+    out.push_str("   ONLY exceptions for .cs/.ts: (1) editing (need exact line numbers for diffs), (2) search_definitions returned an error or is unavailable.\n\n");
 
     // --- Quick reference (Phase 1: 5 bullets instead of 18 full tips) ---
     out.push_str("search-index MCP server -- Quick Reference\n\n");
@@ -526,7 +534,10 @@ mod tests {
         // PREFER block -- client-agnostic, no emoji, CAPS emphasis
         assert!(text.contains("CRITICAL: ALWAYS use search-index tools"), "instructions should have CRITICAL PREFER block");
         assert!(text.contains("DO NOT browse directories"), "instructions should use DO NOT framing");
-        assert!(text.contains("ONLY read files directly when search tools can't help"), "instructions should restrict file reading");
+        assert!(text.contains("NEVER READ .cs/.ts/.tsx FILES DIRECTLY"), "instructions should have absolute prohibition on reading C#/TS files");
+        assert!(text.contains("DECISION TRIGGER"), "instructions should have decision trigger for file extension check");
+        assert!(text.contains("BATCH SPLIT"), "instructions should have batch split instruction for mixed .cs + .md reads");
+        assert!(text.contains("ONLY exceptions for .cs/.ts:"), "instructions should list exceptions for .cs/.ts reading");
         // No emoji in machine-targeted text
         assert!(!text.contains('⚠'), "instructions should not contain emoji (machine-targeted text)");
         assert!(!text.contains('⚡'), "instructions should not contain emoji (machine-targeted text)");

@@ -11,7 +11,7 @@ name = "search"
 path = "src/lib.rs"
 
 [[bin]]
-name = "search"
+name = "search-index"
 path = "src/main.rs"
 
 [dependencies]
