@@ -432,6 +432,9 @@ impl GitHistoryCache {
         std::fs::rename(&tmp_path, path)
             .map_err(|e| format!("Failed to rename temp cache file: {}", e))?;
 
+        // Write sidecar .meta file (best-effort)
+        crate::index::save_index_meta(path, &crate::index::git_cache_meta(self));
+
         Ok(())
     }
 

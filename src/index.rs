@@ -358,6 +358,191 @@ pub fn estimate_git_cache_memory(cache: &crate::git::cache::GitHistoryCache) -> 
     })
 }
 
+// ─── Index metadata sidecar (.meta) ─────────────────────────────────
+
+/// Lightweight metadata saved alongside each index file.
+/// Allows `search info` CLI to display index stats without
+/// deserializing the full index (which can be 500+ MB in RAM).
+///
+/// Written as `<index_file>.meta` (e.g., `prefix_12345678.word-search.meta`).
+/// Format: JSON, ~200 bytes per file.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+pub struct IndexMeta {
+    /// Index type: "content", "definition", "file-list", "git-history"
+    #[serde(rename = "type")]
+    pub index_type: String,
+    /// Root directory of the index
+    pub root: String,
+    /// Timestamp when the index was created (seconds since epoch)
+    pub created_at: u64,
+    /// Max age in seconds before the index is considered stale (0 = no limit)
+    #[serde(default)]
+    pub max_age_secs: u64,
+    /// Number of files in the index
+    #[serde(default)]
+    pub files: usize,
+    /// Number of unique tokens (content index only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unique_tokens: Option<usize>,
+    /// Total tokens indexed (content index only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<u64>,
+    /// File extensions indexed
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub extensions: Vec<String>,
+    /// Number of definitions (definition index only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub definitions: Option<usize>,
+    /// Number of call sites (definition index only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub call_sites: Option<usize>,
+    /// Number of parse errors (definition index only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parse_errors: Option<usize>,
+    /// Number of lossy UTF-8 files (definition index only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lossy_file_count: Option<usize>,
+    /// Number of entries (file-list index only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub entries: Option<usize>,
+    /// Number of commits (git-history only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commits: Option<usize>,
+    /// Number of authors (git-history only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authors: Option<usize>,
+    /// Branch name (git-history only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// HEAD commit hash (git-history only)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_hash: Option<String>,
+}
+
+/// Save an IndexMeta sidecar file alongside an index file.
+/// The sidecar path is `<index_path>.meta`.
+/// Errors are logged but do not propagate (sidecar is best-effort).
+pub fn save_index_meta(index_path: &std::path::Path, meta: &IndexMeta) {
+    let meta_path = meta_path_for(index_path);
+    match serde_json::to_string_pretty(meta) {
+        Ok(json) => {
+            if let Err(e) = fs::write(&meta_path, json) {
+                eprintln!("[meta] Warning: failed to write {}: {}", meta_path.display(), e);
+            }
+        }
+        Err(e) => {
+            eprintln!("[meta] Warning: failed to serialize meta: {}", e);
+        }
+    }
+}
+
+/// Load an IndexMeta sidecar file. Returns None if not found or invalid.
+pub fn load_index_meta(index_path: &std::path::Path) -> Option<IndexMeta> {
+    let meta_path = meta_path_for(index_path);
+    let json = fs::read_to_string(&meta_path).ok()?;
+    serde_json::from_str(&json).ok()
+}
+
+/// Compute the sidecar path for a given index file path.
+fn meta_path_for(index_path: &std::path::Path) -> PathBuf {
+    let mut meta = index_path.as_os_str().to_owned();
+    meta.push(".meta");
+    PathBuf::from(meta)
+}
+
+/// Build IndexMeta for a ContentIndex.
+pub fn content_index_meta(idx: &crate::ContentIndex) -> IndexMeta {
+    IndexMeta {
+        index_type: "content".to_string(),
+        root: idx.root.clone(),
+        created_at: idx.created_at,
+        max_age_secs: idx.max_age_secs,
+        files: idx.files.len(),
+        unique_tokens: Some(idx.index.len()),
+        total_tokens: Some(idx.total_tokens),
+        extensions: idx.extensions.clone(),
+        definitions: None,
+        call_sites: None,
+        parse_errors: None,
+        lossy_file_count: None,
+        entries: None,
+        commits: None,
+        authors: None,
+        branch: None,
+        head_hash: None,
+    }
+}
+
+/// Build IndexMeta for a FileIndex.
+pub fn file_index_meta(idx: &crate::FileIndex) -> IndexMeta {
+    IndexMeta {
+        index_type: "file-list".to_string(),
+        root: idx.root.clone(),
+        created_at: idx.created_at,
+        max_age_secs: idx.max_age_secs,
+        files: 0,
+        unique_tokens: None,
+        total_tokens: None,
+        extensions: Vec::new(),
+        definitions: None,
+        call_sites: None,
+        parse_errors: None,
+        lossy_file_count: None,
+        entries: Some(idx.entries.len()),
+        commits: None,
+        authors: None,
+        branch: None,
+        head_hash: None,
+    }
+}
+
+/// Build IndexMeta for a DefinitionIndex.
+pub fn definition_index_meta(idx: &crate::definitions::DefinitionIndex) -> IndexMeta {
+    let call_sites: usize = idx.method_calls.values().map(|v| v.len()).sum();
+    IndexMeta {
+        index_type: "definition".to_string(),
+        root: idx.root.clone(),
+        created_at: idx.created_at,
+        max_age_secs: 0,
+        files: idx.files.len(),
+        unique_tokens: None,
+        total_tokens: None,
+        extensions: idx.extensions.clone(),
+        definitions: Some(idx.definitions.len()),
+        call_sites: Some(call_sites),
+        parse_errors: if idx.parse_errors > 0 { Some(idx.parse_errors) } else { None },
+        lossy_file_count: if idx.lossy_file_count > 0 { Some(idx.lossy_file_count) } else { None },
+        entries: None,
+        commits: None,
+        authors: None,
+        branch: None,
+        head_hash: None,
+    }
+}
+
+/// Build IndexMeta for a GitHistoryCache.
+pub fn git_cache_meta(cache: &crate::git::cache::GitHistoryCache) -> IndexMeta {
+    IndexMeta {
+        index_type: "git-history".to_string(),
+        root: String::new(),
+        created_at: cache.built_at,
+        max_age_secs: 0,
+        files: cache.file_commits.len(),
+        unique_tokens: None,
+        total_tokens: None,
+        extensions: Vec::new(),
+        definitions: None,
+        call_sites: None,
+        parse_errors: None,
+        lossy_file_count: None,
+        entries: None,
+        commits: Some(cache.commits.len()),
+        authors: Some(cache.authors.len()),
+        branch: Some(cache.branch.clone()),
+        head_hash: Some(cache.head_hash.clone()),
+    }
+}
+
 // ─── Index helpers ───────────────────────────────────────────────────
 
 /// Recover data from a Mutex, handling poisoned state gracefully.
@@ -485,7 +670,9 @@ pub fn index_path_for(dir: &str, index_base: &std::path::Path) -> PathBuf {
 pub fn save_index(index: &FileIndex, index_base: &std::path::Path) -> Result<(), SearchError> {
     fs::create_dir_all(index_base)?;
     let path = index_path_for(&index.root, index_base);
-    save_compressed(&path, index, "file-index")
+    save_compressed(&path, index, "file-index")?;
+    save_index_meta(&path, &file_index_meta(index));
+    Ok(())
 }
 
 pub fn load_index(dir: &str, index_base: &std::path::Path) -> Result<FileIndex, SearchError> {
@@ -504,7 +691,9 @@ pub fn save_content_index(index: &ContentIndex, index_base: &std::path::Path) ->
     fs::create_dir_all(index_base)?;
     let exts_str = index.extensions.join(",");
     let path = content_index_path_for(&index.root, &exts_str, index_base);
-    save_compressed(&path, index, "content-index")
+    save_compressed(&path, index, "content-index")?;
+    save_index_meta(&path, &content_index_meta(index));
+    Ok(())
 }
 
 pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<ContentIndex, SearchError> {
@@ -594,6 +783,8 @@ pub fn cleanup_orphaned_indexes(index_base: &std::path::Path) -> usize {
                     if std::fs::remove_file(&path).is_ok() {
                         removed += 1;
                         eprintln!("  Removed orphaned index: {} (root: {})", path.display(), root);
+                        // Also remove sidecar .meta file
+                        let _ = std::fs::remove_file(meta_path_for(&path));
                     }
                 }
             }
@@ -634,6 +825,8 @@ pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize
                         removed += 1;
                         eprintln!("  Removed index for dir '{}': {} ({})",
                             dir, path.display(), ext.unwrap_or("?"));
+                        // Also remove sidecar .meta file
+                        let _ = std::fs::remove_file(meta_path_for(&path));
                     }
                 }
             }

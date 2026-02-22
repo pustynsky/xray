@@ -21,7 +21,9 @@ pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Pa
     std::fs::create_dir_all(index_base)?;
     let exts_str = index.extensions.join(",");
     let path = definition_index_path_for(&index.root, &exts_str, index_base);
-    crate::index::save_compressed(&path, index, "definition-index")
+    crate::index::save_compressed(&path, index, "definition-index")?;
+    crate::index::save_index_meta(&path, &crate::index::definition_index_meta(index));
+    Ok(())
 }
 
 #[allow(dead_code)]
