@@ -179,8 +179,8 @@ pub fn cmd_serve(args: ServeArgs) {
     }
 
     // ─── Definition index: same async pattern ───
-    // Supported definition languages (no SQL — currently unsupported)
-    let supported_def_langs: &[&str] = &["cs", "ts", "tsx"];
+    // Supported definition languages (SQL supported via regex parser)
+    let supported_def_langs: &[&str] = &["cs", "ts", "tsx", "sql"];
     let def_exts = supported_def_langs.iter()
         .filter(|lang| extensions.iter().any(|e| e.eq_ignore_ascii_case(lang)))
         .copied()

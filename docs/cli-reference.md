@@ -312,7 +312,7 @@ Removed 3 index file(s) for '.'.
 
 ## `search-index def-index` — Build Code Definition Index
 
-Parses source files using tree-sitter to extract structural code definitions (classes, methods, interfaces, enums, etc.). **Unlike the content index, this is language-specific** — supports C# and TypeScript/TSX (SQL parser is retained but disabled). See [Supported Languages](architecture.md#supported-languages) for details.
+Parses source files using tree-sitter (C#, TypeScript/TSX) or regex (SQL) to extract structural code definitions (classes, methods, interfaces, enums, stored procedures, tables, views, etc.). **Unlike the content index, this is language-specific** — supports C#, TypeScript/TSX, and SQL. See [Supported Languages](architecture.md#supported-languages) for details.
 
 ```bash
 # Index C# files
@@ -337,7 +337,7 @@ search-index def-index --dir C:\Projects --ext cs --threads 8
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | C# (.cs)               | classes, interfaces, structs, enums, records, methods, constructors, properties, fields, delegates, events, enum members        |
 | TypeScript (.ts, .tsx) | classes, interfaces, enums, functions, type aliases, variables (const/let/var), methods, constructors, properties, enum members |
-| SQL (.sql)             | stored procedures, tables, views, functions, user-defined types (requires compatible tree-sitter grammar)                       |
+| SQL (.sql)             | stored procedures, tables, views, functions, user-defined types, indexes, columns, FK constraints (regex-based parser)          |
 
 Each definition includes: name, kind, file path, line range, full signature, modifiers (public/static/async/etc.), attributes/decorators (`[ServiceProvider]`, `@Injectable()`, etc.), base types/interfaces, and parent class.
 
@@ -406,6 +406,9 @@ search-index serve --dir C:\Projects --ext cs --watch --definitions
 
 # Mixed C# + TypeScript project
 search-index serve --dir C:\Projects --ext cs,ts,tsx --watch --definitions
+
+# Mixed C# + SQL project
+search-index serve --dir C:\Projects --ext cs,sql --watch --definitions
 ```
 
 **Options:**

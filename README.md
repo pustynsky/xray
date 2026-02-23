@@ -58,7 +58,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
 - **MCP Server** — native Model Context Protocol server for AI agents (Roo Code, Cline, or any MCP-compatible client) with async startup
-- **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*. Angular components enriched with template metadata (selector, child components from HTML templates)
+- **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*, regex-based parsing for *SQL* (.sql files: stored procedures, tables, views, functions, types, indexes, columns, and call sites from SP bodies). Angular components enriched with template metadata (selector, child components from HTML templates)
 - **Code complexity metrics** — 7 metrics computed during AST indexing: cyclomatic complexity, cognitive complexity (SonarSource), max nesting depth, parameter count, return/throw count, call count, lambda count. Query with `includeCodeStats`, sort by any metric, filter with `min*` thresholds
 - **Parallel tokenization** — content index tokenization parallelized across all CPU cores
 - **Parallel parsing** — multi-threaded tree-sitter parsing with lazy grammar loading
@@ -119,7 +119,7 @@ The engine uses three independent index types plus a git history cache:
 | Definitions | `.code-structure` | `search-index def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
 | Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` / `search_git_blame` / `search_branch_status` | Commit metadata, file-to-commit mapping, branch status |
 
-Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
+Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX via tree-sitter; SQL via regex parser) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 
 ### Caller Tree Verification
 
@@ -180,7 +180,7 @@ Test files are split by language module for maintainability:
 | Module | Test files |
 |---|---|
 | `src/mcp/handlers/` | `handlers_tests.rs` (77 general), `handlers_tests_csharp.rs` (31 C#), `handlers_tests_typescript.rs` (TS placeholder) |
-| `src/definitions/` | `definitions_tests.rs` (12 general), `definitions_tests_csharp.rs` (19 C#), `definitions_tests_typescript.rs` (32 TS) |
+| `src/definitions/` | `definitions_tests.rs` (12 general), `definitions_tests_csharp.rs` (19 C#), `definitions_tests_typescript.rs` (32 TS), `definitions_tests_sql.rs` (SQL) |
 | `src/git/` | `cache_tests.rs` (49 cache), `git_tests.rs` (git CLI) |
 | `src/` | `main_tests.rs` (35 general) |
 
@@ -190,7 +190,7 @@ Test files are split by language module for maintainability:
 | Integration | Build + search ContentIndex, build FileIndex, MCP server end-to-end |
 | MCP Protocol | JSON-RPC parsing, initialize, tools/list, tools/call, notifications, errors |
 | Substring/Trigram | Trigram generation, index build, substring search, 13 e2e integration tests |
-| Definitions | C# parsing, TypeScript/TSX parsing, SQL parsing, incremental update |
+| Definitions | C# parsing (tree-sitter), TypeScript/TSX parsing (tree-sitter), SQL parsing (regex-based), incremental update |
 | Git cache | Streaming parser, path normalization, query API, serialization roundtrip, disk persistence, HEAD validation |
 | Property tests | Tokenizer invariants, posting roundtrip, index consistency, TF-IDF ordering |
 | Benchmarks | Tokenizer throughput, index lookup latency, TF-IDF scoring, regex scan |

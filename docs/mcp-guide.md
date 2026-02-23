@@ -94,7 +94,7 @@ See [CLI Reference — `search-index grep`](cli-reference.md#search-grep--search
 
 ## `search_callers` — Call Tree
 
-Traces who calls a method (or what a method calls) and builds a hierarchical call tree. Combines the content index (grep) with the definition index (AST) to determine which method/class contains each call site. Replaces 7+ sequential `search_grep` + `read_file` calls with a single request. Supports C# and TypeScript/TSX.
+Traces who calls a method (or what a method calls) and builds a hierarchical call tree. Combines the content index (grep) with the definition index (AST) to determine which method/class contains each call site. Replaces 7+ sequential `search_grep` + `read_file` calls with a single request. Supports C#, TypeScript/TSX, and SQL (call sites from stored procedure bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE).
 
 ```json
 // Find all callers of ExecuteQueryAsync, 5 levels deep, excluding tests

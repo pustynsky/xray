@@ -26,9 +26,9 @@ notify = "6"
 tree-sitter = "0.24"
 tree-sitter-c-sharp = "0.23"
 tree-sitter-typescript = "0.23"
-# tree-sitter-sequel-tsql removed: version 0.4 requires tree-sitter language version 15,
-# but tree-sitter 0.24 only supports versions 13-14. SQL parsing is disabled until a
-# compatible T-SQL grammar is available.
+# tree-sitter-sequel-tsql removed: version 0.4.2 requires tree-sitter language ABI version 15,
+# but tree-sitter 0.24 only supports versions 13-14. Verified 2026-02-23: still incompatible.
+# SQL parsing is disabled until a compatible T-SQL grammar is available.
 lz4_flex = "0.11"
 mimalloc = { version = "0.1", features = ["override"] }
 thiserror = "2"

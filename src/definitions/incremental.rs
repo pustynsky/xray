@@ -8,6 +8,7 @@ use crate::read_file_lossy;
 use super::types::*;
 use super::parser_csharp::parse_csharp_definitions;
 use super::parser_typescript::parse_typescript_definitions;
+use super::parser_sql::parse_sql_definitions;
 
 /// Update definitions for a single file (incremental).
 /// Removes old definitions for the file, parses it again, adds new ones.
@@ -59,6 +60,9 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
             };
             ts_parser.set_language(&ts_lang.into()).ok();
             parse_typescript_definitions(&mut ts_parser, &content, file_id)
+        }
+        "sql" => {
+            parse_sql_definitions(&content, file_id)
         }
         _ => (Vec::new(), Vec::new(), Vec::new()),
     };

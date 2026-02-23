@@ -3,7 +3,6 @@
 mod types;
 mod parser_csharp;
 mod parser_typescript;
-#[allow(dead_code)]
 mod parser_sql;
 mod storage;
 mod incremental;
@@ -155,6 +154,10 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                                 p
                             });
                             parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
+                        }
+                        "sql" => {
+                            let (defs, calls, stats) = parser_sql::parse_sql_definitions(&content, *file_id);
+                            (defs, calls, stats)
                         }
                         _ => (Vec::new(), Vec::new(), Vec::new()),
                     };
@@ -420,6 +423,10 @@ mod tests_csharp;
 #[cfg(test)]
 #[path = "definitions_tests_typescript.rs"]
 mod tests_typescript;
+
+#[cfg(test)]
+#[path = "definitions_tests_sql.rs"]
+mod tests_sql;
 
 #[cfg(test)]
 #[path = "audit_tests.rs"]

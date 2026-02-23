@@ -8,7 +8,13 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-23
 
+### Bug Fixes
+
+- **SQL excluded from definition index in MCP server** — The `supported_def_langs` array in `serve.rs` was hardcoded to `["cs", "ts", "tsx"]`, blocking SQL from the definition index even though the regex parser was fully implemented. When starting the server with `--ext cs,sql`, SQL files were silently filtered out and only C# definitions were built. Fixed by adding `"sql"` to the supported languages array. No new tests needed — existing SQL parser tests and E2E tests cover the functionality.
+
 ### Features
+
+- **SQL parser** — `search_definitions` now parses `.sql` files, extracting stored procedures, tables, views, functions, user-defined types, indexes, columns, FK constraints, and call sites (EXEC/FROM/JOIN/INSERT/UPDATE/DELETE from stored procedure bodies). Uses a regex-based parser (no tree-sitter dependency for SQL). Definition kinds: `storedProcedure`, `sqlFunction`, `table`, `view`, `userDefinedType`, `sqlIndex`, `column`. GO-separated batches produce correct per-object line ranges. 29 unit tests.
 
 - **Parent relevance ranking in `search_definitions`** — When `parent` filter is set, results are now sorted by parent match quality: exact parent match (tier 0) ranks before prefix match (tier 1), which ranks before substring/contains match (tier 2). Previously, all parent substring matches were treated equally, so searching with `parent=UserService` could return members of `UserServiceMock` before members of `UserService` itself. The fix activates relevance sorting when `parent_filter` is set (in addition to the existing `name_filter` path), using `best_match_tier()` as the primary sort key for parent, with name match tier as secondary. 5 new unit tests.
 
