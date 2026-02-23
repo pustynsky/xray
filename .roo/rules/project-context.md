@@ -15,7 +15,7 @@ After every code change, before completing the task, verify ALL of the following
 5. **Documentation** — `README.md` and the rest relevant GIT-tracked documents are updated
 6. **Changelog** — `CHANGELOG.md` is updated with a concise entry describing the change (categorized as Features, Bug Fixes, Performance, or Internal)
 7. **Neutral names** — all class/method names in docs, tests, and tool descriptions are generic (e.g., `UserService`, `OrderProcessor`) — never expose internal/proprietary names
-8. **All tests pass** — run `cargo test --bin search` and confirm 0 failures
+8. **All tests pass** — run `cargo test --bin search-index` and confirm 0 failures
 9. **Ask user to stop MCP server** — before reinstalling the binary, ask the user to stop the MCP server (restart VS Code or stop the search-index server)
 10. **Reinstall binary** — `cargo install --path . --force`
 11. **Run E2E tests** — after the binary is installed, run `.\e2e-test.ps1` and confirm 0 failures
@@ -65,6 +65,6 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 - **Follow the post-change checklist strictly** — do not skip steps or reorder them. The checklist exists to prevent regressions and ensure quality. When in doubt, re-read the checklist.
 - **Documentation is a contract** — if docs describe a flag/feature, the code MUST support it. If a doc says `--substring` exists as a CLI flag but the code doesn't have it, that's a bug — either fix the code or fix the docs. Never leave docs and code out of sync.
 - **Use PS script files for complex commands** — when a PowerShell command is too complex for inline execution (escaping issues, multi-line, regex with special chars), write it to a `.ps1` file, execute it, then delete the file. Inline PowerShell via `powershell -Command "..."` breaks on colons, backticks, and nested quotes. Script files avoid all escaping issues.
-- **Stop MCP server before reinstall** — before running `cargo install --path . --force`, propose running `taskkill /IM search.exe /F` to stop any running search.exe processes. If the user agrees, run it yourself. Don't ask the user to restart VS Code — just kill the process directly.
+- **Stop MCP server before reinstall** — before running `cargo install --path . --force`, propose running `taskkill /IM search-index.exe /F` to stop any running search-index.exe processes. If the user agrees, run it yourself. Don't ask the user to restart VS Code — just kill the process directly.
 - **Always run product name check before staging** — run `scripts/check-product-names.ps1` before `git add -u`. If product-specific names are found in documentation or code, replace them with neutral equivalents before committing. This prevents accidental exposure of internal/proprietary names in the public repository.
 - **Feature discoverability across interfaces** — every new feature must be exposed in BOTH CLI help and MCP tool descriptions. If a feature exists in code but isn't in `--help` or tool descriptions, users/LLMs can't discover it. Review `src/cli/args.rs` (CLI), `src/tips.rs` (MCP descriptions), and `search_help` output after every feature addition.

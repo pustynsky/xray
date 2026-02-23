@@ -44,12 +44,12 @@ pub fn tips() -> Vec<Tip> {
         Tip {
             rule: "Multi-term OR: find all variants in ONE query",
             why: "Comma-separated terms with mode='or' finds files containing ANY term. Much faster than separate queries.",
-            example: "search grep \"UserService,IUserService,UserServiceFactory\" -e cs  |  MCP: terms='...', mode='or'",
+            example: "search-index grep \"UserService,IUserService,UserServiceFactory\" -e cs  |  MCP: terms='...', mode='or'",
         },
         Tip {
             rule: "AND mode: find files containing ALL terms",
             why: "mode='and' finds files where ALL comma-separated terms co-occur. Useful for finding DI registrations.",
-            example: "search grep \"ServiceProvider,IUserService\" -e cs --all  |  MCP: terms='...', mode='and'",
+            example: "search-index grep \"ServiceProvider,IUserService\" -e cs --all  |  MCP: terms='...', mode='and'",
         },
         Tip {
             rule: "Substring search is ON by default",
@@ -59,12 +59,12 @@ pub fn tips() -> Vec<Tip> {
         Tip {
             rule: "Phrase search: exact multi-word match",
             why: "phrase=true finds exact adjacent word sequences. Slower (~80ms) but precise.",
-            example: "search grep \"new HttpClient\" -e cs --phrase  |  MCP: terms='new HttpClient', phrase=true",
+            example: "search-index grep \"new HttpClient\" -e cs --phrase  |  MCP: terms='new HttpClient', phrase=true",
         },
         Tip {
             rule: "Regex pattern search",
             why: "Full regex for pattern matching. Also works in search_definitions name parameter.",
-            example: "search grep \"I[A-Z]\\w+Cache\" -e cs --regex  |  MCP: terms='I[A-Z]\\w+Cache', regex=true",
+            example: "search-index grep \"I[A-Z]\\w+Cache\" -e cs --regex  |  MCP: terms='I[A-Z]\\w+Cache', regex=true",
         },
         Tip {
             rule: "Exclude test/mock dirs for production-only results",
@@ -99,17 +99,17 @@ pub fn tips() -> Vec<Tip> {
         Tip {
             rule: "Reconnaissance: use countOnly=true",
             why: "search_grep with countOnly=true returns ~46 tokens (counts only) vs 265+ for full results. Perfect for 'how many files use X?'.",
-            example: "search grep \"HttpClient\" -e cs --count-only  |  MCP: terms='HttpClient', countOnly=true",
+            example: "search-index grep \"HttpClient\" -e cs --count-only  |  MCP: terms='HttpClient', countOnly=true",
         },
         Tip {
             rule: "Search ANY indexed file type: XML, csproj, config, etc.",
             why: "search_grep works with all file extensions passed to --ext. Use ext='csproj' to find NuGet dependencies, ext='xml,config,manifestxml' for configuration values.",
-            example: "search grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms='Newtonsoft.Json', ext='csproj'",
+            example: "search-index grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms='Newtonsoft.Json', ext='csproj'",
         },
         Tip {
             rule: "Language scope: content search = any language, AST = C# and TypeScript/TSX",
             why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / def-index use tree-sitter AST parsing -- supports C# and TypeScript/TSX. search_callers uses call-graph analysis -- supports C# and TypeScript/TSX (DI-aware, inject() support, interface resolution).",
-            example: "search grep works on -e rs,py,js,xml,json | search_definitions supports .cs, .ts, .tsx | search_callers supports .cs, .ts, .tsx",
+            example: "search-index grep works on -e rs,py,js,xml,json | search_definitions supports .cs, .ts, .tsx | search_callers supports .cs, .ts, .tsx",
         },
         Tip {
             rule: "Response truncation: large results are auto-capped at ~16KB",
@@ -324,7 +324,7 @@ pub fn parameter_examples() -> Value {
 /// Render tips as human-readable CLI output.
 pub fn render_cli() -> String {
     let mut out = String::new();
-    out.push_str("\nsearch -- Best Practices & Tips\n");
+    out.push_str("\nsearch-index -- Best Practices & Tips\n");
     out.push_str("===============================\n\n");
 
     out.push_str("BEST PRACTICES\n");

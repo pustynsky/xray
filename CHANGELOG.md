@@ -42,7 +42,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 - **`search_info` memory spike fix — 1.8 GB temporary allocation eliminated** — `search_info` MCP handler was calling `cmd_info_json()` which fully deserialized ALL index files from `%LOCALAPPDATA%/search-index/` (including indexes for repos the server doesn't serve). For a multi-repo setup with multiple indexed directories, this loaded ~1.8 GB into memory temporarily. Since the main thread never exits, mimalloc never decommitted these freed segments back to the OS, causing Working Set to stay at ~4.4 GB instead of ~2.5 GB. **Fix:** Rewrote `handle_search_info()` to read all statistics from already-loaded in-memory structures (`ctx.index`, `ctx.def_index`, `ctx.git_cache`) via read locks — zero additional allocations. Disk file sizes obtained via `fs::metadata()` only. Removed the `cmd_info_json()` call entirely from the MCP path. Also removed the temporary `force_mimalloc_collect()` workaround from `dispatch_tool()` that was added during diagnosis. Memory log (`--memory-log`) confirms: `search_info` Δ WS went from +1,799 MB to ~0 MB.
 
-- **CLI `search info` sidecar `.meta` optimization** — CLI `search info` previously deserialized entire index files from disk (~1.8 GB for multi-repo setups) just to extract metadata (root, files count, tokens, age). Added sidecar `.meta` JSON files (~200 bytes each) that are written alongside every index file on save. `cmd_info()` and `cmd_info_json()` now read `.meta` files first (instant, zero deserialization), falling back to full deserialization only for old indexes without `.meta`. Affected save functions: `save_content_index()`, `save_index()`, `save_definition_index()`, `GitHistoryCache::save_to_disk()`. Cleanup functions (`cleanup_orphaned_indexes`, `cleanup_indexes_for_dir`) also remove `.meta` sidecars. 4 new unit tests.
+- **CLI `search-index info` sidecar `.meta` optimization** — CLI `search-index info` previously deserialized entire index files from disk (~1.8 GB for multi-repo setups) just to extract metadata (root, files count, tokens, age). Added sidecar `.meta` JSON files (~200 bytes each) that are written alongside every index file on save. `cmd_info()` and `cmd_info_json()` now read `.meta` files first (instant, zero deserialization), falling back to full deserialization only for old indexes without `.meta`. Affected save functions: `save_content_index()`, `save_index()`, `save_definition_index()`, `GitHistoryCache::save_to_disk()`. Cleanup functions (`cleanup_orphaned_indexes`, `cleanup_indexes_for_dir`) also remove `.meta` sidecars. 4 new unit tests.
 
 ### Performance
 
@@ -63,9 +63,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Features
 
-- **Memory diagnostics (`--memory-log`)** — New `--memory-log` CLI flag for `search serve` writes Working Set / Peak WS / Commit metrics to `memory.log` in the index directory (`%LOCALAPPDATA%/search-index/`) at every key pipeline stage. Metrics are captured at: server startup, content/definition index build start/finish, drop/reload cycles, trigram builds, git cache init/ready. When disabled (default), `log_memory()` is a single `AtomicBool` check — zero overhead. Windows-only (uses `K32GetProcessMemoryInfo`); no-op on other platforms. 7 new unit tests.
+- **Memory diagnostics (`--memory-log`)** — New `--memory-log` CLI flag for `search-index serve` writes Working Set / Peak WS / Commit metrics to `memory.log` in the index directory (`%LOCALAPPDATA%/search-index/`) at every key pipeline stage. Metrics are captured at: server startup, content/definition index build start/finish, drop/reload cycles, trigram builds, git cache init/ready. When disabled (default), `log_memory()` is a single `AtomicBool` check — zero overhead. Windows-only (uses `K32GetProcessMemoryInfo`); no-op on other platforms. 7 new unit tests.
 
-- **Memory estimates in `search_info`** — `search_info` MCP response and CLI `search info` now include a `memoryEstimate` section with calculated per-component memory estimates: inverted index, trigram tokens/map, files, definitions, call sites, git cache, and process memory (Working Set / Peak / Commit). Estimates use sampling (first 1000 keys) for efficiency. Available on all platforms; process memory info is Windows-only.
+- **Memory estimates in `search_info`** — `search_info` MCP response and CLI `search-index info` now include a `memoryEstimate` section with calculated per-component memory estimates: inverted index, trigram tokens/map, files, definitions, call sites, git cache, and process memory (Working Set / Peak / Commit). Estimates use sampling (first 1000 keys) for efficiency. Available on all platforms; process memory info is Windows-only.
 
 ### Performance
 
@@ -97,7 +97,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
   1. `src/cli/args.rs` — Added 5 missing tools to AVAILABLE TOOLS list (`search_git_blame`, `search_branch_status`, `search_git_pickaxe`, `search_help`, `search_reindex_definitions`), bringing the list from 11 to 16 tools
   2. `src/tips.rs` — Added 3 new tips (branch status check, pickaxe usage, noCache parameter), 1 new "Code History Investigation" strategy recipe, git tools brief mention in `render_instructions()`, and `search_branch_status` in tool priority list
   3. `docs/mcp-guide.md` — Added "File Not Found Warning" section documenting the `warning` field in git tool responses when a file doesn't exist in git
-  4. `docs/cli-reference.md` — Added `[GIT]` example output line to `search info` section
+  4. `docs/cli-reference.md` — Added `[GIT]` example output line to `search-index info` section
   5. `README.md` — Added "Branch awareness" feature mention for `branchWarning`
   6. `docs/use-cases.md` — Added "When Was This Error Introduced?" use case showing `search_branch_status` → `search_git_pickaxe` → `search_git_authors` → `search_git_diff` workflow
 
@@ -133,7 +133,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Features
 
-- **Git history cache in `search info` / `search_info`** — The `info` CLI command and MCP `search_info` tool now display `.git-history` cache files alongside existing index types (`.file-list`, `.word-search`, `.code-structure`). CLI output shows `[GIT]` entries with branch, commit count, file count, author count, HEAD hash (first 8 chars), size, and age. MCP JSON output includes `type: "git-history"` entries with full metadata. Previously, `.git-history` cache files existed on disk but were silently skipped by the info command. 4 new unit tests.
+- **Git history cache in `search-index info` / `search_info`** — The `info` CLI command and MCP `search_info` tool now display `.git-history` cache files alongside existing index types (`.file-list`, `.word-search`, `.code-structure`). CLI output shows `[GIT]` entries with branch, commit count, file count, author count, HEAD hash (first 8 chars), size, and age. MCP JSON output includes `type: "git-history"` entries with full metadata. Previously, `.git-history` cache files existed on disk but were silently skipped by the info command. 4 new unit tests.
 
 ### Bug Fixes
 

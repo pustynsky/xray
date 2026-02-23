@@ -8,8 +8,8 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::HashMap;
 
-// Import from the search crate
-use search::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex};
+// Import from the search-index crate
+use search_index::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex};
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 

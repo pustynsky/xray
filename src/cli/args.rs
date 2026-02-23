@@ -162,19 +162,19 @@ pub struct CleanupArgs {
   The server reads JSON requests from stdin and writes responses to stdout.
 
 EXAMPLES:
-  Basic:          search serve --dir C:\Projects\MyApp --ext cs
-  Multi-ext:      search serve --dir C:\Projects --ext cs,sql,csproj
-  C# + TypeScript: search serve --dir C:\Projects --ext cs,ts,tsx
-  With watcher:   search serve --dir C:\Projects --ext cs --watch
-  With defs:      search serve --dir C:\Projects --ext cs --watch --definitions
-  TS defs:        search serve --dir C:\Projects --ext ts,tsx --watch --definitions
-  Custom debounce: search serve --dir . --ext rs --watch --debounce-ms 1000
+  Basic:          search-index serve --dir C:\Projects\MyApp --ext cs
+  Multi-ext:      search-index serve --dir C:\Projects --ext cs,sql,csproj
+  C# + TypeScript: search-index serve --dir C:\Projects --ext cs,ts,tsx
+  With watcher:   search-index serve --dir C:\Projects --ext cs --watch
+  With defs:      search-index serve --dir C:\Projects --ext cs --watch --definitions
+  TS defs:        search-index serve --dir C:\Projects --ext ts,tsx --watch --definitions
+  Custom debounce: search-index serve --dir . --ext rs --watch --debounce-ms 1000
 
 VS CODE CONFIGURATION (.vscode/mcp.json):
   {
     "servers": {
       "search-index": {
-        "command": "search",
+        "command": "search-index",
         "args": ["serve", "--dir", "C:\\Projects\\MyApp", "--ext", "cs", "--watch", "--definitions"]
       }
     }
@@ -260,21 +260,21 @@ pub struct ServeArgs {
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = r#"EXAMPLES:
-  Single term:     search grep "HttpClient" -d C:\Projects -e cs
-  Multi-term OR:   search grep "HttpClient,ILogger,Task" -d C:\Projects -e cs
-  Multi-term AND:  search grep "HttpClient,ILogger" -d C:\Projects -e cs --all
-  Regex:           search grep "i.*cache" -d C:\Projects -e cs --regex
-  Regex + lines:   search grep ".*factory" -d C:\Projects -e cs --regex --show-lines
-  Top 10 results:  search grep "HttpClient" -d C:\Projects --max-results 10
-  Exclude dirs:    search grep "HttpClient" -d . -e cs --exclude-dir test --exclude-dir E2E
-  Exclude files:   search grep "HttpClient" -d . -e cs --exclude Mock
-  Context lines:   search grep "HttpClient" -d . -e cs --show-lines -C 3
-  Before/after:    search grep "HttpClient" -d . -e cs --show-lines -B 2 -A 5
-  Exact tokens:    search grep "UserService" -d C:\Projects -e cs --exact
+  Single term:     search-index grep "HttpClient" -d C:\Projects -e cs
+  Multi-term OR:   search-index grep "HttpClient,ILogger,Task" -d C:\Projects -e cs
+  Multi-term AND:  search-index grep "HttpClient,ILogger" -d C:\Projects -e cs --all
+  Regex:           search-index grep "i.*cache" -d C:\Projects -e cs --regex
+  Regex + lines:   search-index grep ".*factory" -d C:\Projects -e cs --regex --show-lines
+  Top 10 results:  search-index grep "HttpClient" -d C:\Projects --max-results 10
+  Exclude dirs:    search-index grep "HttpClient" -d . -e cs --exclude-dir test --exclude-dir E2E
+  Exclude files:   search-index grep "HttpClient" -d . -e cs --exclude Mock
+  Context lines:   search-index grep "HttpClient" -d . -e cs --show-lines -C 3
+  Before/after:    search-index grep "HttpClient" -d . -e cs --show-lines -B 2 -A 5
+  Exact tokens:    search-index grep "UserService" -d C:\Projects -e cs --exact
 
 NOTES:
   - Requires a content index. Build one first:
-      search content-index -d C:\Projects -e cs,rs,py
+      search-index content-index -d C:\Projects -e cs,rs,py
   - Results sorted by TF-IDF relevance (most relevant files first)
   - Multi-term: comma-separated, OR by default, AND with --all
   - Regex: pattern matched against all indexed tokens (e.g. 754K unique tokens)

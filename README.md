@@ -79,22 +79,22 @@ cd search
 cargo build --release
 ```
 
-Requires [Rust](https://rustup.rs/) 1.85+. Binary: `target/release/search.exe` (Windows) or `target/release/search` (Linux/Mac).
+Requires [Rust](https://rustup.rs/) 1.85+. Binary: `target/release/search-index.exe` (Windows) or `target/release/search-index` (Linux/Mac).
 
 ### CLI Usage
 
 ```bash
 # Build content index for C# files
-search content-index -d C:\Projects -e cs
+search-index content-index -d C:\Projects -e cs
 
 # Search by token (TF-IDF ranked)
-search grep "HttpClient" -d C:\Projects -e cs
+search-index grep "HttpClient" -d C:\Projects -e cs
 
 # Search file names (instant)
-search fast "UserService" -d C:\Projects -e cs
+search-index fast "UserService" -d C:\Projects -e cs
 
 # Live filesystem search (no index needed)
-search find "TODO" -d C:\Projects --contents -e cs
+search-index find "TODO" -d C:\Projects --contents -e cs
 ```
 
 See [CLI Reference](docs/cli-reference.md) for all commands and options.
@@ -103,7 +103,7 @@ See [CLI Reference](docs/cli-reference.md) for all commands and options.
 
 ```bash
 # Start MCP server with file watching and code definitions
-search serve --dir C:\Projects --ext cs --watch --definitions
+search-index serve --dir C:\Projects --ext cs --watch --definitions
 ```
 
 See [MCP Server Guide](docs/mcp-guide.md) for VS Code setup, tools API, and examples.
@@ -114,9 +114,9 @@ The engine uses three independent index types plus a git history cache:
 
 | Index | File | Created by | Searched by | Stores |
 |---|---|---|---|---|
-| File name | `.file-list` | `search index` | `search fast` | File paths, sizes, timestamps |
-| Content | `.word-search` | `search content-index` | `search grep` | Token → (file, line numbers) map |
-| Definitions | `.code-structure` | `search def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
+| File name | `.file-list` | `search-index index` | `search-index fast` | File paths, sizes, timestamps |
+| Content | `.word-search` | `search-index content-index` | `search-index grep` | Token → (file, line numbers) map |
+| Definitions | `.code-structure` | `search-index def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
 | Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` / `search_git_blame` / `search_branch_status` | Commit metadata, file-to-commit mapping, branch status |
 
 Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.

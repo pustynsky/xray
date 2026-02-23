@@ -77,7 +77,7 @@ let hash = stable_hash(&[canonical_dir.as_bytes(), b"git-history"]);
 let filename = format!("{}_{:08x}.git-history", prefix, hash as u32);
 ```
 
-**Implication:** Indexing the same directory with different extension sets produces different files. `search content-index -d C:\Projects -e cs` and `search content-index -d C:\Projects -e cs,sql` create two separate `.word-search` files.
+**Implication:** Indexing the same directory with different extension sets produces different files. `search-index content-index -d C:\Projects -e cs` and `search-index content-index -d C:\Projects -e cs,sql` create two separate `.word-search` files.
 
 ### Collision Handling
 
@@ -112,7 +112,7 @@ let result = load_compressed::<ContentIndex>(&path, "content-index");
 
 ### Sizes on Disk
 
-Measured on a real codebase (from `search info` and build logs):
+Measured on a real codebase (from `search-index info` and build logs):
 
 | Index Type      | Files Indexed   | Content                 | Disk Size |
 | --------------- | --------------- | ----------------------- | --------- |
@@ -215,11 +215,11 @@ fn is_stale(&self) -> bool {
 }
 ```
 
-| Behavior                            | `search fast` / `search grep`                                | `search serve`                   |
+| Behavior                            | `search-index fast` / `search-index grep`                                | `search-index serve`                   |
 | ----------------------------------- | ------------------------------------------------------------ | -------------------------------- |
 | Index stale, `--auto-reindex true`  | Rebuild automatically                                        | N/A (index stays in RAM)         |
 | Index stale, `--auto-reindex false` | Print warning, use stale                                     | N/A                              |
-| Index missing                       | Build automatically (`search fast`) or error (`search grep`) | Build in background (async startup) |
+| Index missing                       | Build automatically (`search-index fast`) or error (`search-index grep`) | Build in background (async startup) |
 | With `--watch`                      | N/A                                                          | Incremental updates, never stale |
 
 Default max age: 24 hours (`--max-age-hours 24`).

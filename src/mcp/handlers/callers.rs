@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::mcp::protocol::ToolCallResult;
 use crate::ContentIndex;
 use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionKind};
-use search::generate_trigrams;
+use search_index::generate_trigrams;
 
 use super::HandlerContext;
 use super::utils::{inject_branch_warning, sorted_intersect};

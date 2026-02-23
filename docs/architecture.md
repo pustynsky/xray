@@ -7,14 +7,14 @@
 ```mermaid
 graph TB
     subgraph CLI["CLI Layer (clap)"]
-        FIND[search find]
-        INDEX[search index]
-        FAST[search fast]
-        CIDX[search content-index]
-        GREP[search grep]
-        DIDX[search def-index]
-        SERVE[search serve]
-        INFO[search info]
+        FIND[search-index find]
+        INDEX[search-index index]
+        FAST[search-index fast]
+        CIDX[search-index content-index]
+        GREP[search-index grep]
+        DIDX[search-index def-index]
+        SERVE[search-index serve]
+        INFO[search-index info]
     end
 
     subgraph Core["Core Engine"]
@@ -451,9 +451,9 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
-| `search content-index -d DIR -e EXT` | Full parallel walk + tokenization | ContentIndex (`.word-search`) | ~7–16s |
-| `search def-index -d DIR -e EXT` | Full parallel walk + tree-sitter parse | DefinitionIndex (`.code-structure`) | ~16–32s |
-| `search index -d DIR` | Full parallel walk | FileIndex (`.file-list`) | ~2–4s |
+| `search-index content-index -d DIR -e EXT` | Full parallel walk + tokenization | ContentIndex (`.word-search`) | ~7–16s |
+| `search-index def-index -d DIR -e EXT` | Full parallel walk + tree-sitter parse | DefinitionIndex (`.code-structure`) | ~16–32s |
+| `search-index index -d DIR` | Full parallel walk | FileIndex (`.file-list`) | ~2–4s |
 | MCP server first start (no index on disk) | Background thread builds indexes; tools return "index is building" until ready | ContentIndex + DefinitionIndex (if `--definitions`) | Same as above |
 | `search_reindex` (MCP tool) | Full rebuild + reload in-memory | ContentIndex | ~7–16s |
 | `search_reindex_definitions` (MCP tool) | Full rebuild + reload in-memory | DefinitionIndex | ~16–32s |
@@ -472,23 +472,23 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
 | Substring search after file watcher update | `trigram_dirty` flag → trigram index rebuilt from inverted index on next `search_grep` with `substring=true` | TrigramIndex (in-memory, part of ContentIndex) | ~200ms |
-| `search fast` with stale FileIndex | Auto-rebuild if `--auto-reindex true` (default) | FileIndex | ~2–4s |
-| `search grep` with stale ContentIndex | Auto-rebuild if `--auto-reindex true` (default) | ContentIndex | ~7–16s |
+| `search-index fast` with stale FileIndex | Auto-rebuild if `--auto-reindex true` (default) | FileIndex | ~2–4s |
+| `search-index grep` with stale ContentIndex | Auto-rebuild if `--auto-reindex true` (default) | ContentIndex | ~7–16s |
 
 ### Load From Disk (No Rebuild)
 
 | Trigger | What Happens | Time |
 |---------|-------------|------|
 | MCP server start (index exists on disk) | Synchronous load of LZ4-compressed bincode files | < 3s |
-| `search grep` / `search fast` (index exists, not stale) | Load from disk | < 3s |
+| `search-index grep` / `search-index fast` (index exists, not stale) | Load from disk | < 3s |
 
 ### What Does NOT Trigger Re-indexing
 
 | Scenario | Why |
 |----------|-----|
-| Upgrading `search.exe` binary (runtime logic changes only) | Index format unchanged → existing `.word-search` / `.code-structure` files are fully compatible |
-| Upgrading `search.exe` binary (parser changes — new definition types, new call site patterns) | Old index loads fine but may have stale/incomplete data → **manual `search_reindex_definitions`** recommended |
-| Upgrading `search.exe` binary (index format changes — e.g., new field added to struct) | Bincode deserialization fails → index is rebuilt automatically on next server start |
+| Upgrading `search-index.exe` binary (runtime logic changes only) | Index format unchanged → existing `.word-search` / `.code-structure` files are fully compatible |
+| Upgrading `search-index.exe` binary (parser changes — new definition types, new call site patterns) | Old index loads fine but may have stale/incomplete data → **manual `search_reindex_definitions`** recommended |
+| Upgrading `search-index.exe` binary (index format changes — e.g., new field added to struct) | Bincode deserialization fails → index is rebuilt automatically on next server start |
 | Restarting VS Code / MCP server | Index loads from disk (if saved); no rebuild |
 | Opening a different VS Code workspace | Each workspace has its own MCP server instance with its own index |
 
@@ -560,8 +560,8 @@ The engine has two layers with **different language coverage**:
 
 | Layer | Tools | Language Support | How it works |
 | ----- | ----- | ---------------- | ------------ |
-| **Content search** | `search grep`, `content-index`, `search_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
-| **AST / structural search** | `search def-index`, `search_definitions`, `search_callers` (MCP) | **C# and TypeScript/TSX** (SQL parser retained but disabled) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. Requires a language-specific grammar. |
+| **Content search** | `search-index grep`, `content-index`, `search_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
+| **AST / structural search** | `search-index def-index`, `search_definitions`, `search_callers` (MCP) | **C# and TypeScript/TSX** (SQL parser retained but disabled) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. Requires a language-specific grammar. |
 
 ### AST Parser Status
 

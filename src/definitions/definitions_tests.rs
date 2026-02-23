@@ -109,7 +109,7 @@ fn test_read_file_lossy_with_valid_utf8() {
     let file_path = dir.join("valid.cs");
     std::fs::write(&file_path, "public class ValidService {}").unwrap();
 
-    let (content, was_lossy) = search::read_file_lossy(&file_path).unwrap();
+    let (content, was_lossy) = search_index::read_file_lossy(&file_path).unwrap();
     assert!(!was_lossy, "Valid UTF-8 file should not be lossy");
     assert!(content.contains("ValidService"));
 }
@@ -125,7 +125,7 @@ fn test_read_file_lossy_with_non_utf8_byte() {
     content.extend_from_slice(b"public class TestService {}\n");
     std::fs::write(&file_path, &content).unwrap();
 
-    let (result, was_lossy) = search::read_file_lossy(&file_path).unwrap();
+    let (result, was_lossy) = search_index::read_file_lossy(&file_path).unwrap();
     assert!(was_lossy, "Non-UTF8 file should be lossy");
     assert!(result.contains("TestService"), "Should still read the file content");
     assert!(result.contains('\u{FFFD}'), "Should contain replacement character");
