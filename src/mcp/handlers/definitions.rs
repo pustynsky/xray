@@ -409,17 +409,41 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
             let vb = get_sort_value(index.code_stats.get(idx_b), def_b, sort_field);
             vb.cmp(&va) // descending — worst first
         });
-    } else if name_filter.is_some() && !use_regex {
-        // Relevance ranking (only when name filter is active and not regex)
-        let terms: Vec<String> = name_filter.unwrap().split(',')
-            .map(|s| s.trim().to_lowercase())
-            .filter(|s| !s.is_empty())
-            .collect();
+    } else if (name_filter.is_some() && !use_regex) || parent_filter.is_some() {
+        // Relevance ranking when name or parent filter is active (not regex)
+        // - Name terms: exact name > prefix > substring
+        // - Parent terms: exact parent > prefix > substring
+        let name_terms: Vec<String> = name_filter
+            .map(|n| n.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect())
+            .unwrap_or_default();
+
+        let parent_terms: Vec<String> = parent_filter
+            .map(|p| vec![p.to_lowercase()])
+            .unwrap_or_default();
 
         results.sort_by(|(_, a), (_, b)| {
-            let tier_a = best_match_tier(&a.name, &terms);
-            let tier_b = best_match_tier(&b.name, &terms);
-            tier_a.cmp(&tier_b)
+            // Parent relevance first (when parent filter is set, exact parent match is critical)
+            let parent_tier_a = if !parent_terms.is_empty() {
+                a.parent.as_deref().map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3)
+            } else { 0 };
+            let parent_tier_b = if !parent_terms.is_empty() {
+                b.parent.as_deref().map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3)
+            } else { 0 };
+
+            parent_tier_a.cmp(&parent_tier_b)
+                .then_with(|| {
+                    // Name relevance as secondary sort
+                    if !name_terms.is_empty() {
+                        let tier_a = best_match_tier(&a.name, &name_terms);
+                        let tier_b = best_match_tier(&b.name, &name_terms);
+                        tier_a.cmp(&tier_b)
+                    } else {
+                        std::cmp::Ordering::Equal
+                    }
+                })
                 .then_with(|| kind_priority(&a.kind).cmp(&kind_priority(&b.kind)))
                 .then_with(|| a.name.len().cmp(&b.name.len()))
                 .then_with(|| a.name.cmp(&b.name))
@@ -651,5 +675,137 @@ mod tests {
         assert!(kind_priority(&DefinitionKind::Enum) < kind_priority(&DefinitionKind::Field));
         assert!(kind_priority(&DefinitionKind::Struct) < kind_priority(&DefinitionKind::Function));
         assert!(kind_priority(&DefinitionKind::Record) < kind_priority(&DefinitionKind::Constructor));
+    }
+
+    // ─── Parent relevance ranking tests ──────────────────────────────
+
+    /// Helper to create a DefinitionEntry with specific name, parent, and kind
+    fn make_def(name: &str, parent: Option<&str>, kind: DefinitionKind) -> DefinitionEntry {
+        DefinitionEntry {
+            name: name.to_string(),
+            kind,
+            file_id: 0,
+            line_start: 1,
+            line_end: 10,
+            signature: None,
+            parent: parent.map(|s| s.to_string()),
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }
+    }
+
+    #[test]
+    fn test_parent_ranking_exact_parent_before_substring_parent() {
+        // When parent_filter="UserService", exact parent "UserService" should rank
+        // before substring parent "UserServiceMock"
+        let parent_terms = vec!["userservice".to_string()];
+        let _name_terms: Vec<String> = vec![];
+
+        let def_exact = make_def("GetUser", Some("UserService"), DefinitionKind::Method);
+        let def_substring = make_def("GetUser", Some("UserServiceMock"), DefinitionKind::Method);
+
+        let tier_exact = def_exact.parent.as_deref()
+            .map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3);
+        let tier_substring = def_substring.parent.as_deref()
+            .map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3);
+
+        // Exact parent (tier 0) should sort before prefix/substring parent (tier 1 or 2)
+        assert!(tier_exact < tier_substring,
+            "Exact parent tier {} should be less than substring parent tier {}",
+            tier_exact, tier_substring);
+        assert_eq!(tier_exact, 0, "Exact parent match should be tier 0");
+    }
+
+    #[test]
+    fn test_parent_ranking_prefix_parent_before_contains_parent() {
+        // "UserServiceFactory" (prefix) should rank before "IUserService" (contains)
+        let parent_terms = vec!["userservice".to_string()];
+
+        let def_prefix = make_def("Create", Some("UserServiceFactory"), DefinitionKind::Method);
+        let def_contains = make_def("Validate", Some("IUserService"), DefinitionKind::Method);
+
+        let tier_prefix = def_prefix.parent.as_deref()
+            .map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3);
+        let tier_contains = def_contains.parent.as_deref()
+            .map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3);
+
+        assert!(tier_prefix < tier_contains,
+            "Prefix parent tier {} should be less than contains parent tier {}",
+            tier_prefix, tier_contains);
+        assert_eq!(tier_prefix, 1, "Prefix parent match should be tier 1");
+        assert_eq!(tier_contains, 2, "Contains parent match should be tier 2");
+    }
+
+    #[test]
+    fn test_parent_ranking_takes_precedence_over_name_ranking() {
+        // Even if name is exact match, parent tier should dominate
+        let parent_terms = vec!["userservice".to_string()];
+        let name_terms = vec!["getuser".to_string()];
+
+        // def_a: exact name match + substring parent (tier 2)
+        let def_a = make_def("GetUser", Some("MockUserServiceWrapper"), DefinitionKind::Method);
+        // def_b: no exact name match + exact parent (tier 0)
+        let def_b = make_def("FetchData", Some("UserService"), DefinitionKind::Method);
+
+        let parent_tier_a = def_a.parent.as_deref()
+            .map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3);
+        let parent_tier_b = def_b.parent.as_deref()
+            .map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3);
+
+        let name_tier_a = best_match_tier(&def_a.name, &name_terms);
+        let name_tier_b = best_match_tier(&def_b.name, &name_terms);
+
+        // def_a has better name tier but worse parent tier
+        assert!(name_tier_a < name_tier_b, "def_a should have better name tier");
+        // def_b has better parent tier — it should sort first
+        assert!(parent_tier_b < parent_tier_a, "def_b should have better parent tier");
+
+        // Simulate the sort comparison
+        let cmp = parent_tier_a.cmp(&parent_tier_b)
+            .then_with(|| name_tier_a.cmp(&name_tier_b));
+        assert_eq!(cmp, std::cmp::Ordering::Greater,
+            "def_a should sort AFTER def_b because parent tier is primary");
+    }
+
+    #[test]
+    fn test_parent_ranking_no_parent_sorts_last() {
+        // Definitions without a parent should sort after those with a matching parent
+        let parent_terms = vec!["userservice".to_string()];
+
+        let def_with_parent = make_def("GetUser", Some("UserService"), DefinitionKind::Method);
+        let def_no_parent = make_def("GetUser", None, DefinitionKind::Method);
+
+        let tier_with = def_with_parent.parent.as_deref()
+            .map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3);
+        let tier_without = def_no_parent.parent.as_deref()
+            .map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3);
+
+        assert_eq!(tier_with, 0, "Exact parent should be tier 0");
+        assert_eq!(tier_without, 3, "No parent should be tier 3 (worst)");
+        assert!(tier_with < tier_without);
+    }
+
+    #[test]
+    fn test_parent_ranking_only_active_with_parent_filter() {
+        // When parent_filter is None, parent_terms is empty,
+        // so parent tier should be 0 for all (no effect on sorting)
+        let parent_terms: Vec<String> = vec![];
+
+        let def_a = make_def("GetUser", Some("UserService"), DefinitionKind::Method);
+        let def_b = make_def("FetchData", Some("OrderService"), DefinitionKind::Method);
+
+        // When parent_terms is empty, both should get tier 0 (neutral)
+        let tier_a = if !parent_terms.is_empty() {
+            def_a.parent.as_deref().map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3)
+        } else { 0 };
+        let tier_b = if !parent_terms.is_empty() {
+            def_b.parent.as_deref().map(|p| best_match_tier(p, &parent_terms)).unwrap_or(3)
+        } else { 0 };
+
+        assert_eq!(tier_a, 0);
+        assert_eq!(tier_b, 0);
+        assert_eq!(tier_a.cmp(&tier_b), std::cmp::Ordering::Equal,
+            "Without parent filter, parent tier should be equal for all");
     }
 }

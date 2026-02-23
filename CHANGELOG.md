@@ -6,6 +6,18 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-23
+
+### Features
+
+- **Parent relevance ranking in `search_definitions`** — When `parent` filter is set, results are now sorted by parent match quality: exact parent match (tier 0) ranks before prefix match (tier 1), which ranks before substring/contains match (tier 2). Previously, all parent substring matches were treated equally, so searching with `parent=UserService` could return members of `UserServiceMock` before members of `UserService` itself. The fix activates relevance sorting when `parent_filter` is set (in addition to the existing `name_filter` path), using `best_match_tier()` as the primary sort key for parent, with name match tier as secondary. 5 new unit tests.
+
+### Documentation
+
+- **Method group/delegate limitation documented in `search_callers`** — Added a new tip and parameter example documenting that `search_callers` only detects direct method invocations (`obj.Method(args)`), NOT method group references or delegate passes (e.g., `list.Where(IsValid)`, `Func<bool> f = svc.Check`). Workaround: use `search_grep` to find all textual references. This is a known parser-level limitation requiring AST changes to fix.
+
+---
+
 ## 2026-02-22
 
 ### Documentation
