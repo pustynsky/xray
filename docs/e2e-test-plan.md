@@ -638,9 +638,9 @@ cargo run -- def-index -d $TEST_DIR -e $TEST_EXT
 
 **Validates:** Tree-sitter parsing, definition extraction, persistence.
 
-**Note:** For `.rs` files, 0 definitions is expected (parser supports C# and TypeScript/TSX only).
+**Note:** For `.rs` files, 0 definitions is expected (parser supports C#, TypeScript/TSX, and SQL only).
 For C# or TypeScript projects, expect hundreds/thousands of definitions.
-SQL parsing is currently disabled.
+For `.sql` files, definitions include stored procedures, tables, views, functions, types, and indexes (regex-based parser).
 
 ---
 
@@ -851,10 +851,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - stdout: JSON-RPC response with definition results
 - For Rust codebase: 0 results (tree-sitter supports C#/TypeScript/SQL only)
 - For C# or TypeScript codebase: results with `name`, `kind`, `file`, `lines`
+- For SQL codebase: results with `name`, `kind` (storedProcedure, table, view, etc.), `file`, `lines`
 
 **Validates:** search_definitions handler, definition index loading, AST-based search.
 
-**Note:** Requires `--definitions` flag. For `.rs` files, 0 results is expected. For TypeScript files, definition kinds include `function`, `typeAlias`, `variable`, etc.
+**Note:** Requires `--definitions` flag. For `.rs` files, 0 results is expected. For TypeScript files, definition kinds include `function`, `typeAlias`, `variable`, etc. For SQL files, definition kinds include `storedProcedure`, `table`, `view`, `sqlFunction`, `userDefinedType`, `sqlIndex`, `column`.
 
 ---
 
@@ -1549,6 +1550,169 @@ cargo run -- tips
 - Multi-term tip mentions comma-separated example: `UserService,IUserService,UserController`
 
 **Validates:** New efficiency guidance tips are visible in CLI output and MCP `search_help`.
+
+---
+
+## SQL Support Tests
+
+### T-SQL-01: `def-index` — Build SQL definition index
+
+**Command:**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e sql
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `[def-index] Found N files to parse`
+- stderr: `[def-index] Parsed N files in X.Xs, extracted M definitions`
+- A `.code-structure` file created
+- Definitions include SQL-specific kinds: `storedProcedure`, `table`, `view`, `sqlFunction`, `userDefinedType`, `sqlIndex`, `column`
+
+**Validates:** Regex-based SQL parsing, definition extraction for `.sql` files.
+
+---
+
+### T-SQL-02: `serve` — search_definitions finds SQL stored procedures
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"storedProcedure"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext sql --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Results contain SQL stored procedures with `kind: "storedProcedure"`
+- Each definition includes `name`, `file`, `lines`, `signature`
+
+**Validates:** `search_definitions` with `kind` filter works for SQL-specific definition kinds.
+
+---
+
+### T-SQL-03: `serve` — search_definitions finds SQL tables
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"table"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext sql --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- Results contain SQL table definitions with `kind: "table"`
+- Each definition includes `name`, `file`, `lines`
+
+**Validates:** `search_definitions` with `kind=table` returns SQL table definitions.
+
+---
+
+### T-SQL-04: `def-index` — SQL file with GO-separated objects
+
+**Setup:**
+
+```powershell
+$tmp = New-Item -ItemType Directory -Path "$env:TEMP\search_sql_go_test_$(Get-Random)"
+@'
+CREATE TABLE dbo.Orders (
+    OrderId INT PRIMARY KEY,
+    CustomerId INT NOT NULL
+);
+GO
+
+CREATE PROCEDURE dbo.GetOrders
+    @CustomerId INT
+AS
+BEGIN
+    SELECT * FROM dbo.Orders WHERE CustomerId = @CustomerId;
+END;
+GO
+
+CREATE VIEW dbo.OrderSummary AS
+SELECT CustomerId, COUNT(*) AS OrderCount FROM dbo.Orders GROUP BY CustomerId;
+GO
+'@ | Set-Content "$tmp\schema.sql"
+```
+
+**Command:**
+
+```powershell
+cargo run -- def-index -d $tmp -e sql
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr shows 3+ definitions extracted (table Orders, procedure GetOrders, view OrderSummary)
+- Each definition has correct line ranges (not overlapping)
+
+**Cleanup:**
+
+```powershell
+cargo run -- cleanup --dir $tmp
+Remove-Item -Recurse -Force $tmp
+```
+
+**Validates:** SQL parser correctly handles GO-separated batches with multiple object types, assigning correct line ranges to each definition.
+
+---
+
+### T-SQL-05: `serve` — search_callers on SQL table shows stored procedures that reference it
+
+**Setup:**
+
+Create temp `.sql` files with a table and a stored procedure that references it via SELECT/INSERT/UPDATE.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Orders","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $tmp --ext sql --definitions
+```
+
+**Expected:**
+
+- `callTree` includes stored procedures that reference the `Orders` table via FROM/JOIN/INSERT/UPDATE/DELETE
+- Call sites extracted from SQL stored procedure bodies
+
+**Validates:** SQL call-site extraction (EXEC, FROM, JOIN, INSERT, UPDATE, DELETE patterns) enables `search_callers` to find stored procedures that reference SQL tables.
+
+---
+
+### T-SQL-06: `def-index` — Mixed C#/TypeScript/SQL definition index
+
+**Command:**
+
+```powershell
+cargo run -- def-index -d $TEST_DIR -e cs,ts,sql
+```
+
+**Expected:**
+
+- Exit code: 0
+- stderr: `[def-index] Found N files to parse` (N includes `.cs`, `.ts`, and `.sql` files)
+- stderr: `[def-index] Parsed N files in X.Xs, extracted M definitions`
+- C# definitions (classes, methods), TypeScript definitions (functions, type aliases), and SQL definitions (stored procedures, tables) all present in the same `.code-structure` index
+
+**Validates:** Mixed-language definition indexing including SQL. C# files use tree-sitter, TypeScript files use tree-sitter, SQL files use regex-based parser, and all coexist in the same `.code-structure` index.
 
 ---
 

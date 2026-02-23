@@ -621,6 +621,99 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
+# T-SQL: SQL definition parsing (def-index + search_definitions)
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SQL sql-definition-parsing"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sql_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        $sqlContent = @"
+CREATE TABLE dbo.Orders (
+    OrderId INT PRIMARY KEY,
+    CustomerId INT NOT NULL
+);
+GO
+
+CREATE PROCEDURE dbo.GetOrders
+    @CustomerId INT
+AS
+BEGIN
+    SELECT * FROM dbo.Orders WHERE CustomerId = @CustomerId;
+END;
+GO
+
+CREATE VIEW dbo.OrderSummary AS
+SELECT CustomerId, COUNT(*) AS OrderCount FROM dbo.Orders GROUP BY CustomerId;
+GO
+"@
+        Set-Content -Path (Join-Path $tmpDir "schema.sql") -Value $sqlContent
+
+        & $Bin content-index -d $tmpDir -e sql 2>&1 | Out-Null
+        & $Bin def-index -d $tmpDir -e sql 2>&1 | Out-Null
+
+        # Query for stored procedures
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"storedProcedure"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext sql --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
+
+        $errors = @()
+
+        if (-not $jsonLine) {
+            $errors += "no JSON-RPC response for storedProcedure query"
+        } else {
+            if ($jsonLine -notmatch 'GetOrders') { $errors += "GetOrders SP not found" }
+        }
+
+        # Query for tables
+        $msgs2 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"table"}}}'
+        ) -join "`n"
+        $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext sql --definitions 2>$null) | Out-String
+        $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
+
+        if (-not $jsonLine2) {
+            $errors += "no JSON-RPC response for table query"
+        } else {
+            if ($jsonLine2 -notmatch 'Orders') { $errors += "Orders table not found" }
+        }
+
+        # Query for views
+        $msgs3 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"view"}}}'
+        ) -join "`n"
+        $output3 = ($msgs3 | & $Bin serve --dir $tmpDir --ext sql --definitions 2>$null) | Out-String
+        $jsonLine3 = $output3 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
+
+        if (-not $jsonLine3) {
+            $errors += "no JSON-RPC response for view query"
+        } else {
+            if ($jsonLine3 -notmatch 'OrderSummary') { $errors += "OrderSummary view not found" }
+        }
+
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        if ($errors.Count -gt 0) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" }
+        }
+        return @{ Name = $name; Passed = $true; Output = "OK" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # T-ANGULAR: Angular template metadata (def-index + .code-structure verification)
 $testBlocks += , {
     param($Bin, $Dir, $Ext)

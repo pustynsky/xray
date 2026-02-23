@@ -163,7 +163,7 @@ pub struct CleanupArgs {
 
 EXAMPLES:
   Basic:          search-index serve --dir C:\Projects\MyApp --ext cs
-  Multi-ext:      search-index serve --dir C:\Projects --ext cs,sql,csproj
+  Multi-ext:      search-index serve --dir C:\Projects --ext cs,csproj,sql
   C# + TypeScript: search-index serve --dir C:\Projects --ext cs,ts,tsx
   With watcher:   search-index serve --dir C:\Projects --ext cs --watch
   With defs:      search-index serve --dir C:\Projects --ext cs --watch --definitions
@@ -183,12 +183,15 @@ VS CODE CONFIGURATION (.vscode/mcp.json):
 AVAILABLE TOOLS (exposed via MCP):
   search_grep        -- Search content index (TF-IDF ranked, regex, phrase, multi-term)
   search_definitions -- Search code definitions: classes, methods, interfaces, enums, SPs,
-                        functions, type aliases, variables. Supports C# and TypeScript/TSX.
+                        functions, type aliases, variables. Supports C#, TypeScript/TSX,
+                        and SQL (.sql files: stored procedures, tables, views, functions,
+                        types, indexes, columns via regex parser; call sites from SP bodies).
                         Supports containsLine to find which method/class/function contains
                         a line. (requires --definitions flag)
   search_callers     -- Find all callers of a method and build a call tree (up/down).
                        Combines grep index + AST index. Replaces 7+ manual queries with 1.
-                       Supports C# and TypeScript/TSX (DI-aware, inject() support).
+                       Supports C#, TypeScript/TSX (DI-aware, inject() support), and SQL
+                       (call sites from EXEC/FROM/JOIN/INSERT/UPDATE/DELETE in SP bodies).
                        Note: calls through local variables (var x = ...; x.Method())
                        may not be detected (AST parsing without type inference).
                        (requires --definitions flag)

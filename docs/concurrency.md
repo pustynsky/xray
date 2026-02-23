@@ -140,7 +140,7 @@ std::thread::scope(|s| {
 **Key details:**
 
 - tree-sitter `Parser` is `!Send` (contains internal mutable state). Each thread creates its own parser instance. This is intentional — tree-sitter parsers reuse internal memory allocations across parse calls, making per-thread parsers more efficient than a shared pool.
-- **Lazy parser initialization:** TS/TSX parsers are created via `Option<Parser>` + `get_or_insert_with()` only when a thread encounters a file with that extension. For C#-only projects (the common case), TypeScript grammars are never loaded, saving ~2s per parser per thread. The `def_exts` parameter in `serve.rs` filters to the intersection of `--ext` and supported languages (`cs`, `ts`, `tsx`), so unnecessary grammars are never even considered.
+- **Lazy parser initialization:** TS/TSX parsers are created via `Option<Parser>` + `get_or_insert_with()` only when a thread encounters a file with that extension. For C#-only projects (the common case), TypeScript grammars are never loaded, saving ~2s per parser per thread. The `def_exts` parameter in `serve.rs` filters to the intersection of `--ext` and supported languages (`cs`, `ts`, `tsx`, `sql`), so unnecessary grammars are never even considered. SQL files use a regex-based parser (no tree-sitter grammar needed).
 
 ## Phase 2: MCP Server Event Loop
 

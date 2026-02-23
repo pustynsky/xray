@@ -107,9 +107,9 @@ pub fn tips() -> Vec<Tip> {
             example: "search-index grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms='Newtonsoft.Json', ext='csproj'",
         },
         Tip {
-            rule: "Language scope: content search = any language, AST = C# and TypeScript/TSX",
-            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / def-index use tree-sitter AST parsing -- supports C# and TypeScript/TSX. search_callers uses call-graph analysis -- supports C# and TypeScript/TSX (DI-aware, inject() support, interface resolution).",
-            example: "search-index grep works on -e rs,py,js,xml,json | search_definitions supports .cs, .ts, .tsx | search_callers supports .cs, .ts, .tsx",
+            rule: "Language scope: content search = any language, AST = C#, TypeScript/TSX, and SQL",
+            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / def-index supports C# and TypeScript/TSX (tree-sitter) and SQL (regex-based). search_callers uses call-graph analysis -- supports C# and TypeScript/TSX (DI-aware, inject() support, interface resolution). SQL call sites (EXEC, FROM, JOIN, INSERT, UPDATE, DELETE) are extracted from stored procedure bodies.",
+            example: "search-index grep works on -e rs,py,js,xml,json | search_definitions supports .cs, .ts, .tsx, .sql | search_callers supports .cs, .ts, .tsx, .sql (SP call sites)",
         },
         Tip {
             rule: "Response truncation: large results are auto-capped at ~16KB",
@@ -264,7 +264,7 @@ pub fn performance_tiers() -> Vec<PerfTier> {
 pub fn tool_priority() -> Vec<ToolPriority> {
     vec![
         ToolPriority { rank: 1, tool: "search_callers", description: "call trees up/down (<1ms, C# and TypeScript/TSX)" },
-        ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, functions, interfaces, typeAliases, variables, containsLine (C# and TypeScript/TSX)" },
+        ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, functions, interfaces, typeAliases, variables, containsLine (C#, TypeScript/TSX, SQL)" },
         ToolPriority { rank: 3, tool: "search_grep", description: "content: exact/OR/AND, substring, phrase, regex (any language)" },
         ToolPriority { rank: 4, tool: "search_fast", description: "file name lookup (~35ms, any file)" },
         ToolPriority { rank: 5, tool: "search_find", description: "live walk (~3s, last resort)" },
@@ -289,7 +289,7 @@ pub fn parameter_examples() -> Value {
             "file": "'Controllers', 'Services' -> substring match on file path",
             "parent": "'UserService' -> all members of that class",
             "regex": "name='I.*Cache' with regex=true -> all types matching pattern",
-            "kind": "C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event. TypeScript kinds: function, typeAlias, variable (plus shared: class, interface, method, property, enum, constructor, enumMember). SQL kinds: storedProcedure, table, view, sqlFunction, userDefinedType",
+            "kind": "C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event. TypeScript kinds: function, typeAlias, variable (plus shared: class, interface, method, property, enum, constructor, enumMember). SQL kinds: storedProcedure, sqlFunction, table, view, userDefinedType, sqlIndex, column. SQL call sites extracted from SP bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE",
             "includeCodeStats": "Each method gets: lines, cyclomaticComplexity, cognitiveComplexity, maxNestingDepth, paramCount, returnCount, callCount, lambdaCount",
             "audit": "Shows: total files, files with/without definitions, read errors, lossy UTF-8, suspicious files (large files with 0 definitions)",
             "angular": "Angular @Component classes include 'selector' and 'templateChildren' in output, showing which child components are used in the template"
