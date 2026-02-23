@@ -4741,6 +4741,43 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 
 ---
 
+### T-RANK-06: `search_definitions` — Parent relevance ranking (exact parent before substring parent)
+
+**Tool:** `search_definitions`
+
+**Scenario:** When searching with `parent` filter, results are sorted by parent match quality:
+
+1. Exact parent match (tier 0) — `parent=UserService` matches `UserService` exactly
+2. Prefix parent match (tier 1) — `parent=UserService` matches `UserServiceFactory`
+3. Contains parent match (tier 2) — `parent=UserService` matches `IUserService` or `MockUserServiceWrapper`
+4. No parent (tier 3) — definitions without a parent field
+
+**Expected order (searching with `parent=UserService`):**
+
+1. Members of `UserService` (exact parent match, tier 0)
+2. Members of `UserServiceFactory` (prefix match, tier 1)
+3. Members of `IUserService` (contains match, tier 2)
+4. Members of `MockUserServiceWrapper` (contains match, tier 2)
+
+**Key behavior:**
+
+- Parent match quality is the PRIMARY sort key (takes precedence over name match quality)
+- Name match quality is SECONDARY (within same parent tier)
+- Kind priority (class=0 > method=1) and name length are tiebreakers
+- Only active when `parent` filter is set (no effect when parent filter is absent)
+
+**Unit tests (5 tests in `definitions.rs`):**
+
+- [`test_parent_ranking_exact_parent_before_substring_parent`](../src/mcp/handlers/definitions.rs) — exact parent ranks before prefix/substring
+- [`test_parent_ranking_prefix_parent_before_contains_parent`](../src/mcp/handlers/definitions.rs) — prefix parent (tier 1) ranks before contains parent (tier 2)
+- [`test_parent_ranking_takes_precedence_over_name_ranking`](../src/mcp/handlers/definitions.rs) — parent tier beats name tier
+- [`test_parent_ranking_no_parent_sorts_last`](../src/mcp/handlers/definitions.rs) — definitions without parent get tier 3
+- [`test_parent_ranking_only_active_with_parent_filter`](../src/mcp/handlers/definitions.rs) — no effect when parent filter is absent
+
+**Status:** ✅ Covered by unit tests
+
+---
+
 ### T-RANK-05: `search_grep` phrase mode — Sort by occurrence count descending
 
 **Tool:** `search_grep` (phrase mode)
