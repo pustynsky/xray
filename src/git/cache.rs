@@ -461,11 +461,11 @@ impl GitHistoryCache {
     pub fn cache_path_for(dir: &str, index_base: &std::path::Path) -> std::path::PathBuf {
         let canonical = std::fs::canonicalize(dir)
             .unwrap_or_else(|_| std::path::PathBuf::from(dir));
-        let hash = search::stable_hash(&[
+        let hash = search_index::stable_hash(&[
             canonical.to_string_lossy().as_bytes(),
             b"git-history", // distinguish from content/def indexes
         ]);
-        let prefix = search::extract_semantic_prefix(&canonical);
+        let prefix = search_index::extract_semantic_prefix(&canonical);
         index_base.join(format!("{}_{:08x}.git-history", prefix, hash as u32))
     }
 

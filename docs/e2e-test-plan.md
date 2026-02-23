@@ -491,7 +491,7 @@ cargo run -- cleanup
 - stderr: `Scanning for orphaned indexes in ...`
 - stderr: `Removed orphaned index: ... (root: ...search_cleanup_test...)`
 - stderr: `Removed N orphaned index file(s).`
-- After cleanup, `search info` should NOT list the deleted temp directory
+- After cleanup, `search-index info` should NOT list the deleted temp directory
 
 **Validates:** Orphaned index detection, safe removal, root field extraction from binary index files.
 
@@ -521,7 +521,7 @@ cargo run -- cleanup --dir $tmp
 - stderr: `Removing indexes for directory '...' from ...`
 - stderr: `Removed index for dir '...' ...` (one line per removed file)
 - stderr: `Removed N index file(s) for '...'.`
-- After cleanup, `search info` should NOT list the temp directory
+- After cleanup, `search-index info` should NOT list the temp directory
 - Indexes for other directories remain untouched
 
 **Validates:** Targeted index cleanup by directory, case-insensitive path comparison, preservation of unrelated indexes.
@@ -1745,7 +1745,7 @@ Start-Sleep -Seconds 3
 # Query for OriginalToken — should find it
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"OriginalToken"}}}' | & search serve --dir $tmpDir --ext cs --watch
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"OriginalToken"}}}' | & search-index serve --dir $tmpDir --ext cs --watch
 
 # Modify the file — replace OriginalToken with UpdatedToken
 Set-Content "$tmpDir\initial.cs" "class OriginalClass { UpdatedToken field; }"
@@ -2530,13 +2530,13 @@ Should return fewer suspicious files (only those >10KB with 0 definitions).
 
 **Background:** The `search def-audit` CLI subcommand loads a previously built `.code-structure` file from disk and reports index coverage: how many files have definitions, how many are empty, and which suspicious files (large but 0 definitions) may have parsing issues. This does NOT rebuild the index.
 
-**Prerequisites:** A definition index must already be built via `search def-index`.
+**Prerequisites:** A definition index must already be built via `search-index def-index`.
 
 **Command:**
 
 ```powershell
 # Build first (if not already built)
-search def-index --dir $TEST_DIR --ext rs
+search-index def-index --dir $TEST_DIR --ext rs
 
 # Audit (instant — loads from disk)
 search def-audit --dir $TEST_DIR --ext rs
@@ -2974,7 +2974,7 @@ $stderr = Get-Content "$dir\stderr.txt" -Raw
 
 ```powershell
 # 1. Start the MCP server
-search serve --dir C:\Projects --ext cs --watch --definitions
+search-index serve --dir C:\Projects --ext cs --watch --definitions
 
 # 2. Wait for the server to finish loading indexes (watch stderr for "ready" messages)
 
@@ -5500,7 +5500,7 @@ $msgs = @(
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
     '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2}}}'
 ) -join "`n"
-echo $msgs | search serve --dir . --ext rs
+echo $msgs | search-index serve --dir . --ext rs
 ```
 
 **Expected:**
@@ -6294,9 +6294,9 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ### T-MEMORY-LOG: `serve --memory-log` — Memory diagnostics file
 
-**Tool:** `search serve --memory-log`
+**Tool:** `search-index serve --memory-log`
 
-**Background:** When `--memory-log` is passed to `search serve`, the server writes a `memory.log` file in the index directory (`%LOCALAPPDATA%/search-index/`) with Working Set / Peak WS / Commit at every key pipeline stage.
+**Background:** When `--memory-log` is passed to `search-index serve`, the server writes a `memory.log` file in the index directory (`%LOCALAPPDATA%/search-index/`) with Working Set / Peak WS / Commit at every key pipeline stage.
 
 **Command:**
 

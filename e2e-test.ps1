@@ -43,7 +43,7 @@ if ($LASTEXITCODE -ne 0) { Write-Host "Build failed!" -ForegroundColor Red; exit
 # After successful build, use the compiled binary directly instead of "cargo run --"
 # to avoid ~0.5-1s cargo freshness check overhead per test invocation.
 if ($Binary -eq "cargo run --") {
-    $Binary = ".\target\debug\search.exe"
+    $Binary = ".\target\debug\search-index.exe"
     Write-Host "Using direct binary: $Binary"
 }
 
@@ -179,8 +179,8 @@ try {
     Set-Content -Path $t59file -Value "class Original { void Run() { } }"
 
     # Find the search binary (installed or debug)
-    $searchBin = (Get-Command search.exe -ErrorAction SilentlyContinue).Source
-    if (-not $searchBin) { $searchBin = ".\target\debug\search.exe" }
+    $searchBin = (Get-Command search-index.exe -ErrorAction SilentlyContinue).Source
+    if (-not $searchBin) { $searchBin = ".\target\debug\search-index.exe" }
 
     $ErrorActionPreference = "Continue"
     & $searchBin content-index -d $t59dir -e cs 2>&1 | Out-Null
@@ -276,12 +276,12 @@ Write-Host "`n=== Parallel MCP tests (Start-Job) ===`n"
 $parallelTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
 # Resolve search binary to absolute path (jobs run in different working directory)
-$searchBinAbs = (Get-Command search.exe -ErrorAction SilentlyContinue).Source
+$searchBinAbs = (Get-Command search-index.exe -ErrorAction SilentlyContinue).Source
 if (-not $searchBinAbs) {
-    $searchBinAbs = (Resolve-Path ".\target\debug\search.exe" -ErrorAction SilentlyContinue).Path
+    $searchBinAbs = (Resolve-Path ".\target\debug\search-index.exe" -ErrorAction SilentlyContinue).Path
 }
 if (-not $searchBinAbs) {
-    Write-Host "ERROR: search.exe not found (not installed, no debug build)" -ForegroundColor Red
+    Write-Host "ERROR: search-index.exe not found (not installed, no debug build)" -ForegroundColor Red
     exit 1
 }
 $projectDirAbs = (Resolve-Path $TestDir).Path

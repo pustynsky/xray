@@ -8,7 +8,7 @@ use serde_json::{json, Value};
 use crate::mcp::protocol::ToolCallResult;
 use crate::{tokenize, ContentIndex};
 use crate::index::build_trigram_index;
-use search::generate_trigrams;
+use search_index::generate_trigrams;
 
 use super::utils::{
     build_line_content_from_matches, inject_branch_warning, is_under_dir, matches_ext_filter,

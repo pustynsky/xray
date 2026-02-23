@@ -1,4 +1,4 @@
-//! # search — High-Performance Code Search Engine
+//! # search-index — High-Performance Code Search Engine
 //!
 //! Inverted index + AST-based code intelligence engine for large-scale codebases.
 //! Sub-microsecond content search, structural code navigation, and native MCP server.
@@ -399,7 +399,7 @@ impl ContentIndex {
 /// # Examples
 ///
 /// ```
-/// use search::tokenize;
+/// use search_index::tokenize;
 ///
 /// let tokens = tokenize("private readonly HttpClient _client;", 2);
 /// assert!(tokens.contains(&"private".to_string()));

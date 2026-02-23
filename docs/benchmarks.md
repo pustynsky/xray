@@ -35,23 +35,23 @@ Real production C# codebase (enterprise backend monorepo):
 
 ## Content Search: search vs ripgrep
 
-Single-term search for `HttpClient` across the full codebase. search.exe token matching finds 1,072 files; rg substring matching finds 2,092 files (includes `IHttpClientFactory`, `HttpClientHandler`, etc.):
+Single-term search for `HttpClient` across the full codebase. search-index.exe token matching finds 1,072 files; rg substring matching finds 2,092 files (includes `IHttpClientFactory`, `HttpClientHandler`, etc.):
 
 | Tool                                           | Operation                                               | Total Time | Speedup     |
 | ---------------------------------------------- | ------------------------------------------------------- | ---------- | ----------- |
 | `rg HttpClient -g '*.cs' -l`                   | Live file scan                                          | 32.0s      | baseline    |
-| `search find "HttpClient" --contents -e cs -c` | Live parallel walk (24 threads)                         | 14.5s      | **2×**      |
-| `search grep "HttpClient" -e cs -c`            | Inverted index (total incl. load)                       | 1.76s      | **18×**     |
+| `search-index find "HttpClient" --contents -e cs -c` | Live parallel walk (24 threads)                         | 14.5s      | **2×**      |
+| `search-index grep "HttpClient" -e cs -c`            | Inverted index (total incl. load)                       | 1.76s      | **18×**     |
 | ↳ index load from disk                         | LZ4 decompress + bincode deserialize (223.7 MB on disk) | 1.19s      | —           |
 | ↳ search + TF-IDF rank                         | HashMap lookup + scoring                                | 0.757ms    | **42,300×** |
 
 > **Note:** In MCP server mode, the index is loaded once at startup. All subsequent queries pay only the search+rank cost (0.6–4ms depending on hardware), not the load cost.
 >
-> **Note:** `search find` (live parallel walk) is slower than indexed search because it reads all 48,779 files from disk. Its advantage over rg is modest (2×) since both perform full filesystem scans. The real speedup comes from the inverted index (18× total, 42,300× in-memory).
+> **Note:** `search-index find` (live parallel walk) is slower than indexed search because it reads all 48,779 files from disk. Its advantage over rg is modest (2×) since both perform full filesystem scans. The real speedup comes from the inverted index (18× total, 42,300× in-memory).
 
 ## CLI Search Latency (index pre-loaded from disk)
 
-Measured via `search grep` on 48,779-file C# index (754K unique tokens). Search+Rank is the pure in-memory search time; total CLI time also includes index load from disk (~1.2s, LZ4 decompress + bincode deserialize):
+Measured via `search-index grep` on 48,779-file C# index (754K unique tokens). Search+Rank is the pure in-memory search time; total CLI time also includes index load from disk (~1.2s, LZ4 decompress + bincode deserialize):
 
 | Query Type                                            | Search+Rank Time | Files Matched | Notes                   |
 | ----------------------------------------------------- | ---------------- | ------------- | ----------------------- |
@@ -63,7 +63,7 @@ Measured via `search grep` on 48,779-file C# index (754K unique tokens). Search+
 | Regex (`I.*Cache`)                                    | 60.6ms           | 1,425         | rg: 2,650 files (33.6s) |
 | Exclude filters (`StorageIndexManager`)               | 0.025ms          | 2             | rg: 4 files (22.9s)     |
 
-**File count differences**: search.exe uses exact token matching by default in CLI mode (no `--substring` flag). rg does substring content matching. In MCP mode, `substring=true` is the default, so MCP file counts typically match rg.
+**File count differences**: search-index.exe uses exact token matching by default in CLI mode (no `--substring` flag). rg does substring content matching. In MCP mode, `substring=true` is the default, so MCP file counts typically match rg.
 
 ## MCP Server: search_grep vs ripgrep (11-Test Suite)
 
@@ -278,7 +278,7 @@ Searching for `notepad` in 333,875 indexed entries (C:\Windows):
 
 | Tool                                     | Operation            | Total Time |
 | ---------------------------------------- | -------------------- | ---------- |
-| `search fast "notepad" -d C:\Windows -c` | Pre-built file index | 0.091s     |
+| `search-index fast "notepad" -d C:\Windows -c` | Pre-built file index | 0.091s     |
 
 Index load: 0.055s, search: 0.036s.
 
@@ -288,9 +288,9 @@ Three distinct indexes, each built independently:
 
 | Index Type                            | What it stores                            | CLI command            | MCP tool                     |
 | ------------------------------------- | ----------------------------------------- | ---------------------- | ---------------------------- |
-| **FileIndex** (.file-list)            | File paths, sizes, timestamps             | `search index`         | —                            |
-| **ContentIndex** (.word-search)       | Inverted token→file map for TF-IDF search | `search content-index` | `search_reindex`             |
-| **DefinitionIndex** (.code-structure) | AST definitions + call graph              | `search def-index`     | `search_reindex_definitions` |
+| **FileIndex** (.file-list)            | File paths, sizes, timestamps             | `search-index index`         | —                            |
+| **ContentIndex** (.word-search)       | Inverted token→file map for TF-IDF search | `search-index content-index` | `search_reindex`             |
+| **DefinitionIndex** (.code-structure) | AST definitions + call graph              | `search-index def-index`     | `search_reindex_definitions` |
 
 ### Build times across machines
 
@@ -455,22 +455,22 @@ cargo build --release
 cargo bench
 
 # Real-codebase benchmarks (requires indexed directory)
-search content-index -d <YOUR_DIR> -e cs
+search-index content-index -d <YOUR_DIR> -e cs
 
 # Measure search (PowerShell)
-Measure-Command { search grep "HttpClient" -d <YOUR_DIR> -e cs -c }
+Measure-Command { search-index grep "HttpClient" -d <YOUR_DIR> -e cs -c }
 
 # Measure ripgrep baseline
 Measure-Command { rg "HttpClient" <YOUR_DIR> -g '*.cs' -l }
 
 # Measure index build
-Measure-Command { search content-index -d <YOUR_DIR> -e cs }
+Measure-Command { search-index content-index -d <YOUR_DIR> -e cs }
 
 # MCP benchmarks (start server, then send JSON-RPC)
-search serve --dir <YOUR_DIR> --ext cs --watch --definitions
+search-index serve --dir <YOUR_DIR> --ext cs --watch --definitions
 # Paste JSON-RPC messages to stdin and measure response times
 
 # Automated benchmark suite (PowerShell)
-# Runs 9 tests comparing rg vs search.exe CLI with real class/method names
+# Runs 9 tests comparing rg vs search-index.exe CLI with real class/method names
 .\docs\run-benchmarks.ps1 -SearchDir <YOUR_DIR>
 ```

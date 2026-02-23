@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use search::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
+use search_index::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -361,7 +361,7 @@ pub fn estimate_git_cache_memory(cache: &crate::git::cache::GitHistoryCache) -> 
 // ─── Index metadata sidecar (.meta) ─────────────────────────────────
 
 /// Lightweight metadata saved alongside each index file.
-/// Allows `search info` CLI to display index stats without
+/// Allows `search-index info` CLI to display index stats without
 /// deserializing the full index (which can be 500+ MB in RAM).
 ///
 /// Written as `<index_file>.meta` (e.g., `prefix_12345678.word-search.meta`).
@@ -1126,7 +1126,7 @@ pub fn build_trigram_index(inverted: &HashMap<String, Vec<Posting>>) -> TrigramI
 mod index_tests {
     use std::collections::HashMap;
     use std::io::Write;
-    use search::Posting;
+    use search_index::Posting;
     use crate::index::build_trigram_index;
 
     #[test]
@@ -1325,7 +1325,7 @@ mod index_tests {
 
     #[test]
     fn test_estimate_content_index_memory_empty() {
-        let idx = search::ContentIndex {
+        let idx = search_index::ContentIndex {
             root: ".".to_string(),
             created_at: 0,
             max_age_secs: 3600,
@@ -1334,7 +1334,7 @@ mod index_tests {
             total_tokens: 0,
             extensions: vec![],
             file_token_counts: vec![],
-            trigram: search::TrigramIndex::default(),
+            trigram: search_index::TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
             path_to_id: None,
@@ -1359,7 +1359,7 @@ mod index_tests {
             Posting { file_id: 0, lines: vec![2] },
         ]);
 
-        let idx = search::ContentIndex {
+        let idx = search_index::ContentIndex {
             root: ".".to_string(),
             created_at: 0,
             max_age_secs: 3600,
@@ -1368,7 +1368,7 @@ mod index_tests {
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50, 30],
-            trigram: search::TrigramIndex::default(),
+            trigram: search_index::TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
             path_to_id: None,

@@ -1,6 +1,6 @@
 # MCP Server Guide
 
-Complete guide for the `search serve` MCP server — setup, tools API, and examples.
+Complete guide for the `search-index serve` MCP server — setup, tools API, and examples.
 
 ## Overview
 
@@ -12,13 +12,13 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
    ```bash
    cargo install --path .
-   # Or copy search.exe to a folder in your PATH
+   # Or copy search-index.exe to a folder in your PATH
    ```
 
 2. **Build a content index** for your project:
 
    ```bash
-   search content-index -d C:\Projects\MyApp -e cs,sql,csproj
+   search-index content-index -d C:\Projects\MyApp -e cs,sql,csproj
    ```
 
 3. **Create `.vscode/mcp.json`** in your workspace root:
@@ -27,7 +27,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
    {
      "servers": {
        "search-index": {
-         "command": "C:\\Users\\you\\.cargo\\bin\\search.exe",
+         "command": "C:\\Users\\you\\.cargo\\bin\\search-index.exe",
          "args": [
            "serve",
            "--dir",
@@ -88,7 +88,7 @@ Search content index with TF-IDF ranking. Supports multi-term (AND/OR), regex, p
 
 Substring search is **on by default** in MCP mode — compound identifiers like `IUserService`, `m_userService`, `UserServiceFactory` are automatically found when searching for `UserService`. Auto-disabled when `regex` or `phrase` is used. Use `"substring": false` for exact-token-only matching.
 
-See [CLI Reference — `search grep`](cli-reference.md#search-grep--search-inverted-content-index) for full parameter details.
+See [CLI Reference — `search-index grep`](cli-reference.md#search-grep--search-inverted-content-index) for full parameter details.
 
 ---
 
@@ -566,7 +566,7 @@ The branch is detected **once at server startup** via `git rev-parse --abbrev-re
 ## Manual Testing (without AI)
 
 ```bash
-search serve --dir . --ext rs --definitions
+search-index serve --dir . --ext rs --definitions
 # Then paste JSON-RPC messages to stdin:
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
