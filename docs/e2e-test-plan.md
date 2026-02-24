@@ -6242,6 +6242,66 @@ and total elapsed time.
 ---
 
 
+### T-US16-SPACE: `serve` — search_grep auto-switches to phrase for spaced terms (US-16)
+
+**Tool:** `search_grep`
+
+**Background:** When `search_grep` receives terms containing spaces in substring mode (the default), it auto-switches to phrase search. Previously, spaced terms silently returned 0 results because the tokenizer splits on spaces, so no individual token contains multi-word substrings.
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"pub fn"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- `summary.totalFiles` ≥ 1 (previously returned 0 with spaced terms)
+- `summary.searchMode` = `"phrase"` (auto-switched from substring)
+- `summary.searchModeNote` contains `"spaces"` and `"auto-switched"` — explains the mode switch
+- Results contain files with the exact phrase `"pub fn"`
+
+**Negative test — non-spaced terms stay in substring mode:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- `summary.searchMode` starts with `"substring"` (no auto-switch)
+- `summary.searchModeNote` is absent
+
+**CLI equivalent:**
+
+```powershell
+cargo run -- grep "pub fn" -d $TEST_DIR -e $TEST_EXT
+```
+
+**Expected:**
+
+- Exit code: 0
+- Results found (auto-switches to phrase internally)
+- stderr shows `[substring-trace] Terms contain spaces, auto-switching to phrase mode`
+
+**Validates:** US-16 fix — spaced terms auto-switch to phrase mode instead of silently returning 0. The `searchModeNote` field makes the behavior transparent.
+
+**Unit tests:** `test_substring_space_in_terms_auto_switches_to_phrase`, `test_substring_space_in_terms_count_only`, `test_substring_no_space_stays_substring`, `test_substring_space_sql_create_table`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T-BRANCH-WARNING: `serve` — `branchWarning` in index-based tool responses
 
 **Background:** When the MCP server is started on a non-main/non-master branch, all index-based tool responses (`search_grep`, `search_definitions`, `search_callers`, `search_fast`) include a `branchWarning` field in the `summary` object. This alerts the AI agent that results may differ from production because the index is built on a feature branch.

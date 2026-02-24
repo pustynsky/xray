@@ -2995,3 +2995,123 @@ fn test_git_history_cached_reversed_dates_returns_error() {
     assert!(result.content[0].text.contains("after"),
         "Error should mention 'after', got: {}", result.content[0].text);
 }
+
+// ─── Substring auto-switch to phrase for spaced terms tests ─────────
+
+// ─── US-16: Substring auto-switch to phrase for spaced terms ────────
+
+/// US-16: search_grep with default substring mode and spaced terms auto-switches to phrase.
+#[test]
+fn test_substring_space_in_terms_auto_switches_to_phrase() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // "public class" contains a space — should auto-switch to phrase mode
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class"
+    }));
+    assert!(!result.is_error, "Spaced terms should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should find files (phrase mode finds "public class" in the test files)
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 1, "Should find at least 1 file with 'public class', got 0 (before fix this was 0)");
+
+    // searchMode should indicate phrase
+    let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+    assert_eq!(mode, "phrase", "Should auto-switch to phrase mode, got: {}", mode);
+
+    // searchModeNote should explain the auto-switch
+    let note = output["summary"]["searchModeNote"].as_str();
+    assert!(note.is_some(), "Should have searchModeNote explaining auto-switch");
+    assert!(note.unwrap().contains("spaces"), "Note should mention spaces: {}", note.unwrap());
+
+    cleanup_tmp(&tmp);
+}
+
+/// US-16: Spaced terms with countOnly=true also auto-switches to phrase.
+#[test]
+fn test_substring_space_in_terms_count_only() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class",
+        "countOnly": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 1, "countOnly with spaced terms should still find files");
+    assert!(output.get("files").is_none(), "countOnly should not have files array");
+    cleanup_tmp(&tmp);
+}
+
+/// US-16: Non-spaced terms still use substring mode (no auto-switch).
+#[test]
+fn test_substring_no_space_stays_substring() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "httpclient"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+    assert!(mode.starts_with("substring"), "Non-spaced terms should stay in substring mode, got: {}", mode);
+    assert!(output["summary"].get("searchModeNote").is_none(),
+        "Non-spaced terms should NOT have searchModeNote");
+    cleanup_tmp(&tmp);
+}
+
+/// US-16: E2E with SQL files — "CREATE TABLE" should find results via auto-switch.
+#[test]
+fn test_substring_space_sql_create_table() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_space_sql_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("schema.sql")).unwrap();
+        writeln!(f, "CREATE TABLE Users (Id INT PRIMARY KEY);").unwrap();
+        writeln!(f, "CREATE TABLE Orders (OrderId INT);").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("sproc.sql")).unwrap();
+        writeln!(f, "CREATE PROCEDURE dsp_GetUsers AS SELECT * FROM Users;").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(), ext: "sql".to_string(),
+        max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
+    });
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)), def_index: None,
+        server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "sql".to_string(),
+        metrics: false, index_base: tmp_dir.join(".index"),
+        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+        content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
+        git_cache: Arc::new(RwLock::new(None)),
+        git_cache_ready: Arc::new(AtomicBool::new(false)),
+        current_branch: None,
+    };
+
+    // "CREATE TABLE" with default substring mode — should auto-switch to phrase
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "CREATE TABLE"
+    }));
+    assert!(!result.is_error, "CREATE TABLE search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert_eq!(total, 1, "Should find exactly 1 file with 'CREATE TABLE', got {}", total);
+    assert_eq!(output["summary"]["searchMode"], "phrase");
+    assert!(output["summary"]["searchModeNote"].as_str().is_some());
+
+    // "CREATE PROCEDURE" — should also find via auto-switch
+    let result2 = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "CREATE PROCEDURE"
+    }));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    assert_eq!(output2["summary"]["totalFiles"], 1);
+
+    cleanup_tmp(&tmp_dir);
+}

@@ -332,6 +332,31 @@ fn handle_substring_search(
         return ToolCallResult::error("No search terms provided".to_string());
     }
 
+    // Auto-switch to phrase mode when terms contain spaces.
+    // Substring search operates on individual tokens (which never contain spaces),
+    // so "CREATE PROCEDURE" would always return 0. Phrase search handles this correctly.
+    if raw_terms.iter().any(|t| t.contains(' ')) {
+        eprintln!("[substring-trace] Terms contain spaces, auto-switching to phrase mode");
+        let mut result = handle_phrase_search(
+            ctx, index, terms_str, ext_filter, exclude_dir, exclude,
+            show_lines, context_lines, max_results_param, count_only, search_start, dir_filter,
+        );
+        // Inject a note explaining the auto-switch
+        if let Some(text) = result.content.first_mut().map(|c| &mut c.text) {
+            if let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
+                if let Some(summary) = output.get_mut("summary") {
+                    summary["searchModeNote"] = serde_json::Value::String(
+                        "Terms contain spaces — auto-switched to phrase search \
+                         (substring mode operates on individual tokens which never contain spaces)"
+                            .to_string(),
+                    );
+                }
+                *text = serde_json::to_string(&output).unwrap();
+            }
+        }
+        return result;
+    }
+
     let trigram_idx = &index.trigram;
     let total_docs = index.files.len() as f64;
     let search_mode = if mode_and { "and" } else { "or" };
