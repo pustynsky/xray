@@ -749,14 +749,14 @@ fn build_caller_tree(
 
                 node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                // Recurse without parent_class filter. The parent_class
-                // disambiguation is most useful at the initial level to
-                // avoid false positives from common method names. At deeper
-                // levels, the visited set prevents infinite loops, and
-                // we don't want to miss callers through DI/interfaces.
+                // Recurse with the CALLER's parent class as the class filter.
+                // This ensures that at depth > 0, we search for callers of
+                // "CallerClass.CallerMethod" (not just "CallerMethod" across
+                // ALL classes), preventing false positives from common method
+                // names like Process, Execute, Handle, Run.
                 let sub_callers = build_caller_tree(
                     &caller_name,
-                    None,
+                    caller_parent.as_deref(),
                     max_depth,
                     current_depth + 1,
                     content_index,
@@ -2690,6 +2690,193 @@ mod tests {
         let mut visited = HashSet::new();
         let result = find_template_parents("nonexistent-selector", 3, 0, &def_idx, &mut visited);
         assert!(result.is_empty(), "Non-existent selector should return empty");
+    }
+
+    // ─── Test: F-10 fix — class filter preserved during upward recursion ──
+
+    #[test]
+    fn test_caller_tree_preserves_class_filter_during_recursion() {
+        // Scenario: We search for callers of ClassA.Process() (a common method name).
+        // ClassB.Handle() calls classA.Process() → this is a valid caller at depth 0.
+        // ClassC.Run() calls classB.Handle() → this is a valid caller at depth 1.
+        // ClassD.Execute() also has a method named "Handle" but it's ClassD.Handle(),
+        //   NOT ClassB.Handle(). Without the fix (passing None at recursion), depth 1
+        //   would find ClassD.Execute() as a false positive because it searches for
+        //   ALL "Handle" methods without class scoping.
+        //
+        // With the fix: at depth 1, we search for callers of "Handle" with class filter
+        // "ClassB" (the caller's parent), so ClassD.Execute() is correctly excluded.
+
+        use crate::{ContentIndex, Posting, TrigramIndex};
+        use std::sync::atomic::AtomicUsize;
+        use std::path::PathBuf;
+
+        // --- Definition Index ---
+        let definitions = vec![
+            // idx 0: class ClassA
+            DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 1: ClassA.Process (target method)
+            DefinitionEntry { file_id: 0, name: "Process".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 20, parent: Some("ClassA".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 2: class ClassB
+            DefinitionEntry { file_id: 1, name: "ClassB".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 3: ClassB.Handle (calls ClassA.Process)
+            DefinitionEntry { file_id: 1, name: "Handle".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("ClassB".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 4: class ClassC
+            DefinitionEntry { file_id: 2, name: "ClassC".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 5: ClassC.Run (calls ClassB.Handle)
+            DefinitionEntry { file_id: 2, name: "Run".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("ClassC".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 6: class ClassD (unrelated class with same method name "Handle")
+            DefinitionEntry { file_id: 3, name: "ClassD".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 7: ClassD.Handle (DIFFERENT method, same name — should NOT appear)
+            DefinitionEntry { file_id: 3, name: "Handle".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("ClassD".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 8: class ClassE
+            DefinitionEntry { file_id: 4, name: "ClassE".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            // idx 9: ClassE.Execute (calls ClassD.Handle — should NOT be in results)
+            DefinitionEntry { file_id: 4, name: "Execute".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("ClassE".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        ];
+
+        let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+        // ClassB.Handle calls ClassA.Process at line 20
+        method_calls.insert(3, vec![
+            CallSite { method_name: "Process".to_string(), receiver_type: Some("ClassA".to_string()), line: 20, receiver_is_generic: false },
+        ]);
+        // ClassC.Run calls ClassB.Handle at line 15
+        method_calls.insert(5, vec![
+            CallSite { method_name: "Handle".to_string(), receiver_type: Some("ClassB".to_string()), line: 15, receiver_is_generic: false },
+        ]);
+        // ClassE.Execute calls ClassD.Handle at line 15
+        method_calls.insert(9, vec![
+            CallSite { method_name: "Handle".to_string(), receiver_type: Some("ClassD".to_string()), line: 15, receiver_is_generic: false },
+        ]);
+
+        // Build def index
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        let files_list = vec![
+            "src/ClassA.cs".to_string(),
+            "src/ClassB.cs".to_string(),
+            "src/ClassC.cs".to_string(),
+            "src/ClassD.cs".to_string(),
+            "src/ClassE.cs".to_string(),
+        ];
+        for (i, f) in files_list.iter().enumerate() {
+            path_to_id.insert(PathBuf::from(f), i as u32);
+        }
+
+        let def_idx = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: files_list.clone(),
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            method_calls,
+            code_stats: HashMap::new(),
+            parse_errors: 0,
+            lossy_file_count: 0,
+            empty_file_ids: Vec::new(),
+            extension_methods: HashMap::new(),
+            selector_index: HashMap::new(),
+            template_children: HashMap::new(),
+        };
+
+        // --- Content Index ---
+        let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+        // "process" appears in file 0 (definition) and file 1 (ClassB calls it)
+        index.insert("process".to_string(), vec![
+            Posting { file_id: 0, lines: vec![10] },
+            Posting { file_id: 1, lines: vec![20] },
+        ]);
+        // "handle" appears in files 1, 2, 3, 4
+        index.insert("handle".to_string(), vec![
+            Posting { file_id: 1, lines: vec![10] },  // definition of ClassB.Handle
+            Posting { file_id: 2, lines: vec![15] },  // ClassC calls ClassB.Handle
+            Posting { file_id: 3, lines: vec![10] },  // definition of ClassD.Handle
+            Posting { file_id: 4, lines: vec![15] },  // ClassE calls ClassD.Handle
+        ]);
+        // Class name tokens for pre-filtering
+        index.insert("classa".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1] },
+            Posting { file_id: 1, lines: vec![20] },
+        ]);
+        index.insert("classb".to_string(), vec![
+            Posting { file_id: 1, lines: vec![1] },
+            Posting { file_id: 2, lines: vec![15] },
+        ]);
+        index.insert("classd".to_string(), vec![
+            Posting { file_id: 3, lines: vec![1] },
+            Posting { file_id: 4, lines: vec![15] },
+        ]);
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: files_list,
+            index,
+            total_tokens: 100,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![50; 5],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+
+        // --- Run build_caller_tree with depth=3 ---
+        let mut visited = HashSet::new();
+        let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+        let node_count = AtomicUsize::new(0);
+
+        let callers = build_caller_tree(
+            "Process",
+            Some("ClassA"),
+            3,  // depth 3: should find ClassB.Handle (depth 0) → ClassC.Run (depth 1)
+            0,
+            &content_index,
+            &def_idx,
+            "cs",
+            &[],
+            &[],
+            false, // no interface resolution
+            &mut visited,
+            &limits,
+            &node_count,
+        );
+
+        // Depth 0: should find ClassB.Handle as the caller of ClassA.Process
+        assert_eq!(callers.len(), 1, "Expected 1 caller at depth 0, got {}: {:?}", callers.len(), callers);
+        assert_eq!(callers[0]["method"].as_str().unwrap(), "Handle");
+        assert_eq!(callers[0]["class"].as_str().unwrap(), "ClassB");
+
+        // Depth 1: ClassB.Handle should have ClassC.Run as its caller
+        let sub_callers = callers[0]["callers"].as_array()
+            .expect("ClassB.Handle should have sub-callers");
+        assert_eq!(sub_callers.len(), 1, "Expected 1 sub-caller of ClassB.Handle, got {}: {:?}", sub_callers.len(), sub_callers);
+        assert_eq!(sub_callers[0]["method"].as_str().unwrap(), "Run");
+        assert_eq!(sub_callers[0]["class"].as_str().unwrap(), "ClassC");
+
+        // CRITICAL: ClassE.Execute should NOT appear anywhere in the tree.
+        // It calls ClassD.Handle, not ClassB.Handle. Without the F-10 fix,
+        // it would appear as a false positive because the class filter was
+        // dropped at depth > 0.
+        let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(total_nodes, 2, "Should have exactly 2 nodes (ClassB.Handle + ClassC.Run), got {}", total_nodes);
     }
 
     // ─── Test 23: resolve_call_site resolves via base_types (existing behavior preserved) ──

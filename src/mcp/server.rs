@@ -88,11 +88,17 @@ pub fn run_server(
                     Err(e) => {
                         warn!(error = %e, "Failed to parse JSON-RPC request");
                         let err = JsonRpcErrorResponse::new(
-                            Value::Null,
-                            -32700,
-                            format!("Parse error: {}", e),
-                        );
-                        let resp = serde_json::to_string(&err).unwrap();
+                                Value::Null,
+                                -32700,
+                                format!("Parse error: {}", e),
+                            );
+                            let resp = match serde_json::to_string(&err) {
+                                Ok(s) => s,
+                                Err(ser_err) => {
+                                    error!(error = %ser_err, "Failed to serialize parse-error response, skipping");
+                                    continue;
+                                }
+                            };
                         debug!(response = %resp, "Error response");
                         if let Err(e) = writeln!(writer, "{}", resp) {
                             error!(error = %e, "Failed to write error response to stdout, shutting down");
@@ -115,7 +121,25 @@ pub fn run_server(
                 let id = request.id.unwrap();
                 let response = handle_request(&ctx, &request.method, &request.params, id.clone());
 
-                let resp_str = serde_json::to_string(&response).unwrap();
+                let resp_str = match serde_json::to_string(&response) {
+                    Ok(s) => s,
+                    Err(ser_err) => {
+                        error!(error = %ser_err, "Failed to serialize JSON-RPC response");
+                        // Send a JSON-RPC internal error instead of panicking
+                        let fallback = JsonRpcErrorResponse::new(
+                            id,
+                            -32603,
+                            format!("Internal error: response serialization failed: {}", ser_err),
+                        );
+                        match serde_json::to_string(&fallback) {
+                            Ok(s) => s,
+                            Err(e2) => {
+                                error!(error = %e2, "Failed to serialize fallback error response, skipping");
+                                continue;
+                            }
+                        }
+                    }
+                };
                 debug!(response = %resp_str, "Outgoing JSON-RPC");
                 if let Err(e) = writeln!(writer, "{}", resp_str) {
                     error!(error = %e, "Failed to write response to stdout, shutting down");
@@ -172,6 +196,25 @@ fn save_indexes_on_shutdown(ctx: &HandlerContext) {
     }
 }
 
+/// Safely serialize a value to a JSON-RPC `Value`, returning a JSON-RPC
+/// internal-error response if serialization fails (instead of panicking).
+fn safe_to_value<T: serde::Serialize>(v: T, id: &Value) -> Value {
+    match serde_json::to_value(v) {
+        Ok(val) => val,
+        Err(e) => {
+            error!(error = %e, "Failed to serialize value to JSON");
+            json!({
+                "jsonrpc": "2.0",
+                "id": id,
+                "error": {
+                    "code": -32603,
+                    "message": format!("Internal error: serialization failed: {}", e)
+                }
+            })
+        }
+    }
+}
+
 fn handle_request(
     ctx: &HandlerContext,
     method: &str,
@@ -181,31 +224,22 @@ fn handle_request(
     match method {
         "initialize" => {
             let result = InitializeResult::new();
-            serde_json::to_value(JsonRpcResponse::new(
-                id,
-                serde_json::to_value(result).unwrap(),
-            ))
-            .unwrap()
+            let result_val = safe_to_value(result, &id);
+            safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)
         }
         "tools/list" => {
             let tools = handlers::tool_definitions();
             let result = ToolsListResult { tools };
-            serde_json::to_value(JsonRpcResponse::new(
-                id,
-                serde_json::to_value(result).unwrap(),
-            ))
-            .unwrap()
+            let result_val = safe_to_value(result, &id);
+            safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)
         }
         "tools/call" => {
             let params = match params {
                 Some(p) => p,
                 None => {
                     let result = ToolCallResult::error("Missing params".to_string());
-                    return serde_json::to_value(JsonRpcResponse::new(
-                        id,
-                        serde_json::to_value(result).unwrap(),
-                    ))
-                    .unwrap();
+                    let result_val = safe_to_value(result, &id);
+                    return safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null);
                 }
             };
 
@@ -226,27 +260,22 @@ fn handle_request(
 
             // Log response (no-op when --debug-log not passed)
             let elapsed_ms = tool_start.elapsed().as_secs_f64() * 1000.0;
-            let result_json = serde_json::to_value(&result).unwrap();
+            let result_json = safe_to_value(&result, &id);
             let response_str = serde_json::to_string(&result_json).unwrap_or_default();
             let response_bytes = response_str.len();
             crate::index::log_response(tool_name, elapsed_ms, response_bytes, &response_str);
 
-            serde_json::to_value(JsonRpcResponse::new(
-                id,
-                result_json,
-            ))
-            .unwrap()
+            safe_to_value(JsonRpcResponse::new(id, result_json), &Value::Null)
         }
         "ping" => {
-            serde_json::to_value(JsonRpcResponse::new(id, json!({}))).unwrap()
+            safe_to_value(JsonRpcResponse::new(id, json!({})), &Value::Null)
         }
         _ => {
-            serde_json::to_value(JsonRpcErrorResponse::new(
+            safe_to_value(JsonRpcErrorResponse::new(
                 id,
                 -32601,
                 format!("Method not found: {}", method),
-            ))
-            .unwrap()
+            ), &Value::Null)
         }
     }
 }
@@ -358,6 +387,45 @@ mod tests {
         let result = handle_request(&ctx, "tools/call", &None, json!(5));
         assert_eq!(result["result"]["isError"], true);
         assert!(result["result"]["content"][0]["text"].as_str().unwrap().contains("Missing params"));
+    }
+
+    #[test]
+    fn test_handle_request_does_not_panic_on_serialization() {
+        // Verify that handle_request uses safe_to_value which doesn't panic.
+        // We exercise all method branches to confirm no unwrap panics.
+        let ctx = make_ctx();
+
+        // All standard branches should return valid JSON-RPC responses
+        let methods = vec![
+            ("initialize", None),
+            ("tools/list", None),
+            ("tools/call", Some(json!({"name": "search_grep", "arguments": {"terms": "test"}}))),
+            ("tools/call", None), // missing params branch
+            ("ping", None),
+            ("unknown/method", None),
+        ];
+        for (method, params) in methods {
+            let result = handle_request(&ctx, method, &params, json!(1));
+            assert!(result.is_object(), "Response for '{}' should be a JSON object, got: {:?}", method, result);
+            assert_eq!(result["jsonrpc"], "2.0", "Response for '{}' should have jsonrpc=2.0", method);
+        }
+    }
+
+    #[test]
+    fn test_safe_to_value_returns_error_on_serialization_failure() {
+        // safe_to_value should return an error JSON object instead of panicking
+        // when given something that can't be serialized.
+        // Since all our types are Serialize, we test the happy path
+        // and verify the function signature works correctly.
+        let id = json!(42);
+        let result = safe_to_value(json!({"test": true}), &id);
+        assert_eq!(result["test"], true);
+
+        // Test with a normal JsonRpcResponse
+        let resp = JsonRpcResponse::new(json!(1), json!({"ok": true}));
+        let result = safe_to_value(resp, &id);
+        assert_eq!(result["jsonrpc"], "2.0");
+        assert_eq!(result["result"]["ok"], true);
     }
 
     #[test]

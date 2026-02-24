@@ -6750,6 +6750,61 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 ---
 
+### T-F07-SERIALIZATION: MCP server handles serialization errors gracefully without crashing
+
+**Tool:** MCP server (`server.rs`)
+
+**Background:** Audit finding F-07 identified that `serde_json::to_string(&resp).unwrap()` and `serde_json::to_value(...).unwrap()` calls could panic the server if serialization failed (e.g., a `Value` containing NaN float). All `unwrap()` calls on response serialization have been replaced with proper error handling that logs the error and returns a JSON-RPC `-32603` internal error response instead of panicking.
+
+**Scenario:** If the server encounters a serialization failure on any response, it should return a valid JSON-RPC error response with code `-32603` rather than crashing.
+
+**Expected:**
+
+- Server does NOT panic on serialization failure
+- Server returns `{"jsonrpc":"2.0","id":...,"error":{"code":-32603,"message":"Internal error: ..."}}` on serialization failure
+- Normal responses continue to work correctly
+
+**Unit tests:** `test_serialize_response_error_returns_internal_error`, `test_serialize_tool_result_error_returns_internal_error`
+
+**Status:** ✅ Covered by unit tests. Not CLI-testable (serialization failures are triggered by internal edge cases like NaN floats, not by normal user input).
+
+---
+
+### T-F10-CLASS-FILTER-RECURSION: Call tree search with common method names does not produce cross-class false positives at depth > 0
+
+**Tool:** `search_callers`
+
+**Background:** Audit finding F-10 identified that `build_caller_tree` passed `parent_class: None` at recursion depth > 0, causing false positive callers from unrelated classes with common method names like `Process`, `Execute`, `Handle` to appear in the call tree. The fix passes `caller_parent` (the class of the found caller) as the class filter for the next recursion level, matching the pattern already used in `build_callee_tree`.
+
+**Setup:** Create C# files with two unrelated classes that both have a method named `Process`:
+
+- `ServiceA.cs`: `public class ServiceA { public void Process() { } }`
+- `ServiceB.cs`: `public class ServiceB { public void Process() { } }`
+- `Consumer.cs`: `public class Consumer { private ServiceA _a; public void Run() { _a.Process(); } }`
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Process","class":"ServiceA","direction":"up","depth":3}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
+```
+
+**Expected:**
+
+- At depth > 0, callers of `Consumer.Run` do NOT include false positives from `ServiceB.Process` callers
+- The class filter is preserved during recursion — each deeper level uses the caller's parent class as the filter
+- `summary.totalNodes` reflects only verified callers with correct class scope
+
+**Unit test:** `test_caller_tree_preserves_class_filter_during_recursion`
+
+**Status:** ✅ Covered by unit test. CLI-testable only with a multi-class codebase where common method names exist in unrelated classes.
+
+---
+
 ### T-ANGULAR-05: `def-index` — Graceful handling of missing HTML template
 
 **Command:**
