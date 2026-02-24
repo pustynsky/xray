@@ -10,6 +10,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Bug Fixes
 
+- **MCP Server**: Replace all `unwrap()` calls on response serialization with proper error handling — server now returns JSON-RPC `-32603` internal error instead of panicking (audit finding F-07)
+- **Call Tree Builder**: Preserve class filter during recursive caller tree building — prevents false positives for common method names like `Process`, `Execute`, `Handle` at recursion depth > 0 (audit finding F-10)
+
 - **SQL parser: files with comment headers before CREATE not parsed** — SQL files starting with comment banners (dashes, copyright notices) before the `CREATE PROCEDURE/TABLE/VIEW/...` statement produced 0 definitions. Root cause: the `CREATE` regex used `^\s*CREATE` with `^` anchored to the start of the batch text (single-line mode). On files without `GO` delimiters, the entire file is one batch, and `^` only matched the first character. Fix: added `(?m)` multiline flag so `^` matches at the start of every line. 1 new unit test.
 
 - **SQL tool description incorrectly stated "SQL parser retained but disabled"** — The `search_definitions` MCP tool description and `def-index --help` text both incorrectly claimed SQL parsing was disabled. The regex-based SQL parser has been fully active since 2026-02-23. Fixed both descriptions. The LLM was reading these descriptions and incorrectly telling users SQL wasn't supported.
