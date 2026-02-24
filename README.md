@@ -18,7 +18,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 ## What Can You Do With It?
 
-| Scenario | Without search-index | With search-index |
+| Scenario | Without search-index | With search-index* |
 |---|---|---|
 | 🐛 **Debug a stack trace** — find the exact method, trace all callers to the API entry point | ~5 min per stack frame | **3 seconds** |
 | 🏗️ **Understand unfamiliar code** — map classes, call trees, and dependencies of a module you've never seen | ~40 min of manual exploration | **2 minutes** |
@@ -27,6 +27,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | 📊 **Estimate task scope** — "how many files use this feature?" | ~5 min | **30 seconds** |
 | 🧪 **Write tests** — find existing test patterns, discover all dependencies to mock | ~10 min browsing | **<1 second** |
 | 🕵️ **Investigate file history** — who changed this file? What was modified last week? Show me the diff from a specific commit. | ~5 min of git log | **<1 second** |
+> \* Times in the "With search-index" column are **pure tool execution time** (index lookup + response). In practice, add ~1–2 seconds of LLM latency (model thinking + MCP round-trip) which is outside the tool's control.
 
 > 📖 **More:** [Use Cases & Vision](docs/use-cases.md) — detailed scenarios including AI-powered architecture exploration, automated impact analysis, and a real-world case study where we reverse-engineered a 3,800-line system in 5 minutes.
 
