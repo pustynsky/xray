@@ -42,7 +42,7 @@ pub fn cmd_serve(args: ServeArgs) {
 
     // Enable memory diagnostics if --memory-log was passed
     if args.memory_log {
-        crate::index::enable_memory_log(&idx_base);
+        crate::index::enable_memory_log(&idx_base, &dir_str);
     }
     crate::index::log_memory("serve: startup");
 

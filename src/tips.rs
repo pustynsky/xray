@@ -53,8 +53,8 @@ pub fn tips() -> Vec<Tip> {
         },
         Tip {
             rule: "Substring search is ON by default",
-            why: "search_grep defaults to substring=true so compound identifiers (IUserService, m_userService) are always found. Use substring=false for exact-token-only matching. Auto-disabled when regex or phrase is used.",
-            example: "Default: terms='UserService' finds IUserService, m_userService. Exact only: terms='UserService', substring=false",
+            why: "search_grep defaults to substring=true so compound identifiers (IUserService, m_userService) are always found. Use substring=false for exact-token-only matching. Auto-disabled when regex or phrase is used. Short tokens (<4 chars) may produce broad results -- use exclude=['pattern'] to filter noise from file paths.",
+            example: "Default: terms='UserService' finds IUserService, m_userService. Noisy short token: terms='dsp_' exclude=['ODSP','test']. Exact only: terms='UserService', substring=false",
         },
         Tip {
             rule: "Phrase search: exact multi-word match",
@@ -80,6 +80,11 @@ pub fn tips() -> Vec<Tip> {
             rule: "Always specify class in search_callers",
             why: "Without class, results mix callers from ALL classes with same method name. Misleading call trees.",
             example: "MCP: search_callers method='ExecuteAsync', class='OrderProcessor'",
+        },
+        Tip {
+            rule: "search_callers 0 results? Try the interface name",
+            why: "Calls through DI use the interface (IUserService), not the implementation (UserService). search_callers matches the receiver type recorded at call sites. If you search class='UserService' but callers use IUserService, you get 0 results.",
+            example: "0 callers with class='UserService' -> retry with class='IUserService'. Also: resolveInterfaces=true auto-resolves implementations",
         },
         Tip {
             rule: "Stack trace analysis: containsLine",
@@ -280,7 +285,7 @@ pub fn tool_priority() -> Vec<ToolPriority> {
 pub fn parameter_examples() -> Value {
     json!({
         "search_definitions": {
-            "name": "Single: 'UserService'. Multi-term OR: 'UserService,IUserService,UserController' (finds ALL in one query). Naming variants: 'Order,IOrder,OrderFactory'",
+            "name": "Single: 'UserService'. Multi-term OR: 'UserService,IUserService,UserController' (finds ALL in one query). Naming variants: 'Order,IOrder,OrderFactory'. NOTE: name searches AST definition names (classes, methods, properties) -- NOT string literals or values inside code. Use search_grep for string content",
             "containsLine": "file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService",
             "includeBody": "parent='UserService', includeBody=true, maxBodyLines=20 -> returns method bodies inline",
             "sortBy": "sortBy='cognitiveComplexity' maxResults=20 -> 20 most complex methods. sortBy='lines' -> longest definitions",

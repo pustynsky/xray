@@ -28,13 +28,26 @@ static MEMORY_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 /// Startup timestamp for relative timing in log entries.
 static MEMORY_LOG_START: OnceLock<Instant> = OnceLock::new();
 
-/// Enable memory logging: creates/truncates `memory.log` in `index_base`,
+/// Enable memory logging: creates/truncates a per-server `memory.log` in `index_base`,
 /// writes a header line, and sets the global enable flag.
 ///
+/// The log filename uses the same semantic prefix as index files (e.g.,
+/// `repos_shared_00343f32.memory.log`) so multiple servers don't overwrite
+/// each other's logs.
+///
 /// Must be called once at startup before any `log_memory()` calls.
-pub fn enable_memory_log(index_base: &std::path::Path) {
+/// Compute the per-server memory log file path.
+/// Uses the same semantic prefix + hash naming as index files.
+pub fn memory_log_path_for(index_base: &std::path::Path, server_dir: &str) -> PathBuf {
+    let canonical = fs::canonicalize(server_dir).unwrap_or_else(|_| PathBuf::from(server_dir));
+    let hash = stable_hash(&[canonical.to_string_lossy().as_bytes()]);
+    let prefix = extract_semantic_prefix(&canonical);
+    index_base.join(format!("{}_{:08x}.memory.log", prefix, hash as u32))
+}
+
+pub fn enable_memory_log(index_base: &std::path::Path, server_dir: &str) {
     let _ = fs::create_dir_all(index_base);
-    let log_path = index_base.join("memory.log");
+    let log_path = memory_log_path_for(index_base, server_dir);
 
     // Truncate and write header
     if let Ok(mut f) = fs::File::create(&log_path) {
@@ -1298,6 +1311,41 @@ mod index_tests {
         assert!(content.contains("elapsed"));
         assert!(content.contains("WS_MB"));
         assert!(content.contains("label"));
+    }
+
+    #[test]
+    fn test_memory_log_path_has_semantic_prefix() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server_dir = tmp.path().to_string_lossy().to_string();
+        let path = crate::index::memory_log_path_for(tmp.path(), &server_dir);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(filename.ends_with(".memory.log"),
+            "Memory log filename should end with .memory.log, got: {}", filename);
+        assert!(filename.contains('_'),
+            "Memory log filename should have prefix_hash format, got: {}", filename);
+    }
+
+    #[test]
+    fn test_memory_log_path_different_dirs_different_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir_a = tmp.path().join("dir_a");
+        let dir_b = tmp.path().join("dir_b");
+        std::fs::create_dir_all(&dir_a).unwrap();
+        std::fs::create_dir_all(&dir_b).unwrap();
+        let path_a = crate::index::memory_log_path_for(tmp.path(), &dir_a.to_string_lossy());
+        let path_b = crate::index::memory_log_path_for(tmp.path(), &dir_b.to_string_lossy());
+        assert_ne!(path_a, path_b,
+            "Different server dirs should produce different memory log paths");
+    }
+
+    #[test]
+    fn test_memory_log_path_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server_dir = tmp.path().to_string_lossy().to_string();
+        let path1 = crate::index::memory_log_path_for(tmp.path(), &server_dir);
+        let path2 = crate::index::memory_log_path_for(tmp.path(), &server_dir);
+        assert_eq!(path1, path2,
+            "Same inputs should produce same memory log path");
     }
 
     #[test]

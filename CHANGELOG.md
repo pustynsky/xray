@@ -6,6 +6,26 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-24
+
+### Documentation
+
+- **Per-server memory.log with semantic prefix** — `--memory-log` now writes per-server log files using the same naming convention as index files (e.g., `repos_shared_00343f32.memory.log` instead of `memory.log`). Multiple MCP servers running simultaneously no longer overwrite each other's memory logs. 3 new tests.
+
+### Documentation
+
+- **3 tips.rs improvements based on LLM agent UX session analysis** — Added new tip "search_callers 0 results? Try the interface name" warning that DI calls use interface types (IUserService), not concrete classes (UserService), and suggesting `resolveInterfaces=true`. Added NOTE to `search_definitions` parameter examples clarifying that `name` searches AST definition names only — NOT string literals or values (use `search_grep` for string content). Enhanced substring search tip with guidance on short-token noise: `exclude=['pattern']` for filtering, with `dsp_` + ODSP example.
+
+### Bug Fixes
+
+- **search_grep substring auto-switches to phrase for spaced terms (US-16)** — When `search_grep` receives terms containing spaces in substring mode (e.g., `"CREATE PROCEDURE"`, `"public class"`), it now auto-switches to phrase search instead of silently returning 0 results. The response includes `searchModeNote` explaining the switch. Previously, spaced terms always returned 0 because the tokenizer splits on spaces and no individual token contains spaces. 4 new tests.
+
+### Documentation
+
+- **Bug report: search_grep substring mode silently returns 0 for terms with spaces** — Documented P1 UX trap where `terms: "CREATE PROCEDURE"` returns 0 results because the tokenizer splits on spaces, so no individual token contains `"create procedure"`. Fixed via Option A (auto-switch to phrase mode). See `docs/bug-reports/substring-space-in-terms-silent-failure.md`.
+
+---
+
 ## 2026-02-23
 
 ### Bug Fixes
