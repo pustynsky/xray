@@ -6516,11 +6516,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ---
 
 
-### T-MEMORY-LOG: `serve --memory-log` — Memory diagnostics file
+### T-DEBUG-LOG: `serve --debug-log` — Debug logging (MCP traces + memory diagnostics)
 
-**Tool:** `search-index serve --memory-log`
+**Tool:** `search-index serve --debug-log`
 
-**Background:** When `--memory-log` is passed to `search-index serve`, the server writes a `memory.log` file in the index directory (`%LOCALAPPDATA%/search-index/`) with Working Set / Peak WS / Commit at every key pipeline stage.
+**Background:** When `--debug-log` is passed to `search-index serve`, the server writes a `.debug.log` file in the index directory (`%LOCALAPPDATA%/search-index/`) with MCP request/response traces (tool name, arguments, elapsed time, response size, Working Set) and Working Set / Peak WS / Commit memory diagnostics at every key pipeline stage.
 
 **Command:**
 
@@ -6530,20 +6530,23 @@ $msgs = @(
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
     '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_info","arguments":{}}}'
 ) -join "`n"
-echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --memory-log
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --debug-log
 ```
 
 **Expected:**
 
-- stderr contains `[memory-log] Enabled, writing to`
+- stderr contains `[debug-log] Enabled, writing to`
 - stderr contains `[memory]` lines with timing, WS_MB, Peak_MB, Commit_MB, and labels
-- File `%LOCALAPPDATA%/search-index/memory.log` is created with header + data lines
+- stderr contains `[debug-log]` lines with REQ/RESP entries for each tool call
+- File `%LOCALAPPDATA%/search-index/<prefix>.debug.log` is created with header + data lines
 - Labels include: `serve: startup`, `content-build: starting`, `content-build: finished`, etc.
-- When `--memory-log` is NOT passed, no `[memory]` lines appear in stderr
+- REQ lines include: tool name and arguments JSON
+- RESP lines include: tool name, elapsed ms, response KB, Working Set MB
+- When `--debug-log` is NOT passed, no `[memory]` or `[debug-log]` lines appear in stderr
 
-**Validates:** Memory diagnostics file creation, `log_memory()` calls at key pipeline stages, no-op when disabled.
+**Validates:** Debug log file creation, `log_memory()` / `log_request()` / `log_response()` calls at key pipeline stages, no-op when disabled.
 
-**Unit tests:** `test_log_memory_is_noop_when_disabled`, `test_enable_memory_log_creates_file`, `test_get_process_memory_info_returns_json`, `test_force_mimalloc_collect_does_not_panic`
+**Unit tests:** `test_log_memory_is_noop_when_disabled`, `test_enable_debug_log_creates_file`, `test_get_process_memory_info_returns_json`, `test_force_mimalloc_collect_does_not_panic`, `test_log_request_format`, `test_log_response_format`, `test_debug_log_path_extension`, `test_format_utc_timestamp_format`
 
 ---
 

@@ -255,10 +255,11 @@ pub struct ServeArgs {
     #[arg(long, default_value = "16")]
     pub max_response_kb: usize,
 
-    /// Enable memory diagnostics: write Working Set / Commit / Peak to a log file
-    /// in the index directory (memory.log). Useful for diagnosing memory spikes.
+    /// Enable debug logging: write MCP request/response traces and memory diagnostics
+    /// to a per-server .debug.log file in the index directory. Useful for diagnosing
+    /// performance issues and MCP traffic.
     #[arg(long)]
-    pub memory_log: bool,
+    pub debug_log: bool,
 }
 
 #[derive(Parser, Debug)]

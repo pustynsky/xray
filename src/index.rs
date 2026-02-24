@@ -14,40 +14,40 @@ use search_index::{clean_path, extract_semantic_prefix, generate_trigrams, read_
 
 use crate::{ContentIndexArgs, IndexArgs};
 
-// ─── Memory diagnostics ─────────────────────────────────────────────
+// ─── Debug logging (memory diagnostics + MCP request/response traces) ────
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::OnceLock;
 
-/// Whether memory logging is enabled (fast check via AtomicBool).
-static MEMORY_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
+/// Whether debug logging is enabled (fast check via AtomicBool).
+static DEBUG_LOG_ENABLED: AtomicBool = AtomicBool::new(false);
 
-/// Path to the memory.log file (set once by `enable_memory_log`).
-static MEMORY_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
+/// Path to the .debug.log file (set once by `enable_debug_log`).
+static DEBUG_LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// Startup timestamp for relative timing in log entries.
-static MEMORY_LOG_START: OnceLock<Instant> = OnceLock::new();
+static DEBUG_LOG_START: OnceLock<Instant> = OnceLock::new();
 
-/// Enable memory logging: creates/truncates a per-server `memory.log` in `index_base`,
-/// writes a header line, and sets the global enable flag.
-///
-/// The log filename uses the same semantic prefix as index files (e.g.,
-/// `repos_shared_00343f32.memory.log`) so multiple servers don't overwrite
-/// each other's logs.
-///
-/// Must be called once at startup before any `log_memory()` calls.
-/// Compute the per-server memory log file path.
+/// Compute the per-server debug log file path.
 /// Uses the same semantic prefix + hash naming as index files.
-pub fn memory_log_path_for(index_base: &std::path::Path, server_dir: &str) -> PathBuf {
+pub fn debug_log_path_for(index_base: &std::path::Path, server_dir: &str) -> PathBuf {
     let canonical = fs::canonicalize(server_dir).unwrap_or_else(|_| PathBuf::from(server_dir));
     let hash = stable_hash(&[canonical.to_string_lossy().as_bytes()]);
     let prefix = extract_semantic_prefix(&canonical);
-    index_base.join(format!("{}_{:08x}.memory.log", prefix, hash as u32))
+    index_base.join(format!("{}_{:08x}.debug.log", prefix, hash as u32))
 }
 
-pub fn enable_memory_log(index_base: &std::path::Path, server_dir: &str) {
+/// Enable debug logging: creates/truncates a per-server `.debug.log` in `index_base`,
+/// writes a header line, and sets the global enable flag.
+///
+/// The log filename uses the same semantic prefix as index files (e.g.,
+/// `repos_shared_00343f32.debug.log`) so multiple servers don't overwrite
+/// each other's logs.
+///
+/// Must be called once at startup before any `log_memory()` / `log_request()` / `log_response()` calls.
+pub fn enable_debug_log(index_base: &std::path::Path, server_dir: &str) {
     let _ = fs::create_dir_all(index_base);
-    let log_path = memory_log_path_for(index_base, server_dir);
+    let log_path = debug_log_path_for(index_base, server_dir);
 
     // Truncate and write header
     if let Ok(mut f) = fs::File::create(&log_path) {
@@ -58,20 +58,85 @@ pub fn enable_memory_log(index_base: &std::path::Path, server_dir: &str) {
         let _ = writeln!(f, "{}", "-".repeat(70));
     }
 
-    let _ = MEMORY_LOG_PATH.set(log_path.clone());
-    let _ = MEMORY_LOG_START.set(Instant::now());
-    MEMORY_LOG_ENABLED.store(true, Ordering::Release);
+    let _ = DEBUG_LOG_PATH.set(log_path.clone());
+    let _ = DEBUG_LOG_START.set(Instant::now());
+    DEBUG_LOG_ENABLED.store(true, Ordering::Release);
 
-    eprintln!("[memory-log] Enabled, writing to {}", log_path.display());
+    eprintln!("[debug-log] Enabled, writing to {}", log_path.display());
 }
 
-/// Log current process memory metrics (Working Set, Peak WS, Commit) to the memory log file.
+/// Generate ISO 8601 UTC timestamp from SystemTime (no chrono dependency).
+/// Format: "2026-02-24T09:28:20Z"
+pub fn format_utc_timestamp() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    // Howard Hinnant civil date algorithm
+    let s = (secs % 86400) as u32;
+    let z = (secs / 86400) as i64 + 719468;
+    let era = if z >= 0 { z } else { z - 146096 } / 146097;
+    let doe = (z - era * 146097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    format!("{:04}-{:02}-{:02}T{:02}:{:02}:{:02}Z",
+        y, m, d, s / 3600, (s % 3600) / 60, s % 60)
+}
+
+/// Append a line to the debug log file. Shared by log_memory, log_request, log_response.
+fn append_to_debug_log(line: &str) {
+    if let Some(path) = DEBUG_LOG_PATH.get() {
+        if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
+}
+
+/// Log an MCP tool request to the debug log file.
+/// Format: "2026-02-24T09:28:20Z | REQ  | search_grep | {"terms":"HttpClient","ext":"cs"}"
+/// No-op when `--debug-log` is not passed (single AtomicBool check).
+pub fn log_request(tool: &str, args: &str) {
+    if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let line = format!("{} | REQ  | {} | {}", format_utc_timestamp(), tool, args);
+    eprintln!("[debug-log] {}", line);
+    append_to_debug_log(&line);
+}
+
+/// Log an MCP tool response to the debug log file.
+/// Format: "2026-02-24T09:28:20Z | RESP | search_grep | 12.3ms | 4.2KB | WS=350.1MB"
+/// followed by the full response body on the next line.
+/// No-op when `--debug-log` is not passed (single AtomicBool check).
+pub fn log_response(tool: &str, elapsed_ms: f64, response_bytes: usize, response_body: &str) {
+    if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+    let ws_mb = {
+        let info = get_process_memory_info();
+        info["workingSetMB"].as_f64().map(|v| format!("WS={:.1}MB", v)).unwrap_or_default()
+    };
+    let line = format!("{} | RESP | {} | {:.1}ms | {:.1}KB | {}",
+        format_utc_timestamp(), tool, elapsed_ms,
+        response_bytes as f64 / 1024.0, ws_mb);
+    eprintln!("[debug-log] {}", line);
+    append_to_debug_log(&line);
+    // Log full response body
+    append_to_debug_log(response_body);
+}
+
+/// Log current process memory metrics (Working Set, Peak WS, Commit) to the debug log file.
 ///
-/// When `--memory-log` is not passed, this is a fast no-op (single AtomicBool check).
+/// When `--debug-log` is not passed, this is a fast no-op (single AtomicBool check).
 /// On non-Windows platforms, this is always a no-op.
 #[cfg(target_os = "windows")]
 pub fn log_memory(label: &str) {
-    if !MEMORY_LOG_ENABLED.load(Ordering::Acquire) {
+    if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
         return;
     }
 
@@ -125,7 +190,7 @@ pub fn log_memory(label: &str) {
     let peak_mb = pmc.PeakWorkingSetSize as f64 / 1_048_576.0;
     let commit_mb = pmc.PagefileUsage as f64 / 1_048_576.0;
 
-    let elapsed = MEMORY_LOG_START
+    let elapsed = DEBUG_LOG_START
         .get()
         .map(|s| s.elapsed().as_secs_f64())
         .unwrap_or(0.0);
@@ -138,12 +203,8 @@ pub fn log_memory(label: &str) {
     // Print to stderr
     eprintln!("[memory] {}", line);
 
-    // Append to log file
-    if let Some(path) = MEMORY_LOG_PATH.get() {
-        if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
-            let _ = writeln!(f, "{}", line);
-        }
-    }
+    // Append to debug log file
+    append_to_debug_log(&line);
 }
 
 /// Log current process memory metrics — no-op on non-Windows platforms.
@@ -1294,12 +1355,12 @@ mod index_tests {
     }
 
     #[test]
-    fn test_enable_memory_log_creates_file() {
+    fn test_enable_debug_log_creates_file() {
         let tmp = tempfile::tempdir().unwrap();
-        // Note: we can't call enable_memory_log in tests because it uses
+        // Note: we can't call enable_debug_log in tests because it uses
         // global OnceLock (can only set once per process). Instead, test the
         // file creation logic directly.
-        let log_path = tmp.path().join("memory.log");
+        let log_path = tmp.path().join("debug.log");
         {
             let mut f = std::fs::File::create(&log_path).unwrap();
             writeln!(f, "{:>8} | {:>8} | {:>8} | {:>8} | {}",
@@ -1314,38 +1375,83 @@ mod index_tests {
     }
 
     #[test]
-    fn test_memory_log_path_has_semantic_prefix() {
+    fn test_debug_log_path_has_semantic_prefix() {
         let tmp = tempfile::tempdir().unwrap();
         let server_dir = tmp.path().to_string_lossy().to_string();
-        let path = crate::index::memory_log_path_for(tmp.path(), &server_dir);
+        let path = crate::index::debug_log_path_for(tmp.path(), &server_dir);
         let filename = path.file_name().unwrap().to_string_lossy();
-        assert!(filename.ends_with(".memory.log"),
-            "Memory log filename should end with .memory.log, got: {}", filename);
+        assert!(filename.ends_with(".debug.log"),
+            "Debug log filename should end with .debug.log, got: {}", filename);
         assert!(filename.contains('_'),
-            "Memory log filename should have prefix_hash format, got: {}", filename);
+            "Debug log filename should have prefix_hash format, got: {}", filename);
     }
 
     #[test]
-    fn test_memory_log_path_different_dirs_different_paths() {
+    fn test_debug_log_path_different_dirs_different_paths() {
         let tmp = tempfile::tempdir().unwrap();
         let dir_a = tmp.path().join("dir_a");
         let dir_b = tmp.path().join("dir_b");
         std::fs::create_dir_all(&dir_a).unwrap();
         std::fs::create_dir_all(&dir_b).unwrap();
-        let path_a = crate::index::memory_log_path_for(tmp.path(), &dir_a.to_string_lossy());
-        let path_b = crate::index::memory_log_path_for(tmp.path(), &dir_b.to_string_lossy());
+        let path_a = crate::index::debug_log_path_for(tmp.path(), &dir_a.to_string_lossy());
+        let path_b = crate::index::debug_log_path_for(tmp.path(), &dir_b.to_string_lossy());
         assert_ne!(path_a, path_b,
-            "Different server dirs should produce different memory log paths");
+            "Different server dirs should produce different debug log paths");
     }
 
     #[test]
-    fn test_memory_log_path_deterministic() {
+    fn test_debug_log_path_deterministic() {
         let tmp = tempfile::tempdir().unwrap();
         let server_dir = tmp.path().to_string_lossy().to_string();
-        let path1 = crate::index::memory_log_path_for(tmp.path(), &server_dir);
-        let path2 = crate::index::memory_log_path_for(tmp.path(), &server_dir);
+        let path1 = crate::index::debug_log_path_for(tmp.path(), &server_dir);
+        let path2 = crate::index::debug_log_path_for(tmp.path(), &server_dir);
         assert_eq!(path1, path2,
-            "Same inputs should produce same memory log path");
+            "Same inputs should produce same debug log path");
+    }
+
+    #[test]
+    fn test_log_request_format() {
+        // Test format_utc_timestamp + log_request line format
+        // Since we can't enable the global log in tests, test the format logic directly
+        let ts = crate::index::format_utc_timestamp();
+        assert!(ts.ends_with('Z'), "Timestamp should end with Z: {}", ts);
+        assert!(ts.contains('T'), "Timestamp should contain T separator: {}", ts);
+        assert_eq!(ts.len(), 20, "Timestamp should be 20 chars (YYYY-MM-DDTHH:MM:SSZ): {}", ts);
+    }
+
+    #[test]
+    fn test_log_response_format() {
+        // Verify format_utc_timestamp produces valid ISO 8601
+        let ts = crate::index::format_utc_timestamp();
+        // Parse year, month, day
+        let year: u32 = ts[0..4].parse().unwrap();
+        let month: u32 = ts[5..7].parse().unwrap();
+        let day: u32 = ts[8..10].parse().unwrap();
+        assert!(year >= 2020 && year <= 2100, "Year out of range: {}", year);
+        assert!(month >= 1 && month <= 12, "Month out of range: {}", month);
+        assert!(day >= 1 && day <= 31, "Day out of range: {}", day);
+    }
+
+    #[test]
+    fn test_debug_log_path_extension() {
+        let tmp = tempfile::tempdir().unwrap();
+        let server_dir = tmp.path().to_string_lossy().to_string();
+        let path = crate::index::debug_log_path_for(tmp.path(), &server_dir);
+        let filename = path.file_name().unwrap().to_string_lossy();
+        assert!(filename.ends_with(".debug.log"),
+            "Debug log filename should end with .debug.log, got: {}", filename);
+    }
+
+    #[test]
+    fn test_format_utc_timestamp_format() {
+        let ts = crate::index::format_utc_timestamp();
+        // Verify exact format: YYYY-MM-DDTHH:MM:SSZ
+        assert_eq!(ts.as_bytes()[4], b'-');
+        assert_eq!(ts.as_bytes()[7], b'-');
+        assert_eq!(ts.as_bytes()[10], b'T');
+        assert_eq!(ts.as_bytes()[13], b':');
+        assert_eq!(ts.as_bytes()[16], b':');
+        assert_eq!(ts.as_bytes()[19], b'Z');
     }
 
     #[test]

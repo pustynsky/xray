@@ -40,9 +40,9 @@ pub fn cmd_serve(args: ServeArgs) {
 
     let idx_base = index_dir();
 
-    // Enable memory diagnostics if --memory-log was passed
-    if args.memory_log {
-        crate::index::enable_memory_log(&idx_base, &dir_str);
+    // Enable debug logging if --debug-log was passed
+    if args.debug_log {
+        crate::index::enable_debug_log(&idx_base, &dir_str);
     }
     crate::index::log_memory("serve: startup");
 

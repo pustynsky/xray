@@ -218,11 +218,22 @@ fn handle_request(
                 .cloned()
                 .unwrap_or(Value::Object(serde_json::Map::new()));
 
+            // Log request (no-op when --debug-log not passed)
+            crate::index::log_request(tool_name, &serde_json::to_string(&arguments).unwrap_or_default());
+
+            let tool_start = std::time::Instant::now();
             let result = handlers::dispatch_tool(ctx, tool_name, &arguments);
+
+            // Log response (no-op when --debug-log not passed)
+            let elapsed_ms = tool_start.elapsed().as_secs_f64() * 1000.0;
+            let result_json = serde_json::to_value(&result).unwrap();
+            let response_str = serde_json::to_string(&result_json).unwrap_or_default();
+            let response_bytes = response_str.len();
+            crate::index::log_response(tool_name, elapsed_ms, response_bytes, &response_str);
 
             serde_json::to_value(JsonRpcResponse::new(
                 id,
-                serde_json::to_value(result).unwrap(),
+                result_json,
             ))
             .unwrap()
         }

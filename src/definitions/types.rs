@@ -279,7 +279,7 @@ pub struct DefIndexArgs {
     /// File extensions to parse, comma-separated.
     /// C# (.cs) uses tree-sitter-c-sharp grammar.
     /// TypeScript (.ts, .tsx) uses tree-sitter-typescript grammar.
-    /// SQL (.sql) parsing is currently disabled (no compatible T-SQL grammar for tree-sitter 0.24).
+    /// SQL (.sql) uses a regex-based parser (stored procedures, tables, views, functions, types, indexes, columns, call sites).
     #[arg(short, long, default_value = "cs")]
     pub ext: String,
 

@@ -98,7 +98,7 @@ fn parse_batch(
 
     // Try to match CREATE statements
     let create_re = Regex::new(
-        r"(?i)^\s*CREATE\s+(OR\s+ALTER\s+)?(UNIQUE\s+)?(CLUSTERED\s+|NONCLUSTERED\s+)?(PROCEDURE|PROC|FUNCTION|TABLE|VIEW|TYPE|INDEX)\s+"
+        r"(?im)^\s*CREATE\s+(OR\s+ALTER\s+)?(UNIQUE\s+)?(CLUSTERED\s+|NONCLUSTERED\s+)?(PROCEDURE|PROC|FUNCTION|TABLE|VIEW|TYPE|INDEX)\s+"
     ).unwrap();
 
     if let Some(m) = create_re.find(&batch_text) {
