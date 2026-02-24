@@ -8,6 +8,18 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-24
 
+### Bug Fixes
+
+- **SQL parser: files with comment headers before CREATE not parsed** — SQL files starting with comment banners (dashes, copyright notices) before the `CREATE PROCEDURE/TABLE/VIEW/...` statement produced 0 definitions. Root cause: the `CREATE` regex used `^\s*CREATE` with `^` anchored to the start of the batch text (single-line mode). On files without `GO` delimiters, the entire file is one batch, and `^` only matched the first character. Fix: added `(?m)` multiline flag so `^` matches at the start of every line. 1 new unit test.
+
+- **SQL tool description incorrectly stated "SQL parser retained but disabled"** — The `search_definitions` MCP tool description and `def-index --help` text both incorrectly claimed SQL parsing was disabled. The regex-based SQL parser has been fully active since 2026-02-23. Fixed both descriptions. The LLM was reading these descriptions and incorrectly telling users SQL wasn't supported.
+
+### Features
+
+- **`--debug-log` now logs full response body** — The debug log (`--debug-log` flag) now writes the complete MCP tool response JSON after each `RESP` line, enabling diagnosis of what the server actually returned. Previously only logged the response size (e.g., `0.3KB`).
+
+- **`--debug-log` replaces `--memory-log` (US-17)** — Renamed `--memory-log` CLI flag to `--debug-log` and extended it into a full debug log for the MCP server. The debug log now captures MCP request/response traces (tool name, arguments, elapsed time, response size, Working Set) in addition to the existing memory diagnostics. Log format: ISO 8601 timestamp + type tag (REQ/RESP/MEM) per line. File extension changed from `.memory.log` to `.debug.log`. Breaking change: `--memory-log` flag removed (use `--debug-log` instead). New helper functions: `log_request()`, `log_response()`, `format_utc_timestamp()`. 4 new tests, 4 renamed tests.
+
 ### Documentation
 
 - **Per-server memory.log with semantic prefix** — `--memory-log` now writes per-server log files using the same naming convention as index files (e.g., `repos_shared_00343f32.memory.log` instead of `memory.log`). Multiple MCP servers running simultaneously no longer overwrite each other's memory logs. 3 new tests.
