@@ -275,6 +275,31 @@ search-index occupies the **"fast enough for interactive AI agents, structured e
 
 **When to reconsider:** If precise type inference becomes critical (not just call-site heuristics), integrating SCIP/LSIF indexes alongside the current AST index would be the path — keeping the fast text search layer while adding semantic precision where needed.
 
+## 10. Interface Resolution Depth in Caller Trees
+
+### Chosen: `resolveInterfaces` expands sibling implementations only at root level (depth 0)
+
+**Why:**
+
+- At depth 0, the user's target method may be defined on an interface (e.g., `IUserService.GetUser`). Expanding to all implementations (`UserService.GetUser`, `MockUserService.GetUser`) is essential — without it, the caller tree would be empty since no code calls the interface method directly.
+- At deeper levels (depth > 0), callers are found via `verify_call_site_target()` which already handles interface-based calls through multiple heuristics:
+  - **Direct naming match** — `IFoo`↔`Foo` prefix matching
+  - **Inheritance via `base_types`** — if `UserService` lists `IUserService` in its base types, calls to `IUserService.GetUser` match `UserService.GetUser`
+  - **Fuzzy DI matching** — `is_implementation_of()` detects dependency injection patterns (field types, constructor parameters) to resolve `_userService.GetUser()` → `IUserService.GetUser`
+- Expanding sibling implementations at every depth level risks **combinatorial explosion**: an interface with 5 implementations would multiply the tree width by 5× at each level, consuming the `max_total_nodes` budget on breadth instead of depth
+
+**The gap:**
+
+The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserService.GetUser`) with no naming relationship to its interface, called by concrete type at depth > 0. This is a narrow edge case — in practice, if a class implements `IUserService`, `verify_call_site_target()` will match it via `base_types` or naming heuristics.
+
+**Rejected alternative:**
+
+| Alternative | Why Not |
+|---|---|
+| **`resolveInterfaces` at all depths** | For an interface with N implementations, the tree width multiplies by N at each level. With depth=5 and N=5, this creates up to 5^5 = 3125 nodes from a single root — exhausting the default `max_total_nodes=200` budget immediately. Result quality degrades because the budget is consumed by sibling implementations rather than the actual call chain the user is investigating. |
+
+**When to reconsider:** If users report missing callers at depth > 0 due to unconventional DI patterns, an optional `interfaceDepth` parameter could allow controlled expansion at deeper levels (e.g., `interfaceDepth: 2` would expand interfaces at depths 0-2).
+
 ## Summary Matrix
 
 | Decision        | Chosen                 | Key Reason                  | Reconsider When              |
