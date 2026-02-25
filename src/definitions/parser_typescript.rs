@@ -361,7 +361,7 @@ fn extract_ts_decorators(node: tree_sitter::Node, source: &str) -> Vec<String> {
 
 /// Extract Angular @Component metadata from decorator text.
 /// Input — decorator text without `@`:
-///   "Component({selector: 'datahub-embed', templateUrl: './file.html'})"
+///   "Component({selector: 'dashboard-embed', templateUrl: './file.html'})"
 /// Returns (selector, templateUrl) if found.
 pub(crate) fn extract_component_metadata(decorator_text: &str) -> Option<(String, Option<String>)> {
     if !decorator_text.starts_with("Component(") {

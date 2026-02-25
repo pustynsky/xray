@@ -775,8 +775,16 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
     load_compressed(&path, "content-index")
 }
 
-/// Try to find any content index (.word-search) file matching the given directory
-pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path) -> Option<ContentIndex> {
+/// Try to find any content index (.word-search) file matching the given directory.
+///
+/// When `expected_exts` is non-empty, the cached index must contain ALL
+/// of the expected extensions (superset check). If the cached index is
+/// missing any expected extension, it is skipped so the caller can
+/// trigger a full rebuild with the correct extensions.
+///
+/// This prevents a stale cache (e.g., built with `--ext cs` only) from
+/// being used when the server now requires `--ext cs,sql`.
+pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expected_exts: &[String]) -> Option<ContentIndex> {
     if !index_base.exists() {
         return None;
     }
@@ -789,6 +797,17 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path) -> Op
             match load_compressed::<ContentIndex>(&path, "content-index") {
                 Ok(index) => {
                     if index.root == clean {
+                        // Validate that cached index has ALL expected extensions
+                        if !expected_exts.is_empty() {
+                            let has_all = expected_exts.iter().all(|ext|
+                                index.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
+                            );
+                            if !has_all {
+                                eprintln!("[find_content_index] Skipping {} — extensions mismatch (cached: {:?}, expected: {:?})",
+                                    path.display(), index.extensions, expected_exts);
+                                continue;
+                            }
+                        }
                         return Some(index);
                     }
                 }
@@ -1570,6 +1589,105 @@ mod index_tests {
         assert_eq!(estimate["definitionCount"], 0);
         assert_eq!(estimate["fileCount"], 0);
         assert_eq!(estimate["totalEstimateMB"].as_f64().unwrap(), 0.0);
+    }
+
+    // ─── find_content_index_for_dir extension validation tests ─────
+
+    #[test]
+    fn test_find_content_index_skips_stale_extensions() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_base = tmp.path();
+
+        let root_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+        // Save a content index with only "cs" extension
+        let idx = search_index::ContentIndex {
+            root: root_str.clone(),
+            created_at: 0,
+            max_age_secs: 86400,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![],
+            trigram: search_index::TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        crate::save_content_index(&idx, index_base).unwrap();
+
+        // Request "cs,sql" — should NOT find the old cs-only index
+        let expected = vec!["cs".to_string(), "sql".to_string()];
+        let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected);
+        assert!(result.is_none(),
+            "Should not find cs-only content index when cs,sql is expected");
+    }
+
+    #[test]
+    fn test_find_content_index_accepts_superset() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_base = tmp.path();
+
+        let root_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+        // Save a content index with "cs,sql,md" extensions
+        let idx = search_index::ContentIndex {
+            root: root_str.clone(),
+            created_at: 0,
+            max_age_secs: 86400,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["cs".to_string(), "sql".to_string(), "md".to_string()],
+            file_token_counts: vec![],
+            trigram: search_index::TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        crate::save_content_index(&idx, index_base).unwrap();
+
+        // Request "cs,sql" — should find the superset index
+        let expected = vec!["cs".to_string(), "sql".to_string()];
+        let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected);
+        assert!(result.is_some(),
+            "Should find cs,sql,md content index when cs,sql is expected (superset)");
+    }
+
+    #[test]
+    fn test_find_content_index_empty_expected_accepts_any() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_base = tmp.path();
+
+        let root_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&root_dir).unwrap();
+        let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+        let idx = search_index::ContentIndex {
+            root: root_str.clone(),
+            created_at: 0,
+            max_age_secs: 86400,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![],
+            trigram: search_index::TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+        };
+        crate::save_content_index(&idx, index_base).unwrap();
+
+        // Empty expected — should accept any (backward compatible)
+        let result = crate::index::find_content_index_for_dir(&root_str, index_base, &[]);
+        assert!(result.is_some(),
+            "Empty expected_exts should accept any cached content index");
     }
 
     #[test]

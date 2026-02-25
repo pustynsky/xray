@@ -673,13 +673,13 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 #[test] fn test_substring_default_finds_compound_identifiers() {
     let ctx = make_substring_ctx(
         vec![
-            ("catalogquerymanager", 0, vec![39]),
-            ("icatalogquerymanager", 1, vec![5]),
-            ("m_catalogquerymanager", 2, vec![12]),
+            ("storageindexmanager", 0, vec![39]),
+            ("istorageindexmanager", 1, vec![5]),
+            ("m_storageindexmanager", 2, vec![12]),
         ],
-        vec!["C:\\test\\CatalogQueryManager.cs", "C:\\test\\ICatalogQueryManager.cs", "C:\\test\\Controller.cs"],
+        vec!["C:\\test\\StorageIndexManager.cs", "C:\\test\\IStorageIndexManager.cs", "C:\\test\\Controller.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "CatalogQueryManager"}));
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "StorageIndexManager"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 3,
@@ -691,13 +691,13 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 #[test] fn test_substring_false_misses_compound_identifiers() {
     let ctx = make_substring_ctx(
         vec![
-            ("catalogquerymanager", 0, vec![39]),
-            ("icatalogquerymanager", 1, vec![5]),
-            ("m_catalogquerymanager", 2, vec![12]),
+            ("storageindexmanager", 0, vec![39]),
+            ("istorageindexmanager", 1, vec![5]),
+            ("m_storageindexmanager", 2, vec![12]),
         ],
-        vec!["C:\\test\\CatalogQueryManager.cs", "C:\\test\\ICatalogQueryManager.cs", "C:\\test\\Controller.cs"],
+        vec!["C:\\test\\StorageIndexManager.cs", "C:\\test\\IStorageIndexManager.cs", "C:\\test\\Controller.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "catalogquerymanager", "substring": false}));
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "storageindexmanager", "substring": false}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1,
