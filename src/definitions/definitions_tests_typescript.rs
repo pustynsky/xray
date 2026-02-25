@@ -994,12 +994,12 @@ fn test_ts_multiline_arrow_function_calls_captured() {
 #[test]
 fn test_extract_component_metadata_standard() {
     use super::parser_typescript::extract_component_metadata;
-    let text = "Component({\n    selector: 'datahub-embed',\n    templateUrl: './datahub-embed.component.html',\n})";
+    let text = "Component({\n    selector: 'dashboard-embed',\n    templateUrl: './dashboard-embed.component.html',\n})";
     let result = extract_component_metadata(text);
     assert!(result.is_some());
     let (selector, tpl) = result.unwrap();
-    assert_eq!(selector, "datahub-embed");
-    assert_eq!(tpl, Some("./datahub-embed.component.html".to_string()));
+    assert_eq!(selector, "dashboard-embed");
+    assert_eq!(tpl, Some("./dashboard-embed.component.html".to_string()));
 }
 
 #[test]
@@ -1107,12 +1107,12 @@ fn test_extract_custom_elements_mixed() {
         <div class="container">
             <ng-container *ngIf="show">
                 <data-grid [config]="gridConfig"></data-grid>
-                <pbi-spinner size="large"></pbi-spinner>
+                <app-spinner size="large"></app-spinner>
                 <span>Loading...</span>
             </ng-container>
             <app-footer></app-footer>
         </div>
     "#;
     let result = super::extract_custom_elements(html);
-    assert_eq!(result, vec!["app-footer", "data-grid", "pbi-spinner"]);
+    assert_eq!(result, vec!["app-footer", "app-spinner", "data-grid"]);
 }

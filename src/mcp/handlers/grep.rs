@@ -44,8 +44,8 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     let mode_and = args.get("mode").and_then(|v| v.as_str()) == Some("and");
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_phrase = args.get("phrase").and_then(|v| v.as_bool()).unwrap_or(false);
-    // Default to substring=true so compound C# identifiers (ICatalogQueryManager,
-    // m_catalogQueryManager) are always found.  Auto-disable when regex/phrase is used.
+    // Default to substring=true so compound C# identifiers (IStorageIndexManager,
+    // m_storageIndexManager) are always found.  Auto-disable when regex/phrase is used.
     let use_substring = if use_regex || use_phrase {
         // If user explicitly asked for substring AND regex/phrase, that's a conflict
         if args.get("substring").and_then(|v| v.as_bool()) == Some(true) {

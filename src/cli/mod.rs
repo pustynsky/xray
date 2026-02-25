@@ -490,7 +490,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
             }
         }
         Err(_) => {
-            match find_content_index_for_dir(&args.dir, &idx_base) {
+            match find_content_index_for_dir(&args.dir, &idx_base, &[]) {
                 Some(idx) => idx,
                 None => return Err(SearchError::IndexNotFound { dir: args.dir.clone() }),
             }

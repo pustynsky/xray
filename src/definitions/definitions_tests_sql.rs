@@ -798,29 +798,29 @@ CREATE TABLE [dbo].[OrderHistory]
 #[test]
 fn test_sql_comment_header_before_create() {
     let source = r#"--------------------------------------------------------------
--- Copyright (c) Microsoft Corporation
+-- Copyright (c) Contoso Ltd.
 --------------------------------------------------------------
-CREATE PROCEDURE [Modifiers].[usp_GetIndexTenantMapping_V5]
-    @TenantObjectId      AS NVARCHAR (256),
+CREATE PROCEDURE [Modifiers].[usp_GetUserMapping_V5]
+    @UserObjectId      AS NVARCHAR (256),
     @IndexType           AS INT,
     @IndexName           AS NVARCHAR (256)
 AS
 BEGIN
     SET NOCOUNT ON
-    SELECT * FROM [dbo].[TenantMappings]
-    WHERE [TenantObjectId] = @TenantObjectId
+    SELECT * FROM [dbo].[UserMappings]
+    WHERE [UserObjectId] = @UserObjectId
 END
 "#;
     let (defs, call_sites, _) = parse_sql_definitions(source, 0);
 
     let proc_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::StoredProcedure).collect();
     assert_eq!(proc_defs.len(), 1, "Expected 1 stored procedure from file with comment header");
-    assert_eq!(proc_defs[0].name, "usp_GetIndexTenantMapping_V5");
+    assert_eq!(proc_defs[0].name, "usp_GetUserMapping_V5");
 
     // Should also extract call sites
     assert!(!call_sites.is_empty(), "Expected call sites from SP body");
     let (_, calls) = &call_sites[0];
     let call_names: Vec<&str> = calls.iter().map(|c| c.method_name.as_str()).collect();
-    assert!(call_names.contains(&"TenantMappings"),
-        "Expected FROM call to TenantMappings, got: {:?}", call_names);
+    assert!(call_names.contains(&"UserMappings"),
+        "Expected FROM call to UserMappings, got: {:?}", call_names);
 }

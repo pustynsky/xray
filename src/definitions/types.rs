@@ -206,11 +206,11 @@ pub struct DefinitionIndex {
     #[serde(default)]
     pub extension_methods: HashMap<String, Vec<String>>,
     /// Angular component selector → def_idx of the @Component class.
-    /// Example: "datahub-compact-view" → [idx of DatahubCompactViewComponent]
+    /// Example: "dashboard-compact-view" → [idx of DashboardCompactViewComponent]
     #[serde(default)]
     pub selector_index: HashMap<String, Vec<u32>>,
     /// def_idx of component → child selectors from HTML template.
-    /// Example: idx of DatahubEmbedComponent → ["datahub-compact-view", "pbi-spinner"]
+    /// Example: idx of DashboardEmbedComponent → ["dashboard-compact-view", "app-spinner"]
     #[serde(default)]
     pub template_children: HashMap<u32, Vec<String>>,
 }

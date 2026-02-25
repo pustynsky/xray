@@ -6,6 +6,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-25
+
+### Bug Fixes
+
+- **Stale index cache loaded when extensions change** — When the MCP server was restarted with different `--ext` parameters (e.g., adding `sql` to a previously `cs`-only setup), the fallback index loader (`find_definition_index_for_dir` / `find_content_index_for_dir`) would find and return an old cached index file that was built with the previous extensions. This caused `search_definitions` to return 0 results for SQL stored procedures even though `sql` was in `--ext` and the SQL parser was fully functional. Root cause: the fallback functions only checked the root directory match but did NOT validate that the cached index's extensions were a superset of the requested extensions. Fix: both functions now accept `expected_exts` parameter and validate that the cached index contains ALL expected extensions (superset check). Stale caches are skipped with a log message, triggering a full rebuild. Same fix applied to content index fallback. 8 new unit tests.
+
+---
+
 ## 2026-02-24
 
 ### Bug Fixes

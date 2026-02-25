@@ -337,7 +337,7 @@ pub(crate) fn find_containing_method(
 
 /// Collect file_ids from the content index where `term` appears as a SUBSTRING of
 /// another token. Uses the trigram index for fast O(k) lookup.
-/// Handles field naming patterns like m_catalogQueryManager, _catalogQueryManager, etc.
+/// Handles field naming patterns like m_storageIndexManager, _storageIndexManager, etc.
 /// No-op if the trigram index is empty or the term is shorter than 3 chars.
 fn collect_substring_file_ids(
     term: &str,
@@ -653,7 +653,7 @@ fn build_caller_tree(
         // in verify_call_site_target() via target_base_types.
 
         // Trigram substring matching: find files where class name appears as a
-        // SUBSTRING of another token (e.g. m_catalogQueryManager, _catalogQueryManager).
+        // SUBSTRING of another token (e.g. m_storageIndexManager, _storageIndexManager).
         // Uses the trigram index for O(k) lookup instead of O(n) linear scan.
         collect_substring_file_ids(&cls_lower, content_index, &mut file_ids);
         collect_substring_file_ids(&interface_name, content_index, &mut file_ids);

@@ -1429,7 +1429,7 @@ Create a temporary directory with a `.csproj` file:
 ```powershell
 $tmp = New-Item -ItemType Directory -Path "$env:TEMP\search_noncode_test_$(Get-Random)"
 @'
-<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Contoso.NET.Sdk">
   <ItemGroup>
     <PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
     <PackageReference Include="Serilog" Version="3.1.1" />
@@ -6802,6 +6802,27 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 **Unit test:** `test_caller_tree_preserves_class_filter_during_recursion`
 
 **Status:** ✅ Covered by unit test. CLI-testable only with a multi-class codebase where common method names exist in unrelated classes.
+
+---
+
+### T-STALE-CACHE: Stale index cache skipped when extensions change
+
+**Tool:** `find_definition_index_for_dir`, `find_content_index_for_dir`
+
+**Background:** When the MCP server is restarted with different `--ext` parameters (e.g., adding `sql` to a previously `cs`-only setup), the fallback index loader must validate that the cached index's extensions match the requested ones. Previously, it would load a stale cache with only `cs` definitions, ignoring the newly requested `sql` extension.
+
+**Scenario:** Build a definition index with `--ext cs`, then restart the server with `--ext cs,sql`. The old `cs`-only cache should be skipped and a full rebuild should be triggered.
+
+**Expected:**
+
+- stderr contains `Skipping ... — extensions mismatch (cached: ["cs"], expected: ["cs", "sql"])`
+- The server rebuilds the index with both `cs` and `sql` extensions
+- `search_definitions` with `kind: "storedProcedure"` returns results (if SQL files exist)
+- Same behavior for content index fallback (`find_content_index_for_dir`)
+
+**Unit tests:** `test_find_def_index_skips_stale_extensions`, `test_find_def_index_accepts_superset`, `test_find_def_index_accepts_exact_match`, `test_find_def_index_empty_expected_accepts_any`, `test_find_def_index_case_insensitive_ext_match`, `test_find_content_index_skips_stale_extensions`, `test_find_content_index_accepts_superset`, `test_find_content_index_empty_expected_accepts_any`
+
+**Status:** ✅ Covered by 8 unit tests
 
 ---
 

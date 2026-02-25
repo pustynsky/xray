@@ -73,7 +73,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let start = Instant::now();
     let loaded = load_content_index(&dir_str, &exts_for_load, &idx_base)
         .ok()
-        .or_else(|| find_content_index_for_dir(&dir_str, &idx_base));
+        .or_else(|| find_content_index_for_dir(&dir_str, &idx_base, &extensions));
 
     if let Some(idx) = loaded {
         let load_elapsed = start.elapsed();
@@ -215,9 +215,10 @@ pub fn cmd_serve(args: ServeArgs) {
 
         // Try fast load from disk
         let def_start = Instant::now();
+        let def_ext_vec: Vec<String> = def_exts.split(',').map(|s| s.to_string()).collect();
         let def_loaded = definitions::load_definition_index(&dir_str, &def_exts, &idx_base)
             .ok()
-            .or_else(|| definitions::find_definition_index_for_dir(&dir_str, &idx_base));
+            .or_else(|| definitions::find_definition_index_for_dir(&dir_str, &idx_base, &def_ext_vec));
 
         if let Some(idx) = def_loaded {
             let def_elapsed = def_start.elapsed();
