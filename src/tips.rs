@@ -417,7 +417,11 @@ pub fn render_json() -> Value {
 /// - Client-agnostic: no Roo/Cline-specific tool names (read_file, list_files)
 /// - Compact: 5 key bullets + strategy recipes + tool priority (not all 18 tips)
 /// - Full tips available via search_help tool
-pub fn render_instructions() -> String {
+///
+/// `def_extensions` — the file extensions that have definition parser support
+/// (intersection of server --ext and DEFINITION_EXTENSIONS). Used to dynamically
+/// generate the "NEVER READ" instruction so it covers exactly the right file types.
+pub fn render_instructions(def_extensions: &[&str]) -> String {
     let mut out = String::new();
 
     // --- PREFER block (Phase 0: client-agnostic, no emoji, CAPS emphasis) ---
@@ -428,12 +432,21 @@ pub fn render_instructions() -> String {
     out.push_str("   search_fast -- file name lookup in ~35ms. DO NOT walk the filesystem.\n\n");
 
     // --- FILE READING RULE (strongest possible: NEVER + decision trigger + batch split) ---
-    out.push_str("NEVER READ .cs/.ts/.tsx FILES DIRECTLY. ALWAYS use search_definitions includeBody=true instead.\n");
-    out.push_str("   DECISION TRIGGER: before ANY file read, check each file's extension.\n");
-    out.push_str("   If the file is .cs, .ts, or .tsx -> use search_definitions name='ClassName' includeBody=true maxBodyLines=30 (or file='path' containsLine=N includeBody=true). Use maxBodyLines to control output size for large classes.\n");
-    out.push_str("   If the file is .md, .json, .xml, .config, .csproj, or other non-C#/TS -> reading directly is OK.\n");
-    out.push_str("   BATCH SPLIT: if you need both .cs and .md files, make TWO calls: search_definitions for .cs files, direct read for .md files. Do NOT batch them into one direct read.\n");
-    out.push_str("   ONLY exceptions for .cs/.ts: (1) editing (need exact line numbers for diffs), (2) search_definitions returned an error or is unavailable.\n\n");
+    // Dynamically generate from the actually-indexed definition extensions.
+    // When no definition-supported extensions are configured (e.g., --ext xml),
+    // skip the NEVER READ block entirely to avoid misleading instructions.
+    if !def_extensions.is_empty() {
+        let ext_dotted: Vec<String> = def_extensions.iter().map(|e| format!(".{}", e)).collect();
+        let ext_list = ext_dotted.join("/");
+        out.push_str(&format!("NEVER READ {} FILES DIRECTLY. ALWAYS use search_definitions includeBody=true instead.\n", ext_list));
+        out.push_str("   DECISION TRIGGER: before ANY file read, check each file's extension.\n");
+        out.push_str(&format!("   If the file is {} -> use search_definitions name='ClassName' includeBody=true maxBodyLines=30 (or file='path' containsLine=N includeBody=true). Use maxBodyLines to control output size for large classes.\n", ext_list));
+        out.push_str("   If the file is .md, .json, .xml, .config, .csproj, or other non-definition-indexed -> reading directly is OK.\n");
+        out.push_str(&format!("   BATCH SPLIT: if you need both {} and .md files, make TWO calls: search_definitions for indexed files, direct read for .md files. Do NOT batch them into one direct read.\n", ext_list));
+        out.push_str(&format!("   ONLY exceptions for {}: (1) editing (need exact line numbers for diffs), (2) search_definitions returned an error or is unavailable.\n\n", ext_list));
+    } else {
+        out.push_str("NOTE: search_definitions is not available for the configured file extensions. Use search_grep for content search.\n\n");
+    }
 
     // --- Quick reference (Phase 1: 5 bullets instead of 18 full tips) ---
     out.push_str("search-index MCP server -- Quick Reference\n\n");
@@ -524,7 +537,7 @@ mod tests {
 
     #[test]
     fn test_render_instructions_contains_key_terms() {
-        let text = render_instructions();
+        let text = render_instructions(crate::definitions::DEFINITION_EXTENSIONS);
         // Core tools mentioned
         assert!(text.contains("search_fast"), "instructions should mention search_fast");
         assert!(text.contains("search_callers"), "instructions should mention search_callers");
@@ -545,10 +558,16 @@ mod tests {
         // PREFER block -- client-agnostic, no emoji, CAPS emphasis
         assert!(text.contains("CRITICAL: ALWAYS use search-index tools"), "instructions should have CRITICAL PREFER block");
         assert!(text.contains("DO NOT browse directories"), "instructions should use DO NOT framing");
-        assert!(text.contains("NEVER READ .cs/.ts/.tsx FILES DIRECTLY"), "instructions should have absolute prohibition on reading C#/TS files");
+        // Dynamic extension list: verify all definition extensions appear in the NEVER READ rule
+        for ext in crate::definitions::DEFINITION_EXTENSIONS {
+            assert!(text.contains(&format!(".{}", ext)),
+                "instructions should mention .{} extension in NEVER READ rule", ext);
+        }
+        assert!(text.contains("NEVER READ"), "instructions should have absolute prohibition on reading indexed files");
+        assert!(text.contains("FILES DIRECTLY"), "instructions should have FILES DIRECTLY in prohibition");
         assert!(text.contains("DECISION TRIGGER"), "instructions should have decision trigger for file extension check");
         assert!(text.contains("BATCH SPLIT"), "instructions should have batch split instruction for mixed .cs + .md reads");
-        assert!(text.contains("ONLY exceptions for .cs/.ts:"), "instructions should list exceptions for .cs/.ts reading");
+        assert!(text.contains("ONLY exceptions for"), "instructions should list exceptions for indexed file reading");
         // No emoji in machine-targeted text
         assert!(!text.contains('⚠'), "instructions should not contain emoji (machine-targeted text)");
         assert!(!text.contains('⚡'), "instructions should not contain emoji (machine-targeted text)");
@@ -608,6 +627,41 @@ mod tests {
              Target: <5500. Shorten parameter descriptions or move examples to search_help.",
             approx_tokens, word_count
         );
+    }
+
+    /// Empty def_extensions: NEVER READ block should be skipped,
+    /// fallback note about search_definitions unavailability should appear.
+    #[test]
+    fn test_render_instructions_empty_extensions() {
+        let text = render_instructions(&[]);
+        // Should NOT contain NEVER READ (no definition-supported extensions)
+        assert!(!text.contains("NEVER READ"),
+            "Empty def_extensions should not produce NEVER READ block");
+        assert!(!text.contains("DECISION TRIGGER"),
+            "Empty def_extensions should not produce DECISION TRIGGER");
+        assert!(!text.contains("BATCH SPLIT"),
+            "Empty def_extensions should not produce BATCH SPLIT");
+        // Should contain fallback note
+        assert!(text.contains("search_definitions is not available"),
+            "Empty def_extensions should have fallback note about search_definitions");
+        // Core tools should still be mentioned (PREFER block is always present)
+        assert!(text.contains("search_grep"), "should still mention search_grep");
+        assert!(text.contains("search_fast"), "should still mention search_fast");
+        assert!(text.contains("STRATEGY RECIPES"), "should still include strategy recipes");
+    }
+
+    /// Single extension: NEVER READ should mention only that extension.
+    #[test]
+    fn test_render_instructions_single_extension() {
+        let text = render_instructions(&["cs"]);
+        assert!(text.contains("NEVER READ .cs FILES DIRECTLY"),
+            "Single extension should produce 'NEVER READ .cs FILES DIRECTLY'. Got:\n{}", text);
+        assert!(text.contains("DECISION TRIGGER"),
+            "Single extension should have DECISION TRIGGER");
+        // Should NOT mention other extensions in the NEVER READ line
+        assert!(!text.contains(".ts"), "Should not mention .ts when only cs is configured");
+        assert!(!text.contains(".tsx"), "Should not mention .tsx when only cs is configured");
+        assert!(!text.contains(".sql"), "Should not mention .sql in NEVER READ when only cs is configured");
     }
 
     #[test]

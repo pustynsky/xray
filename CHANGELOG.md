@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-26
 
+### Features
+
+- **Dynamic MCP instructions adapt to server `--ext` configuration** — The `initialize` → `instructions` field now dynamically generates the "NEVER READ" rule based on the intersection of `DEFINITION_EXTENSIONS` (extensions with parser support: cs, ts, tsx, sql) and the server's `--ext` CLI argument. Previously, the instruction was hardcoded to `.cs/.ts/.tsx`, which was misleading when the server was started with `--ext sql` (SQL was missing from the rule) or `--ext xml` (no parser-supported extensions, but the rule was still present). New behavior: `--ext cs,sql` → `"NEVER READ .cs/.sql FILES DIRECTLY"`, `--ext xml` → fallback note that `search_definitions` is unavailable. Added `DEFINITION_EXTENSIONS` constant in `definitions/mod.rs` as single source of truth. Empty extensions guard prevents malformed instructions. 3 new unit tests.
+
 ### Bug Fixes
 
 - **Watcher bulk reindex after `git pull` — minutes delay reduced to seconds** — Two bugs fixed:
@@ -378,8 +382,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes               | 10                          |
 | Performance             | 3                           |
 | Internal                | 5                           |
-| Unit tests (latest)     | 834                         |
-| E2E tests (latest)      | 55+                         |
+| Unit tests (latest)     | 840                         |
+| E2E tests (latest)      | 59                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |
 | Memory reduction        | 3.7 GB → 2.1 GB (−43%)      |

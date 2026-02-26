@@ -1397,6 +1397,53 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
+### T39a: `serve` — MCP initialize instructions adapt to `--ext` configuration
+
+**Command (server with --ext sql only):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext sql
+```
+
+**Expected:**
+
+- JSON-RPC response `result` contains `instructions` field (string)
+- `instructions` contains `"NEVER READ .sql FILES DIRECTLY"` (only sql, not cs/ts/tsx)
+- `instructions` does NOT contain `.cs` or `.ts` or `.tsx` in the NEVER READ line
+
+**Command (server with --ext xml — no definition parsers):**
+
+```powershell
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
+```
+
+**Expected:**
+
+- `instructions` does NOT contain `"NEVER READ"`
+- `instructions` contains `"search_definitions is not available"` fallback note
+
+**Command (server with --ext cs,ts,sql):**
+
+```powershell
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts,sql
+```
+
+**Expected:**
+
+- `instructions` contains `"NEVER READ .cs/.ts/.sql FILES DIRECTLY"` (all three)
+- `instructions` contains `"DECISION TRIGGER"` and `"BATCH SPLIT"`
+
+**Validates:** MCP `initialize` instructions dynamically adapt to the server's `--ext` configuration. Only extensions with definition parser support (cs, ts, tsx, sql) appear in the "NEVER READ" rule. Extensions without parsers (xml, json, config, etc.) are excluded.
+
+**Unit tests:** `test_render_instructions_empty_extensions`, `test_render_instructions_single_extension`, `test_initialize_def_extension_filtering`
+
+**Status:** ✅ Implemented (covered by unit tests)
+
+---
+
 ### T40: `serve` — MCP search_help returns best practices
 
 **Command:**
