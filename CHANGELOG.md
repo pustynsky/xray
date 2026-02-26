@@ -6,6 +6,16 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-26
+
+### Bug Fixes
+
+- **Watcher startup gap: stale cache files invisible to `--watch` mode** — When the MCP server started with `--watch` and loaded a stale index from disk, files added/modified/deleted while the server was offline were permanently invisible. The `notify` file watcher only fires events for changes AFTER it starts — pre-existing files produce no events. Fix: added **reconciliation scan** at watcher startup that walks the filesystem and compares with the cached index using path diff (added/deleted) + mtime comparison (modified files). Runs once before the event loop, inside the watcher thread — filesystem events during reconciliation are buffered in the mpsc channel. Performance: ~15ms for 130 files, ~3.5s for 30K files (one-time startup cost, zero runtime impact). Also added cache age logging at startup. 4 new unit tests.
+
+- **`search_definitions` `file` and `parent` parameters now support comma-separated OR** — Previously, `file` and `parent` parameters only accepted a single value (substring match), while `name` supported comma-separated OR. This inconsistency caused LLMs to waste queries when trying to search across multiple files or classes at once (e.g., `file: "UserService.cs,OrderService.cs"` returned 0 results). Both parameters now split on commas and match ANY term (OR logic), consistent with `name`. The relevance ranking for `parent` also supports comma-separated terms. 7 new unit tests.
+
+---
+
 ## 2026-02-25
 
 ### Bug Fixes
@@ -353,7 +363,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes               | 10                          |
 | Performance             | 3                           |
 | Internal                | 5                           |
-| Unit tests (latest)     | 822                         |
+| Unit tests (latest)     | 829                         |
 | E2E tests (latest)      | 55+                         |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |

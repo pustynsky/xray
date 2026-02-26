@@ -1,8 +1,9 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use ignore::WalkBuilder;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tracing::{error, info, warn};
 
@@ -30,6 +31,21 @@ pub fn start_watcher(
 
     std::thread::spawn(move || {
         let _watcher = watcher; // move watcher into thread to keep it alive
+
+        // ── Reconciliation: catch files added/modified/removed while server was offline ──
+        // Watcher is already listening — events during reconciliation are buffered in rx channel.
+        reconcile_content_index(&index, &dir_str, &extensions);
+        if let Some(ref def_idx) = def_index {
+            match def_idx.write() {
+                Ok(mut idx) => {
+                    definitions::reconcile_definition_index(&mut idx, &dir_str, &extensions);
+                }
+                Err(e) => {
+                    error!(error = %e, "Failed to acquire def index write lock for reconciliation");
+                }
+            }
+        }
+
         let mut dirty_files: HashSet<PathBuf> = HashSet::new();
         let mut removed_files: HashSet<PathBuf> = HashSet::new();
 
@@ -348,6 +364,140 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
             path_to_id.remove(path);
             // Don't remove from files vec to preserve file_id stability
         }
+}
+
+/// Reconcile content index with filesystem after loading from disk cache.
+///
+/// Walks the filesystem and compares with the in-memory index to find:
+/// - **Added** files: exist on disk but not in `path_to_id` → tokenize and add
+/// - **Modified** files: exist in both but `mtime > index.created_at` → re-tokenize
+/// - **Deleted** files: exist in `path_to_id` but not on disk → remove
+///
+/// Uses a 2-second safety margin on `created_at` to handle clock precision.
+/// Takes the write lock on the index for the duration of the update.
+///
+/// Returns `(added, modified, removed)` counts.
+fn reconcile_content_index(
+    index: &Arc<RwLock<ContentIndex>>,
+    dir: &str,
+    extensions: &[String],
+) {
+    let start = std::time::Instant::now();
+    let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+
+    // Read created_at before acquiring write lock
+    let created_at = match index.read() {
+        Ok(idx) => idx.created_at,
+        Err(e) => {
+            error!(error = %e, "Failed to read content index for reconciliation");
+            return;
+        }
+    };
+
+    let threshold = UNIX_EPOCH + Duration::from_secs(created_at.saturating_sub(2));
+
+    // Walk filesystem to collect all matching files with their mtime
+    let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
+
+    let mut walker = WalkBuilder::new(&dir_path);
+    walker.hidden(false).git_ignore(true);
+
+    for entry in walker.build() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let ext_match = path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
+        if !ext_match {
+            continue;
+        }
+        let mtime = entry.metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(UNIX_EPOCH);
+        let clean = PathBuf::from(clean_path(&path.to_string_lossy()));
+        disk_files.insert(clean, mtime);
+    }
+
+    let scanned = disk_files.len();
+
+    // Acquire write lock and perform reconciliation
+    match index.write() {
+        Ok(mut idx) => {
+            // Collect indexed paths for deletion check
+            let indexed_paths: HashSet<PathBuf> = idx.path_to_id
+                .as_ref()
+                .map(|p2id| p2id.keys().cloned().collect())
+                .unwrap_or_default();
+
+            let mut added = 0usize;
+            let mut modified = 0usize;
+            let mut removed = 0usize;
+
+            // Check for new and modified files
+            for (path, mtime) in &disk_files {
+                let in_index = idx.path_to_id
+                    .as_ref()
+                    .is_some_and(|p2id| p2id.contains_key(path));
+
+                if !in_index {
+                    // NEW file
+                    update_file_in_index(&mut idx, path);
+                    added += 1;
+                } else if *mtime > threshold {
+                    // MODIFIED file
+                    update_file_in_index(&mut idx, path);
+                    modified += 1;
+                }
+            }
+
+            // Check for deleted files
+            for path in &indexed_paths {
+                if !disk_files.contains_key(path) {
+                    remove_file_from_index(&mut idx, path);
+                    removed += 1;
+                }
+            }
+
+            // Mark trigram as dirty if anything changed
+            if added > 0 || modified > 0 || removed > 0 {
+                idx.trigram_dirty = true;
+            }
+
+            let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+            if added > 0 || modified > 0 || removed > 0 {
+                info!(
+                    scanned,
+                    added,
+                    modified,
+                    removed,
+                    elapsed_ms = format_args!("{:.1}", elapsed_ms),
+                    "Content index reconciliation complete"
+                );
+            } else {
+                info!(
+                    scanned,
+                    elapsed_ms = format_args!("{:.1}", elapsed_ms),
+                    "Content index reconciliation: all files up to date"
+                );
+            }
+
+            crate::index::log_memory(&format!(
+                "watcher: content reconciliation (scanned={}, added={}, modified={}, removed={}, {:.0}ms)",
+                scanned, added, modified, removed, elapsed_ms
+            ));
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to acquire content index write lock for reconciliation");
+        }
+    }
 }
 
 #[cfg(test)]

@@ -839,6 +839,99 @@ export class ChildWidgetComponent {
     }
 }
 
+# T-RECONCILE: Watcher startup reconciliation catches stale cache files
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-RECONCILE watcher-startup-reconciliation"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_reconcile_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Step 1: Create initial file and build index
+        Set-Content -Path (Join-Path $tmpDir "Initial.cs") -Value "public class InitialService { public void Run() { } }"
+        & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
+        & $Bin def-index -d $tmpDir -e cs 2>&1 | Out-Null
+
+        # Step 2: Add a NEW file AFTER index is built (simulates git pull while server was offline)
+        Set-Content -Path (Join-Path $tmpDir "NewFile.cs") -Value "public class NewService { public void Process() { } }"
+
+        # Step 3: Start server with --watch --definitions (reconciliation should catch NewFile.cs)
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"NewService"}}}'
+        ) -join "`n"
+
+        # Use --watch so reconciliation runs; sleep 2s to allow reconciliation to complete
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Bin
+        $psi.Arguments = "serve --dir `"$tmpDir`" --ext cs --watch --definitions"
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+
+        $stderrBuilder = New-Object System.Text.StringBuilder
+        $stdoutBuilder = New-Object System.Text.StringBuilder
+        $errHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+        $outHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+
+        $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $errHandler -MessageData $stderrBuilder
+        $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outHandler -MessageData $stdoutBuilder
+
+        $proc.Start() | Out-Null
+        $proc.BeginErrorReadLine()
+        $proc.BeginOutputReadLine()
+
+        # Send initialize + wait for reconciliation
+        $proc.StandardInput.WriteLine($msgs.Split("`n")[0])
+        Start-Sleep -Seconds 3  # Allow reconciliation to complete
+
+        # Send notifications/initialized + search_definitions query
+        $proc.StandardInput.WriteLine($msgs.Split("`n")[1])
+        $proc.StandardInput.WriteLine($msgs.Split("`n")[2])
+        Start-Sleep -Milliseconds 500
+
+        # Close stdin to trigger shutdown
+        $proc.StandardInput.Close()
+        if (-not $proc.WaitForExit(10000)) { $proc.Kill(); $proc.WaitForExit(5000) | Out-Null }
+
+        Start-Sleep -Milliseconds 200
+        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+
+        $stdoutContent = $stdoutBuilder.ToString()
+        $stderrContent = $stderrBuilder.ToString()
+
+        if (!$proc.HasExited) { $proc.Kill() }
+        $proc.Dispose()
+
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        # Verify: NewService should be found (reconciliation added the new file)
+        if ($stdoutContent -match 'NewService') {
+            return @{ Name = $name; Passed = $true; Output = "OK (NewService found after reconciliation)" }
+        } else {
+            # Also check stderr for reconciliation log
+            $reconcileLog = if ($stderrContent -match 'reconciliation') { " (reconciliation logged)" } else { " (no reconciliation log)" }
+            return @{ Name = $name; Passed = $false; Output = "FAILED (NewService not found in output$reconcileLog)" }
+        }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        if ($proc -and !$proc.HasExited) { $proc.Kill() }
+        if ($proc) { $proc.Dispose() }
+        if ($errEvent) { Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue }
+        if ($outEvent) { Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # --- Launch all parallel jobs ---
 $parallelJobs = @()
 foreach ($block in $testBlocks) {

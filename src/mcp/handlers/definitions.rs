@@ -325,17 +325,30 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
             let def = index.definitions.get(idx as usize)?;
             let file_path = index.files.get(def.file_id as usize)?;
 
-            // File filter (normalize separators for cross-platform matching)
-            if let Some(ff) = file_filter
-                && !file_path.replace('\\', "/").to_lowercase().contains(&ff.replace('\\', "/").to_lowercase()) {
+            // File filter: comma-separated OR with substring matching
+            // (e.g., "UserService.cs,OrderService.cs" matches files containing ANY term)
+            if let Some(ff) = file_filter {
+                let file_lower = file_path.replace('\\', "/").to_lowercase();
+                let file_terms: Vec<String> = ff.split(',')
+                    .map(|s| s.trim().replace('\\', "/").to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !file_terms.iter().any(|t| file_lower.contains(t)) {
                     return None;
                 }
+            }
 
-            // Parent filter
+            // Parent filter: comma-separated OR with substring matching
+            // (e.g., "UserService,OrderService" matches members of ANY class)
             if let Some(pf) = parent_filter {
+                let parent_terms: Vec<String> = pf.split(',')
+                    .map(|s| s.trim().to_lowercase())
+                    .filter(|s| !s.is_empty())
+                    .collect();
                 match &def.parent {
                     Some(parent) => {
-                        if !parent.to_lowercase().contains(&pf.to_lowercase()) {
+                        let parent_lower = parent.to_lowercase();
+                        if !parent_terms.iter().any(|t| parent_lower.contains(t)) {
                             return None;
                         }
                     }
@@ -421,7 +434,10 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
             .unwrap_or_default();
 
         let parent_terms: Vec<String> = parent_filter
-            .map(|p| vec![p.to_lowercase()])
+            .map(|p| p.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect())
             .unwrap_or_default();
 
         results.sort_by(|(_, a), (_, b)| {
@@ -807,5 +823,125 @@ mod tests {
         assert_eq!(tier_b, 0);
         assert_eq!(tier_a.cmp(&tier_b), std::cmp::Ordering::Equal,
             "Without parent filter, parent tier should be equal for all");
+    }
+
+    // ─── Comma-separated file filter tests ───────────────────────────
+
+    #[test]
+    fn test_file_filter_comma_separated_matches_multiple_files() {
+        // file="ResilientClient.cs,ProxyClient.cs" should match defs from both files
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "file": "ResilientClient.cs,ProxyClient.cs",
+            "kind": "method"
+        }));
+        assert!(!result.is_error, "should not error: {:?}", result.content[0].text);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        // Should find ExecuteQueryAsync in ResilientClient AND ExecuteQueryAsync in ProxyClient
+        assert!(defs.len() >= 2, "expected >= 2 methods from two files, got {}", defs.len());
+        let files: Vec<&str> = defs.iter()
+            .map(|d| d["file"].as_str().unwrap())
+            .collect();
+        assert!(files.iter().any(|f| f.contains("ResilientClient")),
+            "should include ResilientClient");
+        assert!(files.iter().any(|f| f.contains("ProxyClient")),
+            "should include ProxyClient");
+    }
+
+    #[test]
+    fn test_file_filter_single_value_still_works() {
+        // Single file value (no comma) should work as before
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "file": "QueryService.cs",
+            "kind": "method"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert!(defs.len() >= 3, "expected >= 3 methods in QueryService, got {}", defs.len());
+        for d in defs {
+            assert!(d["file"].as_str().unwrap().contains("QueryService"),
+                "all results should be from QueryService");
+        }
+    }
+
+    #[test]
+    fn test_file_filter_comma_separated_no_match_returns_empty() {
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "file": "NonExistent.cs,AlsoMissing.cs"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 0, "no files match, should return 0 results");
+    }
+
+    // ─── Comma-separated parent filter tests ─────────────────────────
+
+    #[test]
+    fn test_parent_filter_comma_separated_matches_multiple_classes() {
+        // parent="ResilientClient,ProxyClient" should match methods from both classes
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "parent": "ResilientClient,ProxyClient",
+            "kind": "method"
+        }));
+        assert!(!result.is_error, "should not error: {:?}", result.content[0].text);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert!(defs.len() >= 2, "expected >= 2 methods from two classes, got {}", defs.len());
+        let parents: Vec<&str> = defs.iter()
+            .map(|d| d["parent"].as_str().unwrap())
+            .collect();
+        assert!(parents.iter().any(|p| *p == "ResilientClient"),
+            "should include ResilientClient methods");
+        assert!(parents.iter().any(|p| *p == "ProxyClient"),
+            "should include ProxyClient methods");
+    }
+
+    #[test]
+    fn test_parent_filter_single_value_still_works() {
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "parent": "QueryService",
+            "kind": "method"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert!(defs.len() >= 3, "expected >= 3 methods in QueryService, got {}", defs.len());
+        for d in defs {
+            assert_eq!(d["parent"].as_str().unwrap(), "QueryService",
+                "all results should have parent QueryService");
+        }
+    }
+
+    #[test]
+    fn test_parent_filter_comma_separated_no_match_returns_empty() {
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "parent": "NonExistentClass,AlsoMissing"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 0, "no parents match, should return 0 results");
+    }
+
+    #[test]
+    fn test_parent_filter_comma_with_spaces_trimmed() {
+        // Spaces around comma-separated terms should be trimmed
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "parent": " ResilientClient , ProxyClient ",
+            "kind": "method"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert!(defs.len() >= 2, "spaces should be trimmed, still match both classes");
     }
 }

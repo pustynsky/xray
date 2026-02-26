@@ -207,11 +207,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Filter by file path substring."
+                        "description": "Filter by file path substring. Comma-separated for multi-term OR."
                     },
                     "parent": {
                         "type": "string",
-                        "description": "Filter by parent/containing class name."
+                        "description": "Filter by parent/containing class name. Comma-separated for multi-term OR."
                     },
                     "containsLine": {
                         "type": "integer",

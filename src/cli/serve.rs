@@ -77,13 +77,18 @@ pub fn cmd_serve(args: ServeArgs) {
 
     if let Some(idx) = loaded {
         let load_elapsed = start.elapsed();
+        let cache_age = format_cache_age(idx.created_at);
         info!(
             elapsed_ms = format_args!("{:.1}", load_elapsed.as_secs_f64() * 1000.0),
             files = idx.files.len(),
             tokens = idx.index.len(),
+            cache_age = %cache_age,
             "Content index loaded from disk"
         );
-        crate::index::log_memory("serve: content loaded from disk");
+        crate::index::log_memory(&format!(
+            "serve: content loaded (files={}, tokens={}, age={})",
+            idx.files.len(), idx.index.len(), cache_age
+        ));
         let idx = if args.watch {
             mcp::watcher::build_watch_index_from(idx)
         } else {
@@ -222,15 +227,22 @@ pub fn cmd_serve(args: ServeArgs) {
 
         if let Some(idx) = def_loaded {
             let def_elapsed = def_start.elapsed();
+            let cache_age = format_cache_age(idx.created_at);
+            let def_file_count = idx.files.len();
+            let def_count = idx.definitions.len();
             info!(
                 elapsed_ms = format_args!("{:.1}", def_elapsed.as_secs_f64() * 1000.0),
-                definitions = idx.definitions.len(),
-                files = idx.files.len(),
+                definitions = def_count,
+                files = def_file_count,
+                cache_age = %cache_age,
                 "Definition index loaded from disk"
             );
+            crate::index::log_memory(&format!(
+                "serve: def loaded (files={}, defs={}, age={})",
+                def_file_count, def_count, cache_age
+            ));
             *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
             def_ready.store(true, Ordering::Release);
-            crate::index::log_memory("serve: def ready");
         } else {
             // Build in background
             let bg_def = Arc::clone(&def_arc);
@@ -470,4 +482,36 @@ pub fn cmd_serve(args: ServeArgs) {
         git_cache, git_cache_ready,
         current_branch,
     );
+}
+
+/// Format a cache age as a human-readable string (e.g., "2h 15m", "5m", "3d 1h").
+/// `created_at` is seconds since UNIX epoch.
+fn format_cache_age(created_at: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    let age_secs = now.saturating_sub(created_at);
+
+    if age_secs < 60 {
+        format!("{}s", age_secs)
+    } else if age_secs < 3600 {
+        format!("{}m", age_secs / 60)
+    } else if age_secs < 86400 {
+        let hours = age_secs / 3600;
+        let mins = (age_secs % 3600) / 60;
+        if mins > 0 {
+            format!("{}h {}m", hours, mins)
+        } else {
+            format!("{}h", hours)
+        }
+    } else {
+        let days = age_secs / 86400;
+        let hours = (age_secs % 86400) / 3600;
+        if hours > 0 {
+            format!("{}d {}h", days, hours)
+        } else {
+            format!("{}d", days)
+        }
+    }
 }
