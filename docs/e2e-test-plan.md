@@ -6891,6 +6891,37 @@ cargo run -- def-index -d $TEST_DIR -e ts
 **Validates:** `def-index` completes without error when a component's `templateUrl` points to a non-existent file. The component is still indexed for its selector but without template children.
 
 
+### T-TOMBSTONE: Definition index tombstone compaction during `--watch`
+
+**Tool:** `search-index serve --watch --definitions`
+
+**Background:** When the file watcher incrementally updates definitions, old entries remain in the `definitions` Vec as tombstones. This causes `definitions.len()` to grow monotonically, inflating `totalDefinitions` and wasting memory. The fix adds auto-compaction when tombstone ratio exceeds 3× and reports active count instead of Vec length.
+
+**Scenario (totalDefinitions shows active count):**
+
+1. Start MCP server with `--watch --definitions`
+2. Query `search_definitions` — note `totalDefinitions` in summary
+3. Modify a `.cs` file (change class name), wait for watcher debounce
+4. Query `search_definitions` again — `totalDefinitions` should be ~same (not growing)
+
+**Expected:**
+
+- `totalDefinitions` reflects active definitions only (not Vec length with tombstones)
+- After many file updates, `totalDefinitions` stays stable (±1 per file update)
+- `search_info` definition count matches `totalDefinitions` from `search_definitions`
+
+**Scenario (auto-compaction):**
+
+1. Trigger many incremental updates to the same file (>4× to exceed 3× threshold)
+2. Observe stderr log: `"Definition index tombstone threshold exceeded, compacting"`
+3. After compaction: `definitions` Vec length ≈ active count
+
+**Unit tests:** `test_compact_removes_tombstones`, `test_compact_no_tombstones_is_noop`, `test_compact_remaps_method_calls_and_code_stats`, `test_compact_auto_triggers_at_threshold`, `test_compact_remaps_selector_index_and_template_children`
+
+**Status:** ✅ Covered by unit tests. Manual MCP test requires `--watch` mode.
+
+---
+
 ### T-RECONCILE: Watcher startup reconciliation — catches stale cache files
 
 **Tool:** `search-index serve --watch --definitions`

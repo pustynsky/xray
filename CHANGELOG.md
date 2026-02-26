@@ -10,6 +10,13 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Bug Fixes
 
+- **Tombstone growth in definition index during `--watch` mode** — When the file watcher incrementally updated definitions, old `DefinitionEntry` objects were never removed from the `definitions` Vec — they became tombstones occupying memory and inflating `totalDefinitions` count. After 100 file updates, the Vec could grow to 3× its active size. Four fixes applied:
+  - **Fix 1 (UX):** `totalDefinitions` in `search_definitions`, `search_info`, `search_reindex_definitions`, CLI `info`, and memory estimates now shows active definition count (from `file_index`) instead of `definitions.len()` which included tombstones
+  - **Fix 2 (Correctness):** When no `name`/`kind`/`attribute`/`baseType` filter is set, candidate generation now uses `file_index` (active definitions only) instead of `0..definitions.len()` which included tombstones and could produce duplicate results
+  - **Fix 3 (Angular):** `remove_file_definitions()` now cleans `selector_index` and `template_children` (previously stale entries accumulated after incremental updates)
+  - **Fix 4 (Memory):** Auto-compaction triggers when tombstone ratio exceeds 3× (67% waste). In-place `compact_definitions()` rebuilds the Vec with only active entries and remaps all 9 secondary indexes. ~100ms for 846K definitions, <1MB additional memory
+  - 5 new unit tests for compaction (basic, no-op, method_calls/code_stats remapping, auto-trigger, selector/template cleanup)
+
 - **Watcher startup gap: stale cache files invisible to `--watch` mode** — When the MCP server started with `--watch` and loaded a stale index from disk, files added/modified/deleted while the server was offline were permanently invisible. The `notify` file watcher only fires events for changes AFTER it starts — pre-existing files produce no events. Fix: added **reconciliation scan** at watcher startup that walks the filesystem and compares with the cached index using path diff (added/deleted) + mtime comparison (modified files). Runs once before the event loop, inside the watcher thread — filesystem events during reconciliation are buffered in the mpsc channel. Performance: ~15ms for 130 files, ~3.5s for 30K files (one-time startup cost, zero runtime impact). Also added cache age logging at startup. 4 new unit tests.
 
 - **`search_definitions` `file` and `parent` parameters now support comma-separated OR** — Previously, `file` and `parent` parameters only accepted a single value (substring match), while `name` supported comma-separated OR. This inconsistency caused LLMs to waste queries when trying to search across multiple files or classes at once (e.g., `file: "UserService.cs,OrderService.cs"` returned 0 results). Both parameters now split on commas and match ANY term (OR logic), consistent with `name`. The relevance ranking for `parent` also supports comma-separated terms. 7 new unit tests.
@@ -363,7 +370,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes               | 10                          |
 | Performance             | 3                           |
 | Internal                | 5                           |
-| Unit tests (latest)     | 829                         |
+| Unit tests (latest)     | 834                         |
 | E2E tests (latest)      | 55+                         |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |

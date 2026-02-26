@@ -161,6 +161,21 @@ pub struct CallSite {
 }
 
 // ─── Definition Index ────────────────────────────────────────────────
+//
+// ⚠️ IMPORTANT: INCREMENTAL UPDATE CONTRACT
+//
+// When adding a NEW FIELD to this struct, check if it uses `def_idx` (u32 index
+// into the `definitions` Vec). If it does, you MUST update THREE functions in
+// `incremental.rs` to prevent data corruption during --watch mode:
+//
+// 1. remove_file_definitions() — clean/remove entries for deleted file's def_indices
+// 2. compact_definitions()     — remap old def_idx → new def_idx after compaction
+// 3. update_file_definitions() — populate the new field when parsing a file
+//
+// The test `test_definition_index_field_count_guard` in `definitions_tests.rs`
+// will FAIL TO COMPILE when a new field is added, reminding you of this contract.
+//
+// Fields are categorized below by their relationship to def_idx.
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct DefinitionIndex {
@@ -169,24 +184,48 @@ pub struct DefinitionIndex {
     pub extensions: Vec<String>,
     /// file_id -> file path
     pub files: Vec<String>,
-    /// All definitions
+    /// All definitions. During --watch mode, may contain tombstones (entries not
+    /// referenced by any secondary index). Use file_index for active count.
     pub definitions: Vec<DefinitionEntry>,
-    /// name (lowercased) -> Vec<index into definitions>
+
+    // ── CATEGORY A: Secondary indexes with def_idx as VALUES (Vec<u32>) ──
+    // These store Vec<u32> where each u32 is a def_idx into `definitions`.
+    // On file removal: retain() to remove stale def_indices.
+    // On compaction: remap_index_values() to update def_indices.
+
+    /// name (lowercased) -> Vec<def_idx>
     pub name_index: HashMap<String, Vec<u32>>,
-    /// kind -> Vec<index into definitions>
+    /// kind -> Vec<def_idx>
     pub kind_index: HashMap<DefinitionKind, Vec<u32>>,
-    /// attribute name (lowercased) -> Vec<index into definitions>
+    /// attribute name (lowercased) -> Vec<def_idx>
     pub attribute_index: HashMap<String, Vec<u32>>,
-    /// base type name (lowercased) -> Vec<index into definitions>
+    /// base type name (lowercased) -> Vec<def_idx>
     pub base_type_index: HashMap<String, Vec<u32>>,
-    /// file_id -> Vec<index into definitions>
+    /// file_id -> Vec<def_idx>. THE source of truth for active definitions.
     pub file_index: HashMap<u32, Vec<u32>>,
-    /// Path -> file_id lookup (for watcher)
-    pub path_to_id: HashMap<PathBuf, u32>,
+    /// Angular component selector → Vec<def_idx> of @Component classes.
+    #[serde(default)]
+    pub selector_index: HashMap<String, Vec<u32>>,
+
+    // ── CATEGORY B: Indexes with def_idx as KEYS (HashMap<u32, _>) ──
+    // These store data keyed by def_idx.
+    // On file removal: remove() to delete entries for stale def_indices.
+    // On compaction: drain().filter_map() to remap keys.
+
     /// def_idx -> list of call sites found in that method/constructor body.
-    /// Only populated for Method and Constructor kinds.
     #[serde(default)]
     pub method_calls: HashMap<u32, Vec<CallSite>>,
+    /// def_idx -> CodeStats for methods/constructors/functions.
+    #[serde(default)]
+    pub code_stats: HashMap<u32, CodeStats>,
+    /// def_idx of component → child selectors from HTML template.
+    #[serde(default)]
+    pub template_children: HashMap<u32, Vec<String>>,
+
+    // ── CATEGORY C: Fields NOT using def_idx (no compact/remove updates needed) ──
+
+    /// Path -> file_id lookup (for watcher)
+    pub path_to_id: HashMap<PathBuf, u32>,
     /// Number of files that could not be read (IO errors) during index build.
     #[serde(default)]
     pub parse_errors: usize,
@@ -194,25 +233,11 @@ pub struct DefinitionIndex {
     #[serde(default)]
     pub lossy_file_count: usize,
     /// Files that were read and parsed but produced 0 definitions.
-    /// Each entry is (file_id, byte_size). Files >500 bytes with 0 defs are suspicious.
     #[serde(default)]
     pub empty_file_ids: Vec<(u32, u64)>,
-    /// def_idx -> CodeStats for methods/constructors/functions.
-    /// Always populated when --definitions is used.
-    #[serde(default)]
-    pub code_stats: HashMap<u32, CodeStats>,
     /// Extension method name → Vec of static class names containing the extension.
-    /// Populated during C# parsing by detecting static classes with `this` parameter methods.
     #[serde(default)]
     pub extension_methods: HashMap<String, Vec<String>>,
-    /// Angular component selector → def_idx of the @Component class.
-    /// Example: "dashboard-compact-view" → [idx of DashboardCompactViewComponent]
-    #[serde(default)]
-    pub selector_index: HashMap<String, Vec<u32>>,
-    /// def_idx of component → child selectors from HTML template.
-    /// Example: idx of DashboardEmbedComponent → ["dashboard-compact-view", "app-spinner"]
-    #[serde(default)]
-    pub template_children: HashMap<u32, Vec<String>>,
 }
 
 impl Default for DefinitionIndex {

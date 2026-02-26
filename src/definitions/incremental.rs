@@ -1,6 +1,7 @@
 //! Incremental updates for DefinitionIndex (used by file watcher).
 
 use std::collections::{HashMap, HashSet};
+use std::hash::Hash;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -159,6 +160,15 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
         !v.is_empty()
     });
 
+    // Clean Angular-specific indexes (selector_index stores Vec<u32> of def_idx,
+    // template_children is keyed by def_idx)
+    index.selector_index.retain(|_, v| {
+        v.retain(|idx| !indices_set.contains(idx));
+        !v.is_empty()
+    });
+
+    index.template_children.retain(|k, _| !indices_set.contains(k));
+
     // Conditionally shrink secondary index vecs after retain() to release excess capacity.
     // Only shrink when capacity > 2 × len to avoid unnecessary realloc storms.
     // retain() reduces len but not capacity — shrink_to_fit() reclaims dead allocations.
@@ -195,16 +205,17 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
         index.code_stats.shrink_to_fit();
     }
 
-    // Check for excessive tombstone growth
+    // Auto-compact when tombstone ratio exceeds 3× (67% waste)
     let active_count: usize = index.file_index.values().map(|v| v.len()).sum();
     let total_count = index.definitions.len();
-    if total_count > 0 && total_count > active_count * 2 {
-        warn!(
+    if total_count > 0 && total_count > active_count * 3 {
+        info!(
             total = total_count,
             active = active_count,
             waste_pct = ((total_count - active_count) * 100) / total_count,
-            "Definition index has significant tombstone growth, consider restart to compact"
+            "Definition index tombstone threshold exceeded, compacting"
         );
+        compact_definitions(index);
     }
 }
 
@@ -214,6 +225,84 @@ pub fn remove_file_from_def_index(index: &mut DefinitionIndex, path: &Path) {
         remove_file_definitions(index, file_id);
         index.path_to_id.remove(path);
     }
+}
+
+/// Compact the definition index by removing tombstoned entries from the Vec
+/// and remapping all secondary indexes to the new positions.
+///
+/// Tombstones accumulate when files are updated incrementally: old entries
+/// remain in `definitions` Vec but are no longer referenced by `file_index`.
+/// This function rebuilds the Vec with only active entries and updates all
+/// 9 secondary indexes that reference `def_idx` positions.
+///
+/// ⚠️ When adding new indexes with def_idx references to DefinitionIndex,
+/// update this function to remap the new index as well.
+pub fn compact_definitions(index: &mut DefinitionIndex) {
+    let active_set: HashSet<u32> = index.file_index.values()
+        .flat_map(|v| v.iter().copied()).collect();
+
+    if active_set.len() == index.definitions.len() {
+        return; // nothing to compact
+    }
+
+    let before = index.definitions.len();
+
+    // Build new Vec + old→new mapping
+    let mut new_defs = Vec::with_capacity(active_set.len());
+    let mut remap: HashMap<u32, u32> = HashMap::with_capacity(active_set.len());
+    for old_idx in 0..index.definitions.len() as u32 {
+        if active_set.contains(&old_idx) {
+            remap.insert(old_idx, new_defs.len() as u32);
+            new_defs.push(index.definitions[old_idx as usize].clone());
+        }
+    }
+
+    // Remap all secondary indexes that store Vec<u32> values (def_idx references)
+    remap_index_values(&mut index.name_index, &remap);
+    remap_index_values(&mut index.kind_index, &remap);
+    remap_index_values(&mut index.attribute_index, &remap);
+    remap_index_values(&mut index.base_type_index, &remap);
+    remap_index_values(&mut index.file_index, &remap);
+    remap_index_values(&mut index.selector_index, &remap);
+
+    // Remap HashMap<u32, _> keyed indexes
+    index.method_calls = index.method_calls.drain()
+        .filter_map(|(k, v)| remap.get(&k).map(|&new_k| (new_k, v)))
+        .collect();
+    index.code_stats = index.code_stats.drain()
+        .filter_map(|(k, v)| remap.get(&k).map(|&new_k| (new_k, v)))
+        .collect();
+    index.template_children = index.template_children.drain()
+        .filter_map(|(k, v)| remap.get(&k).map(|&new_k| (new_k, v)))
+        .collect();
+
+    let after = new_defs.len();
+    index.definitions = new_defs;
+
+    info!(
+        before,
+        after,
+        removed = before - after,
+        "Definition index compacted"
+    );
+}
+
+/// Remap def_idx values in a HashMap<K, Vec<u32>> secondary index.
+fn remap_index_values<K: Eq + Hash>(map: &mut HashMap<K, Vec<u32>>, remap: &HashMap<u32, u32>) {
+    for v in map.values_mut() {
+        for idx in v.iter_mut() {
+            if let Some(&new_idx) = remap.get(idx) {
+                *idx = new_idx;
+            }
+        }
+    }
+}
+
+/// Return the number of active (non-tombstoned) definitions in the index.
+/// Active definitions are those referenced by `file_index`.
+#[allow(dead_code)]
+pub fn active_definition_count(index: &DefinitionIndex) -> usize {
+    index.file_index.values().map(|v| v.len()).sum()
 }
 
 /// Reconcile definition index with filesystem after loading from disk cache.
