@@ -5,20 +5,20 @@
 After every code change, before completing the task, verify ALL of the following:
 
 1. **Unit tests** — the change has test(s) covering the new/modified behavior
-2. **E2E test plan** — `docs/e2e-test-plan.md` is updated with test scenarios for the change
-3. **E2E test script** — evaluate whether `e2e-test.ps1` should also get new test cases for the change (CLI-testable scenarios). If yes — add them
-4. **CLI & MCP discoverability** — for every new feature:
+2. **All unit tests pass** — run `cargo test --bin search-index` and confirm 0 failures
+3. **Ask user to stop MCP server** — before reinstalling the binary, ask the user to stop the MCP server (restart VS Code or stop the search-index server)
+4. **Reinstall binary** — `cargo install --path . --force`
+5. **Run E2E tests** — after the binary is installed, run `.\e2e-test.ps1` and confirm 0 failures
+6. **E2E test plan** — `docs/e2e-test-plan.md` is updated with test scenarios for the change
+7. **E2E test script** — evaluate whether `e2e-test.ps1` should also get new test cases for the change (CLI-testable scenarios). If yes — add them
+8. **CLI & MCP discoverability** — for every new feature:
   - CLI: verify `--help` output includes the new flag/command (check `src/cli/args.rs`)
   - MCP: verify tool descriptions in `src/tips.rs` include the new parameter/tool
   - LLM instructions: verify `search_help` output covers the new capability
   - Principle: keep LLM instructions concise — add only what helps tool selection, not exhaustive docs
-5. **Documentation** — `README.md` and the rest relevant GIT-tracked documents are updated
-6. **Changelog** — `CHANGELOG.md` is updated with a concise entry describing the change (categorized as Features, Bug Fixes, Performance, or Internal)
-7. **Neutral names** — all class/method names in docs, tests, and tool descriptions are generic (e.g., `UserService`, `OrderProcessor`) — never expose internal/proprietary names
-8. **All tests pass** — run `cargo test --bin search-index` and confirm 0 failures
-9. **Ask user to stop MCP server** — before reinstalling the binary, ask the user to stop the MCP server (restart VS Code or stop the search-index server)
-10. **Reinstall binary** — `cargo install --path . --force`
-11. **Run E2E tests** — after the binary is installed, run `.\e2e-test.ps1` and confirm 0 failures
+9. **Documentation** — `README.md` and the rest relevant GIT-tracked documents are updated
+10. **Changelog** — `CHANGELOG.md` is updated with a concise entry describing the change (categorized as Features, Bug Fixes, Performance, or Internal)
+11. **Neutral names** — all class/method names in docs, tests, and tool descriptions are generic (e.g., `UserService`, `OrderProcessor`) — never expose internal/proprietary names
 
 ## Git Workflow — After All Tests Pass
 
@@ -68,3 +68,4 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 - **Stop MCP server before reinstall** — before running `cargo install --path . --force`, propose running `taskkill /IM search-index.exe /F` to stop any running search-index.exe processes. If the user agrees, run it yourself. Don't ask the user to restart VS Code — just kill the process directly.
 - **Always run product name check before staging** — run `scripts/check-product-names.ps1` before `git add -u`. If product-specific names are found in documentation or code, replace them with neutral equivalents before committing. This prevents accidental exposure of internal/proprietary names in the public repository.
 - **Feature discoverability across interfaces** — every new feature must be exposed in BOTH CLI help and MCP tool descriptions. If a feature exists in code but isn't in `--help` or tool descriptions, users/LLMs can't discover it. Review `src/cli/args.rs` (CLI), `src/tips.rs` (MCP descriptions), and `search_help` output after every feature addition.
+- **Test before documenting** — the post-change checklist runs unit tests → install → E2E tests BEFORE updating documentation/changelog. Rationale: if E2E tests fail, the code needs fixing, which may invalidate documentation written earlier. Testing first avoids documenting features that don't work yet.

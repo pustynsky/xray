@@ -10,6 +10,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Bug Fixes
 
+- **Watcher bulk reindex after `git pull` — minutes delay reduced to seconds** — Two bugs fixed:
+  - **Bug 1: `bulk_threshold=100` triggered full reindex on `git pull`** — When `git pull` changed 100+ files, the watcher's bulk threshold (`--bulk-threshold`, default 100) triggered a full `build_content_index()` that re-scanned all ~48K files, taking **minutes**. The bulk path has been **removed entirely** — the watcher now always uses incremental updates regardless of batch size. Additionally, a new `batch_purge_files()` function purges all stale postings in **O(total_postings)** (single pass) instead of **O(N × total_postings)** (N sequential scans), making even 10K-file `git checkout` operations fast (~10s instead of minutes).
+  - **Bug 2: Definition index silently skipped in bulk path** — When the bulk threshold was exceeded, the `continue` statement at the end of the bulk path skipped the definition index update (lines 189-203), leaving `search_definitions` and `search_callers` with stale data after `git pull`. New methods were invisible until the next small file change triggered incremental update. Fixed by removing the bulk path — the incremental path always updates both content and definition indexes.
+  - **Breaking change**: `--bulk-threshold` CLI parameter removed. If present in configuration, the server will fail to start with "unexpected argument" error.
+  - Performance: `git pull` (300 files) ~4s, `git checkout` (10K files) ~25s (previously: minutes for both)
+  - 3 new unit tests for `batch_purge_files` (multi-file, empty set, equivalence with single purge)
+
+
 - **Tombstone growth in definition index during `--watch` mode** — When the file watcher incrementally updated definitions, old `DefinitionEntry` objects were never removed from the `definitions` Vec — they became tombstones occupying memory and inflating `totalDefinitions` count. After 100 file updates, the Vec could grow to 3× its active size. Four fixes applied:
   - **Fix 1 (UX):** `totalDefinitions` in `search_definitions`, `search_info`, `search_reindex_definitions`, CLI `info`, and memory estimates now shows active definition count (from `file_index`) instead of `definitions.len()` which included tombstones
   - **Fix 2 (Correctness):** When no `name`/`kind`/`attribute`/`baseType` filter is set, candidate generation now uses `file_index` (active definitions only) instead of `0..definitions.len()` which included tombstones and could produce duplicate results
