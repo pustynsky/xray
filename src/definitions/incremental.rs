@@ -1,10 +1,13 @@
 //! Incremental updates for DefinitionIndex (used by file watcher).
 
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use tracing::warn;
+use ignore::WalkBuilder;
+use tracing::{info, warn};
 
-use crate::read_file_lossy;
+use crate::{clean_path, read_file_lossy};
 use super::types::*;
 use super::parser_csharp::parse_csharp_definitions;
 use super::parser_typescript::parse_typescript_definitions;
@@ -211,4 +214,114 @@ pub fn remove_file_from_def_index(index: &mut DefinitionIndex, path: &Path) {
         remove_file_definitions(index, file_id);
         index.path_to_id.remove(path);
     }
+}
+
+/// Reconcile definition index with filesystem after loading from disk cache.
+///
+/// Walks the filesystem and compares with the in-memory index to find:
+/// - **Added** files: exist on disk but not in `path_to_id` → parse and add
+/// - **Modified** files: exist in both but `mtime > index.created_at` → re-parse
+/// - **Deleted** files: exist in `path_to_id` but not on disk → remove
+///
+/// Uses a 2-second safety margin on `created_at` to handle clock precision.
+/// WalkBuilder provides mtime via `entry.metadata()` — no extra `stat()` calls needed.
+///
+/// Returns `(added, modified, removed)` counts.
+pub fn reconcile_definition_index(
+    index: &mut DefinitionIndex,
+    dir: &str,
+    extensions: &[String],
+) -> (usize, usize, usize) {
+    let start = std::time::Instant::now();
+
+    let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+
+    // Threshold: files modified after (created_at - 2s) are considered potentially stale
+    let threshold = UNIX_EPOCH + Duration::from_secs(index.created_at.saturating_sub(2));
+
+    // Walk filesystem to collect all matching files with their mtime
+    let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
+
+    let mut walker = WalkBuilder::new(&dir_path);
+    walker.hidden(false).git_ignore(true);
+
+    for entry in walker.build() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        let ext_match = path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
+        if !ext_match {
+            continue;
+        }
+        let mtime = entry.metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(UNIX_EPOCH);
+        let clean = PathBuf::from(clean_path(&path.to_string_lossy()));
+        disk_files.insert(clean, mtime);
+    }
+
+    let scanned = disk_files.len();
+
+    // Collect indexed paths for deletion check
+    let indexed_paths: HashSet<PathBuf> = index.path_to_id.keys().cloned().collect();
+
+    let mut added = 0usize;
+    let mut modified = 0usize;
+    let mut removed = 0usize;
+
+    // Check for new and modified files
+    for (path, mtime) in &disk_files {
+        if !index.path_to_id.contains_key(path) {
+            // NEW file — not in index
+            update_file_definitions(index, path);
+            added += 1;
+        } else if *mtime > threshold {
+            // MODIFIED file — mtime is newer than index build time
+            update_file_definitions(index, path);
+            modified += 1;
+        }
+        // else: unchanged — skip
+    }
+
+    // Check for deleted files (in index but not on disk)
+    for path in &indexed_paths {
+        if !disk_files.contains_key(path) {
+            remove_file_from_def_index(index, path);
+            removed += 1;
+        }
+    }
+
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+
+    if added > 0 || modified > 0 || removed > 0 {
+        info!(
+            scanned,
+            added,
+            modified,
+            removed,
+            elapsed_ms = format_args!("{:.1}", elapsed_ms),
+            "Definition index reconciliation complete"
+        );
+    } else {
+        info!(
+            scanned,
+            elapsed_ms = format_args!("{:.1}", elapsed_ms),
+            "Definition index reconciliation: all files up to date"
+        );
+    }
+
+    crate::index::log_memory(&format!(
+        "watcher: def reconciliation (scanned={}, added={}, modified={}, removed={}, {:.0}ms)",
+        scanned, added, modified, removed, elapsed_ms
+    ));
+
+    (added, modified, removed)
 }

@@ -194,3 +194,147 @@ fn test_build_def_index_ts_only() {
     assert!(idx.name_index.contains_key("appcontroller"), "Should find TS class");
     assert!(idx.name_index.contains_key("run"), "Should find TS method");
 }
+
+
+// ─── Reconciliation Tests ───────────────────────────────────────────
+
+#[test]
+fn test_reconcile_adds_new_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Create initial file and build index
+    std::fs::write(dir.join("existing.cs"), "public class ExistingService { }").unwrap();
+    let mut index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+    });
+    assert_eq!(index.files.len(), 1);
+    assert!(index.name_index.contains_key("existingservice"));
+
+    // Add a new file AFTER index was built
+    std::fs::write(dir.join("new_service.cs"), "public class NewService { public void Process() {} }").unwrap();
+
+    // Reconcile should find the new file
+    let extensions = vec!["cs".to_string()];
+    let (added, _modified, removed) = incremental::reconcile_definition_index(
+        &mut index,
+        &dir.to_string_lossy(),
+        &extensions,
+    );
+
+    assert_eq!(added, 1, "Should have added 1 new file");
+    assert_eq!(removed, 0, "Should not have removed any files");
+    assert_eq!(index.files.len(), 2, "Should now have 2 files");
+    assert!(index.name_index.contains_key("newservice"), "New class should be in index");
+    assert!(index.name_index.contains_key("process"), "New method should be in index");
+}
+
+#[test]
+fn test_reconcile_removes_deleted_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Create two files and build index
+    std::fs::write(dir.join("keep.cs"), "public class KeepService { }").unwrap();
+    std::fs::write(dir.join("delete.cs"), "public class DeleteService { }").unwrap();
+    let mut index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+    });
+    assert_eq!(index.files.len(), 2);
+    assert!(index.name_index.contains_key("deleteservice"));
+
+    // Delete one file
+    std::fs::remove_file(dir.join("delete.cs")).unwrap();
+
+    // Reconcile should detect the deletion
+    let extensions = vec!["cs".to_string()];
+    let (added, _modified, removed) = incremental::reconcile_definition_index(
+        &mut index,
+        &dir.to_string_lossy(),
+        &extensions,
+    );
+
+    assert_eq!(added, 0, "Should not have added any files");
+    assert_eq!(removed, 1, "Should have removed 1 file");
+    assert!(index.name_index.contains_key("keepservice"), "Kept class should still be in index");
+    // Note: DeleteService definitions may still be in the vec as tombstones,
+    // but name_index should no longer reference them
+    assert!(!index.name_index.contains_key("deleteservice"), "Deleted class should not be in index");
+}
+
+#[test]
+fn test_reconcile_detects_modified_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Create file
+    std::fs::write(dir.join("service.cs"), "public class OldService { public void OldMethod() {} }").unwrap();
+
+    // Build index with a created_at in the past (so any current mtime > threshold)
+    let mut index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+    });
+    assert!(index.name_index.contains_key("oldservice"));
+    assert!(index.name_index.contains_key("oldmethod"));
+
+    // Set created_at to past so the file's mtime will be "newer"
+    index.created_at = 1000;
+
+    // Modify the file content
+    std::fs::write(dir.join("service.cs"), "public class NewService { public void NewMethod() {} }").unwrap();
+
+    // Reconcile should detect the modification via mtime
+    let extensions = vec!["cs".to_string()];
+    let (added, modified, removed) = incremental::reconcile_definition_index(
+        &mut index,
+        &dir.to_string_lossy(),
+        &extensions,
+    );
+
+    assert_eq!(added, 0, "Should not have added any files");
+    assert_eq!(modified, 1, "Should have modified 1 file");
+    assert_eq!(removed, 0, "Should not have removed any files");
+    assert!(index.name_index.contains_key("newservice"), "Updated class should be in index");
+    assert!(index.name_index.contains_key("newmethod"), "Updated method should be in index");
+}
+
+#[test]
+fn test_reconcile_skips_unchanged_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Create file
+    std::fs::write(dir.join("service.cs"), "public class StableService { }").unwrap();
+
+    let mut index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+    });
+    let original_def_count = index.definitions.len();
+    assert!(index.name_index.contains_key("stableservice"));
+
+    // Set created_at to a far future value so no file's mtime will be "newer"
+    // (year ~2100, safely within SystemTime range — avoids overflow panic)
+    index.created_at = 4_102_444_800;
+
+    // Reconcile — nothing should change
+    let extensions = vec!["cs".to_string()];
+    let (added, modified, removed) = incremental::reconcile_definition_index(
+        &mut index,
+        &dir.to_string_lossy(),
+        &extensions,
+    );
+
+    assert_eq!(added, 0);
+    assert_eq!(modified, 0);
+    assert_eq!(removed, 0);
+    assert_eq!(index.definitions.len(), original_def_count, "No definitions should have been added");
+    assert!(index.name_index.contains_key("stableservice"), "Original definition should remain");
+}

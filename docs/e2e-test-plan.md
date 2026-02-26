@@ -6805,6 +6805,52 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 
 ---
 
+### T-COMMA-FILE-PARENT: `search_definitions` — Comma-separated `file` and `parent` parameters
+
+**Tool:** `search_definitions`
+
+**Scenario:** The `file` and `parent` parameters support comma-separated OR (matching `name` behavior).
+
+**Command (comma-separated file):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"UserService.cs,OrderService.cs","kind":"method"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
+```
+
+**Expected:**
+
+- Results include methods from BOTH `UserService.cs` AND `OrderService.cs`
+- Each result's `file` path contains one of the comma-separated terms
+- `summary.totalResults` ≥ 2
+
+**Command (comma-separated parent):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"parent":"UserService,OrderService","kind":"method"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
+```
+
+**Expected:**
+
+- Results include methods from BOTH `UserService` AND `OrderService` classes
+- Each result's `parent` field matches one of the comma-separated terms
+- `summary.totalResults` ≥ 2
+
+**Validates:** Comma-separated OR for `file` and `parent` parameters, consistent with `name` parameter behavior.
+
+**Unit tests:** `test_file_filter_comma_separated_matches_multiple_files`, `test_file_filter_single_value_still_works`, `test_file_filter_comma_separated_no_match_returns_empty`, `test_parent_filter_comma_separated_matches_multiple_classes`, `test_parent_filter_single_value_still_works`, `test_parent_filter_comma_separated_no_match_returns_empty`, `test_parent_filter_comma_with_spaces_trimmed`
+
+---
+
 ### T-STALE-CACHE: Stale index cache skipped when extensions change
 
 **Tool:** `find_definition_index_for_dir`, `find_content_index_for_dir`
@@ -6843,6 +6889,46 @@ cargo run -- def-index -d $TEST_DIR -e ts
 - stderr does NOT contain errors about missing HTML file (handled gracefully)
 
 **Validates:** `def-index` completes without error when a component's `templateUrl` points to a non-existent file. The component is still indexed for its selector but without template children.
+
+
+### T-RECONCILE: Watcher startup reconciliation — catches stale cache files
+
+**Tool:** `search-index serve --watch --definitions`
+
+**Background:** When the MCP server starts with `--watch` and loads indexes from a stale disk cache, files added/modified/deleted while the server was offline are permanently invisible because the `notify` file watcher only fires events for changes AFTER it starts watching. The reconciliation scan at watcher startup walks the filesystem and compares with the loaded index using path diff (added/deleted) and mtime comparison (modified), fixing all three cases.
+
+**Scenario (added files):**
+
+1. Build definition index for a temp directory with 1 file
+2. Add a new `.cs` file to the directory
+3. Restart the server with `--watch --definitions`
+4. Query `search_definitions` for the new file — should find definitions
+
+**Scenario (modified files):**
+
+1. Build definition index for a temp directory with 1 file
+2. Modify the file content (change class name)
+3. Restart the server with `--watch --definitions`
+4. Query `search_definitions` — should find the new class name, not the old one
+
+**Scenario (deleted files):**
+
+1. Build definition index for a temp directory with 2 files
+2. Delete one file
+3. Restart the server with `--watch --definitions`
+4. Query `search_definitions` for the deleted file — should return 0 results
+
+**Expected (all scenarios):**
+
+- stderr contains reconciliation log: `Definition index reconciliation complete` with `added`, `modified`, `removed` counts
+- stderr contains cache age in startup log (e.g., `cache_age=5m`)
+- Indexes are accurate after reconciliation without manual `search_reindex_definitions`
+
+**Validates:** Watcher startup reconciliation catches stale cache files. The reconciliation runs once in the watcher thread before the event loop, with filesystem events buffered in the mpsc channel during the scan.
+
+**Unit tests:** `test_reconcile_adds_new_file`, `test_reconcile_removes_deleted_file`, `test_reconcile_detects_modified_file`, `test_reconcile_skips_unchanged_files`
+
+**Status:** ✅ Covered by unit tests. Manual MCP test requires start/stop server workflow.
 
 ---
 ---
