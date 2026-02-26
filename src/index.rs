@@ -539,8 +539,8 @@ pub fn content_index_meta(idx: &crate::ContentIndex) -> IndexMeta {
         extensions: idx.extensions.clone(),
         definitions: None,
         call_sites: None,
-        parse_errors: None,
-        lossy_file_count: None,
+        parse_errors: if idx.read_errors > 0 { Some(idx.read_errors) } else { None },
+        lossy_file_count: if idx.lossy_file_count > 0 { Some(idx.lossy_file_count) } else { None },
         entries: None,
         commits: None,
         authors: None,
@@ -1044,10 +1044,14 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     builder.threads(thread_count);
 
     let file_data: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
+    let read_errors = std::sync::atomic::AtomicUsize::new(0);
+    let lossy_file_count = std::sync::atomic::AtomicUsize::new(0);
 
     builder.build_parallel().run(|| {
         let extensions = extensions.clone();
         let file_data = &file_data;
+        let read_errors = &read_errors;
+        let lossy_file_count = &lossy_file_count;
         Box::new(move |result| {
             if let Ok(entry) = result {
                 if !entry.file_type().is_some_and(|ft| ft.is_file()) {
@@ -1063,10 +1067,17 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
                 }
                 let path = clean_path(&entry.path().to_string_lossy());
                 match read_file_lossy(entry.path()) {
-                    Ok((content, _was_lossy)) => {
+                    Ok((content, was_lossy)) => {
+                        if was_lossy {
+                            lossy_file_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            eprintln!("[content-index] WARNING: lossy UTF-8 conversion: {}", path);
+                        }
                         file_data.lock().unwrap_or_else(|e| e.into_inner()).push((path, content));
                     }
-                    Err(_) => {}
+                    Err(e) => {
+                        read_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        eprintln!("[content-index] WARNING: failed to read file: {} — {}", path, e);
+                    }
                 }
             }
             ignore::WalkState::Continue
@@ -1075,6 +1086,8 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
 
     let file_data = recover_mutex(file_data, "content-index");
     let file_count = file_data.len();
+    let read_errors = read_errors.load(std::sync::atomic::Ordering::Relaxed);
+    let lossy_file_count = lossy_file_count.load(std::sync::atomic::Ordering::Relaxed);
     let min_len = args.min_token_len;
     log_memory(&format!("content-build: after file walk ({} files)", file_count));
 
@@ -1171,8 +1184,9 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     let elapsed = start.elapsed();
 
     eprintln!(
-        "Indexed {} files, {} unique tokens ({} total) in {:.3}s",
-        file_count, unique_tokens, total_tokens, elapsed.as_secs_f64()
+        "Indexed {} files, {} unique tokens ({} total) in {:.3}s ({} read errors, {} lossy-utf8)",
+        file_count, unique_tokens, total_tokens, elapsed.as_secs_f64(),
+        read_errors, lossy_file_count
     );
 
     let now = SystemTime::now()
@@ -1193,6 +1207,8 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         trigram_dirty: false,
         forward: None,
         path_to_id: None,
+        read_errors,
+        lossy_file_count,
     }
 }
 
@@ -1499,6 +1515,54 @@ mod index_tests {
         // No panic — success
     }
 
+    // ─── content_index_meta error tracking tests ──────────────
+
+    #[test]
+    fn test_content_index_meta_no_errors() {
+        let idx = search_index::ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["file.cs".to_string()],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![],
+            trigram: search_index::TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+            read_errors: 0,
+            lossy_file_count: 0,
+        };
+        let meta = crate::index::content_index_meta(&idx);
+        assert_eq!(meta.parse_errors, None, "parse_errors should be None when read_errors=0");
+        assert_eq!(meta.lossy_file_count, None, "lossy_file_count should be None when lossy_file_count=0");
+    }
+
+    #[test]
+    fn test_content_index_meta_with_errors() {
+        let idx = search_index::ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec!["file.cs".to_string()],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![],
+            trigram: search_index::TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+            read_errors: 7,
+            lossy_file_count: 3,
+        };
+        let meta = crate::index::content_index_meta(&idx);
+        assert_eq!(meta.parse_errors, Some(7), "parse_errors should be Some(7) when read_errors=7");
+        assert_eq!(meta.lossy_file_count, Some(3), "lossy_file_count should be Some(3) when lossy_file_count=3");
+    }
+
     #[test]
     fn test_estimate_content_index_memory_empty() {
         let idx = search_index::ContentIndex {
@@ -1513,7 +1577,7 @@ mod index_tests {
             trigram: search_index::TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         let estimate = crate::index::estimate_content_index_memory(&idx);
         assert!(estimate.is_object());
@@ -1547,7 +1611,7 @@ mod index_tests {
             trigram: search_index::TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         let estimate = crate::index::estimate_content_index_memory(&idx);
         assert!(estimate.is_object());
@@ -1618,7 +1682,7 @@ mod index_tests {
             trigram: search_index::TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         crate::save_content_index(&idx, index_base).unwrap();
 
@@ -1651,7 +1715,7 @@ mod index_tests {
             trigram: search_index::TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         crate::save_content_index(&idx, index_base).unwrap();
 
@@ -1683,7 +1747,7 @@ mod index_tests {
             trigram: search_index::TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         crate::save_content_index(&idx, index_base).unwrap();
 

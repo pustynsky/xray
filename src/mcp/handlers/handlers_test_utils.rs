@@ -54,7 +54,7 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
         trigram: TrigramIndex::default(),
         trigram_dirty: false,
         forward: None,
-        path_to_id: None,
+        path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let definitions = vec![

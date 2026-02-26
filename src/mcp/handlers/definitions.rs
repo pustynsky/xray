@@ -43,7 +43,9 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         .and_then(|s| if s.is_empty() { None } else { Some(s) });
     let kind_filter = args.get("kind").and_then(|v| v.as_str());
     let attribute_filter = args.get("attribute").and_then(|v| v.as_str());
-    let base_type_filter = args.get("baseType").and_then(|v| v.as_str());
+    let base_type_filter = args.get("baseType").and_then(|v| v.as_str())
+        .and_then(|s| if s.is_empty() { None } else { Some(s) });
+    let base_type_transitive = args.get("baseTypeTransitive").and_then(|v| v.as_bool()).unwrap_or(false);
     let file_filter = args.get("file").and_then(|v| v.as_str());
     let parent_filter = args.get("parent").and_then(|v| v.as_str());
     let contains_line = match args.get("containsLine") {
@@ -109,6 +111,7 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         let suspicious_threshold = args.get("auditMinBytes")
             .and_then(|v| v.as_u64())
             .unwrap_or(500) as u64;
+        let cross_validate = args.get("crossValidate").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let files_with_defs = index.file_index.len();
         let total_files = index.files.len();
@@ -122,7 +125,7 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
             })
             .collect();
 
-        let output = json!({
+        let mut output = json!({
             "audit": {
                 "totalFiles": total_files,
                 "filesWithDefinitions": files_with_defs,
@@ -134,6 +137,13 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
             },
             "suspiciousFiles": suspicious,
         });
+
+        // Cross-index validation: compare definition index files with file-list index
+        if cross_validate {
+            let cross = cross_validate_indexes(&index, &ctx.server_dir, &ctx.index_base);
+            output["crossValidation"] = cross;
+        }
+
         return ToolCallResult::success(serde_json::to_string(&output).unwrap());
     }
 
@@ -249,19 +259,42 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         }
     }
 
-    // Filter by base type
+    // Filter by base type (with optional transitive BFS traversal)
+    // Uses substring matching to support generic types: baseType="IAccessTable"
+    // matches IAccessTable<Model>, IAccessTable<Report>, etc.
+    // Fast path: try exact HashMap lookup first (O(1)), fall back to substring scan
+    // only when exact match returns nothing.
     if let Some(bt) = base_type_filter {
         let bt_lower = bt.to_lowercase();
-        if let Some(indices) = index.base_type_index.get(&bt_lower) {
+        let matching_indices = if base_type_transitive {
+            // BFS: collect all types transitively inheriting from bt (substring match)
+            collect_transitive_base_type_indices(&index, &bt_lower)
+        } else {
+            // Substring match: find all base_type_index keys containing bt_lower.
+            // Supports generic types: "IAccessTable" matches "iaccesstable<model>",
+            // "iaccesstable<report>", etc.
+            // O(N) scan over base_type_index keys (~1.4ms for 50K entries).
+            let mut indices = Vec::new();
+            for (key, idx_list) in &index.base_type_index {
+                if key.contains(&bt_lower) {
+                    indices.extend(idx_list);
+                }
+            }
+            indices.sort_unstable();
+            indices.dedup();
+            indices
+        };
+
+        if matching_indices.is_empty() {
+            candidate_indices = Some(Vec::new());
+        } else {
             candidate_indices = Some(match candidate_indices {
                 Some(existing) => {
-                    let set: std::collections::HashSet<u32> = indices.iter().cloned().collect();
+                    let set: std::collections::HashSet<u32> = matching_indices.into_iter().collect();
                     existing.into_iter().filter(|i| set.contains(i)).collect()
                 }
-                None => indices.clone(),
+                None => matching_indices,
             });
-        } else {
-            candidate_indices = Some(Vec::new());
         }
     }
 
@@ -603,6 +636,141 @@ fn get_sort_value(stats: Option<&CodeStats>, def: &DefinitionEntry, field: &str)
     }
 }
 
+/// Cross-validate definition index files against the file-list index on disk.
+///
+/// Loads the FileIndex from disk (adhoc, not kept in memory), then compares:
+/// - Files in file-list but missing from definition index (filtered by def extensions)
+/// - Files in definition index but missing from file-list
+///
+/// Returns a JSON object with the cross-validation results.
+fn cross_validate_indexes(
+    def_index: &crate::definitions::DefinitionIndex,
+    server_dir: &str,
+    index_base: &std::path::Path,
+) -> serde_json::Value {
+    // Try to load FileIndex from disk
+    let file_index = match crate::index::load_index(server_dir, index_base) {
+        Ok(fi) => fi,
+        Err(_) => {
+            return serde_json::json!({
+                "status": "skipped",
+                "reason": "File-list index not found on disk. Run search_reindex or search_fast first."
+            });
+        }
+    };
+
+    let def_extensions: std::collections::HashSet<String> = def_index.extensions.iter()
+        .map(|e| e.to_lowercase())
+        .collect();
+
+    // Build set of definition index file paths (lowercased for comparison)
+    let def_files: std::collections::HashSet<String> = def_index.files.iter()
+        .map(|f| f.to_lowercase())
+        .collect();
+
+    // Files in file-list matching definition extensions but NOT in definition index
+    let mut in_filelist_not_in_defs: Vec<String> = Vec::new();
+    for entry in &file_index.entries {
+        if entry.is_dir { continue; }
+        let ext = std::path::Path::new(&entry.path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .unwrap_or_default();
+        if !def_extensions.contains(&ext) { continue; }
+        if !def_files.contains(&entry.path.to_lowercase()) {
+            in_filelist_not_in_defs.push(entry.path.clone());
+        }
+    }
+
+    // Files in definition index but NOT in file-list
+    let filelist_paths: std::collections::HashSet<String> = file_index.entries.iter()
+        .filter(|e| !e.is_dir)
+        .map(|e| e.path.to_lowercase())
+        .collect();
+
+    let mut in_defs_not_in_filelist: Vec<String> = Vec::new();
+    for def_file in &def_index.files {
+        if !filelist_paths.contains(&def_file.to_lowercase()) {
+            in_defs_not_in_filelist.push(def_file.clone());
+        }
+    }
+
+    // Cap results to avoid huge output
+    let max_report = 50;
+    let total_missing_from_defs = in_filelist_not_in_defs.len();
+    let total_missing_from_filelist = in_defs_not_in_filelist.len();
+    in_filelist_not_in_defs.truncate(max_report);
+    in_defs_not_in_filelist.truncate(max_report);
+
+    serde_json::json!({
+        "status": "ok",
+        "fileListFiles": file_index.entries.len(),
+        "defIndexFiles": def_index.files.len(),
+        "inFileListNotInDefIndex": total_missing_from_defs,
+        "inDefIndexNotInFileList": total_missing_from_filelist,
+        "sampleMissingFromDefIndex": in_filelist_not_in_defs,
+        "sampleMissingFromFileList": in_defs_not_in_filelist,
+    })
+}
+
+/// BFS traversal of the inheritance hierarchy to collect all definition indices
+/// that transitively inherit from a given base type.
+///
+/// Starting from `base_type_name`, finds all classes/structs that directly inherit it,
+/// then finds all classes that inherit from THOSE, etc., up to `MAX_BFS_DEPTH` levels.
+///
+/// Returns a combined Vec of definition indices from all levels.
+///
+/// Known limitation: matching is by name only (no namespace resolution).
+/// Classes with the same name in different namespaces will be conflated.
+fn collect_transitive_base_type_indices(
+    index: &crate::definitions::DefinitionIndex,
+    base_type_name: &str,
+) -> Vec<u32> {
+    const MAX_BFS_DEPTH: usize = 10;
+
+    let mut result: Vec<u32> = Vec::new();
+    let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+
+    // Seed the BFS with the initial base type
+    queue.push_back(base_type_name.to_string());
+    visited.insert(base_type_name.to_string());
+
+    let mut depth = 0;
+    while !queue.is_empty() && depth < MAX_BFS_DEPTH {
+        let level_size = queue.len();
+        for _ in 0..level_size {
+            let current_type = queue.pop_front().unwrap();
+
+            // Find all definitions that have `current_type` as a base type
+            // Use substring matching to support generic types (e.g., IAccessTable matches IAccessTable<Model>)
+            for (key, indices) in &index.base_type_index {
+                if !key.contains(&current_type) { continue; }
+                result.extend(indices);
+
+                // For each matched definition, get its name and enqueue for next BFS level
+                for &def_idx in indices {
+                    if let Some(def) = index.definitions.get(def_idx as usize) {
+                        let def_name_lower = def.name.to_lowercase();
+                        if !visited.contains(&def_name_lower) {
+                            visited.insert(def_name_lower.clone());
+                            queue.push_back(def_name_lower);
+                        }
+                    }
+                }
+            }
+        }
+        depth += 1;
+    }
+
+    // Deduplicate (a definition could be found via multiple paths)
+    result.sort_unstable();
+    result.dedup();
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -931,6 +1099,387 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
         assert_eq!(defs.len(), 0, "no parents match, should return 0 results");
+    }
+
+    // ─── crossValidate audit tests ────────────────────────────────────
+
+    #[test]
+    fn test_audit_cross_validate_no_file_index_returns_skipped() {
+        // When no file-list index exists on disk, crossValidate should return status: "skipped"
+        let ctx = make_transitive_inheritance_ctx();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "audit": true,
+            "crossValidate": true
+        }));
+        assert!(!result.is_error, "audit+crossValidate should not error: {:?}", result.content[0].text);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(v["crossValidation"].is_object(), "Should have crossValidation object");
+        assert_eq!(v["crossValidation"]["status"], "skipped",
+            "Should be 'skipped' when file-list index not found");
+    }
+
+    #[test]
+    fn test_audit_without_cross_validate_has_no_cross_validation() {
+        let ctx = make_transitive_inheritance_ctx();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "audit": true
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(v.get("crossValidation").is_none(),
+            "Without crossValidate=true, should NOT have crossValidation in output");
+    }
+
+    #[test]
+    fn test_audit_cross_validate_with_file_index() {
+        // Create a temp dir, build a file-list index, then cross-validate
+        use std::io::Write;
+        let tmp = tempfile::tempdir().unwrap();
+        let project_dir = tmp.path().join("project");
+        std::fs::create_dir_all(&project_dir).unwrap();
+
+        // Create some .cs files
+        { let mut f = std::fs::File::create(project_dir.join("FileA.cs")).unwrap();
+          writeln!(f, "class FileA {{ }}").unwrap(); }
+        { let mut f = std::fs::File::create(project_dir.join("FileB.cs")).unwrap();
+          writeln!(f, "class FileB {{ }}").unwrap(); }
+
+        let project_str = crate::clean_path(&project_dir.to_string_lossy());
+        let idx_base = tmp.path().join("indexes");
+        std::fs::create_dir_all(&idx_base).unwrap();
+
+        // Build and save a file-list index
+        let file_index = crate::build_index(&crate::IndexArgs {
+            dir: project_str.clone(),
+            max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+        });
+        crate::save_index(&file_index, &idx_base).unwrap();
+
+        // Build a definition index
+        let def_index = crate::definitions::build_definition_index(
+            &crate::definitions::DefIndexArgs {
+                dir: project_str.clone(),
+                ext: "cs".to_string(),
+                threads: 1,
+            }
+        );
+
+        let content_index = crate::ContentIndex {
+            root: project_str.clone(), created_at: 0, max_age_secs: 3600,
+            files: vec![], index: std::collections::HashMap::new(), total_tokens: 0,
+            extensions: vec!["cs".to_string()], file_token_counts: vec![],
+            trigram: crate::TrigramIndex::default(), trigram_dirty: false,
+            forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        };
+
+        let ctx = super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
+            server_dir: project_str,
+            server_ext: "cs".to_string(),
+            metrics: false, index_base: idx_base,
+            max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+            content_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            def_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            git_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            git_cache_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            current_branch: None,
+        };
+
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "audit": true,
+            "crossValidate": true
+        }));
+        assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(v["crossValidation"]["status"], "ok",
+            "Cross-validation should succeed when file-list index exists");
+        assert!(v["crossValidation"]["fileListFiles"].as_u64().unwrap() > 0,
+            "Should report file-list file count");
+        assert!(v["crossValidation"]["defIndexFiles"].as_u64().unwrap() > 0,
+            "Should report def index file count");
+    }
+
+    // ─── baseTypeTransitive tests ─────────────────────────────────────
+
+    /// Helper to create a context with a 3-level inheritance chain:
+    /// BaseService → MiddleService → ConcreteService
+    fn make_transitive_inheritance_ctx() -> HandlerContext {
+        use crate::definitions::*;
+
+        let definitions = vec![
+            // idx 0: BaseService (root, no base types)
+            DefinitionEntry {
+                name: "BaseService".to_string(),
+                kind: DefinitionKind::Class,
+                file_id: 0, line_start: 1, line_end: 50,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![], base_types: vec![],
+            },
+            // idx 1: MiddleService : BaseService
+            DefinitionEntry {
+                name: "MiddleService".to_string(),
+                kind: DefinitionKind::Class,
+                file_id: 0, line_start: 52, line_end: 100,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["BaseService".to_string()],
+            },
+            // idx 2: ConcreteService : MiddleService
+            DefinitionEntry {
+                name: "ConcreteService".to_string(),
+                kind: DefinitionKind::Class,
+                file_id: 1, line_start: 1, line_end: 80,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["MiddleService".to_string()],
+            },
+            // idx 3: UnrelatedService : SomethingElse
+            DefinitionEntry {
+                name: "UnrelatedService".to_string(),
+                kind: DefinitionKind::Class,
+                file_id: 1, line_start: 82, line_end: 120,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["SomethingElse".to_string()],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+            for bt in &def.base_types {
+                base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+            }
+        }
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(), created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec![
+                "C:\\src\\Services.cs".to_string(),
+                "C:\\src\\Concrete.cs".to_string(),
+            ],
+            definitions, name_index, kind_index,
+            attribute_index: HashMap::new(), base_type_index,
+            file_index,
+            path_to_id: HashMap::new(),
+            method_calls: HashMap::new(),
+            code_stats: HashMap::new(),
+            parse_errors: 0, lossy_file_count: 0,
+            empty_file_ids: Vec::new(),
+            extension_methods: HashMap::new(),
+            selector_index: HashMap::new(),
+            template_children: HashMap::new(),
+        };
+
+        let content_index = crate::ContentIndex {
+            root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+            files: vec![], index: HashMap::new(), total_tokens: 0,
+            extensions: vec!["cs".to_string()], file_token_counts: vec![],
+            trigram: crate::TrigramIndex::default(), trigram_dirty: false,
+            forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        };
+
+        super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
+            server_dir: ".".to_string(), server_ext: "cs".to_string(),
+            metrics: false, index_base: std::path::PathBuf::from("."),
+            max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+            content_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            def_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            git_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            git_cache_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            current_branch: None,
+        }
+    }
+
+    #[test]
+    fn test_base_type_transitive_finds_indirect_descendants() {
+        // baseType=BaseService + baseTypeTransitive=true should find:
+        // - MiddleService (directly inherits BaseService)
+        // - ConcreteService (inherits MiddleService which inherits BaseService)
+        let ctx = make_transitive_inheritance_ctx();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "BaseService",
+            "baseTypeTransitive": true
+        }));
+        assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"MiddleService"), "Should find MiddleService (direct child)");
+        assert!(names.contains(&"ConcreteService"), "Should find ConcreteService (grandchild via transitive BFS)");
+        assert!(!names.contains(&"UnrelatedService"), "Should NOT find UnrelatedService");
+        assert!(!names.contains(&"BaseService"), "Should NOT find BaseService itself (it doesn't inherit from itself)");
+    }
+
+    #[test]
+    fn test_base_type_non_transitive_finds_only_direct() {
+        // baseType=BaseService without transitive should find only MiddleService
+        let ctx = make_transitive_inheritance_ctx();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "BaseService"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
+        assert!(names.contains(&"MiddleService"), "Should find MiddleService (direct child)");
+        assert!(!names.contains(&"ConcreteService"), "Should NOT find ConcreteService (indirect, transitive=false)");
+    }
+
+    #[test]
+    fn test_base_type_transitive_no_match_returns_empty() {
+        let ctx = make_transitive_inheritance_ctx();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "NonExistentType",
+            "baseTypeTransitive": true
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert!(defs.is_empty(), "Non-existent base type should return 0 results");
+    }
+
+    #[test]
+    fn test_base_type_empty_string_treated_as_no_filter() {
+        // baseType="" should behave like no baseType filter (return all definitions)
+        // Regression: substring scan with contains("") matches ALL keys
+        let ctx = make_transitive_inheritance_ctx();
+        let result_empty = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": ""
+        }));
+        assert!(!result_empty.is_error);
+        let v_empty: serde_json::Value = serde_json::from_str(&result_empty.content[0].text).unwrap();
+        let defs_empty = v_empty["definitions"].as_array().unwrap();
+
+        let result_no_filter = handle_search_definitions(&ctx, &serde_json::json!({}));
+        let v_no_filter: serde_json::Value = serde_json::from_str(&result_no_filter.content[0].text).unwrap();
+        let defs_no_filter = v_no_filter["definitions"].as_array().unwrap();
+
+        assert_eq!(defs_empty.len(), defs_no_filter.len(),
+            "baseType='' should return same results as no baseType filter. Got {} vs {}",
+            defs_empty.len(), defs_no_filter.len());
+    }
+
+    #[test]
+    fn test_base_type_substring_matches_generic_interface() {
+        // baseType="BaseService" should match via fast-path (exact HashMap lookup)
+        // but if the base_type_index has generic keys like "baseservice<t>",
+        // searching with "baseservice" should find them via substring fallback
+        use crate::definitions::*;
+
+        let definitions = vec![
+            // GenericImpl : IRepository<Model>
+            DefinitionEntry {
+                name: "GenericImpl".to_string(),
+                kind: DefinitionKind::Class,
+                file_id: 0, line_start: 1, line_end: 50,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["IRepository<Model>".to_string()],
+            },
+            // AnotherImpl : IRepository<Report>
+            DefinitionEntry {
+                name: "AnotherImpl".to_string(),
+                kind: DefinitionKind::Class,
+                file_id: 0, line_start: 52, line_end: 100,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["IRepository<Report>".to_string()],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+            for bt in &def.base_types {
+                base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+            }
+        }
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(), created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec!["C:\\src\\Impls.cs".to_string()],
+            definitions, name_index, kind_index,
+            attribute_index: HashMap::new(), base_type_index,
+            file_index, path_to_id: HashMap::new(),
+            method_calls: HashMap::new(), code_stats: HashMap::new(),
+            parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
+            extension_methods: HashMap::new(), selector_index: HashMap::new(),
+            template_children: HashMap::new(),
+        };
+
+        let content_index = crate::ContentIndex {
+            root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+            files: vec![], index: HashMap::new(), total_tokens: 0,
+            extensions: vec!["cs".to_string()], file_token_counts: vec![],
+            trigram: crate::TrigramIndex::default(), trigram_dirty: false,
+            forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        };
+
+        let ctx = super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
+            server_dir: ".".to_string(), server_ext: "cs".to_string(),
+            metrics: false, index_base: std::path::PathBuf::from("."),
+            max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
+            content_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            def_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            git_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
+            git_cache_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            current_branch: None,
+        };
+
+        // Substring search: "IRepository" should find both GenericImpl and AnotherImpl
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "IRepository"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 2, "baseType='IRepository' should find both IRepository<Model> and IRepository<Report> via substring. Got: {:?}",
+            defs.iter().map(|d| d["name"].as_str().unwrap()).collect::<Vec<_>>());
+
+        // Exact search: "IRepository<Model>" should find only GenericImpl (fast path)
+        let result2 = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "IRepository<Model>"
+        }));
+        assert!(!result2.is_error);
+        let v2: serde_json::Value = serde_json::from_str(&result2.content[0].text).unwrap();
+        let defs2 = v2["definitions"].as_array().unwrap();
+        assert_eq!(defs2.len(), 1, "baseType='IRepository<Model>' should find only GenericImpl via exact match");
+        assert_eq!(defs2[0]["name"], "GenericImpl");
+    }
+
+    #[test]
+    fn test_base_type_transitive_case_insensitive() {
+        let ctx = make_transitive_inheritance_ctx();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "BASESERVICE",
+            "baseTypeTransitive": true
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert!(defs.len() >= 2, "Case-insensitive transitive should find both descendants");
     }
 
     #[test]

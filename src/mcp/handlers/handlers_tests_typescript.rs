@@ -51,7 +51,7 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         trigram,
         trigram_dirty: false,
         forward: None,
-        path_to_id: None,
+        path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     // Definitions: all TS definition kinds
@@ -352,7 +352,7 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         index: HashMap::new(), total_tokens: 0,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![0, 0],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let ctx = HandlerContext {
@@ -763,7 +763,7 @@ fn test_ts_search_callers_inject_support() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let definitions = vec![
@@ -904,7 +904,7 @@ fn test_mixed_cs_ts_definitions_query() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["cs".to_string(), "ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let definitions = vec![
@@ -1018,7 +1018,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["cs".to_string(), "ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let definitions = vec![
@@ -1158,7 +1158,7 @@ fn test_tsx_file_support_through_handler() {
         index: content_idx, total_tokens: 50,
         extensions: vec!["ts".to_string(), "tsx".to_string()],
         file_token_counts: vec![50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let definitions = vec![
@@ -1294,7 +1294,7 @@ fn test_ts_incremental_update_through_handler() {
         index: HashMap::new(), total_tokens: 0,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![0],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None,
+        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let ctx = HandlerContext {
@@ -1385,7 +1385,7 @@ fn test_ts_search_definitions_exclude_dir() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let definitions = vec![
@@ -1537,7 +1537,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let definitions = vec![
