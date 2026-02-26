@@ -308,9 +308,10 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         }
     }
 
-    // If no filters applied, return all definitions (up to max)
+    // If no filters applied, return all ACTIVE definitions (up to max).
+    // Use file_index to exclude tombstoned entries that are no longer referenced.
     let mut candidates = candidate_indices.unwrap_or_else(|| {
-        (0..index.definitions.len() as u32).collect()
+        index.file_index.values().flat_map(|v| v.iter().copied()).collect()
     });
 
     // Deduplicate candidate indices (a definition may appear multiple times
@@ -542,12 +543,13 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         obj
     }).collect();
 
+    let active_definitions: usize = index.file_index.values().map(|v| v.len()).sum();
     let mut summary = json!({
         "totalResults": total_results,
         "returned": defs_json.len(),
         "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         "indexFiles": index.files.len(),
-        "totalDefinitions": index.definitions.len(),
+        "totalDefinitions": active_definitions,
     });
     if index.parse_errors > 0 {
         summary["readErrors"] = json!(index.parse_errors);

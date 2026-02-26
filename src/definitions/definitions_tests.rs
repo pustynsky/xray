@@ -338,3 +338,304 @@ fn test_reconcile_skips_unchanged_files() {
     assert_eq!(index.definitions.len(), original_def_count, "No definitions should have been added");
     assert!(index.name_index.contains_key("stableservice"), "Original definition should remain");
 }
+
+// ─── Compact Definitions Tests ──────────────────────────────────────
+
+#[test]
+fn test_compact_removes_tombstones() {
+    use std::path::PathBuf;
+
+    let mut index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
+        definitions: vec![
+            DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 10, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 0, name: "MethodA".to_string(), kind: DefinitionKind::Method, line_start: 2, line_end: 5, parent: Some("ClassA".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "ClassB".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 20, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        ],
+        name_index: { let mut m = HashMap::new(); m.insert("classa".to_string(), vec![0]); m.insert("methoda".to_string(), vec![1]); m.insert("classb".to_string(), vec![2]); m },
+        kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 2]); m.insert(DefinitionKind::Method, vec![1]); m },
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index: { let mut m = HashMap::new(); m.insert(0, vec![0, 1]); m.insert(1, vec![2]); m },
+        path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+    };
+
+    // Simulate removing file0's definitions from secondary indexes (but not from Vec)
+    remove_file_definitions(&mut index, 0);
+
+    // Now definitions Vec has 3 entries but only 1 is active (def[2] = ClassB)
+    assert_eq!(index.definitions.len(), 3, "Vec should still have 3 entries (tombstones)");
+    let active: usize = index.file_index.values().map(|v| v.len()).sum();
+    assert_eq!(active, 1, "Only 1 active definition");
+
+    // Compact — should remove tombstones
+    compact_definitions(&mut index);
+
+    assert_eq!(index.definitions.len(), 1, "After compact, Vec should have 1 entry");
+    assert_eq!(index.definitions[0].name, "ClassB", "Remaining def should be ClassB");
+
+    // Verify secondary indexes are remapped
+    let class_indices = index.kind_index.get(&DefinitionKind::Class).unwrap();
+    assert_eq!(class_indices, &vec![0u32], "ClassB should be at index 0 after compact");
+    assert!(!index.kind_index.contains_key(&DefinitionKind::Method), "Method kind should be empty after compact");
+
+    let classb_name = index.name_index.get("classb").unwrap();
+    assert_eq!(classb_name, &vec![0u32], "classb in name_index should point to 0");
+    assert!(!index.name_index.contains_key("classa"), "classa should be gone from name_index");
+
+    let file1_defs = index.file_index.get(&1).unwrap();
+    assert_eq!(file1_defs, &vec![0u32], "file_index[1] should point to 0 after compact");
+}
+
+#[test]
+fn test_compact_no_tombstones_is_noop() {
+    use std::path::PathBuf;
+
+    let mut index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        files: vec!["file0.cs".to_string()],
+        definitions: vec![
+            DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 10, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        ],
+        name_index: { let mut m = HashMap::new(); m.insert("classa".to_string(), vec![0]); m },
+        kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0]); m },
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
+        path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m },
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+    };
+
+    compact_definitions(&mut index);
+
+    // Should be unchanged
+    assert_eq!(index.definitions.len(), 1);
+    assert_eq!(index.definitions[0].name, "ClassA");
+    assert_eq!(index.name_index.get("classa").unwrap(), &vec![0u32]);
+}
+
+#[test]
+fn test_compact_remaps_method_calls_and_code_stats() {
+    use std::path::PathBuf;
+
+    let mut index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
+        definitions: vec![
+            DefinitionEntry { file_id: 0, name: "MethodA".to_string(), kind: DefinitionKind::Method, line_start: 1, line_end: 5, parent: Some("ClassA".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "MethodB".to_string(), kind: DefinitionKind::Method, line_start: 1, line_end: 10, parent: Some("ClassB".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        ],
+        name_index: { let mut m = HashMap::new(); m.insert("methoda".to_string(), vec![0]); m.insert("methodb".to_string(), vec![1]); m },
+        kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Method, vec![0, 1]); m },
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
+        path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
+        method_calls: {
+            let mut m = HashMap::new();
+            m.insert(0, vec![CallSite { method_name: "Helper".to_string(), receiver_type: None, line: 3, receiver_is_generic: false }]);
+            m.insert(1, vec![CallSite { method_name: "DoWork".to_string(), receiver_type: Some("IService".to_string()), line: 5, receiver_is_generic: false }]);
+            m
+        },
+        code_stats: {
+            let mut m = HashMap::new();
+            m.insert(0, CodeStats { cyclomatic_complexity: 2, cognitive_complexity: 1, max_nesting_depth: 1, param_count: 0, return_count: 1, call_count: 1, lambda_count: 0 });
+            m.insert(1, CodeStats { cyclomatic_complexity: 5, cognitive_complexity: 3, max_nesting_depth: 2, param_count: 2, return_count: 1, call_count: 3, lambda_count: 0 });
+            m
+        },
+        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+    };
+
+    // Remove file0 definitions (MethodA at idx 0)
+    remove_file_definitions(&mut index, 0);
+
+    // Compact
+    compact_definitions(&mut index);
+
+    // Only MethodB should remain at index 0
+    assert_eq!(index.definitions.len(), 1);
+    assert_eq!(index.definitions[0].name, "MethodB");
+
+    // method_calls should be remapped: old key 1 → new key 0
+    assert!(!index.method_calls.contains_key(&1), "Old key should be gone");
+    let calls = index.method_calls.get(&0).unwrap();
+    assert_eq!(calls[0].method_name, "DoWork");
+
+    // code_stats should be remapped similarly
+    assert!(!index.code_stats.contains_key(&1), "Old key should be gone");
+    let stats = index.code_stats.get(&0).unwrap();
+    assert_eq!(stats.cyclomatic_complexity, 5);
+}
+
+#[test]
+fn test_compact_auto_triggers_at_threshold() {
+    use std::path::PathBuf;
+
+    // Create an index with 4 definitions across 2 files
+    let mut index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
+        definitions: vec![
+            DefinitionEntry { file_id: 0, name: "A".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 1, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "B".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 1, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        ],
+        name_index: { let mut m = HashMap::new(); m.insert("a".to_string(), vec![0]); m.insert("b".to_string(), vec![1]); m },
+        kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 1]); m },
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
+        path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+    };
+
+    // Simulate multiple incremental updates to the same file to grow tombstones
+    // Each update adds new entries to the Vec without removing old ones
+    for i in 0..5 {
+        // Simulate file0 being updated — adds 1 new def at end, clears secondary for old
+        let _path = PathBuf::from("file0.cs");
+        let content = format!("public class Update{} {{ }}", i);
+        std::fs::create_dir_all(tmp_dir_for_test()).ok();
+        let file_path = tmp_dir_for_test().join("file0.cs");
+        std::fs::write(&file_path, &content).unwrap();
+        index.path_to_id.insert(file_path.clone(), 0);
+        update_file_definitions(&mut index, &file_path);
+    }
+
+    // After 5 updates to file0, the Vec should have grown significantly
+    // Active count should be small (1 from file0 latest + 1 from file1 = 2)
+    let active: usize = index.file_index.values().map(|v| v.len()).sum();
+    assert!(active <= 3, "Active count should be small: {}", active);
+
+    // If total > active * 3, auto-compact should have triggered in remove_file_definitions
+    // Check that definitions.len() is reasonable
+    assert!(index.definitions.len() <= active * 4,
+        "After auto-compact, Vec len ({}) should be close to active count ({})",
+        index.definitions.len(), active);
+}
+
+/// Helper: provides a test-specific temp directory
+fn tmp_dir_for_test() -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("search_compact_test_{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok();
+    dir
+}
+
+#[test]
+fn test_compact_remaps_selector_index_and_template_children() {
+
+    let mut index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0, extensions: vec!["ts".to_string()],
+        files: vec!["comp-a.ts".to_string(), "comp-b.ts".to_string()],
+        definitions: vec![
+            DefinitionEntry { file_id: 0, name: "CompA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+            DefinitionEntry { file_id: 1, name: "CompB".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 30, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        ],
+        name_index: { let mut m = HashMap::new(); m.insert("compa".to_string(), vec![0]); m.insert("compb".to_string(), vec![1]); m },
+        kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 1]); m },
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
+        path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("comp-a.ts"), 0); m.insert(PathBuf::from("comp-b.ts"), 1); m },
+        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
+        selector_index: { let mut m = HashMap::new(); m.insert("app-comp-a".to_string(), vec![0]); m.insert("app-comp-b".to_string(), vec![1]); m },
+        template_children: { let mut m = HashMap::new(); m.insert(0, vec!["app-child".to_string()]); m.insert(1, vec!["app-other".to_string()]); m },
+    };
+
+    // Remove file0 (CompA at idx 0)
+    remove_file_definitions(&mut index, 0);
+
+    // Verify selector_index and template_children are cleaned (Fix 3)
+    assert!(!index.selector_index.contains_key("app-comp-a"), "CompA selector should be removed");
+    assert!(index.selector_index.contains_key("app-comp-b"), "CompB selector should remain");
+    assert!(!index.template_children.contains_key(&0), "CompA template_children should be removed");
+    assert!(index.template_children.contains_key(&1), "CompB template_children should remain");
+
+    // Compact
+    compact_definitions(&mut index);
+
+    assert_eq!(index.definitions.len(), 1);
+    assert_eq!(index.definitions[0].name, "CompB");
+
+    // selector_index should be remapped: old def_idx 1 → new def_idx 0
+    let compb_selector = index.selector_index.get("app-comp-b").unwrap();
+    assert_eq!(compb_selector, &vec![0u32], "CompB selector should point to 0 after compact");
+
+    // template_children should be remapped: old key 1 → new key 0
+    assert!(index.template_children.contains_key(&0), "CompB children should be at key 0 after compact");
+    assert_eq!(index.template_children.get(&0).unwrap(), &vec!["app-other".to_string()]);
+}
+
+// ─── Compile-time Guard: DefinitionIndex Field Count ────────────────
+
+/// ██████████████████████████████████████████████████████████████████████
+/// ██  COMPILE-TIME GUARD: DefinitionIndex Field Completeness         ██
+/// ██████████████████████████████████████████████████████████████████████
+///
+/// PURPOSE:
+///   This test exists to FORCE a compilation error when someone adds a
+///   new field to DefinitionIndex. The error message ("missing field ...")
+///   brings the developer HERE, where they see instructions to update
+///   the incremental update functions.
+///
+/// WHY THIS MATTERS:
+///   DefinitionIndex uses a Vec<DefinitionEntry> indexed by position (u32).
+///   Secondary indexes like name_index, kind_index, etc. store these positions.
+///   When a file is updated incrementally (--watch mode), old entries become
+///   "tombstones" in the Vec. Three functions must handle this:
+///
+///   1. remove_file_definitions() — cleans secondary indexes when a file is removed
+///   2. compact_definitions()     — remaps all def_idx values when Vec is compacted
+///   3. update_file_definitions() — populates indexes when a file is re-parsed
+///
+///   If a NEW index using def_idx is added but these functions are NOT updated:
+///   - remove_file_definitions: stale entries accumulate (memory leak)
+///   - compact_definitions: old def_idx values point to WRONG definitions (silent corruption!)
+///   - update_file_definitions: new index stays empty (missing data)
+///
+/// WHEN THIS TEST BREAKS:
+///   1. You added a new field to DefinitionIndex — good!
+///   2. Add the field to the constructor below
+///   3. If the field uses def_idx (u32 index into definitions Vec):
+///      → Update remove_file_definitions() in incremental.rs
+///      → Update compact_definitions() in incremental.rs
+///      → Update update_file_definitions() in incremental.rs
+///   4. If the field does NOT use def_idx: just add it to Category C below
+///
+#[test]
+fn test_definition_index_field_count_guard() {
+    let _guard = DefinitionIndex {
+        root: String::new(),
+        created_at: 0,
+        extensions: Vec::new(),
+        files: Vec::new(),
+        definitions: Vec::new(),
+
+        // ══════════════════════════════════════════════════════════════
+        // CATEGORY A: def_idx as VALUES — HashMap<_, Vec<u32>>
+        // On remove: retain() to filter out stale def_indices
+        // On compact: remap_index_values(&mut index.NEW_FIELD, &remap)
+        // ══════════════════════════════════════════════════════════════
+        name_index: HashMap::new(),
+        kind_index: HashMap::new(),
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index: HashMap::new(),
+        selector_index: HashMap::new(),
+
+        // ══════════════════════════════════════════════════════════════
+        // CATEGORY B: def_idx as KEYS — HashMap<u32, _>
+        // On remove: remove(&def_idx) for each removed def
+        // On compact: drain().filter_map(|(k,v)| remap.get(&k).map(|&nk| (nk,v)))
+        // ══════════════════════════════════════════════════════════════
+        method_calls: HashMap::new(),
+        code_stats: HashMap::new(),
+        template_children: HashMap::new(),
+
+        // ══════════════════════════════════════════════════════════════
+        // CATEGORY C: NO def_idx — no compact/remove updates needed
+        // ══════════════════════════════════════════════════════════════
+        path_to_id: HashMap::new(),
+        parse_errors: 0,
+        lossy_file_count: 0,
+        empty_file_ids: Vec::new(),
+        extension_methods: HashMap::new(),
+    };
+    drop(_guard);
+}

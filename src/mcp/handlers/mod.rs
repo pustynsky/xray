@@ -553,11 +553,12 @@ fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
                         .saturating_sub(idx.created_at);
 
                     let call_sites: usize = idx.method_calls.values().map(|v| v.len()).sum();
+                    let active_defs: usize = idx.file_index.values().map(|v| v.len()).sum();
                     let mut def_info = json!({
                         "type": "definition",
                         "root": idx.root,
                         "files": idx.files.len(),
-                        "definitions": idx.definitions.len(),
+                        "definitions": active_defs,
                         "callSites": call_sites,
                         "extensions": idx.extensions,
                         "sizeMb": size_mb,

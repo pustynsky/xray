@@ -135,9 +135,10 @@ pub fn cmd_info() {
                     Ok(index) => {
                         found = true;
                         let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
+                        let active_defs: usize = index.file_index.values().map(|v| v.len()).sum();
                         println!(
                             "  [DEF] {} -- {} files, {} defs, {} call sites, exts: [{}], {:.1} MB, {:.1}h ago ({})",
-                            index.root, index.files.len(), index.definitions.len(),
+                            index.root, index.files.len(), active_defs,
                             call_sites,
                             index.extensions.join(", "),
                             size as f64 / 1_048_576.0, age_hours(index.created_at), filename
@@ -348,11 +349,12 @@ pub(crate) fn cmd_info_json_for_dir(dir: &std::path::Path) -> serde_json::Value 
                         .as_secs()
                         .saturating_sub(index.created_at);
                     let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
+                    let active_defs: usize = index.file_index.values().map(|v| v.len()).sum();
                     let mut def_info = serde_json::json!({
                         "type": "definition",
                         "root": index.root,
                         "files": index.files.len(),
-                        "definitions": index.definitions.len(),
+                        "definitions": active_defs,
                         "callSites": call_sites,
                         "extensions": index.extensions,
                         "sizeMb": (size as f64 / 1_048_576.0 * 10.0).round() / 10.0,

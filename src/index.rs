@@ -372,7 +372,9 @@ pub fn estimate_definition_index_memory(idx: &crate::definitions::DefinitionInde
     let round1 = |v: f64| (v * 10.0).round() / 10.0;
 
     // Each definition: ~200 bytes (name, kind, attributes, base_types, parent, signature, line range)
-    let defs_mb = idx.definitions.len() as f64 * 200.0 / 1_048_576.0;
+    // Use active count (excludes tombstones from incremental updates)
+    let active_defs: usize = idx.file_index.values().map(|v| v.len()).sum();
+    let defs_mb = active_defs as f64 * 200.0 / 1_048_576.0;
 
     // Call sites: ~60 bytes each (method_name, receiver, line, col)
     let total_calls: usize = idx.method_calls.values().map(|v| v.len()).sum();
@@ -398,7 +400,7 @@ pub fn estimate_definition_index_memory(idx: &crate::definitions::DefinitionInde
         "indexesMB": round1(indexes_mb),
         "codeStatsMB": round1(stats_mb),
         "totalEstimateMB": round1(total_mb),
-        "definitionCount": idx.definitions.len(),
+        "definitionCount": active_defs,
         "callSiteCount": total_calls,
         "fileCount": idx.files.len(),
         "codeStatsCount": idx.code_stats.len(),
@@ -573,6 +575,7 @@ pub fn file_index_meta(idx: &crate::FileIndex) -> IndexMeta {
 /// Build IndexMeta for a DefinitionIndex.
 pub fn definition_index_meta(idx: &crate::definitions::DefinitionIndex) -> IndexMeta {
     let call_sites: usize = idx.method_calls.values().map(|v| v.len()).sum();
+    let active_defs: usize = idx.file_index.values().map(|v| v.len()).sum();
     IndexMeta {
         index_type: "definition".to_string(),
         root: idx.root.clone(),
@@ -582,7 +585,7 @@ pub fn definition_index_meta(idx: &crate::definitions::DefinitionIndex) -> Index
         unique_tokens: None,
         total_tokens: None,
         extensions: idx.extensions.clone(),
-        definitions: Some(idx.definitions.len()),
+        definitions: Some(active_defs),
         call_sites: Some(call_sites),
         parse_errors: if idx.parse_errors > 0 { Some(idx.parse_errors) } else { None },
         lossy_file_count: if idx.lossy_file_count > 0 { Some(idx.lossy_file_count) } else { None },
