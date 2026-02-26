@@ -223,7 +223,16 @@ fn handle_request(
 ) -> Value {
     match method {
         "initialize" => {
-            let result = InitializeResult::new();
+            // Compute definition-supported extensions from server config
+            let server_exts: Vec<&str> = ctx.server_ext.split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            let def_extensions: Vec<&str> = definitions::DEFINITION_EXTENSIONS.iter()
+                .filter(|ext| server_exts.iter().any(|se| se.eq_ignore_ascii_case(ext)))
+                .copied()
+                .collect();
+            let result = InitializeResult::new(&def_extensions);
             let result_val = safe_to_value(result, &id);
             safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)
         }
@@ -426,6 +435,47 @@ mod tests {
         let result = safe_to_value(resp, &id);
         assert_eq!(result["jsonrpc"], "2.0");
         assert_eq!(result["result"]["ok"], true);
+    }
+
+    /// Test that the def_extensions filtering logic in initialize correctly
+    /// intersects server_ext with DEFINITION_EXTENSIONS.
+    /// server_ext="cs,xml" should produce def_extensions=["cs"] (xml has no parser).
+    #[test]
+    fn test_initialize_def_extension_filtering() {
+        // server_ext="cs,xml" → only "cs" has a definition parser
+        let mut ctx = make_ctx();
+        ctx.server_ext = "cs,xml".to_string();
+        let result = handle_request(&ctx, "initialize", &None, json!(1));
+        let instructions = result["result"]["instructions"].as_str().unwrap();
+        assert!(instructions.contains(".cs"),
+            "instructions should mention .cs (has parser)");
+        // .xml should NOT appear in the NEVER READ line (no definition parser)
+        // The NEVER READ line looks like "NEVER READ .cs FILES DIRECTLY"
+        // Check that .xml doesn't appear between "NEVER READ" and "FILES DIRECTLY"
+        assert!(!instructions.contains("NEVER READ .xml"),
+            "instructions should NOT mention .xml in NEVER READ (no parser). Got:\n{}", instructions);
+        assert!(!instructions.contains(".xml FILES DIRECTLY"),
+            "instructions should NOT have .xml in file reading rule");
+
+        // server_ext="xml" → no definition extensions at all
+        let mut ctx2 = make_ctx();
+        ctx2.server_ext = "xml".to_string();
+        let result2 = handle_request(&ctx2, "initialize", &None, json!(2));
+        let instructions2 = result2["result"]["instructions"].as_str().unwrap();
+        assert!(!instructions2.contains("NEVER READ"),
+            "xml-only server should NOT have NEVER READ block");
+        assert!(instructions2.contains("search_definitions is not available"),
+            "xml-only server should have fallback note");
+
+        // server_ext="cs,ts,sql" → all three have parsers
+        let mut ctx3 = make_ctx();
+        ctx3.server_ext = "cs,ts,sql".to_string();
+        let result3 = handle_request(&ctx3, "initialize", &None, json!(3));
+        let instructions3 = result3["result"]["instructions"].as_str().unwrap();
+        assert!(instructions3.contains(".cs"), "should contain .cs");
+        assert!(instructions3.contains(".ts"), "should contain .ts");
+        assert!(instructions3.contains(".sql"), "should contain .sql");
+        assert!(instructions3.contains("NEVER READ"), "should have NEVER READ block");
     }
 
     #[test]

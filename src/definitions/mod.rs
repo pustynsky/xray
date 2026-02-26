@@ -22,6 +22,11 @@ use ignore::WalkBuilder;
 use crate::{clean_path, read_file_lossy};
 use parser_typescript::extract_component_metadata;
 
+/// File extensions that have definition parser support (tree-sitter or regex).
+/// Used to dynamically generate MCP instructions about which files can be read
+/// via search_definitions instead of direct file reads.
+pub const DEFINITION_EXTENSIONS: &[&str] = &["cs", "ts", "tsx", "sql"];
+
 // ─── Index Build ─────────────────────────────────────────────────────
 
 pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
