@@ -1521,19 +1521,9 @@ mod index_tests {
     fn test_content_index_meta_no_errors() {
         let idx = search_index::ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec!["file.cs".to_string()],
-            index: HashMap::new(),
-            total_tokens: 0,
             extensions: vec!["cs".to_string()],
-            file_token_counts: vec![],
-            trigram: search_index::TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None,
-            read_errors: 0,
-            lossy_file_count: 0,
+            ..Default::default()
         };
         let meta = crate::index::content_index_meta(&idx);
         assert_eq!(meta.parse_errors, None, "parse_errors should be None when read_errors=0");
@@ -1544,19 +1534,11 @@ mod index_tests {
     fn test_content_index_meta_with_errors() {
         let idx = search_index::ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec!["file.cs".to_string()],
-            index: HashMap::new(),
-            total_tokens: 0,
             extensions: vec!["cs".to_string()],
-            file_token_counts: vec![],
-            trigram: search_index::TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None,
             read_errors: 7,
             lossy_file_count: 3,
+            ..Default::default()
         };
         let meta = crate::index::content_index_meta(&idx);
         assert_eq!(meta.parse_errors, Some(7), "parse_errors should be Some(7) when read_errors=7");
@@ -1567,17 +1549,7 @@ mod index_tests {
     fn test_estimate_content_index_memory_empty() {
         let idx = search_index::ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: search_index::TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         let estimate = crate::index::estimate_content_index_memory(&idx);
         assert!(estimate.is_object());
@@ -1601,17 +1573,12 @@ mod index_tests {
 
         let idx = search_index::ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
             index,
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50, 30],
-            trigram: search_index::TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         let estimate = crate::index::estimate_content_index_memory(&idx);
         assert!(estimate.is_object());
@@ -1644,12 +1611,7 @@ mod index_tests {
             path_to_id: std::collections::HashMap::new(),
             method_calls: std::collections::HashMap::new(),
             code_stats: std::collections::HashMap::new(),
-            parse_errors: 0,
-            lossy_file_count: 0,
-            empty_file_ids: vec![],
-            extension_methods: std::collections::HashMap::new(),
-            selector_index: std::collections::HashMap::new(),
-            template_children: std::collections::HashMap::new(),
+            ..Default::default()
         };
         let estimate = crate::index::estimate_definition_index_memory(&idx);
         assert!(estimate.is_object());
@@ -1672,17 +1634,9 @@ mod index_tests {
         // Save a content index with only "cs" extension
         let idx = search_index::ContentIndex {
             root: root_str.clone(),
-            created_at: 0,
             max_age_secs: 86400,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
             extensions: vec!["cs".to_string()],
-            file_token_counts: vec![],
-            trigram: search_index::TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         crate::save_content_index(&idx, index_base).unwrap();
 
@@ -1705,17 +1659,9 @@ mod index_tests {
         // Save a content index with "cs,sql,md" extensions
         let idx = search_index::ContentIndex {
             root: root_str.clone(),
-            created_at: 0,
             max_age_secs: 86400,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
             extensions: vec!["cs".to_string(), "sql".to_string(), "md".to_string()],
-            file_token_counts: vec![],
-            trigram: search_index::TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         crate::save_content_index(&idx, index_base).unwrap();
 
@@ -1737,17 +1683,9 @@ mod index_tests {
 
         let idx = search_index::ContentIndex {
             root: root_str.clone(),
-            created_at: 0,
             max_age_secs: 86400,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
             extensions: vec!["cs".to_string()],
-            file_token_counts: vec![],
-            trigram: search_index::TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         crate::save_content_index(&idx, index_base).unwrap();
 

@@ -39,7 +39,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     for (i, def) in definitions.iter().enumerate() { let idx = i as u32; name_index.entry(def.name.to_lowercase()).or_default().push(idx); kind_index.entry(def.kind).or_default().push(idx); file_index.entry(def.file_id).or_default().push(idx); }
     path_to_id.insert(file0_path, 0); path_to_id.insert(file1_path, 1);
     let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index, path_to_id, method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new() };
-    let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![file0_str, file1_str], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), files: vec![file0_str, file1_str], extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     (ctx, tmp_dir)
 }
@@ -146,7 +146,7 @@ fn test_search_callers_field_prefix_m_underscore() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\OrderProcessor.cs".to_string(),
             "C:\\src\\CheckoutHandler.cs".to_string(),
@@ -154,7 +154,7 @@ fn test_search_callers_field_prefix_m_underscore() {
         index: content_idx, total_tokens: 200,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![100, 100],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -212,7 +212,7 @@ fn test_search_callers_field_prefix_m_underscore() {
         ],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls, code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        file_index, path_to_id, method_calls, ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -257,12 +257,12 @@ fn test_search_callers_field_prefix_underscore() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\src\\UserService.cs".to_string(), "C:\\src\\AccountController.cs".to_string()],
         index: content_idx, total_tokens: 100,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -317,7 +317,7 @@ fn test_search_callers_field_prefix_underscore() {
         files: vec!["C:\\src\\UserService.cs".to_string(), "C:\\src\\AccountController.cs".to_string()],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls, code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        file_index, path_to_id, method_calls, ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -506,7 +506,7 @@ fn test_resolve_call_site_with_class_scope() {
         base_type_index,
         file_index,
         path_to_id: HashMap::new(),
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
     };
 
     let call_a = CallSite {
@@ -592,11 +592,10 @@ fn test_search_callers_down_class_filter() {
     };
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\src\\IndexSearchService.cs".to_string(), "C:\\src\\IndexedSearchQueryExecuter.cs".to_string()],
         index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()],
-        file_token_counts: vec![100, 100], trigram: TrigramIndex::default(),
-        trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        file_token_counts: vec![100, 100], ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -683,13 +682,12 @@ fn test_search_callers_ambiguity_warning_truncated() {
     }
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: files.clone(),
         index: content_idx, total_tokens: 500,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![50; num_classes],
-        trigram: TrigramIndex::default(), trigram_dirty: false,
-        forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let def_index = DefinitionIndex {
@@ -701,7 +699,7 @@ fn test_search_callers_ambiguity_warning_truncated() {
         attribute_index: HashMap::new(),
         base_type_index: HashMap::new(),
         file_index, path_to_id,
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -775,13 +773,12 @@ fn test_search_callers_ambiguity_warning_few_classes() {
     }
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: files.clone(),
         index: content_idx, total_tokens: 300,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50; num_classes],
-        trigram: TrigramIndex::default(), trigram_dirty: false,
-        forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let def_index = DefinitionIndex {
@@ -793,7 +790,7 @@ fn test_search_callers_ambiguity_warning_few_classes() {
         attribute_index: HashMap::new(),
         base_type_index: HashMap::new(),
         file_index, path_to_id,
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -876,13 +873,12 @@ fn test_search_callers_no_ambiguity_warning_with_class_param() {
     }
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: files.clone(),
         index: content_idx, total_tokens: 300,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50; 3],
-        trigram: TrigramIndex::default(), trigram_dirty: false,
-        forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let def_index = DefinitionIndex {
@@ -894,7 +890,7 @@ fn test_search_callers_no_ambiguity_warning_with_class_param() {
         attribute_index: HashMap::new(),
         base_type_index: HashMap::new(),
         file_index, path_to_id,
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -956,7 +952,7 @@ fn test_search_callers_exclude_dir_and_file() {
     ]);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\services\\ServiceA.cs".to_string(),
             "C:\\src\\controllers\\ControllerB.cs".to_string(),
@@ -965,7 +961,7 @@ fn test_search_callers_exclude_dir_and_file() {
         index: content_idx, total_tokens: 300,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![100, 100, 100],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -1151,12 +1147,12 @@ fn test_search_callers_cycle_detection_down() {
     };
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\src\\ClassA.cs".to_string(), "C:\\src\\ClassB.cs".to_string()],
         index: HashMap::new(), total_tokens: 0,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50, 50],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1261,7 +1257,7 @@ fn test_search_definitions_audit_mode() {
 fn test_search_definitions_exclude_dir() {
     // Create a context with definitions in two different directories
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\main\\UserService.cs".to_string(),
             "C:\\src\\tests\\UserServiceTests.cs".to_string(),
@@ -1269,7 +1265,7 @@ fn test_search_definitions_exclude_dir() {
         index: HashMap::new(), total_tokens: 100,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50, 50],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -1399,12 +1395,12 @@ fn test_search_definitions_combined_name_parent_kind_filter() {
 #[test]
 fn test_search_definitions_struct_kind() {
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\src\\Models.cs".to_string()],
         index: HashMap::new(), total_tokens: 50,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -1488,12 +1484,12 @@ fn test_search_definitions_struct_kind() {
 #[test]
 fn test_search_definitions_base_type_filter() {
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\src\\Controllers.cs".to_string()],
         index: HashMap::new(), total_tokens: 50,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -1598,12 +1594,12 @@ fn test_search_definitions_base_type_filter() {
 #[test]
 fn test_search_definitions_enum_member_kind() {
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\src\\Enums.cs".to_string()],
         index: HashMap::new(), total_tokens: 50,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -1777,7 +1773,7 @@ fn test_search_definitions_enum_member_kind() {
     let mut ni: HashMap<String, Vec<u32>> = HashMap::new(); let mut ki: HashMap<DefinitionKind, Vec<u32>> = HashMap::new(); let mut fi: HashMap<u32, Vec<u32>> = HashMap::new();
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
     let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new() };
-    let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![fs], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), files: vec![fs], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "StaleClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1791,7 +1787,7 @@ fn test_search_definitions_enum_member_kind() {
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
     let ne = "C:\\nonexistent\\path\\Ghost.cs".to_string();
     let di = DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new() };
-    let ci = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec![ne], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![0], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let ci = ContentIndex { root: ".".to_string(), files: vec![ne], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "GhostClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1832,10 +1828,10 @@ fn test_reindex_definitions_success() {
     };
 
     let content_index = ContentIndex {
-        root: dir_str.clone(), created_at: 0, max_age_secs: 3600,
+        root: dir_str.clone(),
         files: vec![], index: HashMap::new(), total_tokens: 0,
         extensions: vec!["cs".to_string()], file_token_counts: vec![],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1923,14 +1919,13 @@ fn make_ctx_with_backslash_paths() -> HandlerContext {
     };
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             r"src\Services\UserService.cs".to_string(),
             r"src\Processing\OrderProcessor.cs".to_string(),
         ],
         index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()],
-        file_token_counts: vec![100, 100], trigram: TrigramIndex::default(),
-        trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        file_token_counts: vec![100, 100], ..Default::default()
     };
 
     HandlerContext {
@@ -2081,7 +2076,7 @@ fn test_search_callers_cycle_detection() {
     ]);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\ServiceA.cs".to_string(),
             "C:\\src\\ServiceB.cs".to_string(),
@@ -2089,7 +2084,7 @@ fn test_search_callers_cycle_detection() {
         index: content_idx, total_tokens: 200,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![100, 100],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -2228,7 +2223,7 @@ fn test_search_callers_ext_filter_comma_split() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\DataService.cs".to_string(),
             "C:\\src\\CsController.cs".to_string(),
@@ -2237,7 +2232,7 @@ fn test_search_callers_ext_filter_comma_split() {
         index: content_idx, total_tokens: 200,
         extensions: vec!["cs".to_string(), "txt".to_string()],
         file_token_counts: vec![80, 60, 60],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -2316,7 +2311,7 @@ fn test_search_callers_ext_filter_comma_split() {
         ],
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
-        file_index, path_to_id, method_calls, code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        file_index, path_to_id, method_calls, ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -2389,7 +2384,7 @@ fn test_search_callers_overloads_not_collapsed_up() {
     ]);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\Validator.cs".to_string(),
             "C:\\src\\Processor.cs".to_string(),
@@ -2397,7 +2392,7 @@ fn test_search_callers_overloads_not_collapsed_up() {
         index: content_idx, total_tokens: 200,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50, 80],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -2590,12 +2585,12 @@ fn test_search_callers_overloads_not_collapsed_down() {
     };
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\src\\Orchestrator.cs".to_string(), "C:\\src\\Executor.cs".to_string()],
         index: HashMap::new(), total_tokens: 0,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50, 80],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -2689,7 +2684,7 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
     ]);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\IServiceA.cs".to_string(),
             "C:\\src\\IServiceB.cs".to_string(),
@@ -2700,7 +2695,7 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
         index: content_idx, total_tokens: 500,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50, 50, 50, 50, 50],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![

@@ -397,6 +397,27 @@ impl ContentIndex {
     }
 }
 
+impl Default for ContentIndex {
+    fn default() -> Self {
+        ContentIndex {
+            root: String::new(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: Vec::new(),
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: Vec::new(),
+            file_token_counts: Vec::new(),
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+            read_errors: 0,
+            lossy_file_count: 0,
+        }
+    }
+}
+
 /// Tokenize a line of text into lowercase tokens.
 ///
 /// Splits on non-alphanumeric characters (except `_`),
@@ -519,21 +540,58 @@ mod lib_tests {
         assert_ne!(empty, nonempty);
     }
 
+    /// Compile-time guard: ContentIndex field completeness.
+    /// If you added a field to ContentIndex and this test doesn't compile,
+    /// update:
+    ///   1. impl Default for ContentIndex (src/lib.rs)
+    ///   2. build_content_index() in src/index.rs
+    ///   3. empty_index in src/cli/serve.rs
+    ///   4. This test — add the new field below
+    #[test]
+    fn test_content_index_field_count_guard() {
+        let _guard = ContentIndex {
+            root: String::new(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: Vec::new(),
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: Vec::new(),
+            file_token_counts: Vec::new(),
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+            read_errors: 0,
+            lossy_file_count: 0,
+        };
+        drop(_guard);
+    }
+
+    #[test]
+    fn test_content_index_default_values() {
+        let d = ContentIndex::default();
+        assert_eq!(d.root, "");
+        assert_eq!(d.created_at, 0);
+        assert_eq!(d.max_age_secs, 3600);
+        assert!(d.files.is_empty());
+        assert!(d.index.is_empty());
+        assert_eq!(d.total_tokens, 0);
+        assert!(d.extensions.is_empty());
+        assert!(d.file_token_counts.is_empty());
+        assert!(!d.trigram_dirty);
+        assert!(d.forward.is_none());
+        assert!(d.path_to_id.is_none());
+        assert_eq!(d.read_errors, 0);
+        assert_eq!(d.lossy_file_count, 0);
+    }
+
     #[test]
     fn test_content_index_stale() {
         let index = ContentIndex {
             root: ".".to_string(),
             created_at: 0, // epoch = definitely stale
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         assert!(index.is_stale());
     }
@@ -544,17 +602,7 @@ mod lib_tests {
     fn test_warm_up_empty_index() {
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         let (trigrams, tokens) = index.warm_up();
         assert_eq!(trigrams, 0);
@@ -575,8 +623,6 @@ mod lib_tests {
 
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec!["file1.cs".to_string(), "file2.cs".to_string()],
             index: inverted,
             total_tokens: 2,
@@ -586,9 +632,7 @@ mod lib_tests {
                 tokens: vec!["httpclient".to_string(), "httphandler".to_string()],
                 trigram_map,
             },
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         let (trigrams, tokens) = index.warm_up();
         assert_eq!(trigrams, 4); // 4 trigram entries
@@ -602,20 +646,12 @@ mod lib_tests {
 
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec!["file1.cs".to_string()],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
             trigram: TrigramIndex {
                 tokens: vec!["abcdef".to_string()],
                 trigram_map,
             },
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
 
         // Call warm_up multiple times — should always return the same result
@@ -641,8 +677,6 @@ mod lib_tests {
 
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec!["test.cs".to_string()],
             index: inverted,
             total_tokens: 1,
@@ -652,9 +686,7 @@ mod lib_tests {
                 tokens: vec!["foobar".to_string()],
                 trigram_map,
             },
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
 
         // Warm up should succeed
@@ -679,17 +711,7 @@ mod lib_tests {
     fn test_content_index_read_errors_default_zero() {
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         assert_eq!(index.read_errors, 0);
         assert_eq!(index.lossy_file_count, 0);
@@ -699,19 +721,9 @@ mod lib_tests {
     fn test_content_index_read_errors_serialization_roundtrip() {
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None,
             read_errors: 5,
             lossy_file_count: 3,
+            ..Default::default()
         };
         let encoded = bincode::serialize(&index).unwrap();
         let decoded: ContentIndex = bincode::deserialize(&encoded).unwrap();
@@ -727,17 +739,7 @@ mod lib_tests {
         // and checking the defaults.
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         // Verify default values are 0
         assert_eq!(index.read_errors, 0);
@@ -1006,13 +1008,6 @@ mod trigram_tests {
         // Create a ContentIndex with a non-empty trigram, serialize/deserialize
         let ci = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
             trigram: TrigramIndex {
                 tokens: vec!["hello".to_string()],
                 trigram_map: {
@@ -1023,9 +1018,7 @@ mod trigram_tests {
                     m
                 },
             },
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         let bytes = bincode::serialize(&ci).unwrap();
         let ci2: ContentIndex = bincode::deserialize(&bytes).unwrap();
@@ -1392,10 +1385,7 @@ mod property_tests {
                 total_tokens,
                 extensions: vec!["cs".to_string()],
                 file_token_counts: file_token_counts.clone(),
-                trigram: TrigramIndex::default(),
-                trigram_dirty: false,
-                forward: None,
-                path_to_id: None, read_errors: 0, lossy_file_count: 0,
+                ..Default::default()
             };
 
             let encoded = bincode::serialize(&ci).unwrap();

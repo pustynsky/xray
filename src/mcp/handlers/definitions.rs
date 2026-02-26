@@ -1165,11 +1165,9 @@ mod tests {
         );
 
         let content_index = crate::ContentIndex {
-            root: project_str.clone(), created_at: 0, max_age_secs: 3600,
-            files: vec![], index: std::collections::HashMap::new(), total_tokens: 0,
-            extensions: vec!["cs".to_string()], file_token_counts: vec![],
-            trigram: crate::TrigramIndex::default(), trigram_dirty: false,
-            forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            root: project_str.clone(),
+            extensions: vec!["cs".to_string()],
+            ..Default::default()
         };
 
         let ctx = super::HandlerContext {
@@ -1272,20 +1270,13 @@ mod tests {
             file_index,
             path_to_id: HashMap::new(),
             method_calls: HashMap::new(),
-            code_stats: HashMap::new(),
-            parse_errors: 0, lossy_file_count: 0,
-            empty_file_ids: Vec::new(),
-            extension_methods: HashMap::new(),
-            selector_index: HashMap::new(),
-            template_children: HashMap::new(),
+            ..Default::default()
         };
 
         let content_index = crate::ContentIndex {
-            root: ".".to_string(), created_at: 0, max_age_secs: 3600,
-            files: vec![], index: HashMap::new(), total_tokens: 0,
-            extensions: vec!["cs".to_string()], file_token_counts: vec![],
-            trigram: crate::TrigramIndex::default(), trigram_dirty: false,
-            forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            root: ".".to_string(),
+            extensions: vec!["cs".to_string()],
+            ..Default::default()
         };
 
         super::HandlerContext {
@@ -1421,18 +1412,13 @@ mod tests {
             definitions, name_index, kind_index,
             attribute_index: HashMap::new(), base_type_index,
             file_index, path_to_id: HashMap::new(),
-            method_calls: HashMap::new(), code_stats: HashMap::new(),
-            parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(),
-            extension_methods: HashMap::new(), selector_index: HashMap::new(),
-            template_children: HashMap::new(),
+            method_calls: HashMap::new(), ..Default::default()
         };
 
         let content_index = crate::ContentIndex {
-            root: ".".to_string(), created_at: 0, max_age_secs: 3600,
-            files: vec![], index: HashMap::new(), total_tokens: 0,
-            extensions: vec!["cs".to_string()], file_token_counts: vec![],
-            trigram: crate::TrigramIndex::default(), trigram_dirty: false,
-            forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            root: ".".to_string(),
+            extensions: vec!["cs".to_string()],
+            ..Default::default()
         };
 
         let ctx = super::HandlerContext {

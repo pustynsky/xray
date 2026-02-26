@@ -76,16 +76,7 @@
         let index = ContentIndex {
             root: ".".to_string(),
             created_at: now,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         assert!(!index.is_stale());
     }
@@ -94,17 +85,7 @@
     fn test_content_index_stale() {
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         assert!(index.is_stale());
     }
@@ -211,16 +192,12 @@
         let index = ContentIndex {
             root: "C:\\test".to_string(),
             created_at: 1000000,
-            max_age_secs: 3600,
             files: vec!["C:\\test\\Program.cs".to_string()],
             index: idx,
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         let encoded = bincode::serialize(&index).unwrap();
         let decoded: ContentIndex = bincode::deserialize(&encoded).unwrap();

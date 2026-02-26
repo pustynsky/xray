@@ -49,9 +49,7 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![100, 100, 100],
         trigram,
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     // Definitions: all TS definition kinds
@@ -342,17 +340,16 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let content_index = ContentIndex {
-        root: tmp_dir.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600,
+        root: tmp_dir.to_string_lossy().to_string(),
         files: vec![file0_str, file1_str],
         index: HashMap::new(), total_tokens: 0,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![0, 0],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -755,7 +752,7 @@ fn test_ts_search_callers_inject_support() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "src/OrderComponent.ts".to_string(),
             "src/UserService.ts".to_string(),
@@ -763,7 +760,7 @@ fn test_ts_search_callers_inject_support() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -828,8 +825,7 @@ fn test_ts_search_callers_inject_support() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -896,7 +892,7 @@ fn test_mixed_cs_ts_definitions_query() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "src/UserService.cs".to_string(),
             "src/UserService.ts".to_string(),
@@ -904,7 +900,7 @@ fn test_mixed_cs_ts_definitions_query() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["cs".to_string(), "ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -952,8 +948,7 @@ fn test_mixed_cs_ts_definitions_query() {
         definitions, name_index, kind_index,
         attribute_index, base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1010,7 +1005,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "src/Service.cs".to_string(),
             "src/Component.ts".to_string(),
@@ -1018,7 +1013,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["cs".to_string(), "ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -1094,8 +1089,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1153,12 +1147,12 @@ fn test_tsx_file_support_through_handler() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["src/App.tsx".to_string()],
         index: content_idx, total_tokens: 50,
         extensions: vec!["ts".to_string(), "tsx".to_string()],
         file_token_counts: vec![50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -1200,8 +1194,7 @@ fn test_tsx_file_support_through_handler() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index,
         file_index, path_to_id, method_calls: HashMap::new(),
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1280,8 +1273,7 @@ fn test_ts_incremental_update_through_handler() {
         kind_index: HashMap::new(), attribute_index: HashMap::new(),
         base_type_index: HashMap::new(), file_index: HashMap::new(),
         path_to_id: HashMap::new(), method_calls: HashMap::new(),
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let clean_path = PathBuf::from(&file_str);
@@ -1289,12 +1281,12 @@ fn test_ts_incremental_update_through_handler() {
 
     // Build content index for the file
     let content_index = ContentIndex {
-        root: tmp_dir.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600,
+        root: tmp_dir.to_string_lossy().to_string(),
         files: vec![file_str.clone()],
         index: HashMap::new(), total_tokens: 0,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![0],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1377,7 +1369,7 @@ fn test_ts_search_definitions_exclude_dir() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "src/services/UserService.ts".to_string(),
             "src/__tests__/UserService.spec.ts".to_string(),
@@ -1385,7 +1377,7 @@ fn test_ts_search_definitions_exclude_dir() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -1427,8 +1419,7 @@ fn test_ts_search_definitions_exclude_dir() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1529,7 +1520,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
     let trigram = build_trigram_index(&content_idx);
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "src/DataProcessor.ts".to_string(),
             "src/Orchestrator.ts".to_string(),
@@ -1537,7 +1528,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
         index: content_idx, total_tokens: 100,
         extensions: vec!["ts".to_string()],
         file_token_counts: vec![50, 50],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
 
     let definitions = vec![
@@ -1619,8 +1610,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls,
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let ctx = HandlerContext {

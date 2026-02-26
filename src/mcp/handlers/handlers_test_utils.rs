@@ -40,8 +40,6 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
 
     let content_index = ContentIndex {
         root: ".".to_string(),
-        created_at: 0,
-        max_age_secs: 3600,
         files: vec![
             "C:\\src\\ResilientClient.cs".to_string(),
             "C:\\src\\ProxyClient.cs".to_string(),
@@ -51,10 +49,7 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
         total_tokens: 500,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![100, 50, 200],
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -137,7 +132,7 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
         base_type_index: HashMap::new(),
         file_index,
         path_to_id,
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     HandlerContext {
