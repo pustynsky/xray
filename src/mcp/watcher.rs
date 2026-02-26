@@ -592,17 +592,12 @@ mod tests {
 
         ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
             index: idx,
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50, 30],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         }
     }
 
@@ -661,8 +656,6 @@ mod tests {
         let clean = crate::clean_path(&test_file.to_string_lossy());
         let mut index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec![clean.clone()],
             index: {
                 let mut m = HashMap::new();
@@ -673,16 +666,12 @@ mod tests {
             total_tokens: 10,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![5],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
             path_to_id: Some({
                 let mut m = HashMap::new();
                 m.insert(PathBuf::from(&clean), 0u32);
                 m
             }),
-            read_errors: 0,
-            lossy_file_count: 0,
+            ..Default::default()
         };
 
         // Now update the file content
@@ -849,8 +838,6 @@ mod tests {
         let clean = crate::clean_path(&test_file.to_string_lossy());
         let mut index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec![clean.clone()],
             index: {
                 let mut m = HashMap::new();
@@ -861,16 +848,12 @@ mod tests {
             total_tokens: 10,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![5],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None, // no forward index!
             path_to_id: Some({
                 let mut m = HashMap::new();
                 m.insert(PathBuf::from(&clean), 0u32);
                 m
             }),
-            read_errors: 0,
-            lossy_file_count: 0,
+            ..Default::default()
         };
 
         // Update file content
@@ -977,8 +960,6 @@ mod tests {
         let clean = crate::clean_path(&test_file.to_string_lossy());
         let mut index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: vec![clean.clone()],
             index: {
                 let mut m = HashMap::new();
@@ -991,16 +972,12 @@ mod tests {
             total_tokens: 4,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![4],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
             path_to_id: Some({
                 let mut m = HashMap::new();
                 m.insert(PathBuf::from(&clean), 0u32);
                 m
             }),
-            read_errors: 0,
-            lossy_file_count: 0,
+            ..Default::default()
         };
 
         // Update file with different content
@@ -1040,19 +1017,9 @@ mod tests {
 
         let mut index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
             extensions: vec!["cs".to_string()],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
             path_to_id: Some(HashMap::new()),
-            read_errors: 0,
-            lossy_file_count: 0,
+            ..Default::default()
         };
 
         // Add file1

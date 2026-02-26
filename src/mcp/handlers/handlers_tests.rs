@@ -86,17 +86,7 @@ fn test_search_find_has_slow_warning() {
 fn make_empty_ctx() -> HandlerContext {
     let index = ContentIndex {
         root: ".".to_string(),
-        created_at: 0,
-        max_age_secs: 3600,
-        files: vec![],
-        index: HashMap::new(),
-        total_tokens: 0,
-        extensions: vec![],
-        file_token_counts: vec![],
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
     HandlerContext {
         index: Arc::new(RwLock::new(index)),
@@ -145,17 +135,12 @@ fn test_dispatch_grep_with_results() {
     }]);
     let index = ContentIndex {
         root: ".".to_string(),
-        created_at: 0,
-        max_age_secs: 3600,
         files: vec!["C:\\test\\Program.cs".to_string()],
         index: idx,
         total_tokens: 100,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50],
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(index)),
@@ -304,10 +289,10 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
     let total_tokens: u64 = file_token_counts.iter().map(|&c| c as u64).sum();
     let trigram = build_trigram_index(&index_map);
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: files.iter().map(|s| s.to_string()).collect(), index: index_map,
         total_tokens, extensions: vec!["cs".to_string()], file_token_counts,
-        trigram, trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram, ..Default::default()
     };
     HandlerContext {
         index: Arc::new(RwLock::new(content_index)), def_index: None,
@@ -444,11 +429,11 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
     let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
     index_map.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\test\\Program.cs".to_string()], index: index_map,
         total_tokens: 1, extensions: vec!["cs".to_string()], file_token_counts: vec![1],
-        trigram: TrigramIndex::default(), trigram_dirty: true,
-        forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram_dirty: true,
+        ..Default::default()
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)), def_index: None,
@@ -845,7 +830,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
 #[test] fn test_metrics_off_no_extra_fields() {
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
-    let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -856,7 +841,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
 #[test] fn test_metrics_on_injects_fields() {
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
-    let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -876,7 +861,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
 #[test] fn test_metrics_search_time_is_positive() {
     let mut idx = HashMap::new();
     idx.insert("foo".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
-    let index = ContentIndex { root: ".".to_string(), created_at: 0, max_age_secs: 3600, files: vec!["test.cs".to_string()], index: idx, total_tokens: 10, extensions: vec!["cs".to_string()], file_token_counts: vec![10], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let index = ContentIndex { root: ".".to_string(), files: vec!["test.cs".to_string()], index: idx, total_tokens: 10, extensions: vec!["cs".to_string()], file_token_counts: vec![10], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "foo"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -900,7 +885,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 });
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
-    let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     (ctx, tmp_dir)
 }
@@ -1005,7 +990,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 #[test] fn test_grep_rejects_outside_dir() {
     let tmp_holder = tempfile::tempdir().unwrap();
     let tmp = tmp_holder.path();
-    let index = ContentIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), file_token_counts: vec![], total_tokens: 0, extensions: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let index = ContentIndex { root: tmp.to_string_lossy().to_string(), ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: tmp.to_path_buf(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
     let result = handle_search_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
     assert!(result.is_error);
@@ -1035,17 +1020,12 @@ fn test_response_truncation_triggers_on_large_result() {
 
     let index = ContentIndex {
         root: ".".to_string(),
-        created_at: 0,
-        max_age_secs: 3600,
         files,
         index: idx,
         total_tokens: 500_000,
         extensions: vec!["cs".to_string()],
         file_token_counts,
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1094,17 +1074,12 @@ fn test_response_truncation_does_not_trigger_on_small_result() {
 
     let index = ContentIndex {
         root: ".".to_string(),
-        created_at: 0,
-        max_age_secs: 3600,
         files: vec!["C:\\test\\Small.cs".to_string()],
         index: idx,
         total_tokens: 50,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50],
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1160,10 +1135,7 @@ fn test_dispatch_definitions_while_def_index_building() {
             file_index: HashMap::new(),
             path_to_id: HashMap::new(),
             method_calls: HashMap::new(),
-            code_stats: HashMap::new(),
-            parse_errors: 0,
-            lossy_file_count: 0,
-            empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+            ..Default::default()
         }))),
         ..make_empty_ctx()
     };
@@ -1190,10 +1162,7 @@ fn test_dispatch_callers_while_def_index_building() {
             file_index: HashMap::new(),
             path_to_id: HashMap::new(),
             method_calls: HashMap::new(),
-            code_stats: HashMap::new(),
-            parse_errors: 0,
-            lossy_file_count: 0,
-            empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+            ..Default::default()
         }))),
         ..make_empty_ctx()
     };
@@ -1274,17 +1243,12 @@ fn test_search_grep_response_truncation_via_small_budget() {
 
     let index = ContentIndex {
         root: ".".to_string(),
-        created_at: 0,
-        max_age_secs: 3600,
         files,
         index: idx,
         total_tokens: 10_000,
         extensions: vec!["cs".to_string()],
         file_token_counts,
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1377,7 +1341,7 @@ fn test_search_fast_dirs_only_and_files_only() {
     let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 });
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
-    let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
 
     let result_dirs = handle_search_fast(&ctx, &json!({"pattern": "Models", "dirsOnly": true}));
@@ -1442,8 +1406,6 @@ fn test_search_grep_sql_extension_filter() {
 
     let index = ContentIndex {
         root: ".".to_string(),
-        created_at: 0,
-        max_age_secs: 3600,
         files: vec![
             "C:\\src\\Schema.sql".to_string(),
             "C:\\src\\Service.cs".to_string(),
@@ -1453,10 +1415,7 @@ fn test_search_grep_sql_extension_filter() {
         total_tokens: 100,
         extensions: vec!["cs".to_string(), "sql".to_string()],
         file_token_counts: vec![50, 50, 50],
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1595,15 +1554,15 @@ fn test_search_definitions_file_filter_slash_normalization() {
     use crate::definitions::*;
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\Models\\User.cs".to_string(),
             "C:\\src\\Services\\UserService.cs".to_string(),
         ],
-        index: HashMap::new(), total_tokens: 50,
+        total_tokens: 50,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![25, 25],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![
@@ -1642,8 +1601,7 @@ fn test_search_definitions_file_filter_slash_normalization() {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1730,17 +1688,12 @@ fn test_search_grep_max_results_zero_means_unlimited() {
 
     let index = ContentIndex {
         root: ".".to_string(),
-        created_at: 0,
-        max_age_secs: 3600,
         files,
         index: idx,
         total_tokens: 1000,
         extensions: vec!["cs".to_string()],
         file_token_counts,
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        forward: None,
-        path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let ctx = HandlerContext {
@@ -1812,10 +1765,9 @@ fn test_search_find_combined_parameters() {
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
     let content_index = ContentIndex {
-        root: dir_str.clone(), created_at: 0, max_age_secs: 3600,
-        files: vec![], index: HashMap::new(), total_tokens: 0,
-        extensions: vec!["cs".to_string()], file_token_counts: vec![],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        root: dir_str.clone(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
@@ -2228,8 +2180,7 @@ fn make_ranking_defs_ctx() -> HandlerContext {
         definitions, name_index, kind_index,
         attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index, path_to_id, method_calls: HashMap::new(),
-        code_stats: HashMap::new(),
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     HandlerContext {
@@ -2361,7 +2312,7 @@ fn test_search_fast_ranking_exact_stem_first() {
     let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 });
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
-    let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
 
     let result = handle_search_fast(&ctx, &json!({"pattern": "UserService"}));
@@ -2409,7 +2360,7 @@ fn test_search_fast_ranking_shorter_stem_first() {
     let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 });
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
-    let content_index = ContentIndex { root: dir_str.clone(), created_at: 0, max_age_secs: 3600, files: vec![], index: HashMap::new(), total_tokens: 0, extensions: vec!["cs".to_string()], file_token_counts: vec![], trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0 };
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
 
     let result = handle_search_fast(&ctx, &json!({"pattern": "Order"}));

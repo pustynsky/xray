@@ -1424,11 +1424,7 @@ mod tests {
             file_index,
             path_to_id: HashMap::new(),
             method_calls,
-            code_stats: HashMap::new(),
-            parse_errors: 0,
-            lossy_file_count: 0,
-            empty_file_ids: Vec::new(),
-            extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+            ..Default::default()
         }
     }
 
@@ -1809,11 +1805,7 @@ mod tests {
             file_index,
             path_to_id,
             method_calls,
-            code_stats: HashMap::new(),
-            parse_errors: 0,
-            lossy_file_count: 0,
-            empty_file_ids: Vec::new(),
-            extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+            ..Default::default()
         };
 
         // --- Content Index ---
@@ -1842,17 +1834,12 @@ mod tests {
 
         let content_index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: files_list,
             index,
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50; num_files as usize],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
 
         // --- Run build_caller_tree ---
@@ -2825,17 +2812,12 @@ mod tests {
 
         let content_index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
             files: files_list,
             index,
             total_tokens: 100,
             extensions: vec!["cs".to_string()],
             file_token_counts: vec![50; 5],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
 
         // --- Run build_caller_tree with depth=3 ---

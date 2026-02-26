@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-26
 
+### Internal
+
+- **`impl Default for ContentIndex` + test boilerplate reduction** — Added `impl Default for ContentIndex` in `src/lib.rs` with compile-time guard test (`test_content_index_field_count_guard`) and default values test (`test_content_index_default_values`). Replaced ~88 test-only `ContentIndex` struct constructions across 13 files with `..Default::default()`, keeping only test-relevant fields explicit. Also replaced ~30 `DefinitionIndex` test constructions (Default already existed). Production code (`build_content_index()`, `serve.rs` empty index) retains explicit fields — compiler enforces conscious field assignment. Adding a new field now requires 3 changes (Default + guard test + production) instead of ~88. 2 new tests, 852 total pass.
+
 ### Features
 
 - **`baseTypeTransitive` parameter for `search_definitions`** — New boolean parameter enables BFS traversal of the inheritance hierarchy. `baseType="BaseService" baseTypeTransitive=true` finds not just direct inheritors (MiddleService) but also grandchildren (ConcreteService) and deeper descendants, up to depth 10. Uses runtime BFS with visited set for cycle safety. Known limitation: name-only matching (no namespace resolution). 4 new unit tests.

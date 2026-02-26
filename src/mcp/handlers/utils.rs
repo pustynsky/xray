@@ -1108,17 +1108,7 @@ mod tests {
 
         let index = ContentIndex {
             root: ".".to_string(),
-            created_at: 0,
-            max_age_secs: 3600,
-            files: vec![],
-            index: HashMap::new(),
-            total_tokens: 0,
-            extensions: vec![],
-            file_token_counts: vec![],
-            trigram: TrigramIndex::default(),
-            trigram_dirty: false,
-            forward: None,
-            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+            ..Default::default()
         };
         HandlerContext {
             index: std::sync::Arc::new(std::sync::RwLock::new(index)),
