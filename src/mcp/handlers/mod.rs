@@ -203,7 +203,11 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "baseType": {
                         "type": "string",
-                        "description": "Filter by base type or implemented interface."
+                        "description": "Filter by base type or implemented interface (substring match — 'IAccessTable' finds IAccessTable<Model>, IAccessTable<Report>, etc.)."
+                    },
+                    "baseTypeTransitive": {
+                        "type": "boolean",
+                        "description": "When true with baseType, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType. Known limitation: name-only matching (no namespace resolution). (default: false)"
                     },
                     "file": {
                         "type": "string",
@@ -249,6 +253,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "auditMinBytes": {
                         "type": "integer",
                         "description": "Min file size to flag as suspicious in audit (default: 500)"
+                    },
+                    "crossValidate": {
+                        "type": "boolean",
+                        "description": "When used with audit=true, compares definition index files against file-list index to find coverage gaps. Loads file-list index from disk. (default: false)"
                     },
                     "includeCodeStats": {
                         "type": "boolean",

@@ -9,16 +9,24 @@ After every code change, before completing the task, verify ALL of the following
 3. **Ask user to stop MCP server** — before reinstalling the binary, ask the user to stop the MCP server (restart VS Code or stop the search-index server)
 4. **Reinstall binary** — `cargo install --path . --force`
 5. **Run E2E tests** — after the binary is installed, run `.\e2e-test.ps1` and confirm 0 failures
-6. **E2E test plan** — `docs/e2e-test-plan.md` is updated with test scenarios for the change
-7. **E2E test script** — evaluate whether `e2e-test.ps1` should also get new test cases for the change (CLI-testable scenarios). If yes — add them
-8. **CLI & MCP discoverability** — for every new feature:
+6. **Self-review for hidden bugs** — BEFORE documenting, critically review ALL changes in this branch:
+   - Re-read every modified function. Ask: "Are there code paths where this change is NOT applied consistently?" (e.g., adding a field to one summary builder but missing 5 others)
+   - Ask: "Does the new code have a different semantic than the old code in edge cases?" (e.g., exact match vs substring match returning different result sets)
+   - Ask: "Are there performance regressions?" (e.g., O(1) HashMap lookup replaced with O(N) scan)
+   - Ask: "What tests are MISSING?" — not just "do existing tests pass" but "what NEW behavior is untested?"
+   - If bugs found — fix them, **add regression tests for each bug found**, re-run ALL tests, then continue to documentation steps
+   - **RECURSIVE**: after fixing bugs found during self-review, review the FIXES themselves for new bugs. Also review the broader context where the fixes run. Repeat until 100% confident no bugs remain. This is not optional — bugs in bugfixes are real and common.
+   - **Tests at every round**: each bug found during recursive review needs its own regression test — not just the first round. If round 2 finds a bug in round 1's fix, add a test for that too. The test count grows with each round until the code is clean.
+7. **E2E test plan** — `docs/e2e-test-plan.md` is updated with test scenarios for the change
+8. **E2E test script** — evaluate whether `e2e-test.ps1` should also get new test cases for the change (CLI-testable scenarios). If yes — add them
+9. **CLI & MCP discoverability** — for every new feature:
   - CLI: verify `--help` output includes the new flag/command (check `src/cli/args.rs`)
   - MCP: verify tool descriptions in `src/tips.rs` include the new parameter/tool
   - LLM instructions: verify `search_help` output covers the new capability
   - Principle: keep LLM instructions concise — add only what helps tool selection, not exhaustive docs
-9. **Documentation** — `README.md` and the rest relevant GIT-tracked documents are updated
-10. **Changelog** — `CHANGELOG.md` is updated with a concise entry describing the change (categorized as Features, Bug Fixes, Performance, or Internal)
-11. **Neutral names** — all class/method names in docs, tests, and tool descriptions are generic (e.g., `UserService`, `OrderProcessor`) — never expose internal/proprietary names
+10. **Documentation** — `README.md` and the rest relevant GIT-tracked documents are updated
+11. **Changelog** — `CHANGELOG.md` is updated with a concise entry describing the change (categorized as Features, Bug Fixes, Performance, or Internal)
+12. **Neutral names** — all class/method names in docs, tests, and tool descriptions are generic (e.g., `UserService`, `OrderProcessor`) — never expose internal/proprietary names
 
 ## Git Workflow — After All Tests Pass
 
@@ -69,3 +77,4 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 - **Always run product name check before staging** — run `scripts/check-product-names.ps1` before `git add -u`. If product-specific names are found in documentation or code, replace them with neutral equivalents before committing. This prevents accidental exposure of internal/proprietary names in the public repository.
 - **Feature discoverability across interfaces** — every new feature must be exposed in BOTH CLI help and MCP tool descriptions. If a feature exists in code but isn't in `--help` or tool descriptions, users/LLMs can't discover it. Review `src/cli/args.rs` (CLI), `src/tips.rs` (MCP descriptions), and `search_help` output after every feature addition.
 - **Test before documenting** — the post-change checklist runs unit tests → install → E2E tests BEFORE updating documentation/changelog. Rationale: if E2E tests fail, the code needs fixing, which may invalidate documentation written earlier. Testing first avoids documenting features that don't work yet.
+- **Self-review catches what tests don't** — after all tests pass, ALWAYS re-read every modified function before documenting. Real example (2026-02-26): adding `readErrors`/`lossyUtf8Files` to grep.rs — the fields were added to 1 of 6 summary builders, passing all tests because no test checked the OTHER 5 code paths. Self-review caught this. Another: `baseType` fast-path (O(1) HashMap) silently hid substring results when an exact key existed — semantically different from the O(N) substring scan. Both bugs were invisible to the test suite but would have caused inconsistent behavior in production.

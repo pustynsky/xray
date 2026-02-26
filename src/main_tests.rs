@@ -85,7 +85,7 @@
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         assert!(!index.is_stale());
     }
@@ -104,7 +104,7 @@
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         assert!(index.is_stale());
     }
@@ -220,7 +220,7 @@
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         let encoded = bincode::serialize(&index).unwrap();
         let decoded: ContentIndex = bincode::deserialize(&encoded).unwrap();

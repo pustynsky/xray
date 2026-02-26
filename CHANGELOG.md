@@ -10,7 +10,17 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Features
 
+- **`baseTypeTransitive` parameter for `search_definitions`** — New boolean parameter enables BFS traversal of the inheritance hierarchy. `baseType="BaseService" baseTypeTransitive=true` finds not just direct inheritors (MiddleService) but also grandchildren (ConcreteService) and deeper descendants, up to depth 10. Uses runtime BFS with visited set for cycle safety. Known limitation: name-only matching (no namespace resolution). 4 new unit tests.
+
+- **`baseType` filter now uses substring matching** — `baseType="IAccessTable"` now matches `IAccessTable<Model>`, `IAccessTable<Report>`, `IAccessTable<Dashboard>`, etc. Previously, exact match required the full generic type name including type parameters. This makes generic interface discovery practical — a single query finds all 15+ implementations instead of requiring per-type-parameter queries. Both direct and transitive modes use substring matching.
+
+- **Cross-index diagnostics (`crossValidate` parameter)** — New `crossValidate=true` parameter in `search_definitions audit=true` mode. Loads the file-list index from disk and compares with the definition index to identify coverage gaps: files in the file-list but missing from definitions (filtered by definition extensions), and files in definitions but missing from the file-list. Graceful handling when file-list index not found on disk. Results capped at 50 samples. 3 new unit tests.
+
 - **Dynamic MCP instructions adapt to server `--ext` configuration** — The `initialize` → `instructions` field now dynamically generates the "NEVER READ" rule based on the intersection of `DEFINITION_EXTENSIONS` (extensions with parser support: cs, ts, tsx, sql) and the server's `--ext` CLI argument. Previously, the instruction was hardcoded to `.cs/.ts/.tsx`, which was misleading when the server was started with `--ext sql` (SQL was missing from the rule) or `--ext xml` (no parser-supported extensions, but the rule was still present). New behavior: `--ext cs,sql` → `"NEVER READ .cs/.sql FILES DIRECTLY"`, `--ext xml` → fallback note that `search_definitions` is unavailable. Added `DEFINITION_EXTENSIONS` constant in `definitions/mod.rs` as single source of truth. Empty extensions guard prevents malformed instructions. 3 new unit tests.
+
+### Bug Fixes
+
+- **Content index silently swallowed `read_file_lossy` errors** — `build_content_index()` had `Err(_) => {}` in the file walk loop, silently discarding IO errors with no logging, no counters, and no way for users to know files were skipped. Fix: added `read_errors: usize` and `lossy_file_count: usize` fields to `ContentIndex` (with `#[serde(default)]` for backward-compatible deserialization). During build, `AtomicUsize` counters track errors and lossy conversions, with `eprintln!` warnings per file. The `search_grep` summary now reports `readErrors` and `lossyUtf8Files` (matching the pattern already used by `search_definitions`). The `.meta` sidecar file also captures these counters. 5 new unit tests.
 
 ### Bug Fixes
 
@@ -382,7 +392,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes               | 10                          |
 | Performance             | 3                           |
 | Internal                | 5                           |
-| Unit tests (latest)     | 840                         |
+| Unit tests (latest)     | 849                         |
 | E2E tests (latest)      | 59                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |

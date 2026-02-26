@@ -257,6 +257,12 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
             "indexLoadTimeMs": 0.0
         });
+        if index.read_errors > 0 {
+            summary["readErrors"] = json!(index.read_errors);
+        }
+        if index.lossy_file_count > 0 {
+            summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+        }
         inject_branch_warning(&mut summary, ctx);
         let output = json!({
             "summary": summary
@@ -292,6 +298,12 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         "indexLoadTimeMs": 0.0
     });
+    if index.read_errors > 0 {
+        summary["readErrors"] = json!(index.read_errors);
+    }
+    if index.lossy_file_count > 0 {
+        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+    }
     inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "files": files_json,
@@ -557,6 +569,12 @@ fn handle_substring_search(
         if !warnings.is_empty() {
             summary["warnings"] = json!(warnings);
         }
+        if index.read_errors > 0 {
+            summary["readErrors"] = json!(index.read_errors);
+        }
+        if index.lossy_file_count > 0 {
+            summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+        }
         inject_branch_warning(&mut summary, ctx);
         let output = json!({
             "summary": summary
@@ -593,6 +611,12 @@ fn handle_substring_search(
     });
     if !warnings.is_empty() {
         summary["warnings"] = json!(warnings);
+    }
+    if index.read_errors > 0 {
+        summary["readErrors"] = json!(index.read_errors);
+    }
+    if index.lossy_file_count > 0 {
+        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
     }
     inject_branch_warning(&mut summary, ctx);
     let output = json!({
@@ -748,6 +772,12 @@ fn handle_phrase_search(
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
             "indexLoadTimeMs": 0.0
         });
+        if index.read_errors > 0 {
+            summary["readErrors"] = json!(index.read_errors);
+        }
+        if index.lossy_file_count > 0 {
+            summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+        }
         inject_branch_warning(&mut summary, ctx);
         let output = json!({
             "summary": summary
@@ -782,6 +812,12 @@ fn handle_phrase_search(
         "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         "indexLoadTimeMs": 0.0
     });
+    if index.read_errors > 0 {
+        summary["readErrors"] = json!(index.read_errors);
+    }
+    if index.lossy_file_count > 0 {
+        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+    }
     inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "files": files_json,

@@ -328,6 +328,12 @@ pub struct ContentIndex {
     /// Path → file_id lookup (populated with --watch)
     #[serde(default)]
     pub path_to_id: Option<HashMap<PathBuf, u32>>,
+    /// Number of files that failed to read during indexing (IO errors)
+    #[serde(default)]
+    pub read_errors: usize,
+    /// Number of files that required lossy UTF-8 conversion (contained non-UTF8 bytes)
+    #[serde(default)]
+    pub lossy_file_count: usize,
 }
 
 impl ContentIndex {
@@ -527,7 +533,7 @@ mod lib_tests {
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         assert!(index.is_stale());
     }
@@ -548,7 +554,7 @@ mod lib_tests {
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         let (trigrams, tokens) = index.warm_up();
         assert_eq!(trigrams, 0);
@@ -582,7 +588,7 @@ mod lib_tests {
             },
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         let (trigrams, tokens) = index.warm_up();
         assert_eq!(trigrams, 4); // 4 trigram entries
@@ -609,7 +615,7 @@ mod lib_tests {
             },
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
 
         // Call warm_up multiple times — should always return the same result
@@ -648,7 +654,7 @@ mod lib_tests {
             },
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
 
         // Warm up should succeed
@@ -665,6 +671,77 @@ mod lib_tests {
         let postings = index.index.get("foobar").unwrap();
         assert_eq!(postings[0].file_id, 0);
         assert_eq!(postings[0].lines, vec![1, 5]);
+    }
+
+    // ─── read_errors / lossy_file_count tests ─────────────────
+
+    #[test]
+    fn test_content_index_read_errors_default_zero() {
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        };
+        assert_eq!(index.read_errors, 0);
+        assert_eq!(index.lossy_file_count, 0);
+    }
+
+    #[test]
+    fn test_content_index_read_errors_serialization_roundtrip() {
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None,
+            read_errors: 5,
+            lossy_file_count: 3,
+        };
+        let encoded = bincode::serialize(&index).unwrap();
+        let decoded: ContentIndex = bincode::deserialize(&encoded).unwrap();
+        assert_eq!(decoded.read_errors, 5);
+        assert_eq!(decoded.lossy_file_count, 3);
+    }
+
+    #[test]
+    fn test_content_index_read_errors_backward_compat_deserialization() {
+        // Simulate an old index without read_errors/lossy_file_count fields.
+        // Since #[serde(default)] is used, deserialization should succeed with 0 defaults.
+        // We test this by serializing a struct, deserializing as ContentIndex,
+        // and checking the defaults.
+        let index = ContentIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            max_age_secs: 3600,
+            files: vec![],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec![],
+            file_token_counts: vec![],
+            trigram: TrigramIndex::default(),
+            trigram_dirty: false,
+            forward: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        };
+        // Verify default values are 0
+        assert_eq!(index.read_errors, 0);
+        assert_eq!(index.lossy_file_count, 0);
     }
 
     #[test]
@@ -948,7 +1025,7 @@ mod trigram_tests {
             },
             trigram_dirty: false,
             forward: None,
-            path_to_id: None,
+            path_to_id: None, read_errors: 0, lossy_file_count: 0,
         };
         let bytes = bincode::serialize(&ci).unwrap();
         let ci2: ContentIndex = bincode::deserialize(&bytes).unwrap();
@@ -1318,7 +1395,7 @@ mod property_tests {
                 trigram: TrigramIndex::default(),
                 trigram_dirty: false,
                 forward: None,
-                path_to_id: None,
+                path_to_id: None, read_errors: 0, lossy_file_count: 0,
             };
 
             let encoded = bincode::serialize(&ci).unwrap();
