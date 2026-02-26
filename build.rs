@@ -27,8 +27,9 @@ fn main() {
     );
 
     println!("cargo:rustc-env=BUILD_DATETIME={}", datetime);
-    // Only re-run if build.rs itself changes (not on every source file change)
-    println!("cargo:rerun-if-changed=build.rs");
+    // Force re-run on every build so BUILD_DATETIME is always current.
+    // Without this, cargo caches the build script output and the date becomes stale.
+    println!("cargo:rerun-if-changed=FORCE_REBUILD_ALWAYS");
 }
 
 /// Convert days since Unix epoch to (year, month, day)
