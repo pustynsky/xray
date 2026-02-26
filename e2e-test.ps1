@@ -932,6 +932,102 @@ $testBlocks += , {
     }
 }
 
+# T-BATCH-WATCHER: Batch watcher update — multiple files modified at once (tests batch_purge_files)
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-BATCH-WATCHER batch-watcher-multi-file-update"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_batch_watcher_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Step 1: Create 5 initial files
+        for ($i = 1; $i -le 5; $i++) {
+            Set-Content -Path (Join-Path $tmpDir "Service$i.cs") -Value "public class OriginalService$i { public void OldMethod$i() { } }"
+        }
+
+        # Build initial indexes
+        & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
+        & $Bin def-index -d $tmpDir -e cs 2>&1 | Out-Null
+
+        # Step 2: Modify ALL 5 files (simulates git pull batch update)
+        for ($i = 1; $i -le 5; $i++) {
+            Set-Content -Path (Join-Path $tmpDir "Service$i.cs") -Value "public class UpdatedService$i { public void NewMethod$i() { } }"
+        }
+
+        # Step 3: Start server with --watch --definitions, wait for watcher to process batch
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Bin
+        $psi.Arguments = "serve --dir `"$tmpDir`" --ext cs --watch --definitions"
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+
+        $stderrBuilder = New-Object System.Text.StringBuilder
+        $stdoutBuilder = New-Object System.Text.StringBuilder
+        $errHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+        $outHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+
+        $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $errHandler -MessageData $stderrBuilder
+        $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outHandler -MessageData $stdoutBuilder
+
+        $proc.Start() | Out-Null
+        $proc.BeginErrorReadLine()
+        $proc.BeginOutputReadLine()
+
+        # Send initialize and wait for reconciliation + watcher to process modified files
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}')
+        Start-Sleep -Seconds 4  # Reconciliation catches all 5 modified files
+
+        # Query for UpdatedService3 (definition index) and NewMethod5 (content index)
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"UpdatedService3"}}}')
+        Start-Sleep -Milliseconds 500
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"NewMethod5"}}}')
+        Start-Sleep -Milliseconds 500
+
+        $proc.StandardInput.Close()
+        if (-not $proc.WaitForExit(10000)) { $proc.Kill(); $proc.WaitForExit(5000) | Out-Null }
+
+        Start-Sleep -Milliseconds 200
+        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+
+        $stdoutContent = $stdoutBuilder.ToString()
+
+        if (!$proc.HasExited) { $proc.Kill() }
+        $proc.Dispose()
+
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        $errors = @()
+        # Check definition index updated: UpdatedService3 should be found
+        if ($stdoutContent -notmatch 'UpdatedService3') { $errors += "UpdatedService3 not found in definitions" }
+        # Check content index updated: NewMethod5 should be found
+        if ($stdoutContent -notmatch 'newmethod5') { $errors += "NewMethod5 not found in content index" }
+        # Check OLD names are NOT present (should be purged)
+        if ($stdoutContent -match 'OriginalService3') { $errors += "OriginalService3 should have been purged" }
+
+        if ($errors.Count -gt 0) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" }
+        }
+        return @{ Name = $name; Passed = $true; Output = "OK (5 files batch-updated, both indexes verified)" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        if ($proc -and !$proc.HasExited) { $proc.Kill() }
+        if ($proc) { $proc.Dispose() }
+        if ($errEvent) { Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue }
+        if ($outEvent) { Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # --- Launch all parallel jobs ---
 $parallelJobs = @()
 foreach ($block in $testBlocks) {

@@ -312,7 +312,6 @@ pub fn cmd_serve(args: ServeArgs) {
             watch_dir,
             extensions,
             args.debounce_ms,
-            args.bulk_threshold,
             idx_base.clone(),
         ) {
             warn!(error = %e, "Failed to start file watcher");

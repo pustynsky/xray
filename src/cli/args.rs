@@ -238,10 +238,6 @@ pub struct ServeArgs {
     #[arg(long, default_value = "info")]
     pub log_level: String,
 
-    /// If more than N files change in one debounce window, do a full reindex.
-    #[arg(long, default_value = "100")]
-    pub bulk_threshold: usize,
-
     /// Also load (or build) a code definition index using tree-sitter.
     #[arg(long)]
     pub definitions: bool,
