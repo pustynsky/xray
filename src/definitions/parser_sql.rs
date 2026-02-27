@@ -302,7 +302,7 @@ fn parse_procedure_or_function(
         None => return,
     };
 
-    let (_schema, name) = if caps.get(2).is_some() {
+    let (schema, name) = if caps.get(2).is_some() {
         (strip_brackets(caps.get(2).unwrap().as_str()),
          strip_brackets(caps.get(3).unwrap().as_str()))
     } else {
@@ -344,7 +344,7 @@ fn parse_procedure_or_function(
         kind,
         line_start,
         line_end,
-        parent: None,
+        parent: if schema.is_empty() { None } else { Some(schema) },
         signature: Some(sig.split_whitespace().collect::<Vec<_>>().join(" ")),
         modifiers: Vec::new(),
         attributes: Vec::new(),

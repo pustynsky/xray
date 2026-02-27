@@ -113,8 +113,8 @@ pub fn tips() -> Vec<Tip> {
         },
         Tip {
             rule: "Language scope: content search = any language, AST = C#, TypeScript/TSX, and SQL",
-            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / def-index supports C# and TypeScript/TSX (tree-sitter) and SQL (regex-based). search_callers uses call-graph analysis -- supports C# and TypeScript/TSX (DI-aware, inject() support, interface resolution). SQL call sites (EXEC, FROM, JOIN, INSERT, UPDATE, DELETE) are extracted from stored procedure bodies.",
-            example: "search-index grep works on -e rs,py,js,xml,json | search_definitions supports .cs, .ts, .tsx, .sql | search_callers supports .cs, .ts, .tsx, .sql (SP call sites)",
+            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / def-index supports C# and TypeScript/TSX (tree-sitter) and SQL (regex-based). search_callers uses call-graph analysis -- supports C#, TypeScript/TSX (DI-aware, inject() support, interface resolution), and SQL (SP-to-SP EXEC call chains). SQL class parameter = schema name (dbo, Sales). Tables/views excluded from call graph (data, not code).",
+            example: "search-index grep works on -e rs,py,js,xml,json | search_definitions supports .cs, .ts, .tsx, .sql | search_callers supports .cs, .ts, .tsx, .sql (SP EXEC call chains, class=schema)",
         },
         Tip {
             rule: "Response truncation: large results are auto-capped at ~16KB",
@@ -268,7 +268,7 @@ pub fn performance_tiers() -> Vec<PerfTier> {
 
 pub fn tool_priority() -> Vec<ToolPriority> {
     vec![
-        ToolPriority { rank: 1, tool: "search_callers", description: "call trees up/down (<1ms, C# and TypeScript/TSX)" },
+        ToolPriority { rank: 1, tool: "search_callers", description: "call trees up/down (<1ms, C#, TypeScript/TSX, and SQL)" },
         ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, functions, interfaces, typeAliases, variables, containsLine (C#, TypeScript/TSX, SQL)" },
         ToolPriority { rank: 3, tool: "search_grep", description: "content: exact/OR/AND, substring, phrase, regex (any language)" },
         ToolPriority { rank: 4, tool: "search_fast", description: "file name lookup (~35ms, any file)" },
@@ -307,7 +307,7 @@ pub fn parameter_examples() -> Value {
             "substring": "Default: terms='UserService' finds IUserService, m_userService. Set substring=false for exact-token-only"
         },
         "search_callers": {
-            "class": "'UserService' -> DI-aware: also finds callers using IUserService. Without class, results mix callers from ALL classes with same method name",
+            "class": "'UserService' -> DI-aware: also finds callers using IUserService. SQL: class = schema name (e.g., class='dbo', class='Sales'). Without class, results mix callers from ALL classes/schemas with same method name",
             "method": "'GetUserAsync'. Angular/TS only: pass a selector (e.g. 'app-header') as method with direction='up' to find parent components that embed it via templateChildren. Returns templateUsage: true for template-based relationships",
             "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees). Angular/TS only: 'down' with class name shows child components from HTML template (recursive with depth). 'up' with selector (e.g. 'app-header') finds parent components recursively — depth=3 traverses grandparents, great-grandparents etc. Parents nested in 'parents' field",
             "resolveInterfaces": "When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo",
