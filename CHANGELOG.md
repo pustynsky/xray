@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-27
 
+### Features
+
+- **SQL stored procedure call graph in `search_callers`** — `search_callers` now supports SQL stored procedure and function call chains via EXEC statements. `direction=up` finds which SPs call a given SP; `direction=down` shows what SPs/functions a given SP calls via EXEC. Tables and views are deliberately excluded from the call graph (data artifacts, not callable code). The `class` parameter maps to SQL schema name (e.g., `class="dbo"`, `class="Sales"`) for disambiguation. Also set `parent` field on SP/SqlFunction definitions to the schema name in the SQL parser, enabling `resolve_call_site` to match EXEC calls across schemas. 8 new unit tests. Cross-language callers (C# → SQL SP via ADO.NET) remain a known limitation.
+
 ### Internal
 - **Refactored `build_definition_index()` in `src/definitions/mod.rs`** — Decomposed the 388-line monolith (cognitive complexity 102, cyclomatic 56) into 3 focused helper functions: `collect_source_files()` (parallel file walking), `index_file_defs()` (shared index population), `enrich_angular_templates()` (Angular template enrichment). `index_file_defs()` eliminates ~50 lines of duplicated code between `build_definition_index()` and `update_file_definitions()` in `incremental.rs` — both now call the same shared function. Also added `ChunkResult` type alias for readability and removed dead `file_count` AtomicUsize. 14 new unit tests for extracted functions. No behavioral changes — all 1085 unit tests + 62 E2E tests pass.
 

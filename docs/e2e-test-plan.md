@@ -1763,11 +1763,11 @@ Remove-Item -Recurse -Force $tmp
 
 ---
 
-### T-SQL-05: `serve` — search_callers on SQL table shows stored procedures that reference it
+### T-SQL-05: `serve` — search_callers direction=up finds callers of SQL stored procedure
 
 **Setup:**
 
-Create temp `.sql` files with a table and a stored procedure that references it via SELECT/INSERT/UPDATE.
+Create temp `.sql` files with two stored procedures where one calls the other via EXEC.
 
 **Command:**
 
@@ -1775,17 +1775,48 @@ Create temp `.sql` files with a table and a stored procedure that references it 
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Orders","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"usp_ValidateOrder","class":"Sales","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $tmp --ext sql --definitions
 ```
 
 **Expected:**
 
-- `callTree` includes stored procedures that reference the `Orders` table via FROM/JOIN/INSERT/UPDATE/DELETE
-- Call sites extracted from SQL stored procedure bodies
+- `callTree` includes the calling stored procedure (e.g., `usp_ProcessBatch`)
+- `class` parameter = SQL schema name (e.g., `"Sales"`, `"dbo"`)
+- Call sites matched via EXEC statements in SP bodies
 
-**Validates:** SQL call-site extraction (EXEC, FROM, JOIN, INSERT, UPDATE, DELETE patterns) enables `search_callers` to find stored procedures that reference SQL tables.
+**Validates:** `search_callers` direction=up finds SQL stored procedures that call the target SP via EXEC.
+
+---
+
+### T-SQL-05b: `serve` — search_callers direction=down shows SP EXEC dependencies
+
+**Setup:**
+
+Create temp `.sql` files with a stored procedure that calls other SPs and references tables.
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"usp_ProcessBatch","class":"dbo","direction":"down","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $tmp --ext sql --definitions
+```
+
+**Expected:**
+
+- `callTree` includes EXEC-called stored procedures (SP→SP dependencies)
+- `callTree` does NOT include tables referenced via FROM/JOIN/INSERT/UPDATE/DELETE (tables are data, not code)
+- `class` = schema name for disambiguation
+- SQL functions (`kind: "sqlFunction"`) are included in the callee tree
+
+**Validates:** `search_callers` direction=down shows SP-to-SP EXEC call chains. Tables/views are deliberately excluded (they are data artifacts, not callable code).
+
+**Known limitation:** Cross-language callers (C# calling SQL SP via ADO.NET string literals) are NOT visible — this requires semantic analysis beyond AST parsing.
 
 ---
 

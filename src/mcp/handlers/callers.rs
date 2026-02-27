@@ -121,7 +121,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         && let Some(name_indices) = def_idx.name_index.get(&method_lower) {
             let method_defs: Vec<&DefinitionEntry> = name_indices.iter()
                 .filter_map(|&di| def_idx.definitions.get(di as usize))
-                .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function)
+                .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function
+                    || d.kind == DefinitionKind::StoredProcedure || d.kind == DefinitionKind::SqlFunction)
                 .collect();
 
             let unique_classes: HashSet<&str> = method_defs.iter()
@@ -340,7 +341,8 @@ pub(crate) fn find_containing_method(
     for &di in def_indices {
         if let Some(def) = def_idx.definitions.get(di as usize) {
             match def.kind {
-                DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Property | DefinitionKind::Function => {}
+                DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Property | DefinitionKind::Function
+                | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction => {}
                 _ => continue,
             }
             if def.line_start <= line && def.line_end >= line {
@@ -755,7 +757,8 @@ fn build_caller_tree(
     let target_line = def_idx.name_index.get(&method_lower)
         .and_then(|indices| indices.iter().find_map(|&di| {
             def_idx.definitions.get(di as usize).and_then(|d| {
-                if matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function) {
+                if matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+                    | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
                     if let Some(cls) = parent_class {
                         if d.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
                             return Some(d.line_start);
@@ -794,7 +797,8 @@ fn build_caller_tree(
     if let Some(name_indices) = def_idx.name_index.get(&method_lower) {
         for &di in name_indices {
             if let Some(def) = def_idx.definitions.get(di as usize)
-                && (def.kind == DefinitionKind::Method || def.kind == DefinitionKind::Constructor || def.kind == DefinitionKind::Function) {
+                && (def.kind == DefinitionKind::Method || def.kind == DefinitionKind::Constructor || def.kind == DefinitionKind::Function
+                    || def.kind == DefinitionKind::StoredProcedure || def.kind == DefinitionKind::SqlFunction) {
                     definition_locations.insert((def.file_id, def.line_start));
                 }
         }
@@ -1079,7 +1083,8 @@ fn build_callee_tree(
     let target_line = def_idx.name_index.get(&method_lower)
         .and_then(|indices| indices.iter().find_map(|&di| {
             def_idx.definitions.get(di as usize).and_then(|d| {
-                if matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function) {
+                if matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+                    | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
                     if let Some(cls) = class_filter {
                         if d.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
                             return Some(d.line_start);
@@ -1110,7 +1115,8 @@ fn build_callee_tree(
                 .filter(|&&di| {
                     def_idx.definitions.get(di as usize)
                         .is_some_and(|d| {
-                            let kind_ok = d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function;
+                            let kind_ok = d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function
+                                || d.kind == DefinitionKind::StoredProcedure || d.kind == DefinitionKind::SqlFunction;
                             if !kind_ok { return false; }
 
                             // Apply class filter: only match methods whose parent matches
@@ -1343,8 +1349,9 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, call
             None => continue,
         };
 
-        // Only match methods, constructors, and functions
-        if def.kind != DefinitionKind::Method && def.kind != DefinitionKind::Constructor && def.kind != DefinitionKind::Function {
+        // Only match methods, constructors, functions, stored procedures, and SQL functions
+        if def.kind != DefinitionKind::Method && def.kind != DefinitionKind::Constructor && def.kind != DefinitionKind::Function
+            && def.kind != DefinitionKind::StoredProcedure && def.kind != DefinitionKind::SqlFunction {
             continue;
         }
 
@@ -3065,5 +3072,406 @@ mod tests {
         let resolved = resolve_call_site(&call, &def_idx, None);
         assert!(!resolved.is_empty(),
             "IDataModelService.getData() should resolve to DataModelWebService.getData via base_types");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    // SQL Caller Tests — SP/SqlFunction integration with search_callers
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// Helper: create a DefinitionEntry for a stored procedure.
+    /// `schema` becomes the `parent` (analogous to class in C#/TS).
+    fn sp_def(file_id: u32, name: &str, schema: Option<&str>, line_start: u32, line_end: u32) -> DefinitionEntry {
+        DefinitionEntry {
+            file_id,
+            name: name.to_string(),
+            kind: DefinitionKind::StoredProcedure,
+            line_start,
+            line_end,
+            parent: schema.map(|s| s.to_string()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }
+    }
+
+    /// Helper: create a DefinitionEntry for a SQL function.
+    fn sqlfn_def(file_id: u32, name: &str, schema: Option<&str>, line_start: u32, line_end: u32) -> DefinitionEntry {
+        DefinitionEntry {
+            file_id,
+            name: name.to_string(),
+            kind: DefinitionKind::SqlFunction,
+            line_start,
+            line_end,
+            parent: schema.map(|s| s.to_string()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }
+    }
+
+    /// Helper: create a DefinitionEntry for a SQL table (should NOT appear in caller results).
+    fn table_def(file_id: u32, name: &str, schema: Option<&str>, line_start: u32, line_end: u32) -> DefinitionEntry {
+        DefinitionEntry {
+            file_id,
+            name: name.to_string(),
+            kind: DefinitionKind::Table,
+            line_start,
+            line_end,
+            parent: schema.map(|s| s.to_string()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }
+    }
+
+    // ─── SQL Test 1: resolve_call_site resolves EXEC to SP definition ──
+
+    #[test]
+    fn test_resolve_call_site_sql_exec() {
+        // SP usp_ProcessBatch calls EXEC [Sales].[usp_ValidateOrder]
+        // Should resolve to the SP definition in Sales schema
+        let definitions = vec![
+            sp_def(0, "usp_ProcessBatch", Some("dbo"), 1, 50),      // idx 0
+            sp_def(1, "usp_ValidateOrder", Some("Sales"), 1, 30),   // idx 1
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        let call = CallSite {
+            method_name: "usp_ValidateOrder".to_string(),
+            receiver_type: Some("Sales".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        };
+
+        let resolved = resolve_call_site(&call, &def_idx, Some("dbo"));
+        assert_eq!(resolved.len(), 1, "EXEC [Sales].[usp_ValidateOrder] should resolve to 1 SP");
+        assert_eq!(def_idx.definitions[resolved[0] as usize].name, "usp_ValidateOrder");
+        assert_eq!(def_idx.definitions[resolved[0] as usize].parent.as_deref(), Some("Sales"));
+    }
+
+    // ─── SQL Test 2: resolve_call_site does NOT resolve FROM to Table ──
+
+    #[test]
+    fn test_resolve_call_site_sql_table_excluded() {
+        // SP calls FROM [dbo].[Orders] — Table kind is NOT in the resolve filter
+        let definitions = vec![
+            sp_def(0, "usp_GetOrders", Some("dbo"), 1, 30),    // idx 0
+            table_def(1, "Orders", Some("dbo"), 1, 10),         // idx 1
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        let call = CallSite {
+            method_name: "Orders".to_string(),
+            receiver_type: Some("dbo".to_string()),
+            line: 5,
+            receiver_is_generic: false,
+        };
+
+        let resolved = resolve_call_site(&call, &def_idx, Some("dbo"));
+        assert!(resolved.is_empty(),
+            "FROM [dbo].[Orders] should NOT resolve to Table definition (tables excluded from callers)");
+    }
+
+    // ─── SQL Test 3: find_containing_method finds containing SP ──
+
+    #[test]
+    fn test_find_containing_method_sql_sp() {
+        // A call site at line 15 is inside SP usp_ProcessBatch (lines 1-50)
+        let definitions = vec![
+            sp_def(0, "usp_ProcessBatch", Some("dbo"), 1, 50),   // idx 0
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        let result = find_containing_method(&def_idx, 0, 15);
+        assert!(result.is_some(), "Should find SP containing line 15");
+        let (name, parent, line_start, _di) = result.unwrap();
+        assert_eq!(name, "usp_ProcessBatch");
+        assert_eq!(parent.as_deref(), Some("dbo"), "SP parent should be the schema name");
+        assert_eq!(line_start, 1);
+    }
+
+    // ─── SQL Test 4: build_callee_tree (direction=down) for SP ──
+
+    #[test]
+    fn test_sql_callee_tree_exec_dependencies() {
+        use std::sync::atomic::AtomicUsize;
+
+        // usp_ProcessBatch (dbo) calls:
+        //   EXEC [Sales].[usp_ValidateOrder]
+        //   EXEC [dbo].[usp_ReserveStock]
+        //   FROM [dbo].[Orders] (table — should NOT appear)
+        let definitions = vec![
+            sp_def(0, "usp_ProcessBatch", Some("dbo"), 1, 50),      // idx 0
+            sp_def(1, "usp_ValidateOrder", Some("Sales"), 1, 30),   // idx 1
+            sp_def(2, "usp_ReserveStock", Some("dbo"), 1, 25),      // idx 2
+            table_def(3, "Orders", Some("dbo"), 1, 5),               // idx 3
+        ];
+
+        let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+        method_calls.insert(0, vec![
+            CallSite { method_name: "usp_ValidateOrder".to_string(), receiver_type: Some("Sales".to_string()), line: 10, receiver_is_generic: false },
+            CallSite { method_name: "usp_ReserveStock".to_string(), receiver_type: Some("dbo".to_string()), line: 20, receiver_is_generic: false },
+            CallSite { method_name: "Orders".to_string(), receiver_type: Some("dbo".to_string()), line: 15, receiver_is_generic: false },
+        ]);
+
+        // Build DefinitionIndex with proper .sql files
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        let files_list = vec![
+            "sql/usp_ProcessBatch.sql".to_string(),
+            "sql/usp_ValidateOrder.sql".to_string(),
+            "sql/usp_ReserveStock.sql".to_string(),
+            "sql/Orders.sql".to_string(),
+        ];
+
+        let def_idx = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["sql".to_string()],
+            files: files_list,
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id: HashMap::new(),
+            method_calls,
+            ..Default::default()
+        };
+
+        let mut visited = HashSet::new();
+        let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+        let node_count = AtomicUsize::new(0);
+
+        let caller_ctx = CallerTreeContext {
+            content_index: &crate::ContentIndex::default(),
+            def_idx: &def_idx,
+            ext_filter: "sql",
+            exclude_dir: &[],
+            exclude_file: &[],
+            resolve_interfaces: false,
+            limits: &limits,
+            node_count: &node_count,
+        };
+
+        let callees = build_callee_tree("usp_ProcessBatch", Some("dbo"), 3, 0, &caller_ctx, &mut visited);
+
+        // Should find 2 SP callees (usp_ValidateOrder and usp_ReserveStock)
+        // Should NOT find Orders (Table kind excluded)
+        assert_eq!(callees.len(), 2, "Should have 2 SP callees, got {:?}", callees);
+
+        let callee_names: Vec<&str> = callees.iter()
+            .map(|c| c["method"].as_str().unwrap())
+            .collect();
+        assert!(callee_names.contains(&"usp_ValidateOrder"), "Should find usp_ValidateOrder");
+        assert!(callee_names.contains(&"usp_ReserveStock"), "Should find usp_ReserveStock");
+        assert!(!callee_names.contains(&"Orders"), "Table Orders should NOT be in callees");
+    }
+
+    // ─── SQL Test 5: build_caller_tree (direction=up) for SP ──
+
+    #[test]
+    fn test_sql_caller_tree_who_calls_sp() {
+        use crate::{ContentIndex, Posting};
+        use std::sync::atomic::AtomicUsize;
+        use std::path::PathBuf;
+
+        // usp_ProcessBatch (dbo) calls EXEC [Sales].[usp_ValidateOrder]
+        // Question: who calls usp_ValidateOrder? → answer: usp_ProcessBatch
+        let definitions = vec![
+            sp_def(0, "usp_ProcessBatch", Some("dbo"), 1, 50),      // idx 0
+            sp_def(1, "usp_ValidateOrder", Some("Sales"), 1, 30),   // idx 1
+        ];
+
+        let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+        method_calls.insert(0, vec![
+            CallSite {
+                method_name: "usp_ValidateOrder".to_string(),
+                receiver_type: Some("Sales".to_string()),
+                line: 20,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        let files_list = vec![
+            "sql/usp_ProcessBatch.sql".to_string(),
+            "sql/usp_ValidateOrder.sql".to_string(),
+        ];
+        path_to_id.insert(PathBuf::from("sql/usp_ProcessBatch.sql"), 0);
+        path_to_id.insert(PathBuf::from("sql/usp_ValidateOrder.sql"), 1);
+
+        let def_idx = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["sql".to_string()],
+            files: files_list.clone(),
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            method_calls,
+            ..Default::default()
+        };
+
+        // Content index: "usp_validateorder" appears in file 0 (call) and file 1 (definition)
+        let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+        index.insert("usp_validateorder".to_string(), vec![
+            Posting { file_id: 0, lines: vec![20] },   // call in usp_ProcessBatch
+            Posting { file_id: 1, lines: vec![1] },     // definition
+        ]);
+        index.insert("sales".to_string(), vec![
+            Posting { file_id: 0, lines: vec![20] },
+            Posting { file_id: 1, lines: vec![1] },
+        ]);
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            files: files_list,
+            index,
+            total_tokens: 50,
+            extensions: vec!["sql".to_string()],
+            file_token_counts: vec![25, 25],
+            ..Default::default()
+        };
+
+        let mut visited = HashSet::new();
+        let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+        let node_count = AtomicUsize::new(0);
+
+        let caller_ctx = CallerTreeContext {
+            content_index: &content_index,
+            def_idx: &def_idx,
+            ext_filter: "sql",
+            exclude_dir: &[],
+            exclude_file: &[],
+            resolve_interfaces: false,
+            limits: &limits,
+            node_count: &node_count,
+        };
+
+        let callers = build_caller_tree(
+            "usp_ValidateOrder",
+            Some("Sales"),
+            3,
+            0,
+            &caller_ctx,
+            &mut visited,
+        );
+
+        assert_eq!(callers.len(), 1, "Expected 1 caller of usp_ValidateOrder, got {:?}", callers);
+        assert_eq!(callers[0]["method"].as_str().unwrap(), "usp_ProcessBatch");
+        assert_eq!(callers[0]["file"].as_str().unwrap(), "usp_ProcessBatch.sql");
+    }
+
+    // ─── SQL Test 6: SqlFunction included in callee tree ──
+
+    #[test]
+    fn test_resolve_call_site_sql_function() {
+        // SP calls a SQL function fn_CalculateTotal
+        let definitions = vec![
+            sp_def(0, "usp_GetReport", Some("dbo"), 1, 30),           // idx 0
+            sqlfn_def(1, "fn_CalculateTotal", Some("dbo"), 1, 15),    // idx 1
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        let call = CallSite {
+            method_name: "fn_CalculateTotal".to_string(),
+            receiver_type: Some("dbo".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        };
+
+        let resolved = resolve_call_site(&call, &def_idx, Some("dbo"));
+        assert_eq!(resolved.len(), 1, "Should resolve SQL function call");
+        assert_eq!(def_idx.definitions[resolved[0] as usize].name, "fn_CalculateTotal");
+        assert_eq!(def_idx.definitions[resolved[0] as usize].kind, DefinitionKind::SqlFunction);
+    }
+
+    // ─── SQL Test 7: Cross-schema EXEC resolution ──
+
+    #[test]
+    fn test_resolve_call_site_sql_cross_schema() {
+        // SP in dbo schema calls SP in Sales schema
+        let definitions = vec![
+            sp_def(0, "usp_ProcessBatch", Some("dbo"), 1, 50),
+            sp_def(1, "usp_ValidateOrder", Some("Sales"), 1, 30),
+            sp_def(2, "usp_ValidateOrder", Some("Inventory"), 1, 25), // same name, different schema
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        // Call with Sales schema → should only match Sales version
+        let call_sales = CallSite {
+            method_name: "usp_ValidateOrder".to_string(),
+            receiver_type: Some("Sales".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        };
+        let resolved = resolve_call_site(&call_sales, &def_idx, Some("dbo"));
+        assert_eq!(resolved.len(), 1, "Should resolve to exactly 1 SP (Sales schema)");
+        assert_eq!(def_idx.definitions[resolved[0] as usize].parent.as_deref(), Some("Sales"));
+
+        // Call with Inventory schema → should only match Inventory version
+        let call_inv = CallSite {
+            method_name: "usp_ValidateOrder".to_string(),
+            receiver_type: Some("Inventory".to_string()),
+            line: 15,
+            receiver_is_generic: false,
+        };
+        let resolved_inv = resolve_call_site(&call_inv, &def_idx, Some("dbo"));
+        assert_eq!(resolved_inv.len(), 1, "Should resolve to exactly 1 SP (Inventory schema)");
+        assert_eq!(def_idx.definitions[resolved_inv[0] as usize].parent.as_deref(), Some("Inventory"));
+    }
+
+    // ─── SQL Test 8: SP with no schema (parent=None) resolved via no-receiver call ──
+
+    #[test]
+    fn test_resolve_call_site_sql_no_schema() {
+        // SP with no schema, called without schema prefix
+        let definitions = vec![
+            sp_def(0, "usp_Cleanup", None, 1, 20),    // idx 0 — no schema
+            sp_def(1, "usp_Main", Some("dbo"), 1, 50), // idx 1
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        // Call without receiver_type (no schema prefix)
+        let call = CallSite {
+            method_name: "usp_Cleanup".to_string(),
+            receiver_type: None,
+            line: 10,
+            receiver_is_generic: false,
+        };
+
+        // With caller_parent=None, all matching methods are accepted
+        let resolved = resolve_call_site(&call, &def_idx, None);
+        assert_eq!(resolved.len(), 1, "Should resolve to usp_Cleanup without schema");
+        assert_eq!(def_idx.definitions[resolved[0] as usize].name, "usp_Cleanup");
     }
 }
