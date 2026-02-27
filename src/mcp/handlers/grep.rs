@@ -16,6 +16,21 @@ use super::utils::{
 };
 use super::HandlerContext;
 
+/// Shared parameters for substring and phrase search modes.
+/// Eliminates 10+ positional parameters from handle_substring_search and handle_phrase_search.
+pub(crate) struct GrepSearchParams<'a> {
+    pub ext_filter: &'a Option<String>,
+    pub exclude_dir: &'a [String],
+    pub exclude: &'a [String],
+    pub show_lines: bool,
+    pub context_lines: usize,
+    pub max_results: usize,
+    pub mode_and: bool,
+    pub count_only: bool,
+    pub search_start: Instant,
+    pub dir_filter: &'a Option<String>,
+}
+
 pub(crate) struct FileScoreEntry {
     pub file_path: String,
     pub lines: Vec<u32>,
@@ -113,18 +128,27 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         Err(e) => return ToolCallResult::error(format!("Failed to acquire index lock: {}", e)),
     };
 
+    let grep_params = GrepSearchParams {
+        ext_filter: &ext_filter,
+        exclude_dir: &exclude_dir,
+        exclude: &exclude,
+        show_lines,
+        context_lines,
+        max_results,
+        mode_and,
+        count_only,
+        search_start,
+        dir_filter: &dir_filter,
+    };
+
     // --- Substring search mode ------------------------------
     if use_substring {
-        return handle_substring_search(ctx, &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
-            show_lines, context_lines, max_results, mode_and, count_only, search_start, &dir_filter);
+        return handle_substring_search(ctx, &index, &terms_str, &grep_params);
     }
 
     // --- Phrase search mode ---------------------------------
     if use_phrase {
-        return handle_phrase_search(
-            ctx, &index, &terms_str, &ext_filter, &exclude_dir, &exclude,
-            show_lines, context_lines, max_results, count_only, search_start, &dir_filter,
-        );
+        return handle_phrase_search(ctx, &index, &terms_str, &grep_params);
     }
 
     // --- Normal token search --------------------------------
@@ -318,18 +342,18 @@ fn handle_substring_search(
     ctx: &HandlerContext,
     index: &ContentIndex,
     terms_str: &str,
-    ext_filter: &Option<String>,
-    exclude_dir: &[String],
-    exclude: &[String],
-    show_lines: bool,
-    context_lines: usize,
-    max_results_param: usize,
-    mode_and: bool,
-    count_only: bool,
-    search_start: Instant,
-    dir_filter: &Option<String>,
+    params: &GrepSearchParams,
 ) -> ToolCallResult {
-    let max_results = if max_results_param == 0 { 0 } else { max_results_param };
+    let max_results = params.max_results;
+    let ext_filter = params.ext_filter;
+    let exclude_dir = params.exclude_dir;
+    let exclude = params.exclude;
+    let show_lines = params.show_lines;
+    let context_lines = params.context_lines;
+    let mode_and = params.mode_and;
+    let count_only = params.count_only;
+    let search_start = params.search_start;
+    let dir_filter = params.dir_filter;
 
     // Stage 1: Terms parsing
     let stage1 = Instant::now();
@@ -349,10 +373,7 @@ fn handle_substring_search(
     // so "CREATE PROCEDURE" would always return 0. Phrase search handles this correctly.
     if raw_terms.iter().any(|t| t.contains(' ')) {
         eprintln!("[substring-trace] Terms contain spaces, auto-switching to phrase mode");
-        let mut result = handle_phrase_search(
-            ctx, index, terms_str, ext_filter, exclude_dir, exclude,
-            show_lines, context_lines, max_results_param, count_only, search_start, dir_filter,
-        );
+        let mut result = handle_phrase_search(ctx, index, terms_str, params);
         // Inject a note explaining the auto-switch
         if let Some(text) = result.content.first_mut().map(|c| &mut c.text) {
             if let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
@@ -637,16 +658,17 @@ fn handle_phrase_search(
     ctx: &HandlerContext,
     index: &ContentIndex,
     phrase: &str,
-    ext_filter: &Option<String>,
-    exclude_dir: &[String],
-    exclude: &[String],
-    show_lines: bool,
-    context_lines: usize,
-    max_results: usize,
-    count_only: bool,
-    search_start: Instant,
-    dir_filter: &Option<String>,
+    params: &GrepSearchParams,
 ) -> ToolCallResult {
+    let ext_filter = params.ext_filter;
+    let exclude_dir = params.exclude_dir;
+    let exclude = params.exclude;
+    let show_lines = params.show_lines;
+    let context_lines = params.context_lines;
+    let max_results = params.max_results;
+    let count_only = params.count_only;
+    let search_start = params.search_start;
+    let dir_filter = params.dir_filter;
     let phrase_lower = phrase.to_lowercase();
     let phrase_tokens = tokenize(&phrase_lower, 2);
 

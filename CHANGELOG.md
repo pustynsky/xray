@@ -12,9 +12,15 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 - **Lazy-compiled regex in SQL parser** — Converted 19 `Regex::new()` calls in `parser_sql.rs` from per-call compilation to `std::sync::LazyLock` module-level statics, compiled once on first use. Eliminates ~9,000 redundant regex compilations when indexing 500 SQL files with ~3 stored procedures each. 1 dynamic regex (using `format!` for `PROC|FUNCTION` keyword) kept as-is. Estimated 5–15% speedup for SQL-heavy codebases.
 
+- **Pre-lowercased exclude lists in `search_callers`** — `excludeDir` and `excludeFile` parameters are now lowercased once at parse time instead of re-lowercasing on every file comparison inside the recursive `build_caller_tree`/`build_callee_tree` functions. In a depth-3 tree with 10 callers per level × 5 exclude entries, this eliminates ~150 unnecessary `to_lowercase()` string allocations per query.
+
 ### Internal
 
 - **Shared tree-sitter utility module** — Extracted 4 duplicated AST helper functions (`node_text`, `find_child_by_kind`, `find_descendant_by_kind`, `find_child_by_field`) from C#, TypeScript, and Rust parsers into a new shared module `src/definitions/tree_sitter_utils.rs`. Eliminates 12 duplicate function definitions across 3 parser files. TypeScript parser keeps a thin 1-line `node_text` wrapper (accepts `&str` instead of `&[u8]`) to avoid changing 50+ call sites. 7 new unit tests for the shared utilities.
+
+- **Unified data-driven `walk_code_stats`** — Replaced 3 near-identical code complexity walker functions (`walk_code_stats_csharp` 109 lines, `walk_code_stats_typescript` 94 lines, `walk_code_stats_rust` 85 lines) with a single `walk_code_stats()` function + 3 static `CodeStatsConfig` structs containing language-specific AST node names. Config covers: branching nodes, else/else-if handling, logical operators, goto, switch cases, return/throw, lambdas, nesting incrementors, and C#-specific if→if flat nesting. Eliminates ~190 lines of duplicated code. Adding a new language parser now requires only a `CodeStatsConfig` definition — no walker code duplication.
+
+- **Parameter structs for grep and server** — Introduced `GrepSearchParams` struct to consolidate 10 positional parameters shared by `handle_substring_search` and `handle_phrase_search` (`ext_filter`, `exclude_dir`, `exclude`, `show_lines`, `context_lines`, `max_results`, `mode_and`, `count_only`, `search_start`, `dir_filter`). Refactored `run_server` from 12 positional parameters to accept `HandlerContext` directly (the struct was already being constructed on the first line).
 
 ### Features
 
