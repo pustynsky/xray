@@ -210,7 +210,7 @@ fn walk_typescript_node_collecting<'a>(
                 return;
             }
         }
-        "enum_member" => {
+        "enum_member" | "enum_assignment" => {
             if let Some(def) = extract_ts_enum_member(node, source, file_id, parent_name) {
                 defs.push(def);
                 return;

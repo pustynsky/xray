@@ -1112,3 +1112,83 @@ fn test_extract_custom_elements_mixed() {
     let result = super::extract_custom_elements(html);
     assert_eq!(result, vec!["app-footer", "app-spinner", "data-grid"]);
 }
+
+// ─── Enum with explicit values (enum_assignment) regression tests ────
+
+#[test]
+fn test_parse_ts_enum_with_string_values() {
+    let source = r#"export enum TemplateName {
+    Report = "report",
+    Dashboard = "dashboard",
+    ReportVisual = "reportVisual"
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let enum_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Enum).collect();
+    assert_eq!(enum_defs.len(), 1);
+    assert_eq!(enum_defs[0].name, "TemplateName");
+
+    let members: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::EnumMember).collect();
+    assert_eq!(members.len(), 3, "Expected 3 enum members for enum with string values");
+    let names: Vec<&str> = members.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"Report"));
+    assert!(names.contains(&"Dashboard"));
+    assert!(names.contains(&"ReportVisual"));
+    for m in &members {
+        assert_eq!(m.parent.as_deref(), Some("TemplateName"),
+            "Enum member '{}' should have parent 'TemplateName'", m.name);
+        // enum_assignment members should have signature with the value
+        assert!(m.signature.is_some(),
+            "Enum member '{}' should have signature", m.name);
+    }
+}
+
+#[test]
+fn test_parse_ts_enum_with_numeric_values() {
+    let source = r#"enum Priority {
+    Low = 0,
+    Medium = 1,
+    High = 2,
+    Critical = 3
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let enum_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Enum).collect();
+    assert_eq!(enum_defs.len(), 1);
+    assert_eq!(enum_defs[0].name, "Priority");
+
+    let members: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::EnumMember).collect();
+    assert_eq!(members.len(), 4, "Expected 4 enum members for numeric enum");
+    let names: Vec<&str> = members.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"Low"));
+    assert!(names.contains(&"Medium"));
+    assert!(names.contains(&"High"));
+    assert!(names.contains(&"Critical"));
+    for m in &members {
+        assert_eq!(m.parent.as_deref(), Some("Priority"));
+    }
+}
+
+#[test]
+fn test_parse_ts_enum_mixed_members() {
+    // Mix of plain identifiers and enum_assignment nodes
+    let source = r#"enum MixedEnum {
+    Auto,
+    Manual = "manual",
+    Default = 0
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into()).unwrap();
+    let (defs, _, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let members: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::EnumMember).collect();
+    assert_eq!(members.len(), 3, "Expected 3 enum members for mixed enum");
+    let names: Vec<&str> = members.iter().map(|d| d.name.as_str()).collect();
+    assert!(names.contains(&"Auto"));
+    assert!(names.contains(&"Manual"));
+    assert!(names.contains(&"Default"));
+}

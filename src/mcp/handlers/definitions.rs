@@ -855,6 +855,24 @@ fn build_search_summary(
         "totalDefinitions": active_definitions,
     });
 
+    // Hint: kind="property" returning 0 results for TypeScript — suggest kind="field"
+    if total_results == 0 {
+        if let Some(ref kind_str) = args.kind_filter {
+            if kind_str.eq_ignore_ascii_case("property") {
+                // Check if there ARE "field" definitions that would match the same filters
+                let has_fields = index.kind_index.get(&DefinitionKind::Field)
+                    .map(|v| !v.is_empty())
+                    .unwrap_or(false);
+                if has_fields {
+                    summary["hint"] = json!(
+                        "kind='property' returned 0 results. In TypeScript, class members are indexed as kind='field', \
+                         while only interface property signatures use kind='property'. Try kind='field' instead."
+                    );
+                }
+            }
+        }
+    }
+
     // Hint for large transitive hierarchies
     if args.base_type_transitive && total_results > 5000 {
         if let Some(ref bt) = args.base_type_filter {
@@ -3036,5 +3054,68 @@ mod tests {
         // Actually, ",,," splits into ["", "", "", ""], filter empty → empty vec, len() = 0 < 2 → None
         let breakdown = compute_term_breakdown(&results, &def_to_term, &args);
         assert!(breakdown.is_none(), "Comma-only name → no usable terms → no breakdown");
+    }
+
+    // ─── property→field hint tests ────────────────────────────────────
+
+    #[test]
+    fn test_kind_property_hint_when_fields_exist() {
+        // Create an index with Field definitions but no Property definitions
+        let mut index = make_test_def_index();
+        // Add a Field definition explicitly
+        let field_def = DefinitionEntry {
+            name: "title".to_string(), kind: DefinitionKind::Field,
+            file_id: 0, line_start: 5, line_end: 5,
+            signature: Some("title: string".to_string()),
+            parent: Some("UserService".to_string()),
+            modifiers: vec!["private".to_string()],
+            attributes: vec![], base_types: vec![],
+        };
+        let field_idx = index.definitions.len() as u32;
+        index.definitions.push(field_def);
+        index.kind_index.entry(DefinitionKind::Field).or_default().push(field_idx);
+        index.name_index.entry("title".to_string()).or_default().push(field_idx);
+        index.file_index.entry(0).or_default().push(field_idx);
+
+        let content_index = crate::ContentIndex {
+            root: ".".to_string(),
+            extensions: vec!["ts".to_string()],
+            ..Default::default()
+        };
+
+        let ctx = super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(index))),
+            ..Default::default()
+        };
+
+        // Search with kind="property" and parent="UserService" — should return 0 results + hint
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "kind": "property",
+            "parent": "UserService"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert_eq!(defs.len(), 0, "kind=property should return 0 for TS class fields");
+
+        // Should have a hint suggesting kind='field'
+        let hint = v["summary"]["hint"].as_str();
+        assert!(hint.is_some(), "Should have hint when kind=property returns 0 but fields exist");
+        assert!(hint.unwrap().contains("kind='field'"),
+            "Hint should suggest kind='field'. Got: {}", hint.unwrap());
+    }
+
+    #[test]
+    fn test_kind_property_no_hint_when_results_exist() {
+        // If kind="property" returns results, no hint needed
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "kind": "class"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(v["summary"].get("hint").is_none(),
+            "No hint when results are returned");
     }
 }
