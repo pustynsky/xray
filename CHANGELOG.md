@@ -10,6 +10,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Internal
 
+- **Refactored `cmd_grep()` in `src/cli/mod.rs`** — Decomposed from 320-line monolith (cognitive complexity 294, cyclomatic 100) into thin orchestrator (~45 lines) calling 10 focused sub-functions: `parse_grep_args()`, `load_grep_index()`, `resolve_grep_dir()`, `dispatch_grep_search()`, `run_exact_token_search()`, `run_substring_search()`, `run_phrase_search()`, `run_regex_search()`, `format_grep_results()`, `print_grep_summary()`. Added 38 new unit tests for extracted functions. No behavioral changes — all 1052 unit tests + 62 E2E tests pass.
+
 - **Test file split: handlers_tests.rs (3,364 lines → 6 files) and handlers_tests_csharp.rs (2,977 lines → 2 files)** — Split two oversized test files into focused modules to improve LLM context efficiency, incremental compilation, and merge conflict risk. Zero behavior change — all 1012 tests pass identically. Bytewise verification confirmed every test line matches the original. Test function name diff against git HEAD confirmed perfect match (94/94 + 51/51).
   - `handlers_tests.rs` (core): 29 tests — tool definitions, dispatch, context, readiness gates
   - `handlers_tests_grep.rs` (NEW): 63 tests — grep, substring, phrase, truncation, unicode
