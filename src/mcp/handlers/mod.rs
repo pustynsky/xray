@@ -20,6 +20,7 @@ use crate::mcp::protocol::{ToolCallResult, ToolDefinition};
 use crate::{
     build_content_index, clean_path,
     save_content_index, ContentIndex, ContentIndexArgs,
+    DEFAULT_MIN_TOKEN_LEN,
 };
 use crate::definitions::DefinitionIndex;
 use crate::git::cache::GitHistoryCache;
@@ -696,7 +697,7 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         hidden: false,
         no_ignore: false,
         threads: 0,
-        min_token_len: 2,
+        min_token_len: DEFAULT_MIN_TOKEN_LEN,
     }) {
         Ok(idx) => idx,
         Err(e) => return ToolCallResult::error(format!("Failed to build content index: {}", e)),

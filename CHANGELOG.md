@@ -6,6 +6,22 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-28
+
+### Bug Fixes
+
+- **`search_grep` non-UTF-8 files now return `lineContent`** — Replaced 4 instances of `std::fs::read_to_string()` with `read_file_lossy()` in grep handler. Previously, Windows-1252, Shift-JIS, and UTF-16LE files silently returned no `lineContent` in search results. Now uses the same lossy reading that the watcher and content indexer already use.
+
+- **Reindex via MCP used hardcoded `min_token_len: 2`** — `handle_search_reindex` in `handlers/mod.rs` used a literal `2` instead of `DEFAULT_MIN_TOKEN_LEN`. Fixed to use the constant to prevent index divergence.
+
+- **`eprintln!` diagnostic traces in grep handler** — 11 `eprintln!("[substring-trace] ...")` calls fired on every grep request in production, polluting stderr. Replaced with `tracing::debug!()` so they only appear when `RUST_LOG=debug` is set.
+
+- **Unbounded stdin `read_line` could OOM** — `server.rs` read an entire line into memory before checking size. A malicious/buggy client sending gigabytes without a newline could cause OOM. Fixed with `.take(MAX_REQUEST_SIZE + 1)` to cap reading, plus bounded drain loop to discard remaining bytes.
+
+- **Watcher thread infinite loop on poisoned `RwLock`** — If a panic poisoned the content or definition index RwLock, the watcher thread would loop forever logging errors and discarding all file changes. Now `process_batch()` returns `false` on poisoned lock, causing the watcher thread to exit gracefully. 3 new regression tests.
+
+---
+
 ## 2026-02-27
 
 ### Bug Fixes

@@ -1,4 +1,4 @@
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -38,7 +38,9 @@ pub fn run_server(ctx: HandlerContext) {
     let mut line = String::new();
     loop {
         line.clear();
-        match reader.read_line(&mut line) {
+        // Use .take() to cap reading at MAX_REQUEST_SIZE + 1 bytes, preventing OOM
+        // from a malicious/buggy client sending gigabytes without a newline.
+        match reader.by_ref().take(MAX_REQUEST_SIZE as u64 + 1).read_line(&mut line) {
             Ok(0) => break, // EOF
             Ok(_) => {
                 // Check if shutdown was signaled (belt-and-suspenders for signal between reads)
@@ -47,7 +49,19 @@ pub fn run_server(ctx: HandlerContext) {
                     break;
                 }
                 if line.len() > MAX_REQUEST_SIZE {
-                    error!(size = line.len(), "Request too large, skipping");
+                    error!(size = line.len(), "Request too large (exceeded {} bytes), skipping", MAX_REQUEST_SIZE);
+                    // Drain remaining bytes until newline to re-sync the stream.
+                    // Use bounded reads in a loop to avoid OOM on the drain itself.
+                    let mut discard = String::new();
+                    loop {
+                        discard.clear();
+                        match reader.by_ref().take(8192).read_line(&mut discard) {
+                            Ok(0) => break,                         // EOF
+                            Ok(_) if discard.ends_with('\n') => break, // found newline
+                            Ok(_) => continue,                      // keep draining
+                            Err(_) => break,
+                        }
+                    }
                     continue;
                 }
                 let line = line.trim().to_string();
