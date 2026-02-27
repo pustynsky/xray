@@ -53,8 +53,8 @@ pub fn tips() -> Vec<Tip> {
         },
         Tip {
             rule: "Substring search is ON by default",
-            why: "search_grep defaults to substring=true so compound identifiers (IUserService, m_userService) are always found. Use substring=false for exact-token-only matching. Auto-disabled when regex or phrase is used. Short tokens (<4 chars) may produce broad results -- use exclude=['pattern'] to filter noise from file paths.",
-            example: "Default: terms='UserService' finds IUserService, m_userService. Noisy short token: terms='dsp_' exclude=['ODSP','test']. Exact only: terms='UserService', substring=false",
+            why: "search_grep defaults to substring=true so compound identifiers (IUserService, m_userService) are always found. Use substring=false for exact-token-only matching. Auto-disabled when regex or phrase is used. Short tokens (<4 chars) may produce broad results -- use exclude=['pattern'] to filter noise from file paths. Comma-separated phrases with spaces are searched independently as OR (or AND with mode='and').",
+            example: "Default: terms='UserService' finds IUserService, m_userService. Multi-phrase OR: terms='fn handle_foo,fn build_bar'. Exact only: terms='UserService', substring=false",
         },
         Tip {
             rule: "Phrase search: exact multi-word match",

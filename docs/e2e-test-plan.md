@@ -350,6 +350,51 @@ cargo run -- grep "pub fn" -d $TEST_DIR -e $TEST_EXT --phrase --show-lines
 
 ---
 
+### T15c: `grep` — Multi-phrase OR search (comma-separated phrases)
+
+**Command:**
+
+```powershell
+cargo run -- grep "pub fn,pub struct" -d $TEST_DIR -e $TEST_EXT --phrase
+```
+
+**Expected:**
+
+- Exit code: 0
+- stdout: files containing EITHER `pub fn` OR `pub struct` as exact phrases
+- `searchMode` = `"phrase-or"` (when 2+ comma-separated phrases)
+- `termsSearched` contains 2 entries: `["pub fn", "pub struct"]`
+
+**With AND mode:**
+
+```powershell
+cargo run -- grep "pub fn,pub struct" -d $TEST_DIR -e $TEST_EXT --phrase --all
+```
+
+**Expected:**
+
+- Only files containing BOTH phrases
+- `searchMode` = `"phrase-and"`
+
+**Regression — single phrase (no comma):**
+
+```powershell
+cargo run -- grep "pub fn" -d $TEST_DIR -e $TEST_EXT --phrase
+```
+
+**Expected:**
+
+- Behavior unchanged: single phrase search
+- `searchMode` = `"phrase"` (not `"phrase-or"`)
+
+**Validates:** Comma-separated phrases are searched independently with OR/AND semantics. Single phrases retain existing behavior. Previously, comma-separated phrases were silently treated as one giant phrase, returning 0 results.
+
+**Unit tests:** `test_multi_phrase_or_auto_switch`, `test_multi_phrase_or_explicit_phrase`, `test_multi_phrase_and_explicit_phrase`, `test_single_phrase_regression_no_comma`, `test_multi_phrase_fn_signatures`, `test_multi_phrase_count_only`, `test_multi_phrase_explicit_count_only`, `test_tokens_no_spaces_stays_substring`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T16: `grep` — Show lines with context
 
 **Command:**

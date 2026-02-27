@@ -35,7 +35,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = vec![
         ToolDefinition {
             name: "search_grep".to_string(),
-            description: "Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results.".to_string(),
+            description: "Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results. Comma-separated phrases with spaces are searched independently (OR/AND).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -62,7 +62,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "phrase": {
                         "type": "boolean",
-                        "description": "Exact phrase match (default: false)"
+                        "description": "Exact phrase match (default: false). Comma-separated phrases are searched independently with OR/AND semantics."
                     },
                     "showLines": {
                         "type": "boolean",
