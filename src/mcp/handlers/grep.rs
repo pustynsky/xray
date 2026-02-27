@@ -39,6 +39,13 @@ pub(crate) struct FileScoreEntry {
     pub terms_matched: usize,
 }
 
+/// A single file match from phrase search, with matched lines and optionally cached content.
+pub(crate) struct PhraseFileMatch {
+    pub file_path: String,
+    pub lines: Vec<u32>,
+    pub content: Option<String>,
+}
+
 pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let terms_str = match args.get("terms").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
@@ -148,7 +155,15 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
 
     // --- Phrase search mode ---------------------------------
     if use_phrase {
-        return handle_phrase_search(ctx, &index, &terms_str, &grep_params);
+        let phrases: Vec<String> = terms_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        if phrases.is_empty() {
+            return ToolCallResult::error("No search terms provided".to_string());
+        }
+        return handle_multi_phrase_search(ctx, &index, &phrases, &grep_params);
     }
 
     // --- Normal token search --------------------------------
@@ -373,7 +388,13 @@ fn handle_substring_search(
     // so "CREATE PROCEDURE" would always return 0. Phrase search handles this correctly.
     if raw_terms.iter().any(|t| t.contains(' ')) {
         eprintln!("[substring-trace] Terms contain spaces, auto-switching to phrase mode");
-        let mut result = handle_phrase_search(ctx, index, terms_str, params);
+        // Split from original terms_str (preserving case for termsSearched display)
+        let phrases: Vec<String> = terms_str
+            .split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut result = handle_multi_phrase_search(ctx, index, &phrases, params);
         // Inject a note explaining the auto-switch
         if let Some(text) = result.content.first_mut().map(|c| &mut c.text) {
             if let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
@@ -847,4 +868,290 @@ fn handle_phrase_search(
     });
 
     ToolCallResult::success(serde_json::to_string(&output).unwrap())
+}
+
+/// Core phrase-matching logic: finds files containing the given phrase.
+/// Extracted to allow reuse by both single-phrase and multi-phrase search.
+fn collect_phrase_matches(
+    index: &ContentIndex,
+    phrase: &str,
+    params: &GrepSearchParams,
+) -> Result<Vec<PhraseFileMatch>, String> {
+    let ext_filter = params.ext_filter;
+    let exclude_dir = params.exclude_dir;
+    let exclude = params.exclude;
+    let show_lines = params.show_lines;
+    let dir_filter = params.dir_filter;
+
+    let phrase_lower = phrase.to_lowercase();
+    let phrase_tokens = tokenize(&phrase_lower, 2);
+
+    if phrase_tokens.is_empty() {
+        return Err(format!(
+            "Phrase '{}' has no indexable tokens (min length 2)", phrase
+        ));
+    }
+
+    let phrase_regex_pattern = phrase_tokens.iter()
+        .map(|t| regex::escape(t))
+        .collect::<Vec<_>>()
+        .join(r"\s+");
+    let phrase_re = match regex::Regex::new(&format!("(?i){}", phrase_regex_pattern)) {
+        Ok(r) => r,
+        Err(e) => return Err(format!("Failed to build phrase regex: {}", e)),
+    };
+
+    // Find candidate files via AND search on phrase tokens
+    let mut candidate_file_ids: Option<HashSet<u32>> = None;
+    for token in &phrase_tokens {
+        if let Some(postings) = index.index.get(token.as_str()) {
+            let file_ids: HashSet<u32> = postings.iter()
+                .filter(|p| {
+                    let path = match index.files.get(p.file_id as usize) {
+                        Some(p) => p,
+                        None => return false,
+                    };
+                    if let Some(prefix) = dir_filter {
+                        if !is_under_dir(path, prefix) { return false; }
+                    }
+                    if let Some(ext) = ext_filter {
+                        if !matches_ext_filter(path, ext) { return false; }
+                    }
+                    if exclude_dir.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
+                        return false;
+                    }
+                    if exclude.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
+                        return false;
+                    }
+                    true
+                })
+                .map(|p| p.file_id)
+                .collect();
+            candidate_file_ids = Some(match candidate_file_ids {
+                Some(existing) => existing.intersection(&file_ids).cloned().collect(),
+                None => file_ids,
+            });
+        } else {
+            candidate_file_ids = Some(HashSet::new());
+            break;
+        }
+    }
+
+    let candidates = candidate_file_ids.unwrap_or_default();
+
+    // Verify phrase match in raw file content.
+    // When phrase contains punctuation, use raw substring match to avoid
+    // false positives from tokenizer stripping non-alphanumeric characters.
+    let phrase_has_punctuation = phrase.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace());
+
+    let mut results: Vec<PhraseFileMatch> = Vec::new();
+
+    for &file_id in &candidates {
+        let file_path = &index.files[file_id as usize];
+        if let Ok(content) = std::fs::read_to_string(file_path) {
+            let mut matching_lines = Vec::new();
+            if phrase_has_punctuation {
+                for (line_num, line) in content.lines().enumerate() {
+                    if line.to_lowercase().contains(&phrase_lower) {
+                        matching_lines.push((line_num + 1) as u32);
+                    }
+                }
+            } else if phrase_re.is_match(&content) {
+                for (line_num, line) in content.lines().enumerate() {
+                    if phrase_re.is_match(line) {
+                        matching_lines.push((line_num + 1) as u32);
+                    }
+                }
+            }
+            if !matching_lines.is_empty() {
+                results.push(PhraseFileMatch {
+                    file_path: file_path.clone(),
+                    lines: matching_lines,
+                    content: if show_lines { Some(content) } else { None },
+                });
+            }
+        }
+    }
+
+    Ok(results)
+}
+
+/// Multi-phrase search: searches each phrase independently, merges with OR/AND semantics.
+/// When only one phrase is provided, delegates to the existing single-phrase handler.
+fn handle_multi_phrase_search(
+    ctx: &HandlerContext,
+    index: &ContentIndex,
+    phrases: &[String],
+    params: &GrepSearchParams,
+) -> ToolCallResult {
+    // Single phrase → delegate to existing handler
+    if phrases.len() == 1 {
+        return handle_phrase_search(ctx, index, &phrases[0], params);
+    }
+
+    let max_results = params.max_results;
+    let count_only = params.count_only;
+    let search_start = params.search_start;
+    let show_lines = params.show_lines;
+    let context_lines = params.context_lines;
+    let mode_and = params.mode_and;
+
+    // Collect matches for each phrase independently
+    let mut per_phrase_results: Vec<Vec<PhraseFileMatch>> = Vec::new();
+    let mut searched_terms: Vec<&str> = Vec::new();
+
+    for phrase in phrases {
+        match collect_phrase_matches(index, phrase, params) {
+            Ok(matches) => {
+                per_phrase_results.push(matches);
+                searched_terms.push(phrase);
+            }
+            Err(e) => return ToolCallResult::error(e),
+        }
+    }
+
+    // Merge results with OR or AND semantics
+    let merged = if mode_and {
+        merge_phrase_results_and(per_phrase_results)
+    } else {
+        merge_phrase_results_or(per_phrase_results)
+    };
+
+    let total_files = merged.len();
+    let total_occurrences: usize = merged.iter().map(|r| r.lines.len()).sum();
+
+    // Sort by occurrences descending
+    let mut results = merged;
+    results.sort_by(|a, b| b.lines.len().cmp(&a.lines.len()));
+
+    if max_results > 0 {
+        results.truncate(max_results);
+    }
+
+    let search_elapsed = search_start.elapsed();
+    let search_mode = if mode_and { "phrase-and" } else { "phrase-or" };
+
+    if count_only {
+        let mut summary = json!({
+            "totalFiles": total_files,
+            "totalOccurrences": total_occurrences,
+            "termsSearched": searched_terms,
+            "searchMode": search_mode,
+            "indexFiles": index.files.len(),
+            "indexTokens": index.index.len(),
+            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+            "indexLoadTimeMs": 0.0
+        });
+        if index.read_errors > 0 {
+            summary["readErrors"] = json!(index.read_errors);
+        }
+        if index.lossy_file_count > 0 {
+            summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+        }
+        inject_branch_warning(&mut summary, ctx);
+        let output = json!({ "summary": summary });
+        return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+    }
+
+    let files_json: Vec<Value> = results.iter().map(|r| {
+        let mut file_obj = json!({
+            "path": r.file_path,
+            "occurrences": r.lines.len(),
+            "lines": r.lines,
+        });
+        if show_lines {
+            if let Some(ref content) = r.content {
+                file_obj["lineContent"] = build_line_content_from_matches(content, &r.lines, context_lines);
+            }
+        }
+        file_obj
+    }).collect();
+
+    let mut summary = json!({
+        "totalFiles": total_files,
+        "totalOccurrences": total_occurrences,
+        "termsSearched": searched_terms,
+        "searchMode": search_mode,
+        "indexFiles": index.files.len(),
+        "indexTokens": index.index.len(),
+        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+        "indexLoadTimeMs": 0.0
+    });
+    if index.read_errors > 0 {
+        summary["readErrors"] = json!(index.read_errors);
+    }
+    if index.lossy_file_count > 0 {
+        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+    }
+    inject_branch_warning(&mut summary, ctx);
+    let output = json!({
+        "files": files_json,
+        "summary": summary
+    });
+
+    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+}
+
+/// Merge phrase results with OR semantics: union of all files.
+/// If the same file appears in multiple phrase results, lines are merged and deduplicated.
+fn merge_phrase_results_or(per_phrase: Vec<Vec<PhraseFileMatch>>) -> Vec<PhraseFileMatch> {
+    let mut file_map: HashMap<String, PhraseFileMatch> = HashMap::new();
+    for results in per_phrase {
+        for m in results {
+            let entry = file_map.entry(m.file_path.clone()).or_insert(PhraseFileMatch {
+                file_path: m.file_path.clone(),
+                lines: Vec::new(),
+                content: None,
+            });
+            entry.lines.extend_from_slice(&m.lines);
+            // Keep content if available (for show_lines)
+            if entry.content.is_none() && m.content.is_some() {
+                entry.content = m.content;
+            }
+        }
+    }
+    for entry in file_map.values_mut() {
+        entry.lines.sort();
+        entry.lines.dedup();
+    }
+    file_map.into_values().collect()
+}
+
+/// Merge phrase results with AND semantics: only files appearing in ALL phrase results.
+fn merge_phrase_results_and(per_phrase: Vec<Vec<PhraseFileMatch>>) -> Vec<PhraseFileMatch> {
+    if per_phrase.is_empty() {
+        return Vec::new();
+    }
+    // Intersect file paths across all phrase results
+    let mut common_files: HashSet<String> = per_phrase[0].iter()
+        .map(|m| m.file_path.clone())
+        .collect();
+    for results in &per_phrase[1..] {
+        let phrase_files: HashSet<String> = results.iter()
+            .map(|m| m.file_path.clone())
+            .collect();
+        common_files = common_files.intersection(&phrase_files).cloned().collect();
+    }
+    // Build merged results for common files only
+    let mut file_map: HashMap<String, PhraseFileMatch> = HashMap::new();
+    for results in per_phrase {
+        for m in results {
+            if common_files.contains(&m.file_path) {
+                let entry = file_map.entry(m.file_path.clone()).or_insert(PhraseFileMatch {
+                    file_path: m.file_path.clone(),
+                    lines: Vec::new(),
+                    content: None,
+                });
+                entry.lines.extend_from_slice(&m.lines);
+                if entry.content.is_none() && m.content.is_some() {
+                    entry.content = m.content;
+                }
+            }
+        }
+    }
+    for entry in file_map.values_mut() {
+        entry.lines.sort();
+        entry.lines.dedup();
+    }
+    file_map.into_values().collect()
 }

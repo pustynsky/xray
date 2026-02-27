@@ -75,6 +75,7 @@ Run-Test "T13 grep-multi-and"      "$Binary grep `"tokenize,posting`" -d $TestDi
 Run-Test "T14 grep-regex"          "$Binary grep `".*stale.*`" -d $TestDir -e $TestExt --regex"
 Run-Test "T15 grep-phrase"         "$Binary grep `"pub fn`" -d $TestDir -e $TestExt --phrase"
 Run-Test "T15b grep-phrase-punct"  "$Binary grep `"pub(crate)`" -d $TestDir -e $TestExt --phrase"
+Run-Test "T15c grep-multi-phrase"  "$Binary grep `"pub fn,pub struct`" -d $TestDir -e $TestExt --phrase"
 Run-Test "T16 grep-context"        "$Binary grep is_stale -d $TestDir -e $TestExt --show-lines -C 2 --max-results 2"
 Run-Test "T17 grep-exclude"        "$Binary grep ContentIndex -d $TestDir -e $TestExt --exclude-dir bench"
 Run-Test "T18 grep-count"          "$Binary grep fn -d $TestDir -e $TestExt -c"

@@ -3026,3 +3026,228 @@ fn test_substring_space_sql_create_table() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-phrase OR/AND search tests (bug fix: comma-separated phrases)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Multi-phrase OR: auto-switch from substring mode when terms have spaces.
+/// Each comma-separated term with space should be searched as a separate phrase.
+#[test]
+fn test_multi_phrase_or_auto_switch() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // "public class" and "private readonly" both exist in test files
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class,private readonly"
+    }));
+    assert!(!result.is_error, "Multi-phrase OR should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 2, "Should find at least 2 files (Service.cs has 'public class', Controller.cs has 'private readonly'), got {}", total);
+
+    // searchMode should reflect phrase-or (via auto-switch)
+    let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+    assert!(mode == "phrase-or" || mode == "phrase",
+        "Expected phrase-or or phrase mode, got: {}", mode);
+
+    // termsSearched should be individual phrases, not the whole string
+    let terms = output["summary"]["termsSearched"].as_array().unwrap();
+    assert!(terms.len() >= 2, "termsSearched should have at least 2 entries, got: {:?}", terms);
+
+    cleanup_tmp(&tmp);
+}
+
+/// Multi-phrase OR: explicit phrase:true with comma-separated terms.
+#[test]
+fn test_multi_phrase_or_explicit_phrase() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class,private readonly",
+        "phrase": true
+    }));
+    assert!(!result.is_error, "Multi-phrase explicit should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 2, "Should find at least 2 files via explicit phrase:true multi-phrase, got {}", total);
+
+    let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+    assert_eq!(mode, "phrase-or", "Expected phrase-or mode for explicit multi-phrase, got: {}", mode);
+
+    let terms = output["summary"]["termsSearched"].as_array().unwrap();
+    assert_eq!(terms.len(), 2, "termsSearched should have exactly 2 entries, got: {:?}", terms);
+
+    cleanup_tmp(&tmp);
+}
+
+/// Multi-phrase AND: only files containing ALL phrases.
+#[test]
+fn test_multi_phrase_and_explicit_phrase() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // "public class" exists in all 3 test files, "private readonly" only in Controller.cs
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class,private readonly",
+        "phrase": true,
+        "mode": "and"
+    }));
+    assert!(!result.is_error, "Multi-phrase AND should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    // Only Controller.cs has both "public class" and "private readonly"
+    assert!(total >= 1, "AND mode should find at least 1 file with both phrases, got {}", total);
+    // Make sure AND is stricter than OR
+    assert!(total <= 2, "AND mode should find fewer files than OR mode, got {}", total);
+
+    let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+    assert_eq!(mode, "phrase-and", "Expected phrase-and mode, got: {}", mode);
+
+    cleanup_tmp(&tmp);
+}
+
+/// Regression: single phrase with spaces still works (no comma → not multi-phrase).
+#[test]
+fn test_single_phrase_regression_no_comma() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 1, "Single phrase should still find files, got 0");
+
+    let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+    assert_eq!(mode, "phrase", "Single phrase should use 'phrase' mode (not phrase-or), got: {}", mode);
+
+    // termsSearched should be a single entry
+    let terms = output["summary"]["termsSearched"].as_array().unwrap();
+    assert_eq!(terms.len(), 1, "Single phrase should have 1 entry in termsSearched, got: {:?}", terms);
+
+    cleanup_tmp(&tmp);
+}
+
+/// Regression: tokens without spaces + explicit phrase:false → still uses substring mode.
+#[test]
+fn test_tokens_no_spaces_stays_substring() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "httpclient,grpcservice"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+    assert!(mode.starts_with("substring"), "Non-spaced terms should stay in substring mode, got: {}", mode);
+
+    cleanup_tmp(&tmp);
+}
+
+/// Multi-phrase countOnly works correctly.
+#[test]
+fn test_multi_phrase_count_only() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class,private readonly",
+        "countOnly": true
+    }));
+    assert!(!result.is_error, "Multi-phrase countOnly should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 2, "countOnly multi-phrase should find at least 2 files, got {}", total);
+    assert!(output.get("files").is_none(), "countOnly should not have files array");
+
+    cleanup_tmp(&tmp);
+}
+
+/// Multi-phrase with explicit phrase:true and countOnly.
+#[test]
+fn test_multi_phrase_explicit_count_only() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "public class,private readonly",
+        "phrase": true,
+        "countOnly": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert!(total >= 2, "explicit phrase countOnly should find at least 2 files, got {}", total);
+    assert!(output.get("files").is_none());
+
+    let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+    assert_eq!(mode, "phrase-or", "Expected phrase-or mode, got: {}", mode);
+
+    cleanup_tmp(&tmp);
+}
+
+/// Bug scenario from user story: "fn handle_search_definitions,fn build_caller_tree"
+/// should find files with either function.
+#[test]
+fn test_multi_phrase_fn_signatures() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_multi_phrase_fn_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("definitions.rs")).unwrap();
+        writeln!(f, "pub fn handle_search_definitions(ctx: &Context) -> Result {{").unwrap();
+        writeln!(f, "    // implementation").unwrap();
+        writeln!(f, "}}").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("callers.rs")).unwrap();
+        writeln!(f, "pub fn build_caller_tree(method: &str) -> Tree {{").unwrap();
+        writeln!(f, "    // implementation").unwrap();
+        writeln!(f, "}}").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("utils.rs")).unwrap();
+        writeln!(f, "pub fn helper() {{ }}").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(), ext: "rs".to_string(),
+        max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
+    });
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: tmp_dir.to_string_lossy().to_string(),
+        server_ext: "rs".to_string(),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
+    };
+
+    // This was the bug scenario: comma-separated function signatures
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "fn handle_search_definitions,fn build_caller_tree"
+    }));
+    assert!(!result.is_error, "Multi-phrase fn search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert_eq!(total, 2, "Should find exactly 2 files (definitions.rs and callers.rs), got {}", total);
+
+    // utils.rs should NOT be in results
+    if let Some(files) = output["files"].as_array() {
+        for file in files {
+            let path = file["path"].as_str().unwrap();
+            assert!(!path.contains("utils.rs"),
+                "utils.rs should not be in results (has no matching phrases)");
+        }
+    }
+
+    // termsSearched should show individual phrases
+    let terms = output["summary"]["termsSearched"].as_array().unwrap();
+    assert_eq!(terms.len(), 2, "Should have 2 searched terms, got: {:?}", terms);
+
+    cleanup_tmp(&tmp_dir);
+}
