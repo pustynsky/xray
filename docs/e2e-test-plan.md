@@ -6853,6 +6853,45 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 
 ---
 
+### T-TERM-BREAKDOWN: `search_definitions` — `termBreakdown` in summary for multi-term name queries
+
+**Tool:** `search_definitions`
+
+**Scenario:** When `name` contains 2+ comma-separated terms, the summary includes a `termBreakdown`
+object showing how many results each term contributed (from the full result set, before `maxResults`
+truncation).
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"QueryService,ResilientClient"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
+```
+
+**Expected:**
+
+- `summary.termBreakdown` is present (JSON object)
+- Keys are lowercased term names: `"queryservice"`, `"resilientclient"`
+- Values are counts (integers ≥ 0)
+- Sum of all values = `summary.totalResults`
+- `termBreakdown` is absent for single-term, regex, or no-name queries
+
+**Negative tests:**
+
+- `name="QueryService"` (single term) → no `termBreakdown` in summary
+- `name="Query.*" regex=true` → no `termBreakdown` in summary
+- No `name` parameter → no `termBreakdown` in summary
+
+**Unit tests:** `test_term_breakdown_multi_term_shows_per_term_counts`, `test_term_breakdown_single_term_not_present`, `test_term_breakdown_regex_not_present`, `test_term_breakdown_no_name_filter_not_present`, `test_term_breakdown_with_zero_match_term`, `test_term_breakdown_counts_are_pre_truncation`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T-COMMA-FILE-PARENT: `search_definitions` — Comma-separated `file` and `parent` parameters
 
 **Tool:** `search_definitions`

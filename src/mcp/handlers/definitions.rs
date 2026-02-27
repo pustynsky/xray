@@ -298,6 +298,9 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         }
     }
 
+    // Track which term matched each definition (for termBreakdown in multi-term name queries)
+    let mut def_to_term: HashMap<u32, usize> = HashMap::new();
+
     // Filter by name
     if let Some(name) = name_filter {
         if use_regex {
@@ -327,7 +330,11 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
                 .collect();
             let mut matching_indices = Vec::new();
             for (n, indices) in &index.name_index {
-                if terms.iter().any(|t| n.contains(t)) {
+                // Find the first matching term for termBreakdown tracking
+                if let Some(term_idx) = terms.iter().position(|t| n.contains(t)) {
+                    for idx in indices {
+                        def_to_term.entry(*idx).or_insert(term_idx);
+                    }
                     matching_indices.extend(indices);
                 }
             }
@@ -447,6 +454,33 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     }
 
     let total_results = results.len();
+
+    // Build termBreakdown for multi-term name queries (computed from full result set,
+    // before truncation, so LLM sees the true distribution across terms)
+    let term_breakdown: Option<Value> = if !use_regex {
+        if let Some(name) = name_filter {
+            let terms: Vec<String> = name.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if terms.len() >= 2 {
+                let mut breakdown = serde_json::Map::new();
+                for (i, term) in terms.iter().enumerate() {
+                    let count = results.iter()
+                        .filter(|(idx, _)| def_to_term.get(idx) == Some(&i))
+                        .count();
+                    breakdown.insert(term.clone(), json!(count));
+                }
+                Some(json!(breakdown))
+            } else {
+                None
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
 
     // ── Sorting ──
     if let Some(sort_field) = sort_by {
@@ -603,6 +637,9 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     }
     if include_code_stats && index.code_stats.is_empty() {
         summary["codeStatsAvailable"] = json!(false);
+    }
+    if let Some(ref breakdown) = term_breakdown {
+        summary["termBreakdown"] = breakdown.clone();
     }
     inject_branch_warning(&mut summary, ctx);
     let output = json!({
@@ -1480,5 +1517,110 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
         assert!(defs.len() >= 2, "spaces should be trimmed, still match both classes");
+    }
+
+    // ─── termBreakdown tests ──────────────────────────────────────────
+
+    #[test]
+    fn test_term_breakdown_multi_term_shows_per_term_counts() {
+        // name="QueryService,ResilientClient" should show breakdown with counts for each term
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "name": "QueryService,ResilientClient"
+        }));
+        assert!(!result.is_error, "should not error: {:?}", result.content[0].text);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let summary = &v["summary"];
+        assert!(summary.get("termBreakdown").is_some(),
+            "Multi-term name query should have termBreakdown in summary");
+        let breakdown = summary["termBreakdown"].as_object().unwrap();
+        assert!(breakdown.contains_key("queryservice"),
+            "termBreakdown should have key for 'queryservice'");
+        assert!(breakdown.contains_key("resilientclient"),
+            "termBreakdown should have key for 'resilientclient'");
+        // Both should have > 0 results
+        assert!(breakdown["queryservice"].as_u64().unwrap() > 0,
+            "queryservice should have results");
+        assert!(breakdown["resilientclient"].as_u64().unwrap() > 0,
+            "resilientclient should have results");
+    }
+
+    #[test]
+    fn test_term_breakdown_single_term_not_present() {
+        // Single-term name query should NOT include termBreakdown
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "name": "QueryService"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(v["summary"].get("termBreakdown").is_none(),
+            "Single-term query should NOT have termBreakdown");
+    }
+
+    #[test]
+    fn test_term_breakdown_regex_not_present() {
+        // Regex name query should NOT include termBreakdown
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "name": "Query.*",
+            "regex": true
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(v["summary"].get("termBreakdown").is_none(),
+            "Regex query should NOT have termBreakdown");
+    }
+
+    #[test]
+    fn test_term_breakdown_no_name_filter_not_present() {
+        // No name filter at all should NOT include termBreakdown
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "kind": "class"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(v["summary"].get("termBreakdown").is_none(),
+            "Query without name filter should NOT have termBreakdown");
+    }
+
+    #[test]
+    fn test_term_breakdown_with_zero_match_term() {
+        // One term matches, another doesn't — breakdown should show 0 for missing term
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "name": "QueryService,NonExistentXyzZzz"
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let breakdown = v["summary"]["termBreakdown"].as_object().unwrap();
+        assert!(breakdown["queryservice"].as_u64().unwrap() > 0,
+            "queryservice should have results");
+        assert_eq!(breakdown["nonexistentxyzzzz"].as_u64().unwrap(), 0,
+            "nonexistent term should have 0 results");
+    }
+
+    #[test]
+    fn test_term_breakdown_counts_are_pre_truncation() {
+        // termBreakdown counts reflect the full result set before maxResults truncation
+        let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "name": "QueryService,ResilientClient",
+            "maxResults": 1
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let breakdown = v["summary"]["termBreakdown"].as_object().unwrap();
+        let total_breakdown: u64 = breakdown.values()
+            .filter_map(|v| v.as_u64())
+            .sum();
+        let total_results = v["summary"]["totalResults"].as_u64().unwrap();
+        assert_eq!(total_breakdown, total_results,
+            "Sum of termBreakdown counts ({}) should equal totalResults ({})",
+            total_breakdown, total_results);
+        // returned should be <= maxResults
+        let returned = v["summary"]["returned"].as_u64().unwrap();
+        assert!(returned <= 1, "returned should be <= maxResults=1, got {}", returned);
     }
 }
