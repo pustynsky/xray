@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{node_text, find_child_by_kind, find_child_by_field, find_descendant_by_kind};
+use super::tree_sitter_utils::{node_text, find_child_by_kind, find_child_by_field, walk_code_stats, RUST_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -795,9 +795,9 @@ fn compute_code_stats_rust(method_node: tree_sitter::Node, source: &[u8]) -> Cod
     // Count parameters (excluding self/&self/&mut self)
     stats.param_count = count_rust_parameters(method_node, source);
 
-    // Walk body
+    // Walk body using unified data-driven walker
     if let Some(body) = find_child_by_kind(method_node, "block") {
-        walk_code_stats_rust(body, source, 0, &mut stats);
+        walk_code_stats(body, source, 0, &mut stats, &RUST_CODE_STATS_CONFIG);
     }
 
     stats
@@ -837,88 +837,5 @@ fn count_rust_parameters(method_node: tree_sitter::Node, source: &[u8]) -> u8 {
     count
 }
 
-fn walk_code_stats_rust(node: tree_sitter::Node, source: &[u8], nesting: u32, stats: &mut CodeStats) {
-    let kind = node.kind();
-
-    match kind {
-        // Structural: +1 cyclomatic, +1+nesting cognitive
-        "if_expression" | "for_expression" | "while_expression" | "loop_expression"
-        | "match_expression" => {
-            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
-            stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1 + nesting as u16);
-        }
-
-        // else handling
-        "else_clause" => {
-            let is_else_if = (0..node.child_count())
-                .any(|i| node.child(i).is_some_and(|c| c.kind() == "if_expression"));
-            if !is_else_if {
-                stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
-            }
-        }
-
-        // Logical operators
-        "binary_expression" => {
-            if let Some(op) = node.child(1) {
-                let op_text = node_text(op, source);
-                // tree-sitter-rust uses "&&" and "||" as node text
-                let op_kind = op.kind();
-                if op_kind == "&&" || op_kind == "||" || op_text == "&&" || op_text == "||" {
-                    stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
-                    let parent_same_op = node.parent()
-                        .filter(|p| p.kind() == "binary_expression")
-                        .and_then(|p| p.child(1))
-                        .map(|pop| pop.kind() == op_kind)
-                        .unwrap_or(false);
-                    if !parent_same_op {
-                        stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
-                    }
-                }
-            }
-        }
-
-        // Match arms: +1 cyclomatic each (match_expression already counted)
-        "match_arm" => {
-            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
-        }
-
-        // ? operator: counts as early return
-        "try_expression" => {
-            stats.return_count = stats.return_count.saturating_add(1);
-        }
-
-        // Return statements
-        "return_expression" => {
-            stats.return_count = stats.return_count.saturating_add(1);
-        }
-
-        // Closures
-        "closure_expression" => {
-            stats.lambda_count = stats.lambda_count.saturating_add(1);
-        }
-
-        _ => {}
-    }
-
-    // Nesting for children
-    let body_nesting = match kind {
-        "if_expression" | "for_expression" | "while_expression" | "loop_expression"
-        | "match_expression" | "closure_expression" => nesting + 1,
-        _ => nesting,
-    };
-
-    stats.max_nesting_depth = stats.max_nesting_depth.max(body_nesting as u8);
-
-    // Recurse with else-if nesting rules
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            let child_nesting = match (kind, child.kind()) {
-                ("if_expression", "else_clause") => nesting,     // else at same level
-                ("else_clause", "if_expression") => nesting,     // else-if continuation
-                ("else_clause", _) => nesting + 1,               // else body nested
-                _ => body_nesting,
-            };
-            walk_code_stats_rust(child, source, child_nesting, stats);
-        }
-    }
-}
+// walk_code_stats_rust removed — replaced by unified walk_code_stats() in tree_sitter_utils.rs
+// with RUST_CODE_STATS_CONFIG.

@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field};
+use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, walk_code_stats, TYPESCRIPT_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -1452,7 +1452,7 @@ fn compute_code_stats_typescript(
         });
 
     if let Some(body_node) = body {
-        walk_code_stats_typescript(body_node, 0, &mut stats);
+        walk_code_stats(body_node, &[], 0, &mut stats, &TYPESCRIPT_CODE_STATS_CONFIG);
     }
 
     // callCount is filled separately from call_sites after invocations walk
@@ -1476,100 +1476,8 @@ pub(crate) fn count_parameters_typescript(method_node: tree_sitter::Node) -> u8 
         .unwrap_or(0)
 }
 
-fn walk_code_stats_typescript(
-    node: tree_sitter::Node,
-    nesting: u32,
-    stats: &mut CodeStats,
-) {
-    let kind = node.kind();
-
-    // ═══ Complexity increments ═══
-    match kind {
-        // B2: structural increment + nesting penalty (cognitive)
-        "if_statement" | "for_statement" | "for_in_statement"
-        | "while_statement" | "do_statement"
-        | "switch_statement"
-        | "catch_clause" | "ternary_expression" => {
-            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
-            stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1 + nesting as u16);
-        }
-
-        // else/else-if handling
-        // Note: else does NOT add +1 cyclomatic (it's not a decision point).
-        "else_clause" => {
-            let is_else_if = (0..node.child_count())
-                .any(|i| node.child(i).map(|c| c.kind() == "if_statement").unwrap_or(false));
-            if !is_else_if {
-                // standalone else: +1 cognitive, no nesting penalty
-                stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
-            }
-            // else-if: child if_statement handles its own +1
-        }
-
-        // Logical operators (cognitive: sequence tracking via parent check)
-        "binary_expression" => {
-            if let Some(op) = node.child(1) {
-                let op_kind = op.kind();
-                if op_kind == "&&" || op_kind == "||" {
-                    // Cyclomatic: always +1 per operator
-                    stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
-                    // Cognitive: +1 only at start of new operator sequence
-                    let parent_same_op = node.parent()
-                        .filter(|p| p.kind() == "binary_expression")
-                        .and_then(|p| p.child(1))
-                        .map(|pop| pop.kind() == op_kind)
-                        .unwrap_or(false);
-                    if !parent_same_op {
-                        stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
-                    }
-                }
-            }
-        }
-
-        // Switch cases: cyclomatic only (switch_statement already counted cognitive)
-        "switch_case" => {
-            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
-        }
-
-        // Return/throw
-        "return_statement" | "throw_statement" => {
-            stats.return_count = stats.return_count.saturating_add(1);
-        }
-
-        // Lambdas
-        "arrow_function" | "function_expression" => {
-            stats.lambda_count = stats.lambda_count.saturating_add(1);
-        }
-
-        _ => {}
-    }
-
-    // ═══ Nesting for children ═══
-    let body_nesting = match kind {
-        "if_statement" | "for_statement" | "for_in_statement"
-        | "while_statement" | "do_statement" | "switch_statement"
-        | "catch_clause" | "ternary_expression"
-        | "try_statement" | "arrow_function"
-        | "function_expression" => nesting + 1,
-        _ => nesting,
-    };
-
-    stats.max_nesting_depth = stats.max_nesting_depth.max(body_nesting as u8);
-
-    // ═══ Recurse with else_clause nesting rules ═══
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            let child_nesting = match (kind, child.kind()) {
-                ("if_statement", "else_clause") => nesting,    // else at same level as if
-                ("else_clause", "if_statement") => nesting,    // else-if continuation
-                ("else_clause", _) => nesting + 1,             // else body is nested
-                _ => body_nesting,
-            };
-
-            walk_code_stats_typescript(child, child_nesting, stats);
-        }
-    }
-}
+// walk_code_stats_typescript removed — replaced by unified walk_code_stats() in tree_sitter_utils.rs
+// with TYPESCRIPT_CODE_STATS_CONFIG.
 
 /// Extract a call site from a new_expression node (e.g., `new SomeClass()`).
 fn extract_ts_new_expression(node: tree_sitter::Node, source: &str) -> Option<CallSite> {

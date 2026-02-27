@@ -89,13 +89,15 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         let raw = args.get("maxTotalNodes").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
         if raw == 0 { usize::MAX } else { raw }
     };
+    // Pre-lowercase exclude lists once to avoid repeated allocations in recursive tree functions.
+    // The tree functions compare these against lowercased file paths, so pre-lowering is correct.
     let exclude_dir: Vec<String> = args.get("excludeDir")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
         .unwrap_or_default();
     let exclude_file: Vec<String> = args.get("excludeFile")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
         .unwrap_or_default();
 
     let search_start = Instant::now();
@@ -713,8 +715,8 @@ fn build_caller_tree(
         if !matches_ext { continue; }
 
         let path_lower = file_path.to_lowercase();
-        if exclude_dir.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) { continue; }
-        if exclude_file.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) { continue; }
+        if exclude_dir.iter().any(|excl| path_lower.contains(excl.as_str())) { continue; }
+        if exclude_file.iter().any(|excl| path_lower.contains(excl.as_str())) { continue; }
 
         let def_fid = match def_idx.path_to_id.get(&std::path::PathBuf::from(file_path)).copied() {
             Some(id) => id,
@@ -1159,10 +1161,10 @@ fn build_callee_tree(
                     });
                 if !matches_ext { continue; }
 
-                // Apply directory/file exclusions
+                // Apply directory/file exclusions (exclude lists are pre-lowercased)
                 let path_lower = callee_file.to_lowercase();
-                if exclude_dir.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) { continue; }
-                if exclude_file.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) { continue; }
+                if exclude_dir.iter().any(|excl| path_lower.contains(excl.as_str())) { continue; }
+                if exclude_file.iter().any(|excl| path_lower.contains(excl.as_str())) { continue; }
 
                 let callee_key = format!("{}.{}.{}",
                     callee_def.parent.as_deref().unwrap_or("?"),

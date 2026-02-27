@@ -501,13 +501,21 @@ pub fn cmd_serve(args: ServeArgs) {
     }
 
     let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
-    mcp::server::run_server(
-        index, def_index, dir_str, exts_for_load,
-        args.metrics, idx_base, max_response_bytes,
-        content_ready, def_ready,
-        git_cache, git_cache_ready,
+    let ctx = mcp::handlers::HandlerContext {
+        index,
+        def_index,
+        server_dir: dir_str,
+        server_ext: exts_for_load,
+        metrics: args.metrics,
+        index_base: idx_base,
+        max_response_bytes,
+        content_ready,
+        def_ready,
+        git_cache,
+        git_cache_ready,
         current_branch,
-    );
+    };
+    mcp::server::run_server(ctx);
 }
 
 /// Format a cache age as a human-readable string (e.g., "2h 15m", "5m", "3d 1h").

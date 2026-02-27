@@ -48,6 +48,223 @@ pub(crate) fn find_child_by_field<'a>(node: tree_sitter::Node<'a>, field: &str) 
     node.child_by_field_name(field)
 }
 
+// ─── Code Stats Config ──────────────────────────────────────────────
+
+use crate::definitions::types::CodeStats;
+
+/// Language-specific configuration for code complexity metrics computation.
+///
+/// Each language parser defines a static config with its AST node names.
+/// The unified [`walk_code_stats`] function uses this config to compute
+/// cyclomatic complexity, cognitive complexity, nesting depth, and other metrics
+/// identically across all languages.
+pub(crate) struct CodeStatsConfig {
+    /// Nodes that add +1 cyclomatic AND +1+nesting cognitive complexity.
+    /// e.g., `if_statement`, `for_statement`, `while_statement`, `catch_clause`
+    pub branching_nodes: &'static [&'static str],
+    /// The "else" clause node name. e.g., `"else_clause"`
+    pub else_clause: &'static str,
+    /// The if-statement node inside else clause. e.g., `"if_statement"` or `"if_expression"`
+    pub else_if_child: &'static str,
+    /// Binary expression node name. e.g., `"binary_expression"`
+    pub binary_op_node: &'static str,
+    /// Whether to also check operator text via `node_text()` for logical operators.
+    /// Needed for Rust where tree-sitter may represent `&&`/`||` differently.
+    pub check_logical_op_text: bool,
+    /// Nodes that add +1 cognitive complexity with NO nesting penalty.
+    /// e.g., `goto_statement` in C#. Empty for most languages.
+    pub cognitive_only_nodes: &'static [&'static str],
+    /// Switch case/arm nodes: +1 cyclomatic only (the switch itself already counted cognitive).
+    /// e.g., `switch_section`, `switch_case`, `match_arm`
+    pub case_nodes: &'static [&'static str],
+    /// Return/throw nodes: +1 return_count.
+    pub return_nodes: &'static [&'static str],
+    /// Lambda/closure nodes: +1 lambda_count.
+    pub lambda_nodes: &'static [&'static str],
+    /// Nodes that increment nesting depth for children.
+    /// Typically a superset of branching_nodes + try + lambda nodes.
+    pub nesting_nodes: &'static [&'static str],
+    /// If true, a direct if→if child (without else_clause wrapper) keeps nesting flat.
+    /// C# specific: tree-sitter C# can parse else-if as `if_statement` → `if_statement`.
+    pub if_to_if_flat_nesting: bool,
+}
+
+/// C# code stats configuration.
+pub(crate) static CSHARP_CODE_STATS_CONFIG: CodeStatsConfig = CodeStatsConfig {
+    branching_nodes: &[
+        "if_statement", "for_statement", "foreach_statement",
+        "while_statement", "do_statement",
+        "switch_statement", "switch_expression",
+        "catch_clause", "conditional_expression",
+    ],
+    else_clause: "else_clause",
+    else_if_child: "if_statement",
+    binary_op_node: "binary_expression",
+    check_logical_op_text: false,
+    cognitive_only_nodes: &["goto_statement"],
+    case_nodes: &["switch_expression_arm", "switch_section"],
+    return_nodes: &["return_statement", "throw_statement", "throw_expression"],
+    lambda_nodes: &["lambda_expression", "anonymous_method_expression"],
+    nesting_nodes: &[
+        "if_statement", "for_statement", "foreach_statement",
+        "while_statement", "do_statement",
+        "switch_statement", "switch_expression",
+        "catch_clause", "conditional_expression",
+        "try_statement", "lambda_expression", "anonymous_method_expression",
+    ],
+    if_to_if_flat_nesting: true,
+};
+
+/// TypeScript/TSX code stats configuration.
+pub(crate) static TYPESCRIPT_CODE_STATS_CONFIG: CodeStatsConfig = CodeStatsConfig {
+    branching_nodes: &[
+        "if_statement", "for_statement", "for_in_statement",
+        "while_statement", "do_statement",
+        "switch_statement",
+        "catch_clause", "ternary_expression",
+    ],
+    else_clause: "else_clause",
+    else_if_child: "if_statement",
+    binary_op_node: "binary_expression",
+    check_logical_op_text: false,
+    cognitive_only_nodes: &[],
+    case_nodes: &["switch_case"],
+    return_nodes: &["return_statement", "throw_statement"],
+    lambda_nodes: &["arrow_function", "function_expression"],
+    nesting_nodes: &[
+        "if_statement", "for_statement", "for_in_statement",
+        "while_statement", "do_statement", "switch_statement",
+        "catch_clause", "ternary_expression",
+        "try_statement", "arrow_function", "function_expression",
+    ],
+    if_to_if_flat_nesting: false,
+};
+
+/// Rust code stats configuration.
+#[cfg(feature = "lang-rust")]
+pub(crate) static RUST_CODE_STATS_CONFIG: CodeStatsConfig = CodeStatsConfig {
+    branching_nodes: &[
+        "if_expression", "for_expression", "while_expression",
+        "loop_expression", "match_expression",
+    ],
+    else_clause: "else_clause",
+    else_if_child: "if_expression",
+    binary_op_node: "binary_expression",
+    check_logical_op_text: true,
+    cognitive_only_nodes: &[],
+    case_nodes: &["match_arm"],
+    return_nodes: &["return_expression", "try_expression"],
+    lambda_nodes: &["closure_expression"],
+    nesting_nodes: &[
+        "if_expression", "for_expression", "while_expression",
+        "loop_expression", "match_expression",
+        "closure_expression",
+    ],
+    if_to_if_flat_nesting: false,
+};
+
+/// Unified code complexity walker for all tree-sitter-based languages.
+///
+/// Walks the AST recursively, computing cyclomatic complexity, cognitive complexity,
+/// nesting depth, return count, and lambda count based on the language-specific
+/// [`CodeStatsConfig`].
+///
+/// # Arguments
+/// * `node` — current AST node
+/// * `source` — source file bytes (needed for logical operator text check in Rust)
+/// * `nesting` — current nesting depth
+/// * `stats` — mutable stats accumulator
+/// * `config` — language-specific node name configuration
+pub(crate) fn walk_code_stats(
+    node: tree_sitter::Node,
+    source: &[u8],
+    nesting: u32,
+    stats: &mut CodeStats,
+    config: &CodeStatsConfig,
+) {
+    let kind = node.kind();
+
+    // ═══ Complexity increments ═══
+
+    if config.branching_nodes.contains(&kind) {
+        // Structural: +1 cyclomatic, +1+nesting cognitive
+        stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+        stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1 + nesting as u16);
+    } else if kind == config.else_clause {
+        // else/else-if handling
+        let is_else_if = (0..node.child_count())
+            .any(|i| node.child(i).is_some_and(|c| c.kind() == config.else_if_child));
+        if !is_else_if {
+            // standalone else: +1 cognitive, no nesting penalty
+            stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+        }
+    } else if kind == config.binary_op_node {
+        // Logical operators: && and ||
+        if let Some(op) = node.child(1) {
+            let op_kind = op.kind();
+            let is_logical = op_kind == "&&" || op_kind == "||"
+                || (config.check_logical_op_text && {
+                    let op_text = node_text(op, source);
+                    op_text == "&&" || op_text == "||"
+                });
+            if is_logical {
+                stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+                // Cognitive: +1 only at start of new operator sequence
+                let parent_same_op = node.parent()
+                    .filter(|p| p.kind() == config.binary_op_node)
+                    .and_then(|p| p.child(1))
+                    .map(|pop| pop.kind() == op_kind)
+                    .unwrap_or(false);
+                if !parent_same_op {
+                    stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+                }
+            }
+        }
+    } else if config.cognitive_only_nodes.contains(&kind) {
+        // goto-like: +1 cognitive only (no nesting penalty, no cyclomatic)
+        stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+    } else if config.case_nodes.contains(&kind) {
+        // switch case/arm: +1 cyclomatic only
+        stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+    } else if config.return_nodes.contains(&kind) {
+        stats.return_count = stats.return_count.saturating_add(1);
+    } else if config.lambda_nodes.contains(&kind) {
+        stats.lambda_count = stats.lambda_count.saturating_add(1);
+    }
+
+    // ═══ Nesting for children ═══
+
+    let body_nesting = if config.nesting_nodes.contains(&kind) {
+        nesting + 1
+    } else {
+        nesting
+    };
+
+    stats.max_nesting_depth = stats.max_nesting_depth.max(body_nesting as u8);
+
+    // ═══ Recurse with else-if nesting rules ═══
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            let child_nesting = match (kind, child.kind()) {
+                // else_clause at same level as if
+                (parent, child_kind) if parent == config.else_if_child && child_kind == config.else_clause => nesting,
+                // else-if continuation
+                (parent, child_kind) if parent == config.else_clause && child_kind == config.else_if_child => nesting,
+                // else body is nested
+                (parent, _) if parent == config.else_clause => nesting + 1,
+                // C# specific: if_statement → if_statement (direct child) = else-if without wrapper
+                (parent, child_kind) if config.if_to_if_flat_nesting
+                    && parent == config.else_if_child
+                    && child_kind == config.else_if_child => nesting,
+                _ => body_nesting,
+            };
+
+            walk_code_stats(child, source, child_nesting, stats, config);
+        }
+    }
+}
+
 // ─── Tests ──────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -127,5 +344,64 @@ mod tests {
         let cls = find_child_by_kind(root, "class_declaration").unwrap();
         let result = find_child_by_field(cls, "nonexistent_field");
         assert!(result.is_none());
+    }
+
+    // ─── walk_code_stats config-driven tests ────────────────────────
+
+    #[test]
+    fn test_walk_code_stats_csharp_config_if_else() {
+        // Verify the unified walk_code_stats produces correct metrics for C#
+        // using CSHARP_CODE_STATS_CONFIG (regression test for the data-driven refactoring).
+        let source = r#"
+class UserService {
+    void Process(int x) {
+        if (x > 0) {
+            Console.WriteLine("positive");
+        } else if (x < 0) {
+            Console.WriteLine("negative");
+        } else {
+            Console.WriteLine("zero");
+        }
+    }
+}
+"#;
+        let (tree, bytes) = parse_csharp_snippet(source);
+        let root = tree.root_node();
+        let method = find_descendant_by_kind(root, "block").unwrap();
+
+        let mut stats = super::CodeStats::default();
+        stats.cyclomatic_complexity = 1; // base
+        super::walk_code_stats(method, &bytes, 0, &mut stats, &super::CSHARP_CODE_STATS_CONFIG);
+
+        // if (+1), else-if's inner if (+1) = cyclomatic 3
+        assert_eq!(stats.cyclomatic_complexity, 3,
+            "C# if/else-if should add +2 cyclomatic (base=1 → total=3)");
+        // cognitive: if (+1+0=1), else-if's if (+1+0=1) = 2
+        // Note: tree-sitter C# (0.23) does NOT produce else_clause nodes for standalone else,
+        // so the else block does NOT add +1 cognitive. This is a known grammar difference.
+        assert_eq!(stats.cognitive_complexity, 2,
+            "C# if/else-if should have cognitive=2 (tree-sitter C# has no else_clause nodes)");
+    }
+
+    #[test]
+    fn test_walk_code_stats_typescript_config_arrow_function() {
+        // Verify that TypeScript lambda_nodes (arrow_function) are counted correctly
+        let mut parser = tree_sitter::Parser::new();
+        parser.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+            .expect("Error loading TypeScript grammar");
+        let source = "const handler = () => { if (true) { return 1; } }";
+        let tree = parser.parse(source, None).expect("parse failed");
+        let bytes = source.as_bytes();
+        let root = tree.root_node();
+        // Find the arrow_function body (statement_block)
+        let arrow = find_descendant_by_kind(root, "arrow_function").unwrap();
+        let body = find_child_by_kind(arrow, "statement_block").unwrap();
+
+        let mut stats = super::CodeStats::default();
+        stats.cyclomatic_complexity = 1;
+        super::walk_code_stats(body, bytes, 0, &mut stats, &super::TYPESCRIPT_CODE_STATS_CONFIG);
+
+        assert_eq!(stats.cyclomatic_complexity, 2, "if inside arrow adds +1 cyclomatic");
+        assert_eq!(stats.return_count, 1, "return statement counted");
     }
 }

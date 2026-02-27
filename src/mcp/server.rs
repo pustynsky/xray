@@ -1,46 +1,20 @@
 use std::io::{self, BufRead, Write};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use serde_json::{json, Value};
 use tracing::{debug, error, info, warn};
 
 use crate::mcp::handlers::{self, HandlerContext};
 use crate::mcp::protocol::*;
-use crate::{save_content_index, ContentIndex};
-use crate::definitions::{self, DefinitionIndex};
-use crate::git::cache::GitHistoryCache;
+use crate::save_content_index;
+use crate::definitions;
 
-/// Run the MCP server event loop over stdio
-pub fn run_server(
-    index: Arc<RwLock<ContentIndex>>,
-    def_index: Option<Arc<RwLock<DefinitionIndex>>>,
-    server_dir: String,
-    server_ext: String,
-    metrics: bool,
-    index_base: PathBuf,
-    max_response_bytes: usize,
-    content_ready: Arc<AtomicBool>,
-    def_ready: Arc<AtomicBool>,
-    git_cache: Arc<RwLock<Option<GitHistoryCache>>>,
-    git_cache_ready: Arc<AtomicBool>,
-    current_branch: Option<String>,
-) {
-    let ctx = HandlerContext {
-        index,
-        def_index,
-        server_dir,
-        server_ext,
-        metrics,
-        index_base,
-        max_response_bytes,
-        content_ready,
-        def_ready,
-        git_cache,
-        git_cache_ready,
-        current_branch,
-    };
+/// Run the MCP server event loop over stdio.
+///
+/// Accepts a fully-constructed [`HandlerContext`] instead of 12 individual parameters.
+/// The caller (`cmd_serve`) builds the context and passes it in.
+pub fn run_server(ctx: HandlerContext) {
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
