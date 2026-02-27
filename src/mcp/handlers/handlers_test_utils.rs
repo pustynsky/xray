@@ -138,15 +138,6 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
     HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(),
-        server_ext: "cs".to_string(),
-        metrics: false,
-        index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-        git_cache: Arc::new(RwLock::new(None)),
-        git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     }
 }

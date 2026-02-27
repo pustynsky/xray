@@ -1211,14 +1211,8 @@ mod tests {
             index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
             def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
             server_dir: project_str,
-            server_ext: "cs".to_string(),
-            metrics: false, index_base: idx_base,
-            max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-            content_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            def_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            git_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            git_cache_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            current_branch: None,
+            index_base: idx_base,
+            ..Default::default()
         };
 
         let result = handle_search_definitions(&ctx, &serde_json::json!({
@@ -1319,14 +1313,7 @@ mod tests {
         super::HandlerContext {
             index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
             def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
-            server_dir: ".".to_string(), server_ext: "cs".to_string(),
-            metrics: false, index_base: std::path::PathBuf::from("."),
-            max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-            content_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            def_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            git_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            git_cache_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            current_branch: None,
+            ..Default::default()
         }
     }
 
@@ -1461,14 +1448,7 @@ mod tests {
         let ctx = super::HandlerContext {
             index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
             def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
-            server_dir: ".".to_string(), server_ext: "cs".to_string(),
-            metrics: false, index_base: std::path::PathBuf::from("."),
-            max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-            content_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            def_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            git_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            git_cache_ready: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            current_branch: None,
+            ..Default::default()
         };
 
         // Substring search: "IRepository" should find both GenericImpl and AnotherImpl

@@ -297,24 +297,7 @@ mod tests {
     use crate::TrigramIndex;
 
     fn make_ctx() -> HandlerContext {
-        let index = ContentIndex {
-            root: ".".to_string(),
-            ..Default::default()
-        };
-        HandlerContext {
-            index: Arc::new(RwLock::new(index)),
-            def_index: None,
-            server_dir: ".".to_string(),
-            server_ext: "cs".to_string(),
-            metrics: false,
-            index_base: std::path::PathBuf::from("."),
-            max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-            content_ready: Arc::new(AtomicBool::new(true)),
-            def_ready: Arc::new(AtomicBool::new(true)),
-            git_cache: Arc::new(RwLock::new(None)),
-            git_cache_ready: Arc::new(AtomicBool::new(false)),
-            current_branch: None,
-        }
+        HandlerContext::default()
     }
 
     #[test]
