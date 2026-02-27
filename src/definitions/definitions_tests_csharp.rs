@@ -1954,3 +1954,266 @@ fn test_csharp_chained_member_access_receiver_not_resolved() {
         receiver
     );
 }
+
+// ─── Constructor body assignment-based DI field resolution tests ──────
+
+#[test]
+fn test_call_site_extraction_constructor_assignment_m_prefix() {
+    // Regression test for DI resolution gap (test report 20.2):
+    // When a class uses m_ prefix for DI fields WITHOUT an explicit field
+    // declaration, the parser should resolve the receiver_type by finding
+    // the `m_field = param` assignment in the constructor body.
+    let source = r#"
+public class OrderController : BaseController
+{
+    public OrderController(IOrderService orderService, ILogger logger)
+        : base(logger)
+    {
+        m_orderService = orderService;
+        m_logger = logger;
+    }
+
+    public void ProcessOrder(int id)
+    {
+        m_orderService.GetOrder(id);
+        m_logger.LogInfo("done");
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let pi = defs.iter().position(|d| d.name == "ProcessOrder").unwrap();
+    let pc: Vec<_> = cs.iter().filter(|(i, _)| *i == pi).collect();
+    assert!(!pc.is_empty(), "Expected call sites for 'ProcessOrder'");
+
+    let get_order = pc[0].1.iter().find(|c| c.method_name == "GetOrder");
+    assert!(get_order.is_some(), "Expected call to 'GetOrder'");
+    assert_eq!(
+        get_order.unwrap().receiver_type.as_deref(),
+        Some("IOrderService"),
+        "m_orderService should resolve to IOrderService via constructor body assignment"
+    );
+
+    let log_info = pc[0].1.iter().find(|c| c.method_name == "LogInfo");
+    assert!(log_info.is_some(), "Expected call to 'LogInfo'");
+    assert_eq!(
+        log_info.unwrap().receiver_type.as_deref(),
+        Some("ILogger"),
+        "m_logger should resolve to ILogger via constructor body assignment"
+    );
+}
+
+#[test]
+fn test_call_site_extraction_constructor_assignment_this_prefix() {
+    // this.field = param pattern
+    let source = r#"
+public class DataService
+{
+    public DataService(IRepository repository)
+    {
+        this.myRepo = repository;
+    }
+
+    public void Run()
+    {
+        myRepo.Save();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ri = defs.iter().position(|d| d.name == "Run").unwrap();
+    let rc: Vec<_> = cs.iter().filter(|(i, _)| *i == ri).collect();
+    assert!(!rc.is_empty(), "Expected call sites for 'Run'");
+
+    let save = rc[0].1.iter().find(|c| c.method_name == "Save");
+    assert!(save.is_some(), "Expected call to 'Save'");
+    assert_eq!(
+        save.unwrap().receiver_type.as_deref(),
+        Some("IRepository"),
+        "myRepo should resolve to IRepository via 'this.myRepo = repository' in constructor"
+    );
+}
+
+#[test]
+fn test_call_site_extraction_constructor_assignment_arbitrary_prefix() {
+    // Any arbitrary prefix/renaming convention should work
+    let source = r#"
+public class Processor
+{
+    public Processor(IValidator validator, INotifier notifier)
+    {
+        fld_validator = validator;
+        s_notifier = notifier;
+    }
+
+    public void Execute()
+    {
+        fld_validator.Check();
+        s_notifier.Send();
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    let ei = defs.iter().position(|d| d.name == "Execute").unwrap();
+    let ec: Vec<_> = cs.iter().filter(|(i, _)| *i == ei).collect();
+    assert!(!ec.is_empty(), "Expected call sites for 'Execute'");
+
+    let check = ec[0].1.iter().find(|c| c.method_name == "Check");
+    assert!(check.is_some(), "Expected call to 'Check'");
+    assert_eq!(
+        check.unwrap().receiver_type.as_deref(),
+        Some("IValidator"),
+        "fld_validator should resolve to IValidator via constructor body assignment"
+    );
+
+    let send = ec[0].1.iter().find(|c| c.method_name == "Send");
+    assert!(send.is_some(), "Expected call to 'Send'");
+    assert_eq!(
+        send.unwrap().receiver_type.as_deref(),
+        Some("INotifier"),
+        "s_notifier should resolve to INotifier via constructor body assignment"
+    );
+}
+
+#[test]
+fn test_extract_constructor_param_types_with_initializer() {
+    // Regression: extract_constructor_param_types used rfind(')') which would
+    // find the closing paren of `: base(logger)` instead of the constructor's own params.
+    use super::parser_csharp::extract_constructor_param_types;
+
+    let sig = "public OrderController(IOrderService orderService, ILogger logger) : base(logger)";
+    let params = extract_constructor_param_types(sig);
+    assert_eq!(params.len(), 2, "Should extract 2 params despite base() initializer");
+    assert_eq!(params[0], ("orderService".to_string(), "IOrderService".to_string()));
+    assert_eq!(params[1], ("logger".to_string(), "ILogger".to_string()));
+
+    // Also test with this() initializer
+    let sig2 = "public MyService(ILogger logger) : this(logger, null)";
+    let params2 = extract_constructor_param_types(sig2);
+    assert_eq!(params2.len(), 1, "Should extract 1 param despite this() initializer");
+    assert_eq!(params2[0], ("logger".to_string(), "ILogger".to_string()));
+
+    // Test with nested parens in generic type
+    let sig3 = "public Svc(Action<Func<int>> handler) : base()";
+    let params3 = extract_constructor_param_types(sig3);
+    assert_eq!(params3.len(), 1, "Should extract param with nested generics");
+    assert_eq!(params3[0].0, "handler");
+}
+
+// ─── Owner.m_field nested class DI resolution tests ──────────────────
+
+#[test]
+fn test_owner_m_field_nested_class_receiver_resolution() {
+    // Regression test for Owner.m_field bug (ControllerBlock pattern):
+    // Nested inner class accesses parent's DI-injected fields via Owner.m_field.
+    // The receiver_type should be resolved to the DI field's type, not "Owner"
+    // or the outer class name.
+    let source = r#"
+public class OrderControllerBlock
+{
+    private readonly IQueryManager m_queryManager;
+
+    public OrderControllerBlock(IQueryManager queryManager)
+    {
+        m_queryManager = queryManager;
+    }
+
+    public class OrderController
+    {
+        private OrderControllerBlock Owner;
+
+        public async Task GetCatalogEntriesAsync()
+        {
+            return await Owner.m_queryManager.GetCatalogEntriesAsync(
+                request: request,
+                authorizationContext: AuthorizationContext);
+        }
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = super::parser_csharp::parse_csharp_definitions(&mut parser, source, 0);
+
+    let method_idx = defs.iter().position(|d| d.name == "GetCatalogEntriesAsync"
+        && d.kind == super::DefinitionKind::Method).unwrap();
+    let method_calls: Vec<_> = cs.iter().filter(|(i, _)| *i == method_idx).collect();
+    assert!(!method_calls.is_empty(), "Expected call sites for GetCatalogEntriesAsync");
+
+    let target_call = method_calls[0].1.iter()
+        .find(|c| c.method_name == "GetCatalogEntriesAsync");
+    assert!(target_call.is_some(), "Expected call to GetCatalogEntriesAsync");
+
+    assert_eq!(
+        target_call.unwrap().receiver_type.as_deref(),
+        Some("IQueryManager"),
+        "Owner.m_queryManager should resolve to IQueryManager (outer class DI field)"
+    );
+}
+
+#[test]
+fn test_owner_m_field_inner_class_field_takes_precedence() {
+    // If the inner class has a field with the same name as the outer class,
+    // the inner class field should take precedence.
+    let source = r#"
+public class OuterBlock
+{
+    private readonly IOuterService m_service;
+
+    public OuterBlock(IOuterService outerService)
+    {
+        m_service = outerService;
+    }
+
+    public class InnerController
+    {
+        private readonly IInnerService m_service;
+        private OuterBlock Owner;
+
+        public InnerController(IInnerService innerService)
+        {
+            m_service = innerService;
+        }
+
+        public void Process()
+        {
+            m_service.Execute();
+            Owner.m_service.Run();
+        }
+    }
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (defs, cs, _, _) = super::parser_csharp::parse_csharp_definitions(&mut parser, source, 0);
+
+    let method_idx = defs.iter().position(|d| d.name == "Process").unwrap();
+    let method_calls: Vec<_> = cs.iter().filter(|(i, _)| *i == method_idx).collect();
+    assert!(!method_calls.is_empty(), "Expected call sites for Process");
+
+    // Direct access to m_service should use INNER class type (IInnerService)
+    let execute = method_calls[0].1.iter().find(|c| c.method_name == "Execute");
+    assert!(execute.is_some(), "Expected call to Execute");
+    assert_eq!(
+        execute.unwrap().receiver_type.as_deref(),
+        Some("IInnerService"),
+        "Direct m_service.Execute() should use inner class field type IInnerService"
+    );
+
+    // Owner.m_service should also resolve via inner class type since inner takes precedence
+    let run = method_calls[0].1.iter().find(|c| c.method_name == "Run");
+    assert!(run.is_some(), "Expected call to Run");
+    assert_eq!(
+        run.unwrap().receiver_type.as_deref(),
+        Some("IInnerService"),
+        "Owner.m_service.Run() — inner class field type takes precedence in merged field_types"
+    );
+}
