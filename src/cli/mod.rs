@@ -134,7 +134,7 @@ pub fn run() {
 
 fn cmd_index(args: IndexArgs) -> Result<(), SearchError> {
     let idx_base = index_dir();
-    let index = build_index(&args);
+    let index = build_index(&args)?;
     save_index(&index, &idx_base)?;
     let path = index_path_for(&args.dir, &idx_base);
     let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -149,7 +149,7 @@ fn cmd_index(args: IndexArgs) -> Result<(), SearchError> {
 fn cmd_content_index(args: ContentIndexArgs) -> Result<(), SearchError> {
     let idx_base = index_dir();
     let exts_str = args.ext.clone();
-    let index = build_content_index(&args);
+    let index = build_content_index(&args)?;
     save_content_index(&index, &idx_base)?;
     let path = content_index_path_for(&args.dir, &exts_str, &idx_base);
     let size = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -395,7 +395,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
                 let new_index = build_index(&IndexArgs {
                     dir: args.dir.clone(), max_age_hours: idx.max_age_secs / 3600,
                     hidden: false, no_ignore: false, threads: 0,
-                });
+                })?;
                 if let Err(e) = save_index(&new_index, &idx_base) {
                     eprintln!("Warning: failed to save updated index: {}", e);
                 }
@@ -412,7 +412,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
             let new_index = build_index(&IndexArgs {
                 dir: args.dir.clone(), max_age_hours: 24,
                 hidden: false, no_ignore: false, threads: 0,
-            });
+            })?;
             if let Err(e) = save_index(&new_index, &idx_base) {
                 eprintln!("Warning: failed to save index: {}", e);
             }
@@ -542,7 +542,7 @@ fn load_grep_index(
                 let new_idx = build_content_index(&ContentIndexArgs {
                     dir: dir.to_string(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
                     hidden: false, no_ignore: false, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-                });
+                })?;
                 let _ = save_content_index(&new_idx, &idx_base);
                 new_idx
             } else {

@@ -36,13 +36,16 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
         Err(_) => {
             // Auto-build
             info!(dir = %dir, "No file index found, building automatically");
-            let new_index = crate::build_index(&crate::IndexArgs {
+            let new_index = match crate::build_index(&crate::IndexArgs {
                 dir: dir.clone(),
                 max_age_hours: 24,
                 hidden: false,
                 no_ignore: false,
                 threads: 0,
-            });
+            }) {
+                Ok(idx) => idx,
+                Err(e) => return ToolCallResult::error(format!("Failed to build file index: {}", e)),
+            };
             let _ = crate::save_index(&new_index, &ctx.index_base);
             new_index
         }

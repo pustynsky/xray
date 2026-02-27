@@ -1435,7 +1435,7 @@ mod tests {
         let file_index = crate::build_index(&crate::IndexArgs {
             dir: project_str.clone(),
             max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
-        });
+        }).unwrap();
         crate::save_index(&file_index, &idx_base).unwrap();
 
         let def_index = crate::definitions::build_definition_index(

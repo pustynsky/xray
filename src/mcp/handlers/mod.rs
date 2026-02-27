@@ -689,7 +689,7 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     info!(dir = %dir, ext = %ext, "Rebuilding content index");
     let start = Instant::now();
 
-    let new_index = build_content_index(&ContentIndexArgs {
+    let new_index = match build_content_index(&ContentIndexArgs {
         dir: dir.to_string(),
         ext: ext.clone(),
         max_age_hours: 24,
@@ -697,7 +697,10 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         no_ignore: false,
         threads: 0,
         min_token_len: 2,
-    });
+    }) {
+        Ok(idx) => idx,
+        Err(e) => return ToolCallResult::error(format!("Failed to build content index: {}", e)),
+    };
 
     // Save to disk
     if let Err(e) = save_content_index(&new_index, &ctx.index_base) {

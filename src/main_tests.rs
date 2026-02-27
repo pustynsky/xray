@@ -111,7 +111,7 @@
             no_ignore: false,
             threads: 1,
             min_token_len: 2,
-        });
+        }).unwrap();
 
         assert_eq!(index.files.len(), 2);
         assert!(index.index.contains_key("httpclient"));
@@ -134,7 +134,7 @@
             hidden: false,
             no_ignore: false,
             threads: 1,
-        });
+        }).unwrap();
 
         assert!(index.entries.len() >= 2, "Should find at least 2 files");
         assert!(!index.is_stale());
@@ -275,7 +275,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         // OR: files with "httpclient" OR "ilogger"
         let term1_postings = index.index.get("httpclient");
@@ -321,7 +321,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         // Check all three terms exist
         let terms = ["httpclient", "task", "ilogger"];
@@ -360,7 +360,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         // Regex "i.*cache" should match itenantcache, iusercache, isessioncache
         let re = Regex::new("(?i)^i.*cache$").unwrap();
@@ -395,7 +395,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         let re = Regex::new("(?i)^zzzznonexistent$").unwrap();
         let matching: Vec<&String> = index.index.keys()
@@ -422,7 +422,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         // Pattern ".*async" should match getasync, postasync, sendasync
         let re = Regex::new("(?i)^.*async$").unwrap();
@@ -465,7 +465,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         assert_eq!(index.files.len(), 3, "Should index 3 files");
 
@@ -510,7 +510,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         let postings = index.index.get("httpclient").unwrap();
 
@@ -609,14 +609,14 @@
         let file_idx = build_index(&IndexArgs {
             dir: root_str.clone(), max_age_hours: 24,
             hidden: false, no_ignore: false, threads: 1,
-        });
+        }).unwrap();
         save_index(&file_idx, &idx_base).unwrap();
 
         // Save a content index
         let content_idx = build_content_index(&ContentIndexArgs {
             dir: root_str.clone(), ext: "cs".to_string(), max_age_hours: 24,
             hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
-        });
+        }).unwrap();
         save_content_index(&content_idx, &idx_base).unwrap();
 
         // Verify index files exist
@@ -659,13 +659,13 @@
         let idx_a = build_index(&IndexArgs {
             dir: root_a.clone(), max_age_hours: 24,
             hidden: false, no_ignore: false, threads: 1,
-        });
+        }).unwrap();
         save_index(&idx_a, &idx_base).unwrap();
 
         let idx_b = build_index(&IndexArgs {
             dir: root_b.clone(), max_age_hours: 24,
             hidden: false, no_ignore: false, threads: 1,
-        });
+        }).unwrap();
         save_index(&idx_b, &idx_base).unwrap();
 
         // Cleanup only dir_a
@@ -709,7 +709,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         // Simulate phrase search: tokenize, AND search, then verify
         let phrase = "new HttpClient";
@@ -768,7 +768,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         let phrase = "new HttpClient";
         let phrase_lower = phrase.to_lowercase();
@@ -796,7 +796,7 @@
             threads: 1,
             min_token_len: 2,
         };
-        let index = build_content_index(&args);
+        let index = build_content_index(&args).unwrap();
 
         let phrase = "new HttpClient";
         let phrase_lower = phrase.to_lowercase();
