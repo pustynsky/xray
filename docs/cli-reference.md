@@ -421,7 +421,6 @@ search-index serve --dir C:\Projects --ext cs,sql --watch --definitions
 | `--definitions`        | Load (or build on first use) code definition index (tree-sitter AST) |
 | `--metrics`            | Add `responseBytes` and `estimatedTokens` to every tool response     |
 | `--debounce-ms <MS>`   | Debounce delay for file watcher (default: 500)                       |
-| `--bulk-threshold <N>` | File changes triggering full reindex (default: 100)                  |
 | `--log-level <LEVEL>`  | Log level: error, warn, info, debug (default: info)                  |
 | `--max-response-kb <N>`| Max response size in KB before truncation, 0 = unlimited (default: 16)|
 | `--debug-log`          | Write MCP request/response traces and memory diagnostics to `.debug.log` in index dir|

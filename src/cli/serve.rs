@@ -186,14 +186,39 @@ pub fn cmd_serve(args: ServeArgs) {
     }
 
     // ─── Definition index: same async pattern ───
-    // Supported definition languages (SQL supported via regex parser)
-    let supported_def_langs: &[&str] = &["cs", "ts", "tsx", "sql"];
+    // Use compile-time definition extensions based on enabled Cargo features
+    let supported_def_langs = definitions::definition_extensions();
     let def_exts = supported_def_langs.iter()
         .filter(|lang| extensions.iter().any(|e| e.eq_ignore_ascii_case(lang)))
         .copied()
         .collect::<Vec<&str>>()
         .join(",");
-    let def_exts = if def_exts.is_empty() { "cs".to_string() } else { def_exts };
+
+    // Warn about unsupported extensions requested via --ext
+    for ext in &extensions {
+        let has_parser = supported_def_langs.iter().any(|lang| lang.eq_ignore_ascii_case(ext));
+        if !has_parser && ["cs", "ts", "tsx", "sql"].iter().any(|known| known.eq_ignore_ascii_case(ext)) {
+            warn!(
+                ext = %ext,
+                compiled_parsers = ?supported_def_langs,
+                "Extension '{}' requested via --ext but its parser is not compiled in this build. \
+                 Rebuild with the appropriate feature flag (e.g., --features lang-csharp) to enable it.",
+                ext
+            );
+        }
+    }
+
+    let def_exts = if def_exts.is_empty() {
+        // No overlap between --ext and compiled parsers — fall back to first compiled parser
+        // or "cs" if none are compiled (will produce empty index)
+        if let Some(first) = supported_def_langs.first() {
+            first.to_string()
+        } else {
+            "cs".to_string()
+        }
+    } else {
+        def_exts
+    };
 
     let def_index = if args.definitions {
         // Create an empty DefinitionIndex placeholder

@@ -57,6 +57,7 @@ fn test_definition_kind_roundtrip_all_variants() {
     }
 }
 
+#[cfg(all(feature = "lang-csharp", feature = "lang-sql"))]
 #[test]
 fn test_definition_index_build_and_search() {
     let tmp = tempfile::tempdir().unwrap();
@@ -133,6 +134,7 @@ fn test_read_file_lossy_with_non_utf8_byte() {
 
 // ─── Lazy Parser Init & Extension Filtering Tests ─────────────────────
 
+#[cfg(feature = "lang-csharp")]
 #[test]
 fn test_build_def_index_cs_only_no_ts_parsers() {
     // When ext="cs" only, TS/TSX parsers should NOT be eagerly created
@@ -155,6 +157,7 @@ fn test_build_def_index_cs_only_no_ts_parsers() {
     assert!(!idx.name_index.contains_key("helper"), "Should NOT find TS function when ext=cs");
 }
 
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript"))]
 #[test]
 fn test_build_def_index_cs_and_ts() {
     // When ext="cs,ts", both C# and TS files should be parsed
@@ -174,6 +177,7 @@ fn test_build_def_index_cs_and_ts() {
     assert!(idx.name_index.contains_key("helper"), "Should find TS function when ext=cs,ts");
 }
 
+#[cfg(feature = "lang-typescript")]
 #[test]
 fn test_build_def_index_ts_only() {
     // When ext="ts,tsx", only TS/TSX files should be parsed
@@ -197,6 +201,7 @@ fn test_build_def_index_ts_only() {
 
 // ─── Reconciliation Tests ───────────────────────────────────────────
 
+#[cfg(feature = "lang-csharp")]
 #[test]
 fn test_reconcile_adds_new_file() {
     let tmp = tempfile::tempdir().unwrap();
@@ -230,6 +235,7 @@ fn test_reconcile_adds_new_file() {
     assert!(index.name_index.contains_key("process"), "New method should be in index");
 }
 
+#[cfg(feature = "lang-csharp")]
 #[test]
 fn test_reconcile_removes_deleted_file() {
     let tmp = tempfile::tempdir().unwrap();
@@ -265,6 +271,7 @@ fn test_reconcile_removes_deleted_file() {
     assert!(!index.name_index.contains_key("deleteservice"), "Deleted class should not be in index");
 }
 
+#[cfg(feature = "lang-csharp")]
 #[test]
 fn test_reconcile_detects_modified_file() {
     let tmp = tempfile::tempdir().unwrap();
@@ -303,6 +310,7 @@ fn test_reconcile_detects_modified_file() {
     assert!(index.name_index.contains_key("newmethod"), "Updated method should be in index");
 }
 
+#[cfg(feature = "lang-csharp")]
 #[test]
 fn test_reconcile_skips_unchanged_files() {
     let tmp = tempfile::tempdir().unwrap();

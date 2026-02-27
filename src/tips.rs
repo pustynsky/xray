@@ -419,7 +419,7 @@ pub fn render_json() -> Value {
 /// - Full tips available via search_help tool
 ///
 /// `def_extensions` — the file extensions that have definition parser support
-/// (intersection of server --ext and DEFINITION_EXTENSIONS). Used to dynamically
+/// (intersection of server --ext and definition_extensions()). Used to dynamically
 /// generate the "NEVER READ" instruction so it covers exactly the right file types.
 pub fn render_instructions(def_extensions: &[&str]) -> String {
     let mut out = String::new();
@@ -535,9 +535,10 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
     #[test]
     fn test_render_instructions_contains_key_terms() {
-        let text = render_instructions(crate::definitions::DEFINITION_EXTENSIONS);
+        let text = render_instructions(crate::definitions::definition_extensions());
         // Core tools mentioned
         assert!(text.contains("search_fast"), "instructions should mention search_fast");
         assert!(text.contains("search_callers"), "instructions should mention search_callers");
@@ -559,7 +560,7 @@ mod tests {
         assert!(text.contains("CRITICAL: ALWAYS use search-index tools"), "instructions should have CRITICAL PREFER block");
         assert!(text.contains("DO NOT browse directories"), "instructions should use DO NOT framing");
         // Dynamic extension list: verify all definition extensions appear in the NEVER READ rule
-        for ext in crate::definitions::DEFINITION_EXTENSIONS {
+        for ext in crate::definitions::definition_extensions() {
             assert!(text.contains(&format!(".{}", ext)),
                 "instructions should mention .{} extension in NEVER READ rule", ext);
         }
