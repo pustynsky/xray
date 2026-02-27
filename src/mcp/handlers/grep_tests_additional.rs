@@ -1,0 +1,491 @@
+use super::*;
+use std::collections::{HashMap, HashSet};
+use std::time::Instant;
+
+fn make_params_default<'a>() -> GrepSearchParams<'a> {
+    GrepSearchParams {
+        ext_filter: &None,
+        exclude_dir: &[],
+        exclude: &[],
+        show_lines: false,
+        context_lines: 0,
+        max_results: 50,
+        mode_and: false,
+        count_only: false,
+        search_start: Instant::now(),
+        dir_filter: &None,
+    }
+}
+
+// ─── auto_switch_to_phrase_if_needed tests ──────────────────────
+
+#[test]
+fn test_auto_switch_no_special_chars_returns_none() {
+    let index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+    let params = make_params_default();
+    let raw_terms = vec!["hello".to_string(), "world".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "hello,world", &raw_terms, &params);
+    assert!(result.is_none(), "Should return None when no terms contain spaces or punctuation");
+}
+
+#[test]
+fn test_auto_switch_with_spaces_returns_some() {
+    let index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+    let params = make_params_default();
+    let raw_terms = vec!["create procedure".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "CREATE PROCEDURE", &raw_terms, &params);
+    assert!(result.is_some(), "Should return Some when terms contain spaces");
+}
+
+#[test]
+fn test_auto_switch_with_punctuation_returns_some() {
+    let index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+    let params = make_params_default();
+    let raw_terms = vec!["#[cfg(test)]".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "#[cfg(test)]", &raw_terms, &params);
+    assert!(result.is_some(), "Should return Some when terms contain punctuation like #[cfg(test)]");
+}
+
+#[test]
+fn test_auto_switch_with_angle_brackets_returns_some() {
+    let index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+    let params = make_params_default();
+    let raw_terms = vec!["<summary>".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "<summary>", &raw_terms, &params);
+    assert!(result.is_some(), "Should return Some when terms contain angle brackets");
+}
+
+#[test]
+fn test_auto_switch_underscore_only_returns_none() {
+    let index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+    let params = make_params_default();
+    let raw_terms = vec!["my_variable".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "my_variable", &raw_terms, &params);
+    assert!(result.is_none(), "Should NOT auto-switch for underscores (they are valid in tokens)");
+}
+
+// ─── has_non_token_chars tests ──────────────────────────────────
+
+#[test]
+fn test_has_non_token_chars_alphanumeric() {
+    assert!(!has_non_token_chars("hello123"));
+}
+
+#[test]
+fn test_has_non_token_chars_underscore() {
+    assert!(!has_non_token_chars("my_var_123"));
+}
+
+#[test]
+fn test_has_non_token_chars_brackets() {
+    assert!(has_non_token_chars("#[cfg(test)]"));
+}
+
+#[test]
+fn test_has_non_token_chars_dot() {
+    assert!(has_non_token_chars("System.IO"));
+}
+
+#[test]
+fn test_has_non_token_chars_at_sign() {
+    assert!(has_non_token_chars("@Attribute"));
+}
+
+#[test]
+fn test_has_non_token_chars_angle_brackets() {
+    assert!(has_non_token_chars("<summary>"));
+}
+
+// ─── score_token_postings tests ─────────────────────────────────
+
+#[test]
+fn test_score_token_postings_basic() {
+    use crate::Posting;
+    let mut index = ContentIndex::default();
+    index.files = vec!["file1.cs".to_string()];
+    index.file_token_counts = vec![100];
+    index.index.insert("userservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10, 20] },
+    ]);
+
+    let params = make_params_default();
+    let mut tokens_with_hits = HashSet::new();
+    let mut file_scores = HashMap::new();
+    let mut file_matched_terms = HashMap::new();
+
+    score_token_postings(
+        &["userservice".to_string()], 0, &index, &params, 1.0,
+        &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+    );
+
+    assert!(tokens_with_hits.contains("userservice"));
+    assert_eq!(file_scores.len(), 1);
+    assert_eq!(file_scores[&0].occurrences, 2);
+    assert_eq!(file_matched_terms[&0].len(), 1);
+}
+
+#[test]
+fn test_score_token_postings_filters_applied() {
+    use crate::Posting;
+    let mut index = ContentIndex::default();
+    index.files = vec!["file1.cs".to_string(), "file2.xml".to_string()];
+    index.file_token_counts = vec![100, 50];
+    index.index.insert("token".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![1] },
+    ]);
+
+    let ext = Some("cs".to_string());
+    let params = GrepSearchParams {
+        ext_filter: &ext,
+        exclude_dir: &[],
+        exclude: &[],
+        show_lines: false,
+        context_lines: 0,
+        max_results: 50,
+        mode_and: false,
+        count_only: false,
+        search_start: Instant::now(),
+        dir_filter: &None,
+    };
+    let mut tokens_with_hits = HashSet::new();
+    let mut file_scores = HashMap::new();
+    let mut file_matched_terms = HashMap::new();
+
+    score_token_postings(
+        &["token".to_string()], 0, &index, &params, 2.0,
+        &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+    );
+
+    // Only file1.cs should pass (ext filter = cs)
+    assert_eq!(file_scores.len(), 1);
+    assert!(file_scores.get(&0).is_some());
+    assert!(file_scores.get(&1).is_none());
+}
+
+#[test]
+fn test_score_token_postings_multi_term_tracking() {
+    use crate::Posting;
+    let mut index = ContentIndex::default();
+    index.files = vec!["file1.cs".to_string()];
+    index.file_token_counts = vec![100];
+    index.index.insert("term_a".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+    ]);
+    index.index.insert("term_b".to_string(), vec![
+        Posting { file_id: 0, lines: vec![5] },
+    ]);
+
+    let params = make_params_default();
+    let mut tokens_with_hits = HashSet::new();
+    let mut file_scores = HashMap::new();
+    let mut file_matched_terms = HashMap::new();
+
+    score_token_postings(
+        &["term_a".to_string()], 0, &index, &params, 1.0,
+        &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+    );
+    score_token_postings(
+        &["term_b".to_string()], 1, &index, &params, 1.0,
+        &mut tokens_with_hits, &mut file_scores, &mut file_matched_terms,
+    );
+
+    assert_eq!(file_matched_terms[&0].len(), 2);
+    assert!(file_matched_terms[&0].contains(&0));
+    assert!(file_matched_terms[&0].contains(&1));
+}
+
+// ─── build_substring_response tests ─────────────────────────────
+
+#[test]
+fn test_build_substring_response_count_only() {
+    let index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+    let params = GrepSearchParams {
+        ext_filter: &None,
+        exclude_dir: &[],
+        exclude: &[],
+        show_lines: false,
+        context_lines: 0,
+        max_results: 50,
+        mode_and: false,
+        count_only: true,
+        search_start: Instant::now(),
+        dir_filter: &None,
+    };
+
+    let results = vec![FileScoreEntry {
+        file_path: "test.cs".to_string(),
+        lines: vec![1, 2],
+        tf_idf: 1.0,
+        occurrences: 2,
+        terms_matched: 1,
+    }];
+    let raw_terms = vec!["svc".to_string()];
+    let matched_tokens = vec!["userservice".to_string()];
+    let warnings = vec!["Short substring query (<4 chars) may return broad results".to_string()];
+
+    let result = build_substring_response(
+        &results, &raw_terms, &matched_tokens, &warnings,
+        1, 2, "or", &index, &ctx, &params,
+    );
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &v["summary"];
+    assert!(summary.get("matchedTokens").is_some());
+    assert!(summary.get("warnings").is_some());
+    assert!(v.get("files").is_none());
+}
+
+#[test]
+fn test_build_substring_response_normal() {
+    let index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+    let params = GrepSearchParams {
+        ext_filter: &None,
+        exclude_dir: &[],
+        exclude: &[],
+        show_lines: false,
+        context_lines: 0,
+        max_results: 50,
+        mode_and: false,
+        count_only: false,
+        search_start: Instant::now(),
+        dir_filter: &None,
+    };
+
+    let results = vec![FileScoreEntry {
+        file_path: "test.cs".to_string(),
+        lines: vec![1],
+        tf_idf: 0.5,
+        occurrences: 1,
+        terms_matched: 1,
+    }];
+    let raw_terms = vec!["hello".to_string()];
+    let matched_tokens = vec!["hello".to_string()];
+
+    let result = build_substring_response(
+        &results, &raw_terms, &matched_tokens, &[],
+        1, 1, "or", &index, &ctx, &params,
+    );
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(v.get("files").is_some());
+    assert!(v.get("summary").is_some());
+    let summary = &v["summary"];
+    assert!(summary.get("matchedTokens").is_some());
+    assert!(summary.get("warnings").is_none());
+}
+
+// ─── parse_grep_args additional tests ────────────────────────────
+
+#[test]
+fn test_parse_grep_args_mode_and() {
+    let args = json!({"terms": "hello", "mode": "and", "substring": false});
+    let result = parse_grep_args(&args, "C:/project").unwrap();
+    assert!(result.mode_and);
+}
+
+#[test]
+fn test_parse_grep_args_count_only() {
+    let args = json!({"terms": "hello", "countOnly": true});
+    let result = parse_grep_args(&args, "C:/project").unwrap();
+    assert!(result.count_only);
+}
+
+#[test]
+fn test_parse_grep_args_show_lines_explicit() {
+    let args = json!({"terms": "hello", "showLines": true});
+    let result = parse_grep_args(&args, "C:/project").unwrap();
+    assert!(result.show_lines);
+}
+
+// ─── score_normal_token_search with filter test ─────────────────
+
+#[test]
+fn test_score_normal_token_search_with_ext_filter() {
+    use crate::Posting;
+    let mut index = ContentIndex::default();
+    index.files = vec!["file1.cs".to_string(), "file2.xml".to_string()];
+    index.file_token_counts = vec![100, 50];
+    index.index.insert("hello".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![1] },
+    ]);
+
+    let ext = Some("cs".to_string());
+    let params = GrepSearchParams {
+        ext_filter: &ext,
+        exclude_dir: &[],
+        exclude: &[],
+        show_lines: false,
+        context_lines: 0,
+        max_results: 50,
+        mode_and: false,
+        count_only: false,
+        search_start: Instant::now(),
+        dir_filter: &None,
+    };
+    let terms = vec!["hello".to_string()];
+    let scores = score_normal_token_search(&terms, &index, &params);
+    assert_eq!(scores.len(), 1, "Only .cs file should pass filter");
+    assert!(scores.get(&0).is_some());
+}
+
+// ─── merge_phrase_results_or tests ──────────────────────────────────
+
+#[test]
+fn test_merge_phrase_or_empty() {
+    let result = merge_phrase_results_or(vec![]);
+    assert!(result.is_empty(), "Empty input should produce empty output");
+}
+
+#[test]
+fn test_merge_phrase_or_single_phrase() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1, 5], content: None },
+        PhraseFileMatch { file_path: "b.cs".into(), lines: vec![3], content: None },
+    ];
+    let result = merge_phrase_results_or(vec![phrase1]);
+    assert_eq!(result.len(), 2, "Single phrase with 2 files should produce 2 results");
+}
+
+#[test]
+fn test_merge_phrase_or_disjoint_files() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1], content: None },
+        PhraseFileMatch { file_path: "b.cs".into(), lines: vec![2], content: None },
+    ];
+    let phrase2 = vec![
+        PhraseFileMatch { file_path: "c.cs".into(), lines: vec![3], content: None },
+        PhraseFileMatch { file_path: "d.cs".into(), lines: vec![4], content: None },
+    ];
+    let result = merge_phrase_results_or(vec![phrase1, phrase2]);
+    assert_eq!(result.len(), 4, "Disjoint files should all appear in union");
+}
+
+#[test]
+fn test_merge_phrase_or_overlapping_files() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1, 3], content: None },
+    ];
+    let phrase2 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![2, 5], content: None },
+    ];
+    let result = merge_phrase_results_or(vec![phrase1, phrase2]);
+    assert_eq!(result.len(), 1, "Same file from two phrases should merge to 1");
+    let entry = &result[0];
+    assert_eq!(entry.file_path, "a.cs");
+    assert_eq!(entry.lines, vec![1, 2, 3, 5], "Lines should be merged, sorted, deduped");
+}
+
+#[test]
+fn test_merge_phrase_or_preserves_content() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1], content: None },
+    ];
+    let phrase2 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![2], content: Some("file content".into()) },
+    ];
+    let result = merge_phrase_results_or(vec![phrase1, phrase2]);
+    assert_eq!(result.len(), 1);
+    // Content from phrase2 should be kept since phrase1 had None
+    assert!(result[0].content.is_some(), "Content should be preserved from second phrase");
+    assert_eq!(result[0].content.as_deref().unwrap(), "file content");
+}
+
+#[test]
+fn test_merge_phrase_or_deduplicates_lines() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1, 3, 5], content: None },
+    ];
+    let phrase2 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![3, 5, 7], content: None },
+    ];
+    let result = merge_phrase_results_or(vec![phrase1, phrase2]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].lines, vec![1, 3, 5, 7], "Duplicate lines should be removed");
+}
+
+// ─── merge_phrase_results_and tests ─────────────────────────────────
+
+#[test]
+fn test_merge_phrase_and_empty() {
+    let result = merge_phrase_results_and(vec![]);
+    assert!(result.is_empty(), "Empty input should produce empty output");
+}
+
+#[test]
+fn test_merge_phrase_and_single_phrase() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1], content: None },
+        PhraseFileMatch { file_path: "b.cs".into(), lines: vec![2], content: None },
+    ];
+    let result = merge_phrase_results_and(vec![phrase1]);
+    assert_eq!(result.len(), 2, "Single phrase should keep all files");
+}
+
+#[test]
+fn test_merge_phrase_and_no_overlap() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1], content: None },
+    ];
+    let phrase2 = vec![
+        PhraseFileMatch { file_path: "b.cs".into(), lines: vec![2], content: None },
+    ];
+    let result = merge_phrase_results_and(vec![phrase1, phrase2]);
+    assert!(result.is_empty(), "No overlapping files should produce empty result");
+}
+
+#[test]
+fn test_merge_phrase_and_full_overlap() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1], content: None },
+        PhraseFileMatch { file_path: "b.cs".into(), lines: vec![2], content: None },
+    ];
+    let phrase2 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![5], content: None },
+        PhraseFileMatch { file_path: "b.cs".into(), lines: vec![6], content: None },
+    ];
+    let result = merge_phrase_results_and(vec![phrase1, phrase2]);
+    assert_eq!(result.len(), 2, "Both files appear in both phrases → both kept");
+}
+
+#[test]
+fn test_merge_phrase_and_partial_overlap() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1], content: None },
+        PhraseFileMatch { file_path: "b.cs".into(), lines: vec![2], content: None },
+        PhraseFileMatch { file_path: "c.cs".into(), lines: vec![3], content: None },
+    ];
+    let phrase2 = vec![
+        PhraseFileMatch { file_path: "b.cs".into(), lines: vec![10], content: None },
+        PhraseFileMatch { file_path: "c.cs".into(), lines: vec![20], content: None },
+        PhraseFileMatch { file_path: "d.cs".into(), lines: vec![30], content: None },
+    ];
+    let result = merge_phrase_results_and(vec![phrase1, phrase2]);
+    assert_eq!(result.len(), 2, "Only b.cs and c.cs are in both");
+    let paths: HashSet<String> = result.iter().map(|r| r.file_path.clone()).collect();
+    assert!(paths.contains("b.cs"));
+    assert!(paths.contains("c.cs"));
+    assert!(!paths.contains("a.cs"));
+    assert!(!paths.contains("d.cs"));
+}
+
+#[test]
+fn test_merge_phrase_and_merges_lines() {
+    let phrase1 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![1, 3], content: None },
+    ];
+    let phrase2 = vec![
+        PhraseFileMatch { file_path: "a.cs".into(), lines: vec![2, 3, 5], content: None },
+    ];
+    let result = merge_phrase_results_and(vec![phrase1, phrase2]);
+    assert_eq!(result.len(), 1);
+    assert_eq!(result[0].lines, vec![1, 2, 3, 5], "Lines should be merged, sorted, deduped");
+}
