@@ -6460,6 +6460,54 @@ cargo run -- grep "pub fn" -d $TEST_DIR -e $TEST_EXT
 
 ---
 
+### T-US16-PUNCT: `serve` — search_grep auto-switches to phrase for punctuation terms
+
+**Tool:** `search_grep`
+
+**Background:** When `search_grep` receives terms containing non-token characters (punctuation, brackets, etc.) in substring mode (the default), it auto-switches to phrase search. The tokenizer strips all characters that are not alphanumeric or underscore, so terms like `#[cfg(test)]`, `<summary>`, `@Attribute`, or `System.IO` would never match any indexed token. Phrase search with punctuation does raw substring matching on file content, which correctly handles these patterns.
+
+**Command (MCP — punctuation term):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"#[cfg(test)]"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- `summary.totalFiles` ≥ 1 (previously returned 0 with punctuation terms)
+- `summary.searchMode` = `"phrase"` (auto-switched from substring)
+- `summary.searchModeNote` contains `"non-token characters"` and `"auto-switched"` — explains the mode switch
+- Results contain files with the literal string `#[cfg(test)]`
+
+**Negative test — alphanumeric+underscore terms stay in substring mode:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"my_variable"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- `summary.searchMode` starts with `"substring"` (no auto-switch)
+- `summary.searchModeNote` is absent (underscores are valid token characters)
+
+**Validates:** Punctuation auto-switch to phrase mode. Terms with `#`, `[`, `(`, `)`, `]`, `.`, `<`, `>`, `@`, etc. are auto-switched. Terms with only alphanumeric + underscore stay in substring mode.
+
+**Unit tests:** `test_auto_switch_with_punctuation_returns_some`, `test_auto_switch_with_angle_brackets_returns_some`, `test_auto_switch_underscore_only_returns_none`, `test_has_non_token_chars_brackets`, `test_has_non_token_chars_dot`, `test_has_non_token_chars_at_sign`, `test_has_non_token_chars_angle_brackets`, `test_has_non_token_chars_alphanumeric`, `test_has_non_token_chars_underscore`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T-BRANCH-WARNING: `serve` — `branchWarning` in index-based tool responses
 
 **Background:** When the MCP server is started on a non-main/non-master branch, all index-based tool responses (`search_grep`, `search_definitions`, `search_callers`, `search_fast`) include a `branchWarning` field in the `summary` object. This alerts the AI agent that results may differ from production because the index is built on a feature branch.

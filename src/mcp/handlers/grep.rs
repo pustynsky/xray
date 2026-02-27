@@ -455,22 +455,51 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     )
 }
 
-/// Auto-switch to phrase mode when substring terms contain spaces.
-/// Substring search operates on individual tokens (which never contain spaces),
-/// so multi-word queries like "CREATE PROCEDURE" would always return 0.
+/// Check if a search term contains characters that the tokenizer strips.
+/// The tokenizer (`tokenize()`) splits on `!c.is_alphanumeric() && c != '_'`,
+/// so any character that is not alphanumeric and not `_` is a separator.
+/// If a term contains such characters (e.g., `#[cfg(test)]`, `<summary>`,
+/// `@Attribute`), substring search will never find it because no indexed
+/// token contains those characters.
+fn has_non_token_chars(term: &str) -> bool {
+    term.chars().any(|c| !c.is_alphanumeric() && c != '_')
+}
+
+/// Auto-switch to phrase mode when substring terms contain characters that
+/// the tokenizer strips (spaces, punctuation, brackets, etc.).
+///
+/// Substring search operates on individual indexed tokens, which only contain
+/// alphanumeric characters and underscores. Queries like `#[cfg(test)]` or
+/// `CREATE PROCEDURE` would always return 0 results in substring mode because
+/// no token contains `#`, `[`, `(`, `)`, `]`, or spaces.
+///
+/// Phrase search with punctuation does raw substring matching on file content,
+/// which correctly handles these patterns.
+///
 /// Returns `Some(result)` if auto-switched, `None` if normal processing should continue.
-fn auto_switch_to_phrase_if_spaces(
+fn auto_switch_to_phrase_if_needed(
     ctx: &HandlerContext,
     index: &ContentIndex,
     terms_str: &str,
     raw_terms: &[String],
     params: &GrepSearchParams,
 ) -> Option<ToolCallResult> {
-    if !raw_terms.iter().any(|t| t.contains(' ')) {
+    let has_spaces = raw_terms.iter().any(|t| t.contains(' '));
+    let has_punctuation = raw_terms.iter().any(|t| has_non_token_chars(t));
+
+    if !has_spaces && !has_punctuation {
         return None;
     }
 
-    eprintln!("[substring-trace] Terms contain spaces, auto-switching to phrase mode");
+    let reason = if has_spaces && has_punctuation {
+        "Terms contain spaces and non-token characters (punctuation/brackets)"
+    } else if has_spaces {
+        "Terms contain spaces"
+    } else {
+        "Terms contain non-token characters (punctuation/brackets) that the tokenizer strips"
+    };
+
+    eprintln!("[substring-trace] {} — auto-switching to phrase mode", reason);
     let phrases: Vec<String> = terms_str
         .split(',')
         .map(|s| s.trim().to_string())
@@ -482,9 +511,9 @@ fn auto_switch_to_phrase_if_spaces(
         && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
             if let Some(summary) = output.get_mut("summary") {
                 summary["searchModeNote"] = serde_json::Value::String(
-                    "Terms contain spaces — auto-switched to phrase search \
-                     (substring mode operates on individual tokens which never contain spaces)"
-                        .to_string(),
+                    format!("{} — auto-switched to phrase search \
+                     (substring mode operates on individual tokens which only contain \
+                     alphanumeric characters and underscores)", reason),
                 );
             }
             *text = json_to_string(&output);
@@ -687,8 +716,8 @@ fn handle_substring_search(
         return ToolCallResult::error("No search terms provided".to_string());
     }
 
-    // Auto-switch to phrase mode when terms contain spaces
-    if let Some(result) = auto_switch_to_phrase_if_spaces(ctx, index, terms_str, &raw_terms, params) {
+    // Auto-switch to phrase mode when terms contain spaces or non-token characters
+    if let Some(result) = auto_switch_to_phrase_if_needed(ctx, index, terms_str, &raw_terms, params) {
         return result;
     }
 
@@ -1620,16 +1649,16 @@ mod grep_additional_tests {
         }
     }
 
-    // ─── auto_switch_to_phrase_if_spaces tests ──────────────────────
+    // ─── auto_switch_to_phrase_if_needed tests ──────────────────────
 
     #[test]
-    fn test_auto_switch_no_spaces_returns_none() {
+    fn test_auto_switch_no_special_chars_returns_none() {
         let index = ContentIndex::default();
         let ctx = HandlerContext::default();
         let params = make_params_default();
         let raw_terms = vec!["hello".to_string(), "world".to_string()];
-        let result = auto_switch_to_phrase_if_spaces(&ctx, &index, "hello,world", &raw_terms, &params);
-        assert!(result.is_none(), "Should return None when no terms contain spaces");
+        let result = auto_switch_to_phrase_if_needed(&ctx, &index, "hello,world", &raw_terms, &params);
+        assert!(result.is_none(), "Should return None when no terms contain spaces or punctuation");
     }
 
     #[test]
@@ -1638,8 +1667,70 @@ mod grep_additional_tests {
         let ctx = HandlerContext::default();
         let params = make_params_default();
         let raw_terms = vec!["create procedure".to_string()];
-        let result = auto_switch_to_phrase_if_spaces(&ctx, &index, "CREATE PROCEDURE", &raw_terms, &params);
+        let result = auto_switch_to_phrase_if_needed(&ctx, &index, "CREATE PROCEDURE", &raw_terms, &params);
         assert!(result.is_some(), "Should return Some when terms contain spaces");
+    }
+
+    #[test]
+    fn test_auto_switch_with_punctuation_returns_some() {
+        let index = ContentIndex::default();
+        let ctx = HandlerContext::default();
+        let params = make_params_default();
+        let raw_terms = vec!["#[cfg(test)]".to_string()];
+        let result = auto_switch_to_phrase_if_needed(&ctx, &index, "#[cfg(test)]", &raw_terms, &params);
+        assert!(result.is_some(), "Should return Some when terms contain punctuation like #[cfg(test)]");
+    }
+
+    #[test]
+    fn test_auto_switch_with_angle_brackets_returns_some() {
+        let index = ContentIndex::default();
+        let ctx = HandlerContext::default();
+        let params = make_params_default();
+        let raw_terms = vec!["<summary>".to_string()];
+        let result = auto_switch_to_phrase_if_needed(&ctx, &index, "<summary>", &raw_terms, &params);
+        assert!(result.is_some(), "Should return Some when terms contain angle brackets");
+    }
+
+    #[test]
+    fn test_auto_switch_underscore_only_returns_none() {
+        let index = ContentIndex::default();
+        let ctx = HandlerContext::default();
+        let params = make_params_default();
+        let raw_terms = vec!["my_variable".to_string()];
+        let result = auto_switch_to_phrase_if_needed(&ctx, &index, "my_variable", &raw_terms, &params);
+        assert!(result.is_none(), "Should NOT auto-switch for underscores (they are valid in tokens)");
+    }
+
+    // ─── has_non_token_chars tests ──────────────────────────────────
+
+    #[test]
+    fn test_has_non_token_chars_alphanumeric() {
+        assert!(!has_non_token_chars("hello123"));
+    }
+
+    #[test]
+    fn test_has_non_token_chars_underscore() {
+        assert!(!has_non_token_chars("my_var_123"));
+    }
+
+    #[test]
+    fn test_has_non_token_chars_brackets() {
+        assert!(has_non_token_chars("#[cfg(test)]"));
+    }
+
+    #[test]
+    fn test_has_non_token_chars_dot() {
+        assert!(has_non_token_chars("System.IO"));
+    }
+
+    #[test]
+    fn test_has_non_token_chars_at_sign() {
+        assert!(has_non_token_chars("@Attribute"));
+    }
+
+    #[test]
+    fn test_has_non_token_chars_angle_brackets() {
+        assert!(has_non_token_chars("<summary>"));
     }
 
     // ─── score_token_postings tests ─────────────────────────────────
