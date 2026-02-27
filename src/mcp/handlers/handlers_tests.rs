@@ -3251,3 +3251,114 @@ fn test_multi_phrase_fn_signatures() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// Comprehensive report gap tests (2026-02-27)
+// Tests identified from comprehensive test report that were missing
+// from unit/E2E test suite.
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Report gap 45.1: Unicode search terms should return 0 results, no panic.
+/// LLM agents may pass non-ASCII terms when working with multilingual codebases.
+#[test]
+fn test_grep_unicode_search_terms_no_crash() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "数据库连接", "countOnly": true}));
+    assert!(!result.is_error, "Unicode search terms should not crash: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 0,
+        "Unicode terms in ASCII codebase should return 0 files");
+}
+
+/// Report gap 49.3: Single-character grep (broadest possible query) should not OOM.
+#[test]
+fn test_grep_single_char_exact_no_oom() {
+    let ctx = make_substring_ctx(
+        vec![("httpclient", 0, vec![5]), ("abc", 1, vec![10])],
+        vec!["C:\\test\\Program.cs", "C:\\test\\Other.cs"],
+    );
+    let result = dispatch_tool(&ctx, "search_grep", &json!({
+        "terms": "a",
+        "substring": false,
+        "countOnly": true
+    }));
+    assert!(!result.is_error, "Single-char grep should not crash: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // "a" as exact token is unlikely to exist in tokenized codebase (min_token_len=2)
+    // The key assertion is no panic/OOM, not the result count
+    assert!(output["summary"]["totalFiles"].as_u64().is_some(),
+        "Should return a valid totalFiles count");
+}
+
+/// Report gap 4.3: containsLine on SQL file — should find the SP containing the line.
+/// Uses manually constructed DefinitionEntry to simulate SQL parser output.
+#[test]
+fn test_contains_line_sql_stored_procedure() {
+    use crate::definitions::*;
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["C:\\sql\\schema.sql".to_string()],
+        total_tokens: 50,
+        extensions: vec!["sql".to_string()],
+        file_token_counts: vec![25],
+        ..Default::default()
+    };
+
+    // Simulate SQL parser output: a stored procedure spanning lines 2-7
+    // (matching "CREATE PROCEDURE dbo.usp_GetOrders ... END;")
+    let defs = vec![
+        DefinitionEntry {
+            file_id: 0, name: "usp_GetOrders".to_string(),
+            kind: DefinitionKind::StoredProcedure, line_start: 2, line_end: 7,
+            parent: None, signature: Some("CREATE PROCEDURE dbo.usp_GetOrders @CustomerId INT".to_string()),
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in defs.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["sql".to_string()],
+        files: vec!["C:\\sql\\schema.sql".to_string()],
+        definitions: defs, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        ..Default::default()
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    // Line 5 is inside the SP body (between line_start=2 and line_end=7)
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "schema.sql",
+        "containsLine": 5
+    }));
+    assert!(!result.is_error, "containsLine on SQL should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // containsLine uses "containingDefinitions" key (not "definitions")
+    let defs_arr = output["containingDefinitions"].as_array()
+        .unwrap_or_else(|| panic!("Expected 'containingDefinitions' array in output, got: {}", output));
+    assert!(!defs_arr.is_empty(),
+        "containsLine=5 should find the SP containing that line, got 0 results");
+    assert_eq!(defs_arr[0]["name"], "usp_GetOrders",
+        "Should find usp_GetOrders SP, got: {}", defs_arr[0]["name"]);
+    assert_eq!(defs_arr[0]["kind"], "storedProcedure",
+        "Definition kind should be storedProcedure");
+}

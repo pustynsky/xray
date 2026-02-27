@@ -381,6 +381,10 @@ fn cmd_find(args: FindArgs) -> Result<(), SearchError> {
 // ─── cmd_fast ───────────────────────────────────────────────────────
 
 fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
+    if args.pattern.trim().is_empty() {
+        return Err(SearchError::InvalidArgs("Pattern must not be empty.".to_string()));
+    }
+
     let start = Instant::now();
     let idx_base = index_dir();
 
