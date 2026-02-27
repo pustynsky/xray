@@ -7,6 +7,8 @@ mod parser_csharp;
 mod parser_typescript;
 #[cfg(feature = "lang-sql")]
 mod parser_sql;
+#[cfg(feature = "lang-rust")]
+mod parser_rust;
 mod storage;
 mod incremental;
 
@@ -34,25 +36,20 @@ use parser_typescript::extract_component_metadata;
 pub fn definition_extensions() -> &'static [&'static str] {
     // When all default features are enabled, return the same list as the old const.
     // For non-default feature combos, cfg picks the right subset.
-    #[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
-    { return &["cs", "ts", "tsx", "sql"]; }
-
-    #[cfg(not(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql")))]
-    {
-        // Build at compile time for non-default combos.
-        // We use a macro-like approach with nested cfg to keep it const-friendly.
-        const EXTS: &[&str] = &[
-            #[cfg(feature = "lang-csharp")]
-            "cs",
-            #[cfg(feature = "lang-typescript")]
-            "ts",
-            #[cfg(feature = "lang-typescript")]
-            "tsx",
-            #[cfg(feature = "lang-sql")]
-            "sql",
-        ];
-        EXTS
-    }
+    // Build at compile time based on enabled features.
+    const EXTS: &[&str] = &[
+        #[cfg(feature = "lang-csharp")]
+        "cs",
+        #[cfg(feature = "lang-typescript")]
+        "ts",
+        #[cfg(feature = "lang-typescript")]
+        "tsx",
+        #[cfg(feature = "lang-sql")]
+        "sql",
+        #[cfg(feature = "lang-rust")]
+        "rs",
+    ];
+    EXTS
 }
 
 // ─── Index Build ─────────────────────────────────────────────────────
@@ -129,6 +126,8 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let need_ts = extensions.iter().any(|e| e == "ts");
     #[cfg(feature = "lang-typescript")]
     let need_tsx = extensions.iter().any(|e| e == "tsx");
+    #[cfg(feature = "lang-rust")]
+    let need_rs = extensions.iter().any(|e| e == "rs");
 
     let thread_results: Vec<_> = std::thread::scope(|s| {
         let handles: Vec<_> = chunks.into_iter().map(|chunk| {
@@ -141,11 +140,13 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     p
                 };
 
-                // Lazy-init: only create TS/TSX parsers when files with those extensions exist
+                // Lazy-init: only create TS/TSX/Rust parsers when files with those extensions exist
                 #[cfg(feature = "lang-typescript")]
                 let mut ts_parser: Option<tree_sitter::Parser> = None;
                 #[cfg(feature = "lang-typescript")]
                 let mut tsx_parser: Option<tree_sitter::Parser> = None;
+                #[cfg(feature = "lang-rust")]
+                let mut rs_parser: Option<tree_sitter::Parser> = None;
 
                 let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>)> = Vec::new();
                 #[cfg(feature = "lang-csharp")]
@@ -204,6 +205,16 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                         "sql" => {
                             let (defs, calls, stats) = parser_sql::parse_sql_definitions(&content, *file_id);
                             (defs, calls, stats)
+                        }
+                        #[cfg(feature = "lang-rust")]
+                        "rs" if need_rs => {
+                            let parser = rs_parser.get_or_insert_with(|| {
+                                let mut p = tree_sitter::Parser::new();
+                                p.set_language(&tree_sitter_rust::LANGUAGE.into())
+                                    .expect("Error loading Rust grammar");
+                                p
+                            });
+                            parser_rust::parse_rust_definitions(parser, &content, *file_id)
                         }
                         _ => (Vec::new(), Vec::new(), Vec::new()),
                     };
@@ -483,6 +494,10 @@ mod tests_typescript;
 #[cfg(all(test, feature = "lang-sql"))]
 #[path = "definitions_tests_sql.rs"]
 mod tests_sql;
+
+#[cfg(all(test, feature = "lang-rust"))]
+#[path = "definitions_tests_rust.rs"]
+mod tests_rust;
 
 #[cfg(all(test, feature = "lang-csharp", feature = "lang-typescript"))]
 #[path = "audit_tests.rs"]

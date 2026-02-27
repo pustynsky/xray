@@ -1,0 +1,959 @@
+//! Rust AST parser using tree-sitter: extracts definitions, call sites, and code stats.
+
+use std::collections::HashMap;
+
+use super::types::*;
+
+// ─── Main entry point ───────────────────────────────────────────────
+
+pub(crate) fn parse_rust_definitions(
+    parser: &mut tree_sitter::Parser,
+    source: &str,
+    file_id: u32,
+) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => {
+            eprintln!("[def-index] WARNING: tree-sitter Rust parse returned None for file_id={}", file_id);
+            return (Vec::new(), Vec::new(), Vec::new());
+        }
+    };
+
+    let mut defs = Vec::new();
+    let source_bytes = source.as_bytes();
+    let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
+    walk_rust_node(tree.root_node(), source_bytes, file_id, None, &mut defs, &mut method_nodes);
+
+    // Build per-struct field type maps from collected defs
+    let mut struct_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
+    for def in &defs {
+        if let Some(ref parent) = def.parent {
+            if def.kind == DefinitionKind::Field {
+                if let Some(ref sig) = def.signature {
+                    if let Some((name, type_name)) = parse_rust_field_type(sig) {
+                        struct_field_types
+                            .entry(parent.clone())
+                            .or_default()
+                            .insert(name, type_name);
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract call sites from pre-collected method nodes
+    let mut call_sites: Vec<(usize, Vec<CallSite>)> = Vec::new();
+    for &(def_local_idx, method_node) in &method_nodes {
+        let def = &defs[def_local_idx];
+        let parent_name = def.parent.as_deref().unwrap_or("");
+        let field_types = struct_field_types.get(parent_name)
+            .cloned()
+            .unwrap_or_default();
+
+        let calls = extract_rust_call_sites(method_node, source_bytes, parent_name, &field_types);
+        if !calls.is_empty() {
+            call_sites.push((def_local_idx, calls));
+        }
+    }
+
+    // Compute code stats
+    let call_count_map: HashMap<usize, u16> = call_sites.iter()
+        .map(|(idx, calls)| (*idx, calls.len() as u16))
+        .collect();
+
+    let mut code_stats_entries: Vec<(usize, CodeStats)> = Vec::new();
+    for &(def_local_idx, method_node) in &method_nodes {
+        let mut stats = compute_code_stats_rust(method_node, source_bytes);
+        stats.call_count = call_count_map.get(&def_local_idx).copied().unwrap_or(0);
+        code_stats_entries.push((def_local_idx, stats));
+    }
+
+    (defs, call_sites, code_stats_entries)
+}
+
+// ─── AST walking ────────────────────────────────────────────────────
+
+fn walk_rust_node<'a>(
+    node: tree_sitter::Node<'a>,
+    source: &[u8],
+    file_id: u32,
+    parent_name: Option<&str>,
+    defs: &mut Vec<DefinitionEntry>,
+    method_nodes: &mut Vec<(usize, tree_sitter::Node<'a>)>,
+) {
+    let kind = node.kind();
+
+    match kind {
+        "struct_item" => {
+            if let Some(def) = extract_rust_struct_def(node, source, file_id, parent_name) {
+                let name = def.name.clone();
+                defs.push(def);
+                // Extract fields from field_declaration_list
+                if let Some(body) = find_child_by_kind(node, "field_declaration_list") {
+                    extract_rust_struct_fields(body, source, file_id, &name, defs);
+                }
+                return;
+            }
+        }
+        "enum_item" => {
+            if let Some(def) = extract_rust_enum_def(node, source, file_id, parent_name) {
+                let name = def.name.clone();
+                defs.push(def);
+                // Extract enum variants
+                if let Some(body) = find_child_by_kind(node, "enum_variant_list") {
+                    extract_rust_enum_variants(body, source, file_id, &name, defs);
+                }
+                return;
+            }
+        }
+        "trait_item" => {
+            if let Some(def) = extract_rust_trait_def(node, source, file_id, parent_name) {
+                let name = def.name.clone();
+                defs.push(def);
+                // Walk trait body for method signatures and default methods
+                if let Some(body) = find_child_by_kind(node, "declaration_list") {
+                    for i in 0..body.child_count() {
+                        if let Some(child) = body.child(i) {
+                            match child.kind() {
+                                // Trait method with body (default implementation)
+                                "function_item" => {
+                                    if let Some(mut def) = extract_rust_function_def(child, source, file_id, Some(&name)) {
+                                        def.kind = DefinitionKind::Method;
+                                        let idx = defs.len();
+                                        defs.push(def);
+                                        method_nodes.push((idx, child));
+                                    }
+                                }
+                                // Trait method without body (signature only)
+                                "function_signature_item" => {
+                                    if let Some(mut def) = extract_rust_function_def(child, source, file_id, Some(&name)) {
+                                        def.kind = DefinitionKind::Method;
+                                        defs.push(def);
+                                        // No method_nodes entry — no body to extract calls from
+                                    }
+                                }
+                                _ => {
+                                    walk_rust_node(child, source, file_id, Some(&name), defs, method_nodes);
+                                }
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+        }
+        "impl_item" => {
+            // Extract the struct name and optional trait name from impl block
+            let (impl_struct_name, trait_name) = extract_impl_names(node, source);
+            if let Some(ref struct_name) = impl_struct_name {
+                // If this is a trait impl, register base_types on the struct
+                if let Some(ref trait_n) = trait_name {
+                    // Find or create a synthetic entry? No — we just set base_types
+                    // on methods inside the impl block via walk. The struct itself
+                    // already has its definition from struct_item.
+                    // We'll pass trait_name info through and handle in method extraction.
+                    let _ = trait_n; // used below when iterating children
+                }
+
+                // Walk impl body — methods inside get parent = struct_name
+                if let Some(body) = find_child_by_kind(node, "declaration_list") {
+                    for i in 0..body.child_count() {
+                        if let Some(child) = body.child(i) {
+                            if child.kind() == "function_item" {
+                                if let Some(mut def) = extract_rust_function_def(child, source, file_id, Some(struct_name)) {
+                                    // Determine kind: Constructor if name is "new" or "default"
+                                    let fn_name = def.name.as_str();
+                                    if fn_name == "new" || fn_name == "default" {
+                                        def.kind = DefinitionKind::Constructor;
+                                    } else {
+                                        def.kind = DefinitionKind::Method;
+                                    }
+                                    // Add trait as base_type if this is a trait impl
+                                    if let Some(ref tn) = trait_name {
+                                        def.base_types.push(tn.clone());
+                                    }
+                                    let idx = defs.len();
+                                    defs.push(def);
+                                    method_nodes.push((idx, child));
+                                }
+                            } else {
+                                walk_rust_node(child, source, file_id, Some(struct_name), defs, method_nodes);
+                            }
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        "function_item" => {
+            // Top-level function (not inside impl — those are handled above)
+            if let Some(def) = extract_rust_function_def(node, source, file_id, parent_name) {
+                let idx = defs.len();
+                defs.push(def);
+                method_nodes.push((idx, node));
+                return;
+            }
+        }
+        "const_item" => {
+            if let Some(def) = extract_rust_const_static_def(node, source, file_id, parent_name, false) {
+                defs.push(def);
+                return;
+            }
+        }
+        "static_item" => {
+            if let Some(def) = extract_rust_const_static_def(node, source, file_id, parent_name, true) {
+                defs.push(def);
+                return;
+            }
+        }
+        "type_item" => {
+            if let Some(def) = extract_rust_type_alias_def(node, source, file_id, parent_name) {
+                defs.push(def);
+                return;
+            }
+        }
+        _ => {}
+    }
+
+    // Default: recurse into children
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            walk_rust_node(child, source, file_id, parent_name, defs, method_nodes);
+        }
+    }
+}
+
+// ─── Helper utilities ───────────────────────────────────────────────
+
+fn node_text<'a>(node: tree_sitter::Node, source: &'a [u8]) -> &'a str {
+    node.utf8_text(source).unwrap_or("")
+}
+
+fn find_child_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == kind {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
+fn find_child_by_field<'a>(node: tree_sitter::Node<'a>, field: &str) -> Option<tree_sitter::Node<'a>> {
+    node.child_by_field_name(field)
+}
+
+#[allow(dead_code)]
+fn find_descendant_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == kind {
+                return Some(child);
+            }
+            if let Some(found) = find_descendant_by_kind(child, kind) {
+                return Some(found);
+            }
+        }
+    }
+    None
+}
+
+// ─── Modifier and attribute extraction ──────────────────────────────
+
+fn extract_rust_modifiers(node: tree_sitter::Node, source: &[u8]) -> Vec<String> {
+    let mut modifiers = Vec::new();
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            match child.kind() {
+                "visibility_modifier" => {
+                    modifiers.push(node_text(child, source).to_string());
+                }
+                "mutable_specifier" => {
+                    modifiers.push("mut".to_string());
+                }
+                _ => {
+                    let text = node_text(child, source);
+                    match text {
+                        "async" | "unsafe" | "const" | "static" | "pub" => {
+                            if !modifiers.iter().any(|m| m == text) {
+                                modifiers.push(text.to_string());
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+    modifiers
+}
+
+fn extract_rust_attributes(node: tree_sitter::Node, source: &[u8]) -> Vec<String> {
+    let mut attributes = Vec::new();
+    // Look for attribute_item nodes that are siblings preceding this node
+    // In tree-sitter-rust, attributes are children of the parent, not of the item itself
+    // But for items inside declaration_list, attributes ARE children of the item
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == "attribute_item" {
+                let text = node_text(child, source).trim();
+                // Strip #[ and ]
+                let inner = text.strip_prefix("#[")
+                    .and_then(|s| s.strip_suffix(']'))
+                    .unwrap_or(text);
+                if !inner.is_empty() {
+                    attributes.push(inner.to_string());
+                }
+            }
+        }
+    }
+
+    // Also check preceding siblings (attributes appear before the item at same level)
+    if let Some(parent) = node.parent() {
+        let node_id = node.id();
+        for i in 0..parent.child_count() {
+            if let Some(child) = parent.child(i) {
+                if child.id() == node_id {
+                    break; // stop when we reach the node itself
+                }
+                if child.kind() == "attribute_item" {
+                    // Check if this attribute is immediately before our node
+                    // (no other named node between them)
+                    let next_named = find_next_named_sibling(parent, i + 1);
+                    if next_named.is_some_and(|n| n.id() == node_id) {
+                        let text = node_text(child, source).trim();
+                        let inner = text.strip_prefix("#[")
+                            .and_then(|s| s.strip_suffix(']'))
+                            .unwrap_or(text);
+                        if !inner.is_empty() && !attributes.contains(&inner.to_string()) {
+                            attributes.push(inner.to_string());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    attributes
+}
+
+fn find_next_named_sibling(parent: tree_sitter::Node, start_idx: usize) -> Option<tree_sitter::Node> {
+    for i in start_idx..parent.child_count() {
+        if let Some(child) = parent.child(i) {
+            if child.is_named() && child.kind() != "attribute_item" && child.kind() != "line_comment" && child.kind() != "block_comment" {
+                return Some(child);
+            }
+        }
+    }
+    None
+}
+
+// ─── impl block name extraction ─────────────────────────────────────
+
+/// Extract (struct_name, trait_name) from an impl_item.
+/// For `impl Foo { ... }` → (Some("Foo"), None)
+/// For `impl Display for Foo { ... }` → (Some("Foo"), Some("Display"))
+fn extract_impl_names(node: tree_sitter::Node, source: &[u8]) -> (Option<String>, Option<String>) {
+    // tree-sitter-rust impl_item fields:
+    //   type: the type being implemented (Foo)
+    //   trait: the trait (if trait impl)
+    let type_node = find_child_by_field(node, "type");
+    let trait_node = find_child_by_field(node, "trait");
+
+    let struct_name = type_node.map(|n| {
+        let text = node_text(n, source).trim();
+        // Strip generic parameters: Foo<T> → Foo
+        text.split('<').next().unwrap_or(text).to_string()
+    });
+
+    let trait_name = trait_node.map(|n| {
+        let text = node_text(n, source).trim();
+        text.split('<').next().unwrap_or(text).to_string()
+    });
+
+    (struct_name, trait_name)
+}
+
+// ─── Definition extraction ──────────────────────────────────────────
+
+fn extract_rust_struct_def(
+    node: tree_sitter::Node, source: &[u8], file_id: u32, parent_name: Option<&str>,
+) -> Option<DefinitionEntry> {
+    let name_node = find_child_by_field(node, "name")?;
+    let name = node_text(name_node, source).to_string();
+    let modifiers = extract_rust_modifiers(node, source);
+    let attributes = extract_rust_attributes(node, source);
+    let sig = build_rust_signature_before_body(node, source);
+
+    Some(DefinitionEntry {
+        file_id, name, kind: DefinitionKind::Struct,
+        line_start: node.start_position().row as u32 + 1,
+        line_end: node.end_position().row as u32 + 1,
+        parent: parent_name.map(|s| s.to_string()),
+        signature: Some(sig), modifiers, attributes, base_types: Vec::new(),
+    })
+}
+
+fn extract_rust_struct_fields(
+    field_list: tree_sitter::Node, source: &[u8], file_id: u32,
+    parent_name: &str, defs: &mut Vec<DefinitionEntry>,
+) {
+    for i in 0..field_list.child_count() {
+        if let Some(child) = field_list.child(i) {
+            if child.kind() == "field_declaration" {
+                let name_node = find_child_by_field(child, "name");
+                if let Some(name_n) = name_node {
+                    let name = node_text(name_n, source).to_string();
+                    let modifiers = extract_rust_modifiers(child, source);
+                    let attributes = extract_rust_attributes(child, source);
+                    let sig = node_text(child, source).split_whitespace()
+                        .collect::<Vec<_>>().join(" ");
+                    defs.push(DefinitionEntry {
+                        file_id, name, kind: DefinitionKind::Field,
+                        line_start: child.start_position().row as u32 + 1,
+                        line_end: child.end_position().row as u32 + 1,
+                        parent: Some(parent_name.to_string()),
+                        signature: Some(sig), modifiers, attributes,
+                        base_types: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn extract_rust_enum_def(
+    node: tree_sitter::Node, source: &[u8], file_id: u32, parent_name: Option<&str>,
+) -> Option<DefinitionEntry> {
+    let name_node = find_child_by_field(node, "name")?;
+    let name = node_text(name_node, source).to_string();
+    let modifiers = extract_rust_modifiers(node, source);
+    let attributes = extract_rust_attributes(node, source);
+    let sig = build_rust_signature_before_body(node, source);
+
+    Some(DefinitionEntry {
+        file_id, name, kind: DefinitionKind::Enum,
+        line_start: node.start_position().row as u32 + 1,
+        line_end: node.end_position().row as u32 + 1,
+        parent: parent_name.map(|s| s.to_string()),
+        signature: Some(sig), modifiers, attributes, base_types: Vec::new(),
+    })
+}
+
+fn extract_rust_enum_variants(
+    variant_list: tree_sitter::Node, source: &[u8], file_id: u32,
+    parent_name: &str, defs: &mut Vec<DefinitionEntry>,
+) {
+    for i in 0..variant_list.child_count() {
+        if let Some(child) = variant_list.child(i) {
+            if child.kind() == "enum_variant" {
+                let name_node = find_child_by_field(child, "name");
+                if let Some(name_n) = name_node {
+                    let name = node_text(name_n, source).to_string();
+                    let attributes = extract_rust_attributes(child, source);
+                    defs.push(DefinitionEntry {
+                        file_id, name, kind: DefinitionKind::EnumMember,
+                        line_start: child.start_position().row as u32 + 1,
+                        line_end: child.end_position().row as u32 + 1,
+                        parent: Some(parent_name.to_string()),
+                        signature: None, modifiers: Vec::new(), attributes,
+                        base_types: Vec::new(),
+                    });
+                }
+            }
+        }
+    }
+}
+
+fn extract_rust_trait_def(
+    node: tree_sitter::Node, source: &[u8], file_id: u32, parent_name: Option<&str>,
+) -> Option<DefinitionEntry> {
+    let name_node = find_child_by_field(node, "name")?;
+    let name = node_text(name_node, source).to_string();
+    let modifiers = extract_rust_modifiers(node, source);
+    let attributes = extract_rust_attributes(node, source);
+    let sig = build_rust_signature_before_body(node, source);
+
+    // Extract supertraits as base_types
+    let mut base_types = Vec::new();
+    if let Some(bounds) = find_child_by_kind(node, "trait_bounds") {
+        for i in 0..bounds.child_count() {
+            if let Some(child) = bounds.child(i) {
+                if child.is_named() {
+                    let bt = node_text(child, source).trim();
+                    let bt_base = bt.split('<').next().unwrap_or(bt);
+                    if !bt_base.is_empty() {
+                        base_types.push(bt_base.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    Some(DefinitionEntry {
+        file_id, name, kind: DefinitionKind::Interface,
+        line_start: node.start_position().row as u32 + 1,
+        line_end: node.end_position().row as u32 + 1,
+        parent: parent_name.map(|s| s.to_string()),
+        signature: Some(sig), modifiers, attributes, base_types,
+    })
+}
+
+fn extract_rust_function_def(
+    node: tree_sitter::Node, source: &[u8], file_id: u32, parent_name: Option<&str>,
+) -> Option<DefinitionEntry> {
+    let name_node = find_child_by_field(node, "name")?;
+    let name = node_text(name_node, source).to_string();
+    let modifiers = extract_rust_modifiers(node, source);
+    let attributes = extract_rust_attributes(node, source);
+    let sig = build_rust_function_signature(node, source);
+
+    // Default kind is Function; caller (impl_item handler) may override to Method/Constructor
+    Some(DefinitionEntry {
+        file_id, name, kind: DefinitionKind::Function,
+        line_start: node.start_position().row as u32 + 1,
+        line_end: node.end_position().row as u32 + 1,
+        parent: parent_name.map(|s| s.to_string()),
+        signature: Some(sig), modifiers, attributes, base_types: Vec::new(),
+    })
+}
+
+fn extract_rust_const_static_def(
+    node: tree_sitter::Node, source: &[u8], file_id: u32, parent_name: Option<&str>,
+    _is_static: bool,
+) -> Option<DefinitionEntry> {
+    let name_node = find_child_by_field(node, "name")?;
+    let name = node_text(name_node, source).to_string();
+    let modifiers = extract_rust_modifiers(node, source);
+    let attributes = extract_rust_attributes(node, source);
+
+    // Build signature: everything up to the value (= ...)
+    let sig = {
+        let start = node.start_byte();
+        let mut end = node.end_byte();
+        // Find '=' to truncate the value part
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i) {
+                if node_text(child, source) == "=" {
+                    end = child.start_byte();
+                    break;
+                }
+            }
+        }
+        let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+        text.split_whitespace().collect::<Vec<_>>().join(" ")
+    };
+
+    Some(DefinitionEntry {
+        file_id, name, kind: DefinitionKind::Variable,
+        line_start: node.start_position().row as u32 + 1,
+        line_end: node.end_position().row as u32 + 1,
+        parent: parent_name.map(|s| s.to_string()),
+        signature: Some(sig), modifiers, attributes, base_types: Vec::new(),
+    })
+}
+
+fn extract_rust_type_alias_def(
+    node: tree_sitter::Node, source: &[u8], file_id: u32, parent_name: Option<&str>,
+) -> Option<DefinitionEntry> {
+    let name_node = find_child_by_field(node, "name")?;
+    let name = node_text(name_node, source).to_string();
+    let modifiers = extract_rust_modifiers(node, source);
+    let attributes = extract_rust_attributes(node, source);
+    let sig = node_text(node, source).split_whitespace()
+        .collect::<Vec<_>>().join(" ");
+
+    Some(DefinitionEntry {
+        file_id, name, kind: DefinitionKind::TypeAlias,
+        line_start: node.start_position().row as u32 + 1,
+        line_end: node.end_position().row as u32 + 1,
+        parent: parent_name.map(|s| s.to_string()),
+        signature: Some(sig), modifiers, attributes, base_types: Vec::new(),
+    })
+}
+
+// ─── Signature building ─────────────────────────────────────────────
+
+fn build_rust_signature_before_body(node: tree_sitter::Node, source: &[u8]) -> String {
+    let start = node.start_byte();
+    let mut end = node.end_byte();
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            match child.kind() {
+                "field_declaration_list" | "enum_variant_list" | "declaration_list" | "{" => {
+                    end = child.start_byte();
+                    break;
+                }
+                _ => {}
+            }
+        }
+    }
+    let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn build_rust_function_signature(node: tree_sitter::Node, source: &[u8]) -> String {
+    let start = node.start_byte();
+    let mut end = node.end_byte();
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            if child.kind() == "block" || child.kind() == ";" {
+                end = child.start_byte();
+                break;
+            }
+        }
+    }
+    let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+// ─── Field type parsing ─────────────────────────────────────────────
+
+/// Parse a Rust field signature like "pub name: String" into (field_name, base_type).
+fn parse_rust_field_type(sig: &str) -> Option<(String, String)> {
+    let colon_pos = sig.find(':')?;
+    let before_colon = sig[..colon_pos].trim();
+    let after_colon = sig[colon_pos + 1..].trim();
+
+    // Field name is the last word before the colon (may have `pub` prefix)
+    let name = before_colon.split_whitespace().last()?.to_string();
+    // Base type: strip generics
+    let base_type = after_colon.split('<').next().unwrap_or(after_colon)
+        .split('(').next().unwrap_or(after_colon)
+        .trim().to_string();
+
+    if !name.is_empty() && !base_type.is_empty() {
+        Some((name, base_type))
+    } else {
+        None
+    }
+}
+
+// ─── Call site extraction ───────────────────────────────────────────
+
+fn extract_rust_call_sites(
+    method_node: tree_sitter::Node,
+    source: &[u8],
+    parent_name: &str,
+    field_types: &HashMap<String, String>,
+) -> Vec<CallSite> {
+    let mut calls = Vec::new();
+
+    let body = find_child_by_kind(method_node, "block");
+    if let Some(body_node) = body {
+        walk_rust_for_calls(body_node, source, parent_name, field_types, &mut calls);
+    }
+
+    calls.sort_by(|a, b| a.line.cmp(&b.line)
+        .then_with(|| a.method_name.cmp(&b.method_name))
+        .then_with(|| a.receiver_type.cmp(&b.receiver_type)));
+    calls.dedup_by(|a, b| a.line == b.line && a.method_name == b.method_name && a.receiver_type == b.receiver_type);
+
+    calls
+}
+
+fn walk_rust_for_calls(
+    node: tree_sitter::Node,
+    source: &[u8],
+    parent_name: &str,
+    field_types: &HashMap<String, String>,
+    calls: &mut Vec<CallSite>,
+) {
+    match node.kind() {
+        "call_expression" => {
+            if let Some(call) = extract_rust_call(node, source, parent_name, field_types) {
+                calls.push(call);
+            }
+            // Recurse into all children for chained/nested calls
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i) {
+                    walk_rust_for_calls(child, source, parent_name, field_types, calls);
+                }
+            }
+            return;
+        }
+        // Skip macro invocations
+        "macro_invocation" => return,
+        _ => {}
+    }
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            walk_rust_for_calls(child, source, parent_name, field_types, calls);
+        }
+    }
+}
+
+fn extract_rust_call(
+    node: tree_sitter::Node,
+    source: &[u8],
+    parent_name: &str,
+    field_types: &HashMap<String, String>,
+) -> Option<CallSite> {
+    // call_expression: child(0) = function expression, child(1) = arguments
+    let func = node.child(0)?;
+    let line = node.start_position().row as u32 + 1;
+
+    match func.kind() {
+        // Simple function call: my_function(args)
+        "identifier" => {
+            let method_name = node_text(func, source).to_string();
+            Some(CallSite { method_name, receiver_type: None, line, receiver_is_generic: false })
+        }
+        // Method call: receiver.method(args) — tree-sitter-rust uses field_expression
+        "field_expression" => {
+            extract_rust_field_expression_call(func, source, parent_name, field_types, line)
+        }
+        // Static/path call: Type::method(args) or module::function(args)
+        "scoped_identifier" => {
+            extract_rust_scoped_call(func, source, line)
+        }
+        // Generic function call: function::<T>(args)
+        "generic_function" => {
+            // generic_function has child(0) = function identifier/scoped_identifier
+            let inner_func = func.child(0)?;
+            match inner_func.kind() {
+                "identifier" => {
+                    let method_name = node_text(inner_func, source).to_string();
+                    Some(CallSite { method_name, receiver_type: None, line, receiver_is_generic: false })
+                }
+                "scoped_identifier" => {
+                    extract_rust_scoped_call(inner_func, source, line)
+                }
+                "field_expression" => {
+                    extract_rust_field_expression_call(inner_func, source, parent_name, field_types, line)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn extract_rust_field_expression_call(
+    node: tree_sitter::Node,
+    source: &[u8],
+    parent_name: &str,
+    field_types: &HashMap<String, String>,
+    line: u32,
+) -> Option<CallSite> {
+    // field_expression: value.field
+    let value_node = find_child_by_field(node, "value").or_else(|| node.child(0))?;
+    let field_node = find_child_by_field(node, "field").or_else(|| {
+        // Last named child is typically the field
+        let count = node.child_count();
+        if count > 0 { node.child(count - 1) } else { None }
+    })?;
+
+    let method_name = node_text(field_node, source).to_string();
+    let receiver_type = resolve_rust_receiver(value_node, source, parent_name, field_types);
+
+    Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
+}
+
+fn extract_rust_scoped_call(
+    node: tree_sitter::Node,
+    source: &[u8],
+    line: u32,
+) -> Option<CallSite> {
+    // scoped_identifier: path::name, e.g., HashMap::new
+    let name_node = find_child_by_field(node, "name")?;
+    let method_name = node_text(name_node, source).to_string();
+
+    let path_node = find_child_by_field(node, "path")?;
+    let path_text = node_text(path_node, source).trim();
+    // Get the last segment of the path as the receiver type
+    let receiver = path_text.rsplit("::").next().unwrap_or(path_text);
+    let receiver_base = receiver.split('<').next().unwrap_or(receiver).trim();
+
+    let receiver_type = if !receiver_base.is_empty() {
+        Some(receiver_base.to_string())
+    } else {
+        None
+    };
+
+    Some(CallSite { method_name, receiver_type, line, receiver_is_generic: false })
+}
+
+fn resolve_rust_receiver(
+    receiver: tree_sitter::Node,
+    source: &[u8],
+    parent_name: &str,
+    field_types: &HashMap<String, String>,
+) -> Option<String> {
+    let text = node_text(receiver, source).trim();
+
+    match receiver.kind() {
+        "self" | "identifier" if text == "self" => {
+            if parent_name.is_empty() { None } else { Some(parent_name.to_string()) }
+        }
+        "identifier" => {
+            // Try to resolve via field types
+            if let Some(type_name) = field_types.get(text) {
+                Some(type_name.clone())
+            } else if text.chars().next().is_some_and(|c| c.is_uppercase()) {
+                Some(text.to_string())
+            } else {
+                Some(text.to_string())
+            }
+        }
+        "field_expression" => {
+            // self.field.method() — extract the field name, look up type
+            let value = find_child_by_field(receiver, "value").or_else(|| receiver.child(0));
+            let field = find_child_by_field(receiver, "field");
+
+            if let (Some(val), Some(fld)) = (value, field) {
+                let val_text = node_text(val, source).trim();
+                let fld_text = node_text(fld, source).trim();
+
+                if val_text == "self" || val.kind() == "self" {
+                    // self.field → look up field type
+                    if let Some(type_name) = field_types.get(fld_text) {
+                        return Some(type_name.clone());
+                    }
+                    return Some(fld_text.to_string());
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+// ─── Code stats computation ─────────────────────────────────────────
+
+fn compute_code_stats_rust(method_node: tree_sitter::Node, source: &[u8]) -> CodeStats {
+    let mut stats = CodeStats::default();
+    stats.cyclomatic_complexity = 1; // base complexity
+
+    // Count parameters (excluding self/&self/&mut self)
+    stats.param_count = count_rust_parameters(method_node, source);
+
+    // Walk body
+    if let Some(body) = find_child_by_kind(method_node, "block") {
+        walk_code_stats_rust(body, source, 0, &mut stats);
+    }
+
+    stats
+}
+
+fn count_rust_parameters(method_node: tree_sitter::Node, source: &[u8]) -> u8 {
+    let params = match find_child_by_field(method_node, "parameters")
+        .or_else(|| find_child_by_kind(method_node, "parameters"))
+    {
+        Some(p) => p,
+        None => return 0,
+    };
+
+    let mut count = 0u8;
+    for i in 0..params.child_count() {
+        if let Some(child) = params.child(i) {
+            match child.kind() {
+                "parameter" => {
+                    count += 1;
+                }
+                "self_parameter" => {
+                    // self, &self, &mut self — do NOT count
+                }
+                _ => {
+                    // Check for `self` text in case tree-sitter uses different node kind
+                    let text = node_text(child, source).trim();
+                    if child.is_named() && text != "self" && text != "&self" && text != "&mut self" && text != "mut self" {
+                        // Only count if it looks like a parameter (has a colon for type annotation)
+                        if text.contains(':') {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+fn walk_code_stats_rust(node: tree_sitter::Node, source: &[u8], nesting: u32, stats: &mut CodeStats) {
+    let kind = node.kind();
+
+    match kind {
+        // Structural: +1 cyclomatic, +1+nesting cognitive
+        "if_expression" | "for_expression" | "while_expression" | "loop_expression"
+        | "match_expression" => {
+            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+            stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1 + nesting as u16);
+        }
+
+        // else handling
+        "else_clause" => {
+            let is_else_if = (0..node.child_count())
+                .any(|i| node.child(i).is_some_and(|c| c.kind() == "if_expression"));
+            if !is_else_if {
+                stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+            }
+        }
+
+        // Logical operators
+        "binary_expression" => {
+            if let Some(op) = node.child(1) {
+                let op_text = node_text(op, source);
+                // tree-sitter-rust uses "&&" and "||" as node text
+                let op_kind = op.kind();
+                if op_kind == "&&" || op_kind == "||" || op_text == "&&" || op_text == "||" {
+                    stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+                    let parent_same_op = node.parent()
+                        .filter(|p| p.kind() == "binary_expression")
+                        .and_then(|p| p.child(1))
+                        .map(|pop| pop.kind() == op_kind)
+                        .unwrap_or(false);
+                    if !parent_same_op {
+                        stats.cognitive_complexity = stats.cognitive_complexity.saturating_add(1);
+                    }
+                }
+            }
+        }
+
+        // Match arms: +1 cyclomatic each (match_expression already counted)
+        "match_arm" => {
+            stats.cyclomatic_complexity = stats.cyclomatic_complexity.saturating_add(1);
+        }
+
+        // ? operator: counts as early return
+        "try_expression" => {
+            stats.return_count = stats.return_count.saturating_add(1);
+        }
+
+        // Return statements
+        "return_expression" => {
+            stats.return_count = stats.return_count.saturating_add(1);
+        }
+
+        // Closures
+        "closure_expression" => {
+            stats.lambda_count = stats.lambda_count.saturating_add(1);
+        }
+
+        _ => {}
+    }
+
+    // Nesting for children
+    let body_nesting = match kind {
+        "if_expression" | "for_expression" | "while_expression" | "loop_expression"
+        | "match_expression" | "closure_expression" => nesting + 1,
+        _ => nesting,
+    };
+
+    stats.max_nesting_depth = stats.max_nesting_depth.max(body_nesting as u8);
+
+    // Recurse with else-if nesting rules
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            let child_nesting = match (kind, child.kind()) {
+                ("if_expression", "else_clause") => nesting,     // else at same level
+                ("else_clause", "if_expression") => nesting,     // else-if continuation
+                ("else_clause", _) => nesting + 1,               // else body nested
+                _ => body_nesting,
+            };
+            walk_code_stats_rust(child, source, child_nesting, stats);
+        }
+    }
+}

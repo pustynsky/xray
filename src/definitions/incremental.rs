@@ -16,6 +16,8 @@ use super::parser_csharp::parse_csharp_definitions;
 use super::parser_typescript::parse_typescript_definitions;
 #[cfg(feature = "lang-sql")]
 use super::parser_sql::parse_sql_definitions;
+#[cfg(feature = "lang-rust")]
+use super::parser_rust::parse_rust_definitions;
 
 /// Update definitions for a single file (incremental).
 /// Removes old definitions for the file, parses it again, adds new ones.
@@ -74,6 +76,12 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
         #[cfg(feature = "lang-sql")]
         "sql" => {
             parse_sql_definitions(&content, file_id)
+        }
+        #[cfg(feature = "lang-rust")]
+        "rs" => {
+            let mut rs_parser = tree_sitter::Parser::new();
+            rs_parser.set_language(&tree_sitter_rust::LANGUAGE.into()).ok();
+            parse_rust_definitions(&mut rs_parser, &content, file_id)
         }
         _ => (Vec::<DefinitionEntry>::new(), Vec::<(usize, Vec<CallSite>)>::new(), Vec::<(usize, CodeStats)>::new()),
     };
