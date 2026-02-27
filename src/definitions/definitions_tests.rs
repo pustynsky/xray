@@ -88,9 +88,8 @@ fn test_definition_index_serialization() {
         }],
         name_index: { let mut m = HashMap::new(); m.insert("testclass".to_string(), vec![0]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0]); m },
-        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     let encoded = bincode::serialize(&index).unwrap();
@@ -346,7 +345,7 @@ fn test_compact_removes_tombstones() {
     use std::path::PathBuf;
 
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        root: ".".to_string(), extensions: vec!["cs".to_string()],
         files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
         definitions: vec![
             DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 10, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
@@ -355,10 +354,9 @@ fn test_compact_removes_tombstones() {
         ],
         name_index: { let mut m = HashMap::new(); m.insert("classa".to_string(), vec![0]); m.insert("methoda".to_string(), vec![1]); m.insert("classb".to_string(), vec![2]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 2]); m.insert(DefinitionKind::Method, vec![1]); m },
-        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0, 1]); m.insert(1, vec![2]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     // Simulate removing file0's definitions from secondary indexes (but not from Vec)
@@ -393,17 +391,16 @@ fn test_compact_no_tombstones_is_noop() {
     use std::path::PathBuf;
 
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        root: ".".to_string(), extensions: vec!["cs".to_string()],
         files: vec!["file0.cs".to_string()],
         definitions: vec![
             DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 10, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
         ],
         name_index: { let mut m = HashMap::new(); m.insert("classa".to_string(), vec![0]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0]); m },
-        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m },
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     compact_definitions(&mut index);
@@ -419,7 +416,7 @@ fn test_compact_remaps_method_calls_and_code_stats() {
     use std::path::PathBuf;
 
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        root: ".".to_string(), extensions: vec!["cs".to_string()],
         files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
         definitions: vec![
             DefinitionEntry { file_id: 0, name: "MethodA".to_string(), kind: DefinitionKind::Method, line_start: 1, line_end: 5, parent: Some("ClassA".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
@@ -427,7 +424,6 @@ fn test_compact_remaps_method_calls_and_code_stats() {
         ],
         name_index: { let mut m = HashMap::new(); m.insert("methoda".to_string(), vec![0]); m.insert("methodb".to_string(), vec![1]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Method, vec![0, 1]); m },
-        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
         method_calls: {
@@ -442,7 +438,7 @@ fn test_compact_remaps_method_calls_and_code_stats() {
             m.insert(1, CodeStats { cyclomatic_complexity: 5, cognitive_complexity: 3, max_nesting_depth: 2, param_count: 2, return_count: 1, call_count: 3, lambda_count: 0 });
             m
         },
-        parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     // Remove file0 definitions (MethodA at idx 0)
@@ -472,7 +468,7 @@ fn test_compact_auto_triggers_at_threshold() {
 
     // Create an index with 4 definitions across 2 files
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        root: ".".to_string(), extensions: vec!["cs".to_string()],
         files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
         definitions: vec![
             DefinitionEntry { file_id: 0, name: "A".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 1, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
@@ -480,10 +476,9 @@ fn test_compact_auto_triggers_at_threshold() {
         ],
         name_index: { let mut m = HashMap::new(); m.insert("a".to_string(), vec![0]); m.insert("b".to_string(), vec![1]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 1]); m },
-        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     // Simulate multiple incremental updates to the same file to grow tombstones
@@ -522,7 +517,7 @@ fn tmp_dir_for_test() -> std::path::PathBuf {
 fn test_compact_remaps_selector_index_and_template_children() {
 
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["ts".to_string()],
+        root: ".".to_string(), extensions: vec!["ts".to_string()],
         files: vec!["comp-a.ts".to_string(), "comp-b.ts".to_string()],
         definitions: vec![
             DefinitionEntry { file_id: 0, name: "CompA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
@@ -530,12 +525,11 @@ fn test_compact_remaps_selector_index_and_template_children() {
         ],
         name_index: { let mut m = HashMap::new(); m.insert("compa".to_string(), vec![0]); m.insert("compb".to_string(), vec![1]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 1]); m },
-        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("comp-a.ts"), 0); m.insert(PathBuf::from("comp-b.ts"), 1); m },
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(),
         selector_index: { let mut m = HashMap::new(); m.insert("app-comp-a".to_string(), vec![0]); m.insert("app-comp-b".to_string(), vec![1]); m },
         template_children: { let mut m = HashMap::new(); m.insert(0, vec!["app-child".to_string()]); m.insert(1, vec!["app-other".to_string()]); m },
+        ..Default::default()
     };
 
     // Remove file0 (CompA at idx 0)

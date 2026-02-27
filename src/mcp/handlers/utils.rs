@@ -1103,10 +1103,10 @@ mod tests {
 
     /// Helper: create a minimal HandlerContext with a given current_branch.
     fn make_ctx_with_branch(branch: Option<&str>) -> HandlerContext {
-        use std::sync::atomic::AtomicBool;
-        use crate::{ContentIndex, TrigramIndex};
+        
+        use crate::ContentIndex;
 
-        let index = ContentIndex {
+        let _index = ContentIndex {
             root: ".".to_string(),
             ..Default::default()
         };

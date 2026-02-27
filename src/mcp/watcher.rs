@@ -574,7 +574,7 @@ fn reconcile_content_index(
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use crate::TrigramIndex;
+    
 
     fn make_test_index() -> ContentIndex {
         let mut idx = HashMap::new();

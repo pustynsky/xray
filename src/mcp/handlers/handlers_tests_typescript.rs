@@ -5,7 +5,6 @@ use super::*;
 use super::handlers_test_utils::cleanup_tmp;
 use crate::index::build_trigram_index;
 use crate::Posting;
-use crate::TrigramIndex;
 use crate::definitions::DefinitionEntry;
 use crate::definitions::*;
 use std::collections::HashMap;
@@ -243,16 +242,8 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
     HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(),
         server_ext: "ts".to_string(),
-        metrics: false,
-        index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     }
 }
 
@@ -357,14 +348,7 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         def_index: Some(Arc::new(RwLock::new(def_index))),
         server_dir: tmp_dir.to_string_lossy().to_string(),
         server_ext: "ts".to_string(),
-        metrics: false,
-        index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
     (ctx, tmp_dir)
 }
@@ -831,14 +815,8 @@ fn test_ts_search_callers_inject_support() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "ts".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        server_ext: "ts".to_string(),
+        ..Default::default()
     };
 
     // search_callers up: who calls getUser in UserService?
@@ -954,14 +932,8 @@ fn test_mixed_cs_ts_definitions_query() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "cs,ts".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        server_ext: "cs,ts".to_string(),
+        ..Default::default()
     };
 
     // Query by name — should find both C# and TS versions
@@ -1095,14 +1067,8 @@ fn test_mixed_cs_ts_callers_ext_filter() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "cs,ts".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        server_ext: "cs,ts".to_string(),
+        ..Default::default()
     };
 
     // Without ext filter — should find callers from both languages
@@ -1200,14 +1166,8 @@ fn test_tsx_file_support_through_handler() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "ts,tsx".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        server_ext: "ts,tsx".to_string(),
+        ..Default::default()
     };
 
     // Find class in .tsx file
@@ -1294,13 +1254,7 @@ fn test_ts_incremental_update_through_handler() {
         def_index: Some(Arc::new(RwLock::new(def_index))),
         server_dir: tmp_dir.to_string_lossy().to_string(),
         server_ext: "ts".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     // Verify OldService is found
@@ -1425,14 +1379,8 @@ fn test_ts_search_definitions_exclude_dir() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "ts".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        server_ext: "ts".to_string(),
+        ..Default::default()
     };
 
     // Exclude __tests__ directory
@@ -1616,14 +1564,8 @@ fn test_ts_direction_down_with_typed_local_variable() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "ts".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        server_ext: "ts".to_string(),
+        ..Default::default()
     };
 
     // direction=down from Orchestrator.run() should find DataProcessor.transform()
