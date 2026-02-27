@@ -188,6 +188,17 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
     }
     // ─── End Angular template tree ───────────────────────────────────
 
+    let caller_ctx = CallerTreeContext {
+        content_index: &content_index,
+        def_idx: &def_idx,
+        ext_filter: &ext_filter,
+        exclude_dir: &exclude_dir,
+        exclude_file: &exclude_file,
+        resolve_interfaces,
+        limits: &limits,
+        node_count: &node_count,
+    };
+
     if direction == "up" {
         let mut visited: HashSet<String> = HashSet::new();
         let tree = build_caller_tree(
@@ -195,15 +206,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             class_filter.as_deref(),
             max_depth,
             0,
-            &content_index,
-            &def_idx,
-            &ext_filter,
-            &exclude_dir,
-            &exclude_file,
-            resolve_interfaces,
+            &caller_ctx,
             &mut visited,
-            &limits,
-            &node_count,
         );
 
         // Dedup: remove duplicate nodes at root level (can happen with resolveInterfaces)
@@ -248,13 +252,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             class_filter.as_deref(),
             max_depth,
             0,
-            &def_idx,
-            &ext_filter,
-            &exclude_dir,
-            &exclude_file,
+            &caller_ctx,
             &mut HashSet::new(),
-            &limits,
-            &node_count,
         );
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
@@ -315,6 +314,19 @@ struct CallerLimits {
     max_total_nodes: usize,
 }
 
+/// Shared context for caller/callee tree building.
+/// Reduces parameter count from 13 to 6 in build_caller_tree.
+struct CallerTreeContext<'a> {
+    content_index: &'a ContentIndex,
+    def_idx: &'a DefinitionIndex,
+    ext_filter: &'a str,
+    exclude_dir: &'a [String],
+    exclude_file: &'a [String],
+    resolve_interfaces: bool,
+    limits: &'a CallerLimits,
+    node_count: &'a AtomicUsize,
+}
+
 /// Find the containing method for a given file_id and line number in the definition index.
 /// Returns `(name, parent, line_start, definition_index)`.
 pub(crate) fn find_containing_method(
@@ -344,6 +356,155 @@ pub(crate) fn find_containing_method(
     }
 
     best.map(|(di, d)| (d.name.clone(), d.parent.clone(), d.line_start, di))
+}
+
+/// Pre-compute which content index file_ids contain the parent class token.
+/// Filters out files that use the same method name but from a different class.
+/// Handles class name, interface name (IClassName), DI implementations, and trigram substring matching.
+fn resolve_parent_file_ids(
+    parent_class: &str,
+    ctx: &CallerTreeContext,
+) -> Option<HashSet<u32>> {
+    let content_index = ctx.content_index;
+    let def_idx = ctx.def_idx;
+
+    let cls_lower = parent_class.to_lowercase();
+    let mut file_ids: HashSet<u32> = HashSet::new();
+
+    // Add files containing the class name directly
+    if let Some(postings) = content_index.index.get(&cls_lower) {
+        file_ids.extend(postings.iter().map(|p| p.file_id));
+    }
+
+    // Also check for interface name (IClassName pattern for DI)
+    let interface_name = format!("i{}", cls_lower);
+    if let Some(postings) = content_index.index.get(&interface_name) {
+        file_ids.extend(postings.iter().map(|p| p.file_id));
+    }
+
+    // Fuzzy DI: find implementations of I{ClassName} via base_type_index
+    // and add files containing those implementation class names
+    let impls = find_implementations_of_interface(def_idx, &interface_name);
+    for impl_lower in &impls {
+        if let Some(postings) = content_index.index.get(impl_lower) {
+            file_ids.extend(postings.iter().map(|p| p.file_id));
+        }
+    }
+    // Also find implementations of the class itself (if cls IS an interface)
+    let impls_of_cls = find_implementations_of_interface(def_idx, &cls_lower);
+    for impl_lower in &impls_of_cls {
+        if let Some(postings) = content_index.index.get(impl_lower) {
+            file_ids.extend(postings.iter().map(|p| p.file_id));
+        }
+    }
+
+    // Trigram substring matching: find files where class name appears as a
+    // SUBSTRING of another token (e.g. m_storageIndexManager, _storageIndexManager).
+    collect_substring_file_ids(&cls_lower, content_index, &mut file_ids);
+    collect_substring_file_ids(&interface_name, content_index, &mut file_ids);
+
+    if file_ids.is_empty() { None } else { Some(file_ids) }
+}
+
+/// Expand caller tree via interface implementations (direction = "up", depth == 0 only).
+/// Finds related interfaces for the target class, then recursively searches for callers
+/// of the method through interface implementations.
+fn expand_interface_callers(
+    method_name: &str,
+    method_lower: &str,
+    parent_class: Option<&str>,
+    max_depth: usize,
+    ctx: &CallerTreeContext,
+    visited: &mut HashSet<String>,
+) -> Vec<Value> {
+    let def_idx = ctx.def_idx;
+    let name_indices = match def_idx.name_index.get(method_lower) {
+        Some(indices) => indices,
+        None => return Vec::new(),
+    };
+
+    // Pre-compute which interfaces are related to the target class
+    let related_interfaces: HashSet<String> = if let Some(pc) = parent_class {
+        let pc_lower = pc.to_lowercase();
+        let mut related = HashSet::new();
+        // I-prefix variant: Foo → IFoo
+        related.insert(format!("i{}", pc_lower));
+        // Reverse: if target is IFoo, also consider Foo-related interfaces
+        if pc_lower.starts_with('i') && pc_lower.len() > 1 {
+            related.insert(pc_lower[1..].to_string());
+        }
+        // Target class's own base_types (interfaces it implements)
+        if let Some(indices) = def_idx.name_index.get(&pc_lower) {
+            for &idx in indices {
+                if let Some(d) = def_idx.definitions.get(idx as usize)
+                    && matches!(d.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record) {
+                        for bt in &d.base_types {
+                            related.insert(bt.to_lowercase());
+                        }
+                    }
+            }
+        }
+        // Find implementations of the target class via base_type_index
+        let impls = find_implementations_of_interface(def_idx, &pc_lower);
+        for impl_name in &impls {
+            related.insert(impl_name.clone());
+        }
+        // Also find implementations of I{ClassName}
+        let iface_name = format!("i{}", pc_lower);
+        let impls_iface = find_implementations_of_interface(def_idx, &iface_name);
+        for impl_name in &impls_iface {
+            related.insert(impl_name.clone());
+        }
+        // Also include the target class itself (it could be an interface)
+        related.insert(pc_lower);
+        related
+    } else {
+        HashSet::new() // no filter when no parent_class
+    };
+
+    let mut callers: Vec<Value> = Vec::new();
+
+    for &di in name_indices {
+        if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
+        if let Some(def) = def_idx.definitions.get(di as usize)
+            && let Some(ref parent_class_name) = def.parent {
+                let parent_lower = parent_class_name.to_lowercase();
+
+                // Skip interfaces that are NOT related to the target class
+                if parent_class.is_some() && !related_interfaces.contains(&parent_lower) {
+                    continue;
+                }
+
+                if let Some(parent_indices) = def_idx.name_index.get(&parent_lower) {
+                    for &pi in parent_indices {
+                        if let Some(parent_def) = def_idx.definitions.get(pi as usize)
+                            && parent_def.kind == DefinitionKind::Interface
+                                && let Some(impl_indices) = def_idx.base_type_index.get(&parent_lower) {
+                                    for &ii in impl_indices {
+                                        if let Some(impl_def) = def_idx.definitions.get(ii as usize)
+                                            && (impl_def.kind == DefinitionKind::Class || impl_def.kind == DefinitionKind::Struct) {
+                                                let no_iface_ctx = CallerTreeContext {
+                                                    resolve_interfaces: false,
+                                                    ..*ctx
+                                                };
+                                                let impl_callers = build_caller_tree(
+                                                    method_name,
+                                                    Some(&impl_def.name),
+                                                    max_depth,
+                                                    1, // current_depth = 1 (interface expansion counts as one level)
+                                                    &no_iface_ctx,
+                                                    visited,
+                                                );
+                                                callers.extend(impl_callers);
+                                            }
+                                    }
+                                }
+                    }
+                }
+            }
+    }
+
+    callers
 }
 
 /// Collect file_ids from the content index where `term` appears as a SUBSTRING of
@@ -566,28 +727,27 @@ fn verify_call_site_target(
 /// we pass the parent class of the method being searched so that we only find
 /// callers that actually reference that specific class (not any unrelated class
 /// with a method of the same name).
-#[allow(clippy::too_many_arguments)]
 fn build_caller_tree(
     method_name: &str,
     parent_class: Option<&str>,
     max_depth: usize,
     current_depth: usize,
-    content_index: &ContentIndex,
-    def_idx: &DefinitionIndex,
-    ext_filter: &str,
-    exclude_dir: &[String],
-    exclude_file: &[String],
-    resolve_interfaces: bool,
+    ctx: &CallerTreeContext,
     visited: &mut HashSet<String>,
-    limits: &CallerLimits,
-    node_count: &AtomicUsize,
 ) -> Vec<Value> {
     if current_depth >= max_depth {
         return Vec::new();
     }
-    if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes {
+    if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes {
         return Vec::new();
     }
+
+    let content_index = ctx.content_index;
+    let def_idx = ctx.def_idx;
+    let ext_filter = ctx.ext_filter;
+    let exclude_dir = ctx.exclude_dir;
+    let exclude_file = ctx.exclude_file;
+    let resolve_interfaces = ctx.resolve_interfaces;
 
     let method_lower = method_name.to_lowercase();
 
@@ -623,52 +783,8 @@ fn build_caller_tree(
         None => return Vec::new(),
     };
 
-    // Pre-compute: which content index file_ids contain the parent class token?
-    // This filters out files that use the same method name but from a different class.
-    // Also check for interface name (IClassName) to handle DI scenarios.
     let parent_file_ids: Option<HashSet<u32>> = parent_class.and_then(|cls| {
-        let cls_lower = cls.to_lowercase();
-        let mut file_ids: HashSet<u32> = HashSet::new();
-
-        // Add files containing the class name directly
-        if let Some(postings) = content_index.index.get(&cls_lower) {
-            file_ids.extend(postings.iter().map(|p| p.file_id));
-        }
-
-        // Also check for interface name (IClassName pattern for DI)
-        let interface_name = format!("i{}", cls_lower);
-        if let Some(postings) = content_index.index.get(&interface_name) {
-            file_ids.extend(postings.iter().map(|p| p.file_id));
-        }
-
-        // Fuzzy DI: find implementations of I{ClassName} via base_type_index
-        // and add files containing those implementation class names
-        let impls = find_implementations_of_interface(def_idx, &interface_name);
-        for impl_lower in &impls {
-            if let Some(postings) = content_index.index.get(impl_lower) {
-                file_ids.extend(postings.iter().map(|p| p.file_id));
-            }
-        }
-        // Also find implementations of the class itself (if cls IS an interface)
-        let impls_of_cls = find_implementations_of_interface(def_idx, &cls_lower);
-        for impl_lower in &impls_of_cls {
-            if let Some(postings) = content_index.index.get(impl_lower) {
-                file_ids.extend(postings.iter().map(|p| p.file_id));
-            }
-        }
-
-        // Note: we intentionally do NOT expand pre-filter by base_types (interfaces).
-        // Common interfaces (IDisposable, IEnumerable, etc.) would add thousands of
-        // irrelevant files, disabling the pre-filter. Inheritance is already verified
-        // in verify_call_site_target() via target_base_types.
-
-        // Trigram substring matching: find files where class name appears as a
-        // SUBSTRING of another token (e.g. m_storageIndexManager, _storageIndexManager).
-        // Uses the trigram index for O(k) lookup instead of O(n) linear scan.
-        collect_substring_file_ids(&cls_lower, content_index, &mut file_ids);
-        collect_substring_file_ids(&interface_name, content_index, &mut file_ids);
-
-        if file_ids.is_empty() { None } else { Some(file_ids) }
+        resolve_parent_file_ids(cls, ctx)
     });
 
     let mut callers: Vec<Value> = Vec::new();
@@ -685,10 +801,10 @@ fn build_caller_tree(
     }
 
     for posting in postings {
-        if callers.len() >= limits.max_callers_per_level {
+        if callers.len() >= ctx.limits.max_callers_per_level {
             break;
         }
-        if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes {
+        if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes {
             break;
         }
 
@@ -722,8 +838,8 @@ fn build_caller_tree(
         };
 
         for &line in &posting.lines {
-            if callers.len() >= limits.max_callers_per_level { break; }
-            if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
+            if callers.len() >= ctx.limits.max_callers_per_level { break; }
+            if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
             if definition_locations.contains(&(def_fid, line)) {
                 continue;
@@ -756,7 +872,7 @@ fn build_caller_tree(
                 }
                 seen_callers.insert(caller_key.clone());
 
-                node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                ctx.node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
                 // Recurse with the CALLER's parent class as the class filter.
                 // This ensures that at depth > 0, we search for callers of
@@ -768,15 +884,8 @@ fn build_caller_tree(
                     caller_parent.as_deref(),
                     max_depth,
                     current_depth + 1,
-                    content_index,
-                    def_idx,
-                    ext_filter,
-                    exclude_dir,
-                    exclude_file,
-                    resolve_interfaces,
+                    ctx,
                     visited,
-                    limits,
-                    node_count,
                 );
 
                 let mut node = json!({
@@ -798,98 +907,13 @@ fn build_caller_tree(
         }
     }
 
-    // Interface resolution: expand to find callers via interface implementations.
-    // IMPORTANT: Only expand interfaces that are related to the target class.
-    // Without this filter, if two unrelated interfaces (e.g. IDataMigrator and
-    // IDatabaseSession) both define the same method name, we would incorrectly
-    // find callers of the wrong interface's implementations.
-    if resolve_interfaces && current_depth == 0
-        && let Some(name_indices) = def_idx.name_index.get(&method_lower) {
-            // Pre-compute which interfaces are related to the target class:
-            // 1. The interface variant "I{ClassName}" of the target class
-            // 2. Interfaces listed in the target class's base_types
-            let related_interfaces: HashSet<String> = if let Some(pc) = parent_class {
-                let pc_lower = pc.to_lowercase();
-                let mut related = HashSet::new();
-                // I-prefix variant: Foo → IFoo
-                related.insert(format!("i{}", pc_lower));
-                // Reverse: if target is IFoo, also consider Foo-related interfaces
-                if pc_lower.starts_with('i') && pc_lower.len() > 1 {
-                    related.insert(pc_lower[1..].to_string());
-                }
-                // Target class's own base_types (interfaces it implements)
-                if let Some(indices) = def_idx.name_index.get(&pc_lower) {
-                    for &idx in indices {
-                        if let Some(d) = def_idx.definitions.get(idx as usize)
-                            && matches!(d.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record) {
-                                for bt in &d.base_types {
-                                    related.insert(bt.to_lowercase());
-                                }
-                            }
-                    }
-                }
-                // Find implementations of the target class via base_type_index
-                // (if it's an interface, this finds concrete classes)
-                let impls = find_implementations_of_interface(def_idx, &pc_lower);
-                for impl_name in &impls {
-                    related.insert(impl_name.clone());
-                }
-                // Also find implementations of I{ClassName}
-                let iface_name = format!("i{}", pc_lower);
-                let impls_iface = find_implementations_of_interface(def_idx, &iface_name);
-                for impl_name in &impls_iface {
-                    related.insert(impl_name.clone());
-                }
-                // Also include the target class itself (it could be an interface)
-                related.insert(pc_lower);
-                related
-            } else {
-                HashSet::new() // no filter when no parent_class
-            };
-
-            for &di in name_indices {
-                if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes { break; }
-                if let Some(def) = def_idx.definitions.get(di as usize)
-                    && let Some(ref parent_class_name) = def.parent {
-                        let parent_lower = parent_class_name.to_lowercase();
-
-                        // Skip interfaces that are NOT related to the target class
-                        if parent_class.is_some() && !related_interfaces.contains(&parent_lower) {
-                            continue;
-                        }
-
-                        if let Some(parent_indices) = def_idx.name_index.get(&parent_lower) {
-                            for &pi in parent_indices {
-                                if let Some(parent_def) = def_idx.definitions.get(pi as usize)
-                                    && parent_def.kind == DefinitionKind::Interface
-                                        && let Some(impl_indices) = def_idx.base_type_index.get(&parent_lower) {
-                                            for &ii in impl_indices {
-                                                if let Some(impl_def) = def_idx.definitions.get(ii as usize)
-                                                    && (impl_def.kind == DefinitionKind::Class || impl_def.kind == DefinitionKind::Struct) {
-                                                        let impl_callers = build_caller_tree(
-                                                            method_name,
-                                                            Some(&impl_def.name),
-                                                            max_depth,
-                                                            current_depth + 1,
-                                                            content_index,
-                                                            def_idx,
-                                                            ext_filter,
-                                                            exclude_dir,
-                                                            exclude_file,
-                                                            false,
-                                                            visited,
-                                                            limits,
-                                                            node_count,
-                                                        );
-                                                        callers.extend(impl_callers);
-                                                    }
-                                            }
-                                        }
-                            }
-                        }
-                    }
-            }
-        }
+    // Interface resolution: expand to find callers via interface implementations
+    if resolve_interfaces && current_depth == 0 {
+        let iface_callers = expand_interface_callers(
+            method_name, &method_lower, parent_class, max_depth, ctx, visited,
+        );
+        callers.extend(iface_callers);
+    }
 
     callers
 }
@@ -1027,23 +1051,24 @@ fn find_template_parents(
 
 /// Build a callee tree (direction = "down"): find what methods are called by this method.
 /// Uses pre-computed call graph from AST analysis (method_calls in DefinitionIndex).
-#[allow(clippy::too_many_arguments)]
 fn build_callee_tree(
     method_name: &str,
     class_filter: Option<&str>,
     max_depth: usize,
     current_depth: usize,
-    def_idx: &DefinitionIndex,
-    ext_filter: &str,
-    exclude_dir: &[String],
-    exclude_file: &[String],
+    ctx: &CallerTreeContext,
     visited: &mut HashSet<String>,
-    limits: &CallerLimits,
-    node_count: &AtomicUsize,
 ) -> Vec<Value> {
     if current_depth >= max_depth {
         return Vec::new();
     }
+    let def_idx = ctx.def_idx;
+    let ext_filter = ctx.ext_filter;
+    let exclude_dir = ctx.exclude_dir;
+    let exclude_file = ctx.exclude_file;
+    let limits = ctx.limits;
+    let node_count = ctx.node_count;
+
     if node_count.load(std::sync::atomic::Ordering::Relaxed) >= limits.max_total_nodes {
         return Vec::new();
     }
@@ -1174,13 +1199,8 @@ fn build_callee_tree(
                     callee_def.parent.as_deref(), // scope recursion to the callee's own class
                     max_depth,
                     current_depth + 1,
-                    def_idx,
-                    ext_filter,
-                    exclude_dir,
-                    exclude_file,
+                    ctx,
                     visited,
-                    limits,
-                    node_count,
                 );
 
                 let mut node = json!({
@@ -1847,20 +1867,23 @@ mod tests {
         };
         let node_count = AtomicUsize::new(0);
 
+        let caller_ctx = CallerTreeContext {
+            content_index: &content_index,
+            def_idx: &def_idx,
+            ext_filter: "cs",
+            exclude_dir: &[],
+            exclude_file: &[],
+            resolve_interfaces: false,
+            limits: &limits,
+            node_count: &node_count,
+        };
         let callers = build_caller_tree(
             "Dispose",
             Some("ResourceManager"),
             3,
             0,
-            &content_index,
-            &def_idx,
-            "cs",
-            &[],
-            &[],
-            false, // no interface resolution for this test
+            &caller_ctx,
             &mut visited,
-            &limits,
-            &node_count,
         );
 
         // Should find exactly one caller: Caller.DoWork
@@ -1936,7 +1959,17 @@ mod tests {
         let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
         let node_count = AtomicUsize::new(0);
 
-        let callees = build_callee_tree("process", Some("ClassA"), 3, 0, &def_idx, "ts", &[], &[], &mut visited, &limits, &node_count);
+        let caller_ctx = CallerTreeContext {
+            content_index: &crate::ContentIndex::default(),
+            def_idx: &def_idx,
+            ext_filter: "ts",
+            exclude_dir: &[],
+            exclude_file: &[],
+            resolve_interfaces: false,
+            limits: &limits,
+            node_count: &node_count,
+        };
+        let callees = build_callee_tree("process", Some("ClassA"), 3, 0, &caller_ctx, &mut visited);
 
         assert_eq!(callees.len(), 2, "Should have 2 callees, got {:?}", callees);
         let callee_names: Vec<(&str, &str)> = callees.iter()
@@ -2822,20 +2855,23 @@ mod tests {
         let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
         let node_count = AtomicUsize::new(0);
 
+        let caller_ctx = CallerTreeContext {
+            content_index: &content_index,
+            def_idx: &def_idx,
+            ext_filter: "cs",
+            exclude_dir: &[],
+            exclude_file: &[],
+            resolve_interfaces: false,
+            limits: &limits,
+            node_count: &node_count,
+        };
         let callers = build_caller_tree(
             "Process",
             Some("ClassA"),
             3,  // depth 3: should find ClassB.Handle (depth 0) → ClassC.Run (depth 1)
             0,
-            &content_index,
-            &def_idx,
-            "cs",
-            &[],
-            &[],
-            false, // no interface resolution
+            &caller_ctx,
             &mut visited,
-            &limits,
-            &node_count,
         );
 
         // Depth 0: should find ClassB.Handle as the caller of ClassA.Process

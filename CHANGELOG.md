@@ -9,6 +9,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ## 2026-02-27
 
 ### Internal
+- **Refactored `handle_search_grep()` / `handle_substring_search()` in `src/mcp/handlers/grep.rs`** — Extracted 4 shared helper functions to eliminate duplicated code across grep/substring/phrase search modes: `passes_file_filters()` (4→1 occurrences), `finalize_grep_results()` (2→1), `build_grep_base_summary()` (8→1 readErrors/lossyUtf8Files/branchWarning blocks), `ensure_trigram_index()`. 19 new unit tests for extracted functions. No behavioral changes — all 1071 unit tests + 62 E2E tests pass.
+
+- **Refactored `build_caller_tree()` / `build_callee_tree()` in `src/mcp/handlers/callers.rs`** — Introduced `CallerTreeContext` struct reducing parameter count from 13→6 (`build_caller_tree`) and 11→6 (`build_callee_tree`). Extracted `resolve_parent_file_ids()` (parent class file pre-filtering) and `expand_interface_callers()` (90-line deeply-nested interface resolution block → 4-line call). No behavioral changes — all 1071 unit tests + 62 E2E tests pass.
+
 
 - **Refactored `cmd_grep()` in `src/cli/mod.rs`** — Decomposed from 320-line monolith (cognitive complexity 294, cyclomatic 100) into thin orchestrator (~45 lines) calling 10 focused sub-functions: `parse_grep_args()`, `load_grep_index()`, `resolve_grep_dir()`, `dispatch_grep_search()`, `run_exact_token_search()`, `run_substring_search()`, `run_phrase_search()`, `run_regex_search()`, `format_grep_results()`, `print_grep_summary()`. Added 38 new unit tests for extracted functions. No behavioral changes — all 1052 unit tests + 62 E2E tests pass.
 
