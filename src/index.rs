@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufReader, BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
@@ -436,9 +436,6 @@ pub fn estimate_git_cache_memory(cache: &crate::git::cache::GitHistoryCache) -> 
 /// Format: JSON, ~200 bytes per file.
 #[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
 pub struct IndexMeta {
-    /// Index type: "content", "definition", "file-list", "git-history"
-    #[serde(rename = "type")]
-    pub index_type: String,
     /// Root directory of the index
     pub root: String,
     /// Timestamp when the index was created (seconds since epoch)
@@ -449,42 +446,51 @@ pub struct IndexMeta {
     /// Number of files in the index
     #[serde(default)]
     pub files: usize,
-    /// Number of unique tokens (content index only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub unique_tokens: Option<usize>,
-    /// Total tokens indexed (content index only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub total_tokens: Option<u64>,
-    /// File extensions indexed
+    /// File extensions indexed (content + definition only)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub extensions: Vec<String>,
-    /// Number of definitions (definition index only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub definitions: Option<usize>,
-    /// Number of call sites (definition index only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub call_sites: Option<usize>,
-    /// Number of parse errors (definition index only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub parse_errors: Option<usize>,
-    /// Number of lossy UTF-8 files (definition index only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub lossy_file_count: Option<usize>,
-    /// Number of entries (file-list index only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub entries: Option<usize>,
-    /// Number of commits (git-history only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub commits: Option<usize>,
-    /// Number of authors (git-history only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub authors: Option<usize>,
-    /// Branch name (git-history only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub branch: Option<String>,
-    /// HEAD commit hash (git-history only)
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub head_hash: Option<String>,
+    /// Type-specific metadata — discriminated by "type" field in JSON
+    #[serde(flatten)]
+    pub details: IndexDetails,
+}
+
+/// Type-specific index metadata, serialized with `"type"` as the JSON discriminator.
+#[derive(serde::Serialize, serde::Deserialize, Debug, Clone)]
+#[serde(tag = "type")]
+pub enum IndexDetails {
+    /// Content (word-search) index metadata
+    #[serde(rename = "content")]
+    Content {
+        unique_tokens: usize,
+        total_tokens: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parse_errors: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lossy_file_count: Option<usize>,
+    },
+    /// Definition (code-structure) index metadata
+    #[serde(rename = "definition")]
+    Definition {
+        definitions: usize,
+        call_sites: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        parse_errors: Option<usize>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lossy_file_count: Option<usize>,
+    },
+    /// File-list index metadata
+    #[serde(rename = "file-list")]
+    FileList {
+        entries: usize,
+    },
+    /// Git history cache metadata
+    #[serde(rename = "git-history")]
+    GitHistory {
+        commits: usize,
+        authors: usize,
+        branch: String,
+        head_hash: String,
+    },
 }
 
 /// Save an IndexMeta sidecar file alongside an index file.
@@ -521,46 +527,31 @@ fn meta_path_for(index_path: &std::path::Path) -> PathBuf {
 /// Build IndexMeta for a ContentIndex.
 pub fn content_index_meta(idx: &crate::ContentIndex) -> IndexMeta {
     IndexMeta {
-        index_type: "content".to_string(),
         root: idx.root.clone(),
         created_at: idx.created_at,
         max_age_secs: idx.max_age_secs,
         files: idx.files.len(),
-        unique_tokens: Some(idx.index.len()),
-        total_tokens: Some(idx.total_tokens),
         extensions: idx.extensions.clone(),
-        definitions: None,
-        call_sites: None,
-        parse_errors: if idx.read_errors > 0 { Some(idx.read_errors) } else { None },
-        lossy_file_count: if idx.lossy_file_count > 0 { Some(idx.lossy_file_count) } else { None },
-        entries: None,
-        commits: None,
-        authors: None,
-        branch: None,
-        head_hash: None,
+        details: IndexDetails::Content {
+            unique_tokens: idx.index.len(),
+            total_tokens: idx.total_tokens,
+            parse_errors: if idx.read_errors > 0 { Some(idx.read_errors) } else { None },
+            lossy_file_count: if idx.lossy_file_count > 0 { Some(idx.lossy_file_count) } else { None },
+        },
     }
 }
 
 /// Build IndexMeta for a FileIndex.
 pub fn file_index_meta(idx: &crate::FileIndex) -> IndexMeta {
     IndexMeta {
-        index_type: "file-list".to_string(),
         root: idx.root.clone(),
         created_at: idx.created_at,
         max_age_secs: idx.max_age_secs,
         files: 0,
-        unique_tokens: None,
-        total_tokens: None,
         extensions: Vec::new(),
-        definitions: None,
-        call_sites: None,
-        parse_errors: None,
-        lossy_file_count: None,
-        entries: Some(idx.entries.len()),
-        commits: None,
-        authors: None,
-        branch: None,
-        head_hash: None,
+        details: IndexDetails::FileList {
+            entries: idx.entries.len(),
+        },
     }
 }
 
@@ -569,46 +560,34 @@ pub fn definition_index_meta(idx: &crate::definitions::DefinitionIndex) -> Index
     let call_sites: usize = idx.method_calls.values().map(|v| v.len()).sum();
     let active_defs: usize = idx.file_index.values().map(|v| v.len()).sum();
     IndexMeta {
-        index_type: "definition".to_string(),
         root: idx.root.clone(),
         created_at: idx.created_at,
         max_age_secs: 0,
         files: idx.files.len(),
-        unique_tokens: None,
-        total_tokens: None,
         extensions: idx.extensions.clone(),
-        definitions: Some(active_defs),
-        call_sites: Some(call_sites),
-        parse_errors: if idx.parse_errors > 0 { Some(idx.parse_errors) } else { None },
-        lossy_file_count: if idx.lossy_file_count > 0 { Some(idx.lossy_file_count) } else { None },
-        entries: None,
-        commits: None,
-        authors: None,
-        branch: None,
-        head_hash: None,
+        details: IndexDetails::Definition {
+            definitions: active_defs,
+            call_sites,
+            parse_errors: if idx.parse_errors > 0 { Some(idx.parse_errors) } else { None },
+            lossy_file_count: if idx.lossy_file_count > 0 { Some(idx.lossy_file_count) } else { None },
+        },
     }
 }
 
 /// Build IndexMeta for a GitHistoryCache.
 pub fn git_cache_meta(cache: &crate::git::cache::GitHistoryCache) -> IndexMeta {
     IndexMeta {
-        index_type: "git-history".to_string(),
         root: String::new(),
         created_at: cache.built_at,
         max_age_secs: 0,
         files: cache.file_commits.len(),
-        unique_tokens: None,
-        total_tokens: None,
         extensions: Vec::new(),
-        definitions: None,
-        call_sites: None,
-        parse_errors: None,
-        lossy_file_count: None,
-        entries: None,
-        commits: Some(cache.commits.len()),
-        authors: Some(cache.authors.len()),
-        branch: Some(cache.branch.clone()),
-        head_hash: Some(cache.head_hash.clone()),
+        details: IndexDetails::GitHistory {
+            commits: cache.commits.len(),
+            authors: cache.authors.len(),
+            branch: cache.branch.clone(),
+            head_hash: cache.head_hash.clone(),
+        },
     }
 }
 
@@ -923,9 +902,9 @@ pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize
 
 // ─── Index building ──────────────────────────────────────────────────
 
-#[must_use]
-pub fn build_index(args: &IndexArgs) -> FileIndex {
-    let root = fs::canonicalize(&args.dir).unwrap_or_else(|_| PathBuf::from(&args.dir));
+pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
+    let root = fs::canonicalize(&args.dir)
+        .map_err(|_| SearchError::DirNotFound(args.dir.clone()))?;
     let root_str = clean_path(&root.to_string_lossy());
 
     eprintln!("Indexing {}...", root_str);
@@ -1001,14 +980,14 @@ pub fn build_index(args: &IndexArgs) -> FileIndex {
         elapsed.as_secs_f64()
     );
 
-    index
+    Ok(index)
 }
 
 // ─── Content index building ──────────────────────────────────────────
 
-#[must_use]
-pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
-    let root = fs::canonicalize(&args.dir).unwrap_or_else(|_| PathBuf::from(&args.dir));
+pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, SearchError> {
+    let root = fs::canonicalize(&args.dir)
+        .map_err(|_| SearchError::DirNotFound(args.dir.clone()))?;
     let root_str = clean_path(&root.to_string_lossy());
     let extensions: Vec<String> = args.ext.split(',').map(|s| s.trim().to_lowercase()).collect();
 
@@ -1034,12 +1013,13 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     };
     builder.threads(thread_count);
 
+    let extensions: Arc<[String]> = extensions.into();
     let file_data: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
     let read_errors = std::sync::atomic::AtomicUsize::new(0);
     let lossy_file_count = std::sync::atomic::AtomicUsize::new(0);
 
     builder.build_parallel().run(|| {
-        let extensions = extensions.clone();
+        let extensions = Arc::clone(&extensions);
         let file_data = &file_data;
         let read_errors = &read_errors;
         let lossy_file_count = &lossy_file_count;
@@ -1185,21 +1165,21 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         .unwrap_or(Duration::ZERO)
         .as_secs();
 
-    ContentIndex {
+    Ok(ContentIndex {
         root: root_str,
         created_at: now,
         max_age_secs: args.max_age_hours * 3600,
         files,
         index,
         total_tokens,
-        extensions,
+        extensions: extensions.to_vec(),
         file_token_counts,
         trigram,
         trigram_dirty: false,
         path_to_id: None,
         read_errors,
         lossy_file_count,
-    }
+    })
 }
 
 /// Build a trigram index from the inverted index's token keys.
@@ -1516,8 +1496,13 @@ mod index_tests {
             ..Default::default()
         };
         let meta = crate::index::content_index_meta(&idx);
-        assert_eq!(meta.parse_errors, None, "parse_errors should be None when read_errors=0");
-        assert_eq!(meta.lossy_file_count, None, "lossy_file_count should be None when lossy_file_count=0");
+        match &meta.details {
+            crate::index::IndexDetails::Content { parse_errors, lossy_file_count, .. } => {
+                assert_eq!(*parse_errors, None, "parse_errors should be None when read_errors=0");
+                assert_eq!(*lossy_file_count, None, "lossy_file_count should be None when lossy_file_count=0");
+            }
+            _ => panic!("Expected IndexDetails::Content"),
+        }
     }
 
     #[test]
@@ -1531,8 +1516,13 @@ mod index_tests {
             ..Default::default()
         };
         let meta = crate::index::content_index_meta(&idx);
-        assert_eq!(meta.parse_errors, Some(7), "parse_errors should be Some(7) when read_errors=7");
-        assert_eq!(meta.lossy_file_count, Some(3), "lossy_file_count should be Some(3) when lossy_file_count=3");
+        match &meta.details {
+            crate::index::IndexDetails::Content { parse_errors, lossy_file_count, .. } => {
+                assert_eq!(*parse_errors, Some(7), "parse_errors should be Some(7) when read_errors=7");
+                assert_eq!(*lossy_file_count, Some(3), "lossy_file_count should be Some(3) when lossy_file_count=3");
+            }
+            _ => panic!("Expected IndexDetails::Content"),
+        }
     }
 
     #[test]
@@ -1683,6 +1673,70 @@ mod index_tests {
         let result = crate::index::find_content_index_for_dir(&root_str, index_base, &[]);
         assert!(result.is_some(),
             "Empty expected_exts should accept any cached content index");
+    }
+
+    #[test]
+    fn test_build_index_nonexistent_dir_returns_error() {
+        let result = crate::index::build_index(&crate::IndexArgs {
+            dir: "/nonexistent/path/that/does/not/exist".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 0,
+        });
+        assert!(result.is_err(), "build_index should return Err for nonexistent directory");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("does not exist"), "Error should mention 'does not exist', got: {}", err_msg);
+    }
+
+    #[test]
+    fn test_build_content_index_nonexistent_dir_returns_error() {
+        let result = crate::index::build_content_index(&crate::ContentIndexArgs {
+            dir: "/nonexistent/path/that/does/not/exist".to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 0,
+            min_token_len: 2,
+        });
+        assert!(result.is_err(), "build_content_index should return Err for nonexistent directory");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(err_msg.contains("does not exist"), "Error should mention 'does not exist', got: {}", err_msg);
+    }
+
+    #[test]
+    fn test_build_index_valid_dir_returns_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("file.txt"), "hello").unwrap();
+        let result = crate::index::build_index(&crate::IndexArgs {
+            dir: tmp.path().to_string_lossy().to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 1,
+        });
+        assert!(result.is_ok(), "build_index should succeed for valid directory");
+        let index = result.unwrap();
+        assert!(!index.entries.is_empty(), "Valid directory should produce non-empty index");
+    }
+
+    #[test]
+    fn test_build_content_index_valid_dir_returns_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("file.cs"), "class Foo {}").unwrap();
+        let result = crate::index::build_content_index(&crate::ContentIndexArgs {
+            dir: tmp.path().to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 1,
+            min_token_len: 2,
+        });
+        assert!(result.is_ok(), "build_content_index should succeed for valid directory");
+        let index = result.unwrap();
+        assert!(!index.files.is_empty(), "Valid directory should produce non-empty content index");
     }
 
     #[test]

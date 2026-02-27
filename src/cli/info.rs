@@ -4,7 +4,7 @@ use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{index_dir, index::load_compressed, ContentIndex, FileIndex};
-use crate::index::{load_index_meta, save_index_meta, IndexMeta};
+use crate::index::{load_index_meta, save_index_meta, IndexDetails, IndexMeta};
 
 /// Check if an index is stale based on created_at and max_age_secs from metadata.
 fn is_stale_from_meta(created_at: u64, max_age_secs: u64) -> bool {
@@ -65,9 +65,13 @@ pub fn cmd_info() {
                 found = true;
                 let stale = is_stale_from_meta(meta.created_at, meta.max_age_secs);
                 let stale_str = if stale { " [STALE]" } else { "" };
+                let entries = match &meta.details {
+                    crate::index::IndexDetails::FileList { entries } => *entries,
+                    _ => 0,
+                };
                 println!(
                     "  [FILE] {} -- {} entries, {:.1} MB, {:.1}h ago{} ({})",
-                    meta.root, meta.entries.unwrap_or(0),
+                    meta.root, entries,
                     size as f64 / 1_048_576.0, age_hours(meta.created_at), stale_str, filename
                 );
             } else {
@@ -95,9 +99,13 @@ pub fn cmd_info() {
                 found = true;
                 let stale = is_stale_from_meta(meta.created_at, meta.max_age_secs);
                 let stale_str = if stale { " [STALE]" } else { "" };
+                let total_tokens = match &meta.details {
+                    crate::index::IndexDetails::Content { total_tokens, .. } => *total_tokens,
+                    _ => 0,
+                };
                 println!(
                     "  [CONTENT] {} -- {} files, {} tokens, exts: [{}], {:.1} MB, {:.1}h ago{} ({})",
-                    meta.root, meta.files, meta.total_tokens.unwrap_or(0),
+                    meta.root, meta.files, total_tokens,
                     meta.extensions.join(", "),
                     size as f64 / 1_048_576.0, age_hours(meta.created_at), stale_str, filename
                 );
@@ -123,10 +131,13 @@ pub fn cmd_info() {
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             if let Some(meta) = load_index_meta(&path) {
                 found = true;
+                let (defs, calls) = match &meta.details {
+                    crate::index::IndexDetails::Definition { definitions, call_sites, .. } => (*definitions, *call_sites),
+                    _ => (0, 0),
+                };
                 println!(
                     "  [DEF] {} -- {} files, {} defs, {} call sites, exts: [{}], {:.1} MB, {:.1}h ago ({})",
-                    meta.root, meta.files, meta.definitions.unwrap_or(0),
-                    meta.call_sites.unwrap_or(0),
+                    meta.root, meta.files, defs, calls,
                     meta.extensions.join(", "),
                     size as f64 / 1_048_576.0, age_hours(meta.created_at), filename
                 );
@@ -154,13 +165,19 @@ pub fn cmd_info() {
             let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
             if let Some(meta) = load_index_meta(&path) {
                 found = true;
+                let (branch, commits, authors, head_hash) = match &meta.details {
+                    crate::index::IndexDetails::GitHistory { branch, commits, authors, head_hash } => {
+                        (branch.as_str(), *commits, *authors, head_hash.as_str())
+                    }
+                    _ => ("?", 0, 0, "?"),
+                };
                 println!(
                     "  [GIT] branch={}, {} commits, {} files, {} authors, HEAD={}, {:.1} MB, {:.1}h ago ({})",
-                    meta.branch.as_deref().unwrap_or("?"),
-                    meta.commits.unwrap_or(0),
+                    branch,
+                    commits,
                     meta.files,
-                    meta.authors.unwrap_or(0),
-                    &meta.head_hash.as_deref().unwrap_or("?")[..meta.head_hash.as_deref().unwrap_or("?").len().min(8)],
+                    authors,
+                    &head_hash[..head_hash.len().min(8)],
                     size as f64 / 1_048_576.0,
                     age_hours(meta.created_at),
                     filename
@@ -193,73 +210,75 @@ fn meta_to_json(meta: &IndexMeta, size: u64, filename: &str) -> serde_json::Valu
     let size_mb = (size as f64 / 1_048_576.0 * 10.0).round() / 10.0;
     let age_h = (age_hours(meta.created_at) * 10.0).round() / 10.0;
 
-    match meta.index_type.as_str() {
-        "file-list" => {
+    match &meta.details {
+        IndexDetails::FileList { entries } => {
             serde_json::json!({
                 "type": "file",
                 "root": meta.root,
-                "entries": meta.entries.unwrap_or(0),
+                "entries": entries,
                 "sizeMb": size_mb,
                 "ageHours": age_h,
                 "stale": is_stale_from_meta(meta.created_at, meta.max_age_secs),
                 "filename": filename,
             })
         }
-        "content" => {
-            serde_json::json!({
+        IndexDetails::Content { total_tokens, parse_errors, lossy_file_count, .. } => {
+            let mut info = serde_json::json!({
                 "type": "content",
                 "root": meta.root,
                 "files": meta.files,
-                "totalTokens": meta.total_tokens.unwrap_or(0),
+                "totalTokens": total_tokens,
                 "extensions": meta.extensions,
                 "sizeMb": size_mb,
                 "ageHours": age_h,
                 "stale": is_stale_from_meta(meta.created_at, meta.max_age_secs),
                 "filename": filename,
-            })
+            });
+            if let Some(pe) = parse_errors
+                && *pe > 0 {
+                    info["readErrors"] = serde_json::json!(pe);
+                }
+            if let Some(lf) = lossy_file_count
+                && *lf > 0 {
+                    info["lossyUtf8Files"] = serde_json::json!(lf);
+                }
+            info
         }
-        "definition" => {
+        IndexDetails::Definition { definitions, call_sites, parse_errors, lossy_file_count } => {
             let mut def_info = serde_json::json!({
                 "type": "definition",
                 "root": meta.root,
                 "files": meta.files,
-                "definitions": meta.definitions.unwrap_or(0),
-                "callSites": meta.call_sites.unwrap_or(0),
+                "definitions": definitions,
+                "callSites": call_sites,
                 "extensions": meta.extensions,
                 "sizeMb": size_mb,
                 "ageHours": age_h,
                 "filename": filename,
             });
-            if let Some(pe) = meta.parse_errors
-                && pe > 0 {
+            if let Some(pe) = parse_errors
+                && *pe > 0 {
                     def_info["readErrors"] = serde_json::json!(pe);
                 }
-            if let Some(lf) = meta.lossy_file_count
-                && lf > 0 {
+            if let Some(lf) = lossy_file_count
+                && *lf > 0 {
                     def_info["lossyUtf8Files"] = serde_json::json!(lf);
                 }
             def_info
         }
-        "git-history" => {
+        IndexDetails::GitHistory { commits, authors, branch, head_hash } => {
             serde_json::json!({
                 "type": "git-history",
-                "commits": meta.commits.unwrap_or(0),
+                "commits": commits,
                 "files": meta.files,
-                "authors": meta.authors.unwrap_or(0),
-                "headHash": meta.head_hash.as_deref().unwrap_or(""),
-                "branch": meta.branch.as_deref().unwrap_or(""),
+                "authors": authors,
+                "headHash": head_hash,
+                "branch": branch,
                 "sizeMb": size_mb,
                 "ageHours": age_h,
                 "filename": filename,
             })
         }
-        _ => serde_json::json!({
-            "type": meta.index_type,
-            "root": meta.root,
-            "sizeMb": size_mb,
-            "ageHours": age_h,
-            "filename": filename,
-        }),
     }
 }
 
@@ -514,7 +533,6 @@ src/lib.rs
         std::fs::write(&index_path, b"fake index data").unwrap();
 
         let meta = crate::index::IndexMeta {
-            index_type: "content".to_string(),
             root: "C:/Repos/TestProject".to_string(),
             created_at: SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -522,18 +540,13 @@ src/lib.rs
                 .as_secs(),
             max_age_secs: 86400,
             files: 42,
-            unique_tokens: Some(1000),
-            total_tokens: Some(50000),
             extensions: vec!["cs".to_string(), "xml".to_string()],
-            definitions: None,
-            call_sites: None,
-            parse_errors: None,
-            lossy_file_count: None,
-            entries: None,
-            commits: None,
-            authors: None,
-            branch: None,
-            head_hash: None,
+            details: crate::index::IndexDetails::Content {
+                unique_tokens: 1000,
+                total_tokens: 50000,
+                parse_errors: None,
+                lossy_file_count: None,
+            },
         };
 
         crate::index::save_index_meta(&index_path, &meta);
@@ -546,11 +559,9 @@ src/lib.rs
         let loaded = crate::index::load_index_meta(&index_path);
         assert!(loaded.is_some(), "Should be able to load meta from sidecar");
         let loaded = loaded.unwrap();
-        assert_eq!(loaded.index_type, "content");
         assert_eq!(loaded.root, "C:/Repos/TestProject");
         assert_eq!(loaded.files, 42);
-        assert_eq!(loaded.unique_tokens, Some(1000));
-        assert_eq!(loaded.total_tokens, Some(50000));
+        assert!(matches!(loaded.details, crate::index::IndexDetails::Content { unique_tokens: 1000, total_tokens: 50000, .. }));
         assert_eq!(loaded.extensions, vec!["cs", "xml"]);
 
         // Verify cmd_info_json_for_dir reads from .meta
@@ -571,6 +582,7 @@ src/lib.rs
 
     #[test]
     fn test_meta_to_json_all_types() {
+        use crate::index::IndexDetails;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -578,23 +590,17 @@ src/lib.rs
 
         // Content
         let meta = IndexMeta {
-            index_type: "content".to_string(),
             root: "C:/test".to_string(),
             created_at: now,
             max_age_secs: 3600,
             files: 100,
-            unique_tokens: Some(5000),
-            total_tokens: Some(100000),
             extensions: vec!["cs".to_string()],
-            definitions: None,
-            call_sites: None,
-            parse_errors: None,
-            lossy_file_count: None,
-            entries: None,
-            commits: None,
-            authors: None,
-            branch: None,
-            head_hash: None,
+            details: IndexDetails::Content {
+                unique_tokens: 5000,
+                total_tokens: 100000,
+                parse_errors: None,
+                lossy_file_count: None,
+            },
         };
         let json = meta_to_json(&meta, 1_048_576, "test.word-search");
         assert_eq!(json["type"], "content");
@@ -604,23 +610,17 @@ src/lib.rs
 
         // Definition
         let meta = IndexMeta {
-            index_type: "definition".to_string(),
             root: "C:/test".to_string(),
             created_at: now,
             max_age_secs: 0,
             files: 50,
-            unique_tokens: None,
-            total_tokens: None,
             extensions: vec!["cs".to_string()],
-            definitions: Some(1000),
-            call_sites: Some(5000),
-            parse_errors: Some(3),
-            lossy_file_count: None,
-            entries: None,
-            commits: None,
-            authors: None,
-            branch: None,
-            head_hash: None,
+            details: IndexDetails::Definition {
+                definitions: 1000,
+                call_sites: 5000,
+                parse_errors: Some(3),
+                lossy_file_count: None,
+            },
         };
         let json = meta_to_json(&meta, 2_097_152, "test.code-structure");
         assert_eq!(json["type"], "definition");
@@ -628,30 +628,119 @@ src/lib.rs
         assert_eq!(json["callSites"], 5000);
         assert_eq!(json["readErrors"], 3);
 
+        // File list
+        let meta = IndexMeta {
+            root: "C:/test".to_string(),
+            created_at: now,
+            max_age_secs: 3600,
+            files: 0,
+            extensions: Vec::new(),
+            details: IndexDetails::FileList {
+                entries: 500,
+            },
+        };
+        let json = meta_to_json(&meta, 262144, "test.file-list");
+        assert_eq!(json["type"], "file");
+        assert_eq!(json["entries"], 500);
+
         // Git history
         let meta = IndexMeta {
-            index_type: "git-history".to_string(),
             root: String::new(),
             created_at: now,
             max_age_secs: 0,
             files: 1000,
-            unique_tokens: None,
-            total_tokens: None,
             extensions: Vec::new(),
-            definitions: None,
-            call_sites: None,
-            parse_errors: None,
-            lossy_file_count: None,
-            entries: None,
-            commits: Some(5000),
-            authors: Some(20),
-            branch: Some("main".to_string()),
-            head_hash: Some("abc123def456".to_string()),
+            details: IndexDetails::GitHistory {
+                commits: 5000,
+                authors: 20,
+                branch: "main".to_string(),
+                head_hash: "abc123def456".to_string(),
+            },
         };
         let json = meta_to_json(&meta, 524288, "test.git-history");
         assert_eq!(json["type"], "git-history");
         assert_eq!(json["commits"], 5000);
         assert_eq!(json["authors"], 20);
         assert_eq!(json["branch"], "main");
+    }
+
+    #[test]
+    fn test_meta_serde_roundtrip_all_variants() {
+        use crate::index::IndexDetails;
+
+        // Content round-trip
+        let meta = IndexMeta {
+            root: "C:/test".to_string(),
+            created_at: 1000,
+            max_age_secs: 3600,
+            files: 42,
+            extensions: vec!["cs".to_string()],
+            details: IndexDetails::Content {
+                unique_tokens: 500,
+                total_tokens: 10000,
+                parse_errors: Some(2),
+                lossy_file_count: None,
+            },
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let loaded: IndexMeta = serde_json::from_str(&json).unwrap();
+        assert!(matches!(loaded.details, IndexDetails::Content { unique_tokens: 500, total_tokens: 10000, .. }));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "content");
+
+        // Definition round-trip
+        let meta = IndexMeta {
+            root: "C:/test".to_string(),
+            created_at: 2000,
+            max_age_secs: 0,
+            files: 50,
+            extensions: vec!["cs".to_string(), "ts".to_string()],
+            details: IndexDetails::Definition {
+                definitions: 100,
+                call_sites: 500,
+                parse_errors: Some(3),
+                lossy_file_count: Some(1),
+            },
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let loaded: IndexMeta = serde_json::from_str(&json).unwrap();
+        assert!(matches!(loaded.details, IndexDetails::Definition { definitions: 100, call_sites: 500, .. }));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "definition");
+
+        // FileList round-trip
+        let meta = IndexMeta {
+            root: "C:/test".to_string(),
+            created_at: 3000,
+            max_age_secs: 7200,
+            files: 0,
+            extensions: Vec::new(),
+            details: IndexDetails::FileList { entries: 1000 },
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let loaded: IndexMeta = serde_json::from_str(&json).unwrap();
+        assert!(matches!(loaded.details, IndexDetails::FileList { entries: 1000 }));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "file-list");
+
+        // GitHistory round-trip
+        let meta = IndexMeta {
+            root: String::new(),
+            created_at: 4000,
+            max_age_secs: 0,
+            files: 200,
+            extensions: Vec::new(),
+            details: IndexDetails::GitHistory {
+                commits: 500,
+                authors: 10,
+                branch: "main".to_string(),
+                head_hash: "abc123".to_string(),
+            },
+        };
+        let json = serde_json::to_string(&meta).unwrap();
+        let loaded: IndexMeta = serde_json::from_str(&json).unwrap();
+        assert!(matches!(loaded.details, IndexDetails::GitHistory { commits: 500, authors: 10, .. }));
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(v["type"], "git-history");
     }
 }

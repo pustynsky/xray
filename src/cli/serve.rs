@@ -123,7 +123,7 @@ pub fn cmd_serve(args: ServeArgs) {
             info!("Building content index in background...");
             crate::index::log_memory("content-build: starting");
             let build_start = Instant::now();
-            let new_idx = build_content_index(&ContentIndexArgs {
+            let new_idx = match build_content_index(&ContentIndexArgs {
                 dir: bg_dir.clone(),
                 ext: bg_ext.clone(),
                 max_age_hours: 24,
@@ -131,7 +131,14 @@ pub fn cmd_serve(args: ServeArgs) {
                 no_ignore: false,
                 threads: 0,
                 min_token_len: DEFAULT_MIN_TOKEN_LEN,
-            });
+            }) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(error = %e, "Failed to build content index");
+                    bg_ready.store(true, Ordering::Release);
+                    return;
+                }
+            };
             crate::index::log_memory("content-build: finished");
             if let Err(e) = save_content_index(&new_idx, &bg_idx_base) {
                 warn!(error = %e, "Failed to save content index to disk");
@@ -146,15 +153,24 @@ pub fn cmd_serve(args: ServeArgs) {
             crate::index::log_memory("serve: after drop(content build)");
             crate::index::force_mimalloc_collect();
             crate::index::log_memory("serve: after mi_collect (content)");
-            let new_idx = load_content_index(&bg_dir, &bg_ext, &bg_idx_base)
-                .unwrap_or_else(|e| {
+            let new_idx = match load_content_index(&bg_dir, &bg_ext, &bg_idx_base) {
+                Ok(idx) => idx,
+                Err(e) => {
                     warn!(error = %e, "Failed to reload content index from disk, rebuilding");
-                    build_content_index(&ContentIndexArgs {
+                    match build_content_index(&ContentIndexArgs {
                         dir: bg_dir, ext: bg_ext,
                         max_age_hours: 24, hidden: false, no_ignore: false,
                         threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-                    })
-                });
+                    }) {
+                        Ok(idx) => idx,
+                        Err(e2) => {
+                            warn!(error = %e2, "Failed to rebuild content index from scratch");
+                            bg_ready.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+            };
 
             crate::index::log_memory("serve: after reload content from disk");
             let new_idx = if bg_watch {

@@ -212,7 +212,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     let content_index = crate::build_content_index(&crate::ContentIndexArgs {
         dir: tmp_dir.to_string_lossy().to_string(), ext: "cs".to_string(),
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
-    });
+    }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         server_dir: tmp_dir.to_string_lossy().to_string(),
@@ -477,7 +477,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let content_index = crate::build_content_index(&crate::ContentIndexArgs {
         dir: tmp_dir.to_string_lossy().to_string(), ext: "xml".to_string(),
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
-    });
+    }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         server_dir: tmp_dir.to_string_lossy().to_string(),
@@ -551,7 +551,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     std::fs::create_dir_all(&sub_a).unwrap(); std::fs::create_dir_all(&sub_b).unwrap();
     std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
     std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
-    let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 });
+    let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 }).unwrap();
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
     let r_all = handle_search_grep(&ctx, &json!({"terms": "productcatalog"}));
     let o_all: Value = serde_json::from_str(&r_all.content[0].text).unwrap();
@@ -815,7 +815,7 @@ fn test_search_grep_phrase_search_with_show_lines() {
         dir: tmp_dir.to_string_lossy().to_string(),
         ext: "sql".to_string(),
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
-    });
+    }).unwrap();
 
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
@@ -950,7 +950,7 @@ fn test_search_grep_phrase_sort_by_occurrences() {
     let content_index = crate::build_content_index(&crate::ContentIndexArgs {
         dir: tmp_dir.to_string_lossy().to_string(), ext: "cs".to_string(),
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
-    });
+    }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         server_dir: tmp_dir.to_string_lossy().to_string(),
@@ -1270,7 +1270,7 @@ fn test_substring_space_sql_create_table() {
     let content_index = crate::build_content_index(&crate::ContentIndexArgs {
         dir: tmp_dir.to_string_lossy().to_string(), ext: "sql".to_string(),
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
-    });
+    }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         server_dir: tmp_dir.to_string_lossy().to_string(),
@@ -1490,7 +1490,7 @@ fn test_multi_phrase_fn_signatures() {
     let content_index = crate::build_content_index(&crate::ContentIndexArgs {
         dir: tmp_dir.to_string_lossy().to_string(), ext: "rs".to_string(),
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
-    });
+    }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         server_dir: tmp_dir.to_string_lossy().to_string(),

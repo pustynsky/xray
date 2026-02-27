@@ -48,6 +48,7 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 ## Environment Rules
 
 - **Windows environment** — this project runs on Windows (cmd / PowerShell). Never use Unix-only commands like `tail`, `head`, `grep`, `sed`, `awk`, `wc`. Use PowerShell equivalents or native Rust/cargo commands instead.
+- **E2E tests require pwsh** — `e2e-test.ps1` uses modern PowerShell syntax (e.g., parentheses in strings) that is incompatible with Windows PowerShell 5.1. Always run E2E tests with `pwsh -File .\e2e-test.ps1`, NOT `powershell -File .\e2e-test.ps1`.
 - **Testing is mandatory** — every code change MUST include:
   - **Unit tests** covering the new/modified behavior
   - **E2E test plan update** (`docs/e2e-test-plan.md`) with a test scenario for the change
