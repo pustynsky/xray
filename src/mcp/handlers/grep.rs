@@ -46,6 +46,122 @@ pub(crate) struct PhraseFileMatch {
     pub content: Option<String>,
 }
 
+/// Build the common grep summary JSON with readErrors, lossyUtf8Files, and branchWarning.
+/// When `include_index_stats` is true, adds indexFiles, indexTokens, searchTimeMs, indexLoadTimeMs.
+fn build_grep_base_summary(
+    total_files: usize,
+    total_occurrences: usize,
+    terms: &Value,
+    search_mode: &str,
+    index: &ContentIndex,
+    search_elapsed: std::time::Duration,
+    ctx: &HandlerContext,
+    include_index_stats: bool,
+) -> Value {
+    let mut summary = json!({
+        "totalFiles": total_files,
+        "totalOccurrences": total_occurrences,
+        "termsSearched": terms,
+        "searchMode": search_mode,
+    });
+    if include_index_stats {
+        summary["indexFiles"] = json!(index.files.len());
+        summary["indexTokens"] = json!(index.index.len());
+        summary["searchTimeMs"] = json!(search_elapsed.as_secs_f64() * 1000.0);
+        summary["indexLoadTimeMs"] = json!(0.0);
+    }
+    if index.read_errors > 0 {
+        summary["readErrors"] = json!(index.read_errors);
+    }
+    if index.lossy_file_count > 0 {
+        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
+    }
+    inject_branch_warning(&mut summary, ctx);
+    summary
+}
+
+/// Finalize grep results: filter by AND mode, sort/dedup lines, sort by TF-IDF descending.
+/// Returns (sorted_results, total_files_before_truncation, total_occurrences).
+fn finalize_grep_results(
+    file_scores: HashMap<u32, FileScoreEntry>,
+    mode_and: bool,
+    term_count: usize,
+) -> (Vec<FileScoreEntry>, usize, usize) {
+    let mut results: Vec<FileScoreEntry> = file_scores
+        .into_values()
+        .filter(|fs| !mode_and || fs.terms_matched >= term_count)
+        .collect();
+
+    // Sort/dedup lines
+    for result in &mut results {
+        result.lines.sort();
+        result.lines.dedup();
+    }
+
+    // Sort by TF-IDF descending
+    results.sort_by(|a, b| b.tf_idf.partial_cmp(&a.tf_idf).unwrap_or(std::cmp::Ordering::Equal));
+
+    let total_files = results.len();
+    let total_occurrences: usize = results.iter().map(|r| r.occurrences).sum();
+
+    (results, total_files, total_occurrences)
+}
+
+/// Ensure the trigram index is up-to-date. Called before substring search.
+/// If `trigram_dirty` is set, rebuilds the trigram index with minimal write-lock time.
+fn ensure_trigram_index(ctx: &HandlerContext) {
+    let trigram_check_start = Instant::now();
+    let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
+    if needs_rebuild {
+        eprintln!("[substring-trace] Trigram dirty, rebuilding...");
+        let rebuild_start = Instant::now();
+        // Build trigram index under READ lock (doesn't block other readers)
+        let new_trigram = ctx.index.read().ok().and_then(|idx| {
+            if idx.trigram_dirty {
+                Some(build_trigram_index(&idx.index))
+            } else {
+                None
+            }
+        });
+        // Swap in under brief WRITE lock (microseconds, not ~200ms)
+        if let Some(trigram) = new_trigram
+            && let Ok(mut idx) = ctx.index.write()
+                && idx.trigram_dirty {  // double-check after acquiring write lock
+                    eprintln!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
+                        trigram.tokens.len(), trigram.trigram_map.len());
+                    idx.trigram = trigram;
+                    idx.trigram_dirty = false;
+                }
+        eprintln!("[substring-trace] Trigram rebuild: {:.3}ms", rebuild_start.elapsed().as_secs_f64() * 1000.0);
+    } else {
+        eprintln!("[substring-trace] Trigram dirty check: clean in {:.3}ms", trigram_check_start.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+/// Check if a file passes all grep filters (dir, ext, excludeDir, exclude).
+/// Returns true if the file should be included in results.
+fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
+    // Dir prefix filter (subdirectory search)
+    if let Some(prefix) = params.dir_filter
+        && !is_under_dir(file_path, prefix) { return false; }
+
+    // Extension filter (supports comma-separated extensions)
+    if let Some(ext) = params.ext_filter
+        && !matches_ext_filter(file_path, ext) { return false; }
+
+    // Exclude dir filter
+    if params.exclude_dir.iter().any(|excl| {
+        file_path.to_lowercase().contains(&excl.to_lowercase())
+    }) { return false; }
+
+    // Exclude pattern filter
+    if params.exclude.iter().any(|excl| {
+        file_path.to_lowercase().contains(&excl.to_lowercase())
+    }) { return false; }
+
+    true
+}
+
 pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let terms_str = match args.get("terms").and_then(|v| v.as_str()) {
         Some(t) => t.to_string(),
@@ -100,32 +216,7 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
 
     // --- Substring: check if trigram index needs rebuild -----
     if use_substring {
-        let trigram_check_start = Instant::now();
-        let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
-        if needs_rebuild {
-            eprintln!("[substring-trace] Trigram dirty, rebuilding...");
-            let rebuild_start = Instant::now();
-            // Build trigram index under READ lock (doesn't block other readers)
-            let new_trigram = ctx.index.read().ok().and_then(|idx| {
-                if idx.trigram_dirty {
-                    Some(build_trigram_index(&idx.index))
-                } else {
-                    None
-                }
-            });
-            // Swap in under brief WRITE lock (microseconds, not ~200ms)
-            if let Some(trigram) = new_trigram
-                && let Ok(mut idx) = ctx.index.write()
-                    && idx.trigram_dirty {  // double-check after acquiring write lock
-                        eprintln!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
-                            trigram.tokens.len(), trigram.trigram_map.len());
-                        idx.trigram = trigram;
-                        idx.trigram_dirty = false;
-                    }
-            eprintln!("[substring-trace] Trigram rebuild: {:.3}ms", rebuild_start.elapsed().as_secs_f64() * 1000.0);
-        } else {
-            eprintln!("[substring-trace] Trigram dirty check: clean in {:.3}ms", trigram_check_start.elapsed().as_secs_f64() * 1000.0);
-        }
+        ensure_trigram_index(ctx);
     }
 
     let index = match ctx.index.read() {
@@ -214,23 +305,7 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
                     None => continue,
                 };
 
-                // Dir prefix filter (subdirectory search)
-                if let Some(ref prefix) = dir_filter
-                    && !is_under_dir(file_path, prefix) { continue; }
-
-                // Extension filter (BUG #1 fix: supports comma-separated extensions)
-                if let Some(ref ext) = ext_filter
-                    && !matches_ext_filter(file_path, ext) { continue; }
-
-                // Exclude dir filter
-                if exclude_dir.iter().any(|excl| {
-                    file_path.to_lowercase().contains(&excl.to_lowercase())
-                }) { continue; }
-
-                // Exclude pattern filter
-                if exclude.iter().any(|excl| {
-                    file_path.to_lowercase().contains(&excl.to_lowercase())
-                }) { continue; }
+                if !passes_file_filters(file_path, &grep_params) { continue; }
 
                 let occurrences = posting.lines.len();
                 let file_total = if (posting.file_id as usize) < index.file_token_counts.len() {
@@ -256,23 +331,8 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         }
     }
 
-    // Filter by AND mode
-    let mut results: Vec<FileScoreEntry> = file_scores
-        .into_values()
-        .filter(|fs| !mode_and || fs.terms_matched >= term_count_for_all)
-        .collect();
-
-    // Sort/dedup lines
-    for result in &mut results {
-        result.lines.sort();
-        result.lines.dedup();
-    }
-
-    // Sort by TF-IDF descending
-    results.sort_by(|a, b| b.tf_idf.partial_cmp(&a.tf_idf).unwrap_or(std::cmp::Ordering::Equal));
-
-    let total_files = results.len();
-    let total_occurrences: usize = results.iter().map(|r| r.occurrences).sum();
+    let (mut results, total_files, total_occurrences) =
+        finalize_grep_results(file_scores, mode_and, term_count_for_all);
 
     // Apply max_results
     if max_results > 0 {
@@ -282,26 +342,11 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
     let search_elapsed = search_start.elapsed();
 
     if count_only {
-        let mut summary = json!({
-            "totalFiles": total_files,
-            "totalOccurrences": total_occurrences,
-            "termsSearched": terms,
-            "searchMode": search_mode,
-            "indexFiles": index.files.len(),
-            "indexTokens": index.index.len(),
-            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            "indexLoadTimeMs": 0.0
-        });
-        if index.read_errors > 0 {
-            summary["readErrors"] = json!(index.read_errors);
-        }
-        if index.lossy_file_count > 0 {
-            summary["lossyUtf8Files"] = json!(index.lossy_file_count);
-        }
-        inject_branch_warning(&mut summary, ctx);
-        let output = json!({
-            "summary": summary
-        });
+        let summary = build_grep_base_summary(
+            total_files, total_occurrences, &json!(terms), search_mode,
+            &index, search_elapsed, ctx, true,
+        );
+        let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
 
@@ -323,23 +368,10 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         file_obj
     }).collect();
 
-    let mut summary = json!({
-        "totalFiles": total_files,
-        "totalOccurrences": total_occurrences,
-        "termsSearched": terms,
-        "searchMode": search_mode,
-        "indexFiles": index.files.len(),
-        "indexTokens": index.index.len(),
-        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-        "indexLoadTimeMs": 0.0
-    });
-    if index.read_errors > 0 {
-        summary["readErrors"] = json!(index.read_errors);
-    }
-    if index.lossy_file_count > 0 {
-        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
-    }
-    inject_branch_warning(&mut summary, ctx);
+    let summary = build_grep_base_summary(
+        total_files, total_occurrences, &json!(terms), search_mode,
+        &index, search_elapsed, ctx, true,
+    );
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -356,15 +388,11 @@ fn handle_substring_search(
     params: &GrepSearchParams,
 ) -> ToolCallResult {
     let max_results = params.max_results;
-    let ext_filter = params.ext_filter;
-    let exclude_dir = params.exclude_dir;
-    let exclude = params.exclude;
     let show_lines = params.show_lines;
     let context_lines = params.context_lines;
     let mode_and = params.mode_and;
     let count_only = params.count_only;
     let search_start = params.search_start;
-    let dir_filter = params.dir_filter;
 
     // Stage 1: Terms parsing
     let stage1 = Instant::now();
@@ -507,23 +535,7 @@ fn handle_substring_search(
                         None => continue,
                     };
 
-                    // Dir prefix filter (subdirectory search)
-                    if let Some(prefix) = dir_filter
-                        && !is_under_dir(file_path, prefix) { continue; }
-
-                    // Extension filter (BUG #1 fix: supports comma-separated extensions)
-                    if let Some(ext) = ext_filter
-                        && !matches_ext_filter(file_path, ext) { continue; }
-
-                    // Exclude dir filter
-                    if exclude_dir.iter().any(|excl| {
-                        file_path.to_lowercase().contains(&excl.to_lowercase())
-                    }) { continue; }
-
-                    // Exclude pattern filter
-                    if exclude.iter().any(|excl| {
-                        file_path.to_lowercase().contains(&excl.to_lowercase())
-                    }) { continue; }
+                    if !passes_file_filters(file_path, params) { continue; }
 
                     term_files_passed += 1;
                     // BUG-7 fix: token passed all filters, record it
@@ -570,23 +582,8 @@ fn handle_substring_search(
         }
     }
 
-    // Filter by AND mode
-    let mut results: Vec<FileScoreEntry> = file_scores
-        .into_values()
-        .filter(|fs| !mode_and || fs.terms_matched >= term_count)
-        .collect();
-
-    // Sort/dedup lines
-    for result in &mut results {
-        result.lines.sort();
-        result.lines.dedup();
-    }
-
-    // Sort by TF-IDF descending
-    results.sort_by(|a, b| b.tf_idf.partial_cmp(&a.tf_idf).unwrap_or(std::cmp::Ordering::Equal));
-
-    let total_files = results.len();
-    let total_occurrences: usize = results.iter().map(|r| r.occurrences).sum();
+    let (mut results, total_files, total_occurrences) =
+        finalize_grep_results(file_scores, mode_and, term_count);
 
     // Apply max_results
     if max_results > 0 {
@@ -594,26 +591,15 @@ fn handle_substring_search(
     }
 
     if count_only {
-        let mut summary = json!({
-            "totalFiles": total_files,
-            "totalOccurrences": total_occurrences,
-            "termsSearched": raw_terms,
-            "searchMode": format!("substring-{}", search_mode),
-            "matchedTokens": all_matched_tokens,
-        });
+        let mut summary = build_grep_base_summary(
+            total_files, total_occurrences, &json!(raw_terms),
+            &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false,
+        );
+        summary["matchedTokens"] = json!(all_matched_tokens);
         if !warnings.is_empty() {
             summary["warnings"] = json!(warnings);
         }
-        if index.read_errors > 0 {
-            summary["readErrors"] = json!(index.read_errors);
-        }
-        if index.lossy_file_count > 0 {
-            summary["lossyUtf8Files"] = json!(index.lossy_file_count);
-        }
-        inject_branch_warning(&mut summary, ctx);
-        let output = json!({
-            "summary": summary
-        });
+        let output = json!({ "summary": summary });
         eprintln!("[substring-trace] Total: {:.3}ms (count_only)", search_start.elapsed().as_secs_f64() * 1000.0);
         return ToolCallResult::success(output.to_string());
     }
@@ -636,23 +622,14 @@ fn handle_substring_search(
         file_obj
     }).collect();
 
-    let mut summary = json!({
-        "totalFiles": total_files,
-        "totalOccurrences": total_occurrences,
-        "termsSearched": raw_terms,
-        "searchMode": format!("substring-{}", search_mode),
-        "matchedTokens": all_matched_tokens,
-    });
+    let mut summary = build_grep_base_summary(
+        total_files, total_occurrences, &json!(raw_terms),
+        &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false,
+    );
+    summary["matchedTokens"] = json!(all_matched_tokens);
     if !warnings.is_empty() {
         summary["warnings"] = json!(warnings);
     }
-    if index.read_errors > 0 {
-        summary["readErrors"] = json!(index.read_errors);
-    }
-    if index.lossy_file_count > 0 {
-        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
-    }
-    inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -673,15 +650,11 @@ fn handle_phrase_search(
     phrase: &str,
     params: &GrepSearchParams,
 ) -> ToolCallResult {
-    let ext_filter = params.ext_filter;
-    let exclude_dir = params.exclude_dir;
-    let exclude = params.exclude;
     let show_lines = params.show_lines;
     let context_lines = params.context_lines;
     let max_results = params.max_results;
     let count_only = params.count_only;
     let search_start = params.search_start;
-    let dir_filter = params.dir_filter;
     let phrase_lower = phrase.to_lowercase();
     let phrase_tokens = tokenize(&phrase_lower, 2);
 
@@ -710,17 +683,7 @@ fn handle_phrase_search(
                         Some(p) => p,
                         None => return false,
                     };
-                    if let Some(prefix) = dir_filter
-                        && !is_under_dir(path, prefix) { return false; }
-                    if let Some(ext) = ext_filter
-                        && !matches_ext_filter(path, ext) { return false; }
-                    if exclude_dir.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
-                        return false;
-                    }
-                    if exclude.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
-                        return false;
-                    }
-                    true
+                    passes_file_filters(path, params)
                 })
                 .map(|p| p.file_id)
                 .collect();
@@ -795,26 +758,11 @@ fn handle_phrase_search(
     let search_elapsed = search_start.elapsed();
 
     if count_only {
-        let mut summary = json!({
-            "totalFiles": total_files,
-            "totalOccurrences": total_occurrences,
-            "termsSearched": [phrase],
-            "searchMode": "phrase",
-            "indexFiles": index.files.len(),
-            "indexTokens": index.index.len(),
-            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            "indexLoadTimeMs": 0.0
-        });
-        if index.read_errors > 0 {
-            summary["readErrors"] = json!(index.read_errors);
-        }
-        if index.lossy_file_count > 0 {
-            summary["lossyUtf8Files"] = json!(index.lossy_file_count);
-        }
-        inject_branch_warning(&mut summary, ctx);
-        let output = json!({
-            "summary": summary
-        });
+        let summary = build_grep_base_summary(
+            total_files, total_occurrences, &json!([phrase]), "phrase",
+            index, search_elapsed, ctx, true,
+        );
+        let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
 
@@ -835,23 +783,10 @@ fn handle_phrase_search(
         file_obj
     }).collect();
 
-    let mut summary = json!({
-        "totalFiles": total_files,
-        "totalOccurrences": total_occurrences,
-        "termsSearched": [phrase],
-        "searchMode": "phrase",
-        "indexFiles": index.files.len(),
-        "indexTokens": index.index.len(),
-        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-        "indexLoadTimeMs": 0.0
-    });
-    if index.read_errors > 0 {
-        summary["readErrors"] = json!(index.read_errors);
-    }
-    if index.lossy_file_count > 0 {
-        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
-    }
-    inject_branch_warning(&mut summary, ctx);
+    let summary = build_grep_base_summary(
+        total_files, total_occurrences, &json!([phrase]), "phrase",
+        index, search_elapsed, ctx, true,
+    );
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -867,11 +802,7 @@ fn collect_phrase_matches(
     phrase: &str,
     params: &GrepSearchParams,
 ) -> Result<Vec<PhraseFileMatch>, String> {
-    let ext_filter = params.ext_filter;
-    let exclude_dir = params.exclude_dir;
-    let exclude = params.exclude;
     let show_lines = params.show_lines;
-    let dir_filter = params.dir_filter;
 
     let phrase_lower = phrase.to_lowercase();
     let phrase_tokens = tokenize(&phrase_lower, 2);
@@ -901,17 +832,7 @@ fn collect_phrase_matches(
                         Some(p) => p,
                         None => return false,
                     };
-                    if let Some(prefix) = dir_filter
-                        && !is_under_dir(path, prefix) { return false; }
-                    if let Some(ext) = ext_filter
-                        && !matches_ext_filter(path, ext) { return false; }
-                    if exclude_dir.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
-                        return false;
-                    }
-                    if exclude.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
-                        return false;
-                    }
-                    true
+                    passes_file_filters(path, params)
                 })
                 .map(|p| p.file_id)
                 .collect();
@@ -1020,23 +941,10 @@ fn handle_multi_phrase_search(
     let search_mode = if mode_and { "phrase-and" } else { "phrase-or" };
 
     if count_only {
-        let mut summary = json!({
-            "totalFiles": total_files,
-            "totalOccurrences": total_occurrences,
-            "termsSearched": searched_terms,
-            "searchMode": search_mode,
-            "indexFiles": index.files.len(),
-            "indexTokens": index.index.len(),
-            "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-            "indexLoadTimeMs": 0.0
-        });
-        if index.read_errors > 0 {
-            summary["readErrors"] = json!(index.read_errors);
-        }
-        if index.lossy_file_count > 0 {
-            summary["lossyUtf8Files"] = json!(index.lossy_file_count);
-        }
-        inject_branch_warning(&mut summary, ctx);
+        let summary = build_grep_base_summary(
+            total_files, total_occurrences, &json!(searched_terms), search_mode,
+            index, search_elapsed, ctx, true,
+        );
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -1054,23 +962,10 @@ fn handle_multi_phrase_search(
         file_obj
     }).collect();
 
-    let mut summary = json!({
-        "totalFiles": total_files,
-        "totalOccurrences": total_occurrences,
-        "termsSearched": searched_terms,
-        "searchMode": search_mode,
-        "indexFiles": index.files.len(),
-        "indexTokens": index.index.len(),
-        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
-        "indexLoadTimeMs": 0.0
-    });
-    if index.read_errors > 0 {
-        summary["readErrors"] = json!(index.read_errors);
-    }
-    if index.lossy_file_count > 0 {
-        summary["lossyUtf8Files"] = json!(index.lossy_file_count);
-    }
-    inject_branch_warning(&mut summary, ctx);
+    let summary = build_grep_base_summary(
+        total_files, total_occurrences, &json!(searched_terms), search_mode,
+        index, search_elapsed, ctx, true,
+    );
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -1141,4 +1036,246 @@ fn merge_phrase_results_and(per_phrase: Vec<Vec<PhraseFileMatch>>) -> Vec<Phrase
         entry.lines.dedup();
     }
     file_map.into_values().collect()
+}
+
+#[cfg(test)]
+mod grep_extracted_tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    /// Helper: create GrepSearchParams with given filters.
+    fn make_params<'a>(
+        dir_filter: &'a Option<String>,
+        ext_filter: &'a Option<String>,
+        exclude_dir: &'a [String],
+        exclude: &'a [String],
+    ) -> GrepSearchParams<'a> {
+        GrepSearchParams {
+            ext_filter,
+            exclude_dir,
+            exclude,
+            show_lines: false,
+            context_lines: 0,
+            max_results: 50,
+            mode_and: false,
+            count_only: false,
+            search_start: Instant::now(),
+            dir_filter,
+        }
+    }
+
+    // ─── passes_file_filters tests ──────────────────────────────────
+
+    #[test]
+    fn test_passes_file_filters_no_filters() {
+        let params = make_params(&None, &None, &[], &[]);
+        assert!(passes_file_filters("C:/project/src/file.cs", &params));
+    }
+
+    #[test]
+    fn test_passes_file_filters_dir_match() {
+        let dir = Some("C:/project/src".to_string());
+        let params = make_params(&dir, &None, &[], &[]);
+        assert!(passes_file_filters("C:/project/src/file.cs", &params));
+    }
+
+    #[test]
+    fn test_passes_file_filters_dir_no_match() {
+        let dir = Some("C:/project/src".to_string());
+        let params = make_params(&dir, &None, &[], &[]);
+        assert!(!passes_file_filters("C:/project/lib/file.cs", &params));
+    }
+
+    #[test]
+    fn test_passes_file_filters_ext_match() {
+        let ext = Some("cs".to_string());
+        let params = make_params(&None, &ext, &[], &[]);
+        assert!(passes_file_filters("C:/project/file.cs", &params));
+    }
+
+    #[test]
+    fn test_passes_file_filters_ext_no_match() {
+        let ext = Some("cs".to_string());
+        let params = make_params(&None, &ext, &[], &[]);
+        assert!(!passes_file_filters("C:/project/file.xml", &params));
+    }
+
+    #[test]
+    fn test_passes_file_filters_ext_comma_separated() {
+        let ext = Some("cs,sql".to_string());
+        let params = make_params(&None, &ext, &[], &[]);
+        assert!(passes_file_filters("C:/project/file.cs", &params));
+        assert!(passes_file_filters("C:/project/file.sql", &params));
+        assert!(!passes_file_filters("C:/project/file.xml", &params));
+    }
+
+    #[test]
+    fn test_passes_file_filters_exclude_dir() {
+        let excl_dir = vec!["test".to_string()];
+        let params = make_params(&None, &None, &excl_dir, &[]);
+        assert!(!passes_file_filters("C:/project/test/file.cs", &params));
+        assert!(passes_file_filters("C:/project/src/file.cs", &params));
+    }
+
+    #[test]
+    fn test_passes_file_filters_exclude_pattern() {
+        let excl = vec!["Mock".to_string()];
+        let params = make_params(&None, &None, &[], &excl);
+        assert!(!passes_file_filters("C:/project/ServiceMock.cs", &params));
+        assert!(passes_file_filters("C:/project/Service.cs", &params));
+    }
+
+    #[test]
+    fn test_passes_file_filters_combined() {
+        let dir = Some("C:/project/src".to_string());
+        let ext = Some("cs".to_string());
+        let excl_dir = vec!["test".to_string()];
+        let excl = vec!["Mock".to_string()];
+        let params = make_params(&dir, &ext, &excl_dir, &excl);
+        // All filters pass
+        assert!(passes_file_filters("C:/project/src/Service.cs", &params));
+        // Wrong dir
+        assert!(!passes_file_filters("C:/project/lib/Service.cs", &params));
+        // Wrong ext
+        assert!(!passes_file_filters("C:/project/src/Service.xml", &params));
+        // Excluded dir
+        assert!(!passes_file_filters("C:/project/src/test/Service.cs", &params));
+        // Excluded pattern
+        assert!(!passes_file_filters("C:/project/src/ServiceMock.cs", &params));
+    }
+
+    // ─── finalize_grep_results tests ────────────────────────────────
+
+    #[test]
+    fn test_finalize_or_mode_passes_all() {
+        let mut scores = HashMap::new();
+        scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![3, 1, 2], tf_idf: 1.0, occurrences: 3, terms_matched: 1 });
+        scores.insert(1, FileScoreEntry { file_path: "b.cs".into(), lines: vec![5], tf_idf: 2.0, occurrences: 1, terms_matched: 1 });
+
+        let (results, total_files, total_occ) = finalize_grep_results(scores, false, 2);
+        assert_eq!(total_files, 2);
+        assert_eq!(total_occ, 4);
+        // Sorted by tf_idf descending
+        assert_eq!(results[0].file_path, "b.cs");
+        assert_eq!(results[1].file_path, "a.cs");
+        // Lines deduped and sorted
+        assert_eq!(results[1].lines, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_finalize_and_mode_filters() {
+        let mut scores = HashMap::new();
+        scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![1], tf_idf: 1.0, occurrences: 1, terms_matched: 2 });
+        scores.insert(1, FileScoreEntry { file_path: "b.cs".into(), lines: vec![1], tf_idf: 2.0, occurrences: 1, terms_matched: 1 });
+
+        let (results, total_files, _total_occ) = finalize_grep_results(scores, true, 2);
+        assert_eq!(total_files, 1);
+        assert_eq!(results[0].file_path, "a.cs");
+    }
+
+    #[test]
+    fn test_finalize_dedup_lines() {
+        let mut scores = HashMap::new();
+        scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![5, 3, 5, 1, 3], tf_idf: 1.0, occurrences: 5, terms_matched: 1 });
+
+        let (results, _, _) = finalize_grep_results(scores, false, 1);
+        assert_eq!(results[0].lines, vec![1, 3, 5]);
+    }
+
+    #[test]
+    fn test_finalize_empty_input() {
+        let scores = HashMap::new();
+        let (results, total_files, total_occ) = finalize_grep_results(scores, false, 1);
+        assert_eq!(total_files, 0);
+        assert_eq!(total_occ, 0);
+        assert!(results.is_empty());
+    }
+
+    // ─── build_grep_base_summary tests ──────────────────────────────
+
+    #[test]
+    fn test_summary_basic_fields() {
+        let index = ContentIndex::default();
+        let ctx = HandlerContext::default();
+        let elapsed = Duration::from_millis(5);
+
+        let summary = build_grep_base_summary(
+            10, 42, &json!(["term1"]), "or", &index, elapsed, &ctx, false,
+        );
+        assert_eq!(summary["totalFiles"], 10);
+        assert_eq!(summary["totalOccurrences"], 42);
+        assert_eq!(summary["searchMode"], "or");
+        // Without include_index_stats, no indexFiles
+        assert!(summary.get("indexFiles").is_none());
+    }
+
+    #[test]
+    fn test_summary_with_index_stats() {
+        let index = ContentIndex::default();
+        let ctx = HandlerContext::default();
+        let elapsed = Duration::from_millis(5);
+
+        let summary = build_grep_base_summary(
+            10, 42, &json!(["term1"]), "or", &index, elapsed, &ctx, true,
+        );
+        assert!(summary.get("indexFiles").is_some());
+        assert!(summary.get("indexTokens").is_some());
+        assert!(summary.get("searchTimeMs").is_some());
+    }
+
+    #[test]
+    fn test_summary_with_read_errors() {
+        let index = ContentIndex { read_errors: 3, lossy_file_count: 2, ..Default::default() };
+        let ctx = HandlerContext::default();
+        let elapsed = Duration::from_millis(1);
+
+        let summary = build_grep_base_summary(
+            0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false,
+        );
+        assert_eq!(summary["readErrors"], 3);
+        assert_eq!(summary["lossyUtf8Files"], 2);
+    }
+
+    #[test]
+    fn test_summary_no_read_errors_when_zero() {
+        let index = ContentIndex { read_errors: 0, lossy_file_count: 0, ..Default::default() };
+        let ctx = HandlerContext::default();
+        let elapsed = Duration::from_millis(1);
+
+        let summary = build_grep_base_summary(
+            0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false,
+        );
+        assert!(summary.get("readErrors").is_none());
+        assert!(summary.get("lossyUtf8Files").is_none());
+    }
+
+    #[test]
+    fn test_summary_branch_warning_on_feature_branch() {
+        let index = ContentIndex::default();
+        let ctx = HandlerContext {
+            current_branch: Some("feature/test".to_string()),
+            ..Default::default()
+        };
+        let elapsed = Duration::from_millis(1);
+
+        let summary = build_grep_base_summary(
+            0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false,
+        );
+        assert!(summary.get("branchWarning").is_some());
+    }
+
+    #[test]
+    fn test_summary_no_branch_warning_on_main() {
+        let index = ContentIndex::default();
+        let ctx = HandlerContext {
+            current_branch: Some("main".to_string()),
+            ..Default::default()
+        };
+        let elapsed = Duration::from_millis(1);
+
+        let summary = build_grep_base_summary(
+            0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false,
+        );
+        assert!(summary.get("branchWarning").is_none());
+    }
 }
