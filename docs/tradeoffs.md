@@ -166,8 +166,8 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 **Known limitations:**
 
 - tree-sitter grammars are large (C# grammar adds ~2MB to binary)
-- Adding a new language requires a new tree-sitter grammar crate + parser implementation (~200 LOC per language)
-- SQL grammar (tree-sitter-sequel-tsql) may not cover all T-SQL dialects perfectly
+- Adding a new language requires a new tree-sitter grammar crate (or regex parser) + parser implementation (~200 LOC per language)
+- Each language parser is an optional Cargo feature (`lang-csharp`, `lang-typescript`, `lang-sql`) — custom builds can exclude unused parsers
 
 ## 7. Tokenization: Simple Split vs Language-Aware
 

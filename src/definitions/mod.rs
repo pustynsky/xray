@@ -1,8 +1,11 @@
 //! Definition index: AST-based code structure extraction using tree-sitter.
 
 mod types;
+#[cfg(feature = "lang-csharp")]
 mod parser_csharp;
+#[cfg(feature = "lang-typescript")]
 mod parser_typescript;
+#[cfg(feature = "lang-sql")]
 mod parser_sql;
 mod storage;
 mod incremental;
@@ -20,12 +23,37 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::{clean_path, read_file_lossy};
+#[cfg(feature = "lang-typescript")]
 use parser_typescript::extract_component_metadata;
 
 /// File extensions that have definition parser support (tree-sitter or regex).
 /// Used to dynamically generate MCP instructions about which files can be read
 /// via search_definitions instead of direct file reads.
-pub const DEFINITION_EXTENSIONS: &[&str] = &["cs", "ts", "tsx", "sql"];
+///
+/// Returns extensions based on which language features are compiled in.
+pub fn definition_extensions() -> &'static [&'static str] {
+    // When all default features are enabled, return the same list as the old const.
+    // For non-default feature combos, cfg picks the right subset.
+    #[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+    { return &["cs", "ts", "tsx", "sql"]; }
+
+    #[cfg(not(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql")))]
+    {
+        // Build at compile time for non-default combos.
+        // We use a macro-like approach with nested cfg to keep it const-friendly.
+        const EXTS: &[&str] = &[
+            #[cfg(feature = "lang-csharp")]
+            "cs",
+            #[cfg(feature = "lang-typescript")]
+            "ts",
+            #[cfg(feature = "lang-typescript")]
+            "tsx",
+            #[cfg(feature = "lang-sql")]
+            "sql",
+        ];
+        EXTS
+    }
+}
 
 // ─── Index Build ─────────────────────────────────────────────────────
 
@@ -97,21 +125,30 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
     eprintln!("[def-index] Parsing with {} threads ({} files/chunk)", chunks.len(), chunk_size);
 
+    #[cfg(feature = "lang-typescript")]
     let need_ts = extensions.iter().any(|e| e == "ts");
+    #[cfg(feature = "lang-typescript")]
     let need_tsx = extensions.iter().any(|e| e == "tsx");
 
     let thread_results: Vec<_> = std::thread::scope(|s| {
         let handles: Vec<_> = chunks.into_iter().map(|chunk| {
             s.spawn(move || {
-                let mut cs_parser = tree_sitter::Parser::new();
-                cs_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into())
-                    .expect("Error loading C# grammar");
+                #[cfg(feature = "lang-csharp")]
+                let mut cs_parser = {
+                    let mut p = tree_sitter::Parser::new();
+                    p.set_language(&tree_sitter_c_sharp::LANGUAGE.into())
+                        .expect("Error loading C# grammar");
+                    p
+                };
 
                 // Lazy-init: only create TS/TSX parsers when files with those extensions exist
+                #[cfg(feature = "lang-typescript")]
                 let mut ts_parser: Option<tree_sitter::Parser> = None;
+                #[cfg(feature = "lang-typescript")]
                 let mut tsx_parser: Option<tree_sitter::Parser> = None;
 
                 let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>)> = Vec::new();
+                #[cfg(feature = "lang-csharp")]
                 let mut chunk_ext_methods: HashMap<String, Vec<String>> = HashMap::new();
                 let mut errors = 0usize;
                 let mut lossy_files: Vec<String> = Vec::new();
@@ -134,6 +171,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                         .unwrap_or("");
 
                     let (file_defs, file_calls, file_stats) = match ext.to_lowercase().as_str() {
+                        #[cfg(feature = "lang-csharp")]
                         "cs" => {
                             let (defs, calls, stats, ext_methods) = parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id);
                             // Merge extension methods from this file into chunk accumulator
@@ -142,6 +180,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                             }
                             (defs, calls, stats)
                         }
+                        #[cfg(feature = "lang-typescript")]
                         "ts" if need_ts => {
                             let parser = ts_parser.get_or_insert_with(|| {
                                 let mut p = tree_sitter::Parser::new();
@@ -151,6 +190,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                             });
                             parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
                         }
+                        #[cfg(feature = "lang-typescript")]
                         "tsx" if need_tsx => {
                             let parser = tsx_parser.get_or_insert_with(|| {
                                 let mut p = tree_sitter::Parser::new();
@@ -160,6 +200,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                             });
                             parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
                         }
+                        #[cfg(feature = "lang-sql")]
                         "sql" => {
                             let (defs, calls, stats) = parser_sql::parse_sql_definitions(&content, *file_id);
                             (defs, calls, stats)
@@ -174,7 +215,10 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     }
                 }
 
-                (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods)
+                #[cfg(feature = "lang-csharp")]
+                { (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) }
+                #[cfg(not(feature = "lang-csharp"))]
+                { (chunk_defs, errors, lossy_files, empty_files, HashMap::<String, Vec<String>>::new()) }
             })
         }).collect();
 
@@ -274,53 +318,59 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     }
 
     // ─── Angular template enrichment ──────────────────────────────────────
-    let template_start = Instant::now();
+    #[allow(unused_mut)]
     let mut selector_index: HashMap<String, Vec<u32>> = HashMap::new();
+    #[allow(unused_mut)]
     let mut template_children: HashMap<u32, Vec<String>> = HashMap::new();
-    let mut templates_processed = 0usize;
-    let mut templates_failed = 0usize;
 
-    for (def_idx, def) in definitions.iter().enumerate() {
-        if def.kind != DefinitionKind::Class { continue; }
-        let component_attr = match def.attributes.iter().find(|a| a.starts_with("Component(")) {
-            Some(a) => a,
-            None => continue,
-        };
-        let (selector, template_url) = match extract_component_metadata(component_attr) {
-            Some(meta) => meta,
-            None => continue,
-        };
-        // Add selector to name_index for discoverability
-        let sel_lower = selector.to_lowercase();
-        name_index.entry(sel_lower).or_default().push(def_idx as u32);
+    #[cfg(feature = "lang-typescript")]
+    {
+        let template_start = Instant::now();
+        let mut templates_processed = 0usize;
+        let mut templates_failed = 0usize;
 
-        selector_index.entry(selector).or_default().push(def_idx as u32);
-
-        if let Some(ref tpl_url) = template_url {
-            let ts_file_path = match files.get(def.file_id as usize) {
-                Some(p) => p,
+        for (def_idx, def) in definitions.iter().enumerate() {
+            if def.kind != DefinitionKind::Class { continue; }
+            let component_attr = match def.attributes.iter().find(|a| a.starts_with("Component(")) {
+                Some(a) => a,
                 None => continue,
             };
-            let html_path = match std::path::Path::new(ts_file_path).parent() {
-                Some(dir) => dir.join(tpl_url.strip_prefix("./").unwrap_or(tpl_url)),
-                None => std::path::PathBuf::from(tpl_url),
+            let (selector, template_url) = match extract_component_metadata(component_attr) {
+                Some(meta) => meta,
+                None => continue,
             };
-            match std::fs::read_to_string(&html_path) {
-                Ok(html_content) => {
-                    let children = extract_custom_elements(&html_content);
-                    if !children.is_empty() {
-                        template_children.insert(def_idx as u32, children);
-                        templates_processed += 1;
+            // Add selector to name_index for discoverability
+            let sel_lower = selector.to_lowercase();
+            name_index.entry(sel_lower).or_default().push(def_idx as u32);
+
+            selector_index.entry(selector).or_default().push(def_idx as u32);
+
+            if let Some(ref tpl_url) = template_url {
+                let ts_file_path = match files.get(def.file_id as usize) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let html_path = match std::path::Path::new(ts_file_path).parent() {
+                    Some(dir) => dir.join(tpl_url.strip_prefix("./").unwrap_or(tpl_url)),
+                    None => std::path::PathBuf::from(tpl_url),
+                };
+                match std::fs::read_to_string(&html_path) {
+                    Ok(html_content) => {
+                        let children = extract_custom_elements(&html_content);
+                        if !children.is_empty() {
+                            template_children.insert(def_idx as u32, children);
+                            templates_processed += 1;
+                        }
                     }
+                    Err(_) => { templates_failed += 1; }
                 }
-                Err(_) => { templates_failed += 1; }
             }
         }
-    }
 
-    if templates_processed > 0 || templates_failed > 0 {
-        eprintln!("[def-index] Angular templates: {} enriched, {} read errors ({:.1}ms)",
-            templates_processed, templates_failed, template_start.elapsed().as_secs_f64() * 1000.0);
+        if templates_processed > 0 || templates_failed > 0 {
+            eprintln!("[def-index] Angular templates: {} enriched, {} read errors ({:.1}ms)",
+                templates_processed, templates_failed, template_start.elapsed().as_secs_f64() * 1000.0);
+        }
     }
 
     // Report suspicious files (>500 bytes but 0 definitions)
@@ -383,6 +433,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 }
 
 /// Extract custom element tag names from HTML content.
+#[cfg_attr(not(feature = "lang-typescript"), allow(dead_code))]
 /// Custom elements are identified by a hyphen in the tag name (HTML spec, web components).
 /// Excludes Angular built-ins: ng-container, ng-content, ng-template.
 /// Returns a deduplicated, sorted list in lowercase.
@@ -421,18 +472,18 @@ pub(crate) fn extract_custom_elements(html_content: &str) -> Vec<String> {
 #[path = "definitions_tests.rs"]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lang-csharp"))]
 #[path = "definitions_tests_csharp.rs"]
 mod tests_csharp;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lang-typescript"))]
 #[path = "definitions_tests_typescript.rs"]
 mod tests_typescript;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lang-sql"))]
 #[path = "definitions_tests_sql.rs"]
 mod tests_sql;
 
-#[cfg(test)]
+#[cfg(all(test, feature = "lang-csharp", feature = "lang-typescript"))]
 #[path = "audit_tests.rs"]
 mod audit_tests;

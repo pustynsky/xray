@@ -10,8 +10,11 @@ use tracing::{info, warn};
 
 use crate::{clean_path, read_file_lossy};
 use super::types::*;
+#[cfg(feature = "lang-csharp")]
 use super::parser_csharp::parse_csharp_definitions;
+#[cfg(feature = "lang-typescript")]
 use super::parser_typescript::parse_typescript_definitions;
+#[cfg(feature = "lang-sql")]
 use super::parser_sql::parse_sql_definitions;
 
 /// Update definitions for a single file (incremental).
@@ -19,6 +22,7 @@ use super::parser_sql::parse_sql_definitions;
 pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
     let path_str = path.to_string_lossy().to_string();
 
+    #[allow(unused_variables)]
     let (content, was_lossy) = match read_file_lossy(path) {
         Ok(r) => r,
         Err(_) => return,
@@ -47,6 +51,7 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
     // Parse the file
     let ext_lower = ext.to_lowercase();
     let (file_defs, file_calls, file_stats) = match ext_lower.as_str() {
+        #[cfg(feature = "lang-csharp")]
         "cs" => {
             let mut cs_parser = tree_sitter::Parser::new();
             cs_parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).ok();
@@ -55,6 +60,7 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
                 (defs, calls, stats)
             }
         }
+        #[cfg(feature = "lang-typescript")]
         "ts" | "tsx" => {
             let mut ts_parser = tree_sitter::Parser::new();
             let ts_lang = if ext_lower == "tsx" {
@@ -65,10 +71,11 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
             ts_parser.set_language(&ts_lang.into()).ok();
             parse_typescript_definitions(&mut ts_parser, &content, file_id)
         }
+        #[cfg(feature = "lang-sql")]
         "sql" => {
             parse_sql_definitions(&content, file_id)
         }
-        _ => (Vec::new(), Vec::new(), Vec::new()),
+        _ => (Vec::<DefinitionEntry>::new(), Vec::<(usize, Vec<CallSite>)>::new(), Vec::<(usize, CodeStats)>::new()),
     };
 
     // Add new definitions to index

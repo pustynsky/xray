@@ -323,7 +323,7 @@ stateDiagram-v2
 4. Add new tokens to inverted index
 5. If definition index is loaded: re-parse with tree-sitter, update definition entries
 
-**Bulk reindex path** (when changes > `bulk_threshold`, default 100):
+**Incremental batch path** (all file changes processed incrementally):
 
 - Full rebuild of content index from scratch
 - Triggered by git checkout, branch switch, large merges
@@ -457,7 +457,6 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 | MCP server first start (no index on disk) | Background thread builds indexes; tools return "index is building" until ready | ContentIndex + DefinitionIndex (if `--definitions`) | Same as above |
 | `search_reindex` (MCP tool) | Full rebuild + reload in-memory | ContentIndex | ~7–16s |
 | `search_reindex_definitions` (MCP tool) | Full rebuild + reload in-memory | DefinitionIndex | ~16–32s |
-| Watcher batch > `--bulk-threshold` (default: 100) | Full rebuild from scratch (faster than 100+ incremental updates) | ContentIndex + DefinitionIndex | ~7–32s |
 
 ### Incremental Update (Watcher)
 
@@ -526,7 +525,7 @@ src/
 │   ├── mod.rs                # build_definition_index() + re-exports
 │   ├── types.rs              # DefinitionKind, DefinitionEntry, DefinitionIndex, CallSite
 │   ├── parser_csharp.rs      # C# AST parsing: walk/extract functions (~30 helpers)
-│   ├── parser_sql.rs         # SQL AST parsing (retained, currently disabled)
+│   ├── parser_sql.rs         # SQL DDL parsing (regex-based: stored procs, tables, views, etc.)
 │   ├── storage.rs            # save/load/find definition index + def_index_path_for()
 │   ├── incremental.rs        # update_file_definitions, remove_file_definitions
 │   ├── definitions_tests.rs  # General definition tests (12 tests)
@@ -561,7 +560,7 @@ The engine has two layers with **different language coverage**:
 | Layer | Tools | Language Support | How it works |
 | ----- | ----- | ---------------- | ------------ |
 | **Content search** | `search-index grep`, `content-index`, `search_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
-| **AST / structural search** | `search-index def-index`, `search_definitions`, `search_callers` (MCP) | **C# and TypeScript/TSX** (SQL parser retained but disabled) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. Requires a language-specific grammar. |
+| **AST / structural search** | `search-index def-index`, `search_definitions`, `search_callers` (MCP) | **C# and TypeScript/TSX** (tree-sitter), **SQL** (regex) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. SQL uses a regex-based parser. Each language parser is optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-sql`). |
 
 ### AST Parser Status
 
@@ -570,6 +569,6 @@ The engine has two layers with **different language coverage**:
 | C# (.cs)          | tree-sitter-c-sharp          | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active |
 | TypeScript (.ts)  | tree-sitter-typescript       | class, interface, enum, method, constructor, property, field, function, type alias, variable (exported), enum member | ✅ Active |
 | TSX (.tsx)         | tree-sitter-typescript (TSX) | *(same as TypeScript)*                                                                                     | ✅ Active |
-| SQL (.sql)        | *(disabled)*                 | stored procedure, table, view, function, user-defined type, column, index                                  | ⏸️ Disabled — `tree-sitter-sequel-tsql` 0.4 requires language version 15, incompatible with tree-sitter 0.24 (supports 13-14). Parsing code is retained for future use. |
+| SQL (.sql)        | regex-based (no tree-sitter) | stored procedure, table, view, function, user-defined type, column, index                                  | ✅ Active |
 
-> **Key takeaway:** You can use `content-index` / `search_grep` on **any** codebase regardless of language. Only `def-index` / `search_definitions` / `search_callers` require a supported tree-sitter grammar (currently C# and TypeScript/TSX).
+> **Key takeaway:** You can use `content-index` / `search_grep` on **any** codebase regardless of language. Only `def-index` / `search_definitions` / `search_callers` require a supported parser (currently C#, TypeScript/TSX via tree-sitter, SQL via regex). Each parser is an optional Cargo feature — build with `--no-default-features --features lang-csharp` for C#-only, etc.

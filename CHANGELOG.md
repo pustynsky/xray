@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-27
 
+### Features
+
+- **Configurable language parsers via Cargo features** — Language parsers are now conditionally compiled via Cargo feature flags: `lang-csharp`, `lang-typescript`, `lang-sql`. Default `cargo build` includes all three (backward compatible). Build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-sql` for SQL-only (no tree-sitter dependency), or `--no-default-features` for grep/content-index-only builds. `tree-sitter`, `tree-sitter-c-sharp`, and `tree-sitter-typescript` are now optional dependencies. All tests are gated with `#[cfg(feature = "...")]` — test counts adjust automatically per feature set: 872 (all), 623 (SQL-only), 593 (none). Future parsers (e.g., Rust) can be added as new features without modifying existing code.
+
 ### Bug Fixes
 
 - **`search_callers` DI resolution for nested class `Owner.m_field` pattern** — When a nested (inner) class accessed DI-injected fields of its outer (parent) class via `Owner.m_field` (ControllerBlock pattern), the receiver type was resolved to the outer class name (e.g., `"OrderControllerBlock"`) instead of the field's interface type (e.g., `"IQueryManager"`). Root cause: the `field_types` map passed to call site extraction only contained fields from the inner class — outer class fields were invisible. Fix: when building `field_types` for methods in a nested class, the parser now merges the outer class's field types into the map (inner class fields take precedence via `or_insert`). This enables `resolve_receiver_type` to find `m_field` in the merged map and resolve it to the correct DI interface type. 2 new unit tests (basic resolution + inner-class-takes-precedence edge case).

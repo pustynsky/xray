@@ -82,6 +82,33 @@ cargo build --release
 
 Requires [Rust](https://rustup.rs/) 1.85+. Binary: `target/release/search-index.exe` (Windows) or `target/release/search-index` (Linux/Mac).
 
+### Build with Feature Flags
+
+Language parsers are configurable via Cargo features. By default, all parsers are included:
+
+```bash
+# Default: all parsers (C#, TypeScript/TSX, SQL)
+cargo build --release
+
+# C# only (no TypeScript/SQL parsers, no tree-sitter-typescript dependency)
+cargo build --release --no-default-features --features lang-csharp
+
+# SQL only (no tree-sitter dependency at all — smallest binary)
+cargo build --release --no-default-features --features lang-sql
+
+# C# + SQL, no TypeScript
+cargo build --release --no-default-features --features lang-csharp,lang-sql
+
+# No parsers (grep/content index only)
+cargo build --release --no-default-features
+```
+
+| Feature | Dependencies | Parser |
+|---|---|---|
+| `lang-csharp` | `tree-sitter`, `tree-sitter-c-sharp` | C# AST (tree-sitter) |
+| `lang-typescript` | `tree-sitter`, `tree-sitter-typescript` | TypeScript/TSX AST (tree-sitter) |
+| `lang-sql` | *(none)* | SQL DDL (regex-based) |
+
 ### CLI Usage
 
 ```bash

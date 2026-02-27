@@ -228,7 +228,7 @@ fn handle_request(
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
                 .collect();
-            let def_extensions: Vec<&str> = definitions::DEFINITION_EXTENSIONS.iter()
+            let def_extensions: Vec<&str> = definitions::definition_extensions().iter()
                 .filter(|ext| server_exts.iter().any(|se| se.eq_ignore_ascii_case(ext)))
                 .copied()
                 .collect();
@@ -293,8 +293,8 @@ fn handle_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    
-    
+
+
 
     fn make_ctx() -> HandlerContext {
         HandlerContext::default()
@@ -411,8 +411,9 @@ mod tests {
     }
 
     /// Test that the def_extensions filtering logic in initialize correctly
-    /// intersects server_ext with DEFINITION_EXTENSIONS.
+    /// intersects server_ext with definition_extensions().
     /// server_ext="cs,xml" should produce def_extensions=["cs"] (xml has no parser).
+    #[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
     #[test]
     fn test_initialize_def_extension_filtering() {
         // server_ext="cs,xml" → only "cs" has a definition parser

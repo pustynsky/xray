@@ -146,7 +146,7 @@ impl InitializeResult {
     /// Create a new InitializeResult with dynamic instructions.
     ///
     /// `def_extensions` — the file extensions that have definition parser support
-    /// in the current server configuration (intersection of --ext and DEFINITION_EXTENSIONS).
+    /// in the current server configuration (intersection of --ext and definition_extensions()).
     pub fn new(def_extensions: &[&str]) -> Self {
         Self {
             protocol_version: "2025-03-26".to_string(),
@@ -210,7 +210,7 @@ mod tests {
 
     #[test]
     fn test_initialize_response_format() {
-        let result = InitializeResult::new(crate::definitions::DEFINITION_EXTENSIONS);
+        let result = InitializeResult::new(crate::definitions::definition_extensions());
         let json = serde_json::to_value(&result).unwrap();
         assert_eq!(json["protocolVersion"], "2025-03-26");
         assert_eq!(json["capabilities"]["tools"]["listChanged"], false);
@@ -220,7 +220,7 @@ mod tests {
 
     #[test]
     fn test_initialize_includes_instructions() {
-        let result = InitializeResult::new(crate::definitions::DEFINITION_EXTENSIONS);
+        let result = InitializeResult::new(crate::definitions::definition_extensions());
         let json = serde_json::to_value(&result).unwrap();
         let instructions = json["instructions"].as_str().unwrap();
         assert!(instructions.contains("search_fast"), "instructions should mention search_fast");
@@ -231,7 +231,7 @@ mod tests {
         assert!(instructions.contains("includeBody"), "instructions should mention includeBody");
         assert!(instructions.contains("countOnly"), "instructions should mention countOnly");
         // Verify all definition extensions appear in instructions
-        for ext in crate::definitions::DEFINITION_EXTENSIONS {
+        for ext in crate::definitions::definition_extensions() {
             assert!(instructions.contains(&format!(".{}", ext)),
                 "instructions should mention .{} extension", ext);
         }
@@ -241,7 +241,7 @@ mod tests {
     fn test_jsonrpc_response_format() {
         let resp = JsonRpcResponse::new(
             serde_json::json!(1),
-            serde_json::to_value(InitializeResult::new(crate::definitions::DEFINITION_EXTENSIONS)).unwrap(),
+            serde_json::to_value(InitializeResult::new(crate::definitions::definition_extensions())).unwrap(),
         );
         let json = serde_json::to_string(&resp).unwrap();
         let parsed: Value = serde_json::from_str(&json).unwrap();

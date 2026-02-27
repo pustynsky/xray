@@ -817,9 +817,11 @@ mod handlers_test_utils;
 mod tests;
 
 #[cfg(test)]
+#[cfg(feature = "lang-csharp")]
 #[path = "handlers_tests_csharp.rs"]
 mod tests_csharp;
 
 #[cfg(test)]
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript"))]
 #[path = "handlers_tests_typescript.rs"]
 mod tests_typescript;
