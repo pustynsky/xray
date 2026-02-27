@@ -4187,6 +4187,40 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 
 ---
 
+### T-CTOR-ASSIGN: Constructor body assignment-based DI field resolution
+
+**Background:** The C# parser resolves receiver types for DI field calls (e.g., `m_service.Method()`) by mapping field names to types from constructor parameters. Previously, only `_paramName` and bare `paramName` conventions were supported. The fix parses the constructor body AST for `field = param` assignments, handling ANY naming convention automatically (e.g., `m_field`, `fld_field`, `this.field`). Also fixes `extract_constructor_param_types` for constructors with `: base(...)` or `: this(...)` initializers.
+
+**Unit tests (4 tests):**
+
+| Test | Pattern | Validates |
+|------|---------|-----------|
+| `test_call_site_extraction_constructor_assignment_m_prefix` | `m_field = param` | Hungarian notation DI fields |
+| `test_call_site_extraction_constructor_assignment_this_prefix` | `this.field = param` | `this.` accessor pattern |
+| `test_call_site_extraction_constructor_assignment_arbitrary_prefix` | `fld_field = param`, `s_field = param` | Any naming convention |
+| `test_extract_constructor_param_types_with_initializer` | `Ctor(params) : base(args)` | Paren matching with initializer |
+
+---
+
+### T-OWNER-FIELD: Owner.m_field nested class DI resolution (ControllerBlock pattern)
+
+**Background:** In the ControllerBlock pattern, a nested inner class accesses DI-injected fields of its outer (parent) class via `Owner.m_field`. Previously, the receiver type for `Owner.m_queryManager.GetEntriesAsync(...)` was resolved to `"OrderControllerBlock"` (the type of the `Owner` field) instead of `"IQueryManager"` (the type of `m_queryManager` in the outer class). This caused `search_callers` with `class: "QueryManager"` or `class: "IQueryManager"` to return 0 results, even though the call site was correctly indexed when no class filter was used.
+
+**Root cause:** The `field_types` map passed to call site extraction only contained fields from the inner class — outer class fields were invisible. The fix merges outer class field types into the inner class's field_types map (inner class fields take precedence).
+
+**Unit tests (2 tests):**
+
+| Test | Pattern | Validates |
+|------|---------|-----------|
+| `test_owner_m_field_nested_class_receiver_resolution` | `Owner.m_field.Method()` | Receiver resolves to outer class field's DI type |
+| `test_owner_m_field_inner_class_field_takes_precedence` | Inner + outer share field name | Inner class field type wins in merged map |
+
+**Status:** ✅ Covered by unit tests. Not CLI-testable (internal parser behavior).
+
+**Status:** ✅ Covered by unit tests. Not CLI-testable (internal parser behavior).
+
+---
+
 ### T-TYPE-INFER: Type inference improvements for search_callers
 
 **Background:** 7 user stories improving local variable type inference in the C# parser. These improvements increase recall for `search_callers` by resolving types from cast expressions, `as` expressions, method return types, `await` + Task<T> unwrap, pattern matching, and extension methods.

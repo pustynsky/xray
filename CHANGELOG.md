@@ -10,6 +10,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Bug Fixes
 
+- **`search_callers` DI resolution for nested class `Owner.m_field` pattern** — When a nested (inner) class accessed DI-injected fields of its outer (parent) class via `Owner.m_field` (ControllerBlock pattern), the receiver type was resolved to the outer class name (e.g., `"OrderControllerBlock"`) instead of the field's interface type (e.g., `"IQueryManager"`). Root cause: the `field_types` map passed to call site extraction only contained fields from the inner class — outer class fields were invisible. Fix: when building `field_types` for methods in a nested class, the parser now merges the outer class's field types into the map (inner class fields take precedence via `or_insert`). This enables `resolve_receiver_type` to find `m_field` in the merged map and resolve it to the correct DI interface type. 2 new unit tests (basic resolution + inner-class-takes-precedence edge case).
+
+- **`search_callers` DI resolution gap for constructor field assignments** — When a class used DI fields with non-standard naming conventions (e.g., `m_field`, `fld_field`, `this.field`) WITHOUT explicit field declarations, the C# parser couldn't resolve the receiver type. Root cause: the parser only generated `_paramName` and bare `paramName` mappings from constructor parameters, missing any other naming convention. Fix: the parser now parses the constructor body AST for `field = param` assignments (e.g., `m_orderService = orderService`, `this.myRepo = repository`), mapping the assigned field to the parameter's type. This handles ANY naming convention automatically without hardcoding prefixes. Also fixed a secondary bug in `extract_constructor_param_types` where constructor initializers (`: base(logger)`, `: this(x)`) caused incorrect parameter extraction because `rfind(')')` matched the initializer's closing paren instead of the constructor's. Replaced with depth-tracking paren matching. 4 new unit tests.
+
 - **`baseTypeTransitive` BFS cascade bug** — `collect_transitive_base_type_indices()` used substring matching (`key.contains(&current_type)`) at ALL BFS levels, causing a cascade when a descendant class had a short/common name (e.g., `"Service"` matched `"iservice"`, `"webservice"`, `"serviceprovider"`, etc.). This produced ~42,508 results instead of ~828 and took ~29 seconds. Fix: substring matching is now used only at level 0 (seed) for generic type support (`IAccessTable` → `iaccesstable<model>`); levels 1+ use exact HashMap lookup (O(1)). 3 new unit tests.
 
 ### Features
@@ -416,7 +420,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes               | 10                          |
 | Performance             | 3                           |
 | Internal                | 5                           |
-| Unit tests (latest)     | 866                         |
+| Unit tests (latest)     | 872                         |
 | E2E tests (latest)      | 59                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |

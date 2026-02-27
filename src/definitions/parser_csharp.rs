@@ -67,22 +67,65 @@ pub(crate) fn parse_csharp_definitions(
         }
     }
 
-    // Extract constructor parameter types as field types (DI pattern)
-    for def in &defs {
-        if def.kind == DefinitionKind::Constructor {
-            if let Some(ref parent) = def.parent {
-                if let Some(ref sig) = def.signature {
-                    let param_types = extract_constructor_param_types(sig);
-                    let field_map = class_field_types.entry(parent.clone()).or_default();
-                    for (param_name, param_type) in param_types {
-                        let underscore_name = format!("_{}", param_name);
-                        if !field_map.contains_key(&underscore_name) {
-                            field_map.insert(underscore_name, param_type.clone());
-                        }
-                        if !field_map.contains_key(&param_name) {
+    // Extract constructor parameter types as field types (DI pattern).
+    // Two strategies:
+    //   1. Convention-based: map _paramName and bare paramName to the param type.
+    //   2. Assignment-based: parse constructor body for `field = paramName` assignments
+    //      and map the assigned field to the param type. This handles ANY naming
+    //      convention (m_field, _field, this.field, etc.) without hardcoding prefixes.
+    let constructor_param_types: HashMap<String, HashMap<String, String>> = {
+        let mut result: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for def in &defs {
+            if def.kind == DefinitionKind::Constructor {
+                if let Some(ref parent) = def.parent {
+                    if let Some(ref sig) = def.signature {
+                        let param_types = extract_constructor_param_types(sig);
+                        let field_map = result.entry(parent.clone()).or_default();
+                        for (param_name, param_type) in param_types {
                             field_map.insert(param_name, param_type);
                         }
                     }
+                }
+            }
+        }
+        result
+    };
+
+    // Strategy 1: Convention-based — add _paramName and bare paramName mappings
+    for (class_name, param_map) in &constructor_param_types {
+        let field_map = class_field_types.entry(class_name.clone()).or_default();
+        for (param_name, param_type) in param_map {
+            let underscore_name = format!("_{}", param_name);
+            if !field_map.contains_key(&underscore_name) {
+                field_map.insert(underscore_name, param_type.clone());
+            }
+            if !field_map.contains_key(param_name) {
+                field_map.insert(param_name.clone(), param_type.clone());
+            }
+        }
+    }
+
+    // Strategy 2: Assignment-based — parse constructor bodies for `field = param` patterns
+    for &(def_local_idx, ctor_node) in &method_nodes {
+        let def = &defs[def_local_idx];
+        if def.kind != DefinitionKind::Constructor { continue; }
+        let parent_name = match &def.parent {
+            Some(p) => p.clone(),
+            None => continue,
+        };
+        let param_map = match constructor_param_types.get(&parent_name) {
+            Some(m) => m,
+            None => continue,
+        };
+        if param_map.is_empty() { continue; }
+
+        let body = find_child_by_kind(ctor_node, "block");
+        if let Some(body_node) = body {
+            let assignments = extract_constructor_field_assignments(body_node, source_bytes, param_map);
+            let field_map = class_field_types.entry(parent_name).or_default();
+            for (field_name, param_type) in assignments {
+                if !field_map.contains_key(&field_name) {
+                    field_map.insert(field_name, param_type);
                 }
             }
         }
@@ -93,9 +136,27 @@ pub(crate) fn parse_csharp_definitions(
     for &(def_local_idx, method_node) in &method_nodes {
         let def = &defs[def_local_idx];
         let parent_name = def.parent.as_deref().unwrap_or("");
-        let field_types = class_field_types.get(parent_name)
+        let mut field_types = class_field_types.get(parent_name)
             .cloned()
             .unwrap_or_default();
+
+        // If this method is in a nested class, also include outer class's field types.
+        // This enables resolving Owner.m_field patterns where m_field is a DI-injected
+        // field of the outer (parent) class. Inner class fields take precedence.
+        if !parent_name.is_empty() {
+            let outer_class_name = defs.iter()
+                .find(|d| d.name == parent_name && matches!(d.kind,
+                    DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record))
+                .and_then(|d| d.parent.as_deref());
+            if let Some(outer_name) = outer_class_name {
+                if let Some(outer_fields) = class_field_types.get(outer_name) {
+                    for (k, v) in outer_fields {
+                        field_types.entry(k.clone()).or_insert(v.clone());
+                    }
+                }
+            }
+        }
+
         let base_types = class_base_types.get(parent_name)
             .cloned()
             .unwrap_or_default();
@@ -269,15 +330,36 @@ pub(crate) fn parse_field_signature(sig: &str) -> Option<(String, String)> {
 }
 
 /// Extract parameter names and types from a constructor signature.
+/// Handles constructor initializers like `: base(logger)` by matching
+/// the closing paren that balances the first opening paren.
 pub(crate) fn extract_constructor_param_types(sig: &str) -> Vec<(String, String)> {
     let mut result = Vec::new();
     let start = match sig.find('(') {
         Some(i) => i + 1,
         None => return result,
     };
-    let end = match sig.rfind(')') {
-        Some(i) => i,
-        None => return result,
+    // Find matching ')' for the first '(' by tracking paren depth.
+    // This avoids matching `)` from constructor initializers like `: base(...)`.
+    let end = {
+        let mut depth = 1;
+        let mut pos = None;
+        for (i, ch) in sig[start..].char_indices() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        pos = Some(start + i);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match pos {
+            Some(p) => p,
+            None => return result,
+        }
     };
     if start >= end { return result; }
 
@@ -298,6 +380,92 @@ pub(crate) fn extract_constructor_param_types(sig: &str) -> Vec<(String, String)
         }
     }
     result
+}
+
+// ─── Constructor body assignment extraction ─────────────────────────
+
+/// Parse constructor body for field assignment patterns like:
+///   `_field = paramName;`
+///   `m_field = paramName;`
+///   `this.field = paramName;`
+///   `this._field = paramName;`
+///
+/// Returns a list of (field_name, param_type) tuples for any assignment where
+/// the right-hand side matches a known constructor parameter name.
+/// This handles ANY naming convention without hardcoding prefixes.
+fn extract_constructor_field_assignments(
+    body_node: tree_sitter::Node,
+    source: &[u8],
+    param_types: &HashMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut result = Vec::new();
+    collect_constructor_assignments(body_node, source, param_types, &mut result);
+    result
+}
+
+fn collect_constructor_assignments(
+    node: tree_sitter::Node,
+    source: &[u8],
+    param_types: &HashMap<String, String>,
+    result: &mut Vec<(String, String)>,
+) {
+    if node.kind() == "assignment_expression" || node.kind() == "simple_assignment_expression" {
+        // AST: assignment_expression → left = right
+        // left is the field (identifier or member_access_expression like this._field)
+        // right is the parameter name (identifier)
+        let left = node.child(0);
+        let right = node.child(2); // child(1) is "="
+
+        if let (Some(left_node), Some(right_node)) = (left, right) {
+            // Right side must be a simple identifier matching a constructor param
+            if right_node.kind() == "identifier" {
+                let param_name = node_text(right_node, source).trim();
+                if let Some(param_type) = param_types.get(param_name) {
+                    // Extract field name from left side
+                    let field_name = match left_node.kind() {
+                        "identifier" => {
+                            // Direct: _field = param; or m_field = param;
+                            Some(node_text(left_node, source).trim().to_string())
+                        }
+                        "member_access_expression" => {
+                            // this._field = param; or this.m_field = param;
+                            let expr = find_child_by_field(left_node, "expression")
+                                .or_else(|| left_node.child(0));
+                            let name = find_child_by_field(left_node, "name");
+                            if let (Some(expr_node), Some(name_node)) = (expr, name) {
+                                let expr_text = node_text(expr_node, source).trim();
+                                if expr_text == "this" || expr_node.kind() == "this_expression" {
+                                    Some(node_text(name_node, source).trim().to_string())
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        _ => None,
+                    };
+
+                    if let Some(name) = field_name {
+                        if !name.is_empty() {
+                            result.push((name, param_type.clone()));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // Recurse into children, but skip nested lambdas/methods
+    match node.kind() {
+        "lambda_expression" | "anonymous_method_expression" | "local_function_statement" => return,
+        _ => {}
+    }
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i) {
+            collect_constructor_assignments(child, source, param_types, result);
+        }
+    }
 }
 
 // ─── Call site extraction ───────────────────────────────────────────
