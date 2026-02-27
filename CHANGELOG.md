@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-27
 
+### Bug Fixes
+
+- **`search_grep` substring mode silently returned 0 for terms with punctuation** — When `search_grep` received terms containing non-token characters (punctuation, brackets, etc.) in substring mode (e.g., `#[cfg(test)]`, `<summary>`, `@Attribute`, `System.IO`), it silently returned 0 results. Root cause: the inverted index tokenizer splits on all non-alphanumeric, non-underscore characters, so no indexed token contains `#`, `[`, `(`, `)`, `]`, `.`, `<`, `>`, `@`, etc. The existing auto-switch for space-containing terms (`auto_switch_to_phrase_if_spaces`) only handled spaces. Fix: extended auto-switch to detect ANY non-token character via new `has_non_token_chars()` helper. When detected, automatically routes to phrase mode (which does raw substring matching on file content for punctuation-containing phrases). Renamed `auto_switch_to_phrase_if_spaces` → `auto_switch_to_phrase_if_needed`. Response includes `searchModeNote` explaining the auto-switch. 11 new unit tests (6 for `has_non_token_chars`, 5 for auto-switch scenarios including punctuation, angle brackets, underscore-only no-switch).
+
 ### Features
 
 - **SQL stored procedure call graph in `search_callers`** — `search_callers` now supports SQL stored procedure and function call chains via EXEC statements. `direction=up` finds which SPs call a given SP; `direction=down` shows what SPs/functions a given SP calls via EXEC. Tables and views are deliberately excluded from the call graph (data artifacts, not callable code). The `class` parameter maps to SQL schema name (e.g., `class="dbo"`, `class="Sales"`) for disambiguation. Also set `parent` field on SP/SqlFunction definitions to the schema name in the SQL parser, enabling `resolve_call_site` to match EXEC calls across schemas. 8 new unit tests. Cross-language callers (C# → SQL SP via ADO.NET) remain a known limitation.
