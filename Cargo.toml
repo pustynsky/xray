@@ -15,7 +15,7 @@ name = "search-index"
 path = "src/main.rs"
 
 [features]
-default = ["lang-csharp", "lang-typescript", "lang-sql"]
+default = ["lang-csharp", "lang-typescript", "lang-sql", "lang-rust"]
 lang-csharp = ["dep:tree-sitter", "dep:tree-sitter-c-sharp"]
 lang-typescript = ["dep:tree-sitter", "dep:tree-sitter-typescript"]
 lang-sql = []

@@ -108,7 +108,7 @@ cargo build --release --no-default-features
 | `lang-csharp` | `tree-sitter`, `tree-sitter-c-sharp` | C# AST (tree-sitter) |
 | `lang-typescript` | `tree-sitter`, `tree-sitter-typescript` | TypeScript/TSX AST (tree-sitter) |
 | `lang-sql` | *(none)* | SQL DDL (regex-based) |
-| `lang-rust` | `tree-sitter`, `tree-sitter-rust` | Rust AST (tree-sitter) — **not in default features** |
+| `lang-rust` | `tree-sitter`, `tree-sitter-rust` | Rust AST (tree-sitter) |
 
 ### CLI Usage
 

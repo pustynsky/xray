@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-27
 
+### Features
+
+- **Rust parser included in default build** — `lang-rust` feature is now part of the default feature set (`lang-csharp`, `lang-typescript`, `lang-sql`, `lang-rust`). All 4 language parsers are compiled and available out of the box. No more `--features lang-rust` needed for Rust support.
+
 ### Performance
 
 - **Lazy-compiled regex in SQL parser** — Converted 19 `Regex::new()` calls in `parser_sql.rs` from per-call compilation to `std::sync::LazyLock` module-level statics, compiled once on first use. Eliminates ~9,000 redundant regex compilations when indexing 500 SQL files with ~3 stored procedures each. 1 dynamic regex (using `format!` for `PROC|FUNCTION` keyword) kept as-is. Estimated 5–15% speedup for SQL-heavy codebases.
@@ -21,6 +25,12 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 - **Unified data-driven `walk_code_stats`** — Replaced 3 near-identical code complexity walker functions (`walk_code_stats_csharp` 109 lines, `walk_code_stats_typescript` 94 lines, `walk_code_stats_rust` 85 lines) with a single `walk_code_stats()` function + 3 static `CodeStatsConfig` structs containing language-specific AST node names. Config covers: branching nodes, else/else-if handling, logical operators, goto, switch cases, return/throw, lambdas, nesting incrementors, and C#-specific if→if flat nesting. Eliminates ~190 lines of duplicated code. Adding a new language parser now requires only a `CodeStatsConfig` definition — no walker code duplication.
 
 - **Parameter structs for grep and server** — Introduced `GrepSearchParams` struct to consolidate 10 positional parameters shared by `handle_substring_search` and `handle_phrase_search` (`ext_filter`, `exclude_dir`, `exclude`, `show_lines`, `context_lines`, `max_results`, `mode_and`, `count_only`, `search_start`, `dir_filter`). Refactored `run_server` from 12 positional parameters to accept `HandlerContext` directly (the struct was already being constructed on the first line).
+
+- **Watcher `process_batch` extraction** — Extracted the core batch update logic (120 lines) from `start_watcher` into 4 focused functions: `process_batch()`, `update_content_index()`, `update_definition_index()`, `shrink_if_oversized()`. The watcher event loop is now 6 lines instead of 120. Added 6 new unit tests covering: empty batch, dirty file update, file removal, mixed dirty+removed, new file addition, and total_tokens consistency.
+
+- **Shared `count_named_children` utility** — Extracted the duplicate "count named children in parameter list" logic from `count_parameters_csharp` (9 lines) and `count_parameters_typescript` (16 lines) into a shared `count_named_children()` function in `tree_sitter_utils.rs`. Both callers now use `.map(count_named_children)` — eliminating 7 lines of duplicated inline closures.
+
+- **Dead code cleanup** — Removed unused `active_definition_count()` function from `incremental.rs`. Removed spurious `#[allow(dead_code)]` from `DEFAULT_MAX_RESPONSE_BYTES` constant (it IS used in production code via `HandlerContext::default()`). Remaining `#[allow(dead_code)]` markers verified as correct: `storage.rs` functions used by binary crate, `protocol.rs` field required for serde, feature-gated functions.
 
 ### Features
 

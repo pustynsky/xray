@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, walk_code_stats, TYPESCRIPT_CODE_STATS_CONFIG};
+use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, TYPESCRIPT_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -1468,11 +1468,7 @@ pub(crate) fn count_parameters_typescript(method_node: tree_sitter::Node) -> u8 
                 .filter(|v| v.kind() == "arrow_function")
                 .and_then(|v| find_child_by_kind(v, "formal_parameters"))
         })
-        .map(|params| {
-            (0..params.child_count())
-                .filter(|&i| params.child(i).map(|c| c.is_named()).unwrap_or(false))
-                .count() as u8
-        })
+        .map(count_named_children)
         .unwrap_or(0)
 }
 
