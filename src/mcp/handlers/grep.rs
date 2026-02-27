@@ -4,9 +4,10 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use serde_json::{json, Value};
+use tracing::debug;
 
 use crate::mcp::protocol::ToolCallResult;
-use crate::{tokenize, ContentIndex};
+use crate::{read_file_lossy, tokenize, ContentIndex};
 use crate::index::build_trigram_index;
 use search_index::generate_trigrams;
 
@@ -113,7 +114,7 @@ fn ensure_trigram_index(ctx: &HandlerContext) {
     let trigram_check_start = Instant::now();
     let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
     if needs_rebuild {
-        eprintln!("[substring-trace] Trigram dirty, rebuilding...");
+        debug!("[substring-trace] Trigram dirty, rebuilding...");
         let rebuild_start = Instant::now();
         // Build trigram index under READ lock (doesn't block other readers)
         let new_trigram = ctx.index.read().ok().and_then(|idx| {
@@ -127,14 +128,14 @@ fn ensure_trigram_index(ctx: &HandlerContext) {
         if let Some(trigram) = new_trigram
             && let Ok(mut idx) = ctx.index.write()
                 && idx.trigram_dirty {  // double-check after acquiring write lock
-                    eprintln!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
+                    debug!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
                         trigram.tokens.len(), trigram.trigram_map.len());
                     idx.trigram = trigram;
                     idx.trigram_dirty = false;
                 }
-        eprintln!("[substring-trace] Trigram rebuild: {:.3}ms", rebuild_start.elapsed().as_secs_f64() * 1000.0);
+        debug!("[substring-trace] Trigram rebuild: {:.3}ms", rebuild_start.elapsed().as_secs_f64() * 1000.0);
     } else {
-        eprintln!("[substring-trace] Trigram dirty check: clean in {:.3}ms", trigram_check_start.elapsed().as_secs_f64() * 1000.0);
+        debug!("[substring-trace] Trigram dirty check: clean in {:.3}ms", trigram_check_start.elapsed().as_secs_f64() * 1000.0);
     }
 }
 
@@ -350,7 +351,7 @@ fn build_grep_response(
         });
 
         if params.show_lines
-            && let Ok(content) = std::fs::read_to_string(&r.file_path) {
+            && let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(&r.file_path)) {
                 file_obj["lineContent"] = build_line_content_from_matches(&content, &r.lines, params.context_lines);
             }
 
@@ -499,7 +500,7 @@ fn auto_switch_to_phrase_if_needed(
         "Terms contain non-token characters (punctuation/brackets) that the tokenizer strips"
     };
 
-    eprintln!("[substring-trace] {} — auto-switching to phrase mode", reason);
+    debug!("[substring-trace] {} — auto-switching to phrase mode", reason);
     let phrases: Vec<String> = terms_str
         .split(',')
         .map(|s| s.trim().to_string())
@@ -564,7 +565,7 @@ fn find_matching_tokens_for_term(
                 .is_some_and(|tok| tok.contains(term))
         })
         .collect();
-    eprintln!("[substring-trace] Token verification for '{}': {} verified from candidates in {:.3}ms",
+    debug!("[substring-trace] Token verification for '{}': {} verified from candidates in {:.3}ms",
         term, verified.len(), verify_start.elapsed().as_secs_f64() * 1000.0);
     verified
 }
@@ -626,7 +627,7 @@ fn score_token_postings(
         }
     }
 
-    eprintln!("[substring-trace] Main index lookup: {} tokens, {} postings checked, {} files passed in {:.3}ms",
+    debug!("[substring-trace] Main index lookup: {} tokens, {} postings checked, {} files passed in {:.3}ms",
         matched_tokens.len(), term_postings_checked, term_files_passed,
         lookup_start.elapsed().as_secs_f64() * 1000.0);
 }
@@ -656,7 +657,7 @@ fn build_substring_response(
             summary["warnings"] = json!(warnings);
         }
         let output = json!({ "summary": summary });
-        eprintln!("[substring-trace] Total: {:.3}ms (count_only)", search_start.elapsed().as_secs_f64() * 1000.0);
+        debug!("[substring-trace] Total: {:.3}ms (count_only)", search_start.elapsed().as_secs_f64() * 1000.0);
         return ToolCallResult::success(output.to_string());
     }
 
@@ -670,7 +671,7 @@ fn build_substring_response(
         });
 
         if params.show_lines
-            && let Ok(content) = std::fs::read_to_string(&r.file_path) {
+            && let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(&r.file_path)) {
                 file_obj["lineContent"] = build_line_content_from_matches(&content, &r.lines, params.context_lines);
             }
 
@@ -689,8 +690,8 @@ fn build_substring_response(
         "files": files_json,
         "summary": summary
     });
-    eprintln!("[substring-trace] Response JSON: {:.3}ms", json_start.elapsed().as_secs_f64() * 1000.0);
-    eprintln!("[substring-trace] Total: {:.3}ms ({} files, {} tokens matched)",
+    debug!("[substring-trace] Response JSON: {:.3}ms", json_start.elapsed().as_secs_f64() * 1000.0);
+    debug!("[substring-trace] Total: {:.3}ms ({} files, {} tokens matched)",
         search_start.elapsed().as_secs_f64() * 1000.0, total_files, all_matched_tokens.len());
 
     ToolCallResult::success(output.to_string())
@@ -710,7 +711,7 @@ fn handle_substring_search(
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
-    eprintln!("[substring-trace] Terms parsed: {:?} in {:.3}ms", raw_terms, stage1.elapsed().as_secs_f64() * 1000.0);
+    debug!("[substring-trace] Terms parsed: {:?} in {:.3}ms", raw_terms, stage1.elapsed().as_secs_f64() * 1000.0);
 
     if raw_terms.is_empty() {
         return ToolCallResult::error("No search terms provided".to_string());
@@ -730,7 +731,7 @@ fn handle_substring_search(
         warnings.push("Short substring query (<4 chars) may return broad results".to_string());
     }
 
-    eprintln!("[substring-trace] Trigram index: {} tokens, {} trigrams",
+    debug!("[substring-trace] Trigram index: {} tokens, {} trigrams",
         trigram_idx.tokens.len(), trigram_idx.trigram_map.len());
 
     let mut tokens_with_hits: HashSet<String> = HashSet::new();
@@ -742,7 +743,7 @@ fn handle_substring_search(
         let trigram_start = Instant::now();
         let matched_token_indices = find_matching_tokens_for_term(term, trigram_idx);
 
-        eprintln!("[substring-trace] Trigram intersection for '{}': {} candidates in {:.3}ms",
+        debug!("[substring-trace] Trigram intersection for '{}': {} candidates in {:.3}ms",
             term, matched_token_indices.len(), trigram_start.elapsed().as_secs_f64() * 1000.0);
 
         let matched_tokens: Vec<String> = matched_token_indices.iter()
@@ -852,7 +853,7 @@ fn handle_phrase_search(
 
     for &file_id in &candidates {
         let file_path = &index.files[file_id as usize];
-        if let Ok(content) = std::fs::read_to_string(file_path) {
+        if let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(file_path)) {
             let mut matching_lines = Vec::new();
             if phrase_has_punctuation {
                 // Use raw phrase substring match (case-insensitive) to avoid
@@ -992,7 +993,7 @@ fn collect_phrase_matches(
 
     for &file_id in &candidates {
         let file_path = &index.files[file_id as usize];
-        if let Ok(content) = std::fs::read_to_string(file_path) {
+        if let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(file_path)) {
             let mut matching_lines = Vec::new();
             if phrase_has_punctuation {
                 for (line_num, line) in content.lines().enumerate() {

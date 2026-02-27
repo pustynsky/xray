@@ -788,3 +788,83 @@ fn test_shrink_if_oversized_skips_when_no_path_to_id() {
     shrink_if_oversized(&mut index);
     assert!(index.path_to_id.is_none());
 }
+
+
+#[test]
+fn test_process_batch_returns_false_on_poisoned_content_lock() {
+    // Poison the RwLock by panicking inside a write guard
+    let index = Arc::new(RwLock::new(ContentIndex {
+        root: ".".to_string(),
+        files: vec![],
+        index: HashMap::new(),
+        extensions: vec!["cs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+
+    // Poison the lock
+    let index_clone = index.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = index_clone.write().unwrap();
+        panic!("intentional panic to poison RwLock");
+    }));
+
+    // Verify the lock is actually poisoned
+    assert!(index.write().is_err(), "Lock should be poisoned");
+
+    let mut dirty = HashSet::new();
+    dirty.insert(PathBuf::from("test.cs"));
+    let mut removed = HashSet::new();
+
+    // process_batch should return false on poisoned lock
+    let result = process_batch(&index, &None, &mut dirty, &mut removed);
+    assert!(!result, "process_batch should return false when content lock is poisoned");
+}
+
+#[test]
+fn test_process_batch_returns_false_on_poisoned_def_lock() {
+    let tmp = tempfile::tempdir().unwrap();
+    let test_file = tmp.path().join("test.cs");
+    std::fs::write(&test_file, "class Test {}").unwrap();
+
+    let index = Arc::new(RwLock::new(ContentIndex {
+        root: tmp.path().to_string_lossy().to_string(),
+        files: vec![],
+        index: HashMap::new(),
+        extensions: vec!["cs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+
+    let def_index = Arc::new(RwLock::new(crate::definitions::DefinitionIndex::default()));
+
+    // Poison the def lock
+    let def_clone = def_index.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = def_clone.write().unwrap();
+        panic!("intentional panic to poison def RwLock");
+    }));
+
+    assert!(def_index.write().is_err(), "Def lock should be poisoned");
+
+    let mut dirty = HashSet::new();
+    dirty.insert(test_file);
+    let mut removed = HashSet::new();
+
+    let result = process_batch(&index, &Some(def_index), &mut dirty, &mut removed);
+    assert!(!result, "process_batch should return false when def lock is poisoned");
+}
+
+#[test]
+fn test_process_batch_returns_true_on_healthy_locks() {
+    let (tmp, index) = make_batch_test_setup();
+    let test_file = tmp.path().join("new_healthy.cs");
+    std::fs::write(&test_file, "class Healthy { }").unwrap();
+
+    let mut dirty = HashSet::new();
+    dirty.insert(test_file);
+    let mut removed = HashSet::new();
+
+    let result = process_batch(&index, &None, &mut dirty, &mut removed);
+    assert!(result, "process_batch should return true when locks are healthy");
+}

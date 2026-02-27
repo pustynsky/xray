@@ -83,7 +83,10 @@ pub fn start_watcher(
                     if dirty_files.is_empty() && removed_files.is_empty() {
                         continue;
                     }
-                    process_batch(&index, &def_index, &mut dirty_files, &mut removed_files);
+                    if !process_batch(&index, &def_index, &mut dirty_files, &mut removed_files) {
+                        error!("RwLock poisoned, watcher thread exiting to avoid infinite error loop");
+                        break;
+                    }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     info!("Watcher channel disconnected, stopping");
@@ -104,12 +107,14 @@ pub fn start_watcher(
 ///
 /// Uses `batch_purge_files` for O(total_postings) instead of O(N × total_postings)
 /// when many files change at once (e.g., git pull with 300+ files).
+///
+/// Returns `false` if a poisoned RwLock is detected, signaling the caller to exit.
 fn process_batch(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     dirty_files: &mut HashSet<PathBuf>,
     removed_files: &mut HashSet<PathBuf>,
-) {
+) -> bool {
     let update_count = dirty_files.len();
     let remove_count = removed_files.len();
 
@@ -124,10 +129,14 @@ fn process_batch(
     let batch_start = std::time::Instant::now();
 
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
-    update_content_index(index, &removed_clean, &dirty_clean);
+    if !update_content_index(index, &removed_clean, &dirty_clean) {
+        return false;
+    }
 
     // Update definition index (if available)
-    update_definition_index(def_index, &removed_clean, &dirty_clean);
+    if !update_definition_index(def_index, &removed_clean, &dirty_clean) {
+        return false;
+    }
 
     let elapsed_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
     info!(
@@ -136,15 +145,18 @@ fn process_batch(
         elapsed_ms = format_args!("{:.1}", elapsed_ms),
         "Incremental index update complete"
     );
+    true
 }
 
 /// Update the content index: purge stale postings, remove deleted files,
 /// re-tokenize modified/new files, and shrink oversized collections.
+///
+/// Returns `false` if the RwLock is poisoned (prior panic), signaling the caller to stop.
 fn update_content_index(
     index: &Arc<RwLock<ContentIndex>>,
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
-) {
+) -> bool {
     match index.write() {
         Ok(mut idx) => {
             // Collect file_ids of all existing files to purge in one pass
@@ -205,17 +217,21 @@ fn update_content_index(
             shrink_if_oversized(&mut idx);
         }
         Err(e) => {
-            error!(error = %e, "Failed to acquire content index write lock");
+            error!(error = %e, "Failed to acquire content index write lock (poisoned)");
+            return false;
         }
     }
+    true
 }
 
 /// Update the definition index: remove deleted files, re-parse modified/new files.
+///
+/// Returns `false` if the RwLock is poisoned (prior panic), signaling the caller to stop.
 fn update_definition_index(
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
-) {
+) -> bool {
     if let Some(def_idx) = def_index {
         match def_idx.write() {
             Ok(mut idx) => {
@@ -227,10 +243,12 @@ fn update_definition_index(
                 }
             }
             Err(e) => {
-                error!(error = %e, "Failed to acquire definition index write lock");
+                error!(error = %e, "Failed to acquire definition index write lock (poisoned)");
+                return false;
             }
         }
     }
+    true
 }
 
 /// Conditionally shrink collections after retain() to release excess capacity.
