@@ -618,6 +618,15 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
         "indexFiles": index.files.len(),
         "totalDefinitions": active_definitions,
     });
+    // Hint for large transitive hierarchies
+    if base_type_transitive && total_results > 5000 {
+        if let Some(bt) = base_type_filter {
+            summary["hint"] = json!(format!(
+                "Hierarchy of '{}' has {} transitive descendants. Consider adding 'kind' or 'file' filters to narrow results.",
+                bt, total_results
+            ));
+        }
+    }
     if index.parse_errors > 0 {
         summary["readErrors"] = json!(index.parse_errors);
     }
@@ -759,6 +768,14 @@ fn cross_validate_indexes(
 ///
 /// Returns a combined Vec of definition indices from all levels.
 ///
+/// Level 0 (seed): uses substring matching on base_type_index keys to support
+/// generic types (e.g., "IAccessTable" matches "iaccesstable<model>").
+///
+/// Levels 1+: uses EXACT HashMap lookup (`base_type_index.get(&name)`) to prevent
+/// cascade bugs where a short descendant name (e.g., "service") would substring-match
+/// many unrelated base_type keys ("iservice", "webservice", "serviceprovider", etc.),
+/// pulling thousands of unrelated definitions into the result set.
+///
 /// Known limitation: matching is by name only (no namespace resolution).
 /// Classes with the same name in different namespaces will be conflated.
 fn collect_transitive_base_type_indices(
@@ -771,29 +788,37 @@ fn collect_transitive_base_type_indices(
     let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
-    // Seed the BFS with the initial base type
-    queue.push_back(base_type_name.to_string());
+    // Seed (level 0): substring match to support generic types
+    // e.g., "iaccesstable" matches "iaccesstable<model>", "iaccesstable<report>"
     visited.insert(base_type_name.to_string());
+    for (key, indices) in &index.base_type_index {
+        if key.contains(base_type_name) {
+            result.extend(indices);
+            for &def_idx in indices {
+                if let Some(def) = index.definitions.get(def_idx as usize) {
+                    let name = def.name.to_lowercase();
+                    if visited.insert(name.clone()) {
+                        queue.push_back(name);
+                    }
+                }
+            }
+        }
+    }
 
-    let mut depth = 0;
+    // BFS levels 1+: EXACT key matching — prevents cascade bug
+    // O(1) HashMap lookup instead of O(N) scan over all keys
+    let mut depth = 1;
     while !queue.is_empty() && depth < MAX_BFS_DEPTH {
         let level_size = queue.len();
         for _ in 0..level_size {
             let current_type = queue.pop_front().unwrap();
-
-            // Find all definitions that have `current_type` as a base type
-            // Use substring matching to support generic types (e.g., IAccessTable matches IAccessTable<Model>)
-            for (key, indices) in &index.base_type_index {
-                if !key.contains(&current_type) { continue; }
+            if let Some(indices) = index.base_type_index.get(&current_type) {
                 result.extend(indices);
-
-                // For each matched definition, get its name and enqueue for next BFS level
                 for &def_idx in indices {
                     if let Some(def) = index.definitions.get(def_idx as usize) {
-                        let def_name_lower = def.name.to_lowercase();
-                        if !visited.contains(&def_name_lower) {
-                            visited.insert(def_name_lower.clone());
-                            queue.push_back(def_name_lower);
+                        let name = def.name.to_lowercase();
+                        if visited.insert(name.clone()) {
+                            queue.push_back(name);
                         }
                     }
                 }
@@ -1483,6 +1508,231 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
         assert!(defs.len() >= 2, "Case-insensitive transitive should find both descendants");
+    }
+
+    // ─── B-1 BFS cascade prevention test ──────────────────────────────
+
+    #[test]
+    fn test_base_type_transitive_no_cascade_with_dangerous_names() {
+        // Regression test for B-1: BFS should NOT cascade when a descendant's name
+        // is a substring of unrelated base_type_index keys.
+        //
+        // Setup:
+        // - "BaseBlock" is the root type
+        // - "ServiceBlock" inherits from "BaseBlock" ← level 0 finds this
+        // - Unrelated entries: "iservice" → [UnrelatedA], "webservicebase" → [UnrelatedB]
+        // - Without the fix, BFS level 1 would search for "serviceblock" via substring,
+        //   and while "serviceblock" wouldn't match "iservice", a shorter name like "service"
+        //   WOULD match. So we test with a descendant named exactly "Service" to trigger the cascade.
+        //
+        // Hierarchy:
+        //   BaseBlock → Service (idx 1)
+        //   Unrelated: iservice → UnrelatedA (idx 2), webservicebase → UnrelatedB (idx 3)
+        //
+        // Expected: transitive search for "BaseBlock" finds Service only, NOT UnrelatedA or UnrelatedB
+        use crate::definitions::*;
+
+        let definitions = vec![
+            // idx 0: BaseBlock (root)
+            DefinitionEntry {
+                name: "BaseBlock".to_string(), kind: DefinitionKind::Class,
+                file_id: 0, line_start: 1, line_end: 50,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![], base_types: vec![],
+            },
+            // idx 1: Service : BaseBlock  ← descendant with a "dangerous" short name
+            DefinitionEntry {
+                name: "Service".to_string(), kind: DefinitionKind::Class,
+                file_id: 0, line_start: 52, line_end: 100,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["BaseBlock".to_string()],
+            },
+            // idx 2: UnrelatedA : IService  ← unrelated, but "iservice" contains "service"
+            DefinitionEntry {
+                name: "UnrelatedA".to_string(), kind: DefinitionKind::Class,
+                file_id: 1, line_start: 1, line_end: 50,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["IService".to_string()],
+            },
+            // idx 3: UnrelatedB : WebServiceBase  ← unrelated, "webservicebase" contains "service"
+            DefinitionEntry {
+                name: "UnrelatedB".to_string(), kind: DefinitionKind::Class,
+                file_id: 1, line_start: 52, line_end: 100,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["WebServiceBase".to_string()],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+            for bt in &def.base_types {
+                base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+            }
+        }
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(), created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec![
+                "C:\\src\\Blocks.cs".to_string(),
+                "C:\\src\\Services.cs".to_string(),
+            ],
+            definitions, name_index, kind_index,
+            attribute_index: HashMap::new(), base_type_index,
+            file_index, path_to_id: HashMap::new(),
+            method_calls: HashMap::new(), ..Default::default()
+        };
+
+        let content_index = crate::ContentIndex {
+            root: ".".to_string(),
+            extensions: vec!["cs".to_string()],
+            ..Default::default()
+        };
+
+        let ctx = super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
+            ..Default::default()
+        };
+
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "BaseBlock",
+            "baseTypeTransitive": true
+        }));
+        assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
+
+        // Service should be found (direct descendant of BaseBlock)
+        assert!(names.contains(&"Service"),
+            "Should find Service (direct descendant). Got: {:?}", names);
+
+        // UnrelatedA and UnrelatedB should NOT be found
+        // Without the fix, BFS level 1 would search for "service" via substring,
+        // matching "iservice" and "webservicebase" → pulling in UnrelatedA and UnrelatedB
+        assert!(!names.contains(&"UnrelatedA"),
+            "Should NOT find UnrelatedA (unrelated, inherits IService not BaseBlock). Got: {:?}", names);
+        assert!(!names.contains(&"UnrelatedB"),
+            "Should NOT find UnrelatedB (unrelated, inherits WebServiceBase not BaseBlock). Got: {:?}", names);
+    }
+
+    #[test]
+    fn test_base_type_transitive_generics_still_work_at_seed_level() {
+        // Verify that substring matching at level 0 (seed) still works for generics
+        // e.g., baseType="IRepository" should match "irepository<model>" and "irepository<report>"
+        use crate::definitions::*;
+
+        let definitions = vec![
+            // idx 0: GenericImpl : IRepository<Model>
+            DefinitionEntry {
+                name: "GenericImpl".to_string(), kind: DefinitionKind::Class,
+                file_id: 0, line_start: 1, line_end: 50,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["IRepository<Model>".to_string()],
+            },
+            // idx 1: AnotherImpl : IRepository<Report>
+            DefinitionEntry {
+                name: "AnotherImpl".to_string(), kind: DefinitionKind::Class,
+                file_id: 0, line_start: 52, line_end: 100,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["IRepository<Report>".to_string()],
+            },
+            // idx 2: SubImpl : GenericImpl (transitive — should be found at level 1 via exact match)
+            DefinitionEntry {
+                name: "SubImpl".to_string(), kind: DefinitionKind::Class,
+                file_id: 0, line_start: 102, line_end: 150,
+                signature: None, parent: None, modifiers: vec![],
+                attributes: vec![],
+                base_types: vec!["GenericImpl".to_string()],
+            },
+        ];
+
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+            for bt in &def.base_types {
+                base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
+            }
+        }
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(), created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: vec!["C:\\src\\Impls.cs".to_string()],
+            definitions, name_index, kind_index,
+            attribute_index: HashMap::new(), base_type_index,
+            file_index, path_to_id: HashMap::new(),
+            method_calls: HashMap::new(), ..Default::default()
+        };
+
+        let content_index = crate::ContentIndex {
+            root: ".".to_string(),
+            extensions: vec!["cs".to_string()],
+            ..Default::default()
+        };
+
+        let ctx = super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
+            ..Default::default()
+        };
+
+        // Transitive search from IRepository should find GenericImpl, AnotherImpl, and SubImpl
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "IRepository",
+            "baseTypeTransitive": true
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        let names: Vec<&str> = defs.iter().map(|d| d["name"].as_str().unwrap()).collect();
+
+        assert!(names.contains(&"GenericImpl"),
+            "Should find GenericImpl (IRepository<Model> matched via seed substring). Got: {:?}", names);
+        assert!(names.contains(&"AnotherImpl"),
+            "Should find AnotherImpl (IRepository<Report> matched via seed substring). Got: {:?}", names);
+        assert!(names.contains(&"SubImpl"),
+            "Should find SubImpl (inherits GenericImpl, found via level 1 exact match). Got: {:?}", names);
+    }
+
+    // ─── F-2 Hint for large transitive hierarchy test ─────────────────
+
+    #[test]
+    fn test_base_type_transitive_hint_for_large_hierarchy() {
+        // When baseTypeTransitive=true and totalResults > 5000, a hint should appear
+        // We can't easily create 5000+ definitions in a unit test, so we test the
+        // negative case: no hint when results are small
+        let ctx = make_transitive_inheritance_ctx();
+        let result = handle_search_definitions(&ctx, &serde_json::json!({
+            "baseType": "BaseService",
+            "baseTypeTransitive": true
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        // With only 2 results, no hint should be present
+        assert!(v["summary"].get("hint").is_none(),
+            "No hint expected for small result set (< 5000)");
     }
 
     #[test]

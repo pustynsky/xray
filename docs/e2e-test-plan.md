@@ -6978,6 +6978,59 @@ cargo run -- def-index -d $TEST_DIR -e ts
 **Validates:** `def-index` completes without error when a component's `templateUrl` points to a non-existent file. The component is still indexed for its selector but without template children.
 
 
+### T-BFS-CASCADE: `search_definitions` — `baseTypeTransitive` BFS no longer cascades
+
+**Tool:** `search_definitions`
+
+**Background:** The `collect_transitive_base_type_indices()` BFS previously used substring matching (`key.contains(&current_type)`) at ALL levels. When a descendant class had a short/common name (e.g., `"Service"`), BFS level 1+ would substring-match many unrelated base_type keys (`"iservice"`, `"webservice"`, `"serviceprovider"`), pulling thousands of definitions into the result set (~42K instead of ~828, ~29 sec instead of <1 sec). The fix uses exact HashMap lookup at levels 1+, keeping substring matching only at level 0 (seed) for generic type support.
+
+**Expected:**
+
+- `baseType="BaseBlock" baseTypeTransitive=true` returns < 5000 results (expected ~800-2000) and completes in < 500ms
+- Generic types still work at seed level: `baseType="IRepository" baseTypeTransitive=true` finds classes inheriting `IRepository<Model>`, `IRepository<Report>`, etc.
+- Transitive chain works: `BaseService → MiddleService → ConcreteService` all found
+
+**Unit tests:** `test_base_type_transitive_no_cascade_with_dangerous_names`, `test_base_type_transitive_generics_still_work_at_seed_level`, `test_base_type_transitive_finds_indirect_descendants`, `test_base_type_transitive_case_insensitive`, `test_base_type_transitive_no_match_returns_empty`
+
+**Status:** ✅ Covered by unit tests
+
+---
+
+### T-CALLERS-HINT: `search_callers` — Hint when 0 results with class filter
+
+**Tool:** `search_callers`
+
+**Background:** When `search_callers` returns an empty call tree and `class` parameter is set, the response now includes a `hint` field suggesting possible reasons (extension methods, DI wrappers, narrow class filter) and advising to try without `class` or with the interface name.
+
+**Expected:**
+
+- `method="X" class="NonExistent"` → response includes `"hint"` field mentioning class parameter
+- `method="X"` (no class filter) → response does NOT include `"hint"` even if tree is empty
+- `method="X" class="ValidClass"` with callers found → response does NOT include `"hint"`
+
+**Unit tests:** `test_search_callers_hint_when_empty_with_class_filter`, `test_search_callers_no_hint_without_class_filter`, `test_search_callers_no_hint_when_results_found`
+
+**Status:** ✅ Covered by unit tests
+
+---
+
+### T-TRANSITIVE-HINT: `search_definitions` — Hint for large transitive hierarchies
+
+**Tool:** `search_definitions`
+
+**Background:** When `baseTypeTransitive=true` and `totalResults > 5000`, the summary includes a `hint` suggesting `kind` or `file` filters to narrow results.
+
+**Expected:**
+
+- Small result set (< 5000) → no `hint` in summary
+- Large result set (> 5000) → `hint` present mentioning `kind` and `file` filters
+
+**Unit test:** `test_base_type_transitive_hint_for_large_hierarchy`
+
+**Status:** ✅ Covered by unit test (negative case; positive case requires 5000+ definitions)
+
+---
+
 ### T-TOMBSTONE: Definition index tombstone compaction during `--watch`
 
 **Tool:** `search-index serve --watch --definitions`

@@ -229,6 +229,11 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             },
             "summary": summary
         });
+        if tree.is_empty() && class_filter.is_some() {
+            output["hint"] = json!(
+                "No callers found. Possible reasons: (1) calls go through extension methods or DI wrappers, (2) class filter is too narrow. Try without 'class' parameter or with the interface name."
+            );
+        }
         if let Some(ref warning) = ambiguity_warning {
             output["warning"] = json!(warning);
         }
@@ -269,6 +274,11 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             },
             "summary": summary
         });
+        if tree.is_empty() && class_filter.is_some() {
+            output["hint"] = json!(
+                "No callees found. Possible reasons: (1) method body not parsed, (2) class filter is too narrow. Try without 'class' parameter or with the interface name."
+            );
+        }
         if let Some(ref warning) = ambiguity_warning {
             output["warning"] = json!(warning);
         }
@@ -2859,6 +2869,154 @@ mod tests {
         // dropped at depth > 0.
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
         assert_eq!(total_nodes, 2, "Should have exactly 2 nodes (ClassB.Handle + ClassC.Run), got {}", total_nodes);
+    }
+
+    // ─── F-1: Hint when 0 callers with class filter ─────────────────
+
+    #[test]
+    fn test_search_callers_hint_when_empty_with_class_filter() {
+        // When class filter is set and callTree is empty, response should include a hint
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+            method_def(0, "process", "OrderService", 5, 15),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        let content_index = crate::ContentIndex {
+            root: ".".to_string(),
+            files: vec!["src/OrderController.ts".to_string()],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["ts".to_string()],
+            file_token_counts: vec![0],
+            ..Default::default()
+        };
+
+        let ctx = super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+            ..Default::default()
+        };
+
+        // Search for callers of a method with a class filter that yields 0 results
+        let result = handle_search_callers(&ctx, &serde_json::json!({
+            "method": "process",
+            "class": "NonExistentClass",
+            "depth": 1
+        }));
+        assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(v.get("hint").is_some(),
+            "Should have hint when callTree is empty with class filter. Got: {}",
+            serde_json::to_string_pretty(&v).unwrap());
+        let hint = v["hint"].as_str().unwrap();
+        assert!(hint.contains("class"), "Hint should mention class parameter");
+    }
+
+    #[test]
+    fn test_search_callers_no_hint_without_class_filter() {
+        // When no class filter is set, no hint should appear even if tree is empty
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+            method_def(0, "process", "OrderService", 5, 15),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+
+        let content_index = crate::ContentIndex {
+            root: ".".to_string(),
+            files: vec!["src/OrderController.ts".to_string()],
+            index: HashMap::new(),
+            total_tokens: 0,
+            extensions: vec!["ts".to_string()],
+            file_token_counts: vec![0],
+            ..Default::default()
+        };
+
+        let ctx = super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+            ..Default::default()
+        };
+
+        // Search without class filter — no hint expected
+        let result = handle_search_callers(&ctx, &serde_json::json!({
+            "method": "nonexistentmethod",
+            "depth": 1
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(v.get("hint").is_none(),
+            "Should NOT have hint when no class filter is set");
+    }
+
+    #[test]
+    fn test_search_callers_no_hint_when_results_found() {
+        // When callers ARE found with class filter, no hint should appear
+        use crate::{ContentIndex, Posting};
+        use std::path::PathBuf;
+
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+            method_def(0, "process", "OrderService", 5, 15),
+            class_def(1, "Consumer", vec![]),
+            method_def(1, "run", "Consumer", 5, 20),
+        ];
+
+        let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+        method_calls.insert(3, vec![
+            CallSite {
+                method_name: "process".to_string(),
+                receiver_type: Some("OrderService".to_string()),
+                line: 10,
+                receiver_is_generic: false,
+            },
+        ]);
+
+        let mut def_idx = make_def_index(definitions, method_calls);
+        def_idx.path_to_id.insert(PathBuf::from("src/OrderController.ts"), 0);
+        def_idx.path_to_id.insert(PathBuf::from("src/OrderValidator.ts"), 1);
+
+        let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+        index.insert("process".to_string(), vec![
+            Posting { file_id: 0, lines: vec![5] },
+            Posting { file_id: 1, lines: vec![10] },
+        ]);
+        index.insert("orderservice".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1] },
+            Posting { file_id: 1, lines: vec![10] },
+        ]);
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            files: vec![
+                "src/OrderController.ts".to_string(),
+                "src/OrderValidator.ts".to_string(),
+            ],
+            index,
+            total_tokens: 100,
+            extensions: vec!["ts".to_string()],
+            file_token_counts: vec![50, 50],
+            ..Default::default()
+        };
+
+        let ctx = super::HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+            ..Default::default()
+        };
+
+        let result = handle_search_callers(&ctx, &serde_json::json!({
+            "method": "process",
+            "class": "OrderService",
+            "depth": 1
+        }));
+        assert!(!result.is_error);
+        let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let tree = v["callTree"].as_array().unwrap();
+        if !tree.is_empty() {
+            assert!(v.get("hint").is_none(),
+                "Should NOT have hint when callers are found");
+        }
     }
 
     // ─── Test 23: resolve_call_site resolves via base_types (existing behavior preserved) ──
