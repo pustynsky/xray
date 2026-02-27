@@ -470,20 +470,77 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
     Ok(())
 }
 
-// ─── cmd_grep ───────────────────────────────────────────────────────
+// ─── cmd_grep helpers ───────────────────────────────────────────────
 
-fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
+use crate::ContentIndex;
+use std::time::Duration;
+
+/// Check if a file path passes extension + exclude_dir + exclude filters.
+fn file_matches_filters(
+    file_path: &str,
+    ext: &Option<String>,
+    exclude_dir: &[String],
+    exclude: &[String],
+) -> bool {
+    if let Some(ext) = ext {
+        let m = Path::new(file_path).extension().and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case(ext));
+        if !m { return false; }
+    }
+    if exclude_dir.iter().any(|excl| file_path.to_lowercase().contains(&excl.to_lowercase())) { return false; }
+    if exclude.iter().any(|excl| file_path.to_lowercase().contains(&excl.to_lowercase())) { return false; }
+    true
+}
+
+/// Display a single file's matching lines with context (shared by phrase and token search).
+fn display_lines_with_context(
+    file_path: &str,
+    match_line_numbers: &[u32],
+    ctx_before: usize,
+    ctx_after: usize,
+) {
+    if let Ok(content) = fs::read_to_string(file_path) {
+        let lines_vec: Vec<&str> = content.lines().collect();
+        let total_lines = lines_vec.len();
+        let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
+        let mut match_lines_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
+        for &ln in match_line_numbers {
+            let idx = (ln as usize).saturating_sub(1);
+            if idx < total_lines {
+                match_lines_set.insert(idx);
+                let s = idx.saturating_sub(ctx_before);
+                let e = (idx + ctx_after).min(total_lines - 1);
+                for i in s..=e { lines_to_show.insert(i); }
+            }
+        }
+        let mut prev: Option<usize> = None;
+        for &idx in &lines_to_show {
+            if let Some(p) = prev && idx > p + 1 { println!("--"); }
+            let marker = if match_lines_set.contains(&idx) { ">" } else { " " };
+            println!("{}{}:{}: {}", marker, file_path, idx + 1, lines_vec[idx]);
+            prev = Some(idx);
+        }
+        if !lines_to_show.is_empty() { println!(); }
+    }
+}
+
+/// Load content index, handle stale/missing/auto-reindex.
+fn load_grep_index(
+    dir: &str,
+    ext: &Option<String>,
+    auto_reindex: bool,
+) -> Result<(ContentIndex, Duration), SearchError> {
     let start = Instant::now();
     let idx_base = index_dir();
-    let exts_for_load = args.ext.clone().unwrap_or_default();
+    let exts_for_load = ext.clone().unwrap_or_default();
 
-    let index = match load_content_index(&args.dir, &exts_for_load, &idx_base) {
+    let index = match load_content_index(dir, &exts_for_load, &idx_base) {
         Ok(idx) => {
-            if idx.is_stale() && args.auto_reindex {
+            if idx.is_stale() && auto_reindex {
                 eprintln!("Content index is stale, rebuilding...");
                 let ext_str = idx.extensions.join(",");
                 let new_idx = build_content_index(&ContentIndexArgs {
-                    dir: args.dir.clone(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
+                    dir: dir.to_string(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
                     hidden: false, no_ignore: false, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 });
                 let _ = save_content_index(&new_idx, &idx_base);
@@ -494,214 +551,233 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
             }
         }
         Err(_) => {
-            match find_content_index_for_dir(&args.dir, &idx_base, &[]) {
+            match find_content_index_for_dir(dir, &idx_base, &[]) {
                 Some(idx) => idx,
-                None => return Err(SearchError::IndexNotFound { dir: args.dir.clone() }),
+                None => return Err(SearchError::IndexNotFound { dir: dir.to_string() }),
             }
         }
     };
 
     let load_elapsed = start.elapsed();
+    Ok((index, load_elapsed))
+}
+
+/// Find file IDs that contain all phrase tokens via inverted index intersection.
+fn find_phrase_candidates(
+    index: &ContentIndex,
+    phrase_tokens: &[String],
+    ext: &Option<String>,
+    exclude_dir: &[String],
+    exclude: &[String],
+) -> std::collections::HashSet<u32> {
+    let mut candidate_file_ids: Option<std::collections::HashSet<u32>> = None;
+    for token in phrase_tokens {
+        if let Some(postings) = index.index.get(token.as_str()) {
+            let file_ids: std::collections::HashSet<u32> = postings.iter()
+                .filter(|p| {
+                    let path = match index.files.get(p.file_id as usize) {
+                        Some(p) => p,
+                        None => return false,
+                    };
+                    file_matches_filters(path, ext, exclude_dir, exclude)
+                })
+                .map(|p| p.file_id).collect();
+            candidate_file_ids = Some(match candidate_file_ids {
+                Some(existing) => existing.intersection(&file_ids).cloned().collect(),
+                None => file_ids,
+            });
+        } else {
+            candidate_file_ids = Some(std::collections::HashSet::new());
+            break;
+        }
+    }
+    candidate_file_ids.unwrap_or_default()
+}
+
+struct PhraseMatch { file_path: String, lines: Vec<u32> }
+
+/// Read candidate files from disk and verify phrase regex matches.
+fn verify_phrase_matches(
+    index: &ContentIndex,
+    candidates: &std::collections::HashSet<u32>,
+    phrase_re: &Regex,
+) -> Vec<PhraseMatch> {
+    let mut results: Vec<PhraseMatch> = Vec::new();
+    for &file_id in candidates {
+        let file_path = match index.files.get(file_id as usize) {
+            Some(p) => p,
+            None => continue,
+        };
+        if let Ok(content) = fs::read_to_string(file_path) && phrase_re.is_match(&content) {
+            let mut matching_lines = Vec::new();
+            for (line_num, line) in content.lines().enumerate() {
+                if phrase_re.is_match(line) { matching_lines.push((line_num + 1) as u32); }
+            }
+            if !matching_lines.is_empty() {
+                results.push(PhraseMatch { file_path: file_path.clone(), lines: matching_lines });
+            }
+        }
+    }
+    results
+}
+
+/// Handle the entire phrase search branch (early return path).
+fn cmd_grep_phrase(
+    index: &ContentIndex,
+    args: &GrepArgs,
+    load_elapsed: Duration,
+) -> Result<(), SearchError> {
     let search_start = Instant::now();
 
-    // ─── Determine search mode ──────────────────────────────
-    // Default: substring search (like MCP). Disabled by --exact, --regex, or --phrase.
-    let use_substring = !args.exact && !args.regex && !args.phrase;
-
-    // ─── Phrase search mode ─────────────────────────────────
-    if args.phrase {
-        let phrase = &args.pattern;
-        let phrase_lower = phrase.to_lowercase();
-        let phrase_tokens = tokenize(&phrase_lower, DEFAULT_MIN_TOKEN_LEN);
-        if phrase_tokens.is_empty() {
-            return Err(SearchError::EmptyPhrase { phrase: phrase.to_string() });
-        }
-
-        let phrase_regex_pattern = phrase_tokens.iter()
-            .map(|t| regex::escape(t)).collect::<Vec<_>>().join(r"\s+");
-        let phrase_re_pat = format!("(?i){}", phrase_regex_pattern);
-        let phrase_re = match Regex::new(&phrase_re_pat) {
-            Ok(r) => r,
-            Err(e) => return Err(SearchError::InvalidRegex { pattern: phrase_re_pat, source: e }),
-        };
-
-        eprintln!("Phrase search: '{}' -> tokens: {:?} -> regex: {}", phrase, phrase_tokens, phrase_regex_pattern);
-
-        let mut candidate_file_ids: Option<std::collections::HashSet<u32>> = None;
-        for token in &phrase_tokens {
-            if let Some(postings) = index.index.get(token.as_str()) {
-                let file_ids: std::collections::HashSet<u32> = postings.iter()
-                    .filter(|p| {
-                        let path = match index.files.get(p.file_id as usize) {
-                            Some(p) => p,
-                            None => return false,
-                        };
-                        if let Some(ref ext) = args.ext {
-                            let m = Path::new(path).extension().and_then(|e| e.to_str())
-                                .is_some_and(|e| e.eq_ignore_ascii_case(ext));
-                            if !m { return false; }
-                        }
-                        if args.exclude_dir.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) { return false; }
-                        if args.exclude.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) { return false; }
-                        true
-                    })
-                    .map(|p| p.file_id).collect();
-                candidate_file_ids = Some(match candidate_file_ids {
-                    Some(existing) => existing.intersection(&file_ids).cloned().collect(),
-                    None => file_ids,
-                });
-            } else {
-                candidate_file_ids = Some(std::collections::HashSet::new());
-                break;
-            }
-        }
-
-        let candidates = candidate_file_ids.unwrap_or_default();
-        eprintln!("Found {} candidate files containing all tokens", candidates.len());
-
-        struct PhraseMatch { file_path: String, lines: Vec<u32> }
-        let mut results: Vec<PhraseMatch> = Vec::new();
-
-        for &file_id in &candidates {
-            let file_path = match index.files.get(file_id as usize) {
-                Some(p) => p,
-                None => continue,
-            };
-            if let Ok(content) = fs::read_to_string(file_path) && phrase_re.is_match(&content) {
-                let mut matching_lines = Vec::new();
-                for (line_num, line) in content.lines().enumerate() {
-                    if phrase_re.is_match(line) { matching_lines.push((line_num + 1) as u32); }
-                }
-                if !matching_lines.is_empty() {
-                    results.push(PhraseMatch { file_path: file_path.clone(), lines: matching_lines });
-                }
-            }
-        }
-
-        let search_elapsed = search_start.elapsed();
-        let total_elapsed = start.elapsed();
-        let match_count = results.len();
-        let line_count: usize = results.iter().map(|r| r.lines.len()).sum();
-
-        let display_results = if args.max_results > 0 { &results[..results.len().min(args.max_results)] } else { &results };
-        let ctx_before = if args.context > 0 { args.context } else { args.before };
-        let ctx_after = if args.context > 0 { args.context } else { args.after };
-
-        if !args.count {
-            for result in display_results {
-                if args.show_lines {
-                    if let Ok(content) = fs::read_to_string(&result.file_path) {
-                        let lines_vec: Vec<&str> = content.lines().collect();
-                        let total_lines = lines_vec.len();
-                        let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-                        let mut match_lines_set: std::collections::HashSet<usize> = std::collections::HashSet::new();
-                        for &ln in &result.lines {
-                            let idx = (ln as usize).saturating_sub(1);
-                            if idx < total_lines {
-                                match_lines_set.insert(idx);
-                                let s = idx.saturating_sub(ctx_before);
-                                let e = (idx + ctx_after).min(total_lines - 1);
-                                for i in s..=e { lines_to_show.insert(i); }
-                            }
-                        }
-                        let mut prev: Option<usize> = None;
-                        for &idx in &lines_to_show {
-                            if let Some(p) = prev && idx > p + 1 { println!("--"); }
-                            let marker = if match_lines_set.contains(&idx) { ">" } else { " " };
-                            println!("{}{}:{}: {}", marker, result.file_path, idx + 1, lines_vec[idx]);
-                            prev = Some(idx);
-                        }
-                        if !lines_to_show.is_empty() { println!(); }
-                    }
-                } else {
-                    println!("{} ({} matches, lines: {})", result.file_path, result.lines.len(),
-                        result.lines.iter().take(10).map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
-                }
-            }
-        }
-
-        eprintln!("\n{} files, {} lines matching phrase '{}' (candidates: {}, index: {} files)",
-            match_count, line_count, phrase, candidates.len(), index.files.len());
-        eprintln!("Index load: {:.3}s | Search+Verify: {:.6}s | Total: {:.3}s",
-            load_elapsed.as_secs_f64(), search_elapsed.as_secs_f64(), total_elapsed.as_secs_f64());
-        return Ok(());
+    let phrase = &args.pattern;
+    let phrase_lower = phrase.to_lowercase();
+    let phrase_tokens = tokenize(&phrase_lower, DEFAULT_MIN_TOKEN_LEN);
+    if phrase_tokens.is_empty() {
+        return Err(SearchError::EmptyPhrase { phrase: phrase.to_string() });
     }
 
-    // ─── Normal token search ────────────────────────────────
-    let raw_terms: Vec<String> = args.pattern.split(',')
-        .map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+    let phrase_regex_pattern = phrase_tokens.iter()
+        .map(|t| regex::escape(t)).collect::<Vec<_>>().join(r"\s+");
+    let phrase_re_pat = format!("(?i){}", phrase_regex_pattern);
+    let phrase_re = match Regex::new(&phrase_re_pat) {
+        Ok(r) => r,
+        Err(e) => return Err(SearchError::InvalidRegex { pattern: phrase_re_pat, source: e }),
+    };
 
-    let terms: Vec<String> = if use_substring {
-        // Expand terms using trigram index: find all tokens containing each term as a substring
-        let trigram_idx = &index.trigram;
-        let mut expanded = Vec::new();
-        for term in &raw_terms {
-            let matched_tokens: Vec<String> = if term.len() < 3 {
-                // Linear scan for very short terms (no trigrams possible)
-                trigram_idx.tokens.iter()
+    eprintln!("Phrase search: '{}' -> tokens: {:?} -> regex: {}", phrase, phrase_tokens, phrase_regex_pattern);
+
+    let candidates = find_phrase_candidates(index, &phrase_tokens, &args.ext, &args.exclude_dir, &args.exclude);
+    eprintln!("Found {} candidate files containing all tokens", candidates.len());
+
+    let results = verify_phrase_matches(index, &candidates, &phrase_re);
+
+    let search_elapsed = search_start.elapsed();
+    let total_elapsed = load_elapsed + search_elapsed;
+    let match_count = results.len();
+    let line_count: usize = results.iter().map(|r| r.lines.len()).sum();
+
+    let display_results = if args.max_results > 0 { &results[..results.len().min(args.max_results)] } else { &results };
+    let ctx_before = if args.context > 0 { args.context } else { args.before };
+    let ctx_after = if args.context > 0 { args.context } else { args.after };
+
+    if !args.count {
+        for result in display_results {
+            if args.show_lines {
+                display_lines_with_context(&result.file_path, &result.lines, ctx_before, ctx_after);
+            } else {
+                println!("{} ({} matches, lines: {})", result.file_path, result.lines.len(),
+                    result.lines.iter().take(10).map(|n| n.to_string()).collect::<Vec<_>>().join(", "));
+            }
+        }
+    }
+
+    eprintln!("\n{} files, {} lines matching phrase '{}' (candidates: {}, index: {} files)",
+        match_count, line_count, phrase, candidates.len(), index.files.len());
+    eprintln!("Index load: {:.3}s | Search+Verify: {:.6}s | Total: {:.3}s",
+        load_elapsed.as_secs_f64(), search_elapsed.as_secs_f64(), total_elapsed.as_secs_f64());
+    Ok(())
+}
+
+/// Expand terms using trigram index for substring matching.
+fn expand_substring_terms(
+    raw_terms: &[String],
+    trigram_idx: &crate::TrigramIndex,
+) -> Vec<String> {
+    let mut expanded = Vec::new();
+    for term in raw_terms {
+        let matched_tokens: Vec<String> = if term.len() < 3 {
+            // Linear scan for very short terms (no trigrams possible)
+            trigram_idx.tokens.iter()
+                .filter(|tok| tok.contains(term.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            let trigrams = search_index::generate_trigrams(term);
+            if trigrams.is_empty() {
+                Vec::new()
+            } else {
+                let mut candidates: Option<Vec<u32>> = None;
+                for tri in &trigrams {
+                    if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
+                        candidates = Some(match candidates {
+                            None => posting_list.clone(),
+                            Some(prev) => crate::mcp::handlers::utils::sorted_intersect(&prev, posting_list),
+                        });
+                    } else {
+                        candidates = Some(Vec::new());
+                        break;
+                    }
+                }
+                candidates.unwrap_or_default().into_iter()
+                    .filter_map(|idx| trigram_idx.tokens.get(idx as usize))
                     .filter(|tok| tok.contains(term.as_str()))
                     .cloned()
                     .collect()
-            } else {
-                let trigrams = search_index::generate_trigrams(term);
-                if trigrams.is_empty() {
-                    Vec::new()
-                } else {
-                    let mut candidates: Option<Vec<u32>> = None;
-                    for tri in &trigrams {
-                        if let Some(posting_list) = trigram_idx.trigram_map.get(tri) {
-                            candidates = Some(match candidates {
-                                None => posting_list.clone(),
-                                Some(prev) => crate::mcp::handlers::utils::sorted_intersect(&prev, posting_list),
-                            });
-                        } else {
-                            candidates = Some(Vec::new());
-                            break;
-                        }
-                    }
-                    candidates.unwrap_or_default().into_iter()
-                        .filter_map(|idx| trigram_idx.tokens.get(idx as usize))
-                        .filter(|tok| tok.contains(term.as_str()))
-                        .cloned()
-                        .collect()
-                }
-            };
-            if matched_tokens.is_empty() {
-                eprintln!("Warning: substring '{}' matched 0 tokens", term);
-            } else {
-                eprintln!("Substring '{}' matched {} tokens: {}", term, matched_tokens.len(),
-                    matched_tokens.iter().take(10).cloned().collect::<Vec<_>>().join(", "));
             }
-            expanded.extend(matched_tokens);
+        };
+        if matched_tokens.is_empty() {
+            eprintln!("Warning: substring '{}' matched 0 tokens", term);
+        } else {
+            eprintln!("Substring '{}' matched {} tokens: {}", term, matched_tokens.len(),
+                matched_tokens.iter().take(10).cloned().collect::<Vec<_>>().join(", "));
         }
-        expanded
-    } else if args.regex {
-        let mut expanded = Vec::new();
-        for pat in &raw_terms {
-            match Regex::new(&format!("(?i)^{}$", pat)) {
-                Ok(re) => {
-                    let matching: Vec<String> = index.index.keys().filter(|k| re.is_match(k)).cloned().collect();
-                    if matching.is_empty() { eprintln!("Warning: regex '{}' matched 0 tokens", pat); }
-                    else { eprintln!("Regex '{}' matched {} tokens", pat, matching.len()); }
-                    expanded.extend(matching);
-                }
-                Err(e) => return Err(SearchError::InvalidRegex { pattern: pat.clone(), source: e }),
+        expanded.extend(matched_tokens);
+    }
+    expanded
+}
+
+/// Expand terms using regex pattern matching against all indexed tokens.
+fn expand_regex_terms(
+    raw_terms: &[String],
+    index_keys: &HashMap<String, Vec<crate::Posting>>,
+) -> Result<Vec<String>, SearchError> {
+    let mut expanded = Vec::new();
+    for pat in raw_terms {
+        match Regex::new(&format!("(?i)^{}$", pat)) {
+            Ok(re) => {
+                let matching: Vec<String> = index_keys.keys().filter(|k| re.is_match(k)).cloned().collect();
+                if matching.is_empty() { eprintln!("Warning: regex '{}' matched 0 tokens", pat); }
+                else { eprintln!("Regex '{}' matched {} tokens", pat, matching.len()); }
+                expanded.extend(matching);
             }
+            Err(e) => return Err(SearchError::InvalidRegex { pattern: pat.clone(), source: e }),
         }
-        expanded
+    }
+    Ok(expanded)
+}
+
+/// Expand raw comma-separated search terms based on search mode (substring/regex/exact).
+fn expand_grep_terms(
+    raw_terms: &[String],
+    index: &ContentIndex,
+    use_substring: bool,
+    use_regex: bool,
+) -> Result<Vec<String>, SearchError> {
+    if use_substring {
+        Ok(expand_substring_terms(raw_terms, &index.trigram))
+    } else if use_regex {
+        expand_regex_terms(raw_terms, &index.index)
     } else {
-        raw_terms.clone()
-    };
+        Ok(raw_terms.to_vec())
+    }
+}
 
+struct FileScore { file_path: String, lines: Vec<u32>, tf_idf: f64, occurrences: usize, terms_matched: usize }
+
+/// Compute TF-IDF scores per file for expanded terms.
+fn score_grep_results(
+    index: &ContentIndex,
+    terms: &[String],
+    ext: &Option<String>,
+    exclude_dir: &[String],
+    exclude: &[String],
+    require_all: bool,
+    raw_term_count: usize,
+) -> Vec<FileScore> {
     let total_docs = index.files.len() as f64;
-    let mode_str = if use_substring { if args.all { "SUBSTRING-AND" } else { "SUBSTRING-OR" } }
-        else if args.regex { "REGEX" } else if args.all { "AND" } else { "OR" };
-
-    struct FileScore { file_path: String, lines: Vec<u32>, tf_idf: f64, occurrences: usize, terms_matched: usize }
     let mut file_scores: HashMap<u32, FileScore> = HashMap::new();
-    let term_count_for_all = if args.regex || use_substring { raw_terms.len() } else { terms.len() };
 
-    for term in &terms {
+    for term in terms {
         if let Some(postings) = index.index.get(term.as_str()) {
             let doc_freq = postings.len() as f64;
             let idf = (total_docs / doc_freq).ln();
@@ -710,13 +786,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
                     Some(p) => p,
                     None => continue,
                 };
-                if let Some(ref ext) = args.ext {
-                    let matches = Path::new(file_path).extension().and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
-                    if !matches { continue; }
-                }
-                if args.exclude_dir.iter().any(|excl| file_path.to_lowercase().contains(&excl.to_lowercase())) { continue; }
-                if args.exclude.iter().any(|excl| file_path.to_lowercase().contains(&excl.to_lowercase())) { continue; }
+                if !file_matches_filters(file_path, ext, exclude_dir, exclude) { continue; }
 
                 let occurrences = posting.lines.len();
                 let file_total = if (posting.file_id as usize) < index.file_token_counts.len() {
@@ -737,14 +807,48 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     }
 
     let mut results: Vec<FileScore> = file_scores.into_values()
-        .filter(|fs| !args.all || fs.terms_matched >= term_count_for_all).collect();
+        .filter(|fs| !require_all || fs.terms_matched >= raw_term_count).collect();
 
     for result in &mut results { result.lines.sort(); result.lines.dedup(); }
     results.sort_by(|a, b| b.tf_idf.partial_cmp(&a.tf_idf).unwrap_or(std::cmp::Ordering::Equal));
 
+    results
+}
+
+// ─── cmd_grep ───────────────────────────────────────────────────────
+
+fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
+    let start = Instant::now();
+    let (index, load_elapsed) = load_grep_index(&args.dir, &args.ext, args.auto_reindex)?;
+    let search_start = Instant::now();
+
+    // Default: substring search (like MCP). Disabled by --exact, --regex, or --phrase.
+    let use_substring = !args.exact && !args.regex && !args.phrase;
+
+    // Phrase search: separate code path with early return
+    if args.phrase {
+        return cmd_grep_phrase(&index, &args, load_elapsed);
+    }
+
+    // ─── Normal token search ────────────────────────────────
+    let raw_terms: Vec<String> = args.pattern.split(',')
+        .map(|s| s.trim().to_lowercase()).filter(|s| !s.is_empty()).collect();
+
+    let terms = expand_grep_terms(&raw_terms, &index, use_substring, args.regex)?;
+
+    let mode_str = if use_substring { if args.all { "SUBSTRING-AND" } else { "SUBSTRING-OR" } }
+        else if args.regex { "REGEX" } else if args.all { "AND" } else { "OR" };
+
+    let raw_term_count = if args.regex || use_substring { raw_terms.len() } else { terms.len() };
+    let results = score_grep_results(
+        &index, &terms, &args.ext, &args.exclude_dir, &args.exclude,
+        args.all, raw_term_count,
+    );
+
     let match_count = results.len();
     let line_count: usize = results.iter().map(|r| r.lines.len()).sum();
-    let display_results = if args.max_results > 0 { &results[..results.len().min(args.max_results)] } else { &results };
+    let max = args.max_results;
+    let display_results = if max > 0 { &results[..results.len().min(max)] } else { &results };
 
     let ctx_before = if args.context > 0 { args.context } else { args.before };
     let ctx_after = if args.context > 0 { args.context } else { args.after };
@@ -752,29 +856,7 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     if !args.count {
         for result in display_results {
             if args.show_lines {
-                if let Ok(content) = fs::read_to_string(&result.file_path) {
-                    let lines_vec: Vec<&str> = content.lines().collect();
-                    let total_lines = lines_vec.len();
-                    let mut lines_to_show: std::collections::BTreeSet<usize> = std::collections::BTreeSet::new();
-                    let mut match_lines: std::collections::HashSet<usize> = std::collections::HashSet::new();
-                    for &line_num in &result.lines {
-                        let idx = (line_num as usize).saturating_sub(1);
-                        if idx < total_lines {
-                            match_lines.insert(idx);
-                            let start = idx.saturating_sub(ctx_before);
-                            let end = (idx + ctx_after).min(total_lines - 1);
-                            for i in start..=end { lines_to_show.insert(i); }
-                        }
-                    }
-                    let mut prev_idx: Option<usize> = None;
-                    for &idx in &lines_to_show {
-                        if let Some(prev) = prev_idx && idx > prev + 1 { println!("--"); }
-                        let marker = if match_lines.contains(&idx) { ">" } else { " " };
-                        println!("{}{}:{}: {}", marker, result.file_path, idx + 1, lines_vec[idx]);
-                        prev_idx = Some(idx);
-                    }
-                    if !lines_to_show.is_empty() { println!(); }
-                }
+                display_lines_with_context(&result.file_path, &result.lines, ctx_before, ctx_after);
             } else {
                 println!("[{:.4}] {} ({} occurrences, {}/{} terms, lines: {})",
                     result.tf_idf, result.file_path, result.occurrences,
@@ -791,4 +873,615 @@ fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     eprintln!("Index load: {:.3}s | Search+Rank: {:.6}s | Total: {:.3}s",
         load_elapsed.as_secs_f64(), search_elapsed.as_secs_f64(), total_elapsed.as_secs_f64());
     Ok(())
+}
+
+// ─── Tests for extracted cmd_grep helpers ────────────────────────────
+
+#[cfg(test)]
+mod grep_helper_tests {
+    use super::*;
+    use std::collections::HashMap;
+    use crate::{ContentIndex, Posting, TrigramIndex};
+
+    // ─── Helper: build a minimal ContentIndex from known data ────────
+
+    /// Build a test ContentIndex with given files, tokens→postings, and token counts.
+    /// Also builds a valid TrigramIndex from the token set.
+    fn make_test_index(
+        files: Vec<&str>,
+        postings: Vec<(&str, Vec<Posting>)>,
+        file_token_counts: Vec<u32>,
+    ) -> ContentIndex {
+        let files: Vec<String> = files.into_iter().map(|s| s.to_string()).collect();
+        let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+        for (token, posts) in postings {
+            index.insert(token.to_string(), posts);
+        }
+
+        // Build trigram index from the token keys
+        let mut tokens: Vec<String> = index.keys().cloned().collect();
+        tokens.sort();
+        let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+        for (idx, token) in tokens.iter().enumerate() {
+            for tri in search_index::generate_trigrams(token) {
+                trigram_map.entry(tri).or_default().push(idx as u32);
+            }
+        }
+
+        ContentIndex {
+            root: ".".to_string(),
+            files,
+            index,
+            file_token_counts,
+            trigram: TrigramIndex { tokens, trigram_map },
+            ..Default::default()
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  file_matches_filters() tests — pure predicate, no index needed
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_file_matches_filters_no_filters() {
+        // No filters → everything passes
+        assert!(file_matches_filters("src/main.cs", &None, &[], &[]));
+    }
+
+    #[test]
+    fn test_file_matches_filters_ext_match() {
+        let ext = Some("cs".to_string());
+        assert!(file_matches_filters("src/Service.cs", &ext, &[], &[]));
+    }
+
+    #[test]
+    fn test_file_matches_filters_ext_no_match() {
+        let ext = Some("cs".to_string());
+        assert!(!file_matches_filters("src/main.rs", &ext, &[], &[]));
+    }
+
+    #[test]
+    fn test_file_matches_filters_ext_case_insensitive() {
+        let ext = Some("cs".to_string());
+        assert!(file_matches_filters("src/Service.CS", &ext, &[], &[]));
+        assert!(file_matches_filters("src/Service.Cs", &ext, &[], &[]));
+    }
+
+    #[test]
+    fn test_file_matches_filters_exclude_dir() {
+        let exclude_dir = vec!["tests".to_string()];
+        assert!(!file_matches_filters("src/tests/unit.cs", &None, &exclude_dir, &[]));
+        assert!(file_matches_filters("src/main.cs", &None, &exclude_dir, &[]));
+    }
+
+    #[test]
+    fn test_file_matches_filters_exclude_dir_case_insensitive() {
+        let exclude_dir = vec!["Tests".to_string()];
+        assert!(!file_matches_filters("src/tests/unit.cs", &None, &exclude_dir, &[]));
+        assert!(!file_matches_filters("src/TESTS/unit.cs", &None, &exclude_dir, &[]));
+    }
+
+    #[test]
+    fn test_file_matches_filters_exclude_pattern() {
+        let exclude = vec!["mock".to_string()];
+        assert!(!file_matches_filters("src/ServiceMock.cs", &None, &[], &exclude));
+        assert!(file_matches_filters("src/Service.cs", &None, &[], &exclude));
+    }
+
+    #[test]
+    fn test_file_matches_filters_exclude_pattern_case_insensitive() {
+        let exclude = vec!["Mock".to_string()];
+        assert!(!file_matches_filters("src/servicemock.cs", &None, &[], &exclude));
+    }
+
+    #[test]
+    fn test_file_matches_filters_multiple_excludes() {
+        let exclude_dir = vec!["tests".to_string()];
+        let exclude = vec!["mock".to_string()];
+        // Excluded by dir
+        assert!(!file_matches_filters("tests/unit.cs", &None, &exclude_dir, &exclude));
+        // Excluded by pattern
+        assert!(!file_matches_filters("src/ServiceMock.cs", &None, &exclude_dir, &exclude));
+        // Passes both
+        assert!(file_matches_filters("src/Service.cs", &None, &exclude_dir, &exclude));
+    }
+
+    #[test]
+    fn test_file_matches_filters_combined_ext_and_exclude() {
+        let ext = Some("cs".to_string());
+        let exclude_dir = vec!["tests".to_string()];
+        // Wrong extension
+        assert!(!file_matches_filters("src/main.rs", &ext, &exclude_dir, &[]));
+        // Right extension but excluded dir
+        assert!(!file_matches_filters("tests/unit.cs", &ext, &exclude_dir, &[]));
+        // Passes both
+        assert!(file_matches_filters("src/Service.cs", &ext, &exclude_dir, &[]));
+    }
+
+    #[test]
+    fn test_file_matches_filters_no_extension_file() {
+        let ext = Some("cs".to_string());
+        // File with no extension should not match ext filter
+        assert!(!file_matches_filters("Makefile", &ext, &[], &[]));
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  expand_regex_terms() tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_expand_regex_terms_matches_tokens() {
+        let mut index_keys: HashMap<String, Vec<Posting>> = HashMap::new();
+        index_keys.insert("httpclient".to_string(), vec![]);
+        index_keys.insert("httphandler".to_string(), vec![]);
+        index_keys.insert("ilogger".to_string(), vec![]);
+        index_keys.insert("icache".to_string(), vec![]);
+
+        let terms = vec!["http.*".to_string()];
+        let result = expand_regex_terms(&terms, &index_keys).unwrap();
+        assert_eq!(result.len(), 2);
+        let mut sorted = result.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["httpclient", "httphandler"]);
+    }
+
+    #[test]
+    fn test_expand_regex_terms_no_match() {
+        let mut index_keys: HashMap<String, Vec<Posting>> = HashMap::new();
+        index_keys.insert("httpclient".to_string(), vec![]);
+
+        let terms = vec!["zzzznonexistent".to_string()];
+        let result = expand_regex_terms(&terms, &index_keys).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_expand_regex_terms_invalid_regex() {
+        let index_keys: HashMap<String, Vec<Posting>> = HashMap::new();
+        let terms = vec!["[invalid".to_string()];
+        let result = expand_regex_terms(&terms, &index_keys);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_expand_regex_terms_multiple_patterns() {
+        let mut index_keys: HashMap<String, Vec<Posting>> = HashMap::new();
+        index_keys.insert("httpclient".to_string(), vec![]);
+        index_keys.insert("ilogger".to_string(), vec![]);
+        index_keys.insert("icache".to_string(), vec![]);
+
+        let terms = vec!["http.*".to_string(), "i.*".to_string()];
+        let result = expand_regex_terms(&terms, &index_keys).unwrap();
+        // http.* matches httpclient; i.* matches ilogger, icache
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_expand_regex_terms_case_insensitive() {
+        let mut index_keys: HashMap<String, Vec<Posting>> = HashMap::new();
+        index_keys.insert("httpclient".to_string(), vec![]);
+
+        // Pattern is uppercase but matching is case-insensitive ((?i) is added)
+        let terms = vec!["HTTPCLIENT".to_string()];
+        let result = expand_regex_terms(&terms, &index_keys).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], "httpclient");
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  expand_substring_terms() tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_expand_substring_terms_matches_via_trigram() {
+        // Build a TrigramIndex with known tokens
+        let tokens = vec![
+            "httpclient".to_string(),
+            "httphandler".to_string(),
+            "ilogger".to_string(),
+        ];
+        let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+        for (idx, token) in tokens.iter().enumerate() {
+            for tri in search_index::generate_trigrams(token) {
+                trigram_map.entry(tri).or_default().push(idx as u32);
+            }
+        }
+        let trigram_idx = TrigramIndex { tokens, trigram_map };
+
+        // "client" is a substring of "httpclient" only
+        let terms = vec!["client".to_string()];
+        let result = expand_substring_terms(&terms, &trigram_idx);
+        assert_eq!(result, vec!["httpclient"]);
+    }
+
+    #[test]
+    fn test_expand_substring_terms_matches_multiple() {
+        let tokens = vec![
+            "httpclient".to_string(),
+            "httphandler".to_string(),
+            "ilogger".to_string(),
+        ];
+        let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+        for (idx, token) in tokens.iter().enumerate() {
+            for tri in search_index::generate_trigrams(token) {
+                trigram_map.entry(tri).or_default().push(idx as u32);
+            }
+        }
+        let trigram_idx = TrigramIndex { tokens, trigram_map };
+
+        // "http" is a substring of both httpclient and httphandler
+        let terms = vec!["http".to_string()];
+        let result = expand_substring_terms(&terms, &trigram_idx);
+        let mut sorted = result.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["httpclient", "httphandler"]);
+    }
+
+    #[test]
+    fn test_expand_substring_terms_no_match() {
+        let tokens = vec!["httpclient".to_string()];
+        let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+        for (idx, token) in tokens.iter().enumerate() {
+            for tri in search_index::generate_trigrams(token) {
+                trigram_map.entry(tri).or_default().push(idx as u32);
+            }
+        }
+        let trigram_idx = TrigramIndex { tokens, trigram_map };
+
+        let terms = vec!["zzzzz".to_string()];
+        let result = expand_substring_terms(&terms, &trigram_idx);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_expand_substring_terms_short_term_linear_scan() {
+        // Terms shorter than 3 chars use linear scan (no trigrams)
+        let tokens = vec![
+            "ax".to_string(),
+            "bx".to_string(),
+            "abc".to_string(),
+        ];
+        let trigram_map: HashMap<String, Vec<u32>> = HashMap::new(); // empty — short terms don't use it
+        let trigram_idx = TrigramIndex { tokens, trigram_map };
+
+        // "ax" should match "ax" via linear scan
+        let terms = vec!["ax".to_string()];
+        let result = expand_substring_terms(&terms, &trigram_idx);
+        assert_eq!(result, vec!["ax"]);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  expand_grep_terms() tests — routing logic
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_expand_grep_terms_exact_mode() {
+        let index = make_test_index(
+            vec!["file.cs"],
+            vec![("httpclient", vec![Posting { file_id: 0, lines: vec![1] }])],
+            vec![10],
+        );
+        // Exact mode: terms returned as-is, no expansion
+        let raw = vec!["myterm".to_string()];
+        let result = expand_grep_terms(&raw, &index, false, false).unwrap();
+        assert_eq!(result, vec!["myterm"]);
+    }
+
+    #[test]
+    fn test_expand_grep_terms_substring_mode() {
+        let index = make_test_index(
+            vec!["file.cs"],
+            vec![
+                ("httpclient", vec![Posting { file_id: 0, lines: vec![1] }]),
+                ("httphandler", vec![Posting { file_id: 0, lines: vec![2] }]),
+            ],
+            vec![10],
+        );
+        // Substring mode: "http" should expand to matching tokens
+        let raw = vec!["http".to_string()];
+        let result = expand_grep_terms(&raw, &index, true, false).unwrap();
+        let mut sorted = result.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["httpclient", "httphandler"]);
+    }
+
+    #[test]
+    fn test_expand_grep_terms_regex_mode() {
+        let index = make_test_index(
+            vec!["file.cs"],
+            vec![
+                ("httpclient", vec![Posting { file_id: 0, lines: vec![1] }]),
+                ("ilogger", vec![Posting { file_id: 0, lines: vec![2] }]),
+            ],
+            vec![10],
+        );
+        // Regex mode: "http.*" should match httpclient
+        let raw = vec!["http.*".to_string()];
+        let result = expand_grep_terms(&raw, &index, false, true).unwrap();
+        assert_eq!(result, vec!["httpclient"]);
+    }
+
+    #[test]
+    fn test_expand_grep_terms_regex_invalid() {
+        let index = make_test_index(vec!["file.cs"], vec![], vec![10]);
+        let raw = vec!["[invalid".to_string()];
+        let result = expand_grep_terms(&raw, &index, false, true);
+        assert!(result.is_err());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  find_phrase_candidates() tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_find_phrase_candidates_all_tokens_found() {
+        let index = make_test_index(
+            vec!["src/a.cs", "src/b.cs"],
+            vec![
+                ("new", vec![
+                    Posting { file_id: 0, lines: vec![1] },
+                    Posting { file_id: 1, lines: vec![1] },
+                ]),
+                ("httpclient", vec![
+                    Posting { file_id: 0, lines: vec![1] },
+                ]),
+            ],
+            vec![10, 10],
+        );
+        // "new" is in files 0,1. "httpclient" is in file 0 only.
+        // Intersection = {0}
+        let tokens = vec!["new".to_string(), "httpclient".to_string()];
+        let result = find_phrase_candidates(&index, &tokens, &None, &[], &[]);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&0));
+    }
+
+    #[test]
+    fn test_find_phrase_candidates_token_missing() {
+        let index = make_test_index(
+            vec!["src/a.cs"],
+            vec![
+                ("new", vec![Posting { file_id: 0, lines: vec![1] }]),
+            ],
+            vec![10],
+        );
+        // "httpclient" is not in the index → empty result
+        let tokens = vec!["new".to_string(), "httpclient".to_string()];
+        let result = find_phrase_candidates(&index, &tokens, &None, &[], &[]);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_find_phrase_candidates_with_ext_filter() {
+        let index = make_test_index(
+            vec!["src/a.cs", "src/b.rs"],
+            vec![
+                ("httpclient", vec![
+                    Posting { file_id: 0, lines: vec![1] },
+                    Posting { file_id: 1, lines: vec![1] },
+                ]),
+            ],
+            vec![10, 10],
+        );
+        // Filter to .cs only
+        let ext = Some("cs".to_string());
+        let tokens = vec!["httpclient".to_string()];
+        let result = find_phrase_candidates(&index, &tokens, &ext, &[], &[]);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&0));
+    }
+
+    #[test]
+    fn test_find_phrase_candidates_with_exclude_dir() {
+        let index = make_test_index(
+            vec!["src/Service.cs", "tests/ServiceTest.cs"],
+            vec![
+                ("httpclient", vec![
+                    Posting { file_id: 0, lines: vec![1] },
+                    Posting { file_id: 1, lines: vec![1] },
+                ]),
+            ],
+            vec![10, 10],
+        );
+        let exclude_dir = vec!["tests".to_string()];
+        let tokens = vec!["httpclient".to_string()];
+        let result = find_phrase_candidates(&index, &tokens, &None, &exclude_dir, &[]);
+        assert_eq!(result.len(), 1);
+        assert!(result.contains(&0)); // only src/Service.cs
+    }
+
+    #[test]
+    fn test_find_phrase_candidates_empty_tokens() {
+        let index = make_test_index(
+            vec!["src/a.cs"],
+            vec![("httpclient", vec![Posting { file_id: 0, lines: vec![1] }])],
+            vec![10],
+        );
+        let tokens: Vec<String> = vec![];
+        let result = find_phrase_candidates(&index, &tokens, &None, &[], &[]);
+        // No tokens → no candidates (unwrap_or_default returns empty set)
+        assert!(result.is_empty());
+    }
+
+    // ═══════════════════════════════════════════════════════════════════
+    //  score_grep_results() tests
+    // ═══════════════════════════════════════════════════════════════════
+
+    #[test]
+    fn test_score_grep_results_single_term() {
+        // Need 3+ files so IDF > 0 (term appears in 2 of 3 files → IDF = ln(3/2) > 0)
+        let index = make_test_index(
+            vec!["src/a.cs", "src/b.cs", "src/c.cs"],
+            vec![
+                ("httpclient", vec![
+                    Posting { file_id: 0, lines: vec![1, 5] },
+                    Posting { file_id: 1, lines: vec![3] },
+                ]),
+                ("othertoken", vec![
+                    Posting { file_id: 2, lines: vec![1] },
+                ]),
+            ],
+            vec![10, 20, 10],
+        );
+        let terms = vec!["httpclient".to_string()];
+        let results = score_grep_results(&index, &terms, &None, &[], &[], false, 1);
+        assert_eq!(results.len(), 2);
+        // File 0 has 2 occurrences in 10 tokens (higher TF) → should rank higher
+        assert_eq!(results[0].file_path, "src/a.cs");
+        assert_eq!(results[0].occurrences, 2);
+        assert_eq!(results[1].file_path, "src/b.cs");
+        assert_eq!(results[1].occurrences, 1);
+    }
+
+    #[test]
+    fn test_score_grep_results_require_all_filters() {
+        let index = make_test_index(
+            vec!["src/both.cs", "src/only_one.cs"],
+            vec![
+                ("httpclient", vec![
+                    Posting { file_id: 0, lines: vec![1] },
+                    Posting { file_id: 1, lines: vec![1] },
+                ]),
+                ("ilogger", vec![
+                    Posting { file_id: 0, lines: vec![2] },
+                ]),
+            ],
+            vec![10, 10],
+        );
+        let terms = vec!["httpclient".to_string(), "ilogger".to_string()];
+
+        // require_all = true, raw_term_count = 2 → only files with both terms
+        let results = score_grep_results(&index, &terms, &None, &[], &[], true, 2);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path, "src/both.cs");
+        assert_eq!(results[0].terms_matched, 2);
+    }
+
+    #[test]
+    fn test_score_grep_results_require_all_false() {
+        let index = make_test_index(
+            vec!["src/both.cs", "src/only_one.cs"],
+            vec![
+                ("httpclient", vec![
+                    Posting { file_id: 0, lines: vec![1] },
+                    Posting { file_id: 1, lines: vec![1] },
+                ]),
+                ("ilogger", vec![
+                    Posting { file_id: 0, lines: vec![2] },
+                ]),
+            ],
+            vec![10, 10],
+        );
+        let terms = vec!["httpclient".to_string(), "ilogger".to_string()];
+
+        // require_all = false → both files returned (OR)
+        let results = score_grep_results(&index, &terms, &None, &[], &[], false, 2);
+        assert_eq!(results.len(), 2);
+    }
+
+    #[test]
+    fn test_score_grep_results_with_ext_filter() {
+        let index = make_test_index(
+            vec!["src/a.cs", "src/b.rs"],
+            vec![
+                ("httpclient", vec![
+                    Posting { file_id: 0, lines: vec![1] },
+                    Posting { file_id: 1, lines: vec![1] },
+                ]),
+            ],
+            vec![10, 10],
+        );
+        let ext = Some("cs".to_string());
+        let terms = vec!["httpclient".to_string()];
+        let results = score_grep_results(&index, &terms, &ext, &[], &[], false, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path, "src/a.cs");
+    }
+
+    #[test]
+    fn test_score_grep_results_with_exclude() {
+        let index = make_test_index(
+            vec!["src/Service.cs", "src/ServiceMock.cs"],
+            vec![
+                ("httpclient", vec![
+                    Posting { file_id: 0, lines: vec![1] },
+                    Posting { file_id: 1, lines: vec![1] },
+                ]),
+            ],
+            vec![10, 10],
+        );
+        let exclude = vec!["mock".to_string()];
+        let terms = vec!["httpclient".to_string()];
+        let results = score_grep_results(&index, &terms, &None, &[], &exclude, false, 1);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].file_path, "src/Service.cs");
+    }
+
+    #[test]
+    fn test_score_grep_results_empty_terms() {
+        let index = make_test_index(
+            vec!["src/a.cs"],
+            vec![("httpclient", vec![Posting { file_id: 0, lines: vec![1] }])],
+            vec![10],
+        );
+        let terms: Vec<String> = vec![];
+        let results = score_grep_results(&index, &terms, &None, &[], &[], false, 0);
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn test_score_grep_results_lines_deduped_and_sorted() {
+        let index = make_test_index(
+            vec!["src/a.cs"],
+            vec![
+                // Two terms both appear on line 5 → should be deduped
+                ("termx", vec![Posting { file_id: 0, lines: vec![5, 3, 5] }]),
+                ("termy", vec![Posting { file_id: 0, lines: vec![3, 7] }]),
+            ],
+            vec![10],
+        );
+        let terms = vec!["termx".to_string(), "termy".to_string()];
+        let results = score_grep_results(&index, &terms, &None, &[], &[], false, 2);
+        assert_eq!(results.len(), 1);
+        // Lines should be sorted and deduped: [3, 5, 7]
+        assert_eq!(results[0].lines, vec![3, 5, 7]);
+    }
+
+    #[test]
+    fn test_score_grep_results_tf_idf_ranking() {
+        // File A: small file with 2 occurrences of term (high TF)
+        // File B: large file with 1 occurrence of term (low TF)
+        // File C: doesn't have the term (so IDF = ln(3/2) > 0, not ln(1) = 0)
+        let index = make_test_index(
+            vec!["small.cs", "large.cs", "unrelated.cs"],
+            vec![
+                ("targetterm", vec![
+                    Posting { file_id: 0, lines: vec![1, 2] },
+                    Posting { file_id: 1, lines: vec![50] },
+                ]),
+                ("othertoken", vec![
+                    Posting { file_id: 2, lines: vec![1] },
+                ]),
+            ],
+            vec![5, 500, 10], // small file has 5 tokens, large has 500, unrelated has 10
+        );
+        let terms = vec!["targetterm".to_string()];
+        let results = score_grep_results(&index, &terms, &None, &[], &[], false, 1);
+        assert_eq!(results.len(), 2);
+        // Small file should rank first (higher TF-IDF)
+        assert_eq!(results[0].file_path, "small.cs");
+        assert!(results[0].tf_idf > results[1].tf_idf);
+    }
+
+    #[test]
+    fn test_score_grep_results_nonexistent_term() {
+        let index = make_test_index(
+            vec!["src/a.cs"],
+            vec![("httpclient", vec![Posting { file_id: 0, lines: vec![1] }])],
+            vec![10],
+        );
+        let terms = vec!["nonexistent".to_string()];
+        let results = score_grep_results(&index, &terms, &None, &[], &[], false, 1);
+        assert!(results.is_empty());
+    }
 }

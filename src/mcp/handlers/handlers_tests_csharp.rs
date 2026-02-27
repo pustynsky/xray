@@ -896,7 +896,7 @@ fn test_search_definitions_contains_line_mixed_separators() {
 }
 #[test]
 fn test_search_definitions_comma_separated_name_filter() {
-    // PowerBIClients Test 1.5: Comma-separated name OR lookup.
+    // Analytics Test 1.5: Comma-separated name OR lookup.
     // name="ClassA,ClassB,ClassC" should return results from all matching names.
     let ctx = make_ctx_with_defs();
 
@@ -927,7 +927,7 @@ fn test_search_definitions_comma_separated_name_filter() {
 
 #[test]
 fn test_search_definitions_comma_separated_name_partial_match() {
-    // PowerBIClients Test 1.5 variant: some terms match, some don't.
+    // Analytics Test 1.5 variant: some terms match, some don't.
     let ctx = make_ctx_with_defs();
 
     let result = dispatch_tool(&ctx, "search_definitions", &json!({
@@ -948,7 +948,7 @@ fn test_search_definitions_comma_separated_name_partial_match() {
 
 #[test]
 fn test_search_definitions_case_insensitive_name() {
-    // PowerBIClients Test 42.4: Wrong casing (lowercase input).
+    // Analytics Test 42.4: Wrong casing (lowercase input).
     // name="resilientclient" should find "ResilientClient" (case-insensitive).
     let ctx = make_ctx_with_defs();
 
@@ -984,7 +984,7 @@ fn test_search_definitions_case_insensitive_name_mixed() {
 
 #[test]
 fn test_contains_line_outside_any_definition() {
-    // PowerBIClients Test 3.3: containsLine on a line that's inside the file
+    // Analytics Test 3.3: containsLine on a line that's inside the file
     // but outside any class/method definition (e.g., import line).
     // ResilientClient class spans 1-300, ExecuteQueryAsync spans 240-260.
     // Line 301 is past the end of the class — outside any definition.
@@ -1028,7 +1028,7 @@ fn test_contains_line_inside_class_but_outside_method() {
 
 #[test]
 fn test_search_definitions_empty_intersection_all_valid_params() {
-    // PowerBIClients Test 10.1: All valid parameters but targeting non-existent
+    // Analytics Test 10.1: All valid parameters but targeting non-existent
     // combinations should return 0 results without crash.
     let ctx = make_ctx_with_defs();
 
@@ -1047,7 +1047,7 @@ fn test_search_definitions_empty_intersection_all_valid_params() {
 
 #[test]
 fn test_search_definitions_sort_by_cognitive_complexity() {
-    // PowerBIClients Test 8.1: sortBy="cognitiveComplexity" returns results
+    // Analytics Test 8.1: sortBy="cognitiveComplexity" returns results
     // sorted by complexity descending.
     // We need to set up code_stats in the definition index.
     let content_index = ContentIndex {
