@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
+use super::tree_sitter_utils::{node_text, find_child_by_kind, find_child_by_field, find_descendant_by_kind};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -221,42 +222,6 @@ fn walk_rust_node<'a>(
             walk_rust_node(child, source, file_id, parent_name, defs, method_nodes);
         }
     }
-}
-
-// ─── Helper utilities ───────────────────────────────────────────────
-
-fn node_text<'a>(node: tree_sitter::Node, source: &'a [u8]) -> &'a str {
-    node.utf8_text(source).unwrap_or("")
-}
-
-fn find_child_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-    }
-    None
-}
-
-fn find_child_by_field<'a>(node: tree_sitter::Node<'a>, field: &str) -> Option<tree_sitter::Node<'a>> {
-    node.child_by_field_name(field)
-}
-
-#[allow(dead_code)]
-fn find_descendant_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-            if let Some(found) = find_descendant_by_kind(child, kind) {
-                return Some(found);
-            }
-        }
-    }
-    None
 }
 
 // ─── Modifier and attribute extraction ──────────────────────────────

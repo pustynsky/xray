@@ -8,6 +8,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-27
 
+### Performance
+
+- **Lazy-compiled regex in SQL parser** — Converted 19 `Regex::new()` calls in `parser_sql.rs` from per-call compilation to `std::sync::LazyLock` module-level statics, compiled once on first use. Eliminates ~9,000 redundant regex compilations when indexing 500 SQL files with ~3 stored procedures each. 1 dynamic regex (using `format!` for `PROC|FUNCTION` keyword) kept as-is. Estimated 5–15% speedup for SQL-heavy codebases.
+
+### Internal
+
+- **Shared tree-sitter utility module** — Extracted 4 duplicated AST helper functions (`node_text`, `find_child_by_kind`, `find_descendant_by_kind`, `find_child_by_field`) from C#, TypeScript, and Rust parsers into a new shared module `src/definitions/tree_sitter_utils.rs`. Eliminates 12 duplicate function definitions across 3 parser files. TypeScript parser keeps a thin 1-line `node_text` wrapper (accepts `&str` instead of `&[u8]`) to avoid changing 50+ call sites. 7 new unit tests for the shared utilities.
+
 ### Features
 
 - **Rust parser (`lang-rust` optional feature)** — New tree-sitter-based parser for `.rs` files, activated via `--features lang-rust` (NOT in default build). Extracts: structs, enums, traits (`Interface`), `impl` block methods (with parent struct association), constructors (`fn new()`/`fn default()`), trait impls (`base_types`), `const`/`static` variables, type aliases, struct fields, enum variants. Call sites: `self.method()`, `self.field.method()`, `Type::method()`, free function calls. Code stats: cyclomatic/cognitive complexity, match arms, `?` operator (early return), closures, nesting depth, params (excluding `self`). Modifiers: `pub`, `async`, `unsafe`, `const`, `mut`. Attributes: `#[test]`, `#[derive(Debug)]`, `#[cfg(test)]`, `#[serde(default)]`. Build with `cargo build --features lang-rust` or `cargo build --no-default-features --features lang-rust` (Rust-only). 24 new tests (18 parser + 6 handler).
@@ -426,7 +434,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes               | 10                          |
 | Performance             | 3                           |
 | Internal                | 5                           |
-| Unit tests (latest)     | 896 (with lang-rust)        |
+| Unit tests (latest)     | 903 (with lang-rust)        |
 | E2E tests (latest)      | 59                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |

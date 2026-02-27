@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
+use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -257,37 +258,11 @@ fn walk_typescript_node_collecting<'a>(
 
 // ─── Helper utilities ───────────────────────────────────────────────
 
+/// TypeScript-specific wrapper for `node_text` that accepts `&str` source.
+/// Delegates to the shared `tree_sitter_utils::node_text` with `source.as_bytes()`.
+/// This avoids changing 50+ call sites that pass `source: &str`.
 fn node_text<'a>(node: tree_sitter::Node, source: &'a str) -> &'a str {
-    node.utf8_text(source.as_bytes()).unwrap_or("")
-}
-
-fn find_child_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-        }
-    }
-    None
-}
-
-fn find_descendant_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
-    for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
-                return Some(child);
-            }
-            if let Some(found) = find_descendant_by_kind(child, kind) {
-                return Some(found);
-            }
-        }
-    }
-    None
-}
-
-fn find_child_by_field<'a>(node: tree_sitter::Node<'a>, field: &str) -> Option<tree_sitter::Node<'a>> {
-    node.child_by_field_name(field)
+    super::tree_sitter_utils::node_text(node, source.as_bytes())
 }
 
 /// Check if a node is exported (its parent is an export_statement).

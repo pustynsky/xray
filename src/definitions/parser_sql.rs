@@ -4,8 +4,116 @@
 //! GO batch delimiters, column extraction, FK constraints, and call sites.
 
 use std::collections::HashSet;
+use std::sync::LazyLock;
 
 use regex::Regex;
+
+// ─── Lazy-compiled regex statics ────────────────────────────────────
+// All regex patterns are compiled once on first use instead of per-call.
+
+static GO_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*GO\s*$").unwrap()
+});
+
+static CREATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?im)^\s*CREATE\s+(OR\s+ALTER\s+)?(UNIQUE\s+)?(CLUSTERED\s+|NONCLUSTERED\s+)?(PROCEDURE|PROC|FUNCTION|TABLE|VIEW|TYPE|INDEX)\s+"
+    ).unwrap()
+});
+
+static PARAM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)^\s*(@[\w]+)").unwrap()
+});
+
+static CREATE_TABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)CREATE\s+TABLE\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static FK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)REFERENCES\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static PK_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)PRIMARY\s+KEY").unwrap()
+});
+
+static COL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)^\s*(\[?[A-Za-z_][\w]*\]?)\s+(BIGINT|INT|SMALLINT|TINYINT|BIT|DECIMAL|NUMERIC|FLOAT|REAL|MONEY|SMALLMONEY|DATETIME|DATETIME2|DATETIMEOFFSET|DATE|TIME|SMALLDATETIME|CHAR|VARCHAR|NCHAR|NVARCHAR|TEXT|NTEXT|BINARY|VARBINARY|IMAGE|UNIQUEIDENTIFIER|XML|SQL_VARIANT|HIERARCHYID|GEOGRAPHY|GEOMETRY|SYSNAME|TIMESTAMP|ROWVERSION)"
+    ).unwrap()
+});
+
+static CONSTRAINT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^\s*(CONSTRAINT|PRIMARY\s+KEY|UNIQUE|INDEX|CHECK|FOREIGN\s+KEY)").unwrap()
+});
+
+static CREATE_TABLE_LINE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)CREATE\s+TABLE").unwrap()
+});
+
+static CREATE_VIEW_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)CREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static CREATE_TYPE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)CREATE\s+TYPE\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static CREATE_INDEX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)CREATE\s+(?:UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\s+(\[?[\w]+\]?)"
+    ).unwrap()
+});
+
+static ON_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bON\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static EXEC_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bEXEC(?:UTE)?\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static FROM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bFROM\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static JOIN_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bJOIN\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static INSERT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bINSERT\s+INTO\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static UPDATE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bUPDATE\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
+
+static DELETE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bDELETE\s+FROM\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
+    ).unwrap()
+});
 
 #[allow(unused_imports)]
 use super::types::*;
@@ -57,12 +165,11 @@ struct Batch<'a> {
 /// Split lines by GO delimiter. Each GO on its own line (with optional whitespace)
 /// starts a new batch.
 fn split_go_batches<'a>(lines: &'a [&'a str]) -> Vec<Batch<'a>> {
-    let go_re = Regex::new(r"(?i)^\s*GO\s*$").unwrap();
     let mut batches = Vec::new();
     let mut batch_start = 0;
 
     for (i, line) in lines.iter().enumerate() {
-        if go_re.is_match(line) {
+        if GO_RE.is_match(line) {
             if i > batch_start {
                 batches.push(Batch {
                     lines: &lines[batch_start..i],
@@ -97,11 +204,7 @@ fn parse_batch(
     let batch_upper = batch_text.to_uppercase();
 
     // Try to match CREATE statements
-    let create_re = Regex::new(
-        r"(?im)^\s*CREATE\s+(OR\s+ALTER\s+)?(UNIQUE\s+)?(CLUSTERED\s+|NONCLUSTERED\s+)?(PROCEDURE|PROC|FUNCTION|TABLE|VIEW|TYPE|INDEX)\s+"
-    ).unwrap();
-
-    if let Some(m) = create_re.find(&batch_text) {
+    if let Some(m) = CREATE_RE.find(&batch_text) {
         let after_keyword = &batch_text[m.end()..];
         let keyword = extract_keyword_from_match(&batch_upper[m.start()..m.end()]);
 
@@ -219,8 +322,7 @@ fn parse_procedure_or_function(
     let mut sig = first_line.to_string();
 
     // Extract parameters (lines starting with @)
-    let param_re = Regex::new(r"(?m)^\s*(@[\w]+)").unwrap();
-    let params: Vec<String> = param_re.captures_iter(batch_text)
+    let params: Vec<String> = PARAM_RE.captures_iter(batch_text)
         .take(5)
         .map(|c| c.get(1).unwrap().as_str().to_string())
         .collect();
@@ -270,11 +372,7 @@ fn parse_table(
     defs: &mut Vec<DefinitionEntry>,
     code_stats: &mut Vec<(usize, CodeStats)>,
 ) {
-    let re = Regex::new(
-        r"(?i)CREATE\s+TABLE\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    let caps = match re.captures(batch_text) {
+    let caps = match CREATE_TABLE_RE.captures(batch_text) {
         Some(c) => c,
         None => return,
     };
@@ -296,12 +394,9 @@ fn parse_table(
     };
 
     // Extract FK constraints → base_types
-    let fk_re = Regex::new(
-        r"(?i)REFERENCES\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
     let mut base_types: Vec<String> = Vec::new();
     let mut seen_fk: HashSet<String> = HashSet::new();
-    for caps in fk_re.captures_iter(batch_text) {
+    for caps in FK_RE.captures_iter(batch_text) {
         let ref_table = if caps.get(2).is_some() {
             strip_brackets(caps.get(3).unwrap().as_str())
         } else {
@@ -314,8 +409,7 @@ fn parse_table(
 
     // Check for primary key
     let mut modifiers = Vec::new();
-    let pk_re = Regex::new(r"(?i)PRIMARY\s+KEY").unwrap();
-    if pk_re.is_match(batch_text) {
+    if PK_RE.is_match(batch_text) {
         modifiers.push("primaryKey".to_string());
     }
 
@@ -352,28 +446,21 @@ fn extract_columns(
     table_name: &str,
     defs: &mut Vec<DefinitionEntry>,
 ) {
-    let col_re = Regex::new(
-        r"(?i)^\s*(\[?[A-Za-z_][\w]*\]?)\s+(BIGINT|INT|SMALLINT|TINYINT|BIT|DECIMAL|NUMERIC|FLOAT|REAL|MONEY|SMALLMONEY|DATETIME|DATETIME2|DATETIMEOFFSET|DATE|TIME|SMALLDATETIME|CHAR|VARCHAR|NCHAR|NVARCHAR|TEXT|NTEXT|BINARY|VARBINARY|IMAGE|UNIQUEIDENTIFIER|XML|SQL_VARIANT|HIERARCHYID|GEOGRAPHY|GEOMETRY|SYSNAME|TIMESTAMP|ROWVERSION)"
-    ).unwrap();
-
-    // Also match constraint lines to skip them
-    let constraint_re = Regex::new(r"(?i)^\s*(CONSTRAINT|PRIMARY\s+KEY|UNIQUE|INDEX|CHECK|FOREIGN\s+KEY)").unwrap();
-
     for (i, line) in batch.lines.iter().enumerate() {
         let trimmed = line.trim();
         // Skip empty, comment, and constraint lines
         if trimmed.is_empty() || trimmed.starts_with("--") || trimmed == "(" || trimmed == ")" || trimmed.starts_with(")") {
             continue;
         }
-        if constraint_re.is_match(trimmed) {
+        if CONSTRAINT_RE.is_match(trimmed) {
             continue;
         }
         // Skip CREATE TABLE line itself
-        if Regex::new(r"(?i)CREATE\s+TABLE").unwrap().is_match(trimmed) {
+        if CREATE_TABLE_LINE_RE.is_match(trimmed) {
             continue;
         }
 
-        if let Some(caps) = col_re.captures(trimmed) {
+        if let Some(caps) = COL_RE.captures(trimmed) {
             let col_name = strip_brackets(caps.get(1).unwrap().as_str());
             let col_type = caps.get(2).unwrap().as_str().to_uppercase();
 
@@ -410,11 +497,7 @@ fn parse_view(
     defs: &mut Vec<DefinitionEntry>,
     code_stats: &mut Vec<(usize, CodeStats)>,
 ) {
-    let re = Regex::new(
-        r"(?i)CREATE\s+(?:OR\s+ALTER\s+)?VIEW\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    let caps = match re.captures(batch_text) {
+    let caps = match CREATE_VIEW_RE.captures(batch_text) {
         Some(c) => c,
         None => return,
     };
@@ -464,11 +547,7 @@ fn parse_type(
     defs: &mut Vec<DefinitionEntry>,
     code_stats: &mut Vec<(usize, CodeStats)>,
 ) {
-    let re = Regex::new(
-        r"(?i)CREATE\s+TYPE\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    let caps = match re.captures(batch_text) {
+    let caps = match CREATE_TYPE_RE.captures(batch_text) {
         Some(c) => c,
         None => return,
     };
@@ -518,11 +597,7 @@ fn parse_index(
     defs: &mut Vec<DefinitionEntry>,
     code_stats: &mut Vec<(usize, CodeStats)>,
 ) {
-    let re = Regex::new(
-        r"(?i)CREATE\s+(?:UNIQUE\s+)?(?:CLUSTERED\s+|NONCLUSTERED\s+)?INDEX\s+(\[?[\w]+\]?)"
-    ).unwrap();
-
-    let caps = match re.captures(batch_text) {
+    let caps = match CREATE_INDEX_RE.captures(batch_text) {
         Some(c) => c,
         None => return,
     };
@@ -531,11 +606,7 @@ fn parse_index(
     if index_name.is_empty() { return; }
 
     // Parse ON [schema].[table] to determine parent table
-    let on_re = Regex::new(
-        r"(?i)\bON\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    let parent = if let Some(on_caps) = on_re.captures(batch_text) {
+    let parent = if let Some(on_caps) = ON_RE.captures(batch_text) {
         if on_caps.get(2).is_some() {
             Some(strip_brackets(on_caps.get(3).unwrap().as_str()))
         } else {
@@ -580,41 +651,11 @@ fn extract_call_sites_from_body(
     let mut calls: Vec<CallSite> = Vec::new();
     let mut seen: HashSet<(String, String)> = HashSet::new();
 
-    // EXEC [schema].[name] or EXECUTE [schema].[name]
-    let exec_re = Regex::new(
-        r"(?i)\bEXEC(?:UTE)?\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    // FROM [schema].[table]
-    let from_re = Regex::new(
-        r"(?i)\bFROM\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    // JOIN [schema].[table]
-    let join_re = Regex::new(
-        r"(?i)\bJOIN\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    // INSERT INTO [schema].[table]
-    let insert_re = Regex::new(
-        r"(?i)\bINSERT\s+INTO\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    // UPDATE [schema].[table]
-    let update_re = Regex::new(
-        r"(?i)\bUPDATE\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
-    // DELETE FROM [schema].[table]
-    let delete_re = Regex::new(
-        r"(?i)\bDELETE\s+FROM\s+((\[?[\w]+\]?)\s*\.\s*(\[?[\w]+\]?)|(\[?[\w]+\]?))"
-    ).unwrap();
-
     // Temporary table/variable names to skip
     let skip_names: HashSet<&str> = ["#", "@", "INSERTED", "DELETED", "sys", "INFORMATION_SCHEMA"]
         .iter().copied().collect();
 
-    let all_regexes: Vec<&Regex> = vec![&exec_re, &from_re, &join_re, &insert_re, &update_re, &delete_re];
+    let all_regexes: Vec<&Regex> = vec![&EXEC_RE, &FROM_RE, &JOIN_RE, &INSERT_RE, &UPDATE_RE, &DELETE_RE];
 
     for (line_idx, line) in batch.lines.iter().enumerate() {
         let trimmed = line.trim();
