@@ -724,6 +724,107 @@ fn verify_call_site_target(
     false
 }
 
+/// Find the `line_start` of the first matching method definition for overload disambiguation.
+/// Searches the name index for definitions with callable kinds (Method, Constructor, Function,
+/// StoredProcedure, SqlFunction). When `parent_class` is provided, only matches definitions
+/// whose parent matches (case-insensitive).
+fn find_target_line(
+    def_idx: &DefinitionIndex,
+    method_lower: &str,
+    parent_class: Option<&str>,
+) -> Option<u32> {
+    def_idx.name_index.get(method_lower)
+        .and_then(|indices| indices.iter().find_map(|&di| {
+            def_idx.definitions.get(di as usize).and_then(|d| {
+                if !matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+                    | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
+                    return None;
+                }
+                if let Some(cls) = parent_class {
+                    if d.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
+                        return Some(d.line_start);
+                    }
+                    None
+                } else {
+                    Some(d.line_start)
+                }
+            })
+        }))
+}
+
+/// Collect all (file_id, line_start) pairs for method definitions matching `method_lower`.
+/// These represent definition sites that should be excluded from caller results
+/// (a method's own definition line is not a call site).
+fn collect_definition_locations(
+    def_idx: &DefinitionIndex,
+    method_lower: &str,
+) -> HashSet<(u32, u32)> {
+    let mut locations: HashSet<(u32, u32)> = HashSet::new();
+    if let Some(name_indices) = def_idx.name_index.get(method_lower) {
+        for &di in name_indices {
+            if let Some(def) = def_idx.definitions.get(di as usize) {
+                if matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+                    | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
+                    locations.insert((def.file_id, def.line_start));
+                }
+            }
+        }
+    }
+    locations
+}
+
+/// Check if a file path matches the extension filter and does not match any exclusion patterns.
+/// Returns `true` if the file passes all filters.
+fn passes_caller_file_filters(
+    file_path: &str,
+    ext_filter: &str,
+    exclude_dir: &[String],
+    exclude_file: &[String],
+) -> bool {
+    let matches_ext = Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| {
+            ext_filter.split(',')
+                .any(|allowed| e.eq_ignore_ascii_case(allowed.trim()))
+        });
+    if !matches_ext { return false; }
+
+    let path_lower = file_path.to_lowercase();
+    if exclude_dir.iter().any(|excl| path_lower.contains(excl.as_str())) { return false; }
+    if exclude_file.iter().any(|excl| path_lower.contains(excl.as_str())) { return false; }
+
+    true
+}
+
+/// Build a JSON node for a single caller in the call tree.
+/// Includes method name, definition line, call site line, optional class, optional file name,
+/// and optional sub-callers array.
+fn build_caller_node(
+    caller_name: &str,
+    caller_parent: Option<&str>,
+    caller_line: u32,
+    call_site_line: u32,
+    file_path: &str,
+    sub_callers: Vec<Value>,
+) -> Value {
+    let mut node = json!({
+        "method": caller_name,
+        "line": caller_line,
+        "callSite": call_site_line,
+    });
+    if let Some(parent) = caller_parent {
+        node["class"] = json!(parent);
+    }
+    if let Some(fname) = Path::new(file_path).file_name().and_then(|f| f.to_str()) {
+        node["file"] = json!(fname);
+    }
+    if !sub_callers.is_empty() {
+        node["callers"] = json!(sub_callers);
+    }
+    node
+}
+
 /// Build a caller tree recursively (direction = "up").
 /// `parent_class` is used to disambiguate common method names -- when recursing,
 /// we pass the parent class of the method being searched so that we only find
@@ -744,32 +845,9 @@ fn build_caller_tree(
         return Vec::new();
     }
 
-    let content_index = ctx.content_index;
-    let def_idx = ctx.def_idx;
-    let ext_filter = ctx.ext_filter;
-    let exclude_dir = ctx.exclude_dir;
-    let exclude_file = ctx.exclude_file;
-    let resolve_interfaces = ctx.resolve_interfaces;
-
     let method_lower = method_name.to_lowercase();
 
-    // Find line_start of first matching method definition for overload disambiguation
-    let target_line = def_idx.name_index.get(&method_lower)
-        .and_then(|indices| indices.iter().find_map(|&di| {
-            def_idx.definitions.get(di as usize).and_then(|d| {
-                if matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
-                    | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
-                    if let Some(cls) = parent_class {
-                        if d.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
-                            return Some(d.line_start);
-                        }
-                    } else {
-                        return Some(d.line_start);
-                    }
-                }
-                None
-            })
-        }));
+    let target_line = find_target_line(ctx.def_idx, &method_lower, parent_class);
 
     // Use class.method.line as visited key to distinguish overloads
     let visited_key = if let Some(cls) = parent_class {
@@ -781,7 +859,7 @@ fn build_caller_tree(
         return Vec::new();
     }
 
-    let postings = match content_index.index.get(&method_lower) {
+    let postings = match ctx.content_index.index.get(&method_lower) {
         Some(p) => p,
         None => return Vec::new(),
     };
@@ -790,53 +868,30 @@ fn build_caller_tree(
         resolve_parent_file_ids(cls, ctx)
     });
 
+    let definition_locations = collect_definition_locations(ctx.def_idx, &method_lower);
+
     let mut callers: Vec<Value> = Vec::new();
     let mut seen_callers: HashSet<String> = HashSet::new();
 
-    let mut definition_locations: HashSet<(u32, u32)> = HashSet::new();
-    if let Some(name_indices) = def_idx.name_index.get(&method_lower) {
-        for &di in name_indices {
-            if let Some(def) = def_idx.definitions.get(di as usize)
-                && (def.kind == DefinitionKind::Method || def.kind == DefinitionKind::Constructor || def.kind == DefinitionKind::Function
-                    || def.kind == DefinitionKind::StoredProcedure || def.kind == DefinitionKind::SqlFunction) {
-                    definition_locations.insert((def.file_id, def.line_start));
-                }
-        }
-    }
-
     for posting in postings {
-        if callers.len() >= ctx.limits.max_callers_per_level {
-            break;
-        }
-        if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes {
-            break;
-        }
+        if callers.len() >= ctx.limits.max_callers_per_level { break; }
+        if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
         // If we have a parent class context, skip files that don't reference that class
-        if let Some(ref pids) = parent_file_ids
-            && !pids.contains(&posting.file_id) {
-                continue;
-            }
+        if let Some(ref pids) = parent_file_ids {
+            if !pids.contains(&posting.file_id) { continue; }
+        }
 
-        let file_path = match content_index.files.get(posting.file_id as usize) {
+        let file_path = match ctx.content_index.files.get(posting.file_id as usize) {
             Some(p) => p,
             None => continue,
         };
 
-        let matches_ext = Path::new(file_path)
-            .extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| {
-                ext_filter.split(',')
-                    .any(|allowed| e.eq_ignore_ascii_case(allowed.trim()))
-            });
-        if !matches_ext { continue; }
+        if !passes_caller_file_filters(file_path, ctx.ext_filter, ctx.exclude_dir, ctx.exclude_file) {
+            continue;
+        }
 
-        let path_lower = file_path.to_lowercase();
-        if exclude_dir.iter().any(|excl| path_lower.contains(excl.as_str())) { continue; }
-        if exclude_file.iter().any(|excl| path_lower.contains(excl.as_str())) { continue; }
-
-        let def_fid = match def_idx.path_to_id.get(&std::path::PathBuf::from(file_path)).copied() {
+        let def_fid = match ctx.def_idx.path_to_id.get(&std::path::PathBuf::from(file_path)).copied() {
             Some(id) => id,
             None => continue,
         };
@@ -845,74 +900,53 @@ fn build_caller_tree(
             if callers.len() >= ctx.limits.max_callers_per_level { break; }
             if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
-            if definition_locations.contains(&(def_fid, line)) {
+            if definition_locations.contains(&(def_fid, line)) { continue; }
+
+            let (caller_name, caller_parent, caller_line, caller_di) =
+                match find_containing_method(ctx.def_idx, def_fid, line) {
+                    Some(v) => v,
+                    None => continue,
+                };
+
+            // Verify the call on this line actually targets the expected class
+            if parent_class.is_some()
+                && !verify_call_site_target(ctx.def_idx, caller_di, line, &method_lower, parent_class)
+            {
                 continue;
             }
 
-            if let Some((caller_name, caller_parent, caller_line, caller_di)) =
-                find_containing_method(def_idx, def_fid, line)
-            {
-                // Verify the call on this line actually targets the expected class
-                // using pre-computed call-site data from the AST
-                if parent_class.is_some()
-                    && !verify_call_site_target(
-                        def_idx,
-                        caller_di,
-                        line,
-                        &method_lower,
-                        parent_class,
-                    ) {
-                        continue;
-                    }
+            let caller_key = format!("{}.{}.{}",
+                caller_parent.as_deref().unwrap_or("?"),
+                &caller_name,
+                caller_line
+            );
+            if !seen_callers.insert(caller_key) { continue; }
 
-                let caller_key = format!("{}.{}.{}",
-                    caller_parent.as_deref().unwrap_or("?"),
-                    &caller_name,
-                    caller_line
-                );
+            ctx.node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
-                if seen_callers.contains(&caller_key) {
-                    continue;
-                }
-                seen_callers.insert(caller_key.clone());
+            // Recurse with the CALLER's parent class as the class filter.
+            let sub_callers = build_caller_tree(
+                &caller_name,
+                caller_parent.as_deref(),
+                max_depth,
+                current_depth + 1,
+                ctx,
+                visited,
+            );
 
-                ctx.node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-                // Recurse with the CALLER's parent class as the class filter.
-                // This ensures that at depth > 0, we search for callers of
-                // "CallerClass.CallerMethod" (not just "CallerMethod" across
-                // ALL classes), preventing false positives from common method
-                // names like Process, Execute, Handle, Run.
-                let sub_callers = build_caller_tree(
-                    &caller_name,
-                    caller_parent.as_deref(),
-                    max_depth,
-                    current_depth + 1,
-                    ctx,
-                    visited,
-                );
-
-                let mut node = json!({
-                    "method": caller_name,
-                    "line": caller_line,
-                    "callSite": line,
-                });
-                if let Some(ref parent) = caller_parent {
-                    node["class"] = json!(parent);
-                }
-                if let Some(fname) = Path::new(file_path).file_name().and_then(|f| f.to_str()) {
-                    node["file"] = json!(fname);
-                }
-                if !sub_callers.is_empty() {
-                    node["callers"] = json!(sub_callers);
-                }
-                callers.push(node);
-            }
+            callers.push(build_caller_node(
+                &caller_name,
+                caller_parent.as_deref(),
+                caller_line,
+                line,
+                file_path,
+                sub_callers,
+            ));
         }
     }
 
     // Interface resolution: expand to find callers via interface implementations
-    if resolve_interfaces && current_depth == 0 {
+    if ctx.resolve_interfaces && current_depth == 0 {
         let iface_callers = expand_interface_callers(
             method_name, &method_lower, parent_class, max_depth, ctx, visited,
         );
@@ -1079,23 +1113,7 @@ fn build_callee_tree(
 
     let method_lower = method_name.to_lowercase();
 
-    // Find line_start of first matching method definition for overload disambiguation
-    let target_line = def_idx.name_index.get(&method_lower)
-        .and_then(|indices| indices.iter().find_map(|&di| {
-            def_idx.definitions.get(di as usize).and_then(|d| {
-                if matches!(d.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
-                    | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
-                    if let Some(cls) = class_filter {
-                        if d.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
-                            return Some(d.line_start);
-                        }
-                    } else {
-                        return Some(d.line_start);
-                    }
-                }
-                None
-            })
-        }));
+    let target_line = find_target_line(def_idx, &method_lower, class_filter);
 
     // Use class.method.line as visit key to distinguish overloads
     let visit_key = if let Some(cls) = class_filter {
@@ -1174,20 +1192,9 @@ fn build_callee_tree(
                 let callee_file = def_idx.files.get(callee_def.file_id as usize)
                     .map(|s| s.as_str()).unwrap_or("");
 
-                // Apply extension filter
-                let matches_ext = Path::new(callee_file)
-                    .extension()
-                    .and_then(|e| e.to_str())
-                    .is_some_and(|e| {
-                        ext_filter.split(',')
-                            .any(|allowed| e.eq_ignore_ascii_case(allowed.trim()))
-                    });
-                if !matches_ext { continue; }
-
-                // Apply directory/file exclusions (exclude lists are pre-lowercased)
-                let path_lower = callee_file.to_lowercase();
-                if exclude_dir.iter().any(|excl| path_lower.contains(excl.as_str())) { continue; }
-                if exclude_file.iter().any(|excl| path_lower.contains(excl.as_str())) { continue; }
+                if !passes_caller_file_filters(callee_file, ext_filter, exclude_dir, exclude_file) {
+                    continue;
+                }
 
                 let callee_key = format!("{}.{}.{}",
                     callee_def.parent.as_deref().unwrap_or("?"),
@@ -3450,6 +3457,183 @@ mod tests {
         assert_eq!(def_idx.definitions[resolved_inv[0] as usize].parent.as_deref(), Some("Inventory"));
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Tests for extracted helper functions (complexity reduction)
+    // ═══════════════════════════════════════════════════════════════════
+
+    // ─── find_target_line tests ──────────────────────────────────────
+
+    #[test]
+    fn test_find_target_line_method_found() {
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+            method_def(0, "process", "OrderService", 10, 20),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        assert_eq!(find_target_line(&def_idx, "process", None), Some(10));
+    }
+
+    #[test]
+    fn test_find_target_line_with_class_filter() {
+        let definitions = vec![
+            class_def(0, "ClassA", vec![]),
+            method_def(0, "doWork", "ClassA", 5, 15),
+            class_def(1, "ClassB", vec![]),
+            method_def(1, "doWork", "ClassB", 10, 20),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        assert_eq!(find_target_line(&def_idx, "dowork", Some("ClassA")), Some(5));
+        assert_eq!(find_target_line(&def_idx, "dowork", Some("ClassB")), Some(10));
+    }
+
+    #[test]
+    fn test_find_target_line_not_found() {
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        assert_eq!(find_target_line(&def_idx, "nonexistent", None), None);
+    }
+
+    #[test]
+    fn test_find_target_line_skips_non_callable_kinds() {
+        // A class definition should not be returned — only methods/constructors/functions
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        assert_eq!(find_target_line(&def_idx, "orderservice", None), None);
+    }
+
+    #[test]
+    fn test_find_target_line_class_filter_no_match() {
+        let definitions = vec![
+            class_def(0, "ClassA", vec![]),
+            method_def(0, "doWork", "ClassA", 5, 15),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        assert_eq!(find_target_line(&def_idx, "dowork", Some("ClassB")), None);
+    }
+
+    // ─── collect_definition_locations tests ──────────────────────────
+
+    #[test]
+    fn test_collect_definition_locations_single_method() {
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+            method_def(0, "process", "OrderService", 10, 20),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        let locations = collect_definition_locations(&def_idx, "process");
+        assert_eq!(locations.len(), 1);
+        assert!(locations.contains(&(0, 10)));
+    }
+
+    #[test]
+    fn test_collect_definition_locations_multiple_overloads() {
+        let definitions = vec![
+            class_def(0, "ClassA", vec![]),
+            method_def(0, "doWork", "ClassA", 5, 15),
+            class_def(1, "ClassB", vec![]),
+            method_def(1, "doWork", "ClassB", 10, 20),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        let locations = collect_definition_locations(&def_idx, "dowork");
+        assert_eq!(locations.len(), 2);
+        assert!(locations.contains(&(0, 5)));
+        assert!(locations.contains(&(1, 10)));
+    }
+
+    #[test]
+    fn test_collect_definition_locations_empty() {
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        let locations = collect_definition_locations(&def_idx, "nonexistent");
+        assert!(locations.is_empty());
+    }
+
+    #[test]
+    fn test_collect_definition_locations_excludes_classes() {
+        // Class definitions should not be included
+        let definitions = vec![
+            class_def(0, "OrderService", vec![]),
+        ];
+        let def_idx = make_def_index(definitions, HashMap::new());
+        let locations = collect_definition_locations(&def_idx, "orderservice");
+        assert!(locations.is_empty());
+    }
+
+    // ─── passes_caller_file_filters tests ───────────────────────────
+
+    #[test]
+    fn test_passes_caller_file_filters_matching_ext() {
+        assert!(passes_caller_file_filters("src/OrderService.cs", "cs", &[], &[]));
+        assert!(passes_caller_file_filters("src/app.ts", "ts", &[], &[]));
+    }
+
+    #[test]
+    fn test_passes_caller_file_filters_non_matching_ext() {
+        assert!(!passes_caller_file_filters("src/OrderService.cs", "ts", &[], &[]));
+        assert!(!passes_caller_file_filters("src/README.md", "cs", &[], &[]));
+    }
+
+    #[test]
+    fn test_passes_caller_file_filters_multi_ext() {
+        assert!(passes_caller_file_filters("src/OrderService.cs", "cs,ts", &[], &[]));
+        assert!(passes_caller_file_filters("src/app.ts", "cs,ts", &[], &[]));
+        assert!(!passes_caller_file_filters("src/README.md", "cs,ts", &[], &[]));
+    }
+
+    #[test]
+    fn test_passes_caller_file_filters_exclude_dir() {
+        let exclude_dir = vec!["test".to_string()];
+        assert!(!passes_caller_file_filters("src/test/OrderService.cs", "cs", &exclude_dir, &[]));
+        assert!(passes_caller_file_filters("src/main/OrderService.cs", "cs", &exclude_dir, &[]));
+    }
+
+    #[test]
+    fn test_passes_caller_file_filters_exclude_file() {
+        let exclude_file = vec!["mock".to_string()];
+        assert!(!passes_caller_file_filters("src/MockOrderService.cs", "cs", &[], &exclude_file));
+        assert!(passes_caller_file_filters("src/OrderService.cs", "cs", &[], &exclude_file));
+    }
+
+    // ─── build_caller_node tests ────────────────────────────────────
+
+    #[test]
+    fn test_build_caller_node_basic() {
+        let node = build_caller_node("doWork", Some("OrderService"), 10, 25, "src/OrderService.cs", vec![]);
+        assert_eq!(node["method"].as_str().unwrap(), "doWork");
+        assert_eq!(node["class"].as_str().unwrap(), "OrderService");
+        assert_eq!(node["line"].as_u64().unwrap(), 10);
+        assert_eq!(node["callSite"].as_u64().unwrap(), 25);
+        assert_eq!(node["file"].as_str().unwrap(), "OrderService.cs");
+        assert!(node.get("callers").is_none());
+    }
+
+    #[test]
+    fn test_build_caller_node_no_parent() {
+        let node = build_caller_node("doWork", None, 10, 25, "src/OrderService.cs", vec![]);
+        assert_eq!(node["method"].as_str().unwrap(), "doWork");
+        assert!(node.get("class").is_none());
+    }
+
+    #[test]
+    fn test_build_caller_node_with_sub_callers() {
+        let sub = vec![json!({"method": "run", "line": 5, "callSite": 12})];
+        let node = build_caller_node("doWork", Some("OrderService"), 10, 25, "src/OrderService.cs", sub);
+        assert!(node.get("callers").is_some());
+        assert_eq!(node["callers"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_build_caller_node_extracts_filename() {
+        let node = build_caller_node("doWork", None, 10, 25, "src/deep/nested/OrderService.cs", vec![]);
+        assert_eq!(node["file"].as_str().unwrap(), "OrderService.cs");
+    }
+
     // ─── SQL Test 8: SP with no schema (parent=None) resolved via no-receiver call ──
 
     #[test]
@@ -3473,5 +3657,170 @@ mod tests {
         let resolved = resolve_call_site(&call, &def_idx, None);
         assert_eq!(resolved.len(), 1, "Should resolve to usp_Cleanup without schema");
         assert_eq!(def_idx.definitions[resolved[0] as usize].name, "usp_Cleanup");
+    }
+}
+
+#[cfg(test)]
+mod callers_additional_tests {
+    use super::*;
+    use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind};
+    use std::collections::HashMap;
+
+    fn make_def_index_simple(definitions: Vec<DefinitionEntry>) -> DefinitionIndex {
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+
+        DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["sql".to_string()],
+            files: vec!["file.sql".to_string()],
+            definitions,
+            name_index,
+            kind_index,
+            file_index,
+            ..Default::default()
+        }
+    }
+
+    fn sp_def_simple(file_id: u32, name: &str, schema: &str, line: u32) -> DefinitionEntry {
+        DefinitionEntry {
+            file_id,
+            name: name.to_string(),
+            kind: DefinitionKind::StoredProcedure,
+            line_start: line,
+            line_end: line + 10,
+            parent: Some(schema.to_string()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }
+    }
+
+    fn sqlfn_def_simple(file_id: u32, name: &str, schema: &str, line: u32) -> DefinitionEntry {
+        DefinitionEntry {
+            file_id,
+            name: name.to_string(),
+            kind: DefinitionKind::SqlFunction,
+            line_start: line,
+            line_end: line + 10,
+            parent: Some(schema.to_string()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }
+    }
+
+    // ─── find_target_line — SQL kinds ────────────────────────────────
+
+    #[test]
+    fn test_find_target_line_stored_procedure() {
+        let definitions = vec![sp_def_simple(0, "usp_GetOrders", "dbo", 5)];
+        let def_idx = make_def_index_simple(definitions);
+        assert_eq!(find_target_line(&def_idx, "usp_getorders", None), Some(5));
+    }
+
+    #[test]
+    fn test_find_target_line_sql_function() {
+        let definitions = vec![sqlfn_def_simple(0, "fn_CalcTotal", "dbo", 15)];
+        let def_idx = make_def_index_simple(definitions);
+        assert_eq!(find_target_line(&def_idx, "fn_calctotal", None), Some(15));
+    }
+
+    #[test]
+    fn test_find_target_line_sp_with_schema_filter() {
+        let definitions = vec![
+            sp_def_simple(0, "usp_Process", "dbo", 5),
+            sp_def_simple(0, "usp_Process", "Sales", 20),
+        ];
+        let def_idx = make_def_index_simple(definitions);
+        assert_eq!(find_target_line(&def_idx, "usp_process", Some("Sales")), Some(20));
+        assert_eq!(find_target_line(&def_idx, "usp_process", Some("dbo")), Some(5));
+    }
+
+    #[test]
+    fn test_find_target_line_case_insensitive_class() {
+        let definitions = vec![DefinitionEntry {
+            file_id: 0,
+            name: "DoWork".to_string(),
+            kind: DefinitionKind::Method,
+            line_start: 10,
+            line_end: 20,
+            parent: Some("OrderService".to_string()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }];
+        let def_idx = make_def_index_simple(definitions);
+        // Case-insensitive parent match
+        assert_eq!(find_target_line(&def_idx, "dowork", Some("ORDERSERVICE")), Some(10));
+        assert_eq!(find_target_line(&def_idx, "dowork", Some("orderservice")), Some(10));
+    }
+
+    // ─── collect_definition_locations — SQL kinds ───────────────────
+
+    #[test]
+    fn test_collect_definition_locations_includes_sp() {
+        let definitions = vec![sp_def_simple(0, "usp_GetOrders", "dbo", 5)];
+        let def_idx = make_def_index_simple(definitions);
+        let locs = collect_definition_locations(&def_idx, "usp_getorders");
+        assert_eq!(locs.len(), 1);
+        assert!(locs.contains(&(0, 5)));
+    }
+
+    #[test]
+    fn test_collect_definition_locations_includes_sql_function() {
+        let definitions = vec![sqlfn_def_simple(0, "fn_CalcTotal", "dbo", 15)];
+        let def_idx = make_def_index_simple(definitions);
+        let locs = collect_definition_locations(&def_idx, "fn_calctotal");
+        assert_eq!(locs.len(), 1);
+        assert!(locs.contains(&(0, 15)));
+    }
+
+    // ─── passes_caller_file_filters — additional edge cases ─────────
+
+    #[test]
+    fn test_passes_caller_file_filters_case_insensitive_ext() {
+        // Extension comparison should be case-insensitive
+        assert!(passes_caller_file_filters("src/File.CS", "cs", &[], &[]));
+        assert!(passes_caller_file_filters("src/File.Cs", "CS", &[], &[]));
+    }
+
+    #[test]
+    fn test_passes_caller_file_filters_combined_exclude() {
+        let exclude_dir = vec!["test".to_string()];
+        let exclude_file = vec!["mock".to_string()];
+        // File in test dir
+        assert!(!passes_caller_file_filters("src/test/Service.cs", "cs", &exclude_dir, &exclude_file));
+        // File matching exclude_file
+        assert!(!passes_caller_file_filters("src/MockService.cs", "cs", &exclude_dir, &exclude_file));
+        // Both excluded
+        assert!(!passes_caller_file_filters("src/test/MockService.cs", "cs", &exclude_dir, &exclude_file));
+        // Neither excluded
+        assert!(passes_caller_file_filters("src/main/Service.cs", "cs", &exclude_dir, &exclude_file));
+    }
+
+    #[test]
+    fn test_passes_caller_file_filters_no_extension() {
+        // File without extension should not match any ext filter
+        assert!(!passes_caller_file_filters("Makefile", "cs", &[], &[]));
+    }
+
+    #[test]
+    fn test_passes_caller_file_filters_ext_with_spaces() {
+        // Comma-separated ext with spaces should be trimmed
+        assert!(passes_caller_file_filters("src/File.cs", "cs, ts", &[], &[]));
+        assert!(passes_caller_file_filters("src/File.ts", " cs , ts ", &[], &[]));
     }
 }
