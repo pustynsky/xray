@@ -13,6 +13,11 @@ pub(crate) fn cleanup_tmp(tmp_dir: &std::path::Path) {
     let _ = std::fs::remove_dir_all(tmp_dir);
 }
 
+/// Create a HandlerContext with empty/default indexes.
+pub(crate) fn make_empty_ctx() -> HandlerContext {
+    HandlerContext::default()
+}
+
 /// Helper: create a context with both content + definition indexes (C# classes/methods).
 /// Used by general handler tests and C#-specific tests.
 pub(crate) fn make_ctx_with_defs() -> HandlerContext {

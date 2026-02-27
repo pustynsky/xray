@@ -8,6 +8,19 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-27
 
+### Internal
+
+- **Test file split: handlers_tests.rs (3,364 lines → 6 files) and handlers_tests_csharp.rs (2,977 lines → 2 files)** — Split two oversized test files into focused modules to improve LLM context efficiency, incremental compilation, and merge conflict risk. Zero behavior change — all 1012 tests pass identically. Bytewise verification confirmed every test line matches the original. Test function name diff against git HEAD confirmed perfect match (94/94 + 51/51).
+  - `handlers_tests.rs` (core): 29 tests — tool definitions, dispatch, context, readiness gates
+  - `handlers_tests_grep.rs` (NEW): 63 tests — grep, substring, phrase, truncation, unicode
+  - `handlers_tests_fast.rs` (NEW): 14 tests — search_fast
+  - `handlers_tests_find.rs` (NEW): 2 tests — search_find
+  - `handlers_tests_git.rs` (NEW): 10 tests — git cache, noCache
+  - `handlers_tests_misc.rs` (NEW): 24 tests — metrics, security, ranking, validation
+  - `handlers_tests_csharp.rs` (definitions): 36 tests — definitions, includeBody, containsLine, audit, reindex
+  - `handlers_tests_csharp_callers.rs` (NEW): 23 tests — callers up/down, DI, cycles, overloads
+  - `handlers_test_utils.rs` extended with shared `make_empty_ctx()` helper
+
 ### Bug Fixes
 
 - **TypeScript `enumMember` extraction broken for enums with explicit values** — Enums with string or numeric values (e.g., `enum Status { Active = "active", Inactive = 0 }`) produced 0 `enumMember` definitions. Root cause: tree-sitter-typescript emits `enum_assignment` nodes for valued members, but the parser only matched `enum_member` and `property_identifier` patterns. Fix: added `"enum_assignment"` to the match arm in `walk_typescript_node_collecting()`. Simple enums without values (`enum Foo { A, B, C }`) were not affected (they use `property_identifier` nodes). 3 new regression tests (string values, numeric values, mixed members). Discovered via large-scale TypeScript E2E testing (449K definitions, 0 `enumMember` results for `parent:"FilteringState"`).

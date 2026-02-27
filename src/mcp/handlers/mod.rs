@@ -817,9 +817,34 @@ mod handlers_test_utils;
 mod tests;
 
 #[cfg(test)]
+#[path = "handlers_tests_grep.rs"]
+mod tests_grep;
+
+#[cfg(test)]
+#[path = "handlers_tests_fast.rs"]
+mod tests_fast;
+
+#[cfg(test)]
+#[path = "handlers_tests_find.rs"]
+mod tests_find;
+
+#[cfg(test)]
+#[path = "handlers_tests_git.rs"]
+mod tests_git;
+
+#[cfg(test)]
+#[path = "handlers_tests_misc.rs"]
+mod tests_misc;
+
+#[cfg(test)]
 #[cfg(feature = "lang-csharp")]
 #[path = "handlers_tests_csharp.rs"]
 mod tests_csharp;
+
+#[cfg(test)]
+#[cfg(feature = "lang-csharp")]
+#[path = "handlers_tests_csharp_callers.rs"]
+mod tests_csharp_callers;
 
 #[cfg(test)]
 #[cfg(all(feature = "lang-csharp", feature = "lang-typescript"))]
