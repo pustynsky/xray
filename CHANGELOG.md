@@ -6,6 +6,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-02-27
+
+### Features
+
+- **`termBreakdown` in `search_definitions` summary for multi-term name queries** — When `name` contains comma-separated terms (e.g., `name="AccessSource,AccessContracts,IAccessTable"`), the summary now includes a `termBreakdown` object showing how many results each term contributed (computed from the full result set before `maxResults` truncation). This helps LLM agents understand result distribution and decide whether to refine their query with `kind` filters or split into separate queries. Only appears for 2+ terms in non-regex mode. 6 new unit tests.
+
+---
+
 ## 2026-02-26
 
 ### Internal
