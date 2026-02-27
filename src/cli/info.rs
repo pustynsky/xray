@@ -165,22 +165,20 @@ pub fn cmd_info() {
                     age_hours(meta.created_at),
                     filename
                 );
-            } else {
-                if let Ok(cache) = crate::git::cache::GitHistoryCache::load_from_disk(&path) {
-                    found = true;
-                    println!(
-                        "  [GIT] branch={}, {} commits, {} files, {} authors, HEAD={}, {:.1} MB, {:.1}h ago ({})",
-                        cache.branch,
-                        cache.commits.len(),
-                        cache.file_commits.len(),
-                        cache.authors.len(),
-                        &cache.head_hash[..cache.head_hash.len().min(8)],
-                        size as f64 / 1_048_576.0,
-                        age_hours(cache.built_at),
-                        filename
-                    );
-                    save_index_meta(&path, &crate::index::git_cache_meta(&cache));
-                }
+            } else if let Ok(cache) = crate::git::cache::GitHistoryCache::load_from_disk(&path) {
+                found = true;
+                println!(
+                    "  [GIT] branch={}, {} commits, {} files, {} authors, HEAD={}, {:.1} MB, {:.1}h ago ({})",
+                    cache.branch,
+                    cache.commits.len(),
+                    cache.file_commits.len(),
+                    cache.authors.len(),
+                    &cache.head_hash[..cache.head_hash.len().min(8)],
+                    size as f64 / 1_048_576.0,
+                    age_hours(cache.built_at),
+                    filename
+                );
+                save_index_meta(&path, &crate::index::git_cache_meta(&cache));
             }
         }
     }
@@ -232,16 +230,14 @@ fn meta_to_json(meta: &IndexMeta, size: u64, filename: &str) -> serde_json::Valu
                 "ageHours": age_h,
                 "filename": filename,
             });
-            if let Some(pe) = meta.parse_errors {
-                if pe > 0 {
+            if let Some(pe) = meta.parse_errors
+                && pe > 0 {
                     def_info["readErrors"] = serde_json::json!(pe);
                 }
-            }
-            if let Some(lf) = meta.lossy_file_count {
-                if lf > 0 {
+            if let Some(lf) = meta.lossy_file_count
+                && lf > 0 {
                     def_info["lossyUtf8Files"] = serde_json::json!(lf);
                 }
-            }
             def_info
         }
         "git-history" => {

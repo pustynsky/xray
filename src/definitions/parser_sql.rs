@@ -123,7 +123,7 @@ use super::types::*;
 pub(crate) fn parse_sql_definitions(
     source: &str,
     file_id: u32,
-) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
+) -> ParseResult {
     if source.trim().is_empty() {
         return (Vec::new(), Vec::new(), Vec::new());
     }
@@ -683,11 +683,10 @@ fn extract_call_sites_from_body(
                 if method_name.starts_with('#') || method_name.starts_with('@') {
                     continue;
                 }
-                if let Some(ref rt) = receiver_type {
-                    if skip_names.contains(rt.as_str()) {
+                if let Some(ref rt) = receiver_type
+                    && skip_names.contains(rt.as_str()) {
                         continue;
                     }
-                }
                 if skip_names.contains(method_name.as_str()) {
                     continue;
                 }

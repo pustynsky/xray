@@ -365,7 +365,7 @@ impl ContentIndex {
 
         // Touch every posting list in the trigram map to fault in pages
         let mut trigram_count = 0usize;
-        for (_key, posting_list) in &trigram.trigram_map {
+        for posting_list in trigram.trigram_map.values() {
             // Read first and last element to touch the page range
             if let Some(first) = posting_list.first() {
                 black_box(*first);
@@ -387,7 +387,7 @@ impl ContentIndex {
         }
 
         // Also touch the inverted index keys (HashMap bucket pages)
-        for (_key, postings) in &self.index {
+        for postings in self.index.values() {
             if let Some(first) = postings.first() {
                 black_box(first.file_id);
             }

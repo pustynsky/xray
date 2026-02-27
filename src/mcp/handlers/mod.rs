@@ -613,8 +613,8 @@ fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
     // ── File list index (disk metadata only — small file, no full deserialization) ──
     {
         let file_index_path = crate::index::index_path_for(&ctx.server_dir, &ctx.index_base);
-        if file_index_path.exists() {
-            if let Some(root) = crate::index::read_root_from_index_file_pub(&file_index_path) {
+        if file_index_path.exists()
+            && let Some(root) = crate::index::read_root_from_index_file_pub(&file_index_path) {
                 let size_mb = std::fs::metadata(&file_index_path)
                     .map(|m| (m.len() as f64 / 1_048_576.0 * 10.0).round() / 10.0)
                     .unwrap_or(0.0);
@@ -624,13 +624,12 @@ fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
                     "sizeMb": size_mb,
                 }));
             }
-        }
     }
 
     // ── Git cache (in-memory) ──
-    if ctx.git_cache_ready.load(Ordering::Acquire) {
-        if let Ok(guard) = ctx.git_cache.read() {
-            if let Some(ref cache) = *guard {
+    if ctx.git_cache_ready.load(Ordering::Acquire)
+        && let Ok(guard) = ctx.git_cache.read()
+            && let Some(ref cache) = *guard {
                 let cache_path = crate::git::cache::GitHistoryCache::cache_path_for(&ctx.server_dir, &ctx.index_base);
                 let size_mb = std::fs::metadata(&cache_path)
                     .map(|m| (m.len() as f64 / 1_048_576.0 * 10.0).round() / 10.0)
@@ -648,12 +647,10 @@ fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
                 }));
                 memory_estimate["gitCache"] = crate::index::estimate_git_cache_memory(cache);
             }
-        }
-    }
 
     // ── Process memory info (Windows only) ──
     let process_memory = crate::index::get_process_memory_info();
-    if !process_memory.as_object().map_or(true, |m| m.is_empty()) {
+    if !process_memory.as_object().is_none_or(|m| m.is_empty()) {
         memory_estimate["process"] = process_memory;
     }
 
@@ -662,7 +659,7 @@ fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
         "indexes": indexes,
     });
 
-    if !memory_estimate.as_object().map_or(true, |m| m.is_empty()) {
+    if !memory_estimate.as_object().is_none_or(|m| m.is_empty()) {
         info["memoryEstimate"] = memory_estimate;
     }
 

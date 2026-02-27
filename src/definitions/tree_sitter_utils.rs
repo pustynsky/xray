@@ -15,11 +15,10 @@ pub(crate) fn node_text<'a>(node: tree_sitter::Node, source: &'a [u8]) -> &'a st
 /// Only checks immediate children (depth 1), not descendants.
 pub(crate) fn find_child_by_kind<'a>(node: tree_sitter::Node<'a>, kind: &str) -> Option<tree_sitter::Node<'a>> {
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == kind {
+        if let Some(child) = node.child(i)
+            && child.kind() == kind {
                 return Some(child);
             }
-        }
     }
     None
 }

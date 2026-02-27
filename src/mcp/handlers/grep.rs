@@ -114,16 +114,14 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
                 }
             });
             // Swap in under brief WRITE lock (microseconds, not ~200ms)
-            if let Some(trigram) = new_trigram {
-                if let Ok(mut idx) = ctx.index.write() {
-                    if idx.trigram_dirty {  // double-check after acquiring write lock
+            if let Some(trigram) = new_trigram
+                && let Ok(mut idx) = ctx.index.write()
+                    && idx.trigram_dirty {  // double-check after acquiring write lock
                         eprintln!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
                             trigram.tokens.len(), trigram.trigram_map.len());
                         idx.trigram = trigram;
                         idx.trigram_dirty = false;
                     }
-                }
-            }
             eprintln!("[substring-trace] Trigram rebuild: {:.3}ms", rebuild_start.elapsed().as_secs_f64() * 1000.0);
         } else {
             eprintln!("[substring-trace] Trigram dirty check: clean in {:.3}ms", trigram_check_start.elapsed().as_secs_f64() * 1000.0);
@@ -217,14 +215,12 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
                 };
 
                 // Dir prefix filter (subdirectory search)
-                if let Some(ref prefix) = dir_filter {
-                    if !is_under_dir(file_path, prefix) { continue; }
-                }
+                if let Some(ref prefix) = dir_filter
+                    && !is_under_dir(file_path, prefix) { continue; }
 
                 // Extension filter (BUG #1 fix: supports comma-separated extensions)
-                if let Some(ref ext) = ext_filter {
-                    if !matches_ext_filter(file_path, ext) { continue; }
-                }
+                if let Some(ref ext) = ext_filter
+                    && !matches_ext_filter(file_path, ext) { continue; }
 
                 // Exclude dir filter
                 if exclude_dir.iter().any(|excl| {
@@ -396,8 +392,8 @@ fn handle_substring_search(
             .collect();
         let mut result = handle_multi_phrase_search(ctx, index, &phrases, params);
         // Inject a note explaining the auto-switch
-        if let Some(text) = result.content.first_mut().map(|c| &mut c.text) {
-            if let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
+        if let Some(text) = result.content.first_mut().map(|c| &mut c.text)
+            && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
                 if let Some(summary) = output.get_mut("summary") {
                     summary["searchModeNote"] = serde_json::Value::String(
                         "Terms contain spaces — auto-switched to phrase search \
@@ -407,7 +403,6 @@ fn handle_substring_search(
                 }
                 *text = json_to_string(&output);
             }
-        }
         return result;
     }
 
@@ -513,14 +508,12 @@ fn handle_substring_search(
                     };
 
                     // Dir prefix filter (subdirectory search)
-                    if let Some(prefix) = dir_filter {
-                        if !is_under_dir(file_path, prefix) { continue; }
-                    }
+                    if let Some(prefix) = dir_filter
+                        && !is_under_dir(file_path, prefix) { continue; }
 
                     // Extension filter (BUG #1 fix: supports comma-separated extensions)
-                    if let Some(ext) = ext_filter {
-                        if !matches_ext_filter(file_path, ext) { continue; }
-                    }
+                    if let Some(ext) = ext_filter
+                        && !matches_ext_filter(file_path, ext) { continue; }
 
                     // Exclude dir filter
                     if exclude_dir.iter().any(|excl| {
@@ -635,11 +628,10 @@ fn handle_substring_search(
             "lines": r.lines,
         });
 
-        if show_lines {
-            if let Ok(content) = std::fs::read_to_string(&r.file_path) {
+        if show_lines
+            && let Ok(content) = std::fs::read_to_string(&r.file_path) {
                 file_obj["lineContent"] = build_line_content_from_matches(&content, &r.lines, context_lines);
             }
-        }
 
         file_obj
     }).collect();
@@ -718,12 +710,10 @@ fn handle_phrase_search(
                         Some(p) => p,
                         None => return false,
                     };
-                    if let Some(prefix) = dir_filter {
-                        if !is_under_dir(path, prefix) { return false; }
-                    }
-                    if let Some(ext) = ext_filter {
-                        if !matches_ext_filter(path, ext) { return false; }
-                    }
+                    if let Some(prefix) = dir_filter
+                        && !is_under_dir(path, prefix) { return false; }
+                    if let Some(ext) = ext_filter
+                        && !matches_ext_filter(path, ext) { return false; }
                     if exclude_dir.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
                         return false;
                     }
@@ -911,12 +901,10 @@ fn collect_phrase_matches(
                         Some(p) => p,
                         None => return false,
                     };
-                    if let Some(prefix) = dir_filter {
-                        if !is_under_dir(path, prefix) { return false; }
-                    }
-                    if let Some(ext) = ext_filter {
-                        if !matches_ext_filter(path, ext) { return false; }
-                    }
+                    if let Some(prefix) = dir_filter
+                        && !is_under_dir(path, prefix) { return false; }
+                    if let Some(ext) = ext_filter
+                        && !matches_ext_filter(path, ext) { return false; }
                     if exclude_dir.iter().any(|excl| path.to_lowercase().contains(&excl.to_lowercase())) {
                         return false;
                     }
@@ -1059,11 +1047,10 @@ fn handle_multi_phrase_search(
             "occurrences": r.lines.len(),
             "lines": r.lines,
         });
-        if show_lines {
-            if let Some(ref content) = r.content {
+        if show_lines
+            && let Some(ref content) = r.content {
                 file_obj["lineContent"] = build_line_content_from_matches(content, &r.lines, context_lines);
             }
-        }
         file_obj
     }).collect();
 

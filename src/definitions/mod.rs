@@ -150,7 +150,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 #[cfg(feature = "lang-rust")]
                 let mut rs_parser: Option<tree_sitter::Parser> = None;
 
-                let mut chunk_defs: Vec<(u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>)> = Vec::new();
+                let mut chunk_defs: Vec<DefChunk> = Vec::new();
                 #[cfg(feature = "lang-csharp")]
                 let mut chunk_ext_methods: HashMap<String, Vec<String>> = HashMap::new();
                 let mut errors = 0usize;

@@ -326,9 +326,8 @@ pub fn parse_git_log_stream(
     for line_result in reader.lines() {
         let line = line_result.map_err(|e| format!("IO error reading git log: {}", e))?;
 
-        if line.starts_with(COMMIT_PREFIX) {
+        if let Some(header) = line.strip_prefix(COMMIT_PREFIX) {
             // Parse commit header: COMMIT:<hash>␞<timestamp>␞<email>␞<name>␞<subject...>
-            let header = &line[COMMIT_PREFIX.len()..];
             let fields: Vec<&str> = header.split(FIELD_SEP).collect();
 
             if fields.len() < 5 {
@@ -375,7 +374,7 @@ pub fn parse_git_log_stream(
             commit_count += 1;
 
             // Progress logging every 10K commits or every 10 seconds
-            if commit_count % 10_000 == 0 || last_progress.elapsed().as_secs() >= 10 {
+            if commit_count.is_multiple_of(10_000) || last_progress.elapsed().as_secs() >= 10 {
                 let elapsed = progress_start.elapsed();
                 eprintln!(
                     "[git-cache] Progress: {} commits parsed ({:.1}s elapsed)...",
@@ -601,23 +600,20 @@ impl GitHistoryCache {
                 let meta = self.commits.get(idx as usize)?;
 
                 // Filter by date range
-                if let Some(from_ts) = from {
-                    if meta.timestamp < from_ts {
+                if let Some(from_ts) = from
+                    && meta.timestamp < from_ts {
                         return None;
                     }
-                }
-                if let Some(to_ts) = to {
-                    if meta.timestamp > to_ts {
+                if let Some(to_ts) = to
+                    && meta.timestamp > to_ts {
                         return None;
                     }
-                }
 
                 // Filter by author
-                if let Some(ref idxs) = matching_author_idxs {
-                    if !idxs.contains(&meta.author_idx) {
+                if let Some(ref idxs) = matching_author_idxs
+                    && !idxs.contains(&meta.author_idx) {
                         return None;
                     }
-                }
 
                 // Filter by message
                 if let Some(ref msg_pattern) = message_filter_lower {
@@ -638,11 +634,10 @@ impl GitHistoryCache {
         let total_count = commits.len();
 
         // Truncate to maxResults
-        if let Some(max) = max_results {
-            if max > 0 {
+        if let Some(max) = max_results
+            && max > 0 {
                 commits.truncate(max);
             }
-        }
 
         (commits, total_count)
     }
@@ -691,23 +686,20 @@ impl GitHistoryCache {
         for &commit_idx in &all_commit_ids {
             if let Some(meta) = self.commits.get(commit_idx as usize) {
                 // Filter by date range
-                if let Some(from_ts) = from {
-                    if meta.timestamp < from_ts {
+                if let Some(from_ts) = from
+                    && meta.timestamp < from_ts {
                         continue;
                     }
-                }
-                if let Some(to_ts) = to {
-                    if meta.timestamp > to_ts {
+                if let Some(to_ts) = to
+                    && meta.timestamp > to_ts {
                         continue;
                     }
-                }
 
                 // Filter by author
-                if let Some(ref idxs) = matching_author_idxs {
-                    if !idxs.contains(&meta.author_idx) {
+                if let Some(ref idxs) = matching_author_idxs
+                    && !idxs.contains(&meta.author_idx) {
                         continue;
                     }
-                }
 
                 // Filter by message
                 if let Some(ref msg_pattern) = message_filter_lower {
@@ -784,23 +776,20 @@ impl GitHistoryCache {
                 .iter()
                 .filter_map(|&idx| {
                     let meta = self.commits.get(idx as usize)?;
-                    if let Some(from_ts) = from {
-                        if meta.timestamp < from_ts {
+                    if let Some(from_ts) = from
+                        && meta.timestamp < from_ts {
                             return None;
                         }
-                    }
-                    if let Some(to_ts) = to {
-                        if meta.timestamp > to_ts {
+                    if let Some(to_ts) = to
+                        && meta.timestamp > to_ts {
                             return None;
                         }
-                    }
 
                     // Filter by author
-                    if let Some(ref idxs) = matching_author_idxs {
-                        if !idxs.contains(&meta.author_idx) {
+                    if let Some(ref idxs) = matching_author_idxs
+                        && !idxs.contains(&meta.author_idx) {
                             return None;
                         }
-                    }
 
                     // Filter by message
                     if let Some(ref msg_pattern) = message_filter_lower {

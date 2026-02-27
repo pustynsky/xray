@@ -607,24 +607,18 @@ fn apply_stats_filters(
                 None => return false,
             };
 
-            if let Some(min) = args.min_complexity {
-                if stats.cyclomatic_complexity < min { return false; }
-            }
-            if let Some(min) = args.min_cognitive {
-                if stats.cognitive_complexity < min { return false; }
-            }
-            if let Some(min) = args.min_nesting {
-                if stats.max_nesting_depth < min { return false; }
-            }
-            if let Some(min) = args.min_params {
-                if stats.param_count < min { return false; }
-            }
-            if let Some(min) = args.min_returns {
-                if stats.return_count < min { return false; }
-            }
-            if let Some(min) = args.min_calls {
-                if stats.call_count < min { return false; }
-            }
+            if let Some(min) = args.min_complexity
+                && stats.cyclomatic_complexity < min { return false; }
+            if let Some(min) = args.min_cognitive
+                && stats.cognitive_complexity < min { return false; }
+            if let Some(min) = args.min_nesting
+                && stats.max_nesting_depth < min { return false; }
+            if let Some(min) = args.min_params
+                && stats.param_count < min { return false; }
+            if let Some(min) = args.min_returns
+                && stats.return_count < min { return false; }
+            if let Some(min) = args.min_calls
+                && stats.call_count < min { return false; }
             true
         });
 
@@ -726,6 +720,7 @@ fn sort_results(
 // ─── Output formatting ──────────────────────────────────────────────
 
 /// Format the final JSON output from filtered, sorted results.
+#[allow(clippy::too_many_arguments)]
 fn format_search_output(
     index: &DefinitionIndex,
     results: &[(u32, &DefinitionEntry)],
@@ -815,8 +810,8 @@ fn format_definition_entry(
     }
 
     // Inject codeStats if requested
-    if args.include_code_stats {
-        if let Some(stats) = index.code_stats.get(&def_idx) {
+    if args.include_code_stats
+        && let Some(stats) = index.code_stats.get(&def_idx) {
             let lines = def.line_end.saturating_sub(def.line_start) + 1;
             obj["codeStats"] = json!({
                 "lines": lines,
@@ -829,12 +824,12 @@ fn format_definition_entry(
                 "lambdaCount": stats.lambda_count,
             });
         }
-    }
 
     obj
 }
 
 /// Build the summary JSON object for the search response.
+#[allow(clippy::too_many_arguments)]
 fn build_search_summary(
     index: &DefinitionIndex,
     defs_json: &[Value],
@@ -856,9 +851,9 @@ fn build_search_summary(
     });
 
     // Hint: kind="property" returning 0 results for TypeScript — suggest kind="field"
-    if total_results == 0 {
-        if let Some(ref kind_str) = args.kind_filter {
-            if kind_str.eq_ignore_ascii_case("property") {
+    if total_results == 0
+        && let Some(ref kind_str) = args.kind_filter
+            && kind_str.eq_ignore_ascii_case("property") {
                 // Check if there ARE "field" definitions that would match the same filters
                 let has_fields = index.kind_index.get(&DefinitionKind::Field)
                     .map(|v| !v.is_empty())
@@ -870,18 +865,15 @@ fn build_search_summary(
                     );
                 }
             }
-        }
-    }
 
     // Hint for large transitive hierarchies
-    if args.base_type_transitive && total_results > 5000 {
-        if let Some(ref bt) = args.base_type_filter {
+    if args.base_type_transitive && total_results > 5000
+        && let Some(ref bt) = args.base_type_filter {
             summary["hint"] = json!(format!(
                 "Hierarchy of '{}' has {} transitive descendants. Consider adding 'kind' or 'file' filters to narrow results.",
                 bt, total_results
             ));
         }
-    }
     if index.parse_errors > 0 {
         summary["readErrors"] = json!(index.parse_errors);
     }

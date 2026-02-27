@@ -11,7 +11,7 @@ pub(crate) fn parse_csharp_definitions(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
-) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, HashMap<String, Vec<String>>) {
+) -> CsharpParseResult {
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
@@ -34,24 +34,22 @@ pub(crate) fn parse_csharp_definitions(
         if let Some(ref parent) = def.parent {
             match def.kind {
                 DefinitionKind::Field | DefinitionKind::Property => {
-                    if let Some(ref sig) = def.signature {
-                        if let Some((type_name, _field_name)) = parse_field_signature(sig) {
+                    if let Some(ref sig) = def.signature
+                        && let Some((type_name, _field_name)) = parse_field_signature(sig) {
                             class_field_types
                                 .entry(parent.clone())
                                 .or_default()
                                 .insert(def.name.clone(), type_name);
                         }
-                    }
                 }
                 DefinitionKind::Method => {
-                    if let Some(ref sig) = def.signature {
-                        if let Some(return_type) = parse_return_type_from_signature(sig) {
+                    if let Some(ref sig) = def.signature
+                        && let Some(return_type) = parse_return_type_from_signature(sig) {
                             class_method_return_types
                                 .entry(parent.clone())
                                 .or_default()
                                 .insert(def.name.clone(), return_type);
                         }
-                    }
                 }
                 DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record => {
                     if !def.base_types.is_empty() {
@@ -61,11 +59,10 @@ pub(crate) fn parse_csharp_definitions(
                 _ => {}
             }
         }
-        if def.parent.is_none() && matches!(def.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record) {
-            if !def.base_types.is_empty() {
+        if def.parent.is_none() && matches!(def.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record)
+            && !def.base_types.is_empty() {
                 class_base_types.insert(def.name.clone(), def.base_types.clone());
             }
-        }
     }
 
     // Extract constructor parameter types as field types (DI pattern).
@@ -77,17 +74,15 @@ pub(crate) fn parse_csharp_definitions(
     let constructor_param_types: HashMap<String, HashMap<String, String>> = {
         let mut result: HashMap<String, HashMap<String, String>> = HashMap::new();
         for def in &defs {
-            if def.kind == DefinitionKind::Constructor {
-                if let Some(ref parent) = def.parent {
-                    if let Some(ref sig) = def.signature {
+            if def.kind == DefinitionKind::Constructor
+                && let Some(ref parent) = def.parent
+                    && let Some(ref sig) = def.signature {
                         let param_types = extract_constructor_param_types(sig);
                         let field_map = result.entry(parent.clone()).or_default();
                         for (param_name, param_type) in param_types {
                             field_map.insert(param_name, param_type);
                         }
                     }
-                }
-            }
         }
         result
     };
@@ -97,9 +92,7 @@ pub(crate) fn parse_csharp_definitions(
         let field_map = class_field_types.entry(class_name.clone()).or_default();
         for (param_name, param_type) in param_map {
             let underscore_name = format!("_{}", param_name);
-            if !field_map.contains_key(&underscore_name) {
-                field_map.insert(underscore_name, param_type.clone());
-            }
+            field_map.entry(underscore_name).or_insert_with(|| param_type.clone());
             if !field_map.contains_key(param_name) {
                 field_map.insert(param_name.clone(), param_type.clone());
             }
@@ -125,9 +118,7 @@ pub(crate) fn parse_csharp_definitions(
             let assignments = extract_constructor_field_assignments(body_node, source_bytes, param_map);
             let field_map = class_field_types.entry(parent_name).or_default();
             for (field_name, param_type) in assignments {
-                if !field_map.contains_key(&field_name) {
-                    field_map.insert(field_name, param_type);
-                }
+                field_map.entry(field_name).or_insert(param_type);
             }
         }
     }
@@ -149,13 +140,12 @@ pub(crate) fn parse_csharp_definitions(
                 .find(|d| d.name == parent_name && matches!(d.kind,
                     DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record))
                 .and_then(|d| d.parent.as_deref());
-            if let Some(outer_name) = outer_class_name {
-                if let Some(outer_fields) = class_field_types.get(outer_name) {
+            if let Some(outer_name) = outer_class_name
+                && let Some(outer_fields) = class_field_types.get(outer_name) {
                     for (k, v) in outer_fields {
                         field_types.entry(k.clone()).or_insert(v.clone());
                     }
                 }
-            }
         }
 
         let base_types = class_base_types.get(parent_name)
@@ -222,14 +212,13 @@ fn build_extension_method_map(defs: &[DefinitionEntry]) -> HashMap<String, Vec<S
             continue;
         }
         // Check if the method signature has `(this ` indicating an extension method
-        if let Some(ref sig) = def.signature {
-            if sig.contains("(this ") {
+        if let Some(ref sig) = def.signature
+            && sig.contains("(this ") {
                 extension_methods
                     .entry(def.name.clone())
                     .or_default()
                     .push(parent.to_string());
             }
-        }
     }
 
     extension_methods
@@ -447,11 +436,10 @@ fn collect_constructor_assignments(
                         _ => None,
                     };
 
-                    if let Some(name) = field_name {
-                        if !name.is_empty() {
+                    if let Some(name) = field_name
+                        && !name.is_empty() {
                             result.push((name, param_type.clone()));
                         }
-                    }
                 }
             }
         }
@@ -634,11 +622,10 @@ fn extract_conditional_access_call(
 fn extract_method_name_from_name_node(name_node: tree_sitter::Node, source: &[u8]) -> String {
     if name_node.kind() == "generic_name" {
         // generic_name: child(0) = identifier, child(1) = type_argument_list
-        if let Some(id_node) = name_node.child(0) {
-            if id_node.kind() == "identifier" {
+        if let Some(id_node) = name_node.child(0)
+            && id_node.kind() == "identifier" {
                 return node_text(id_node, source).to_string();
             }
-        }
         // Fallback: strip everything from '<' onwards
         let text = node_text(name_node, source);
         text.split('<').next().unwrap_or(text).to_string()
@@ -683,10 +670,9 @@ fn resolve_receiver_type(
                 _ => {
                     if let Some(type_name) = field_types.get(name) {
                         Some(type_name.clone())
-                    } else if name.chars().next().is_some_and(|c| c.is_uppercase()) {
-                        Some(name.to_string())
                     } else {
-                        Some(name.to_string()) // preserve unresolved receiver name (e.g., "dbSession")
+                        // Preserve receiver name regardless of case (e.g., "dbSession", "UserService")
+                        Some(name.to_string())
                     }
                 }
             }
@@ -1137,13 +1123,13 @@ fn extract_csharp_var_declaration_types(
 
     // Iterate over variable_declarator children
     for i in 0..var_decl.child_count() {
-        if let Some(child) = var_decl.child(i) {
-            if child.kind() == "variable_declarator" {
+        if let Some(child) = var_decl.child(i)
+            && child.kind() == "variable_declarator" {
                 // Get variable name — try field "name" first, then first child
                 let name_node = find_child_by_field(child, "name")
                     .or_else(|| child.child(0));
-                if let Some(name_n) = name_node {
-                    if name_n.kind() == "identifier" {
+                if let Some(name_n) = name_node
+                    && name_n.kind() == "identifier" {
                         let name = node_text(name_n, source).trim().to_string();
                         if name.is_empty() { continue; }
 
@@ -1199,9 +1185,7 @@ fn extract_csharp_var_declaration_types(
                             }
                         }
                     }
-                }
             }
-        }
     }
 }
 
@@ -1329,11 +1313,11 @@ fn compute_code_stats_csharp(
     method_node: tree_sitter::Node,
     _source: &[u8],
 ) -> CodeStats {
-    let mut stats = CodeStats::default();
-    stats.cyclomatic_complexity = 1; // base complexity
-
-    // paramCount from parameter_list (not from body walk)
-    stats.param_count = count_parameters_csharp(method_node);
+    let mut stats = CodeStats {
+        cyclomatic_complexity: 1, // base complexity
+        param_count: count_parameters_csharp(method_node),
+        ..Default::default()
+    };
 
     // Find body node
     let body = find_child_by_kind(method_node, "block")

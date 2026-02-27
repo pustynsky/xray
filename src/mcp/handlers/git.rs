@@ -196,14 +196,13 @@ fn parse_cache_date_range(
             None => None,
         };
         // Validate from <= to (BUG-4: reversed date range silently returned 0 results)
-        if let (Some(f), Some(t)) = (from_ts, to_ts) {
-            if f > t {
+        if let (Some(f), Some(t)) = (from_ts, to_ts)
+            && f > t {
                 return Err(format!(
                     "'from' date ({}) is after 'to' date ({}). Swap them or correct the range.",
                     from.unwrap_or("?"), to.unwrap_or("?")
                 ));
             }
-        }
         Ok((from_ts, to_ts))
     }
 }
@@ -256,9 +255,9 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path (history only, not diff — cache has no patch data) ──
-    if !include_diff && !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed) {
-        if let Ok(cache_guard) = ctx.git_cache.read() {
-            if let Some(cache) = cache_guard.as_ref() {
+    if !include_diff && !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
+        && let Ok(cache_guard) = ctx.git_cache.read()
+            && let Some(cache) = cache_guard.as_ref() {
                 let start = Instant::now();
                 let normalized = GitHistoryCache::normalize_path(file);
 
@@ -309,8 +308,6 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
 
                 return ToolCallResult::success(json_to_string(&output));
             }
-        }
-    }
 
     // ── CLI fallback ──
     let filter = match git::parse_date_filter(from, to, date) {
@@ -386,9 +383,9 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path ──
-    if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed) {
-        if let Ok(cache_guard) = ctx.git_cache.read() {
-            if let Some(cache) = cache_guard.as_ref() {
+    if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
+        && let Ok(cache_guard) = ctx.git_cache.read()
+            && let Some(cache) = cache_guard.as_ref() {
                 let start = Instant::now();
                 let normalized = GitHistoryCache::normalize_path(query_path);
 
@@ -441,8 +438,6 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
                 return ToolCallResult::success(json_to_string(&output));
             }
-        }
-    }
 
     // ── CLI fallback ──
     let filter = match git::parse_date_filter(from, to, None) {
@@ -505,9 +500,9 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path ──
-    if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed) {
-        if let Ok(cache_guard) = ctx.git_cache.read() {
-            if let Some(cache) = cache_guard.as_ref() {
+    if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
+        && let Ok(cache_guard) = ctx.git_cache.read()
+            && let Some(cache) = cache_guard.as_ref() {
                 let start = Instant::now();
 
                 // For activity, use empty string for whole-repo scope
@@ -556,8 +551,6 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
                 return ToolCallResult::success(json_to_string(&output));
             }
-        }
-    }
 
     // ── CLI fallback ──
     let filter = match git::parse_date_filter(from, to, date) {
@@ -645,13 +638,12 @@ fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let end_line = args.get("endLine").and_then(|v| v.as_u64()).map(|n| n as usize);
 
     // Validate endLine >= startLine if provided
-    if let Some(end) = end_line {
-        if end < start_line {
+    if let Some(end) = end_line
+        && end < start_line {
             return ToolCallResult::error(format!(
                 "endLine ({}) must be >= startLine ({})", end, start_line
             ));
         }
-    }
 
     let start = Instant::now();
 
@@ -928,15 +920,14 @@ pub(crate) fn build_warning(
             current_branch,
             main_branch.as_deref().unwrap_or("main/master")
         )];
-        if let Some(behind) = behind_main {
-            if behind > 0 {
+        if let Some(behind) = behind_main
+            && behind > 0 {
                 parts.push(format!(
                     "Local branch is {} commits behind remote {}.",
                     behind,
                     main_branch.as_deref().unwrap_or("main/master")
                 ));
             }
-        }
         Some(parts.join(" "))
     }
 }

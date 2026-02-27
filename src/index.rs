@@ -82,8 +82,8 @@ pub fn enable_debug_log(index_base: &std::path::Path, server_dir: &str) {
     // Truncate and write header
     if let Ok(mut f) = fs::File::create(&log_path) {
         let _ = writeln!(f,
-            "{:>8} | {:>8} | {:>8} | {:>8} | {}",
-            "elapsed", "WS_MB", "Peak_MB", "Commit_MB", "label"
+            "{:>8} | {:>8} | {:>8} | {:>8} | label",
+            "elapsed", "WS_MB", "Peak_MB", "Commit_MB"
         );
         let _ = writeln!(f, "{}", "-".repeat(70));
     }
@@ -120,11 +120,10 @@ pub fn format_utc_timestamp() -> String {
 
 /// Append a line to the debug log file. Shared by log_memory, log_request, log_response.
 fn append_to_debug_log(line: &str) {
-    if let Some(path) = DEBUG_LOG_PATH.get() {
-        if let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
+    if let Some(path) = DEBUG_LOG_PATH.get()
+        && let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
             let _ = writeln!(f, "{}", line);
         }
-    }
 }
 
 /// Log an MCP tool request to the debug log file.
@@ -645,7 +644,7 @@ pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, la
     writer.write_all(LZ4_MAGIC)?;
     let mut encoder = lz4_flex::frame::FrameEncoder::new(writer);
     bincode::serialize_into(&mut encoder, data)?;
-    let mut writer = encoder.finish().map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let mut writer = encoder.finish().map_err(std::io::Error::other)?;
     writer.flush()?;
 
     let compressed_size = std::fs::metadata(path)?.len();
@@ -867,16 +866,14 @@ pub fn cleanup_orphaned_indexes(index_base: &std::path::Path) -> usize {
                 continue;
             }
 
-            if let Some(root) = read_root_from_index_file(&path) {
-                if !std::path::Path::new(&root).exists() {
-                    if std::fs::remove_file(&path).is_ok() {
+            if let Some(root) = read_root_from_index_file(&path)
+                && !std::path::Path::new(&root).exists()
+                    && std::fs::remove_file(&path).is_ok() {
                         removed += 1;
                         eprintln!("  Removed orphaned index: {} (root: {})", path.display(), root);
                         // Also remove sidecar .meta file
                         let _ = std::fs::remove_file(meta_path_for(&path));
                     }
-                }
-            }
         }
     }
 
@@ -909,15 +906,14 @@ pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize
                 let root_canonical = std::fs::canonicalize(&root)
                     .map(|p| clean_path(&p.to_string_lossy()))
                     .unwrap_or_else(|_| clean_path(&root));
-                if root_canonical.eq_ignore_ascii_case(&target) {
-                    if std::fs::remove_file(&path).is_ok() {
+                if root_canonical.eq_ignore_ascii_case(&target)
+                    && std::fs::remove_file(&path).is_ok() {
                         removed += 1;
                         eprintln!("  Removed index for dir '{}': {} ({})",
                             dir, path.display(), ext.unwrap_or("?"));
                         // Also remove sidecar .meta file
                         let _ = std::fs::remove_file(meta_path_for(&path));
                     }
-                }
             }
         }
     }

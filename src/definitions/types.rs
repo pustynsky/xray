@@ -178,6 +178,7 @@ pub struct CallSite {
 // Fields are categorized below by their relationship to def_idx.
 
 #[derive(Serialize, Deserialize, Debug)]
+#[derive(Default)]
 pub struct DefinitionIndex {
     pub root: String,
     pub created_at: u64,
@@ -240,31 +241,18 @@ pub struct DefinitionIndex {
     pub extension_methods: HashMap<String, Vec<String>>,
 }
 
-impl Default for DefinitionIndex {
-    fn default() -> Self {
-        Self {
-            root: String::new(),
-            created_at: 0,
-            extensions: Vec::new(),
-            files: Vec::new(),
-            definitions: Vec::new(),
-            name_index: HashMap::new(),
-            kind_index: HashMap::new(),
-            attribute_index: HashMap::new(),
-            base_type_index: HashMap::new(),
-            file_index: HashMap::new(),
-            path_to_id: HashMap::new(),
-            method_calls: HashMap::new(),
-            code_stats: HashMap::new(),
-            parse_errors: 0,
-            lossy_file_count: 0,
-            empty_file_ids: Vec::new(),
-            extension_methods: HashMap::new(),
-            selector_index: HashMap::new(),
-            template_children: HashMap::new(),
-        }
-    }
-}
+
+// ─── Parser result type aliases ──────────────────────────────────────
+// Shared by all parser entry points to avoid clippy::type_complexity.
+
+/// Result type for parsers that don't produce extension methods (TS, Rust, SQL).
+pub type ParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>);
+
+/// Result type for the C# parser, which also returns extension method mappings.
+pub type CsharpParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, HashMap<String, Vec<String>>);
+
+/// Chunk type used during parallel definition index building.
+pub type DefChunk = (u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>);
 
 // ─── CLI Args ────────────────────────────────────────────────────────
 

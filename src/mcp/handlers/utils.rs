@@ -252,13 +252,12 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
     // Phase 1: Cap `lines` arrays per file
     if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
         for file_entry in files.iter_mut() {
-            if let Some(lines) = file_entry.get_mut("lines").and_then(|l| l.as_array_mut()) {
-                if lines.len() > MAX_LINES_PER_FILE {
+            if let Some(lines) = file_entry.get_mut("lines").and_then(|l| l.as_array_mut())
+                && lines.len() > MAX_LINES_PER_FILE {
                     let omitted = lines.len() - MAX_LINES_PER_FILE;
                     lines.truncate(MAX_LINES_PER_FILE);
                     file_entry["linesOmitted"] = json!(omitted);
                 }
-            }
             // Remove lineContent entirely if present — it's the biggest space consumer
             if file_entry.get("lineContent").is_some() {
                 file_entry.as_object_mut().map(|o| o.remove("lineContent"));
@@ -276,16 +275,14 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
     }
 
     // Phase 2: Cap `matchedTokens` in summary
-    if let Some(summary) = output.get_mut("summary") {
-        if let Some(tokens) = summary.get_mut("matchedTokens").and_then(|t| t.as_array_mut()) {
-            if tokens.len() > MAX_MATCHED_TOKENS {
+    if let Some(summary) = output.get_mut("summary")
+        && let Some(tokens) = summary.get_mut("matchedTokens").and_then(|t| t.as_array_mut())
+            && tokens.len() > MAX_MATCHED_TOKENS {
                 let omitted = tokens.len() - MAX_MATCHED_TOKENS;
                 tokens.truncate(MAX_MATCHED_TOKENS);
                 summary["matchedTokensOmitted"] = json!(omitted);
                 reasons.push(format!("capped matchedTokens to {}", MAX_MATCHED_TOKENS));
             }
-        }
-    }
 
     // Check size after phase 2
     let size_after_p2 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
@@ -344,16 +341,16 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
     // (already handled above). This covers "definitions", "containingDefinitions",
     // "callTree", or any future tool response format.
     let current_size = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if current_size > max_bytes {
-        if let Some(obj) = output.as_object_mut() {
+    if current_size > max_bytes
+        && let Some(obj) = output.as_object_mut() {
             // Find the largest top-level array (skip "files" — already handled)
             let largest_array_key = obj.iter()
                 .filter(|(k, v)| *k != "files" && *k != "summary" && v.is_array())
                 .max_by_key(|(_, v)| v.as_array().map(|a| a.len()).unwrap_or(0))
                 .map(|(k, _)| k.clone());
 
-            if let Some(key) = largest_array_key {
-                if let Some(arr) = obj.get_mut(&key).and_then(|v| v.as_array_mut()) {
+            if let Some(key) = largest_array_key
+                && let Some(arr) = obj.get_mut(&key).and_then(|v| v.as_array_mut()) {
                     let original_count = arr.len();
                     if original_count > 0 {
                         // Estimate how many entries to keep
@@ -379,9 +376,7 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
                         }
                     }
                 }
-            }
         }
-    }
 
     inject_truncation_metadata(&mut output, &reasons, initial_size);
     output
@@ -484,6 +479,7 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
 
 // ─── Body injection helper ──────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn inject_body_into_obj(
     obj: &mut Value,
     file_path: &str,

@@ -66,13 +66,13 @@ pub fn validate_date(s: &str) -> Result<(), String> {
     let month: u32 = parts[1].parse().map_err(|_| format!("Invalid month in '{}'", s))?;
     let day: u32 = parts[2].parse().map_err(|_| format!("Invalid day in '{}'", s))?;
 
-    if year < 1970 || year > 2100 {
+    if !(1970..=2100).contains(&year) {
         return Err(format!("Year {} out of range (1970-2100)", year));
     }
-    if month < 1 || month > 12 {
+    if !(1..=12).contains(&month) {
         return Err(format!("Month {} out of range (1-12)", month));
     }
-    if day < 1 || day > 31 {
+    if !(1..=31).contains(&day) {
         return Err(format!("Day {} out of range (1-31)", day));
     }
 
@@ -129,14 +129,13 @@ pub fn parse_date_filter(
             validate_date(t)?;
         }
         // Validate from <= to (BUG-4: reversed date range silently returned 0 results)
-        if let (Some(f), Some(t)) = (from, to) {
-            if f > t {
+        if let (Some(f), Some(t)) = (from, to)
+            && f > t {
                 return Err(format!(
                     "'from' date ({}) is after 'to' date ({}). Swap them or correct the range.",
                     f, t
                 ));
             }
-        }
         Ok(DateFilter {
             from_date: from.map(|s| s.to_string()),
             to_date: to.map(|s| s.to_string()),
@@ -565,10 +564,10 @@ pub(crate) fn parse_blame_porcelain(output: &str) -> Result<Vec<BlameLine>, Stri
         let mut has_headers = false;
 
         // Read header fields until we hit the content line (starts with \t)
-        while let Some(header_line) = lines_iter.next() {
-            if header_line.starts_with('\t') {
+        for header_line in lines_iter.by_ref() {
+            if let Some(stripped) = header_line.strip_prefix('\t') {
                 // Content line — strip the leading tab
-                content = header_line[1..].to_string();
+                content = stripped.to_string();
                 break;
             }
 

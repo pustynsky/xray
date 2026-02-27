@@ -117,8 +117,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
     // Check for ambiguous method names and generate warning
     let method_lower = method_name.to_lowercase();
     let mut ambiguity_warning: Option<String> = None;
-    if class_filter.is_none() {
-        if let Some(name_indices) = def_idx.name_index.get(&method_lower) {
+    if class_filter.is_none()
+        && let Some(name_indices) = def_idx.name_index.get(&method_lower) {
             let method_defs: Vec<&DefinitionEntry> = name_indices.iter()
                 .filter_map(|&di| def_idx.definitions.get(di as usize))
                 .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function)
@@ -147,7 +147,6 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
                 }
             }
         }
-    }
 
     // ─── Angular template tree (check before standard call tree) ─────
     let is_down = direction == "down";
@@ -388,11 +387,10 @@ fn collect_substring_file_ids(
         for &ti in &candidate_indices {
             if let Some(tok) = trigram_idx.tokens.get(ti as usize) {
                 // Only match tokens strictly LONGER than the term (substring, not exact)
-                if tok.len() > term.len() && tok.contains(term) {
-                    if let Some(postings) = content_index.index.get(tok) {
+                if tok.len() > term.len() && tok.contains(term)
+                    && let Some(postings) = content_index.index.get(tok) {
                         file_ids.extend(postings.iter().map(|p| p.file_id));
                     }
-                }
             }
         }
     }
@@ -480,11 +478,10 @@ fn verify_call_site_target(
     // Note: extension_methods keys are original-case but method_name here is lowercased,
     // so we do a case-insensitive scan over the map keys.
     for (ext_method, ext_classes) in &def_idx.extension_methods {
-        if ext_method.eq_ignore_ascii_case(method_name) {
-            if ext_classes.iter().any(|c| c.eq_ignore_ascii_case(target_class)) {
+        if ext_method.eq_ignore_ascii_case(method_name)
+            && ext_classes.iter().any(|c| c.eq_ignore_ascii_case(target_class)) {
                 return true;
             }
-        }
     }
 
     // Check if ANY matching call-site passes verification
@@ -507,7 +504,7 @@ fn verify_call_site_target(
                     return true;
                 }
                 // Inheritance: target class has base_types containing the receiver_type
-                if target_base_types.iter().any(|bt| *bt == rt_lower) {
+                if target_base_types.contains(&rt_lower) {
                     return true;
                 }
                 // Fuzzy DI interface matching: IDataModelService → DataModelWebService
@@ -569,6 +566,7 @@ fn verify_call_site_target(
 /// we pass the parent class of the method being searched so that we only find
 /// callers that actually reference that specific class (not any unrelated class
 /// with a method of the same name).
+#[allow(clippy::too_many_arguments)]
 fn build_caller_tree(
     method_name: &str,
     parent_class: Option<&str>,
@@ -736,8 +734,8 @@ fn build_caller_tree(
             {
                 // Verify the call on this line actually targets the expected class
                 // using pre-computed call-site data from the AST
-                if parent_class.is_some() {
-                    if !verify_call_site_target(
+                if parent_class.is_some()
+                    && !verify_call_site_target(
                         def_idx,
                         caller_di,
                         line,
@@ -746,7 +744,6 @@ fn build_caller_tree(
                     ) {
                         continue;
                     }
-                }
 
                 let caller_key = format!("{}.{}.{}",
                     caller_parent.as_deref().unwrap_or("?"),
@@ -823,13 +820,12 @@ fn build_caller_tree(
                 // Target class's own base_types (interfaces it implements)
                 if let Some(indices) = def_idx.name_index.get(&pc_lower) {
                     for &idx in indices {
-                        if let Some(d) = def_idx.definitions.get(idx as usize) {
-                            if matches!(d.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record) {
+                        if let Some(d) = def_idx.definitions.get(idx as usize)
+                            && matches!(d.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record) {
                                 for bt in &d.base_types {
                                     related.insert(bt.to_lowercase());
                                 }
                             }
-                        }
                     }
                 }
                 // Find implementations of the target class via base_type_index
@@ -940,18 +936,17 @@ fn build_template_callee_tree(
                 let mut node = json!({ "selector": child_selector, "templateUsage": true });
 
                 // Resolve child selector → class for recursion
-                if let Some(child_def_indices) = def_idx.selector_index.get(child_selector) {
-                    if let Some(&child_di) = child_def_indices.first() {
-                        if let Some(child_def) = def_idx.definitions.get(child_di as usize) {
+                if let Some(child_def_indices) = def_idx.selector_index.get(child_selector)
+                    && let Some(&child_di) = child_def_indices.first()
+                        && let Some(child_def) = def_idx.definitions.get(child_di as usize) {
                             node["class"] = json!(child_def.name);
                             node["line"] = json!(child_def.line_start);
-                            if let Some(f) = def_idx.files.get(child_def.file_id as usize) {
-                                if let Some(fname) =
+                            if let Some(f) = def_idx.files.get(child_def.file_id as usize)
+                                && let Some(fname) =
                                     Path::new(f.as_str()).file_name().and_then(|f| f.to_str())
                                 {
                                     node["file"] = json!(fname);
                                 }
-                            }
                             let sub = build_template_callee_tree(
                                 &child_def.name,
                                 max_depth,
@@ -963,8 +958,6 @@ fn build_template_callee_tree(
                                 node["children"] = json!(sub);
                             }
                         }
-                    }
-                }
                 results.push(node);
             }
         }
@@ -991,20 +984,19 @@ fn find_template_parents(
 
     let mut parents: Vec<Value> = Vec::new();
     for (parent_di, children) in &def_idx.template_children {
-        if children.iter().any(|c| c == selector) {
-            if let Some(parent_def) = def_idx.definitions.get(*parent_di as usize) {
+        if children.iter().any(|c| c == selector)
+            && let Some(parent_def) = def_idx.definitions.get(*parent_di as usize) {
                 let mut node = json!({
                     "class": parent_def.name,
                     "line": parent_def.line_start,
                     "templateUsage": true,
                 });
-                if let Some(f) = def_idx.files.get(parent_def.file_id as usize) {
-                    if let Some(fname) =
+                if let Some(f) = def_idx.files.get(parent_def.file_id as usize)
+                    && let Some(fname) =
                         Path::new(f.as_str()).file_name().and_then(|f| f.to_str())
                     {
                         node["file"] = json!(fname);
                     }
-                }
                 // Resolve this parent's own selector for recursion
                 let mut parent_selector: Option<String> = None;
                 for (sel, indices) in &def_idx.selector_index {
@@ -1029,13 +1021,13 @@ fn find_template_parents(
                 }
                 parents.push(node);
             }
-        }
     }
     parents
 }
 
 /// Build a callee tree (direction = "down"): find what methods are called by this method.
 /// Uses pre-computed call graph from AST analysis (method_calls in DefinitionIndex).
+#[allow(clippy::too_many_arguments)]
 fn build_callee_tree(
     method_name: &str,
     class_filter: Option<&str>,
@@ -1279,13 +1271,12 @@ fn find_implementations_of_interface(
     let mut impls = Vec::new();
     if let Some(impl_indices) = def_idx.base_type_index.get(interface_name_lower) {
         for &ii in impl_indices {
-            if let Some(impl_def) = def_idx.definitions.get(ii as usize) {
-                if matches!(impl_def.kind,
+            if let Some(impl_def) = def_idx.definitions.get(ii as usize)
+                && matches!(impl_def.kind,
                     DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record)
                 {
                     impls.push(impl_def.name.to_lowercase());
                 }
-            }
         }
     }
     impls
@@ -1296,15 +1287,12 @@ fn find_implementations_of_interface(
 fn is_class_generic(def_idx: &DefinitionIndex, class_name_lower: &str) -> bool {
     if let Some(indices) = def_idx.name_index.get(class_name_lower) {
         for &di in indices {
-            if let Some(def) = def_idx.definitions.get(di as usize) {
-                if matches!(def.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record | DefinitionKind::Interface) {
-                    if let Some(ref sig) = def.signature {
-                        if sig.contains('<') {
+            if let Some(def) = def_idx.definitions.get(di as usize)
+                && matches!(def.kind, DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record | DefinitionKind::Interface)
+                    && let Some(ref sig) = def.signature
+                        && sig.contains('<') {
                             return true;
                         }
-                    }
-                }
-            }
         }
     }
     false
@@ -1324,11 +1312,10 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, call
     let mut resolved: Vec<u32> = Vec::new();
 
     // Skip matching for built-in types to avoid false positives
-    if let Some(ref rt) = call.receiver_type {
-        if BUILTIN_RECEIVER_TYPES.iter().any(|&b| b.eq_ignore_ascii_case(rt.as_str())) {
+    if let Some(ref rt) = call.receiver_type
+        && BUILTIN_RECEIVER_TYPES.iter().any(|&b| b.eq_ignore_ascii_case(rt.as_str())) {
             return Vec::new();
         }
-    }
 
     for &di in candidates {
         let def = match def_idx.definitions.get(di as usize) {
@@ -1363,8 +1350,8 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, call
                 // Check if parent's class definition has recv_type in base_types
                 if let Some(parent_defs) = def_idx.name_index.get(&parent_lower) {
                     for &pi in parent_defs {
-                        if let Some(parent_def) = def_idx.definitions.get(pi as usize) {
-                            if matches!(parent_def.kind,
+                        if let Some(parent_def) = def_idx.definitions.get(pi as usize)
+                            && matches!(parent_def.kind,
                                 DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record)
                             {
                                 let implements = parent_def.base_types.iter()
@@ -1377,18 +1364,16 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, call
                                     break;
                                 }
                             }
-                        }
                     }
                 }
             }
         } else {
             // No receiver type -- prefer methods in the same class as the caller
             if let Some(caller_cls) = caller_parent {
-                if let Some(ref parent) = def.parent {
-                    if parent.eq_ignore_ascii_case(caller_cls) {
+                if let Some(ref parent) = def.parent
+                    && parent.eq_ignore_ascii_case(caller_cls) {
                         resolved.push(di);
                     }
-                }
             } else {
                 // No caller class context -- accept all (backward-compatible)
                 resolved.push(di);

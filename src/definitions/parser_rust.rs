@@ -11,7 +11,7 @@ pub(crate) fn parse_rust_definitions(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
-) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
+) -> ParseResult {
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
@@ -28,18 +28,15 @@ pub(crate) fn parse_rust_definitions(
     // Build per-struct field type maps from collected defs
     let mut struct_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
     for def in &defs {
-        if let Some(ref parent) = def.parent {
-            if def.kind == DefinitionKind::Field {
-                if let Some(ref sig) = def.signature {
-                    if let Some((name, type_name)) = parse_rust_field_type(sig) {
+        if let Some(ref parent) = def.parent
+            && def.kind == DefinitionKind::Field
+                && let Some(ref sig) = def.signature
+                    && let Some((name, type_name)) = parse_rust_field_type(sig) {
                         struct_field_types
                             .entry(parent.clone())
                             .or_default()
                             .insert(name, type_name);
                     }
-                }
-            }
-        }
     }
 
     // Extract call sites from pre-collected method nodes
@@ -260,8 +257,8 @@ fn extract_rust_attributes(node: tree_sitter::Node, source: &[u8]) -> Vec<String
     // In tree-sitter-rust, attributes are children of the parent, not of the item itself
     // But for items inside declaration_list, attributes ARE children of the item
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == "attribute_item" {
+        if let Some(child) = node.child(i)
+            && child.kind() == "attribute_item" {
                 let text = node_text(child, source).trim();
                 // Strip #[ and ]
                 let inner = text.strip_prefix("#[")
@@ -271,7 +268,6 @@ fn extract_rust_attributes(node: tree_sitter::Node, source: &[u8]) -> Vec<String
                     attributes.push(inner.to_string());
                 }
             }
-        }
     }
 
     // Also check preceding siblings (attributes appear before the item at same level)
@@ -305,11 +301,10 @@ fn extract_rust_attributes(node: tree_sitter::Node, source: &[u8]) -> Vec<String
 
 fn find_next_named_sibling(parent: tree_sitter::Node, start_idx: usize) -> Option<tree_sitter::Node> {
     for i in start_idx..parent.child_count() {
-        if let Some(child) = parent.child(i) {
-            if child.is_named() && child.kind() != "attribute_item" && child.kind() != "line_comment" && child.kind() != "block_comment" {
+        if let Some(child) = parent.child(i)
+            && child.is_named() && child.kind() != "attribute_item" && child.kind() != "line_comment" && child.kind() != "block_comment" {
                 return Some(child);
             }
-        }
     }
     None
 }
@@ -365,8 +360,8 @@ fn extract_rust_struct_fields(
     parent_name: &str, defs: &mut Vec<DefinitionEntry>,
 ) {
     for i in 0..field_list.child_count() {
-        if let Some(child) = field_list.child(i) {
-            if child.kind() == "field_declaration" {
+        if let Some(child) = field_list.child(i)
+            && child.kind() == "field_declaration" {
                 let name_node = find_child_by_field(child, "name");
                 if let Some(name_n) = name_node {
                     let name = node_text(name_n, source).to_string();
@@ -384,7 +379,6 @@ fn extract_rust_struct_fields(
                     });
                 }
             }
-        }
     }
 }
 
@@ -411,8 +405,8 @@ fn extract_rust_enum_variants(
     parent_name: &str, defs: &mut Vec<DefinitionEntry>,
 ) {
     for i in 0..variant_list.child_count() {
-        if let Some(child) = variant_list.child(i) {
-            if child.kind() == "enum_variant" {
+        if let Some(child) = variant_list.child(i)
+            && child.kind() == "enum_variant" {
                 let name_node = find_child_by_field(child, "name");
                 if let Some(name_n) = name_node {
                     let name = node_text(name_n, source).to_string();
@@ -427,7 +421,6 @@ fn extract_rust_enum_variants(
                     });
                 }
             }
-        }
     }
 }
 
@@ -444,15 +437,14 @@ fn extract_rust_trait_def(
     let mut base_types = Vec::new();
     if let Some(bounds) = find_child_by_kind(node, "trait_bounds") {
         for i in 0..bounds.child_count() {
-            if let Some(child) = bounds.child(i) {
-                if child.is_named() {
+            if let Some(child) = bounds.child(i)
+                && child.is_named() {
                     let bt = node_text(child, source).trim();
                     let bt_base = bt.split('<').next().unwrap_or(bt);
                     if !bt_base.is_empty() {
                         base_types.push(bt_base.to_string());
                     }
                 }
-            }
         }
     }
 
@@ -499,12 +491,11 @@ fn extract_rust_const_static_def(
         let mut end = node.end_byte();
         // Find '=' to truncate the value part
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                if node_text(child, source) == "=" {
+            if let Some(child) = node.child(i)
+                && node_text(child, source) == "=" {
                     end = child.start_byte();
                     break;
                 }
-            }
         }
         let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
         text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -562,12 +553,11 @@ fn build_rust_function_signature(node: tree_sitter::Node, source: &[u8]) -> Stri
     let start = node.start_byte();
     let mut end = node.end_byte();
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == "block" || child.kind() == ";" {
+        if let Some(child) = node.child(i)
+            && (child.kind() == "block" || child.kind() == ";") {
                 end = child.start_byte();
                 break;
             }
-        }
     }
     let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
     text.split_whitespace().collect::<Vec<_>>().join(" ")
@@ -757,9 +747,8 @@ fn resolve_rust_receiver(
             // Try to resolve via field types
             if let Some(type_name) = field_types.get(text) {
                 Some(type_name.clone())
-            } else if text.chars().next().is_some_and(|c| c.is_uppercase()) {
-                Some(text.to_string())
             } else {
+                // Preserve receiver name regardless of case
                 Some(text.to_string())
             }
         }
@@ -789,11 +778,11 @@ fn resolve_rust_receiver(
 // ─── Code stats computation ─────────────────────────────────────────
 
 fn compute_code_stats_rust(method_node: tree_sitter::Node, source: &[u8]) -> CodeStats {
-    let mut stats = CodeStats::default();
-    stats.cyclomatic_complexity = 1; // base complexity
-
-    // Count parameters (excluding self/&self/&mut self)
-    stats.param_count = count_rust_parameters(method_node, source);
+    let mut stats = CodeStats {
+        cyclomatic_complexity: 1, // base complexity
+        param_count: count_rust_parameters(method_node, source),
+        ..Default::default()
+    };
 
     // Walk body using unified data-driven walker
     if let Some(body) = find_child_by_kind(method_node, "block") {

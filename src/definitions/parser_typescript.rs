@@ -11,7 +11,7 @@ pub(crate) fn parse_typescript_definitions(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
-) -> (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>) {
+) -> ParseResult {
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
@@ -28,35 +28,28 @@ pub(crate) fn parse_typescript_definitions(
     let mut class_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
 
     for def in &defs {
-        if let Some(ref parent) = def.parent {
-            if def.kind == DefinitionKind::Field {
-                if let Some(ref sig) = def.signature {
-                    if let Some((name, type_name)) = parse_ts_field_type(sig) {
+        if let Some(ref parent) = def.parent
+            && def.kind == DefinitionKind::Field
+                && let Some(ref sig) = def.signature
+                    && let Some((name, type_name)) = parse_ts_field_type(sig) {
                         class_field_types
                             .entry(parent.clone())
                             .or_default()
                             .insert(name, type_name);
                     }
-                }
-            }
-        }
     }
 
     // Extract constructor parameter types as field types (DI pattern)
     for def in &defs {
-        if def.kind == DefinitionKind::Constructor {
-            if let Some(ref parent) = def.parent {
-                if let Some(ref sig) = def.signature {
+        if def.kind == DefinitionKind::Constructor
+            && let Some(ref parent) = def.parent
+                && let Some(ref sig) = def.signature {
                     let param_types = extract_ts_constructor_param_types(sig);
                     let field_map = class_field_types.entry(parent.clone()).or_default();
                     for (param_name, param_type) in param_types {
-                        if !field_map.contains_key(&param_name) {
-                            field_map.insert(param_name, param_type);
-                        }
+                        field_map.entry(param_name).or_insert(param_type);
                     }
                 }
-            }
-        }
     }
 
     // Extract Angular inject() patterns as field types
@@ -306,31 +299,27 @@ fn extract_ts_decorators(node: tree_sitter::Node, source: &str) -> Vec<String> {
     let mut decorators = Vec::new();
     // Check direct children of this node
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == "decorator" {
+        if let Some(child) = node.child(i)
+            && child.kind() == "decorator" {
                 let text = node_text(child, source);
                 let trimmed = text.strip_prefix('@').unwrap_or(text).to_string();
                 decorators.push(trimmed);
             }
-        }
     }
     // If no decorators found and parent is export_statement, check parent's children
     // (tree-sitter-typescript places decorators as siblings inside export_statement)
-    if decorators.is_empty() {
-        if let Some(parent) = node.parent() {
-            if parent.kind() == "export_statement" {
+    if decorators.is_empty()
+        && let Some(parent) = node.parent()
+            && parent.kind() == "export_statement" {
                 for i in 0..parent.child_count() {
-                    if let Some(child) = parent.child(i) {
-                        if child.kind() == "decorator" {
+                    if let Some(child) = parent.child(i)
+                        && child.kind() == "decorator" {
                             let text = node_text(child, source);
                             let trimmed = text.strip_prefix('@').unwrap_or(text).to_string();
                             decorators.push(trimmed);
                         }
-                    }
                 }
             }
-        }
-    }
     decorators
 }
 
@@ -378,11 +367,10 @@ fn extract_ts_heritage(node: tree_sitter::Node, source: &str) -> Vec<String> {
                                 // In class_heritage, there may be nested extends_clause/implements_clause
                                 "extends_clause" | "implements_clause" => {
                                     for k in 0..type_node.child_count() {
-                                        if let Some(t) = type_node.child(k) {
-                                            if t.is_named() && t.kind() != "extends" && t.kind() != "implements" {
+                                        if let Some(t) = type_node.child(k)
+                                            && t.is_named() && t.kind() != "extends" && t.kind() != "implements" {
                                                 base_types.push(node_text(t, source).to_string());
                                             }
-                                        }
                                     }
                                 }
                                 _ if type_node.is_named()
@@ -716,11 +704,10 @@ fn extract_ts_variable_defs(
     // lexical_declaration contains "const"/"let" keyword and variable_declarator(s)
     let mut decl_keyword = String::new();
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == "const" || child.kind() == "let" || child.kind() == "var" {
+        if let Some(child) = node.child(i)
+            && (child.kind() == "const" || child.kind() == "let" || child.kind() == "var") {
                 decl_keyword = node_text(child, source).to_string();
             }
-        }
     }
 
     let mut modifiers = vec![];
@@ -732,9 +719,9 @@ fn extract_ts_variable_defs(
     }
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
-            if child.kind() == "variable_declarator" {
-                if let Some(name_node) = find_child_by_field(child, "name") {
+        if let Some(child) = node.child(i)
+            && child.kind() == "variable_declarator"
+                && let Some(name_node) = find_child_by_field(child, "name") {
                     let name = node_text(name_node, source).to_string();
                     let type_ann = extract_type_annotation(child, source);
                     let sig = if let Some(ref t) = type_ann {
@@ -756,8 +743,6 @@ fn extract_ts_variable_defs(
                         base_types: Vec::new(),
                     });
                 }
-            }
-        }
     }
 }
 
@@ -944,11 +929,10 @@ fn extract_inject_from_class_body(
                     let is_constructor = find_child_by_field(child, "name")
                         .map(|n| node_text(n, source) == "constructor")
                         .unwrap_or(false);
-                    if is_constructor {
-                        if let Some(stmt_block) = find_child_by_kind(child, "statement_block") {
+                    if is_constructor
+                        && let Some(stmt_block) = find_child_by_kind(child, "statement_block") {
                             extract_inject_from_statement_block(stmt_block, source, class_name, class_field_types);
                         }
-                    }
                 }
                 _ => {}
             }
@@ -984,16 +968,14 @@ fn extract_inject_from_statement_block(
             // expression_statement → assignment_expression
             if child.kind() == "expression_statement" {
                 for j in 0..child.child_count() {
-                    if let Some(expr) = child.child(j) {
-                        if expr.kind() == "assignment_expression" {
-                            if let Some((field_name, type_name)) = extract_inject_from_assignment(expr, source) {
+                    if let Some(expr) = child.child(j)
+                        && expr.kind() == "assignment_expression"
+                            && let Some((field_name, type_name)) = extract_inject_from_assignment(expr, source) {
                                 class_field_types
                                     .entry(class_name.to_string())
                                     .or_default()
                                     .insert(field_name, type_name);
                             }
-                        }
-                    }
                 }
             }
         }
@@ -1039,8 +1021,8 @@ fn extract_inject_class_name(node: tree_sitter::Node, source: &str) -> Option<St
 
     // Find the first real argument (skip parentheses and commas)
     for k in 0..args.child_count() {
-        if let Some(arg) = args.child(k) {
-            if arg.is_named() {
+        if let Some(arg) = args.child(k)
+            && arg.is_named() {
                 let arg_text = node_text(arg, source).trim().to_string();
                 // Strip generic type params: Store<AppState> → Store
                 let base_name = arg_text
@@ -1053,7 +1035,6 @@ fn extract_inject_class_name(node: tree_sitter::Node, source: &str) -> Option<St
                     return Some(base_name);
                 }
             }
-        }
     }
     None
 }
@@ -1130,7 +1111,7 @@ fn extract_ts_constructor_param_types(sig: &str) -> Vec<(String, String)> {
 /// Handles two patterns:
 /// 1. Explicit type annotation: const x: Foo = ...
 /// 2. Constructor inference: const x = new Foo(...)
-/// Returns a map of variable_name -> base_type.
+///    Returns a map of variable_name -> base_type.
 fn extract_ts_local_var_types(
     body_node: tree_sitter::Node,
     source: &str,
@@ -1148,11 +1129,10 @@ fn collect_ts_local_var_types(
     match node.kind() {
         "lexical_declaration" | "variable_declaration" => {
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
-                    if child.kind() == "variable_declarator" {
+                if let Some(child) = node.child(i)
+                    && child.kind() == "variable_declarator" {
                         extract_ts_var_declarator_type(child, source, vars);
                     }
-                }
             }
         }
         // Don't recurse into nested functions/classes/arrow functions
@@ -1198,11 +1178,10 @@ fn extract_ts_var_declarator_type(
     }
 
     // Path 2: infer from new expression — const x = new Foo(...)
-    if let Some(value_node) = node.child_by_field_name("value") {
-        if let Some(new_type) = extract_type_from_new_expr(value_node, source) {
+    if let Some(value_node) = node.child_by_field_name("value")
+        && let Some(new_type) = extract_type_from_new_expr(value_node, source) {
             vars.insert(name, new_type);
         }
-    }
 }
 
 /// Extracts the constructor name from a `new_expression` node or its wrapper.
@@ -1393,10 +1372,9 @@ fn resolve_ts_receiver_type(
         "identifier" => {
             if let Some(type_name) = field_types.get(text) {
                 Some(type_name.clone())
-            } else if text.chars().next().is_some_and(|c| c.is_uppercase()) {
-                Some(text.to_string())
             } else {
-                Some(text.to_string()) // preserve unresolved receiver name (e.g., "dbSession")
+                // Preserve receiver name regardless of case (e.g., "dbSession", "UserService")
+                Some(text.to_string())
             }
         }
         "member_expression" => {
@@ -1432,11 +1410,11 @@ fn compute_code_stats_typescript(
     method_node: tree_sitter::Node,
     _source: &str,
 ) -> CodeStats {
-    let mut stats = CodeStats::default();
-    stats.cyclomatic_complexity = 1; // base complexity
-
-    // paramCount from formal_parameters (not from body walk)
-    stats.param_count = count_parameters_typescript(method_node);
+    let mut stats = CodeStats {
+        cyclomatic_complexity: 1, // base complexity
+        param_count: count_parameters_typescript(method_node),
+        ..Default::default()
+    };
 
     // Find body node — statement_block for methods/functions, or arrow body
     let body = find_child_by_kind(method_node, "statement_block")
@@ -1480,11 +1458,10 @@ fn extract_ts_new_expression(node: tree_sitter::Node, source: &str) -> Option<Ca
     // new_expression: find the constructor identifier
     let type_node = find_child_by_field(node, "constructor").or_else(|| {
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                if child.kind() == "identifier" {
+            if let Some(child) = node.child(i)
+                && child.kind() == "identifier" {
                     return Some(child);
                 }
-            }
         }
         None
     })?;
@@ -1496,12 +1473,11 @@ fn extract_ts_new_expression(node: tree_sitter::Node, source: &str) -> Option<Ca
         // tree-sitter may separate generics into a type_arguments child node
         let mut found = false;
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i) {
-                if child.kind() == "type_arguments" {
+            if let Some(child) = node.child(i)
+                && child.kind() == "type_arguments" {
                     found = true;
                     break;
                 }
-            }
         }
         found
     };

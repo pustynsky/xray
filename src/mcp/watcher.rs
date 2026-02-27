@@ -244,11 +244,10 @@ fn shrink_if_oversized(idx: &mut ContentIndex) {
     if idx.index.capacity() > idx.index.len() * 2 {
         idx.index.shrink_to_fit();
     }
-    if let Some(ref mut p2id) = idx.path_to_id {
-        if p2id.capacity() > p2id.len() * 2 {
+    if let Some(ref mut p2id) = idx.path_to_id
+        && p2id.capacity() > p2id.len() * 2 {
             p2id.shrink_to_fit();
         }
-    }
 }
 
 /// Check if a path is inside a `.git` directory.
