@@ -20,7 +20,6 @@ pub use incremental::*;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
@@ -53,29 +52,21 @@ pub fn definition_extensions() -> &'static [&'static str] {
     EXTS
 }
 
-// ─── Index Build ─────────────────────────────────────────────────────
+// ─── Extracted helpers ───────────────────────────────────────────────
 
-#[must_use]
-pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
-    let dir = std::fs::canonicalize(&args.dir)
-        .unwrap_or_else(|_| PathBuf::from(&args.dir));
-    let dir_str = clean_path(&dir.to_string_lossy());
-
-    let extensions: Vec<String> = args.ext.split(',')
-        .map(|s| s.trim().to_lowercase())
-        .filter(|s| !s.is_empty())
-        .collect();
-
-    let start = Instant::now();
-
-    // Collect all files
-    let mut walker = WalkBuilder::new(&dir);
+/// Walk directory tree and collect all source files matching the given extensions.
+/// Returns cleaned file paths. Uses parallel walker with .gitignore support.
+pub(crate) fn collect_source_files(
+    dir: &Path,
+    extensions: &[String],
+    threads: usize,
+) -> Vec<String> {
+    let mut walker = WalkBuilder::new(dir);
     walker.hidden(false).git_ignore(true);
-    if args.threads > 0 {
-        walker.threads(args.threads);
+    if threads > 0 {
+        walker.threads(threads);
     }
 
-    let file_count = AtomicUsize::new(0);
     let all_files: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
 
     walker.build_parallel().run(|| {
@@ -96,12 +87,161 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
             }
             let clean = clean_path(&path.to_string_lossy());
             all_files.lock().unwrap_or_else(|e| e.into_inner()).push(clean);
-            file_count.fetch_add(1, Ordering::Relaxed);
             ignore::WalkState::Continue
         })
     });
 
-    let files: Vec<String> = crate::index::recover_mutex(all_files, "def-index");
+    crate::index::recover_mutex(all_files, "def-index")
+}
+
+/// Index a single file's parsed definitions into the DefinitionIndex.
+///
+/// Populates: name_index, kind_index, attribute_index, base_type_index,
+/// file_index, method_calls, and code_stats.
+///
+/// Returns the number of call sites added.
+///
+/// Used by both `build_definition_index()` (bulk build) and
+/// `update_file_definitions()` (incremental update) to eliminate duplication.
+pub(crate) fn index_file_defs(
+    index: &mut DefinitionIndex,
+    file_id: u32,
+    file_defs: Vec<DefinitionEntry>,
+    file_calls: Vec<(usize, Vec<CallSite>)>,
+    file_stats: Vec<(usize, CodeStats)>,
+) -> usize {
+    let base_def_idx = index.definitions.len() as u32;
+    let mut call_sites_added = 0usize;
+
+    for def in file_defs {
+        let def_idx = index.definitions.len() as u32;
+
+        index.name_index.entry(def.name.to_lowercase())
+            .or_default()
+            .push(def_idx);
+
+        index.kind_index.entry(def.kind)
+            .or_default()
+            .push(def_idx);
+
+        {
+            let mut seen_attrs = std::collections::HashSet::new();
+            for attr in &def.attributes {
+                let attr_name = attr.split('(').next().unwrap_or(attr).trim().to_lowercase();
+                if seen_attrs.insert(attr_name.clone()) {
+                    index.attribute_index.entry(attr_name)
+                        .or_default()
+                        .push(def_idx);
+                }
+            }
+        }
+
+        for bt in &def.base_types {
+            index.base_type_index.entry(bt.to_lowercase())
+                .or_default()
+                .push(def_idx);
+        }
+
+        index.file_index.entry(file_id)
+            .or_default()
+            .push(def_idx);
+
+        index.definitions.push(def);
+    }
+
+    // Map local call site indices to global def indices
+    for (local_idx, calls) in file_calls {
+        let global_idx = base_def_idx + local_idx as u32;
+        if !calls.is_empty() {
+            call_sites_added += calls.len();
+            index.method_calls.insert(global_idx, calls);
+        }
+    }
+
+    // Map local code stats indices to global def indices
+    for (local_idx, stats) in file_stats {
+        let global_idx = base_def_idx + local_idx as u32;
+        index.code_stats.insert(global_idx, stats);
+    }
+
+    call_sites_added
+}
+
+/// Scan Angular @Component definitions for selectors and template children.
+/// Populates selector_index and template_children from HTML templates.
+#[cfg(feature = "lang-typescript")]
+pub(crate) fn enrich_angular_templates(
+    definitions: &[DefinitionEntry],
+    files: &[String],
+    name_index: &mut HashMap<String, Vec<u32>>,
+    selector_index: &mut HashMap<String, Vec<u32>>,
+    template_children: &mut HashMap<u32, Vec<String>>,
+) {
+    let template_start = Instant::now();
+    let mut templates_processed = 0usize;
+    let mut templates_failed = 0usize;
+
+    for (def_idx, def) in definitions.iter().enumerate() {
+        if def.kind != DefinitionKind::Class { continue; }
+        let component_attr = match def.attributes.iter().find(|a| a.starts_with("Component(")) {
+            Some(a) => a,
+            None => continue,
+        };
+        let (selector, template_url) = match extract_component_metadata(component_attr) {
+            Some(meta) => meta,
+            None => continue,
+        };
+        // Add selector to name_index for discoverability
+        let sel_lower = selector.to_lowercase();
+        name_index.entry(sel_lower).or_default().push(def_idx as u32);
+
+        selector_index.entry(selector).or_default().push(def_idx as u32);
+
+        if let Some(ref tpl_url) = template_url {
+            let ts_file_path = match files.get(def.file_id as usize) {
+                Some(p) => p,
+                None => continue,
+            };
+            let html_path = match std::path::Path::new(ts_file_path).parent() {
+                Some(dir) => dir.join(tpl_url.strip_prefix("./").unwrap_or(tpl_url)),
+                None => std::path::PathBuf::from(tpl_url),
+            };
+            match std::fs::read_to_string(&html_path) {
+                Ok(html_content) => {
+                    let children = extract_custom_elements(&html_content);
+                    if !children.is_empty() {
+                        template_children.insert(def_idx as u32, children);
+                        templates_processed += 1;
+                    }
+                }
+                Err(_) => { templates_failed += 1; }
+            }
+        }
+    }
+
+    if templates_processed > 0 || templates_failed > 0 {
+        eprintln!("[def-index] Angular templates: {} enriched, {} read errors ({:.1}ms)",
+            templates_processed, templates_failed, template_start.elapsed().as_secs_f64() * 1000.0);
+    }
+}
+
+// ─── Index Build ─────────────────────────────────────────────────────
+
+#[must_use]
+pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
+    let dir = std::fs::canonicalize(&args.dir)
+        .unwrap_or_else(|_| PathBuf::from(&args.dir));
+    let dir_str = clean_path(&dir.to_string_lossy());
+
+    let extensions: Vec<String> = args.ext.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let start = Instant::now();
+
+    // ─── Collect all matching source files ─────────────────────
+    let files = collect_source_files(&dir, &extensions, args.threads);
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
     crate::index::log_memory(&format!("def-build: after file walk ({} files)", total_files));
@@ -131,7 +271,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     #[cfg(feature = "lang-rust")]
     let need_rs = extensions.iter().any(|e| e == "rs");
 
-    let thread_results: Vec<_> = std::thread::scope(|s| {
+    let thread_results: Vec<ChunkResult> = std::thread::scope(|s| {
         let handles: Vec<_> = chunks.into_iter().map(|chunk| {
             s.spawn(move || {
                 #[cfg(feature = "lang-csharp")]
@@ -155,7 +295,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 let mut chunk_ext_methods: HashMap<String, Vec<String>> = HashMap::new();
                 let mut errors = 0usize;
                 let mut lossy_files: Vec<String> = Vec::new();
-                let mut empty_files: Vec<(u32, u64)> = Vec::new(); // (file_id, byte_size) for files with 0 defs
+                let mut empty_files: Vec<(u32, u64)> = Vec::new();
 
                 for (file_id, file_path) in &chunk {
                     let (content, was_lossy) = match read_file_lossy(Path::new(file_path)) {
@@ -177,7 +317,6 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                         #[cfg(feature = "lang-csharp")]
                         "cs" => {
                             let (defs, calls, stats, ext_methods) = parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id);
-                            // Merge extension methods from this file into chunk accumulator
                             for (method_name, classes) in ext_methods {
                                 chunk_ext_methods.entry(method_name).or_default().extend(classes);
                             }
@@ -241,208 +380,84 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         })).collect()
     });
 
-    // ─── Merge results ────────────────────────────────────────
-    let mut definitions: Vec<DefinitionEntry> = Vec::new();
-    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
-    let mut attribute_index: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut base_type_index: HashMap<String, Vec<u32>> = HashMap::new();
-    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
-    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
-    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
-    let mut code_stats: HashMap<u32, CodeStats> = HashMap::new();
-    let mut extension_methods: HashMap<String, Vec<String>> = HashMap::new();
-    let mut parse_errors = 0usize;
-    let mut total_call_sites = 0usize;
-
-    // Build path_to_id from the files list
+    // ─── Initialize index and merge results ───────────────────
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::with_capacity(files.len());
     for (file_id, file_path) in files.iter().enumerate() {
         path_to_id.insert(PathBuf::from(file_path), file_id as u32);
     }
 
-    let mut lossy_file_count = 0usize;
-    let mut empty_file_ids: Vec<(u32, u64)> = Vec::new();
+    let mut index = DefinitionIndex {
+        root: dir_str,
+        extensions,
+        files,
+        path_to_id,
+        ..Default::default()
+    };
+
+    let mut total_call_sites = 0usize;
+
     for (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) in thread_results {
-        parse_errors += errors;
+        index.parse_errors += errors;
         for f in &lossy_files {
             eprintln!("[def-index] WARNING: file contains non-UTF8 bytes (lossy conversion applied): {}", f);
         }
-        lossy_file_count += lossy_files.len();
-        empty_file_ids.extend(empty_files);
+        index.lossy_file_count += lossy_files.len();
+        index.empty_file_ids.extend(empty_files);
+
         for (file_id, file_defs, file_calls, file_stats) in chunk_defs {
-            let base_def_idx = definitions.len() as u32;
-
-            for def in file_defs {
-                let def_idx = definitions.len() as u32;
-
-                name_index.entry(def.name.to_lowercase())
-                    .or_default()
-                    .push(def_idx);
-
-                kind_index.entry(def.kind)
-                    .or_default()
-                    .push(def_idx);
-
-                {
-                    let mut seen_attrs = std::collections::HashSet::new();
-                    for attr in &def.attributes {
-                        let attr_name = attr.split('(').next().unwrap_or(attr).trim().to_lowercase();
-                        if seen_attrs.insert(attr_name.clone()) {
-                            attribute_index.entry(attr_name)
-                                .or_default()
-                                .push(def_idx);
-                        }
-                    }
-                }
-
-                for bt in &def.base_types {
-                    base_type_index.entry(bt.to_lowercase())
-                        .or_default()
-                        .push(def_idx);
-                }
-
-                file_index.entry(file_id)
-                    .or_default()
-                    .push(def_idx);
-
-                definitions.push(def);
-            }
-
-            // Map local call site indices to global def indices
-            for (local_idx, calls) in file_calls {
-                let global_idx = base_def_idx + local_idx as u32;
-                if !calls.is_empty() {
-                    total_call_sites += calls.len();
-                    method_calls.insert(global_idx, calls);
-                }
-            }
-
-            // Map local code stats indices to global def indices
-            for (local_idx, stats) in file_stats {
-                let global_idx = base_def_idx + local_idx as u32;
-                code_stats.insert(global_idx, stats);
-            }
+            total_call_sites += index_file_defs(&mut index, file_id, file_defs, file_calls, file_stats);
         }
 
         // Merge extension methods from this chunk
         for (method_name, classes) in chunk_ext_methods {
-            extension_methods.entry(method_name).or_default().extend(classes);
+            index.extension_methods.entry(method_name).or_default().extend(classes);
         }
     }
 
-    // ─── Angular template enrichment ──────────────────────────────────────
-    #[allow(unused_mut)]
-    let mut selector_index: HashMap<String, Vec<u32>> = HashMap::new();
-    #[allow(unused_mut)]
-    let mut template_children: HashMap<u32, Vec<String>> = HashMap::new();
-
+    // ─── Angular template enrichment ──────────────────────────
     #[cfg(feature = "lang-typescript")]
-    {
-        let template_start = Instant::now();
-        let mut templates_processed = 0usize;
-        let mut templates_failed = 0usize;
+    enrich_angular_templates(
+        &index.definitions, &index.files,
+        &mut index.name_index, &mut index.selector_index, &mut index.template_children,
+    );
 
-        for (def_idx, def) in definitions.iter().enumerate() {
-            if def.kind != DefinitionKind::Class { continue; }
-            let component_attr = match def.attributes.iter().find(|a| a.starts_with("Component(")) {
-                Some(a) => a,
-                None => continue,
-            };
-            let (selector, template_url) = match extract_component_metadata(component_attr) {
-                Some(meta) => meta,
-                None => continue,
-            };
-            // Add selector to name_index for discoverability
-            let sel_lower = selector.to_lowercase();
-            name_index.entry(sel_lower).or_default().push(def_idx as u32);
-
-            selector_index.entry(selector).or_default().push(def_idx as u32);
-
-            if let Some(ref tpl_url) = template_url {
-                let ts_file_path = match files.get(def.file_id as usize) {
-                    Some(p) => p,
-                    None => continue,
-                };
-                let html_path = match std::path::Path::new(ts_file_path).parent() {
-                    Some(dir) => dir.join(tpl_url.strip_prefix("./").unwrap_or(tpl_url)),
-                    None => std::path::PathBuf::from(tpl_url),
-                };
-                match std::fs::read_to_string(&html_path) {
-                    Ok(html_content) => {
-                        let children = extract_custom_elements(&html_content);
-                        if !children.is_empty() {
-                            template_children.insert(def_idx as u32, children);
-                            templates_processed += 1;
-                        }
-                    }
-                    Err(_) => { templates_failed += 1; }
-                }
-            }
-        }
-
-        if templates_processed > 0 || templates_failed > 0 {
-            eprintln!("[def-index] Angular templates: {} enriched, {} read errors ({:.1}ms)",
-                templates_processed, templates_failed, template_start.elapsed().as_secs_f64() * 1000.0);
-        }
-    }
-
-    // Report suspicious files (>500 bytes but 0 definitions)
+    // ─── Report and finalize ──────────────────────────────────
     let suspicious_threshold = 500u64;
-    let suspicious: Vec<_> = empty_file_ids.iter()
+    let suspicious_count = index.empty_file_ids.iter()
         .filter(|(_, size)| *size > suspicious_threshold)
-        .collect();
-    if !suspicious.is_empty() {
+        .count();
+    if suspicious_count > 0 {
         eprintln!("[def-index] WARNING: {} files with >{}B but 0 definitions. Run 'search def-audit' to see full list.",
-            suspicious.len(), suspicious_threshold);
+            suspicious_count, suspicious_threshold);
     }
 
-    crate::index::log_memory(&format!("def-build: parsing complete ({} defs, {} calls)", definitions.len(), total_call_sites));
+    crate::index::log_memory(&format!("def-build: parsing complete ({} defs, {} calls)", index.definitions.len(), total_call_sites));
 
     let elapsed = start.elapsed();
-    let files_with_defs = total_files - empty_file_ids.len() - parse_errors;
+    let files_with_defs = total_files - index.empty_file_ids.len() - index.parse_errors;
     eprintln!(
         "[def-index] Parsed {} files in {:.1}s: {} with definitions, {} empty, {} read errors, {} lossy-utf8, {} threads",
         total_files,
         elapsed.as_secs_f64(),
         files_with_defs,
-        empty_file_ids.len(),
-        parse_errors,
-        lossy_file_count,
+        index.empty_file_ids.len(),
+        index.parse_errors,
+        index.lossy_file_count,
         num_threads
     );
     eprintln!(
         "[def-index] Extracted {} definitions, {} call sites, {} code stats entries",
-        definitions.len(),
+        index.definitions.len(),
         total_call_sites,
-        code_stats.len(),
+        index.code_stats.len(),
     );
 
-    let now = SystemTime::now()
+    index.created_at = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or(Duration::ZERO)
         .as_secs();
 
-    DefinitionIndex {
-        root: dir_str,
-        created_at: now,
-        extensions,
-        files,
-        definitions,
-        name_index,
-        kind_index,
-        attribute_index,
-        base_type_index,
-        file_index,
-        path_to_id,
-        method_calls,
-        parse_errors,
-        lossy_file_count,
-        empty_file_ids,
-        code_stats,
-        extension_methods,
-        selector_index,
-        template_children,
-    }
+    index
 }
 
 /// Extract custom element tag names from HTML content.

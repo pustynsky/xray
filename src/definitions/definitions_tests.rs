@@ -564,6 +564,367 @@ fn test_compact_remaps_selector_index_and_template_children() {
     assert_eq!(index.template_children.get(&0).unwrap(), &vec!["app-other".to_string()]);
 }
 
+// ─── collect_source_files() Tests ───────────────────────────────────
+
+#[test]
+fn test_collect_source_files_filters_by_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    std::fs::write(dir.join("service.cs"), "public class UserService {}").unwrap();
+    std::fs::write(dir.join("readme.md"), "# Readme").unwrap();
+    std::fs::write(dir.join("util.ts"), "export function helper() {}").unwrap();
+
+    let extensions = vec!["cs".to_string()];
+    let files = collect_source_files(dir, &extensions, 1);
+
+    assert_eq!(files.len(), 1, "Should only find .cs files");
+    assert!(files[0].ends_with("service.cs"), "Should find service.cs, got: {}", files[0]);
+}
+
+#[test]
+fn test_collect_source_files_empty_directory() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    let extensions = vec!["cs".to_string()];
+    let files = collect_source_files(dir, &extensions, 1);
+
+    assert!(files.is_empty(), "Empty directory should return no files");
+}
+
+#[test]
+fn test_collect_source_files_multiple_extensions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    std::fs::write(dir.join("service.cs"), "class A {}").unwrap();
+    std::fs::write(dir.join("util.ts"), "function b() {}").unwrap();
+    std::fs::write(dir.join("data.json"), "{}").unwrap();
+
+    let extensions = vec!["cs".to_string(), "ts".to_string()];
+    let files = collect_source_files(dir, &extensions, 1);
+
+    assert_eq!(files.len(), 2, "Should find both .cs and .ts files");
+}
+
+#[test]
+fn test_collect_source_files_case_insensitive_ext() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    std::fs::write(dir.join("Service.CS"), "class Upper {}").unwrap();
+
+    let extensions = vec!["cs".to_string()];
+    let files = collect_source_files(dir, &extensions, 1);
+
+    assert_eq!(files.len(), 1, "Extension matching should be case-insensitive");
+}
+
+#[test]
+fn test_collect_source_files_respects_gitignore() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Initialize a git repo so .gitignore is respected by the `ignore` crate
+    std::process::Command::new("git")
+        .args(["init"])
+        .current_dir(dir)
+        .output()
+        .expect("git init failed");
+
+    // Create .gitignore that ignores the "ignored" directory
+    std::fs::write(dir.join(".gitignore"), "ignored/\n").unwrap();
+    std::fs::create_dir(dir.join("ignored")).unwrap();
+    std::fs::write(dir.join("ignored").join("hidden.cs"), "class Hidden {}").unwrap();
+    std::fs::write(dir.join("visible.cs"), "class Visible {}").unwrap();
+
+    let extensions = vec!["cs".to_string()];
+    let files = collect_source_files(dir, &extensions, 1);
+
+    assert_eq!(files.len(), 1, "Should only find 1 file (gitignored file excluded)");
+    assert!(files[0].ends_with("visible.cs"), "Should find visible.cs");
+}
+
+// ─── index_file_defs() Tests ────────────────────────────────────────
+
+#[test]
+fn test_index_file_defs_populates_all_indexes() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("test.cs".to_string());
+
+    let defs = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(), kind: DefinitionKind::Class,
+            line_start: 1, line_end: 50, parent: None,
+            signature: Some("public class UserService".to_string()),
+            modifiers: vec!["public".to_string()],
+            attributes: vec![],
+            base_types: vec!["IService".to_string()],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Process".to_string(), kind: DefinitionKind::Method,
+            line_start: 5, line_end: 20, parent: Some("UserService".to_string()),
+            signature: Some("public void Process()".to_string()),
+            modifiers: vec!["public".to_string()],
+            attributes: vec![],
+            base_types: vec![],
+        },
+    ];
+
+    let call_sites_added = index_file_defs(&mut index, 0, defs, vec![], vec![]);
+
+    // Verify definitions
+    assert_eq!(index.definitions.len(), 2);
+    assert_eq!(call_sites_added, 0);
+
+    // Verify name_index (lowercased)
+    assert!(index.name_index.contains_key("userservice"));
+    assert!(index.name_index.contains_key("process"));
+
+    // Verify kind_index
+    assert_eq!(index.kind_index[&DefinitionKind::Class], vec![0]);
+    assert_eq!(index.kind_index[&DefinitionKind::Method], vec![1]);
+
+    // Verify base_type_index (lowercased)
+    assert!(index.base_type_index.contains_key("iservice"));
+    assert_eq!(index.base_type_index["iservice"], vec![0]);
+
+    // Verify file_index
+    assert_eq!(index.file_index[&0], vec![0, 1]);
+}
+
+#[test]
+fn test_index_file_defs_handles_attributes_dedup() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("test.cs".to_string());
+
+    let defs = vec![
+        DefinitionEntry {
+            file_id: 0, name: "Handler".to_string(), kind: DefinitionKind::Class,
+            line_start: 1, line_end: 10, parent: None, signature: None,
+            modifiers: vec![],
+            // Duplicate attributes — should be deduplicated
+            attributes: vec![
+                "Authorize".to_string(),
+                "Authorize(Roles = \"Admin\")".to_string(),
+                "Route(\"/api\")".to_string(),
+            ],
+            base_types: vec![],
+        },
+    ];
+
+    index_file_defs(&mut index, 0, defs, vec![], vec![]);
+
+    // "authorize" appears twice as attribute, but should only have ONE entry in attribute_index
+    let authorize_indices = &index.attribute_index["authorize"];
+    assert_eq!(authorize_indices.len(), 1, "Duplicate attribute 'authorize' should be deduplicated");
+
+    // "route" should also be indexed
+    assert!(index.attribute_index.contains_key("route"));
+}
+
+#[test]
+fn test_index_file_defs_maps_call_sites() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("test.cs".to_string());
+
+    // Pre-populate with one existing definition to test global indexing
+    index.definitions.push(DefinitionEntry {
+        file_id: 0, name: "Existing".to_string(), kind: DefinitionKind::Class,
+        line_start: 1, line_end: 5, parent: None, signature: None,
+        modifiers: vec![], attributes: vec![], base_types: vec![],
+    });
+
+    let defs = vec![
+        DefinitionEntry {
+            file_id: 1, name: "NewMethod".to_string(), kind: DefinitionKind::Method,
+            line_start: 1, line_end: 10, parent: None, signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let calls = vec![
+        (0, vec![
+            CallSite { method_name: "DoWork".to_string(), receiver_type: Some("IService".to_string()), line: 3, receiver_is_generic: false },
+            CallSite { method_name: "Log".to_string(), receiver_type: None, line: 5, receiver_is_generic: false },
+        ]),
+    ];
+
+    let call_sites_added = index_file_defs(&mut index, 1, defs, calls, vec![]);
+
+    assert_eq!(call_sites_added, 2, "Should report 2 call sites added");
+
+    // The new definition is at global index 1 (after the pre-existing one)
+    // So call site local_idx=0 maps to global_idx = base(1) + 0 = 1
+    let method_calls = &index.method_calls[&1];
+    assert_eq!(method_calls.len(), 2);
+    assert_eq!(method_calls[0].method_name, "DoWork");
+    assert_eq!(method_calls[1].method_name, "Log");
+}
+
+#[test]
+fn test_index_file_defs_maps_code_stats() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("test.cs".to_string());
+
+    let defs = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ComplexMethod".to_string(), kind: DefinitionKind::Method,
+            line_start: 1, line_end: 30, parent: None, signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let stats = vec![
+        (0, CodeStats {
+            cyclomatic_complexity: 15,
+            cognitive_complexity: 25,
+            max_nesting_depth: 4,
+            param_count: 3,
+            return_count: 2,
+            call_count: 8,
+            lambda_count: 1,
+        }),
+    ];
+
+    index_file_defs(&mut index, 0, defs, vec![], stats);
+
+    // Definition at global index 0
+    let cs = &index.code_stats[&0];
+    assert_eq!(cs.cyclomatic_complexity, 15);
+    assert_eq!(cs.cognitive_complexity, 25);
+    assert_eq!(cs.max_nesting_depth, 4);
+    assert_eq!(cs.param_count, 3);
+    assert_eq!(cs.call_count, 8);
+    assert_eq!(cs.lambda_count, 1);
+}
+
+#[test]
+fn test_index_file_defs_empty_input() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("empty.cs".to_string());
+
+    let call_sites = index_file_defs(&mut index, 0, vec![], vec![], vec![]);
+
+    assert_eq!(call_sites, 0);
+    assert!(index.definitions.is_empty());
+    assert!(index.name_index.is_empty());
+    assert!(index.kind_index.is_empty());
+    assert!(index.file_index.is_empty());
+}
+
+#[test]
+fn test_index_file_defs_multiple_files_sequential() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("file0.cs".to_string());
+    index.files.push("file1.cs".to_string());
+
+    // Index file 0
+    let defs0 = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class,
+            line_start: 1, line_end: 10, parent: None, signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+    index_file_defs(&mut index, 0, defs0, vec![], vec![]);
+
+    // Index file 1
+    let defs1 = vec![
+        DefinitionEntry {
+            file_id: 1, name: "ClassB".to_string(), kind: DefinitionKind::Class,
+            line_start: 1, line_end: 20, parent: None, signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+    index_file_defs(&mut index, 1, defs1, vec![], vec![]);
+
+    // Both should be in the index at correct positions
+    assert_eq!(index.definitions.len(), 2);
+    assert_eq!(index.definitions[0].name, "ClassA");
+    assert_eq!(index.definitions[1].name, "ClassB");
+    assert_eq!(index.name_index["classa"], vec![0]);
+    assert_eq!(index.name_index["classb"], vec![1]);
+    assert_eq!(index.file_index[&0], vec![0]);
+    assert_eq!(index.file_index[&1], vec![1]);
+    assert_eq!(index.kind_index[&DefinitionKind::Class], vec![0, 1]);
+}
+
+#[test]
+fn test_collect_source_files_traverses_subdirectories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    std::fs::create_dir(dir.join("sub1")).unwrap();
+    std::fs::create_dir(dir.join("sub1").join("deep")).unwrap();
+    std::fs::write(dir.join("root.cs"), "class Root {}").unwrap();
+    std::fs::write(dir.join("sub1").join("inner.cs"), "class Inner {}").unwrap();
+    std::fs::write(dir.join("sub1").join("deep").join("deep.cs"), "class Deep {}").unwrap();
+
+    let extensions = vec!["cs".to_string()];
+    let files = collect_source_files(dir, &extensions, 1);
+
+    assert_eq!(files.len(), 3, "Should find files in root and all subdirectories");
+}
+
+#[test]
+fn test_index_file_defs_skips_empty_call_site_vecs() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("test.cs".to_string());
+
+    let defs = vec![
+        DefinitionEntry {
+            file_id: 0, name: "MethodA".to_string(), kind: DefinitionKind::Method,
+            line_start: 1, line_end: 10, parent: None, signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "MethodB".to_string(), kind: DefinitionKind::Method,
+            line_start: 11, line_end: 20, parent: None, signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    // MethodA has empty call vec, MethodB has one call
+    let calls = vec![
+        (0, vec![]), // empty — should NOT be inserted
+        (1, vec![CallSite { method_name: "DoWork".to_string(), receiver_type: None, line: 15, receiver_is_generic: false }]),
+    ];
+
+    let call_sites_added = index_file_defs(&mut index, 0, defs, calls, vec![]);
+
+    assert_eq!(call_sites_added, 1, "Should only count non-empty call vecs");
+    assert!(!index.method_calls.contains_key(&0), "Empty call vec should NOT be stored");
+    assert!(index.method_calls.contains_key(&1), "Non-empty call vec should be stored");
+}
+
+#[test]
+fn test_index_file_defs_duplicate_base_types() {
+    let mut index = DefinitionIndex::default();
+    index.files.push("test.cs".to_string());
+
+    let defs = vec![
+        DefinitionEntry {
+            file_id: 0, name: "Handler".to_string(), kind: DefinitionKind::Class,
+            line_start: 1, line_end: 10, parent: None, signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            // Same base type listed twice (possible from parser)
+            base_types: vec!["IService".to_string(), "IService".to_string()],
+        },
+    ];
+
+    index_file_defs(&mut index, 0, defs, vec![], vec![]);
+
+    // base_type_index will have two entries for "iservice" pointing to def 0.
+    // This is the existing behavior — base_types are NOT deduplicated in the original.
+    // The test documents this behavior explicitly.
+    let bt_entries = &index.base_type_index["iservice"];
+    assert_eq!(bt_entries.len(), 2, "Duplicate base types are stored as-is (no dedup)");
+    assert_eq!(bt_entries, &vec![0, 0]);
+}
+
 // ─── Compile-time Guard: DefinitionIndex Field Count ────────────────
 
 /// ██████████████████████████████████████████████████████████████████████

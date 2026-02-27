@@ -9,7 +9,7 @@ use ignore::WalkBuilder;
 use tracing::{info, warn};
 
 use crate::{clean_path, read_file_lossy};
-use super::types::*;
+use super::{index_file_defs, types::*};
 #[cfg(feature = "lang-csharp")]
 use super::parser_csharp::parse_csharp_definitions;
 #[cfg(feature = "lang-typescript")]
@@ -86,58 +86,8 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
         _ => (Vec::<DefinitionEntry>::new(), Vec::<(usize, Vec<CallSite>)>::new(), Vec::<(usize, CodeStats)>::new()),
     };
 
-    // Add new definitions to index
-    let base_def_idx = index.definitions.len() as u32;
-
-    for def in file_defs {
-        let def_idx = index.definitions.len() as u32;
-
-        index.name_index.entry(def.name.to_lowercase())
-            .or_default()
-            .push(def_idx);
-
-        index.kind_index.entry(def.kind)
-            .or_default()
-            .push(def_idx);
-
-        {
-            let mut seen_attrs = std::collections::HashSet::new();
-            for attr in &def.attributes {
-                let attr_name = attr.split('(').next().unwrap_or(attr).trim().to_lowercase();
-                if seen_attrs.insert(attr_name.clone()) {
-                    index.attribute_index.entry(attr_name)
-                        .or_default()
-                        .push(def_idx);
-                }
-            }
-        }
-
-        for bt in &def.base_types {
-            index.base_type_index.entry(bt.to_lowercase())
-                .or_default()
-                .push(def_idx);
-        }
-
-        index.file_index.entry(file_id)
-            .or_default()
-            .push(def_idx);
-
-        index.definitions.push(def);
-    }
-
-    // Add call sites for new definitions
-    for (local_idx, calls) in file_calls {
-        let global_idx = base_def_idx + local_idx as u32;
-        if !calls.is_empty() {
-            index.method_calls.insert(global_idx, calls);
-        }
-    }
-
-    // Add code stats for new definitions
-    for (local_idx, stats) in file_stats {
-        let global_idx = base_def_idx + local_idx as u32;
-        index.code_stats.insert(global_idx, stats);
-    }
+    // Add new definitions to index (shared with build_definition_index)
+    index_file_defs(index, file_id, file_defs, file_calls, file_stats);
 }
 
 /// Remove all definitions for a file from the index
