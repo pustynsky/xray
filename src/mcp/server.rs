@@ -293,8 +293,8 @@ fn handle_request(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
-    use crate::TrigramIndex;
+    
+    
 
     fn make_ctx() -> HandlerContext {
         HandlerContext::default()

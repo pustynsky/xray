@@ -1690,7 +1690,7 @@ mod tests {
         // We test this by running build_caller_tree and verifying that
         // only the file with the actual call is in the results.
 
-        use crate::{ContentIndex, Posting, TrigramIndex};
+        use crate::{ContentIndex, Posting};
         use std::sync::atomic::AtomicUsize;
         use std::path::PathBuf;
 
@@ -2694,7 +2694,7 @@ mod tests {
         // With the fix: at depth 1, we search for callers of "Handle" with class filter
         // "ClassB" (the caller's parent), so ClassD.Execute() is correctly excluded.
 
-        use crate::{ContentIndex, Posting, TrigramIndex};
+        use crate::{ContentIndex, Posting};
         use std::sync::atomic::AtomicUsize;
         use std::path::PathBuf;
 

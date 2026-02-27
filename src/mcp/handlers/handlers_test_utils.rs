@@ -4,7 +4,6 @@
 use super::*;
 use crate::definitions::*;
 use crate::Posting;
-use crate::TrigramIndex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};

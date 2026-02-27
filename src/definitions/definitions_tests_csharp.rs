@@ -277,11 +277,8 @@ fn test_incremental_update_new_file() {
     std::fs::write(&test_file, "public class NewClass { public void NewMethod() {} }").unwrap();
 
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
-        files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
-        kind_index: HashMap::new(), attribute_index: HashMap::new(),
-        base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        root: ".".to_string(), extensions: vec!["cs".to_string()],
+        ..Default::default()
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
@@ -303,7 +300,7 @@ fn test_incremental_update_existing_file() {
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));
 
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        root: ".".to_string(), extensions: vec!["cs".to_string()],
         files: vec![clean.to_string_lossy().to_string()],
         definitions: vec![DefinitionEntry {
             file_id: 0, name: "OldClass".to_string(), kind: DefinitionKind::Class,
@@ -312,10 +309,9 @@ fn test_incremental_update_existing_file() {
         }],
         name_index: { let mut m = HashMap::new(); m.insert("oldclass".to_string(), vec![0]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0]); m },
-        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(clean.clone(), 0u32); m },
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     std::fs::write(&test_file, "public class UpdatedClass { public int Value { get; set; } }").unwrap();
@@ -329,7 +325,7 @@ fn test_incremental_update_existing_file() {
 #[test]
 fn test_remove_file_from_def_index() {
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
+        root: ".".to_string(), extensions: vec!["cs".to_string()],
         files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
         definitions: vec![
             DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 10, parent: None, signature: None, modifiers: Vec::new(), attributes: Vec::new(), base_types: Vec::new() },
@@ -337,10 +333,9 @@ fn test_remove_file_from_def_index() {
         ],
         name_index: { let mut m = HashMap::new(); m.insert("classa".to_string(), vec![0]); m.insert("classb".to_string(), vec![1]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0, 1]); m },
-        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m.insert(1, vec![1]); m },
         path_to_id: { let mut m = HashMap::new(); m.insert(PathBuf::from("file0.cs"), 0); m.insert(PathBuf::from("file1.cs"), 1); m },
-        method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     remove_file_from_def_index(&mut index, &PathBuf::from("file0.cs"));
@@ -555,11 +550,8 @@ public class MyService {
 "#).unwrap();
 
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()],
-        files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
-        kind_index: HashMap::new(), attribute_index: HashMap::new(),
-        base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        root: ".".to_string(), extensions: vec!["cs".to_string()],
+        ..Default::default()
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));

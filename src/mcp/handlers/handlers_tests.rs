@@ -1574,14 +1574,7 @@ fn test_search_definitions_file_filter_slash_normalization() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result_backslash = dispatch_tool(&ctx, "search_definitions", &json!({
@@ -1666,16 +1659,8 @@ fn test_search_grep_max_results_zero_means_unlimited() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(index)),
         def_index: None,
-        server_dir: ".".to_string(),
-        server_ext: "cs".to_string(),
-        metrics: false,
-        index_base: PathBuf::from("."),
         max_response_bytes: 0,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result_unlimited = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1740,15 +1725,8 @@ fn test_search_find_combined_parameters() {
         index: Arc::new(RwLock::new(content_index)),
         def_index: None,
         server_dir: dir_str.clone(),
-        server_ext: "cs".to_string(),
-        metrics: false,
         index_base: tmp_dir.join(".index"),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result_count = dispatch_tool(&ctx, "search_find", &json!({
@@ -1900,14 +1878,8 @@ fn test_search_find_contents_mode() {
         def_index: None,
         server_dir: dir_str.clone(),
         server_ext: "txt".to_string(),
-        metrics: false,
         index_base: tmp_dir.join(".index"),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     // Search file contents for "magic_searchable_token" in .txt files
@@ -2153,14 +2125,7 @@ fn make_ranking_defs_ctx() -> HandlerContext {
     HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     }
 }
 

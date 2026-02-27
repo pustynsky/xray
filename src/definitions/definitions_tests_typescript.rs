@@ -3,7 +3,6 @@
 use super::*;
 use super::parser_typescript::parse_typescript_definitions;
 use super::parser_csharp::parse_csharp_definitions;  // needed for test_ts_csharp_callers_still_work
-use std::collections::HashMap;
 use std::path::PathBuf;
 
 // ─── TypeScript Parsing Tests ────────────────────────────────────────
@@ -261,11 +260,8 @@ fn test_ts_incremental_update() {
     std::fs::write(&test_file, "export class OrderService { process(): void {} }").unwrap();
 
     let mut index = DefinitionIndex {
-        root: ".".to_string(), created_at: 0, extensions: vec!["ts".to_string()],
-        files: Vec::new(), definitions: Vec::new(), name_index: HashMap::new(),
-        kind_index: HashMap::new(), attribute_index: HashMap::new(),
-        base_type_index: HashMap::new(), file_index: HashMap::new(),
-        path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        root: ".".to_string(), extensions: vec!["ts".to_string()],
+        ..Default::default()
     };
 
     let clean = PathBuf::from(crate::clean_path(&test_file.to_string_lossy()));

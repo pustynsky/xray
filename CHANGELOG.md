@@ -12,6 +12,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 - **`termBreakdown` in `search_definitions` summary for multi-term name queries** — When `name` contains comma-separated terms (e.g., `name="AccessSource,AccessContracts,IAccessTable"`), the summary now includes a `termBreakdown` object showing how many results each term contributed (computed from the full result set before `maxResults` truncation). This helps LLM agents understand result distribution and decide whether to refine their query with `kind` filters or split into separate queries. Only appears for 2+ terms in non-regex mode. 6 new unit tests.
 
+### Internal
+
+- **Complete `..Default::default()` boilerplate cleanup** — Replaced ~60 explicit field enumerations in test code with `..Default::default()` for both `HandlerContext` (33 sites) and `DefinitionIndex` (27 sites) across 8 test files. Also ran `cargo fix` to remove 12 unused imports from 8 files. No behavioral changes — purely mechanical cleanup. All 860 unit tests + 59 E2E tests pass.
+
 ---
 
 ## 2026-02-26
