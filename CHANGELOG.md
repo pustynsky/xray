@@ -8,9 +8,17 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-27
 
+### Bug Fixes
+
+- **`baseTypeTransitive` BFS cascade bug** — `collect_transitive_base_type_indices()` used substring matching (`key.contains(&current_type)`) at ALL BFS levels, causing a cascade when a descendant class had a short/common name (e.g., `"Service"` matched `"iservice"`, `"webservice"`, `"serviceprovider"`, etc.). This produced ~42,508 results instead of ~828 and took ~29 seconds. Fix: substring matching is now used only at level 0 (seed) for generic type support (`IAccessTable` → `iaccesstable<model>`); levels 1+ use exact HashMap lookup (O(1)). 3 new unit tests.
+
 ### Features
 
 - **`termBreakdown` in `search_definitions` summary for multi-term name queries** — When `name` contains comma-separated terms (e.g., `name="AccessSource,AccessContracts,IAccessTable"`), the summary now includes a `termBreakdown` object showing how many results each term contributed (computed from the full result set before `maxResults` truncation). This helps LLM agents understand result distribution and decide whether to refine their query with `kind` filters or split into separate queries. Only appears for 2+ terms in non-regex mode. 6 new unit tests.
+
+- **Hint when `search_callers` returns 0 results with class filter** — When `search_callers` returns an empty call tree and `class` parameter is set, the response now includes a `hint` field suggesting: try without `class` parameter, or use the interface name. Helps LLM agents diagnose why no callers were found. 3 new unit tests.
+
+- **Hint for large `baseTypeTransitive` hierarchies** — When `baseTypeTransitive=true` and `totalResults > 5000`, the `search_definitions` response includes a `hint` suggesting `kind` or `file` filters to narrow results. 1 new unit test.
 
 ### Internal
 
@@ -408,7 +416,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes               | 10                          |
 | Performance             | 3                           |
 | Internal                | 5                           |
-| Unit tests (latest)     | 849                         |
+| Unit tests (latest)     | 866                         |
 | E2E tests (latest)      | 59                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |
