@@ -40,7 +40,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     path_to_id.insert(file0_path, 0); path_to_id.insert(file1_path, 1);
     let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index, path_to_id, method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new() };
     let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), files: vec![file0_str, file1_str], extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), ..Default::default() };
     (ctx, tmp_dir)
 }
 
@@ -218,11 +218,7 @@ fn test_search_callers_field_prefix_m_underscore() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result = dispatch_tool(&ctx, "search_callers", &json!({
@@ -1774,7 +1770,7 @@ fn test_search_definitions_enum_member_kind() {
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
     let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new() };
     let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), files: vec![fs], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), ..Default::default() };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "StaleClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["definitions"].as_array().unwrap()[0].get("bodyWarning").is_some());
@@ -1788,7 +1784,7 @@ fn test_search_definitions_enum_member_kind() {
     let ne = "C:\\nonexistent\\path\\Ghost.cs".to_string();
     let di = DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, attribute_index: HashMap::new(), base_type_index: HashMap::new(), file_index: fi, path_to_id: HashMap::new(), method_calls: HashMap::new(), code_stats: HashMap::new(), parse_errors: 0, lossy_file_count: 0, empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new() };
     let ci = ContentIndex { root: ".".to_string(), files: vec![ne], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), ..Default::default() };
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "GhostClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["definitions"].as_array().unwrap()[0]["bodyError"], "failed to read file");

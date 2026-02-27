@@ -1111,18 +1111,8 @@ mod tests {
             ..Default::default()
         };
         HandlerContext {
-            index: std::sync::Arc::new(std::sync::RwLock::new(index)),
-            def_index: None,
-            server_dir: ".".to_string(),
-            server_ext: "cs".to_string(),
-            metrics: false,
-            index_base: std::path::PathBuf::from("."),
-            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
-            content_ready: std::sync::Arc::new(AtomicBool::new(true)),
-            def_ready: std::sync::Arc::new(AtomicBool::new(true)),
-            git_cache: std::sync::Arc::new(std::sync::RwLock::new(None)),
-            git_cache_ready: std::sync::Arc::new(AtomicBool::new(false)),
             current_branch: branch.map(|s| s.to_string()),
+            ..Default::default()
         }
     }
 

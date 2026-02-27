@@ -83,22 +83,46 @@ fn test_search_find_has_slow_warning() {
     assert!(find.description.contains("SLOW") || find.description.contains("search_fast"), "search_find should discourage use and point to search_fast");
 }
 
-fn make_empty_ctx() -> HandlerContext {
-    let index = ContentIndex {
-        root: ".".to_string(),
-        ..Default::default()
-    };
-    HandlerContext {
-        index: Arc::new(RwLock::new(index)),
+/// Compile-time guard: lists ALL HandlerContext fields explicitly.
+/// If a new field is added to HandlerContext, this test will fail to compile,
+/// reminding the developer to update `impl Default` and this guard.
+#[test]
+fn test_handler_context_field_count_guard() {
+    let _guard = HandlerContext {
+        index: Arc::new(RwLock::new(ContentIndex::default())),
         def_index: None,
         server_dir: ".".to_string(),
         server_ext: "cs".to_string(),
         metrics: false,
-        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
+        index_base: PathBuf::from("."),
+        max_response_bytes: 0,
+        content_ready: Arc::new(AtomicBool::new(true)),
+        def_ready: Arc::new(AtomicBool::new(true)),
+        git_cache: Arc::new(RwLock::new(None)),
+        git_cache_ready: Arc::new(AtomicBool::new(false)),
         current_branch: None,
-    }
+    };
+    drop(_guard);
+}
+
+/// Verify that Default creates correct values for test-critical fields.
+#[test]
+fn test_handler_context_default_values() {
+    let ctx = HandlerContext::default();
+    assert_eq!(ctx.server_dir, ".");
+    assert_eq!(ctx.server_ext, "cs");
+    assert!(!ctx.metrics);
+    assert_eq!(ctx.index_base, PathBuf::from("."));
+    assert_eq!(ctx.max_response_bytes, crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES);
+    assert!(ctx.content_ready.load(std::sync::atomic::Ordering::Relaxed), "content_ready should default to true");
+    assert!(ctx.def_ready.load(std::sync::atomic::Ordering::Relaxed), "def_ready should default to true");
+    assert!(!ctx.git_cache_ready.load(std::sync::atomic::Ordering::Relaxed), "git_cache_ready should default to false");
+    assert!(ctx.def_index.is_none());
+    assert!(ctx.current_branch.is_none());
+}
+
+fn make_empty_ctx() -> HandlerContext {
+    HandlerContext::default()
 }
 
 #[test]
@@ -144,14 +168,7 @@ fn test_dispatch_grep_with_results() {
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(index)),
-        def_index: None,
-        server_dir: ".".to_string(),
-        server_ext: "cs".to_string(),
-        metrics: false,
-        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient", "substring": false}));
     assert!(!result.is_error);
@@ -295,12 +312,8 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
         trigram, ..Default::default()
     };
     HandlerContext {
-        index: Arc::new(RwLock::new(content_index)), def_index: None,
-        server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        index: Arc::new(RwLock::new(content_index)),
+        ..Default::default()
     }
 }
 
@@ -436,12 +449,8 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
         ..Default::default()
     };
     let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)), def_index: None,
-        server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        index: Arc::new(RwLock::new(content_index)),
+        ..Default::default()
     };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpcli", "substring": true}));
     assert!(!result.is_error);
@@ -487,13 +496,10 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
     });
     let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)), def_index: None,
-        server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: tmp_dir.join(".index"),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: tmp_dir.to_string_lossy().to_string(),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
     };
     (ctx, tmp_dir)
 }
@@ -574,7 +580,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     assert_eq!(loaded.files.len(), orig_files);
     assert_eq!(loaded.index.len(), orig_tokens);
     assert_eq!(loaded.trigram.trigram_map.len(), orig_trigrams);
-    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), def_index: None, server_dir: root, server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), server_dir: root, ..Default::default() };
     let result = dispatch_tool(&loaded_ctx, "search_grep", &json!({"terms": "databaseconn", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -755,14 +761,11 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
     });
     let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)), def_index: None,
-        server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "xml".to_string(),
-        metrics: false, index_base: tmp_dir.join(".index"),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: tmp_dir.to_string_lossy().to_string(),
+        server_ext: "xml".to_string(),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
     };
     (ctx, tmp_dir)
 }
@@ -831,7 +834,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: false, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), ..Default::default() };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"].get("responseBytes").is_none());
@@ -842,7 +845,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().is_some());
@@ -862,7 +865,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let mut idx = HashMap::new();
     idx.insert("foo".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["test.cs".to_string()], index: idx, total_tokens: 10, extensions: vec!["cs".to_string()], file_token_counts: vec![10], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: ".".to_string(), server_ext: "cs".to_string(), metrics: true, index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "foo"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().unwrap() >= 0.0);
@@ -886,7 +889,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
     (ctx, tmp_dir)
 }
 
@@ -977,7 +980,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
     std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
     let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 });
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), metrics: false, index_base: tmp.to_path_buf(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
     let r_all = handle_search_grep(&ctx, &json!({"terms": "productcatalog"}));
     let o_all: Value = serde_json::from_str(&r_all.content[0].text).unwrap();
     assert_eq!(o_all["summary"]["totalFiles"], 2);
@@ -991,7 +994,7 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let tmp_holder = tempfile::tempdir().unwrap();
     let tmp = tmp_holder.path();
     let index = ContentIndex { root: tmp.to_string_lossy().to_string(), ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), def_index: None, server_dir: tmp.to_string_lossy().to_string(), server_ext: "cs".to_string(), metrics: false, index_base: tmp.to_path_buf(), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), server_dir: tmp.to_string_lossy().to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
     let result = handle_search_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
     assert!(result.is_error);
 }
@@ -1030,14 +1033,8 @@ fn test_response_truncation_triggers_on_large_result() {
 
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(index)),
-        def_index: None,
-        server_dir: ".".to_string(),
-        server_ext: "cs".to_string(),
         metrics: true,
-        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1084,14 +1081,8 @@ fn test_response_truncation_does_not_trigger_on_small_result() {
 
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(index)),
-        def_index: None,
-        server_dir: ".".to_string(),
-        server_ext: "cs".to_string(),
         metrics: true,
-        index_base: PathBuf::from("."), max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "mytoken", "substring": false}));
@@ -1253,17 +1244,9 @@ fn test_search_grep_response_truncation_via_small_budget() {
 
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(index)),
-        def_index: None,
-        server_dir: ".".to_string(),
-        server_ext: "cs".to_string(),
         metrics: true,
-        index_base: PathBuf::from("."),
         max_response_bytes: 2_000,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1342,7 +1325,7 @@ fn test_search_fast_dirs_only_and_files_only() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
     let result_dirs = handle_search_fast(&ctx, &json!({"pattern": "Models", "dirsOnly": true}));
     assert!(!result_dirs.is_error, "dirsOnly should not error: {}", result_dirs.content[0].text);
@@ -1420,17 +1403,8 @@ fn test_search_grep_sql_extension_filter() {
 
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(index)),
-        def_index: None,
-        server_dir: ".".to_string(),
         server_ext: "cs,sql".to_string(),
-        metrics: false,
-        index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -1494,17 +1468,10 @@ fn test_search_grep_phrase_search_with_show_lines() {
 
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        def_index: None,
         server_dir: tmp_dir.to_string_lossy().to_string(),
         server_ext: "sql".to_string(),
-        metrics: false,
         index_base: tmp_dir.join(".index"),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        ..Default::default()
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -2313,7 +2280,7 @@ fn test_search_fast_ranking_exact_stem_first() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
     let result = handle_search_fast(&ctx, &json!({"pattern": "UserService"}));
     assert!(!result.is_error, "search_fast should not error: {}", result.content[0].text);
@@ -2361,7 +2328,7 @@ fn test_search_fast_ranking_shorter_stem_first() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: None, server_dir: dir_str, server_ext: "cs".to_string(), metrics: false, index_base: idx_base, max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES, content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)), git_cache: Arc::new(RwLock::new(None)), git_cache_ready: Arc::new(AtomicBool::new(false)), current_branch: None };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
     let result = handle_search_fast(&ctx, &json!({"pattern": "Order"}));
     assert!(!result.is_error);
@@ -2557,15 +2524,10 @@ fn test_search_grep_phrase_sort_by_occurrences() {
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
     });
     let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)), def_index: None,
-        server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: tmp_dir.join(".index"),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)),
-        def_ready: Arc::new(AtomicBool::new(true)),
-    git_cache: Arc::new(RwLock::new(None)),
-    git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: tmp_dir.to_string_lossy().to_string(),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
     };
 
     let result = dispatch_tool(&ctx, "search_grep", &json!({
@@ -2704,14 +2666,8 @@ fn test_read_errors_in_substring_summary() {
         read_errors: 3, lossy_file_count: 2,
     };
     let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(index)), def_index: None,
-        server_dir: ".".to_string(), server_ext: "cs".to_string(),
-        metrics: false, index_base: PathBuf::from("."),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-        git_cache: Arc::new(RwLock::new(None)),
-        git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        index: Arc::new(RwLock::new(index)),
+        ..Default::default()
     };
     // Substring mode
     let result = handle_search_grep(&ctx, &json!({"terms": "httpcli", "substring": true}));
@@ -3077,14 +3033,11 @@ fn test_substring_space_sql_create_table() {
         max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
     });
     let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)), def_index: None,
-        server_dir: tmp_dir.to_string_lossy().to_string(), server_ext: "sql".to_string(),
-        metrics: false, index_base: tmp_dir.join(".index"),
-        max_response_bytes: crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES,
-        content_ready: Arc::new(AtomicBool::new(true)), def_ready: Arc::new(AtomicBool::new(true)),
-        git_cache: Arc::new(RwLock::new(None)),
-        git_cache_ready: Arc::new(AtomicBool::new(false)),
-        current_branch: None,
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: tmp_dir.to_string_lossy().to_string(),
+        server_ext: "sql".to_string(),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
     };
 
     // "CREATE TABLE" with default substring mode — should auto-switch to phrase

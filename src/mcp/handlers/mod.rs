@@ -394,6 +394,25 @@ pub struct HandlerContext {
     pub current_branch: Option<String>,
 }
 
+impl Default for HandlerContext {
+    fn default() -> Self {
+        HandlerContext {
+            index: Arc::new(RwLock::new(ContentIndex::default())),
+            def_index: None,
+            server_dir: ".".to_string(),
+            server_ext: "cs".to_string(),
+            metrics: false,
+            index_base: PathBuf::from("."),
+            max_response_bytes: utils::DEFAULT_MAX_RESPONSE_BYTES,
+            content_ready: Arc::new(AtomicBool::new(true)),
+            def_ready: Arc::new(AtomicBool::new(true)),
+            git_cache: Arc::new(RwLock::new(None)),
+            git_cache_ready: Arc::new(AtomicBool::new(false)),
+            current_branch: None,
+        }
+    }
+}
+
 /// Message returned when the content index is still building in background.
 const INDEX_BUILDING_MSG: &str =
     "Content index is currently being built in the background. Please retry in a few seconds.";
