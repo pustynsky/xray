@@ -19,7 +19,7 @@ default = ["lang-csharp", "lang-typescript", "lang-sql"]
 lang-csharp = ["dep:tree-sitter", "dep:tree-sitter-c-sharp"]
 lang-typescript = ["dep:tree-sitter", "dep:tree-sitter-typescript"]
 lang-sql = []
-# Future: lang-rust = ["dep:tree-sitter", "dep:tree-sitter-rust"]
+lang-rust = ["dep:tree-sitter", "dep:tree-sitter-rust"]
 
 [dependencies]
 ignore = "0.4"
@@ -33,6 +33,7 @@ notify = "6"
 tree-sitter = { version = "0.24", optional = true }
 tree-sitter-c-sharp = { version = "0.23", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
+tree-sitter-rust = { version = "0.23", optional = true }
 # tree-sitter-sequel-tsql removed: version 0.4.2 requires tree-sitter language ABI version 15,
 # but tree-sitter 0.24 only supports versions 13-14. Verified 2026-02-23: still incompatible.
 # SQL parsing is disabled until a compatible T-SQL grammar is available.

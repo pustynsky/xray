@@ -10,6 +10,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Features
 
+- **Rust parser (`lang-rust` optional feature)** — New tree-sitter-based parser for `.rs` files, activated via `--features lang-rust` (NOT in default build). Extracts: structs, enums, traits (`Interface`), `impl` block methods (with parent struct association), constructors (`fn new()`/`fn default()`), trait impls (`base_types`), `const`/`static` variables, type aliases, struct fields, enum variants. Call sites: `self.method()`, `self.field.method()`, `Type::method()`, free function calls. Code stats: cyclomatic/cognitive complexity, match arms, `?` operator (early return), closures, nesting depth, params (excluding `self`). Modifiers: `pub`, `async`, `unsafe`, `const`, `mut`. Attributes: `#[test]`, `#[derive(Debug)]`, `#[cfg(test)]`, `#[serde(default)]`. Build with `cargo build --features lang-rust` or `cargo build --no-default-features --features lang-rust` (Rust-only). 24 new tests (18 parser + 6 handler).
+
 - **Configurable language parsers via Cargo features** — Language parsers are now conditionally compiled via Cargo feature flags: `lang-csharp`, `lang-typescript`, `lang-sql`. Default `cargo build` includes all three (backward compatible). Build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-sql` for SQL-only (no tree-sitter dependency), or `--no-default-features` for grep/content-index-only builds. `tree-sitter`, `tree-sitter-c-sharp`, and `tree-sitter-typescript` are now optional dependencies. All tests are gated with `#[cfg(feature = "...")]` — test counts adjust automatically per feature set: 872 (all), 623 (SQL-only), 593 (none). Future parsers (e.g., Rust) can be added as new features without modifying existing code.
 
 ### Bug Fixes
@@ -424,7 +426,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 | Bug Fixes               | 10                          |
 | Performance             | 3                           |
 | Internal                | 5                           |
-| Unit tests (latest)     | 872                         |
+| Unit tests (latest)     | 896 (with lang-rust)        |
 | E2E tests (latest)      | 59                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |

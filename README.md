@@ -108,6 +108,7 @@ cargo build --release --no-default-features
 | `lang-csharp` | `tree-sitter`, `tree-sitter-c-sharp` | C# AST (tree-sitter) |
 | `lang-typescript` | `tree-sitter`, `tree-sitter-typescript` | TypeScript/TSX AST (tree-sitter) |
 | `lang-sql` | *(none)* | SQL DDL (regex-based) |
+| `lang-rust` | `tree-sitter`, `tree-sitter-rust` | Rust AST (tree-sitter) — **not in default features** |
 
 ### CLI Usage
 
@@ -207,8 +208,8 @@ Test files are split by language module for maintainability:
 
 | Module | Test files |
 |---|---|
-| `src/mcp/handlers/` | `handlers_tests.rs` (77 general), `handlers_tests_csharp.rs` (31 C#), `handlers_tests_typescript.rs` (TS placeholder) |
-| `src/definitions/` | `definitions_tests.rs` (12 general), `definitions_tests_csharp.rs` (19 C#), `definitions_tests_typescript.rs` (32 TS), `definitions_tests_sql.rs` (SQL) |
+| `src/mcp/handlers/` | `handlers_tests.rs` (77 general), `handlers_tests_csharp.rs` (31 C#), `handlers_tests_typescript.rs` (TS), `handlers_tests_rust.rs` (6 Rust, `lang-rust` feature) |
+| `src/definitions/` | `definitions_tests.rs` (12 general), `definitions_tests_csharp.rs` (19 C#), `definitions_tests_typescript.rs` (32 TS), `definitions_tests_sql.rs` (SQL), `definitions_tests_rust.rs` (18 Rust, `lang-rust` feature) |
 | `src/git/` | `cache_tests.rs` (49 cache), `git_tests.rs` (git CLI) |
 | `src/` | `main_tests.rs` (35 general) |
 
