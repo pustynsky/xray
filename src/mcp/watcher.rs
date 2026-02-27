@@ -83,125 +83,7 @@ pub fn start_watcher(
                     if dirty_files.is_empty() && removed_files.is_empty() {
                         continue;
                     }
-
-                    // Incremental update — always used (bulk path removed to fix
-                    // definition index skip bug and improve git pull performance).
-                    // Uses batch_purge_files for O(total_postings) instead of
-                    // O(N × total_postings) when many files change at once.
-                    let update_count = dirty_files.len();
-                    let remove_count = removed_files.len();
-
-                    // Collect cleaned paths once for both indexes
-                    let removed_clean: Vec<PathBuf> = removed_files.drain()
-                        .map(|p| PathBuf::from(clean_path(&p.to_string_lossy())))
-                        .collect();
-                    let dirty_clean: Vec<PathBuf> = dirty_files.drain()
-                        .map(|p| PathBuf::from(clean_path(&p.to_string_lossy())))
-                        .collect();
-
-                    let batch_start = std::time::Instant::now();
-
-                    // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
-                    match index.write() {
-                        Ok(mut idx) => {
-                            // Collect file_ids of all existing files to purge in one pass
-                            let mut purge_ids: HashSet<u32> = HashSet::new();
-                            if let Some(ref p2id) = idx.path_to_id {
-                                for path in &removed_clean {
-                                    if let Some(&fid) = p2id.get(path) {
-                                        purge_ids.insert(fid);
-                                    }
-                                }
-                                for path in &dirty_clean {
-                                    if let Some(&fid) = p2id.get(path) {
-                                        purge_ids.insert(fid);
-                                    }
-                                }
-                            }
-
-                            // Batch purge: ONE pass over inverted index removes all stale postings
-                            if !purge_ids.is_empty() {
-                                // Subtract old token counts before purge
-                                for &fid in &purge_ids {
-                                    let old_count = if (fid as usize) < idx.file_token_counts.len() {
-                                        idx.file_token_counts[fid as usize] as u64
-                                    } else {
-                                        0u64
-                                    };
-                                    idx.total_tokens = idx.total_tokens.saturating_sub(old_count);
-                                }
-                                batch_purge_files(&mut idx.index, &purge_ids);
-                            }
-
-                            // Process removed files: update path_to_id and zero token counts
-                            for path in &removed_clean {
-                                // Two-step borrow: look up fid first, then mutate
-                                let fid = idx.path_to_id.as_ref()
-                                    .and_then(|p2id| p2id.get(path).copied());
-                                if let Some(fid) = fid {
-                                    if (fid as usize) < idx.file_token_counts.len() {
-                                        idx.file_token_counts[fid as usize] = 0;
-                                    }
-                                    if let Some(ref mut p2id) = idx.path_to_id {
-                                        p2id.remove(path);
-                                    }
-                                }
-                            }
-
-                            // Process dirty files: re-tokenize and insert new postings
-                            // (purge already done above via batch_purge_files)
-                            for path in &dirty_clean {
-                                reindex_file_after_purge(&mut idx, path);
-                            }
-
-                            // Mark trigram index as dirty — will be rebuilt lazily on next substring search
-                            idx.trigram_dirty = true;
-
-                            // Conditionally shrink collections after retain() to release excess capacity.
-                            // Only shrink when capacity > 2 × len to avoid unnecessary realloc storms.
-                            for postings in idx.index.values_mut() {
-                                if postings.capacity() > postings.len() * 2 {
-                                    postings.shrink_to_fit();
-                                }
-                            }
-                            if idx.index.capacity() > idx.index.len() * 2 {
-                                idx.index.shrink_to_fit();
-                            }
-                            if let Some(ref mut p2id) = idx.path_to_id {
-                                if p2id.capacity() > p2id.len() * 2 {
-                                    p2id.shrink_to_fit();
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            error!(error = %e, "Failed to acquire content index write lock");
-                        }
-                    }
-
-                    // Update definition index (if available)
-                    if let Some(ref def_idx) = def_index {
-                        match def_idx.write() {
-                            Ok(mut idx) => {
-                                for path in &removed_clean {
-                                    definitions::remove_file_from_def_index(&mut idx, path);
-                                }
-                                for path in &dirty_clean {
-                                    definitions::update_file_definitions(&mut idx, path);
-                                }
-                            }
-                            Err(e) => {
-                                error!(error = %e, "Failed to acquire definition index write lock");
-                            }
-                        }
-                    }
-
-                    let elapsed_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
-                    info!(
-                        updated = update_count,
-                        removed = remove_count,
-                        elapsed_ms = format_args!("{:.1}", elapsed_ms),
-                        "Incremental index update complete"
-                    );
+                    process_batch(&index, &def_index, &mut dirty_files, &mut removed_files);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     info!("Watcher channel disconnected, stopping");
@@ -212,6 +94,161 @@ pub fn start_watcher(
     });
 
     Ok(())
+}
+
+/// Process a batch of dirty (modified/created) and removed files by updating
+/// the content index and definition index.
+///
+/// This is the core incremental update logic, extracted from the watcher event
+/// loop to enable isolated unit testing.
+///
+/// Uses `batch_purge_files` for O(total_postings) instead of O(N × total_postings)
+/// when many files change at once (e.g., git pull with 300+ files).
+fn process_batch(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    dirty_files: &mut HashSet<PathBuf>,
+    removed_files: &mut HashSet<PathBuf>,
+) {
+    let update_count = dirty_files.len();
+    let remove_count = removed_files.len();
+
+    // Collect cleaned paths once for both indexes
+    let removed_clean: Vec<PathBuf> = removed_files.drain()
+        .map(|p| PathBuf::from(clean_path(&p.to_string_lossy())))
+        .collect();
+    let dirty_clean: Vec<PathBuf> = dirty_files.drain()
+        .map(|p| PathBuf::from(clean_path(&p.to_string_lossy())))
+        .collect();
+
+    let batch_start = std::time::Instant::now();
+
+    // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
+    update_content_index(index, &removed_clean, &dirty_clean);
+
+    // Update definition index (if available)
+    update_definition_index(def_index, &removed_clean, &dirty_clean);
+
+    let elapsed_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
+    info!(
+        updated = update_count,
+        removed = remove_count,
+        elapsed_ms = format_args!("{:.1}", elapsed_ms),
+        "Incremental index update complete"
+    );
+}
+
+/// Update the content index: purge stale postings, remove deleted files,
+/// re-tokenize modified/new files, and shrink oversized collections.
+fn update_content_index(
+    index: &Arc<RwLock<ContentIndex>>,
+    removed_clean: &[PathBuf],
+    dirty_clean: &[PathBuf],
+) {
+    match index.write() {
+        Ok(mut idx) => {
+            // Collect file_ids of all existing files to purge in one pass
+            let mut purge_ids: HashSet<u32> = HashSet::new();
+            if let Some(ref p2id) = idx.path_to_id {
+                for path in removed_clean {
+                    if let Some(&fid) = p2id.get(path) {
+                        purge_ids.insert(fid);
+                    }
+                }
+                for path in dirty_clean {
+                    if let Some(&fid) = p2id.get(path) {
+                        purge_ids.insert(fid);
+                    }
+                }
+            }
+
+            // Batch purge: ONE pass over inverted index removes all stale postings
+            if !purge_ids.is_empty() {
+                // Subtract old token counts before purge
+                for &fid in &purge_ids {
+                    let old_count = if (fid as usize) < idx.file_token_counts.len() {
+                        idx.file_token_counts[fid as usize] as u64
+                    } else {
+                        0u64
+                    };
+                    idx.total_tokens = idx.total_tokens.saturating_sub(old_count);
+                }
+                batch_purge_files(&mut idx.index, &purge_ids);
+            }
+
+            // Process removed files: update path_to_id and zero token counts
+            for path in removed_clean {
+                // Two-step borrow: look up fid first, then mutate
+                let fid = idx.path_to_id.as_ref()
+                    .and_then(|p2id| p2id.get(path).copied());
+                if let Some(fid) = fid {
+                    if (fid as usize) < idx.file_token_counts.len() {
+                        idx.file_token_counts[fid as usize] = 0;
+                    }
+                    if let Some(ref mut p2id) = idx.path_to_id {
+                        p2id.remove(path);
+                    }
+                }
+            }
+
+            // Process dirty files: re-tokenize and insert new postings
+            // (purge already done above via batch_purge_files)
+            for path in dirty_clean {
+                reindex_file_after_purge(&mut idx, path);
+            }
+
+            // Mark trigram index as dirty — will be rebuilt lazily on next substring search
+            idx.trigram_dirty = true;
+
+            // Conditionally shrink collections after retain() to release excess capacity.
+            // Only shrink when capacity > 2 × len to avoid unnecessary realloc storms.
+            shrink_if_oversized(&mut idx);
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to acquire content index write lock");
+        }
+    }
+}
+
+/// Update the definition index: remove deleted files, re-parse modified/new files.
+fn update_definition_index(
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    removed_clean: &[PathBuf],
+    dirty_clean: &[PathBuf],
+) {
+    if let Some(def_idx) = def_index {
+        match def_idx.write() {
+            Ok(mut idx) => {
+                for path in removed_clean {
+                    definitions::remove_file_from_def_index(&mut idx, path);
+                }
+                for path in dirty_clean {
+                    definitions::update_file_definitions(&mut idx, path);
+                }
+            }
+            Err(e) => {
+                error!(error = %e, "Failed to acquire definition index write lock");
+            }
+        }
+    }
+}
+
+/// Conditionally shrink collections after retain() to release excess capacity.
+/// Only shrinks when capacity > 2 × len to avoid unnecessary realloc storms.
+fn shrink_if_oversized(idx: &mut ContentIndex) {
+    for postings in idx.index.values_mut() {
+        if postings.capacity() > postings.len() * 2 {
+            postings.shrink_to_fit();
+        }
+    }
+    if idx.index.capacity() > idx.index.len() * 2 {
+        idx.index.shrink_to_fit();
+    }
+    if let Some(ref mut p2id) = idx.path_to_id {
+        if p2id.capacity() > p2id.len() * 2 {
+            p2id.shrink_to_fit();
+        }
+    }
 }
 
 /// Check if a path is inside a `.git` directory.
@@ -574,7 +611,7 @@ fn reconcile_content_index(
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    
+
 
     fn make_test_index() -> ContentIndex {
         let mut idx = HashMap::new();
@@ -1087,5 +1124,214 @@ mod tests {
         assert!(loaded.path_to_id.is_some(), "path_to_id should survive roundtrip");
         assert_eq!(loaded.path_to_id.as_ref().unwrap().len(), orig_path_to_id_len,
             "path_to_id entry count mismatch after roundtrip");
+    }
+
+    // ─── process_batch tests ───────────────────────────────────────────
+
+    /// Helper: create a ContentIndex backed by real files in a temp dir,
+    /// wrapped in Arc<RwLock> for process_batch.
+    fn make_batch_test_setup() -> (tempfile::TempDir, Arc<RwLock<ContentIndex>>) {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+
+        let file_a = dir.join("a.cs");
+        let file_b = dir.join("b.cs");
+        std::fs::write(&file_a, "class Alpha { HttpClient client; }").unwrap();
+        std::fs::write(&file_b, "class Beta { ILogger logger; }").unwrap();
+
+        let clean_a = crate::clean_path(&file_a.to_string_lossy());
+        let clean_b = crate::clean_path(&file_b.to_string_lossy());
+
+        let mut inverted = HashMap::new();
+        inverted.insert("alpha".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        inverted.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        inverted.insert("client".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        inverted.insert("beta".to_string(), vec![Posting { file_id: 1, lines: vec![1] }]);
+        inverted.insert("ilogger".to_string(), vec![Posting { file_id: 1, lines: vec![1] }]);
+        inverted.insert("logger".to_string(), vec![Posting { file_id: 1, lines: vec![1] }]);
+        inverted.insert("class".to_string(), vec![
+            Posting { file_id: 0, lines: vec![1] },
+            Posting { file_id: 1, lines: vec![1] },
+        ]);
+
+        let index = ContentIndex {
+            root: dir.to_string_lossy().to_string(),
+            files: vec![clean_a.clone(), clean_b.clone()],
+            index: inverted,
+            total_tokens: 20,
+            extensions: vec!["cs".to_string()],
+            file_token_counts: vec![10, 10],
+            path_to_id: Some({
+                let mut m = HashMap::new();
+                m.insert(PathBuf::from(&clean_a), 0u32);
+                m.insert(PathBuf::from(&clean_b), 1u32);
+                m
+            }),
+            ..Default::default()
+        };
+
+        (tmp, Arc::new(RwLock::new(index)))
+    }
+
+    #[test]
+    fn test_process_batch_empty() {
+        let (_tmp, index) = make_batch_test_setup();
+        let mut dirty = HashSet::new();
+        let mut removed = HashSet::new();
+
+        let tokens_before = index.read().unwrap().total_tokens;
+        let files_before = index.read().unwrap().files.len();
+
+        process_batch(&index, &None, &mut dirty, &mut removed);
+
+        let idx = index.read().unwrap();
+        assert_eq!(idx.total_tokens, tokens_before, "empty batch should not change total_tokens");
+        assert_eq!(idx.files.len(), files_before, "empty batch should not change files");
+    }
+
+    #[test]
+    fn test_process_batch_dirty_file() {
+        let (tmp, index) = make_batch_test_setup();
+
+        // Modify file a.cs with new content
+        let file_a = tmp.path().join("a.cs");
+        std::fs::write(&file_a, "class AlphaUpdated { NewService service; }").unwrap();
+
+        let mut dirty = HashSet::new();
+        dirty.insert(file_a);
+        let mut removed = HashSet::new();
+
+        process_batch(&index, &None, &mut dirty, &mut removed);
+
+        let idx = index.read().unwrap();
+        // Old token "httpclient" should be gone
+        assert!(!idx.index.contains_key("httpclient"),
+            "old token 'httpclient' should be removed after update");
+        // New token "alphaupdated" should be present
+        assert!(idx.index.contains_key("alphaupdated"),
+            "new token 'alphaupdated' should be present after update");
+        // File b should be untouched
+        assert!(idx.index.contains_key("beta"),
+            "token 'beta' from untouched file should remain");
+        // dirty set should be drained
+        assert!(dirty.is_empty(), "dirty set should be drained after process_batch");
+        // trigram should be marked dirty
+        assert!(idx.trigram_dirty, "trigram should be marked dirty after update");
+    }
+
+    #[test]
+    fn test_process_batch_removed_file() {
+        let (tmp, index) = make_batch_test_setup();
+
+        let file_a = tmp.path().join("a.cs");
+
+        let mut dirty = HashSet::new();
+        let mut removed = HashSet::new();
+        removed.insert(file_a);
+
+        process_batch(&index, &None, &mut dirty, &mut removed);
+
+        let idx = index.read().unwrap();
+        // Tokens exclusive to file a should be gone
+        assert!(!idx.index.contains_key("httpclient"),
+            "token 'httpclient' from removed file should be gone");
+        assert!(!idx.index.contains_key("alpha"),
+            "token 'alpha' from removed file should be gone");
+        // Tokens from file b should remain
+        assert!(idx.index.contains_key("beta"),
+            "token 'beta' from untouched file should remain");
+        // path_to_id should not contain the removed file
+        let clean_a = crate::clean_path(&tmp.path().join("a.cs").to_string_lossy());
+        assert!(!idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_a)),
+            "removed file should not be in path_to_id");
+        // removed set should be drained
+        assert!(removed.is_empty(), "removed set should be drained after process_batch");
+    }
+
+    #[test]
+    fn test_process_batch_mixed_dirty_and_removed() {
+        let (tmp, index) = make_batch_test_setup();
+
+        // Remove file a, modify file b
+        let file_a = tmp.path().join("a.cs");
+        let file_b = tmp.path().join("b.cs");
+        std::fs::write(&file_b, "class BetaModified { NewToken value; }").unwrap();
+
+        let mut dirty = HashSet::new();
+        dirty.insert(file_b);
+        let mut removed = HashSet::new();
+        removed.insert(file_a);
+
+        process_batch(&index, &None, &mut dirty, &mut removed);
+
+        let idx = index.read().unwrap();
+        // File a tokens gone
+        assert!(!idx.index.contains_key("httpclient"),
+            "removed file's token should be gone");
+        assert!(!idx.index.contains_key("alpha"),
+            "removed file's token should be gone");
+        // File b old tokens gone, new tokens present
+        assert!(!idx.index.contains_key("ilogger"),
+            "old token from modified file should be gone");
+        assert!(idx.index.contains_key("betamodified"),
+            "new token from modified file should be present");
+        assert!(idx.index.contains_key("newtoken"),
+            "new token from modified file should be present");
+        // Both sets should be drained
+        assert!(dirty.is_empty(), "dirty should be drained");
+        assert!(removed.is_empty(), "removed should be drained");
+    }
+
+    #[test]
+    fn test_process_batch_new_file_in_dirty() {
+        let (tmp, index) = make_batch_test_setup();
+
+        // Create a brand new file
+        let file_c = tmp.path().join("c.cs");
+        std::fs::write(&file_c, "class Gamma { UniqueToken gamma; }").unwrap();
+
+        let mut dirty = HashSet::new();
+        dirty.insert(file_c);
+        let mut removed = HashSet::new();
+
+        process_batch(&index, &None, &mut dirty, &mut removed);
+
+        let idx = index.read().unwrap();
+        // New tokens should be present
+        assert!(idx.index.contains_key("gamma"),
+            "new file token 'gamma' should be present");
+        assert!(idx.index.contains_key("uniquetoken"),
+            "new file token 'uniquetoken' should be present");
+        // Old files untouched
+        assert!(idx.index.contains_key("alpha"),
+            "old token 'alpha' should remain");
+        assert!(idx.index.contains_key("beta"),
+            "old token 'beta' should remain");
+        // New file should be in path_to_id
+        let clean_c = crate::clean_path(&tmp.path().join("c.cs").to_string_lossy());
+        assert!(idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_c)),
+            "new file should be in path_to_id");
+        assert_eq!(idx.files.len(), 3, "should have 3 files after adding new one");
+    }
+
+    #[test]
+    fn test_process_batch_total_tokens_consistent() {
+        let (tmp, index) = make_batch_test_setup();
+
+        // Modify file a
+        let file_a = tmp.path().join("a.cs");
+        std::fs::write(&file_a, "class X { }").unwrap();
+
+        let mut dirty = HashSet::new();
+        dirty.insert(file_a);
+        let mut removed = HashSet::new();
+
+        process_batch(&index, &None, &mut dirty, &mut removed);
+
+        let idx = index.read().unwrap();
+        // Verify total_tokens == sum of file_token_counts
+        let sum: u64 = idx.file_token_counts.iter().map(|&c| c as u64).sum();
+        assert_eq!(idx.total_tokens, sum,
+            "total_tokens ({}) should equal sum of file_token_counts ({})", idx.total_tokens, sum);
     }
 }

@@ -313,13 +313,6 @@ fn remap_index_values<K: Eq + Hash>(map: &mut HashMap<K, Vec<u32>>, remap: &Hash
     }
 }
 
-/// Return the number of active (non-tombstoned) definitions in the index.
-/// Active definitions are those referenced by `file_index`.
-#[allow(dead_code)]
-pub fn active_definition_count(index: &DefinitionIndex) -> usize {
-    index.file_index.values().map(|v| v.len()).sum()
-}
-
 /// Reconcile definition index with filesystem after loading from disk cache.
 ///
 /// Walks the filesystem and compares with the in-memory index to find:

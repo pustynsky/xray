@@ -209,7 +209,6 @@ pub(crate) fn build_grouped_line_content(
 /// 16KB ≈ 4K tokens — keeps LLM context budget reasonable.
 /// Can be overridden via `--max-response-kb` CLI flag.
 /// Used by tests and as the fallback when no explicit budget is configured.
-#[allow(dead_code)]
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16_384;
 
 /// Maximum number of line numbers to include per file entry.
@@ -1103,7 +1102,7 @@ mod tests {
 
     /// Helper: create a minimal HandlerContext with a given current_branch.
     fn make_ctx_with_branch(branch: Option<&str>) -> HandlerContext {
-        
+
         use crate::ContentIndex;
 
         let _index = ContentIndex {

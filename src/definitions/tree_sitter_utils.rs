@@ -48,6 +48,17 @@ pub(crate) fn find_child_by_field<'a>(node: tree_sitter::Node<'a>, field: &str) 
     node.child_by_field_name(field)
 }
 
+/// Count the number of named children in a parameter list node.
+///
+/// This is the shared core logic used by both C# and TypeScript parameter
+/// counting. Each language finds its parameter list node differently
+/// (`parameter_list` vs `formal_parameters`), but the counting logic is identical.
+pub(crate) fn count_named_children(node: tree_sitter::Node) -> u8 {
+    (0..node.child_count())
+        .filter(|&i| node.child(i).map(|c| c.is_named()).unwrap_or(false))
+        .count() as u8
+}
+
 // ─── Code Stats Config ──────────────────────────────────────────────
 
 use crate::definitions::types::CodeStats;
