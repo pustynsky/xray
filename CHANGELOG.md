@@ -8,7 +8,13 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-27
 
+### Bug Fixes
+
+- **TypeScript `enumMember` extraction broken for enums with explicit values** — Enums with string or numeric values (e.g., `enum Status { Active = "active", Inactive = 0 }`) produced 0 `enumMember` definitions. Root cause: tree-sitter-typescript emits `enum_assignment` nodes for valued members, but the parser only matched `enum_member` and `property_identifier` patterns. Fix: added `"enum_assignment"` to the match arm in `walk_typescript_node_collecting()`. Simple enums without values (`enum Foo { A, B, C }`) were not affected (they use `property_identifier` nodes). 3 new regression tests (string values, numeric values, mixed members). Discovered via large-scale TypeScript E2E testing (449K definitions, 0 `enumMember` results for `parent:"FilteringState"`).
+
 ### Features
+
+- **Hint when `kind:"property"` returns 0 results for TypeScript** — When `search_definitions` with `kind:"property"` returns 0 results and the index contains `field` definitions, the response now includes a `hint` in the summary: "In TypeScript, class members are indexed as kind='field', while only interface property signatures use kind='property'. Try kind='field' instead." Also updated the `kind` parameter documentation in `search_help` to clarify the property vs field distinction. 2 new unit tests.
 
 - **Rust parser included in default build** — `lang-rust` feature is now part of the default feature set (`lang-csharp`, `lang-typescript`, `lang-sql`, `lang-rust`). All 4 language parsers are compiled and available out of the box. No more `--features lang-rust` needed for Rust support.
 

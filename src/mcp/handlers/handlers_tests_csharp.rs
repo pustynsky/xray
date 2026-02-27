@@ -2717,3 +2717,261 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
         "Callers of ServiceB.Execute() SHOULD include Consumer.DoWork() (which calls via IServiceB). Got tree: {}",
         serde_json::to_string_pretty(&tree_b).unwrap());
 }
+// ─── Tests inspired by PowerBIClients test results (2026-02-27) ──────
+// These tests fill gaps identified by comparing PowerBIClients test results
+// against our existing test coverage.
+
+
+// ─── Tests inspired by PowerBIClients test results (2026-02-27) ──────
+// These tests fill gaps identified by comparing PowerBIClients test results
+// against our existing test coverage.
+
+#[test]
+fn test_search_definitions_comma_separated_name_filter() {
+    // PowerBIClients Test 1.5: Comma-separated name OR lookup.
+    // name="ClassA,ClassB,ClassC" should return results from all matching names.
+    let ctx = make_ctx_with_defs();
+
+    // Search for multiple names at once: ResilientClient,QueryService,ProxyClient
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "ResilientClient,QueryService,ProxyClient",
+        "kind": "class"
+    }));
+    assert!(!result.is_error, "Comma-separated name filter should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should find all 3 classes
+    assert_eq!(defs.len(), 3,
+        "Expected 3 classes for comma-separated name filter, got {}: {:?}",
+        defs.len(), defs.iter().map(|d| d["name"].as_str().unwrap_or("?")).collect::<Vec<_>>());
+
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"ResilientClient"), "Should contain ResilientClient");
+    assert!(names.contains(&"QueryService"), "Should contain QueryService");
+    assert!(names.contains(&"ProxyClient"), "Should contain ProxyClient");
+
+    // Verify termBreakdown is present in summary
+    let summary = &output["summary"];
+    assert!(summary["termBreakdown"].is_object(),
+        "Summary should contain termBreakdown for comma-separated name queries");
+}
+
+#[test]
+fn test_search_definitions_comma_separated_name_partial_match() {
+    // PowerBIClients Test 1.5 variant: some terms match, some don't.
+    let ctx = make_ctx_with_defs();
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "ResilientClient,NonExistentClass123,QueryService",
+        "kind": "class"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should find 2 classes (NonExistentClass123 doesn't exist)
+    assert_eq!(defs.len(), 2,
+        "Expected 2 classes (NonExistentClass123 shouldn't match), got {}", defs.len());
+    let names: Vec<&str> = defs.iter().filter_map(|d| d["name"].as_str()).collect();
+    assert!(names.contains(&"ResilientClient"));
+    assert!(names.contains(&"QueryService"));
+}
+
+#[test]
+fn test_search_definitions_case_insensitive_name() {
+    // PowerBIClients Test 42.4: Wrong casing (lowercase input).
+    // name="resilientclient" should find "ResilientClient" (case-insensitive).
+    let ctx = make_ctx_with_defs();
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "resilientclient",
+        "kind": "class"
+    }));
+    assert!(!result.is_error, "Case-insensitive name search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    assert_eq!(defs.len(), 1, "Expected 1 class for case-insensitive search, got {}", defs.len());
+    assert_eq!(defs[0]["name"], "ResilientClient",
+        "Lowercase 'resilientclient' should match PascalCase 'ResilientClient'");
+}
+
+#[test]
+fn test_search_definitions_case_insensitive_name_mixed() {
+    // Variant: mixed case input like "QUERYSERVICE" should find "QueryService"
+    let ctx = make_ctx_with_defs();
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "QUERYSERVICE",
+        "kind": "class"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    assert_eq!(defs.len(), 1, "Expected 1 class for UPPERCASE search, got {}", defs.len());
+    assert_eq!(defs[0]["name"], "QueryService");
+}
+
+#[test]
+fn test_contains_line_outside_any_definition() {
+    // PowerBIClients Test 3.3: containsLine on a line that's inside the file
+    // but outside any class/method definition (e.g., import line).
+    // ResilientClient class spans 1-300, ExecuteQueryAsync spans 240-260.
+    // Line 301 is past the end of the class — outside any definition.
+    let ctx = make_ctx_with_defs();
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "ResilientClient",
+        "containsLine": 301
+    }));
+    assert!(!result.is_error, "containsLine=301 should not error");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert!(defs.is_empty(),
+        "Line 301 (past end of class) should return 0 results, got {}", defs.len());
+}
+
+#[test]
+fn test_contains_line_inside_class_but_outside_method() {
+    // Line 270 is inside ResilientClient (1-300) but outside ExecuteQueryAsync (240-260).
+    // Should return only the class, not a method.
+    let ctx = make_ctx_with_defs();
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "ResilientClient",
+        "containsLine": 270
+    }));
+    assert!(!result.is_error, "containsLine=270 should not error");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+
+    assert!(!defs.is_empty(), "Line 270 should be inside ResilientClient class");
+    // Should find the class but NOT a method
+    let class_defs: Vec<&Value> = defs.iter().filter(|d| d["kind"] == "class").collect();
+    let method_defs: Vec<&Value> = defs.iter().filter(|d| d["kind"] == "method").collect();
+    assert_eq!(class_defs.len(), 1, "Should find exactly 1 containing class");
+    assert_eq!(class_defs[0]["name"], "ResilientClient");
+    assert!(method_defs.is_empty(),
+        "Line 270 is between methods, should not find any method. Got: {:?}",
+        method_defs.iter().map(|d| d["name"].as_str()).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_search_definitions_empty_intersection_all_valid_params() {
+    // PowerBIClients Test 10.1: All valid parameters but targeting non-existent
+    // combinations should return 0 results without crash.
+    let ctx = make_ctx_with_defs();
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "ExecuteQueryAsync",
+        "kind": "method",
+        "file": "NonExistentPath",
+        "parent": "NonExistentClass"
+    }));
+    assert!(!result.is_error, "Empty intersection should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 0,
+        "All valid params with non-intersecting filters should return 0 results, got {}", defs.len());
+}
+
+#[test]
+fn test_search_definitions_sort_by_cognitive_complexity() {
+    // PowerBIClients Test 8.1: sortBy="cognitiveComplexity" returns results
+    // sorted by complexity descending.
+    // We need to set up code_stats in the definition index.
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["C:\\src\\Services.cs".to_string()],
+        index: HashMap::new(), total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![200],
+        ..Default::default()
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "SimpleMethod".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 15,
+            parent: Some("DataService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "ComplexMethod".to_string(),
+            kind: DefinitionKind::Method, line_start: 20, line_end: 80,
+            parent: Some("DataService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "MediumMethod".to_string(),
+            kind: DefinitionKind::Method, line_start: 85, line_end: 120,
+            parent: Some("DataService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "DataService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 200,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\src\\Services.cs"), 0);
+
+    // Create code stats: ComplexMethod(50) > MediumMethod(15) > SimpleMethod(2)
+    let mut code_stats: HashMap<u32, CodeStats> = HashMap::new();
+    code_stats.insert(0, CodeStats { cognitive_complexity: 2, cyclomatic_complexity: 3, ..Default::default() });   // SimpleMethod
+    code_stats.insert(1, CodeStats { cognitive_complexity: 50, cyclomatic_complexity: 25, ..Default::default() });  // ComplexMethod
+    code_stats.insert(2, CodeStats { cognitive_complexity: 15, cyclomatic_complexity: 10, ..Default::default() });  // MediumMethod
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\src\\Services.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls: HashMap::new(),
+        code_stats,
+        ..Default::default()
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "sortBy": "cognitiveComplexity",
+        "kind": "method",
+        "maxResults": 3
+    }));
+    assert!(!result.is_error, "sortBy should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+
+    // Should return methods sorted by cognitive complexity descending
+    assert_eq!(defs.len(), 3, "Expected 3 methods, got {}", defs.len());
+    assert_eq!(defs[0]["name"], "ComplexMethod",
+        "First result should be ComplexMethod (cognitive=50), got {}", defs[0]["name"]);
+    assert_eq!(defs[1]["name"], "MediumMethod",
+        "Second result should be MediumMethod (cognitive=15), got {}", defs[1]["name"]);
+    assert_eq!(defs[2]["name"], "SimpleMethod",
+        "Third result should be SimpleMethod (cognitive=2), got {}", defs[2]["name"]);
+
+    // Verify code stats are included in the response (nested under "codeStats")
+    assert!(defs[0].get("codeStats").is_some(),
+        "sortBy should auto-enable includeCodeStats");
+    assert_eq!(defs[0]["codeStats"]["cognitiveComplexity"].as_u64().unwrap(), 50);
+}

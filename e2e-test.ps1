@@ -159,14 +159,17 @@ Run-Test "T54 grep-nonexistent-term" "$Binary grep ZZZNonExistentXYZ123 -d $Test
 # T65: fast with invalid regex should return error (exit 1)
 Run-Test "T65 fast-invalid-regex"    "$Binary fast `"[invalid`" -d $TestDir --regex" -ExpectedExit 1
 
-# T76: fast with empty pattern
-Run-Test "T76 fast-empty-pattern"    "$Binary fast `"`" -d $TestDir -e $TestExt" -ExpectedExit 2
+# T76: fast with empty pattern should return error (exit 1)
+Run-Test "T76 fast-empty-pattern"    "$Binary fast `"`" -d $TestDir -e $TestExt" -ExpectedExit 1
 
 # T80: grep with non-existent directory should return error (no index found)
 Run-Test "T80 grep-nonexistent-dir"  "$Binary grep fn -d C:\nonexistent\fakepath123 -e $TestExt" -ExpectedExit 1
 
 # T82: grep with --max-results 0 should work (0 means unlimited)
 Run-Test "T82 grep-max-results-zero" "$Binary grep fn -d $TestDir -e $TestExt --max-results 0"
+
+# T83: grep with Unicode terms should not crash (exit 0, 0 results)
+Run-Test "T83 grep-unicode-no-crash" "$Binary grep `"数据库连接`" -d $TestDir -e $TestExt"
 
 # T-SHUTDOWN: save-on-shutdown
 Write-Host -NoNewline "  T-SHUTDOWN save-on-shutdown ... "
@@ -529,6 +532,29 @@ $testBlocks += , {
         if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
         return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
     }
+}
+
+# T-SEARCH-INFO-MCP: verify search_info returns index metadata via MCP
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SEARCH-INFO-MCP search-info-mcp-response"
+    try {
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_info","arguments":{}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no JSON-RPC response)" } }
+        $errors = @()
+        if ($jsonLine -notmatch 'contentIndex') { $errors += "missing contentIndex" }
+        if ($jsonLine -notmatch 'definitionIndex') { $errors += "missing definitionIndex" }
+        if ($jsonLine -notmatch 'inMemory') { $errors += "missing inMemory field" }
+        if ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK" }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
 # T-SERVE-HELP-TOOLS: verify serve --help lists key tools
