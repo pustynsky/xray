@@ -22,6 +22,7 @@ use crate::git::cache::GitHistoryCache;
 use crate::mcp::protocol::ToolCallResult;
 
 use super::HandlerContext;
+use super::utils::json_to_string;
 
 /// Return tool definitions for all git history tools.
 pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition> {
@@ -306,7 +307,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                     }
                 }
 
-                return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+                return ToolCallResult::success(json_to_string(&output));
             }
         }
     }
@@ -360,7 +361,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                 output["warning"] = json!(format!("File not found in git: {}. Check the path.", file));
             }
 
-            ToolCallResult::success(serde_json::to_string(&output).unwrap())
+            ToolCallResult::success(json_to_string(&output))
         }
         Err(e) => ToolCallResult::error(e),
     }
@@ -438,7 +439,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     }
                 }
 
-                return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+                return ToolCallResult::success(json_to_string(&output));
             }
         }
     }
@@ -483,7 +484,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 output["warning"] = json!(format!("File not found in git: {}. Check the path.", query_path));
             }
 
-            ToolCallResult::success(serde_json::to_string(&output).unwrap())
+            ToolCallResult::success(json_to_string(&output))
         }
         Err(e) => ToolCallResult::error(e),
     }
@@ -553,7 +554,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     }
                 }
 
-                return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+                return ToolCallResult::success(json_to_string(&output));
             }
         }
     }
@@ -621,7 +622,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 output["warning"] = json!(format!("File not found in git: {}. Check the path.", activity_path));
             }
 
-            ToolCallResult::success(serde_json::to_string(&output).unwrap())
+            ToolCallResult::success(json_to_string(&output))
         }
         Err(e) => ToolCallResult::error(e),
     }
@@ -697,7 +698,7 @@ fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 }
             });
 
-            ToolCallResult::success(serde_json::to_string(&output).unwrap())
+            ToolCallResult::success(json_to_string(&output))
         }
         Err(e) => ToolCallResult::error(e),
     }
@@ -762,7 +763,7 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         }
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }
 
 // ─── Branch status helper functions ─────────────────────────────────

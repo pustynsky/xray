@@ -87,12 +87,11 @@ pub fn run_server(ctx: HandlerContext) {
                 };
 
                 // Notifications have no id — don't send a response
-                if request.id.is_none() {
+                let Some(id) = request.id else {
                     debug!(method = %request.method, "Received notification");
                     continue;
-                }
+                };
 
-                let id = request.id.unwrap();
                 let response = handle_request(&ctx, &request.method, &request.params, id.clone());
 
                 let resp_str = match serde_json::to_string(&response) {

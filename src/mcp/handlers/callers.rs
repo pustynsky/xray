@@ -13,7 +13,7 @@ use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionK
 use search_index::generate_trigrams;
 
 use super::HandlerContext;
-use super::utils::{inject_branch_warning, sorted_intersect};
+use super::utils::{inject_branch_warning, json_to_string, sorted_intersect};
 
 /// Built-in JavaScript/TypeScript types whose methods should never be resolved
 /// to user-defined classes. When a call site has one of these as its receiver type,
@@ -185,7 +185,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
-        return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+        return ToolCallResult::success(json_to_string(&output));
     }
     // ─── End Angular template tree ───────────────────────────────────
 
@@ -242,7 +242,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
-        ToolCallResult::success(serde_json::to_string(&output).unwrap())
+        ToolCallResult::success(json_to_string(&output))
     } else {
         let tree = build_callee_tree(
             &method_name,
@@ -287,7 +287,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
-        ToolCallResult::success(serde_json::to_string(&output).unwrap())
+        ToolCallResult::success(json_to_string(&output))
     }
 }
 

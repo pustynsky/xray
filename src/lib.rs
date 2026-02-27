@@ -94,9 +94,9 @@ pub fn sanitize_for_filename(name: &str) -> String {
         sanitized
     };
 
-    // Truncate to max length
+    // Truncate to max length (char-safe to avoid panicking on multi-byte chars)
     if sanitized.len() > MAX_PREFIX_LEN {
-        sanitized[..MAX_PREFIX_LEN].to_string()
+        sanitized.chars().take(MAX_PREFIX_LEN).collect::<String>()
     } else {
         sanitized
     }

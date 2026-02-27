@@ -9,7 +9,7 @@ use tracing::info;
 use crate::mcp::protocol::ToolCallResult;
 
 use super::HandlerContext;
-use super::utils::{best_match_tier, inject_branch_warning};
+use super::utils::{best_match_tier, inject_branch_warning, json_to_string};
 
 pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
@@ -150,5 +150,5 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
         "summary": summary
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }

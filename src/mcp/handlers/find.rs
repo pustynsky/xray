@@ -7,7 +7,7 @@ use serde_json::{json, Value};
 
 use crate::mcp::protocol::ToolCallResult;
 
-use super::utils::validate_search_dir;
+use super::utils::{json_to_string, validate_search_dir};
 use super::HandlerContext;
 
 pub(crate) fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -162,5 +162,5 @@ pub(crate) fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCall
         }
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }

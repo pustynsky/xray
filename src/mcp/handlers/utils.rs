@@ -10,6 +10,15 @@ use crate::clean_path;
 
 use super::HandlerContext;
 
+/// Serialize a JSON Value to a string, returning a fallback error JSON
+/// if serialization fails (e.g., due to NaN/Infinity float values).
+/// This prevents panics in MCP handlers from crashing the long-lived server process.
+pub(crate) fn json_to_string(v: &serde_json::Value) -> String {
+    serde_json::to_string(v).unwrap_or_else(|e| {
+        format!(r#"{{"error":"serialization failed: {}"}}"#, e)
+    })
+}
+
 // ─── Branch warning ─────────────────────────────────────────────────
 
 /// Returns a warning message if the current branch is not `main` or `master`.
@@ -422,7 +431,7 @@ pub(crate) fn truncate_response_if_needed(result: ToolCallResult, max_bytes: usi
 
     if let Ok(output) = serde_json::from_str::<Value>(text) {
         let truncated = truncate_large_response(output, max_bytes);
-        ToolCallResult::success(serde_json::to_string(&truncated).unwrap())
+        ToolCallResult::success(json_to_string(&truncated))
     } else {
         result
     }
@@ -459,14 +468,14 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
         output = truncate_large_response(output, max_bytes);
 
         // Measure response size after truncation
-        let json_str = serde_json::to_string(&output).unwrap();
+        let json_str = json_to_string(&output);
         let bytes = json_str.len();
         if let Some(summary) = output.get_mut("summary") {
             summary["responseBytes"] = json!(bytes);
             summary["estimatedTokens"] = json!(bytes / 4);
         }
 
-        ToolCallResult::success(serde_json::to_string(&output).unwrap())
+        ToolCallResult::success(json_to_string(&output))
     } else {
         // Not valid JSON or no summary -- return as-is
         result
@@ -586,6 +595,22 @@ pub(crate) fn best_match_tier(name: &str, terms: &[String]) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_json_to_string_happy_path() {
+        let v = json!({"key": "value", "num": 42});
+        let result = json_to_string(&v);
+        assert!(result.contains("key"));
+        assert!(result.contains("42"));
+    }
+
+    #[test]
+    fn test_json_to_string_returns_valid_json() {
+        let v = json!({"ok": true});
+        let result = json_to_string(&v);
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed["ok"], true);
+    }
 
     #[test]
     fn test_sorted_intersect_empty_left() {

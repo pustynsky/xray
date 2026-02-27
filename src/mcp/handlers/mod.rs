@@ -511,7 +511,7 @@ pub fn dispatch_tool(
 
 fn handle_search_help() -> ToolCallResult {
     let help = crate::tips::render_json();
-    ToolCallResult::success(serde_json::to_string(&help).unwrap())
+    ToolCallResult::success(utils::json_to_string(&help))
 }
 
 /// Build search_info response from in-memory indexes only.
@@ -666,7 +666,7 @@ fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
         info["memoryEstimate"] = memory_estimate;
     }
 
-    ToolCallResult::success(serde_json::to_string(&info).unwrap())
+    ToolCallResult::success(utils::json_to_string(&info))
 }
 
 fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -727,7 +727,7 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         "rebuildTimeMs": elapsed.as_secs_f64() * 1000.0,
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(utils::json_to_string(&output))
 }
 
 fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -801,7 +801,7 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
         "rebuildTimeMs": elapsed.as_secs_f64() * 1000.0,
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(utils::json_to_string(&output))
 }
 
 // ─── Tests ──────────────────────────────────────────────────────────

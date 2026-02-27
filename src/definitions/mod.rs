@@ -55,6 +55,7 @@ pub fn definition_extensions() -> &'static [&'static str] {
 
 // ─── Index Build ─────────────────────────────────────────────────────
 
+#[must_use]
 pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let dir = std::fs::canonicalize(&args.dir)
         .unwrap_or_else(|_| PathBuf::from(&args.dir));

@@ -11,8 +11,8 @@ use crate::index::build_trigram_index;
 use search_index::generate_trigrams;
 
 use super::utils::{
-    build_line_content_from_matches, inject_branch_warning, is_under_dir, matches_ext_filter,
-    sorted_intersect, validate_search_dir,
+    build_line_content_from_matches, inject_branch_warning, is_under_dir, json_to_string,
+    matches_ext_filter, sorted_intersect, validate_search_dir,
 };
 use super::HandlerContext;
 
@@ -306,7 +306,7 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         let output = json!({
             "summary": summary
         });
-        return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+        return ToolCallResult::success(json_to_string(&output));
     }
 
     // Build JSON output
@@ -349,7 +349,7 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         "summary": summary
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }
 
 /// Substring search using the trigram index.
@@ -405,7 +405,7 @@ fn handle_substring_search(
                             .to_string(),
                     );
                 }
-                *text = serde_json::to_string(&output).unwrap();
+                *text = json_to_string(&output);
             }
         }
         return result;
@@ -825,7 +825,7 @@ fn handle_phrase_search(
         let output = json!({
             "summary": summary
         });
-        return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+        return ToolCallResult::success(json_to_string(&output));
     }
 
     let files_json: Vec<Value> = results.iter().map(|r| {
@@ -867,7 +867,7 @@ fn handle_phrase_search(
         "summary": summary
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }
 
 /// Core phrase-matching logic: finds files containing the given phrase.
@@ -1050,7 +1050,7 @@ fn handle_multi_phrase_search(
         }
         inject_branch_warning(&mut summary, ctx);
         let output = json!({ "summary": summary });
-        return ToolCallResult::success(serde_json::to_string(&output).unwrap());
+        return ToolCallResult::success(json_to_string(&output));
     }
 
     let files_json: Vec<Value> = results.iter().map(|r| {
@@ -1089,7 +1089,7 @@ fn handle_multi_phrase_search(
         "summary": summary
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }
 
 /// Merge phrase results with OR semantics: union of all files.

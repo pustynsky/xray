@@ -14,6 +14,36 @@ use search_index::{clean_path, extract_semantic_prefix, generate_trigrams, read_
 
 use crate::{ContentIndexArgs, IndexArgs};
 
+// ─── Windows FFI bindings (shared by log_memory + get_process_memory_info) ───
+
+#[cfg(target_os = "windows")]
+mod win_ffi {
+    /// Windows process memory counters, matching PROCESS_MEMORY_COUNTERS from psapi.h.
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    pub(super) struct ProcessMemoryCounters {
+        pub cb: u32,
+        pub PageFaultCount: u32,
+        pub PeakWorkingSetSize: usize,
+        pub WorkingSetSize: usize,
+        pub QuotaPeakPagedPoolUsage: usize,
+        pub QuotaPagedPoolUsage: usize,
+        pub QuotaPeakNonPagedPoolUsage: usize,
+        pub QuotaNonPagedPoolUsage: usize,
+        pub PagefileUsage: usize,
+        pub PeakPagefileUsage: usize,
+    }
+
+    unsafe extern "system" {
+        pub(super) fn GetCurrentProcess() -> isize;
+        pub(super) fn K32GetProcessMemoryInfo(
+            process: isize,
+            ppsmemCounters: *mut ProcessMemoryCounters,
+            cb: u32,
+        ) -> i32;
+    }
+}
+
 // ─── Debug logging (memory diagnostics + MCP request/response traces) ────
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -140,33 +170,8 @@ pub fn log_memory(label: &str) {
         return;
     }
 
-    // Windows API: K32GetProcessMemoryInfo
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct ProcessMemoryCounters {
-        cb: u32,
-        PageFaultCount: u32,
-        PeakWorkingSetSize: usize,
-        WorkingSetSize: usize,
-        QuotaPeakPagedPoolUsage: usize,
-        QuotaPagedPoolUsage: usize,
-        QuotaPeakNonPagedPoolUsage: usize,
-        QuotaNonPagedPoolUsage: usize,
-        PagefileUsage: usize,
-        PeakPagefileUsage: usize,
-    }
-
-    unsafe extern "system" {
-        fn GetCurrentProcess() -> isize;
-        fn K32GetProcessMemoryInfo(
-            process: isize,
-            ppsmemCounters: *mut ProcessMemoryCounters,
-            cb: u32,
-        ) -> i32;
-    }
-
-    let mut pmc = ProcessMemoryCounters {
-        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+    let mut pmc = win_ffi::ProcessMemoryCounters {
+        cb: std::mem::size_of::<win_ffi::ProcessMemoryCounters>() as u32,
         PageFaultCount: 0,
         PeakWorkingSetSize: 0,
         WorkingSetSize: 0,
@@ -178,8 +183,12 @@ pub fn log_memory(label: &str) {
         PeakPagefileUsage: 0,
     };
 
+    // SAFETY: GetCurrentProcess() returns a pseudo-handle (-1) that is always valid
+    // and does not need to be closed. K32GetProcessMemoryInfo is safe to call with
+    // a correctly-laid-out #[repr(C)] ProcessMemoryCounters struct initialized to zero,
+    // with cb set to the struct size. The function only writes within the struct bounds.
     let ok = unsafe {
-        K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb)
+        win_ffi::K32GetProcessMemoryInfo(win_ffi::GetCurrentProcess(), &mut pmc, pmc.cb)
     };
 
     if ok == 0 {
@@ -218,32 +227,8 @@ pub fn log_memory(_label: &str) {
 /// On non-Windows, returns an empty object.
 #[cfg(target_os = "windows")]
 pub fn get_process_memory_info() -> serde_json::Value {
-    #[repr(C)]
-    #[allow(non_snake_case)]
-    struct ProcessMemoryCounters {
-        cb: u32,
-        PageFaultCount: u32,
-        PeakWorkingSetSize: usize,
-        WorkingSetSize: usize,
-        QuotaPeakPagedPoolUsage: usize,
-        QuotaPagedPoolUsage: usize,
-        QuotaPeakNonPagedPoolUsage: usize,
-        QuotaNonPagedPoolUsage: usize,
-        PagefileUsage: usize,
-        PeakPagefileUsage: usize,
-    }
-
-    unsafe extern "system" {
-        fn GetCurrentProcess() -> isize;
-        fn K32GetProcessMemoryInfo(
-            process: isize,
-            ppsmemCounters: *mut ProcessMemoryCounters,
-            cb: u32,
-        ) -> i32;
-    }
-
-    let mut pmc = ProcessMemoryCounters {
-        cb: std::mem::size_of::<ProcessMemoryCounters>() as u32,
+    let mut pmc = win_ffi::ProcessMemoryCounters {
+        cb: std::mem::size_of::<win_ffi::ProcessMemoryCounters>() as u32,
         PageFaultCount: 0,
         PeakWorkingSetSize: 0,
         WorkingSetSize: 0,
@@ -255,8 +240,12 @@ pub fn get_process_memory_info() -> serde_json::Value {
         PeakPagefileUsage: 0,
     };
 
+    // SAFETY: GetCurrentProcess() returns a pseudo-handle (-1) that is always valid
+    // and does not need to be closed. K32GetProcessMemoryInfo is safe to call with
+    // a correctly-laid-out #[repr(C)] ProcessMemoryCounters struct initialized to zero,
+    // with cb set to the struct size. The function only writes within the struct bounds.
     let ok = unsafe {
-        K32GetProcessMemoryInfo(GetCurrentProcess(), &mut pmc, pmc.cb)
+        win_ffi::K32GetProcessMemoryInfo(win_ffi::GetCurrentProcess(), &mut pmc, pmc.cb)
     };
 
     if ok == 0 {
@@ -284,6 +273,10 @@ pub fn force_mimalloc_collect() {
     unsafe extern "C" {
         fn mi_collect(force: bool);
     }
+    // SAFETY: mi_collect(true) is an idempotent operation that triggers garbage collection
+    // in the mimalloc allocator. It is safe to call at any time — mimalloc guarantees
+    // thread-safety for mi_collect. Our global allocator is mimalloc (#[global_allocator]),
+    // so the allocator is initialized before any code runs.
     unsafe { mi_collect(true); }
 }
 
@@ -934,6 +927,7 @@ pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize
 
 // ─── Index building ──────────────────────────────────────────────────
 
+#[must_use]
 pub fn build_index(args: &IndexArgs) -> FileIndex {
     let root = fs::canonicalize(&args.dir).unwrap_or_else(|_| PathBuf::from(&args.dir));
     let root_str = clean_path(&root.to_string_lossy());
@@ -1016,6 +1010,7 @@ pub fn build_index(args: &IndexArgs) -> FileIndex {
 
 // ─── Content index building ──────────────────────────────────────────
 
+#[must_use]
 pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
     let root = fs::canonicalize(&args.dir).unwrap_or_else(|_| PathBuf::from(&args.dir));
     let root_str = clean_path(&root.to_string_lossy());

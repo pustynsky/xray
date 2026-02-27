@@ -17,7 +17,7 @@ use serde_json::{json, Value};
 use crate::mcp::protocol::ToolCallResult;
 use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind, CodeStats};
 
-use super::utils::{inject_body_into_obj, inject_branch_warning, best_match_tier};
+use super::utils::{inject_body_into_obj, inject_branch_warning, best_match_tier, json_to_string};
 use super::HandlerContext;
 
 // ─── Parsed arguments struct ─────────────────────────────────────────
@@ -296,7 +296,7 @@ fn handle_audit_mode(
         output["crossValidation"] = cross;
     }
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }
 
 // ─── ContainsLine mode ───────────────────────────────────────────────
@@ -378,7 +378,7 @@ fn handle_contains_line_mode(
         },
         "summary": summary,
     });
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }
 
 // ─── Candidate collection (index-based filtering) ────────────────────
@@ -757,7 +757,7 @@ fn format_search_output(
         "summary": summary,
     });
 
-    ToolCallResult::success(serde_json::to_string(&output).unwrap())
+    ToolCallResult::success(json_to_string(&output))
 }
 
 /// Format a single definition entry as a JSON object.
