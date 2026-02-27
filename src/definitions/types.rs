@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 // ─── Definition Kind ─────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum DefinitionKind {
     // C# kinds
     Class,

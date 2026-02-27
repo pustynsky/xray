@@ -64,7 +64,6 @@ pub fn cmd_serve(args: ServeArgs) {
         file_token_counts: Vec::new(),
         trigram: TrigramIndex::default(),
         trigram_dirty: false,
-        forward: None,  // forward index eliminated — saves ~1.5 GB RAM
         path_to_id: if args.watch { Some(HashMap::new()) } else { None },
         read_errors: 0,
         lossy_file_count: 0,

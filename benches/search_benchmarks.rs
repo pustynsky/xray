@@ -81,7 +81,6 @@ fn build_synthetic_index(num_files: usize, tokens_per_file: usize) -> ContentInd
         file_token_counts,
         trigram: TrigramIndex::default(),
         trigram_dirty: false,
-        forward: None,
         path_to_id: None,
     }
 }

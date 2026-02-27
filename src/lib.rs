@@ -319,12 +319,6 @@ pub struct ContentIndex {
     /// Whether the trigram index needs rebuilding before next substring search
     #[serde(default)]
     pub trigram_dirty: bool,
-    /// Forward index: DEPRECATED — always None. Kept for backward-compatible deserialization
-    /// of older index files. Previously stored file_id → Vec<token> for watch mode,
-    /// but consumed ~1.5 GB of RAM due to string duplication. Replaced by brute-force
-    /// scan of the inverted index on file change (~50-100ms, acceptable for watcher).
-    #[serde(default)]
-    pub forward: Option<HashMap<u32, Vec<String>>>,
     /// Path → file_id lookup (populated with --watch)
     #[serde(default)]
     pub path_to_id: Option<HashMap<PathBuf, u32>>,
@@ -410,7 +404,6 @@ impl Default for ContentIndex {
             file_token_counts: Vec::new(),
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
-            forward: None,
             path_to_id: None,
             read_errors: 0,
             lossy_file_count: 0,
@@ -560,7 +553,6 @@ mod lib_tests {
             file_token_counts: Vec::new(),
             trigram: TrigramIndex::default(),
             trigram_dirty: false,
-            forward: None,
             path_to_id: None,
             read_errors: 0,
             lossy_file_count: 0,
@@ -580,7 +572,6 @@ mod lib_tests {
         assert!(d.extensions.is_empty());
         assert!(d.file_token_counts.is_empty());
         assert!(!d.trigram_dirty);
-        assert!(d.forward.is_none());
         assert!(d.path_to_id.is_none());
         assert_eq!(d.read_errors, 0);
         assert_eq!(d.lossy_file_count, 0);

@@ -1196,7 +1196,6 @@ pub fn build_content_index(args: &ContentIndexArgs) -> ContentIndex {
         file_token_counts,
         trigram,
         trigram_dirty: false,
-        forward: None,
         path_to_id: None,
         read_errors,
         lossy_file_count,

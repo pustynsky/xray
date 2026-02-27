@@ -276,8 +276,6 @@ pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
         path_to_id.insert(PathBuf::from(path), i as u32);
     }
 
-    // Drop any legacy forward index loaded from disk
-    index.forward = None;
     index.path_to_id = Some(path_to_id);
     index
 }
@@ -638,12 +636,10 @@ mod tests {
     }
 
     #[test]
-    fn test_build_watch_index_no_forward_but_has_path_to_id() {
+    fn test_build_watch_index_has_path_to_id() {
         let index = make_test_index();
         let watch_index = build_watch_index_from(index);
 
-        // Forward index is no longer built (saves ~1.5 GB RAM)
-        assert!(watch_index.forward.is_none());
         assert!(watch_index.path_to_id.is_some());
     }
 
@@ -822,30 +818,9 @@ mod tests {
     }
 
     #[test]
-    fn test_build_watch_drops_legacy_forward_index() {
-        let mut index = make_test_index();
-        // Simulate a legacy index loaded from disk with a forward index populated
-        index.forward = Some({
-            let mut m = HashMap::new();
-            m.insert(0u32, vec!["httpclient".to_string(), "ilogger".to_string()]);
-            m.insert(1u32, vec!["ilogger".to_string()]);
-            m
-        });
-
-        let watch_index = build_watch_index_from(index);
-
-        // Forward index should be dropped (saves ~1.5 GB RAM)
-        assert!(watch_index.forward.is_none(), "forward index should be None after build_watch_index_from");
-        // path_to_id should still be populated
-        assert!(watch_index.path_to_id.is_some());
-        assert_eq!(watch_index.path_to_id.as_ref().unwrap().len(), 2);
-    }
-
-    #[test]
     fn test_remove_file_without_forward_index() {
-        // Verify that remove works via brute-force scan (no forward index)
+        // Verify that remove works via brute-force scan of inverted index
         let mut index = make_test_index();
-        index.forward = None; // explicitly no forward index
         index.path_to_id = Some({
             let mut m = HashMap::new();
             m.insert(PathBuf::from("file0.cs"), 0u32);
@@ -1086,18 +1061,13 @@ mod tests {
         // can be saved to disk and loaded back with all data intact.
         // This is critical for save-on-shutdown: if path_to_id doesn't serialize
         // properly, the loaded index would lose incremental updates.
-        //
-        // Note: forward index was intentionally dropped in build_watch_index_from
-        // (memory optimization commit b43473c) to save ~1.5 GB RAM.
-        // Only path_to_id is preserved for watch-mode operation.
         let tmp = tempfile::tempdir().unwrap();
 
-        // Build a watch-mode index with path_to_id populated (forward is None)
+        // Build a watch-mode index with path_to_id populated
         let index = make_test_index();
         let watch_index = build_watch_index_from(index);
 
         // Verify watch fields before save
-        assert!(watch_index.forward.is_none(), "forward should be None (dropped to save RAM)");
         assert!(watch_index.path_to_id.is_some(), "path_to_id should be populated");
         let orig_files = watch_index.files.len();
         let orig_tokens = watch_index.index.len();
@@ -1115,9 +1085,6 @@ mod tests {
         assert_eq!(loaded.files.len(), orig_files, "files count mismatch");
         assert_eq!(loaded.index.len(), orig_tokens, "token count mismatch");
         assert_eq!(loaded.total_tokens, watch_index.total_tokens, "total_tokens mismatch");
-
-        // forward should remain None after roundtrip (not used since memory optimization)
-        assert!(loaded.forward.is_none(), "forward should remain None after roundtrip");
 
         // path_to_id should survive serialization
         assert!(loaded.path_to_id.is_some(), "path_to_id should survive roundtrip");

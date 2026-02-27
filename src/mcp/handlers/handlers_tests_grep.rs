@@ -1009,7 +1009,7 @@ fn test_read_errors_in_substring_summary() {
         root: ".".to_string(), created_at: 0, max_age_secs: 3600,
         files: vec!["C:\\test\\Program.cs".to_string()], index: idx,
         total_tokens: 1, extensions: vec!["cs".to_string()], file_token_counts: vec![1],
-        trigram, trigram_dirty: false, forward: None, path_to_id: None,
+        trigram, trigram_dirty: false, path_to_id: None,
         read_errors: 3, lossy_file_count: 2,
     };
     let ctx = HandlerContext {

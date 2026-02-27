@@ -407,7 +407,7 @@ fn make_ranking_defs_ctx() -> HandlerContext {
         index: HashMap::new(), total_tokens: 100,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50, 30, 20],
-        trigram: TrigramIndex::default(), trigram_dirty: false, forward: None, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        trigram: TrigramIndex::default(), trigram_dirty: false, path_to_id: None, read_errors: 0, lossy_file_count: 0,
     };
 
     let definitions = vec![
