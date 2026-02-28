@@ -144,6 +144,55 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `excludeFile`        | File path substrings to exclude                                                                                                                     |
 | `resolveInterfaces`  | Auto-resolve interface → implementation (default: true)                                                                                             |
 | `ext`                | File extension filter (default: server's `--ext`)                                                                                                   |
+| `includeBody`        | Include source code body of each method in the call tree (default: false). Also adds `rootMethod` with the target method's body                     |
+| `maxBodyLines`       | Max source lines per method when `includeBody=true` (default: 30, 0=unlimited)                                                                      |
+| `maxTotalBodyLines`  | Max total body lines across all methods in the tree (default: 300, 0=unlimited)                                                                      |
+| `impactAnalysis`     | When `true` with `direction=up`, identifies test methods covering the target. Returns `testsCovering` array with full file path, `depth`, and `callChain`. Test nodes marked `isTest: true`. Recursion stops at tests. Tests detected via C# `[Test]`/`[Fact]`/`[Theory]`/`[TestMethod]`, Rust `#[test]`, TS `*.spec.ts`/`*.test.ts` files. (default: false) |
+
+### Impact Analysis
+
+Find which tests cover a method — one call replaces manual multi-step investigation.
+
+```json
+// Request
+{
+  "method": "SaveOrder",
+  "class": "OrderService",
+  "direction": "up",
+  "depth": 5,
+  "impactAnalysis": true
+}
+
+// Response
+{
+  "callTree": [
+    {
+      "method": "ProcessCheckout",
+      "class": "CheckoutController",
+      "callers": [
+        {
+          "method": "TestCheckout_SavesOrder",
+          "class": "CheckoutTests",
+          "file": "CheckoutTests.cs",
+          "isTest": true
+        }
+      ]
+    }
+  ],
+  "testsCovering": [
+    {
+      "method": "TestCheckout_SavesOrder",
+      "class": "CheckoutTests",
+      "file": "test/CheckoutTests.cs",
+      "depth": 2,
+      "callChain": ["SaveOrder", "ProcessCheckout", "TestCheckout_SavesOrder"]
+    }
+  ],
+  "summary": { "totalNodes": 3, "testsFound": 1, "searchTimeMs": 0.15 }
+}
+```
+
+`callChain` shows the method-by-method path from target to test. Short chain (depth 1-2) = direct test. Long chain (depth 4+) = transitive via helpers — may be less relevant.
 
 ### Limitations
 

@@ -15,6 +15,49 @@ use search_index::generate_trigrams;
 use super::HandlerContext;
 use super::utils::{inject_body_into_obj, inject_branch_warning, json_to_string, sorted_intersect};
 
+/// Test attribute markers (lowercase) used to identify test methods.
+/// Covers: NUnit [Test], xUnit [Fact]/[Theory], MSTest [TestMethod],
+/// Rust #[test]/#[tokio::test], and similar frameworks.
+const TEST_ATTRIBUTE_MARKERS: &[&str] = &[
+    "test",         // NUnit [Test], Rust #[test], #[tokio::test]
+    "fact",         // xUnit [Fact]
+    "theory",       // xUnit [Theory]
+    "testmethod",   // MSTest [TestMethod]
+];
+
+/// File name patterns (lowercase) that indicate TypeScript/JavaScript test files.
+/// Used as a heuristic since describe()/it() are call expressions, not decorators.
+const TEST_FILE_PATTERNS: &[&str] = &[
+    ".spec.ts", ".test.ts", ".spec.tsx", ".test.tsx",
+    ".spec.js", ".test.js",
+];
+
+/// Check if a definition entry represents a test method.
+/// Uses two strategies:
+/// 1. Attribute-based: checks for test framework attributes (C#, Rust)
+/// 2. File-name-based: checks for test file patterns (TypeScript/JavaScript)
+fn is_test_method(def: &DefinitionEntry, file_path: &str) -> bool {
+    // Strategy 1: check attributes (C#, Rust)
+    for attr in &def.attributes {
+        let lower = attr.to_lowercase();
+        for marker in TEST_ATTRIBUTE_MARKERS {
+            if lower.contains(marker) {
+                return true;
+            }
+        }
+    }
+
+    // Strategy 2: file name heuristic (TypeScript/JavaScript)
+    let file_lower = file_path.to_lowercase();
+    for pattern in TEST_FILE_PATTERNS {
+        if file_lower.ends_with(pattern) {
+            return true;
+        }
+    }
+
+    false
+}
+
 /// Built-in JavaScript/TypeScript types whose methods should never be resolved
 /// to user-defined classes. When a call site has one of these as its receiver type,
 /// we skip candidate matching to avoid false positives (e.g., Promise.resolve()
@@ -104,6 +147,14 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
     let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false);
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(300) as usize;
+
+    // Impact analysis parameter
+    let impact_analysis = args.get("impactAnalysis").and_then(|v| v.as_bool()).unwrap_or(false);
+    if impact_analysis && direction != "up" {
+        return ToolCallResult::error(
+            "impactAnalysis only works with direction='up'. It traces callers upward to find test methods covering the target.".to_string()
+        );
+    }
 
     let search_start = Instant::now();
 
@@ -206,6 +257,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         include_body,
         max_body_lines,
         max_total_body_lines,
+        impact_analysis,
     };
 
     // Mutable state for body injection (shared across recursive calls)
@@ -229,6 +281,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
 
     if direction == "up" {
         let mut visited: HashSet<String> = HashSet::new();
+        let mut tests_found: Vec<Value> = Vec::new();
+        let initial_chain = vec![method_name.clone()];
         let tree = build_caller_tree(
             &method_name,
             class_filter.as_deref(),
@@ -238,6 +292,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             &mut visited,
             &mut file_cache,
             &mut total_body_lines_emitted,
+            &mut tests_found,
+            &initial_chain,
         );
 
         // Dedup: remove duplicate nodes at root level (can happen with resolveInterfaces)
@@ -267,6 +323,28 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         if let Some(root) = &root_method {
             output["rootMethod"] = root.clone();
         }
+
+        // Impact analysis: add testsCovering section
+        if impact_analysis {
+            // Dedup by method+class+file
+            tests_found.sort_by(|a, b| {
+                let key = |v: &Value| format!("{}.{}.{}",
+                    v["class"].as_str().unwrap_or(""),
+                    v["method"].as_str().unwrap_or(""),
+                    v["file"].as_str().unwrap_or(""));
+                key(a).cmp(&key(b))
+            });
+            tests_found.dedup_by(|a, b| {
+                a["method"] == b["method"]
+                    && a["class"] == b["class"]
+                    && a["file"] == b["file"]
+            });
+            output["testsCovering"] = json!(tests_found);
+            summary["testsFound"] = json!(tests_found.len());
+            output["summary"] = summary;
+            output["query"]["impactAnalysis"] = json!(true);
+        }
+
         if tree.is_empty() && class_filter.is_some() {
             output["hint"] = json!(
                 "No callers found. Possible reasons: (1) calls go through extension methods or DI wrappers, (2) class filter is too narrow. Try without 'class' parameter or with the interface name."
@@ -366,6 +444,7 @@ struct CallerTreeContext<'a> {
     include_body: bool,
     max_body_lines: usize,
     max_total_body_lines: usize,
+    impact_analysis: bool,
 }
 
 /// Find the containing method for a given file_id and line number in the definition index.
@@ -460,6 +539,8 @@ fn expand_interface_callers(
     visited: &mut HashSet<String>,
     file_cache: &mut HashMap<String, Option<String>>,
     total_body_lines_emitted: &mut usize,
+    tests_found: &mut Vec<Value>,
+    call_chain: &[String],
 ) -> Vec<Value> {
     let def_idx = ctx.def_idx;
     let name_indices = match def_idx.name_index.get(method_lower) {
@@ -532,15 +613,17 @@ fn expand_interface_callers(
                                                     ..*ctx
                                                 };
                                                 let impl_callers = build_caller_tree(
-                                                    method_name,
-                                                    Some(&impl_def.name),
-                                                    max_depth,
-                                                    1, // current_depth = 1 (interface expansion counts as one level)
-                                                    &no_iface_ctx,
-                                                    visited,
-                                                    file_cache,
-                                                    total_body_lines_emitted,
-                                                );
+                                                                    method_name,
+                                                                    Some(&impl_def.name),
+                                                                    max_depth,
+                                                                    1, // current_depth = 1 (interface expansion counts as one level)
+                                                                    &no_iface_ctx,
+                                                                    visited,
+                                                                    file_cache,
+                                                                    total_body_lines_emitted,
+                                                                    tests_found,
+                                                                    call_chain,
+                                                                );
                                                 callers.extend(impl_callers);
                                             }
                                     }
@@ -938,6 +1021,8 @@ fn build_caller_tree(
     visited: &mut HashSet<String>,
     file_cache: &mut HashMap<String, Option<String>>,
     total_body_lines_emitted: &mut usize,
+    tests_found: &mut Vec<Value>,
+    call_chain: &[String],
 ) -> Vec<Value> {
     if current_depth >= max_depth {
         return Vec::new();
@@ -1025,7 +1110,60 @@ fn build_caller_tree(
 
             ctx.node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
+            // Impact analysis: check if this caller is a test method
+            if ctx.impact_analysis {
+                let caller_def = &ctx.def_idx.definitions[caller_di as usize];
+                if is_test_method(caller_def, file_path) {
+                    // Test method found — add to collector with full path, depth, callChain
+                    let mut chain = call_chain.to_vec();
+                    chain.push(caller_name.clone());
+                    let mut test_info = json!({
+                        "method": &caller_name,
+                        "line": caller_line,
+                        "file": file_path,
+                        "depth": current_depth + 1,
+                        "callChain": chain,
+                    });
+                    if let Some(ref parent) = caller_parent {
+                        test_info["class"] = json!(parent);
+                    }
+                    tests_found.push(test_info);
+
+                    let mut node = build_caller_node(
+                        &caller_name,
+                        caller_parent.as_deref(),
+                        caller_line,
+                        line,
+                        file_path,
+                        vec![], // no sub-callers — test is a leaf
+                    );
+                    node["isTest"] = json!(true);
+
+                    // Inject body if requested
+                    if ctx.include_body {
+                        let caller_line_end = ctx.def_idx.definitions.get(caller_di as usize)
+                            .map(|d| d.line_end)
+                            .unwrap_or(caller_line);
+                        inject_body_into_obj(
+                            &mut node,
+                            file_path,
+                            caller_line,
+                            caller_line_end,
+                            file_cache,
+                            total_body_lines_emitted,
+                            ctx.max_body_lines,
+                            ctx.max_total_body_lines,
+                        );
+                    }
+
+                    callers.push(node);
+                    continue; // don't recurse past test methods
+                }
+            }
+
             // Recurse with the CALLER's parent class as the class filter.
+            let mut next_chain = call_chain.to_vec();
+            next_chain.push(caller_name.clone());
             let sub_callers = build_caller_tree(
                 &caller_name,
                 caller_parent.as_deref(),
@@ -1035,6 +1173,8 @@ fn build_caller_tree(
                 visited,
                 file_cache,
                 total_body_lines_emitted,
+                tests_found,
+                &next_chain,
             );
 
             let mut node = build_caller_node(
@@ -1071,7 +1211,7 @@ fn build_caller_tree(
     if ctx.resolve_interfaces && current_depth == 0 {
         let iface_callers = expand_interface_callers(
             method_name, &method_lower, parent_class, max_depth, ctx, visited,
-            file_cache, total_body_lines_emitted,
+            file_cache, total_body_lines_emitted, tests_found, call_chain,
         );
         callers.extend(iface_callers);
     }
