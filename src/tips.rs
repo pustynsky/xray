@@ -177,12 +177,13 @@ pub fn strategies() -> Vec<Strategy> {
             name: "Call Chain Investigation",
             when: "User asks 'who calls X', 'trace how X is invoked', or 'show the call chain for X'",
             steps: &[
-                "Step 1 - Get call tree (1 call): search_callers method='MethodName' class='ClassName' depth=3 direction='up' -> full caller hierarchy",
-                "Step 2 (optional) - Read caller source (1 call): search_definitions name='<top callers from step 1>' includeBody=true -> see what callers actually do",
+                "Step 1 - Get call tree with source (1 call): search_callers method='MethodName' class='ClassName' depth=3 direction='up' includeBody=true -> full caller hierarchy WITH method source code inline",
+                "Step 2 (optional, only if more context needed): search_definitions name='<specific callers from step 1>' includeBody=true maxBodyLines=0 -> full source of specific methods",
             ],
             anti_patterns: &[
                 "Don't omit the class parameter -- without it, results mix callers from ALL classes with the same method name",
                 "Don't use search_grep to manually find callers -- search_callers does it in sub-millisecond with DI/interface resolution",
+                "Don't call search_callers then search_definitions separately to get source -- use includeBody=true in search_callers to get both in ONE call",
             ],
         },
         Strategy {
@@ -311,6 +312,9 @@ pub fn parameter_examples() -> Value {
             "method": "'GetUserAsync'. Angular/TS only: pass a selector (e.g. 'app-header') as method with direction='up' to find parent components that embed it via templateChildren. Returns templateUsage: true for template-based relationships",
             "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees). Angular/TS only: 'down' with class name shows child components from HTML template (recursive with depth). 'up' with selector (e.g. 'app-header') finds parent components recursively — depth=3 traverses grandparents, great-grandparents etc. Parents nested in 'parents' field",
             "resolveInterfaces": "When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo",
+            "includeBody": "includeBody=true -> each node in call tree includes 'body' (source lines) and 'bodyStartLine'. Also adds a top-level 'rootMethod' object with the searched method's own body. Eliminates the need for a separate search_definitions call. Default: false",
+            "maxBodyLines": "Max source lines per method (default: 30, 0=unlimited). Controls per-method body size when includeBody=true",
+            "maxTotalBodyLines": "Max total body lines across all methods in tree (default: 300, 0=unlimited). When exceeded, remaining methods get 'bodyOmitted' instead of body",
             "angular": "TypeScript/Angular only: method='app-header' direction='up' -> finds parent components embedding <app-header> via templateChildren (templateUsage: true). method='processOrder' class='OrderFormComponent' direction='down' -> shows child components used in template",
             "limitation": "Only finds direct invocations (obj.Method(args)). Does NOT find method group/delegate references (e.g., list.Where(IsValid), Func<bool> f = svc.Check). Use search_grep for those."
         },
