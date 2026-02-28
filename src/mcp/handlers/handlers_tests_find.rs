@@ -3,8 +3,6 @@
 use super::*;
 use super::handlers_test_utils::cleanup_tmp;
 use crate::ContentIndex;
-use crate::TrigramIndex;
-use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 /// T43-T45 — search_find combined parameters: countOnly, maxDepth, ignoreCase, regex.
 #[test]
@@ -103,10 +101,9 @@ fn test_search_find_contents_mode() {
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
     let content_index = ContentIndex {
-        root: dir_str.clone(), created_at: 0, max_age_secs: 3600,
-        files: vec![], index: HashMap::new(), total_tokens: 0,
-        extensions: vec!["txt".to_string()], file_token_counts: vec![],
-        trigram: TrigramIndex::default(), trigram_dirty: false, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        root: dir_str.clone(),
+        extensions: vec!["txt".to_string()],
+        ..Default::default()
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),

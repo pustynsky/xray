@@ -1006,11 +1006,12 @@ fn test_read_errors_in_substring_summary() {
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let trigram = build_trigram_index(&idx);
     let index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec!["C:\\test\\Program.cs".to_string()], index: idx,
         total_tokens: 1, extensions: vec!["cs".to_string()], file_token_counts: vec![1],
-        trigram, trigram_dirty: false, path_to_id: None,
+        trigram,
         read_errors: 3, lossy_file_count: 2,
+        ..Default::default()
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(index)),

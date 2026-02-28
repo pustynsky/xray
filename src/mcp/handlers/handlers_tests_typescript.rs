@@ -213,7 +213,6 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
 
     let def_index = DefinitionIndex {
         root: ".".to_string(),
-        created_at: 0,
         extensions: vec!["ts".to_string()],
         files: vec![
             "src/services/UserService.ts".to_string(),
@@ -233,10 +232,7 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         file_index,
         path_to_id,
         method_calls,
-        code_stats: HashMap::new(),
-        parse_errors: 0,
-        lossy_file_count: 0,
-        empty_file_ids: Vec::new(), extension_methods: HashMap::new(), selector_index: HashMap::new(), template_children: HashMap::new(),
+        ..Default::default()
     };
 
     HandlerContext {

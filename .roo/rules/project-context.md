@@ -67,6 +67,14 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 - **If a new tool IS genuinely needed** (new data source, fundamentally different operation), keep it atomic — one index, one data source, one concern. Examples of correct atomic tools: `search_grep` (content index), `search_definitions` (definition index), `search_git_blame` (git CLI).
 - **Tool count budget**: aim to stay under 16 tools total. Every tool beyond that should have a strong justification.
 
+## User Story Convention
+
+- **Approved user stories** are saved as `docs/todo_approved_{YYYY-MM-DD}_{feature-name}.md`
+- Format: `todo_approved_{date}_{kebab-case-feature-name}.md`
+- Example: `docs/todo_approved_2026-02-28_override-caller-tracking.md`
+- Language: Russian (unless explicitly requested otherwise)
+- Must include: problem description, solution approach, implementation plan with code sketches, acceptance criteria
+
 ## Lessons Learned
 
 - **Verify facts, don't assume** — always run `git status` / `git log` before stating whether a file is tracked, staged, or committed. Never claim a file's git state from memory — check it.

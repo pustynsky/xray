@@ -5,7 +5,6 @@ use super::*;
 use super::utils::validate_search_dir;
 use super::handlers_test_utils::{make_ctx_with_defs, make_empty_ctx};
 use crate::Posting;
-use crate::TrigramIndex;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
@@ -398,16 +397,16 @@ fn make_ranking_defs_ctx() -> HandlerContext {
     use crate::definitions::*;
 
     let content_index = ContentIndex {
-        root: ".".to_string(), created_at: 0, max_age_secs: 3600,
+        root: ".".to_string(),
         files: vec![
             "C:\\src\\UserService.cs".to_string(),
             "C:\\src\\UserServiceFactory.cs".to_string(),
             "C:\\src\\Helpers.cs".to_string(),
         ],
-        index: HashMap::new(), total_tokens: 100,
+        total_tokens: 100,
         extensions: vec!["cs".to_string()],
         file_token_counts: vec![50, 30, 20],
-        trigram: TrigramIndex::default(), trigram_dirty: false, path_to_id: None, read_errors: 0, lossy_file_count: 0,
+        ..Default::default()
     };
 
     let definitions = vec![

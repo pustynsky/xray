@@ -1395,24 +1395,15 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
 
     let def_idx = DefinitionIndex {
         root: ".".to_string(),
-        created_at: 0,
         extensions: vec!["cs".to_string()],
         files: files_list.clone(),
         definitions,
         name_index,
         kind_index,
-        attribute_index: HashMap::new(),
-        base_type_index: HashMap::new(),
         file_index,
         path_to_id,
         method_calls,
-        code_stats: HashMap::new(),
-        parse_errors: 0,
-        lossy_file_count: 0,
-        empty_file_ids: Vec::new(),
-        extension_methods: HashMap::new(),
-        selector_index: HashMap::new(),
-        template_children: HashMap::new(),
+        ..Default::default()
     };
 
     // --- Content Index ---

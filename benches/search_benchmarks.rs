@@ -79,9 +79,7 @@ fn build_synthetic_index(num_files: usize, tokens_per_file: usize) -> ContentInd
         total_tokens,
         extensions: vec!["cs".to_string()],
         file_token_counts,
-        trigram: TrigramIndex::default(),
-        trigram_dirty: false,
-        path_to_id: None,
+        ..Default::default()
     }
 }
 

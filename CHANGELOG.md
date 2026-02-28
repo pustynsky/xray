@@ -130,7 +130,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Internal
 
-- **Complete `..Default::default()` boilerplate cleanup** — Replaced ~60 explicit field enumerations in test code with `..Default::default()` for both `HandlerContext` (33 sites) and `DefinitionIndex` (27 sites) across 8 test files. Also ran `cargo fix` to remove 12 unused imports from 8 files. No behavioral changes — purely mechanical cleanup. All 860 unit tests + 59 E2E tests pass.
+- **Complete `..Default::default()` boilerplate cleanup** — Replaced ~60 explicit field enumerations in test code with `..Default::default()` for both `HandlerContext` (33 sites) and `DefinitionIndex` (27 sites) across 8 test files. Also ran `cargo fix` to remove 12 unused imports from 8 files. Final pass: replaced 6 remaining cosmetic sites (4 `ContentIndex` + 2 `DefinitionIndex`) in `search_benchmarks.rs`, `handlers_tests_find.rs`, `handlers_tests_misc.rs`, `handlers_tests_grep.rs`, `handlers_tests_typescript.rs`, and `callers_tests.rs`. Removed 2 unused `TrigramIndex` imports. No behavioral changes — purely mechanical cleanup. All 1214 unit tests + 62 E2E tests pass.
 
 ---
 
