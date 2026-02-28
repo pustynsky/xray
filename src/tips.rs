@@ -151,6 +151,11 @@ pub fn tips() -> Vec<Tip> {
             why: "search_callers only finds direct method invocations (obj.Method(args)). It does NOT detect methods passed as delegates or method groups (e.g., list.Where(IsValid), Func<bool> f = service.Check). Use search_grep to find all textual references including delegate usage.",
             example: "search_callers misses delegate usage -> use search_grep terms='IsValid' ext='cs' to find all references including method group passes",
         },
+        Tip {
+            rule: "Impact analysis: find which tests cover a method",
+            why: "impactAnalysis=true in search_callers traces callers upward and identifies test methods (via [Test]/[Fact]/[Theory]/[TestMethod]/#[test] attributes or *.spec.ts/*.test.ts files). Returns a 'testsCovering' array with all tests in the call chain. Use depth=5-7 for deep call chains. One call replaces manual multi-step investigation.",
+            example: "MCP: search_callers method='SaveOrder' class='OrderService' direction='up' depth=5 impactAnalysis=true -> testsCovering: [{method: 'TestSaveOrder', class: 'OrderTests', file: 'src/OrderTests.cs', depth: 1, callChain: ['SaveOrder', 'TestSaveOrder']}]",
+        },
     ]
 }
 
@@ -316,14 +321,45 @@ pub fn parameter_examples() -> Value {
             "maxBodyLines": "Max source lines per method (default: 30, 0=unlimited). Controls per-method body size when includeBody=true",
             "maxTotalBodyLines": "Max total body lines across all methods in tree (default: 300, 0=unlimited). When exceeded, remaining methods get 'bodyOmitted' instead of body",
             "angular": "TypeScript/Angular only: method='app-header' direction='up' -> finds parent components embedding <app-header> via templateChildren (templateUsage: true). method='processOrder' class='OrderFormComponent' direction='down' -> shows child components used in template",
+            "impactAnalysis": "impactAnalysis=true with direction='up' -> identifies test methods covering the target. Response includes 'testsCovering' array (with full file path, depth, and callChain for each test) and isTest=true on test nodes. callChain shows the method-by-method path from target to test — use it to assess relevance (short chain = direct test, long chain = transitive via helpers). Tests detected via: C# [Test]/[Fact]/[Theory]/[TestMethod], Rust #[test], TS *.spec.ts/*.test.ts files. Use depth=5-7 for deep chains.",
             "limitation": "Only finds direct invocations (obj.Method(args)). Does NOT find method group/delegate references (e.g., list.Where(IsValid), Func<bool> f = svc.Check). Use search_grep for those."
         },
         "search_fast": {
             "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term"
         },
         "search_git_history": {
-            "author": "'john', 'john@example.com'",
-            "message": "'fix bug', 'PR 12345', '[GI]'"
+            "repo": "'.' (current directory) or absolute path to git repo",
+            "file": "File path relative to repo root: 'src/main.rs', 'Services/UserService.cs'",
+            "from": "'2025-01-01' (YYYY-MM-DD, inclusive start date)",
+            "to": "'2025-01-31' (YYYY-MM-DD, inclusive end date)",
+            "date": "'2025-01-15' — overrides from/to for single-day filter",
+            "maxResults": "50 (default). 0 = unlimited. Use with date filters for large repos",
+            "author": "'john', 'john@example.com' (case-insensitive substring)",
+            "message": "'fix bug', 'PR 12345', '[GI]' (case-insensitive substring)",
+            "noCache": "true -> bypass in-memory cache, query git CLI directly"
+        },
+        "search_git_diff": {
+            "note": "Same params as search_git_history (except noCache — always uses CLI). Includes 'patch' field with diff lines per commit"
+        },
+        "search_git_authors": {
+            "path": "'src/main.rs' (file), 'src/controllers' (directory), or omit for entire repo. 'file' is backward-compatible alias",
+            "top": "10 (default). Max authors to return",
+            "from": "'2025-01-01' — narrow to date range",
+            "message": "'feature' — filter commits by message substring",
+            "noCache": "true -> bypass cache"
+        },
+        "search_git_activity": {
+            "from": "'2025-01-01' — RECOMMENDED to narrow results. Without date filter, returns ALL repo activity",
+            "author": "'alice' — filter by author",
+            "message": "'refactor' — filter by commit message"
+        },
+        "search_git_blame": {
+            "file": "'src/UserService.cs' — file path relative to repo root",
+            "startLine": "10 (1-based, required). Start of line range",
+            "endLine": "20 (1-based, optional). If omitted, only startLine is blamed"
+        },
+        "search_branch_status": {
+            "repo": "'.' — shows branch name, behind/ahead counts, dirty files, fetch age. Call FIRST when investigating production bugs"
         }
     })
 }

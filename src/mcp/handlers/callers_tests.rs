@@ -470,9 +470,11 @@ fn test_prefilter_does_not_expand_by_base_types() {
         include_body: false,
         max_body_lines: 0,
         max_total_body_lines: 0,
+        impact_analysis: false,
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
+    let mut tests_found = Vec::new();
     let callers = build_caller_tree(
         "Dispose",
         Some("ResourceManager"),
@@ -482,6 +484,8 @@ fn test_prefilter_does_not_expand_by_base_types() {
         &mut visited,
         &mut file_cache,
         &mut total_body_lines,
+        &mut tests_found,
+        &[],
     );
 
     // Should find exactly one caller: Caller.DoWork
@@ -569,6 +573,7 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
         include_body: false,
         max_body_lines: 0,
         max_total_body_lines: 0,
+        impact_analysis: false,
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -1461,9 +1466,11 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         include_body: false,
         max_body_lines: 0,
         max_total_body_lines: 0,
+        impact_analysis: false,
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
+    let mut tests_found = Vec::new();
     let callers = build_caller_tree(
         "Process",
         Some("ClassA"),
@@ -1473,6 +1480,8 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         &mut visited,
         &mut file_cache,
         &mut total_body_lines,
+        &mut tests_found,
+        &[],
     );
 
     // Depth 0: should find ClassB.Handle as the caller of ClassA.Process
@@ -1862,6 +1871,7 @@ fn test_sql_callee_tree_exec_dependencies() {
         include_body: false,
         max_body_lines: 0,
         max_total_body_lines: 0,
+        impact_analysis: false,
     };
 
     let mut file_cache = HashMap::new();
@@ -1977,10 +1987,12 @@ fn test_sql_caller_tree_who_calls_sp() {
         include_body: false,
         max_body_lines: 0,
         max_total_body_lines: 0,
+        impact_analysis: false,
     };
 
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
+    let mut tests_found = Vec::new();
     let callers = build_caller_tree(
         "usp_ValidateOrder",
         Some("Sales"),
@@ -1990,6 +2002,8 @@ fn test_sql_caller_tree_who_calls_sp() {
         &mut visited,
         &mut file_cache,
         &mut total_body_lines,
+        &mut tests_found,
+        &[],
     );
 
     assert_eq!(callers.len(), 1, "Expected 1 caller of usp_ValidateOrder, got {:?}", callers);
@@ -2256,4 +2270,464 @@ fn test_resolve_call_site_sql_no_schema() {
     let resolved = resolve_call_site(&call, &def_idx, None);
     assert_eq!(resolved.len(), 1, "Should resolve to usp_Cleanup without schema");
     assert_eq!(def_idx.definitions[resolved[0] as usize].name, "usp_Cleanup");
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+// Impact Analysis Tests — is_test_method + impactAnalysis parameter
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_is_test_method_csharp_test_attribute() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "TestSaveOrder".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("OrderTests".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec!["Test".to_string()],
+    };
+    assert!(is_test_method(&def, "src/OrderTests.cs"));
+}
+
+#[test]
+fn test_is_test_method_xunit_fact() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "ShouldSave".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("OrderTests".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec!["Fact".to_string()],
+    };
+    assert!(is_test_method(&def, "src/OrderTests.cs"));
+}
+
+#[test]
+fn test_is_test_method_xunit_theory() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "ShouldValidate".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("ValidationTests".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec!["Theory".to_string(), "InlineData(1)".to_string()],
+    };
+    assert!(is_test_method(&def, "src/ValidationTests.cs"));
+}
+
+#[test]
+fn test_is_test_method_mstest_testmethod() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "TestProcess".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("ProcessTests".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec!["TestMethod".to_string()],
+    };
+    assert!(is_test_method(&def, "src/ProcessTests.cs"));
+}
+
+#[test]
+fn test_is_test_method_rust_test() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "test_save_order".to_string(), kind: DefinitionKind::Function,
+        line_start: 10, line_end: 30, parent: None,
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec!["test".to_string()],
+    };
+    assert!(is_test_method(&def, "src/lib.rs"));
+}
+
+#[test]
+fn test_is_test_method_rust_tokio_test() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "test_async_save".to_string(), kind: DefinitionKind::Function,
+        line_start: 10, line_end: 30, parent: None,
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec!["tokio::test".to_string()],
+    };
+    assert!(is_test_method(&def, "src/lib.rs"));
+}
+
+#[test]
+fn test_is_test_method_ts_spec_file() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "shouldSaveOrder".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("OrderSpec".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec![],  // no attributes — TS uses file heuristic
+    };
+    assert!(is_test_method(&def, "src/order.spec.ts"));
+}
+
+#[test]
+fn test_is_test_method_ts_test_file() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "shouldProcess".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("ProcessTest".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec![],
+    };
+    assert!(is_test_method(&def, "src/process.test.ts"));
+}
+
+#[test]
+fn test_is_test_method_tsx_spec_file() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "shouldRender".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("ComponentSpec".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec![],
+    };
+    assert!(is_test_method(&def, "src/component.spec.tsx"));
+}
+
+#[test]
+fn test_is_test_method_negative_no_attributes_no_test_file() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "processOrder".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("OrderService".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec![],
+    };
+    assert!(!is_test_method(&def, "src/OrderService.cs"));
+}
+
+#[test]
+fn test_is_test_method_negative_non_test_attribute() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "processOrder".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("OrderService".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec!["Authorize".to_string(), "HttpGet".to_string()],
+    };
+    assert!(!is_test_method(&def, "src/OrderService.cs"));
+}
+
+#[test]
+fn test_is_test_method_negative_ts_non_test_file() {
+    let def = DefinitionEntry {
+        file_id: 0, name: "processOrder".to_string(), kind: DefinitionKind::Method,
+        line_start: 10, line_end: 30, parent: Some("OrderService".to_string()),
+        signature: None, modifiers: vec![], base_types: vec![],
+        attributes: vec![],
+    };
+    assert!(!is_test_method(&def, "src/order.service.ts"));
+}
+
+// ─── Impact analysis: handler-level tests ───────────────────────
+
+#[test]
+fn test_impact_analysis_rejects_direction_down() {
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "process",
+        "direction": "down",
+        "impactAnalysis": true
+    }));
+    assert!(result.is_error, "impactAnalysis with direction=down should return error");
+    assert!(result.content[0].text.contains("direction='up'"),
+        "Error should mention direction='up'");
+}
+
+#[test]
+fn test_impact_analysis_false_no_tests_covering() {
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    // Without impactAnalysis, response should NOT have testsCovering
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "process",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(v.get("testsCovering").is_none(),
+        "Without impactAnalysis, should NOT have testsCovering field");
+}
+
+#[test]
+fn test_impact_analysis_finds_test_methods() {
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+
+    // OrderService.process() is called by OrderTests.testProcess() which has [Test] attribute
+    let definitions = vec![
+        // idx 0: class OrderService
+        DefinitionEntry { file_id: 0, name: "OrderService".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        // idx 1: OrderService.process (target method)
+        DefinitionEntry { file_id: 0, name: "process".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 20, parent: Some("OrderService".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        // idx 2: class OrderTests
+        DefinitionEntry { file_id: 1, name: "OrderTests".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        // idx 3: OrderTests.testProcess — has [Test] attribute
+        DefinitionEntry { file_id: 1, name: "testProcess".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("OrderTests".to_string()), signature: None, modifiers: vec![], attributes: vec!["Test".to_string()], base_types: vec![] },
+    ];
+
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![
+        CallSite { method_name: "process".to_string(), receiver_type: Some("OrderService".to_string()), line: 20, receiver_is_generic: false },
+    ]);
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    let files_list = vec![
+        "src/OrderService.cs".to_string(),
+        "src/OrderTests.cs".to_string(),
+    ];
+    path_to_id.insert(PathBuf::from("src/OrderService.cs"), 0);
+    path_to_id.insert(PathBuf::from("src/OrderTests.cs"), 1);
+
+    let def_idx = DefinitionIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        files: files_list.clone(),
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        path_to_id,
+        method_calls,
+        ..Default::default()
+    };
+
+    // Content index
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("process".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },
+        Posting { file_id: 1, lines: vec![20] },
+    ]);
+    index.insert("orderservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![20] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![25, 25],
+        ..Default::default()
+    };
+
+    // Test via build_caller_tree directly
+    let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+    let node_count = AtomicUsize::new(0);
+    let caller_ctx = CallerTreeContext {
+        content_index: &content_index,
+        def_idx: &def_idx,
+        ext_filter: "cs",
+        exclude_dir: &[],
+        exclude_file: &[],
+        resolve_interfaces: false,
+        limits: &limits,
+        node_count: &node_count,
+        include_body: false,
+        max_body_lines: 0,
+        max_total_body_lines: 0,
+        impact_analysis: true,
+    };
+
+    let mut visited = HashSet::new();
+    let mut file_cache = HashMap::new();
+    let mut total_body_lines = 0usize;
+    let mut tests_found = Vec::new();
+
+    let initial_chain = vec!["process".to_string()];
+    let callers = build_caller_tree(
+        "process", Some("OrderService"), 5, 0,
+        &caller_ctx, &mut visited, &mut file_cache,
+        &mut total_body_lines, &mut tests_found, &initial_chain,
+    );
+
+    // Should find the test method
+    assert_eq!(callers.len(), 1, "Should find 1 caller");
+    assert_eq!(callers[0]["method"].as_str().unwrap(), "testProcess");
+    assert_eq!(callers[0]["isTest"].as_bool(), Some(true), "Node should be marked isTest=true");
+
+    // tests_found collector should have the test info with full path, depth, callChain
+    assert_eq!(tests_found.len(), 1, "Should find 1 test method");
+    assert_eq!(tests_found[0]["method"].as_str().unwrap(), "testProcess");
+    assert_eq!(tests_found[0]["class"].as_str().unwrap(), "OrderTests");
+    assert_eq!(tests_found[0]["file"].as_str().unwrap(), "src/OrderTests.cs",
+        "Should have full file path, not just filename");
+    assert_eq!(tests_found[0]["depth"].as_u64().unwrap(), 1,
+        "Direct caller should have depth=1");
+    let chain = tests_found[0]["callChain"].as_array().unwrap();
+    assert_eq!(chain.len(), 2, "callChain should be [target, test]");
+    assert_eq!(chain[0].as_str().unwrap(), "process");
+    assert_eq!(chain[1].as_str().unwrap(), "testProcess");
+
+    // No sub-callers on test nodes (leaf)
+    assert!(callers[0].get("callers").is_none(),
+        "Test method nodes should not have sub-callers");
+}
+
+#[test]
+fn test_impact_analysis_non_test_method_recurses_normally() {
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+    use std::sync::atomic::AtomicUsize;
+
+    // OrderService.process() → Controller.handle() → TestController.testHandle()
+    // At depth 0: Controller.handle() is NOT a test → should recurse
+    // At depth 1: TestController.testHandle() IS a test → should stop
+    let definitions = vec![
+        DefinitionEntry { file_id: 0, name: "OrderService".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 0, name: "process".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 20, parent: Some("OrderService".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 1, name: "Controller".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 1, name: "handle".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("Controller".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 2, name: "ControllerTests".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
+        DefinitionEntry { file_id: 2, name: "testHandle".to_string(), kind: DefinitionKind::Method, line_start: 10, line_end: 30, parent: Some("ControllerTests".to_string()), signature: None, modifiers: vec![], attributes: vec!["Fact".to_string()], base_types: vec![] },
+    ];
+
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![
+        CallSite { method_name: "process".to_string(), receiver_type: Some("OrderService".to_string()), line: 20, receiver_is_generic: false },
+    ]);
+    method_calls.insert(5, vec![
+        CallSite { method_name: "handle".to_string(), receiver_type: Some("Controller".to_string()), line: 20, receiver_is_generic: false },
+    ]);
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    let files_list = vec![
+        "src/OrderService.cs".to_string(),
+        "src/Controller.cs".to_string(),
+        "test/ControllerTests.cs".to_string(),
+    ];
+    for (i, f) in files_list.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+
+    let def_idx = DefinitionIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        files: files_list.clone(),
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        path_to_id,
+        method_calls,
+        ..Default::default()
+    };
+
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("process".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },
+        Posting { file_id: 1, lines: vec![20] },
+    ]);
+    index.insert("handle".to_string(), vec![
+        Posting { file_id: 1, lines: vec![10] },
+        Posting { file_id: 2, lines: vec![20] },
+    ]);
+    index.insert("orderservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![20] },
+    ]);
+    index.insert("controller".to_string(), vec![
+        Posting { file_id: 1, lines: vec![1] },
+        Posting { file_id: 2, lines: vec![20] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![30, 30, 30],
+        ..Default::default()
+    };
+
+    let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+    let node_count = AtomicUsize::new(0);
+    let caller_ctx = CallerTreeContext {
+        content_index: &content_index,
+        def_idx: &def_idx,
+        ext_filter: "cs",
+        exclude_dir: &[],
+        exclude_file: &[],
+        resolve_interfaces: false,
+        limits: &limits,
+        node_count: &node_count,
+        include_body: false,
+        max_body_lines: 0,
+        max_total_body_lines: 0,
+        impact_analysis: true,
+    };
+
+    let mut visited = HashSet::new();
+    let mut file_cache = HashMap::new();
+    let mut total_body_lines = 0usize;
+    let mut tests_found = Vec::new();
+
+    let initial_chain = vec!["process".to_string()];
+    let callers = build_caller_tree(
+        "process", Some("OrderService"), 5, 0,
+        &caller_ctx, &mut visited, &mut file_cache,
+        &mut total_body_lines, &mut tests_found, &initial_chain,
+    );
+
+    // Depth 0: Controller.handle (NOT a test) → should have sub-callers
+    assert_eq!(callers.len(), 1);
+    assert_eq!(callers[0]["method"].as_str().unwrap(), "handle");
+    assert!(callers[0].get("isTest").is_none(), "Non-test method should NOT have isTest");
+
+    // Depth 1: ControllerTests.testHandle (IS a test) → leaf node
+    let sub = callers[0]["callers"].as_array().expect("Non-test method should have callers array");
+    assert_eq!(sub.len(), 1);
+    assert_eq!(sub[0]["method"].as_str().unwrap(), "testHandle");
+    assert_eq!(sub[0]["isTest"].as_bool(), Some(true));
+
+    // tests_found should have the test with depth and callChain
+    assert_eq!(tests_found.len(), 1);
+    assert_eq!(tests_found[0]["method"].as_str().unwrap(), "testHandle");
+    assert_eq!(tests_found[0]["class"].as_str().unwrap(), "ControllerTests");
+    assert_eq!(tests_found[0]["depth"].as_u64().unwrap(), 2,
+        "Test at depth 2: process → handle → testHandle");
+    let chain = tests_found[0]["callChain"].as_array().unwrap();
+    assert_eq!(chain.len(), 3, "callChain: [process, handle, testHandle]");
+    assert_eq!(chain[0].as_str().unwrap(), "process");
+    assert_eq!(chain[1].as_str().unwrap(), "handle");
+    assert_eq!(chain[2].as_str().unwrap(), "testHandle");
 }

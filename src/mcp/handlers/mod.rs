@@ -356,6 +356,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "maxTotalBodyLines": {
                         "type": "integer",
                         "description": "Max total body lines across all methods in the tree (default: 300, 0=unlimited)"
+                    },
+                    "impactAnalysis": {
+                        "type": "boolean",
+                        "description": "When true with direction='up', identifies test methods in the caller chain. Test methods (detected via [Test]/[Fact]/[Theory]/[TestMethod]/#[test] attributes or *.spec.ts/*.test.ts file patterns) are marked with isTest=true and collected in a 'testsCovering' array with full file path, depth (distance from target), and callChain (array of method names from target to test). Recursion stops at test methods. (default: false)"
                     }
                 },
                 "required": ["method"]

@@ -23,6 +23,7 @@ After every code change, before completing the task, verify ALL of the following
   - CLI: verify `--help` output includes the new flag/command (check `src/cli/args.rs`)
   - MCP: verify tool descriptions in `src/tips.rs` include the new parameter/tool
   - LLM instructions: verify `search_help` output covers the new capability
+  - Docs: update `docs/mcp-guide.md` (parameter tables, examples) and `docs/cli-reference.md` if applicable
   - Principle: keep LLM instructions concise — add only what helps tool selection, not exhaustive docs
 10. **Documentation** — `README.md` and the rest relevant GIT-tracked documents are updated
 11. **Changelog** — `CHANGELOG.md` is updated with a concise entry describing the change (categorized as Features, Bug Fixes, Performance, or Internal)
