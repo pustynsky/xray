@@ -84,11 +84,89 @@ AI:  "Found 1,082 files. The most relevant is CustomHttpClient.cs (score: 0.49).
 
 ## `search_grep` — Content Search
 
-Search content index with TF-IDF ranking. Supports multi-term (AND/OR), regex, phrase, and substring search.
+Search content index with TF-IDF ranking. Supports multi-term (AND/OR), regex, phrase, and substring search. **Language-agnostic** — works with any text file indexed via `--ext` (C#, Rust, Python, JS/TS, XML, JSON, config, etc.).
 
 Substring search is **on by default** in MCP mode — compound identifiers like `IUserService`, `m_userService`, `UserServiceFactory` are automatically found when searching for `UserService`. Auto-disabled when `regex` or `phrase` is used. Use `"substring": false` for exact-token-only matching.
 
-See [CLI Reference — `search-index grep`](cli-reference.md#search-grep--search-inverted-content-index) for full parameter details.
+> **MCP ↔ CLI parameter name mapping:** MCP `mode: "and"` = CLI `--all`, MCP `substring: false` = CLI `--exact`, MCP `countOnly: true` = CLI `-c/--count`, MCP `showLines: true` = CLI `--show-lines`, MCP `contextLines` = CLI `-C/--context`. See [CLI Reference — `search-index grep`](cli-reference.md#search-grep--search-inverted-content-index) for CLI usage.
+
+### Parameters
+
+| Parameter      | Type    | Default | Description                                                                                          |
+| -------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------- |
+| `terms`        | string  | —       | Search terms (required). Comma-separated for multi-term OR/AND                                       |
+| `dir`          | string  | server's `--dir` | Directory to search                                                                         |
+| `ext`          | string  | all indexed | File extension filter, comma-separated                                                           |
+| `mode`         | string  | `"or"` | Multi-term mode: `"or"` = ANY term, `"and"` = ALL terms (CLI: `--all`)                               |
+| `regex`        | boolean | false   | Treat terms as regex pattern                                                                         |
+| `phrase`       | boolean | false   | Exact phrase match. Comma-separated phrases are searched independently with OR/AND semantics          |
+| `substring`    | boolean | true    | Match within tokens (finds `IUserService` when searching `UserService`). Auto-disabled for regex/phrase. (CLI: `--exact` to disable) |
+| `showLines`    | boolean | false   | Include matching source lines in results (CLI: `--show-lines`)                                       |
+| `contextLines` | integer | 0       | Context lines before/after each match, requires `showLines` (CLI: `-C`)                              |
+| `maxResults`   | integer | 50      | Max results (0 = unlimited)                                                                          |
+| `excludeDir`   | array   | —       | Directory names to exclude                                                                           |
+| `exclude`      | array   | —       | File path substrings to exclude                                                                      |
+| `countOnly`    | boolean | false   | Return counts only — no file list (CLI: `-c/--count`)                                                |
+
+### Response Fields
+
+```json
+// Request
+{ "terms": "HttpClient", "maxResults": 3, "ext": "cs" }
+
+// Response
+{
+  "files": [
+    {
+      "file": "Services/CustomHttpClient.cs",
+      "score": 0.49,
+      "matchingTokens": ["httpclient"],
+      "termCounts": { "httpclient": 12 }
+    },
+    {
+      "file": "Controllers/ApiController.cs",
+      "score": 0.31,
+      "matchingTokens": ["httpclient"],
+      "termCounts": { "httpclient": 3 }
+    }
+  ],
+  "summary": {
+    "tool": "search_grep",
+    "totalFiles": 1082,
+    "returned": 3,
+    "searchTimeMs": 0.6,
+    "responseTruncated": false
+  }
+}
+```
+
+When `showLines: true`:
+
+```json
+{
+  "files": [
+    {
+      "file": "Services/CustomHttpClient.cs",
+      "score": 0.49,
+      "lineGroups": [
+        {
+          "startLine": 15,
+          "lines": [
+            "    private readonly HttpClient _client;",
+            "    ",
+            "    public CustomHttpClient(HttpClient client)"
+          ],
+          "matchIndices": [0, 2]
+        }
+      ]
+    }
+  ]
+}
+```
+
+When `countOnly: true`, returns only summary with file/token counts (~46 tokens vs 265+ for full results).
+
+When `responseTruncated: true` appears in the summary, narrow your query with `ext`, `dir`, `excludeDir`, or use `countOnly: true`.
 
 ---
 
@@ -194,6 +272,51 @@ Find which tests cover a method — one call replaces manual multi-step investig
 
 `callChain` shows the method-by-method path from target to test. Short chain (depth 1-2) = direct test. Long chain (depth 4+) = transitive via helpers — may be less relevant.
 
+### Response Fields with `includeBody`
+
+When `includeBody: true`, each node in the call tree includes source code:
+
+```json
+{
+  "callTree": [
+    {
+      "method": "RunQueryAsync",
+      "class": "QueryService",
+      "file": "QueryService.cs",
+      "line": 386,
+      "body": [
+        "public async Task<Result> RunQueryAsync(string sql)",
+        "{",
+        "    return await ExecuteQueryAsync(sql);",
+        "}"
+      ],
+      "bodyStartLine": 386,
+      "bodyTruncated": false,
+      "callers": []
+    }
+  ],
+  "rootMethod": {
+    "name": "ExecuteQueryAsync",
+    "class": "QueryService",
+    "file": "QueryService.cs",
+    "lines": "400-420",
+    "body": ["public async Task<Result> ExecuteQueryAsync(string sql)", "{", "    ..."],
+    "bodyStartLine": 400,
+    "bodyTruncated": false
+  },
+  "summary": { "totalNodes": 1, "searchTimeMs": 0.2 }
+}
+```
+
+| Response field    | When present                                    | Description                                          |
+| ----------------- | ----------------------------------------------- | ---------------------------------------------------- |
+| `body`            | `includeBody=true` and body budget not exceeded  | Array of source lines for the method                 |
+| `bodyStartLine`   | `includeBody=true` and body budget not exceeded  | 1-based line number of the first body line            |
+| `bodyTruncated`   | Body exceeds `maxBodyLines`                      | `true` when body was cut short                       |
+| `bodyOmitted`     | Global `maxTotalBodyLines` budget exceeded        | `true` — body skipped entirely for this node         |
+| `bodyWarning`     | Body omitted                                     | Human-readable reason for omission                   |
+| `rootMethod`      | `includeBody=true`                               | Top-level object with the searched method's own body |
+
 ### Limitations
 
 - **Interface vs concrete class name** — when searching for callers, always use the **interface name** (e.g., `class: "IUserService"`) rather than the concrete class name (e.g., `class: "UserService"`). Calls through DI use the interface type as the receiver. Searching with the concrete class returns 0 callers if all call sites use the interface. Alternatively, set `resolveInterfaces: true` to auto-resolve implementations.
@@ -215,8 +338,9 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `name`              | string  | —       | Substring or comma-separated OR search                                                   |
 | `kind`              | string  | —       | Filter by definition kind (class, method, property, function, typeAlias, variable, etc.) |
 | `attribute`         | string  | —       | Filter by C# attribute or TypeScript decorator                                           |
-| `baseType`          | string  | —       | Filter by base type/interface                                                            |
-| `file`              | string  | —       | Filter by file path substring                                                            |
+| `baseType`          | string  | —       | Filter by base type/interface (substring match — `IAccessTable` finds `IAccessTable<Model>`, etc.) |
+| `baseTypeTransitive`| boolean | false   | With `baseType`, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType |
+| `file`              | string  | —       | Filter by file path substring. Comma-separated for multi-term OR                         |
 | `parent`            | string  | —       | Filter by parent class name                                                              |
 | `containsLine`      | integer | —       | Find definition containing a line number (requires `file`)                               |
 | `regex`             | boolean | false   | Treat `name` as regex                                                                    |
@@ -227,6 +351,7 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `maxTotalBodyLines` | integer | 500     | Max total body lines across all results (0 = unlimited)                                  |
 | `audit`             | boolean | false   | Return index coverage report instead of search results                                   |
 | `auditMinBytes`     | integer | 500     | Min file size to flag as suspicious in audit mode                                        |
+| `crossValidate`     | boolean | false   | With `audit=true`, compares definition index files against file-list index to find coverage gaps |
 | `includeCodeStats`  | boolean | false   | Include complexity metrics (`codeStats` object) for methods/functions/constructors        |
 | `sortBy`            | string  | —       | Sort by metric descending. Values: `cyclomaticComplexity`, `cognitiveComplexity`, `maxNestingDepth`, `paramCount`, `returnCount`, `callCount`, `lambdaCount`, `lines`. Auto-enables `includeCodeStats` |
 | `minComplexity`     | integer | —       | Filter: min cyclomatic complexity. Auto-enables `includeCodeStats`                       |
@@ -385,6 +510,150 @@ Check if all files in the repository are properly indexed. Files >500 bytes with
 
 ---
 
+## `search_fast` — File Name Search
+
+Search pre-built file name index for instant file lookup (~35ms vs ~3s for live filesystem walk). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Results are relevance-ranked: exact stem match → prefix match → contains match.
+
+### Parameters
+
+| Parameter   | Type    | Default          | Description                                                  |
+| ----------- | ------- | ---------------- | ------------------------------------------------------------ |
+| `pattern`   | string  | —                | File name pattern (required). Comma-separated for multi-term OR |
+| `dir`       | string  | server's `--dir` | Directory to search                                          |
+| `ext`       | string  | —                | Filter by extension                                          |
+| `regex`     | boolean | false            | Treat as regex                                               |
+| `ignoreCase`| boolean | false            | Case-insensitive                                             |
+| `dirsOnly`  | boolean | false            | Show only directories                                        |
+| `filesOnly` | boolean | false            | Show only files                                              |
+| `countOnly` | boolean | false            | Count only                                                   |
+
+### Response
+
+```json
+// Request
+{ "pattern": "UserService", "ext": "cs" }
+
+// Response
+{
+  "files": [
+    "src/Services/UserService.cs",
+    "src/Services/IUserService.cs",
+    "test/UserServiceTests.cs"
+  ],
+  "summary": { "tool": "search_fast", "totalMatches": 3, "searchTimeMs": 35 }
+}
+```
+
+---
+
+## `search_info` — Index Information
+
+Shows all existing indexes with their status, sizes, age, and memory usage. No parameters.
+
+### Response
+
+```json
+{
+  "directory": "C:\\Users\\you\\AppData\\Local\\search-index",
+  "indexes": [
+    {
+      "type": "content",
+      "root": "C:\\Projects\\MyApp",
+      "files": 48986,
+      "uniqueTokens": 754000,
+      "totalTokens": 33229888,
+      "extensions": ["cs", "sql"],
+      "sizeMb": 242.7,
+      "ageHours": 0.5,
+      "inMemory": true
+    },
+    {
+      "type": "definition",
+      "root": "C:\\Projects\\MyApp",
+      "files": 48730,
+      "definitions": 846000,
+      "callSites": 2400000,
+      "extensions": ["cs"],
+      "sizeMb": 324.0,
+      "ageHours": 0.5,
+      "inMemory": true
+    },
+    {
+      "type": "file-list",
+      "root": "C:\\Projects\\MyApp",
+      "sizeMb": 47.8
+    },
+    {
+      "type": "git-history",
+      "commits": 12345,
+      "files": 2500,
+      "authors": 42,
+      "branch": "main",
+      "headHash": "abc123de",
+      "sizeMb": 1.2,
+      "inMemory": true
+    }
+  ],
+  "memoryEstimate": {
+    "contentIndex": "...",
+    "definitionIndex": "...",
+    "gitCache": "...",
+    "process": { "workingSetMb": 512 }
+  }
+}
+```
+
+---
+
+## `search_reindex` — Rebuild Content Index
+
+Force rebuild the content index and reload it into the server's in-memory cache. Useful after many file changes or when `--watch` is not enabled.
+
+### Parameters
+
+| Parameter | Type   | Default          | Description                       |
+| --------- | ------ | ---------------- | --------------------------------- |
+| `dir`     | string | server's `--dir` | Directory to reindex              |
+| `ext`     | string | server's `--ext` | File extensions (comma-separated) |
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "files": 48986,
+  "uniqueTokens": 754000,
+  "rebuildTimeMs": 1200.5
+}
+```
+
+---
+
+## `search_reindex_definitions` — Rebuild Definition Index
+
+Force rebuild the AST definition index (tree-sitter) and reload it into the server's in-memory cache. Requires server started with `--definitions` flag.
+
+### Parameters
+
+| Parameter | Type   | Default          | Description                              |
+| --------- | ------ | ---------------- | ---------------------------------------- |
+| `dir`     | string | server's `--dir` | Directory to reindex                     |
+| `ext`     | string | server's `--ext` | File extensions to parse, comma-separated |
+
+### Response
+
+```json
+{
+  "status": "ok",
+  "files": 48730,
+  "definitions": 846000,
+  "callSites": 2400000,
+  "codeStatsEntries": 320000,
+  "sizeMb": 324.0,
+  "rebuildTimeMs": 16500.0
+}
+```
+
 ---
 
 ## Git History Tools
@@ -517,8 +786,8 @@ Get line-level attribution for a file or line range via `git blame`. Returns the
 |---|---|---|---|
 | `repo`      | string  | ✅ | Path to local git repository |
 | `file`      | string  | ✅ | File path relative to repo root |
-| `startLine` | integer | — | First line to blame (1-based, default: 1) |
-| `endLine`   | integer | — | Last line to blame (1-based, default: end of file) |
+| `startLine` | integer | ✅ | First line to blame (1-based, inclusive) |
+| `endLine`   | integer | — | Last line to blame (1-based, inclusive). If omitted, only `startLine` |
 
 ```json
 // Request — blame lines 10-15 of UserService.cs

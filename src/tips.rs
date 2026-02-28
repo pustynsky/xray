@@ -328,8 +328,38 @@ pub fn parameter_examples() -> Value {
             "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term"
         },
         "search_git_history": {
-            "author": "'john', 'john@example.com'",
-            "message": "'fix bug', 'PR 12345', '[GI]'"
+            "repo": "'.' (current directory) or absolute path to git repo",
+            "file": "File path relative to repo root: 'src/main.rs', 'Services/UserService.cs'",
+            "from": "'2025-01-01' (YYYY-MM-DD, inclusive start date)",
+            "to": "'2025-01-31' (YYYY-MM-DD, inclusive end date)",
+            "date": "'2025-01-15' — overrides from/to for single-day filter",
+            "maxResults": "50 (default). 0 = unlimited. Use with date filters for large repos",
+            "author": "'john', 'john@example.com' (case-insensitive substring)",
+            "message": "'fix bug', 'PR 12345', '[GI]' (case-insensitive substring)",
+            "noCache": "true -> bypass in-memory cache, query git CLI directly"
+        },
+        "search_git_diff": {
+            "note": "Same params as search_git_history (except noCache — always uses CLI). Includes 'patch' field with diff lines per commit"
+        },
+        "search_git_authors": {
+            "path": "'src/main.rs' (file), 'src/controllers' (directory), or omit for entire repo. 'file' is backward-compatible alias",
+            "top": "10 (default). Max authors to return",
+            "from": "'2025-01-01' — narrow to date range",
+            "message": "'feature' — filter commits by message substring",
+            "noCache": "true -> bypass cache"
+        },
+        "search_git_activity": {
+            "from": "'2025-01-01' — RECOMMENDED to narrow results. Without date filter, returns ALL repo activity",
+            "author": "'alice' — filter by author",
+            "message": "'refactor' — filter by commit message"
+        },
+        "search_git_blame": {
+            "file": "'src/UserService.cs' — file path relative to repo root",
+            "startLine": "10 (1-based, required). Start of line range",
+            "endLine": "20 (1-based, optional). If omitted, only startLine is blamed"
+        },
+        "search_branch_status": {
+            "repo": "'.' — shows branch name, behind/ahead counts, dirty files, fetch age. Call FIRST when investigating production bugs"
         }
     })
 }
