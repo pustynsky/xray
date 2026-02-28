@@ -1127,6 +1127,148 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
+### T29a: `serve` — search_callers with `includeBody: true` (direction=up)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":2,"includeBody":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with call tree
+- Each node in `callTree` contains:
+  - `body` — array of source code lines for that method
+  - `bodyStartLine` — 1-based line number where the body starts
+- `body` content corresponds to the actual source code of each method in the call chain
+- Response budget automatically increased to 64KB (vs default 16KB) because `includeBody=true`
+
+**Validates:** `includeBody` parameter in `search_callers` returns method source code inline, eliminating the need for a separate `search_definitions` call. Uses the same `inject_body_into_obj()` function as `search_definitions`.
+
+**Note:** Replace `<MethodName>` and `<ClassName>` with a method/class that exists and has callers.
+
+---
+
+### T29b: `serve` — search_callers with `includeBody: true` and `maxBodyLines` limit
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":1,"includeBody":true,"maxBodyLines":5}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- Each node's `body` array has at most 5 entries
+- If the method body is longer than 5 lines, `bodyTruncated: true` is present
+- `totalBodyLines` field shows the actual untruncated body length
+
+**Validates:** `maxBodyLines` caps per-method body output in call trees.
+
+---
+
+### T29c: `serve` — search_callers with `includeBody: true` and `maxTotalBodyLines` budget
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":2,"includeBody":true,"maxTotalBodyLines":20}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- First few nodes in the call tree have `body` arrays with content
+- Later nodes have `bodyOmitted: "total body lines budget exceeded"` instead of `body`
+- Total body lines across all nodes ≤ 20
+
+**Validates:** `maxTotalBodyLines` global budget is enforced across the entire call tree.
+
+---
+
+### T29d: `serve` — search_callers with `includeBody: true` direction=down
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","direction":"down","depth":2,"includeBody":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- `query.direction` = "down"
+- Each callee node contains `body` and `bodyStartLine`
+- Body content corresponds to the callee method's source code
+
+**Validates:** `includeBody` works for both `direction=up` (callers) and `direction=down` (callees).
+
+---
+
+### T29e: `serve` — search_callers backward compatibility (default `includeBody: false`)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":1}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- Call tree nodes do NOT contain `body`, `bodyStartLine`, or `bodyOmitted` fields
+- Same output format as before the feature was added
+
+**Validates:** Backward compatibility — omitting `includeBody` produces the original response format.
+
+**Unit tests:** `test_search_callers_include_body_default_false`, `test_search_callers_include_body_false_explicit`, `test_search_callers_include_body_up`, `test_search_callers_include_body_down`, `test_search_callers_include_body_max_body_lines`, `test_search_callers_include_body_max_total_body_lines`, `test_search_callers_include_body_nonexistent_file`, `test_include_body_response_budget_64kb`
+
+**Status:** ✅ Implemented
+
+---
+
+### T29f: `serve` — Global response budget increase for `includeBody=true`
+
+**Scenario:** When any tool is called with `includeBody=true`, the response byte budget is automatically increased from 16KB to 64KB, preventing premature truncation of body-rich responses.
+
+**Applies to:** `search_callers` with `includeBody=true`, `search_definitions` with `includeBody=true`
+
+**Expected:**
+
+- `includeBody=true` responses can be up to 64KB without truncation
+- `includeBody=false` (or absent) responses use the default 16KB budget
+- `search_help` uses its own 32KB budget (unchanged)
+- `search_grep` and other tools without `includeBody` parameter use 16KB (unchanged)
+
+**Unit test:** `test_include_body_response_budget_64kb`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T31: `serve` — search_callers finds callers through prefixed fields (C# only)
 
 **Command (C# codebase with field naming like `m_orderProcessor` or `_userService`):**

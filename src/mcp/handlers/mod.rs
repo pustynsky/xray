@@ -344,6 +344,18 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "resolveInterfaces": {
                         "type": "boolean",
                         "description": "Auto-resolve interface methods to implementations (default: true)"
+                    },
+                    "includeBody": {
+                        "type": "boolean",
+                        "description": "Include source code body of each method in the call tree, plus a 'rootMethod' object with the searched method's own body. Eliminates the need for a separate search_definitions call. (default: false)"
+                    },
+                    "maxBodyLines": {
+                        "type": "integer",
+                        "description": "Max source lines per method when includeBody=true (default: 30, 0=unlimited)"
+                    },
+                    "maxTotalBodyLines": {
+                        "type": "integer",
+                        "description": "Max total body lines across all methods in the tree (default: 300, 0=unlimited)"
                     }
                 },
                 "required": ["method"]
@@ -426,11 +438,19 @@ const DEF_INDEX_BUILDING_MSG: &str =
 const ALREADY_BUILDING_MSG: &str =
     "Index is already being built in the background. Please wait for it to finish.";
 
-/// Minimum response budget for search_help (20KB).
+/// Minimum response budget for search_help (32KB).
 /// search_help returns reference content (best practices, strategies, parameter examples)
-/// that exceeds the default 16KB search-result budget (~17KB as of 21 tips).
-/// 20KB gives ~18% headroom for adding a few more tips before hitting the limit.
-const SEARCH_HELP_MIN_RESPONSE_BYTES: usize = 20_480;
+/// that exceeds the default 16KB search-result budget (~20KB as of 23 tips + parameter examples).
+/// 32KB gives comfortable headroom for adding more tips and parameter examples.
+const SEARCH_HELP_MIN_RESPONSE_BYTES: usize = 32_768;
+
+/// Minimum response budget for tools called with includeBody=true (64KB).
+/// When includeBody is true, responses contain source code of methods which
+/// can easily exceed the default 16KB budget. 300 body lines × ~80 chars ≈ 24KB
+/// plus metadata ≈ 30-35KB. 64KB gives comfortable headroom.
+/// Applies globally to any tool with includeBody (currently search_definitions
+/// and search_callers). Users can increase further via --max-response-kb CLI flag.
+const INCLUDE_BODY_MIN_RESPONSE_BYTES: usize = 65_536;
 
 /// Returns true when a tool requires the content index to be ready.
 fn requires_content_index(tool_name: &str) -> bool {
@@ -486,10 +506,19 @@ pub fn dispatch_tool(
         return result;
     }
 
-    // search_help is reference content (best practices, strategies, examples).
-    // Use a larger response budget (32KB) to avoid truncating static help text.
+    // Determine effective response budget:
+    // - search_help: 20KB (static reference content)
+    // - Any tool with includeBody=true: 64KB (source code is large)
+    // - Everything else: default (16KB)
+    let has_include_body = arguments
+        .get("includeBody")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
     let effective_max = if tool_name == "search_help" {
         ctx.max_response_bytes.max(SEARCH_HELP_MIN_RESPONSE_BYTES)
+    } else if has_include_body {
+        ctx.max_response_bytes.max(INCLUDE_BODY_MIN_RESPONSE_BYTES)
     } else {
         ctx.max_response_bytes
     };

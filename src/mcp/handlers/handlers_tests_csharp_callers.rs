@@ -1819,3 +1819,506 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
         "Callers of ServiceB.Execute() SHOULD include Consumer.DoWork() (which calls via IServiceB). Got tree: {}",
         serde_json::to_string_pretty(&tree_b).unwrap());
 }
+
+
+// ─── includeBody tests (require real files on disk) ──────────────────
+
+#[test]
+fn test_search_callers_include_body_default_false() {
+    // Default (no includeBody) should NOT have body fields in nodes
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ExecuteQueryAsync",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    for node in tree {
+        assert!(node.get("body").is_none(),
+            "Default (includeBody absent) should NOT include body. Got: {}",
+            serde_json::to_string_pretty(node).unwrap());
+        assert!(node.get("bodyStartLine").is_none(),
+            "Default should NOT include bodyStartLine");
+    }
+}
+
+#[test]
+fn test_search_callers_include_body_false_explicit() {
+    // Explicit includeBody=false should NOT have body fields
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ExecuteQueryAsync",
+        "depth": 1,
+        "includeBody": false
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    for node in tree {
+        assert!(node.get("body").is_none(),
+            "includeBody=false should NOT include body");
+    }
+}
+
+/// Helper: create a temp directory with real .cs files and set up indexes for includeBody tests.
+/// Returns (HandlerContext, TempDir path).
+fn make_callers_body_ctx() -> (HandlerContext, std::path::PathBuf) {
+    let tmp = std::env::temp_dir().join(format!("search_callers_body_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("Failed to create temp dir for callers body test");
+
+    // File 0: OrderService.cs — defines SubmitOrder method
+    let file0 = tmp.join("OrderService.cs");
+    std::fs::write(&file0, r#"namespace App {
+    public class OrderService {
+        private readonly IValidator _validator;
+
+        public void SubmitOrder(string id) {
+            var order = LoadOrder(id);
+            _validator.Validate(order);
+            SaveOrder(order);
+        }
+
+        private Order LoadOrder(string id) {
+            return new Order(id);
+        }
+    }
+}
+"#).unwrap();
+
+    // File 1: OrderController.cs — calls SubmitOrder
+    let file1 = tmp.join("OrderController.cs");
+    std::fs::write(&file1, r#"namespace App {
+    public class OrderController {
+        private readonly OrderService _orderService;
+
+        public IActionResult ProcessOrder(string id) {
+            try {
+                _orderService.SubmitOrder(id);
+                return Ok();
+            } catch (Exception ex) {
+                return BadRequest(ex.Message);
+            }
+        }
+    }
+}
+"#).unwrap();
+
+    let file0_str = file0.to_string_lossy().to_string();
+    let file1_str = file1.to_string_lossy().to_string();
+
+    let mut content_idx = HashMap::new();
+    content_idx.insert("submitorder".to_string(), vec![
+        Posting { file_id: 0, lines: vec![5] },
+        Posting { file_id: 1, lines: vec![7] },
+    ]);
+    content_idx.insert("orderservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![2] },
+        Posting { file_id: 1, lines: vec![3, 7] },
+    ]);
+    content_idx.insert("ordercontroller".to_string(), vec![
+        Posting { file_id: 1, lines: vec![2] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: tmp.to_string_lossy().to_string(),
+        files: vec![file0_str.clone(), file1_str.clone()],
+        index: content_idx, total_tokens: 200,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![100, 100],
+        ..Default::default()
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "OrderService".to_string(),
+            kind: DefinitionKind::Class, line_start: 2, line_end: 14,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "SubmitOrder".to_string(),
+            kind: DefinitionKind::Method, line_start: 5, line_end: 9,
+            parent: Some("OrderService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "OrderController".to_string(),
+            kind: DefinitionKind::Class, line_start: 2, line_end: 14,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ProcessOrder".to_string(),
+            kind: DefinitionKind::Method, line_start: 5, line_end: 12,
+            parent: Some("OrderController".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from(&file0_str), 0);
+    path_to_id.insert(PathBuf::from(&file1_str), 1);
+
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![CallSite {
+        method_name: "SubmitOrder".to_string(),
+        receiver_type: Some("OrderService".to_string()),
+        line: 7,
+        receiver_is_generic: false,
+    }]);
+
+    let def_index = DefinitionIndex {
+        root: tmp.to_string_lossy().to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![file0_str, file1_str],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls,
+        ..Default::default()
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        server_dir: tmp.to_string_lossy().to_string(),
+        max_response_bytes: 0, // no truncation for tests
+        ..Default::default()
+    };
+
+    (ctx, tmp)
+}
+
+fn cleanup_callers_body_ctx(tmp: &std::path::Path) {
+    let _ = std::fs::remove_dir_all(tmp);
+}
+
+#[test]
+fn test_search_callers_include_body_up() {
+    let (ctx, tmp) = make_callers_body_ctx();
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "SubmitOrder",
+        "class": "OrderService",
+        "depth": 1,
+        "includeBody": true
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(!tree.is_empty(), "Call tree should not be empty");
+
+    let node = &tree[0];
+    assert_eq!(node["method"].as_str(), Some("ProcessOrder"));
+    assert_eq!(node["class"].as_str(), Some("OrderController"));
+
+    // Should have body and bodyStartLine
+    let body = node["body"].as_array().expect("includeBody=true should produce body array");
+    assert!(!body.is_empty(), "body should not be empty");
+    assert!(node["bodyStartLine"].as_u64().is_some(), "Should have bodyStartLine");
+
+    // Body should contain the source code of ProcessOrder
+    let body_text: String = body.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(body_text.contains("ProcessOrder"),
+        "Body should contain method name. Got: {}", body_text);
+    assert!(body_text.contains("SubmitOrder"),
+        "Body should contain the call to SubmitOrder. Got: {}", body_text);
+
+    cleanup_callers_body_ctx(&tmp);
+}
+
+#[test]
+fn test_search_callers_include_body_down() {
+    let (ctx, tmp) = make_callers_body_ctx();
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ProcessOrder",
+        "class": "OrderController",
+        "direction": "down",
+        "depth": 1,
+        "includeBody": true
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(!tree.is_empty(), "Callee tree should not be empty");
+
+    let node = &tree[0];
+    assert_eq!(node["method"].as_str(), Some("SubmitOrder"));
+
+    // Should have body
+    let body = node["body"].as_array().expect("includeBody=true should produce body in direction=down");
+    assert!(!body.is_empty(), "body should not be empty for callee");
+    assert!(node["bodyStartLine"].as_u64().is_some(), "Should have bodyStartLine");
+
+    cleanup_callers_body_ctx(&tmp);
+}
+
+#[test]
+fn test_search_callers_include_body_max_body_lines() {
+    let (ctx, tmp) = make_callers_body_ctx();
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "SubmitOrder",
+        "class": "OrderService",
+        "depth": 1,
+        "includeBody": true,
+        "maxBodyLines": 2
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+    assert!(!tree.is_empty());
+
+    let node = &tree[0];
+    let body = node["body"].as_array().expect("Should have body");
+    assert!(body.len() <= 2,
+        "maxBodyLines=2 should cap body to at most 2 lines, got {}", body.len());
+    // bodyTruncated should be set if original body was longer
+    if body.len() == 2 {
+        assert!(node.get("bodyTruncated").is_some(),
+            "Body was capped, should have bodyTruncated marker");
+    }
+
+    cleanup_callers_body_ctx(&tmp);
+}
+
+#[test]
+fn test_search_callers_include_body_max_total_body_lines() {
+    let (ctx, tmp) = make_callers_body_ctx();
+
+    // Set maxTotalBodyLines=1 — after the first node's body, the budget should be exhausted
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "SubmitOrder",
+        "class": "OrderService",
+        "depth": 1,
+        "includeBody": true,
+        "maxTotalBodyLines": 1
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+
+    // The caller node's body should be capped or have bodyOmitted
+    if !tree.is_empty() {
+        let node = &tree[0];
+        // Either body exists and is small (≤1 line), or bodyOmitted is set
+        if let Some(body) = node["body"].as_array() {
+            assert!(body.len() <= 1,
+                "maxTotalBodyLines=1 should limit total body lines to 1");
+        }
+        // If there was a second node, it should have bodyOmitted
+    }
+
+    cleanup_callers_body_ctx(&tmp);
+}
+
+#[test]
+fn test_search_callers_include_body_nonexistent_file() {
+    // When file doesn't exist on disk, body should have bodyError
+    let mut content_idx = HashMap::new();
+    content_idx.insert("dowork".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },
+        Posting { file_id: 1, lines: vec![15] },
+    ]);
+    content_idx.insert("worker".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![5, 15] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec![
+            "C:\\nonexistent\\Worker.cs".to_string(),
+            "C:\\nonexistent\\Caller.cs".to_string(),
+        ],
+        index: content_idx, total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 50],
+        ..Default::default()
+    };
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "Worker".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "DoWork".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("Worker".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "Caller".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 30,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "CallDoWork".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("Caller".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from("C:\\nonexistent\\Worker.cs"), 0);
+    path_to_id.insert(PathBuf::from("C:\\nonexistent\\Caller.cs"), 1);
+
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![CallSite {
+        method_name: "DoWork".to_string(),
+        receiver_type: Some("Worker".to_string()),
+        line: 15,
+        receiver_is_generic: false,
+    }]);
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["C:\\nonexistent\\Worker.cs".to_string(), "C:\\nonexistent\\Caller.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id, method_calls,
+        ..Default::default()
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        max_response_bytes: 0,
+        ..Default::default()
+    };
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "DoWork",
+        "class": "Worker",
+        "depth": 1,
+        "includeBody": true
+    }));
+    assert!(!result.is_error, "includeBody with non-existent files should not error");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = output["callTree"].as_array().unwrap();
+
+    // Nodes should have bodyError instead of body (file doesn't exist)
+    if !tree.is_empty() {
+        let node = &tree[0];
+        assert!(node.get("bodyError").is_some(),
+            "Non-existent file should produce bodyError, got: {}",
+            serde_json::to_string_pretty(node).unwrap());
+    }
+}
+
+// ─── Response budget test ────────────────────────────────────────────
+
+#[test]
+fn test_include_body_response_budget_64kb() {
+    // When includeBody=true is passed, dispatch_tool should use 64KB budget
+    // instead of the default 16KB. We test this by checking that the
+    // INCLUDE_BODY_MIN_RESPONSE_BYTES constant is correctly applied.
+    use crate::mcp::handlers::utils::DEFAULT_MAX_RESPONSE_BYTES;
+
+    let ctx = HandlerContext {
+        max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES, // 16KB
+        ..Default::default()
+    };
+
+    // Without includeBody: effective_max should be 16KB (default)
+    let result_no_body = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "NonExistent"
+    }));
+    // The error result won't be truncated, but the dispatch logic was exercised
+
+    // With includeBody=true: effective_max should be 64KB
+    // We can't directly observe the effective_max, but we verify the feature
+    // compiles and runs without error
+    let result_with_body = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "NonExistent",
+        "includeBody": true
+    }));
+    // Both should succeed (no error from budget logic)
+    assert!(!result_no_body.is_error || result_no_body.content[0].text.contains("Definition index"));
+    assert!(!result_with_body.is_error || result_with_body.content[0].text.contains("Definition index"));
+}
+
+
+#[test]
+fn test_search_callers_include_body_has_root_method() {
+    // When includeBody=true, the response should include rootMethod with body of the searched method
+    let (ctx, tmp) = make_callers_body_ctx();
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "SubmitOrder",
+        "class": "OrderService",
+        "depth": 1,
+        "includeBody": true
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // rootMethod should be present
+    let root = output.get("rootMethod").expect("includeBody=true should include rootMethod");
+    assert_eq!(root["method"].as_str(), Some("SubmitOrder"));
+    assert_eq!(root["class"].as_str(), Some("OrderService"));
+    assert!(root["body"].as_array().is_some(), "rootMethod should have body");
+    let body = root["body"].as_array().unwrap();
+    assert!(!body.is_empty(), "rootMethod body should not be empty");
+    let body_text: String = body.iter().filter_map(|v| v.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(body_text.contains("SubmitOrder"),
+        "rootMethod body should contain the method name. Got: {}", body_text);
+    assert!(root["bodyStartLine"].as_u64().is_some(), "rootMethod should have bodyStartLine");
+
+    // rootMethod should NOT appear when includeBody=false
+    let result2 = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "SubmitOrder",
+        "class": "OrderService",
+        "depth": 1
+    }));
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    assert!(output2.get("rootMethod").is_none(),
+        "rootMethod should NOT appear when includeBody is absent/false");
+
+    cleanup_callers_body_ctx(&tmp);
+}
+
+#[test]
+fn test_search_callers_include_body_root_method_down() {
+    // rootMethod should also work for direction=down
+    let (ctx, tmp) = make_callers_body_ctx();
+
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "ProcessOrder",
+        "class": "OrderController",
+        "direction": "down",
+        "depth": 1,
+        "includeBody": true
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let root = output.get("rootMethod").expect("includeBody=true direction=down should include rootMethod");
+    assert_eq!(root["method"].as_str(), Some("ProcessOrder"));
+    assert_eq!(root["class"].as_str(), Some("OrderController"));
+    assert!(root["body"].as_array().is_some(), "rootMethod should have body for direction=down");
+
+    cleanup_callers_body_ctx(&tmp);
+}

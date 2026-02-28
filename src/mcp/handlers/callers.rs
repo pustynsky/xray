@@ -1,6 +1,6 @@
 //! search_callers handler: call tree building (up/down).
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
@@ -13,7 +13,7 @@ use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionK
 use search_index::generate_trigrams;
 
 use super::HandlerContext;
-use super::utils::{inject_branch_warning, json_to_string, sorted_intersect};
+use super::utils::{inject_body_into_obj, inject_branch_warning, json_to_string, sorted_intersect};
 
 /// Built-in JavaScript/TypeScript types whose methods should never be resolved
 /// to user-defined classes. When a call site has one of these as its receiver type,
@@ -99,6 +99,11 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
         .unwrap_or_default();
+
+    // Body injection parameters
+    let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false);
+    let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
+    let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(300) as usize;
 
     let search_start = Instant::now();
 
@@ -198,6 +203,28 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         resolve_interfaces,
         limits: &limits,
         node_count: &node_count,
+        include_body,
+        max_body_lines,
+        max_total_body_lines,
+    };
+
+    // Mutable state for body injection (shared across recursive calls)
+    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total_body_lines_emitted: usize = 0;
+
+    // Build root method info (for includeBody — includes the searched method's own body)
+    let root_method = if include_body {
+        build_root_method_info(
+            &method_lower,
+            class_filter.as_deref(),
+            &def_idx,
+            &mut file_cache,
+            &mut total_body_lines_emitted,
+            max_body_lines,
+            max_total_body_lines,
+        )
+    } else {
+        None
     };
 
     if direction == "up" {
@@ -209,6 +236,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             0,
             &caller_ctx,
             &mut visited,
+            &mut file_cache,
+            &mut total_body_lines_emitted,
         );
 
         // Dedup: remove duplicate nodes at root level (can happen with resolveInterfaces)
@@ -235,6 +264,9 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             },
             "summary": summary
         });
+        if let Some(root) = &root_method {
+            output["rootMethod"] = root.clone();
+        }
         if tree.is_empty() && class_filter.is_some() {
             output["hint"] = json!(
                 "No callers found. Possible reasons: (1) calls go through extension methods or DI wrappers, (2) class filter is too narrow. Try without 'class' parameter or with the interface name."
@@ -255,6 +287,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             0,
             &caller_ctx,
             &mut HashSet::new(),
+            &mut file_cache,
+            &mut total_body_lines_emitted,
         );
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
@@ -275,6 +309,9 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             },
             "summary": summary
         });
+        if let Some(root) = &root_method {
+            output["rootMethod"] = root.clone();
+        }
         if tree.is_empty() && class_filter.is_some() {
             output["hint"] = json!(
                 "No callees found. Possible reasons: (1) method body not parsed, (2) class filter is too narrow. Try without 'class' parameter or with the interface name."
@@ -326,6 +363,9 @@ struct CallerTreeContext<'a> {
     resolve_interfaces: bool,
     limits: &'a CallerLimits,
     node_count: &'a AtomicUsize,
+    include_body: bool,
+    max_body_lines: usize,
+    max_total_body_lines: usize,
 }
 
 /// Find the containing method for a given file_id and line number in the definition index.
@@ -418,6 +458,8 @@ fn expand_interface_callers(
     max_depth: usize,
     ctx: &CallerTreeContext,
     visited: &mut HashSet<String>,
+    file_cache: &mut HashMap<String, Option<String>>,
+    total_body_lines_emitted: &mut usize,
 ) -> Vec<Value> {
     let def_idx = ctx.def_idx;
     let name_indices = match def_idx.name_index.get(method_lower) {
@@ -496,6 +538,8 @@ fn expand_interface_callers(
                                                     1, // current_depth = 1 (interface expansion counts as one level)
                                                     &no_iface_ctx,
                                                     visited,
+                                                    file_cache,
+                                                    total_body_lines_emitted,
                                                 );
                                                 callers.extend(impl_callers);
                                             }
@@ -724,6 +768,61 @@ fn verify_call_site_target(
     false
 }
 
+/// Build a JSON object describing the root method (the method being searched for).
+/// Includes body if includeBody is true. Returns None if the method is not found in the definition index.
+fn build_root_method_info(
+    method_lower: &str,
+    class_filter: Option<&str>,
+    def_idx: &DefinitionIndex,
+    file_cache: &mut HashMap<String, Option<String>>,
+    total_body_lines_emitted: &mut usize,
+    max_body_lines: usize,
+    max_total_body_lines: usize,
+) -> Option<Value> {
+    let name_indices = def_idx.name_index.get(method_lower)?;
+
+    // Find the best matching method definition
+    for &di in name_indices {
+        let def = def_idx.definitions.get(di as usize)?;
+        if !matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+            | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
+            continue;
+        }
+        // Apply class filter if provided
+        if let Some(cls) = class_filter {
+            if !def.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
+                continue;
+            }
+        }
+
+        let file_path = def_idx.files.get(def.file_id as usize)?;
+        let mut node = json!({
+            "method": def.name,
+            "line": def.line_start,
+        });
+        if let Some(ref parent) = def.parent {
+            node["class"] = json!(parent);
+        }
+        if let Some(fname) = Path::new(file_path.as_str()).file_name().and_then(|f| f.to_str()) {
+            node["file"] = json!(fname);
+        }
+
+        inject_body_into_obj(
+            &mut node,
+            file_path,
+            def.line_start,
+            def.line_end,
+            file_cache,
+            total_body_lines_emitted,
+            max_body_lines,
+            max_total_body_lines,
+        );
+
+        return Some(node);
+    }
+    None
+}
+
 /// Find the `line_start` of the first matching method definition for overload disambiguation.
 /// Searches the name index for definitions with callable kinds (Method, Constructor, Function,
 /// StoredProcedure, SqlFunction). When `parent_class` is provided, only matches definitions
@@ -837,6 +936,8 @@ fn build_caller_tree(
     current_depth: usize,
     ctx: &CallerTreeContext,
     visited: &mut HashSet<String>,
+    file_cache: &mut HashMap<String, Option<String>>,
+    total_body_lines_emitted: &mut usize,
 ) -> Vec<Value> {
     if current_depth >= max_depth {
         return Vec::new();
@@ -932,16 +1033,37 @@ fn build_caller_tree(
                 current_depth + 1,
                 ctx,
                 visited,
+                file_cache,
+                total_body_lines_emitted,
             );
 
-            callers.push(build_caller_node(
+            let mut node = build_caller_node(
                 &caller_name,
                 caller_parent.as_deref(),
                 caller_line,
                 line,
                 file_path,
                 sub_callers,
-            ));
+            );
+
+            // Inject body if requested
+            if ctx.include_body {
+                let caller_line_end = ctx.def_idx.definitions.get(caller_di as usize)
+                    .map(|d| d.line_end)
+                    .unwrap_or(caller_line);
+                inject_body_into_obj(
+                    &mut node,
+                    file_path,
+                    caller_line,
+                    caller_line_end,
+                    file_cache,
+                    total_body_lines_emitted,
+                    ctx.max_body_lines,
+                    ctx.max_total_body_lines,
+                );
+            }
+
+            callers.push(node);
         }
     }
 
@@ -949,6 +1071,7 @@ fn build_caller_tree(
     if ctx.resolve_interfaces && current_depth == 0 {
         let iface_callers = expand_interface_callers(
             method_name, &method_lower, parent_class, max_depth, ctx, visited,
+            file_cache, total_body_lines_emitted,
         );
         callers.extend(iface_callers);
     }
@@ -1096,6 +1219,8 @@ fn build_callee_tree(
     current_depth: usize,
     ctx: &CallerTreeContext,
     visited: &mut HashSet<String>,
+    file_cache: &mut HashMap<String, Option<String>>,
+    total_body_lines_emitted: &mut usize,
 ) -> Vec<Value> {
     if current_depth >= max_depth {
         return Vec::new();
@@ -1214,6 +1339,8 @@ fn build_callee_tree(
                     current_depth + 1,
                     ctx,
                     visited,
+                    file_cache,
+                    total_body_lines_emitted,
                 );
 
                 let mut node = json!({
@@ -1233,6 +1360,21 @@ fn build_callee_tree(
                 if !sub_callees.is_empty() {
                     node["callees"] = json!(sub_callees);
                 }
+
+                // Inject body if requested
+                if ctx.include_body {
+                    inject_body_into_obj(
+                        &mut node,
+                        callee_file,
+                        callee_def.line_start,
+                        callee_def.line_end,
+                        file_cache,
+                        total_body_lines_emitted,
+                        ctx.max_body_lines,
+                        ctx.max_total_body_lines,
+                    );
+                }
+
                 callees.push(node);
             }
         }

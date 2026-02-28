@@ -8,6 +8,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-02-28
 
+### Features
+
+- **`includeBody` in `search_callers`** — Each node in the call tree can now include the method's source code inline via `includeBody=true` parameter. Supports `maxBodyLines` (default: 30) and `maxTotalBodyLines` (default: 300) for budget control. Works for both `direction=up` (callers) and `direction=down` (callees). Reuses the existing `inject_body_into_obj()` function from `search_definitions`. When the total body budget is exceeded, remaining nodes get `bodyOmitted` instead of `body`. Eliminates the need for a separate `search_definitions` call to read caller source code after getting the call tree — one call instead of two. 8 new unit tests.
+
+- **Global 64KB response budget for `includeBody=true`** — When any tool (`search_callers` or `search_definitions`) is called with `includeBody=true`, the response byte budget is automatically increased from 16KB to 64KB. This prevents premature truncation of body-rich responses by the progressive truncation mechanism. Tools without `includeBody` continue to use the default 16KB budget. Also retroactively fixes `search_definitions` with `includeBody=true` which could be truncated on large result sets.
+
+- **`search_help` response budget increased to 32KB** — The `search_help` tool response budget was increased from 20KB to 32KB to accommodate the growing parameter examples and tips. Previously, adding new tool parameters could cause best practices tips to be truncated.
+
 ### Bug Fixes
 
 - **`search_grep` non-UTF-8 files now return `lineContent`** — Replaced 4 instances of `std::fs::read_to_string()` with `read_file_lossy()` in grep handler. Previously, Windows-1252, Shift-JIS, and UTF-16LE files silently returned no `lineContent` in search results. Now uses the same lossy reading that the watcher and content indexer already use.

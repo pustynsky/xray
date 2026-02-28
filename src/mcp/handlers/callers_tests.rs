@@ -467,7 +467,12 @@ fn test_prefilter_does_not_expand_by_base_types() {
         resolve_interfaces: false,
         limits: &limits,
         node_count: &node_count,
+        include_body: false,
+        max_body_lines: 0,
+        max_total_body_lines: 0,
     };
+    let mut file_cache = HashMap::new();
+    let mut total_body_lines = 0usize;
     let callers = build_caller_tree(
         "Dispose",
         Some("ResourceManager"),
@@ -475,6 +480,8 @@ fn test_prefilter_does_not_expand_by_base_types() {
         0,
         &caller_ctx,
         &mut visited,
+        &mut file_cache,
+        &mut total_body_lines,
     );
 
     // Should find exactly one caller: Caller.DoWork
@@ -559,8 +566,13 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
         resolve_interfaces: false,
         limits: &limits,
         node_count: &node_count,
+        include_body: false,
+        max_body_lines: 0,
+        max_total_body_lines: 0,
     };
-    let callees = build_callee_tree("process", Some("ClassA"), 3, 0, &caller_ctx, &mut visited);
+    let mut file_cache = HashMap::new();
+    let mut total_body_lines = 0usize;
+    let callees = build_callee_tree("process", Some("ClassA"), 3, 0, &caller_ctx, &mut visited, &mut file_cache, &mut total_body_lines);
 
     assert_eq!(callees.len(), 2, "Should have 2 callees, got {:?}", callees);
     let callee_names: Vec<(&str, &str)> = callees.iter()
@@ -1455,7 +1467,12 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         resolve_interfaces: false,
         limits: &limits,
         node_count: &node_count,
+        include_body: false,
+        max_body_lines: 0,
+        max_total_body_lines: 0,
     };
+    let mut file_cache = HashMap::new();
+    let mut total_body_lines = 0usize;
     let callers = build_caller_tree(
         "Process",
         Some("ClassA"),
@@ -1463,6 +1480,8 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         0,
         &caller_ctx,
         &mut visited,
+        &mut file_cache,
+        &mut total_body_lines,
     );
 
     // Depth 0: should find ClassB.Handle as the caller of ClassA.Process
@@ -1849,9 +1868,14 @@ fn test_sql_callee_tree_exec_dependencies() {
         resolve_interfaces: false,
         limits: &limits,
         node_count: &node_count,
+        include_body: false,
+        max_body_lines: 0,
+        max_total_body_lines: 0,
     };
 
-    let callees = build_callee_tree("usp_ProcessBatch", Some("dbo"), 3, 0, &caller_ctx, &mut visited);
+    let mut file_cache = HashMap::new();
+    let mut total_body_lines = 0usize;
+    let callees = build_callee_tree("usp_ProcessBatch", Some("dbo"), 3, 0, &caller_ctx, &mut visited, &mut file_cache, &mut total_body_lines);
 
     // Should find 2 SP callees (usp_ValidateOrder and usp_ReserveStock)
     // Should NOT find Orders (Table kind excluded)
@@ -1959,8 +1983,13 @@ fn test_sql_caller_tree_who_calls_sp() {
         resolve_interfaces: false,
         limits: &limits,
         node_count: &node_count,
+        include_body: false,
+        max_body_lines: 0,
+        max_total_body_lines: 0,
     };
 
+    let mut file_cache = HashMap::new();
+    let mut total_body_lines = 0usize;
     let callers = build_caller_tree(
         "usp_ValidateOrder",
         Some("Sales"),
@@ -1968,6 +1997,8 @@ fn test_sql_caller_tree_who_calls_sp() {
         0,
         &caller_ctx,
         &mut visited,
+        &mut file_cache,
+        &mut total_body_lines,
     );
 
     assert_eq!(callers.len(), 1, "Expected 1 caller of usp_ValidateOrder, got {:?}", callers);
