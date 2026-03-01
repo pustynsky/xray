@@ -597,3 +597,227 @@ fn test_inject_branch_warning_skips_none() {
     inject_branch_warning(&mut summary, &ctx);
     assert!(summary.get("branchWarning").is_none());
 }
+
+
+// ─── Doc comment scanning tests ─────────────────────────────────────
+
+#[test]
+fn test_find_doc_comment_start_csharp_triple_slash() {
+    let lines = vec![
+        "using System;",           // 0
+        "",                         // 1
+        "/// <summary>",           // 2
+        "/// Validates the order.", // 3
+        "/// </summary>",          // 4
+        "public bool ValidateOrder(Order order)", // 5
+        "{",                        // 6
+    ];
+    // decl_start_idx = 5 (0-based)
+    let result = find_doc_comment_start(&lines, 5);
+    assert_eq!(result, 2, "Should find first /// line at index 2");
+}
+
+#[test]
+fn test_find_doc_comment_start_typescript_jsdoc() {
+    let lines = vec![
+        "import { Service } from './service';", // 0
+        "",                                      // 1
+        "/**",                                   // 2
+        " * Gets the user by ID.",               // 3
+        " * @param id - The user identifier",    // 4
+        " * @returns The user model",            // 5
+        " */",                                   // 6
+        "async function getUser(id: string) {",  // 7
+    ];
+    let result = find_doc_comment_start(&lines, 7);
+    assert_eq!(result, 2, "Should find /** start at index 2");
+}
+
+#[test]
+fn test_find_doc_comment_start_no_comment() {
+    let lines = vec![
+        "using System;",       // 0
+        "",                     // 1
+        "public class Foo {",  // 2
+        "    public void Bar()", // 3
+    ];
+    let result = find_doc_comment_start(&lines, 3);
+    assert_eq!(result, 3, "Should return decl_start_idx when no doc comment");
+}
+
+#[test]
+fn test_find_doc_comment_start_separated_by_code() {
+    let lines = vec![
+        "/// <summary>Doc for something else</summary>", // 0
+        "private int _field;",                            // 1
+        "public void Method()",                           // 2
+    ];
+    let result = find_doc_comment_start(&lines, 2);
+    assert_eq!(result, 2, "Should NOT capture comment separated by code line");
+}
+
+#[test]
+fn test_find_doc_comment_start_with_blank_line_between() {
+    let lines = vec![
+        "/// <summary>",           // 0
+        "/// Doc comment.",        // 1
+        "/// </summary>",          // 2
+        "",                         // 3 - blank line
+        "public void Method()",    // 4
+    ];
+    let result = find_doc_comment_start(&lines, 4);
+    assert_eq!(result, 0, "Should skip blank line and capture doc comment");
+}
+
+#[test]
+fn test_find_doc_comment_start_rust_doc() {
+    let lines = vec![
+        "use std::io;",            // 0
+        "",                         // 1
+        "/// Creates a new instance.", // 2
+        "/// With multiple lines.",    // 3
+        "pub fn new() -> Self {",      // 4
+    ];
+    let result = find_doc_comment_start(&lines, 4);
+    assert_eq!(result, 2, "Should capture Rust /// doc comments");
+}
+
+#[test]
+fn test_find_doc_comment_start_at_file_start() {
+    let lines = vec![
+        "/// Doc at very start.", // 0
+        "pub fn first() {}",     // 1
+    ];
+    let result = find_doc_comment_start(&lines, 1);
+    assert_eq!(result, 0, "Should capture doc comment at first line of file");
+}
+
+#[test]
+fn test_find_doc_comment_start_decl_at_zero() {
+    let lines = vec![
+        "pub fn first() {}", // 0
+    ];
+    let result = find_doc_comment_start(&lines, 0);
+    assert_eq!(result, 0, "Should return 0 when decl is at line 0");
+}
+
+#[test]
+fn test_is_doc_comment_line_variants() {
+    assert!(is_doc_comment_line("    /// <summary>"));
+    assert!(is_doc_comment_line("///"));
+    assert!(is_doc_comment_line("/// text"));
+    assert!(is_doc_comment_line("    /**"));
+    assert!(is_doc_comment_line("     * continuation"));
+    assert!(is_doc_comment_line("     */"));
+    assert!(is_doc_comment_line("  *"));
+    assert!(!is_doc_comment_line("  // regular comment"));
+    assert!(!is_doc_comment_line("  public void Method()"));
+    assert!(!is_doc_comment_line(""));
+    assert!(!is_doc_comment_line("   "));
+}
+
+#[test]
+fn test_inject_body_with_doc_comments_csharp() {
+    // Create a temp file with C# code
+    let content = "using System;\n\
+                   \n\
+                   /// <summary>\n\
+                   /// Validates the order.\n\
+                   /// </summary>\n\
+                   [Authorize]\n\
+                   public bool ValidateOrder(Order order)\n\
+                   {\n\
+                       return true;\n\
+                   }\n";
+    let dir = std::env::temp_dir().join("search_test_doc_comments_cs");
+    let _ = std::fs::create_dir_all(&dir);
+    let file_path = dir.join("test.cs");
+    std::fs::write(&file_path, content).unwrap();
+    let file_str = file_path.to_string_lossy().to_string();
+
+    let mut obj = json!({});
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total = 0usize;
+
+    // line_start=6 (1-based, [Authorize] line), line_end=10
+    inject_body_into_obj(
+        &mut obj, &file_str, 6, 10, &mut cache, &mut total, 100, 500, true,
+    );
+
+    // Body should start at the /// line (line 3, 1-based)
+    assert_eq!(obj["bodyStartLine"], 3, "bodyStartLine should be 3 (first /// line)");
+    assert_eq!(obj["docCommentLines"], 3, "docCommentLines should be 3");
+    let body = obj["body"].as_array().unwrap();
+    assert!(body[0].as_str().unwrap().contains("/// <summary>"),
+        "First body line should be the doc comment");
+
+    // Cleanup
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_inject_body_without_doc_comments_flag() {
+    let content = "/// <summary>\n\
+                   /// Doc text.\n\
+                   /// </summary>\n\
+                   public void Method()\n\
+                   {\n\
+                   }\n";
+    let dir = std::env::temp_dir().join("search_test_no_doc_flag");
+    let _ = std::fs::create_dir_all(&dir);
+    let file_path = dir.join("test.cs");
+    std::fs::write(&file_path, content).unwrap();
+    let file_str = file_path.to_string_lossy().to_string();
+
+    let mut obj = json!({});
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total = 0usize;
+
+    // line_start=4, line_end=6, include_doc_comments=false
+    inject_body_into_obj(
+        &mut obj, &file_str, 4, 6, &mut cache, &mut total, 100, 500, false,
+    );
+
+    assert_eq!(obj["bodyStartLine"], 4, "bodyStartLine should be 4 (no expansion)");
+    assert!(obj.get("docCommentLines").is_none(), "No docCommentLines when flag is false");
+    let body = obj["body"].as_array().unwrap();
+    assert!(body[0].as_str().unwrap().contains("public void Method"),
+        "First line should be the method declaration");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn test_inject_body_with_doc_comments_jsdoc() {
+    let content = "import { User } from './types';\n\
+                   \n\
+                   /**\n\
+                   * Gets user by ID.\n\
+                   * @param id - user ID\n\
+                   */\n\
+                   export async function getUser(id: string): Promise<User> {\n\
+                       return fetch(`/users/${id}`);\n\
+                   }\n";
+    let dir = std::env::temp_dir().join("search_test_doc_comments_ts");
+    let _ = std::fs::create_dir_all(&dir);
+    let file_path = dir.join("test.ts");
+    std::fs::write(&file_path, content).unwrap();
+    let file_str = file_path.to_string_lossy().to_string();
+
+    let mut obj = json!({});
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total = 0usize;
+
+    // line_start=7 (export async function), line_end=9
+    inject_body_into_obj(
+        &mut obj, &file_str, 7, 9, &mut cache, &mut total, 100, 500, true,
+    );
+
+    assert_eq!(obj["bodyStartLine"], 3, "bodyStartLine should be 3 (/** line)");
+    assert_eq!(obj["docCommentLines"], 4, "docCommentLines should be 4 (/** through */)");
+    let body = obj["body"].as_array().unwrap();
+    assert!(body[0].as_str().unwrap().contains("/**"),
+        "First body line should be the JSDoc start");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

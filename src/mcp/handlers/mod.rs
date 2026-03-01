@@ -239,6 +239,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "boolean",
                         "description": "Include source code body in results. Use maxBodyLines to control size. (default: false)"
                     },
+                    "includeDocComments": {
+                        "type": "boolean",
+                        "description": "Expand body upward to include doc-comments (/// in C#/Rust, /** */ JSDoc in TypeScript). Implies includeBody=true. Adds 'docCommentLines' field showing how many lines are comments. Budget-aware: respects maxBodyLines. (default: false)"
+                    },
                     "maxBodyLines": {
                         "type": "integer",
                         "description": "Max source lines per definition when includeBody=true (default: 100, 0=unlimited)"
@@ -348,6 +352,10 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "includeBody": {
                         "type": "boolean",
                         "description": "Include source code body of each method in the call tree, plus a 'rootMethod' object with the searched method's own body. Eliminates the need for a separate search_definitions call. (default: false)"
+                    },
+                    "includeDocComments": {
+                        "type": "boolean",
+                        "description": "Expand body upward to include doc-comments (/// in C#/Rust, /** */ JSDoc in TypeScript). Implies includeBody=true. Adds 'docCommentLines' field. (default: false)"
                     },
                     "maxBodyLines": {
                         "type": "integer",
@@ -517,7 +525,11 @@ pub fn dispatch_tool(
     let has_include_body = arguments
         .get("includeBody")
         .and_then(|v| v.as_bool())
-        .unwrap_or(false);
+        .unwrap_or(false)
+        || arguments
+            .get("includeDocComments")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
     let effective_max = if tool_name == "search_help" {
         ctx.max_response_bytes.max(SEARCH_HELP_MIN_RESPONSE_BYTES)

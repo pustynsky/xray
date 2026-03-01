@@ -6,6 +6,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-03-01
+
+### Features
+
+- **`includeDocComments` in `search_definitions` and `search_callers`** — New parameter that expands body output upward to capture doc-comment blocks above definitions. Supports `///` XML doc comments (C#/Rust) and `/** */` JSDoc blocks (TypeScript/JavaScript). Implies `includeBody=true` — no need to specify both. Response includes `docCommentLines` field showing how many lines are doc-comments. Budget-aware: doc-comment lines count against `maxBodyLines` and `maxTotalBodyLines`. Works in all body injection paths: `search_definitions` (normal search, containsLine mode), `search_callers` (caller tree nodes, callee tree nodes, rootMethod). Skips blank lines between comment and declaration, stops at first non-comment line, and does NOT capture comments separated by code. 13 new unit tests. Self-review caught and fixed a bug where `build_root_method_info` was not passing the `include_doc_comments` flag.
+
+---
+
 ## 2026-02-28
 
 ### Features

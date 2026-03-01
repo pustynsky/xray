@@ -38,6 +38,7 @@ pub(crate) struct DefinitionSearchArgs {
     pub max_results: usize,
     pub exclude_dir: Vec<String>,
     pub include_body: bool,
+    pub include_doc_comments: bool,
     pub max_body_lines: usize,
     pub max_total_body_lines: usize,
     pub audit: bool,
@@ -104,7 +105,9 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
-    let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false);
+    let include_doc_comments = args.get("includeDocComments").and_then(|v| v.as_bool()).unwrap_or(false);
+    let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false)
+        || include_doc_comments; // includeDocComments implies includeBody
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
     let audit = args.get("audit").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -159,6 +162,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         max_results,
         exclude_dir,
         include_body,
+        include_doc_comments,
         max_body_lines,
         max_total_body_lines,
         audit,
@@ -354,6 +358,7 @@ fn handle_contains_line_mode(
                         &mut obj, file_path, def.line_start, def.line_end,
                         &mut file_cache, &mut total_body_lines_emitted,
                         args.max_body_lines, args.max_total_body_lines,
+                        args.include_doc_comments,
                     );
                 }
                 containing_defs.push(obj);
@@ -806,6 +811,7 @@ fn format_definition_entry(
             &mut obj, file_path, def.line_start, def.line_end,
             file_cache, total_body_lines_emitted,
             args.max_body_lines, args.max_total_body_lines,
+            args.include_doc_comments,
         );
     }
 

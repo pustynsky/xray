@@ -223,6 +223,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `resolveInterfaces`  | Auto-resolve interface → implementation (default: true)                                                                                             |
 | `ext`                | File extension filter (default: server's `--ext`)                                                                                                   |
 | `includeBody`        | Include source code body of each method in the call tree (default: false). Also adds `rootMethod` with the target method's body                     |
+| `includeDocComments` | Expand body upward to include doc-comments above definitions. Implies `includeBody=true`. Adds `docCommentLines` field (default: false)             |
 | `maxBodyLines`       | Max source lines per method when `includeBody=true` (default: 30, 0=unlimited)                                                                      |
 | `maxTotalBodyLines`  | Max total body lines across all methods in the tree (default: 300, 0=unlimited)                                                                      |
 | `impactAnalysis`     | When `true` with `direction=up`, identifies test methods covering the target. Returns `testsCovering` array with full file path, `depth`, and `callChain`. Test nodes marked `isTest: true`. Recursion stops at tests. Tests detected via C# `[Test]`/`[Fact]`/`[Theory]`/`[TestMethod]`, Rust `#[test]`, TS `*.spec.ts`/`*.test.ts` files. (default: false) |
@@ -315,6 +316,7 @@ When `includeBody: true`, each node in the call tree includes source code:
 | `bodyTruncated`   | Body exceeds `maxBodyLines`                      | `true` when body was cut short                       |
 | `bodyOmitted`     | Global `maxTotalBodyLines` budget exceeded        | `true` — body skipped entirely for this node         |
 | `bodyWarning`     | Body omitted                                     | Human-readable reason for omission                   |
+| `docCommentLines` | `includeDocComments=true` and doc-comment found   | Number of lines that are doc-comments (before method declaration) |
 | `rootMethod`      | `includeBody=true`                               | Top-level object with the searched method's own body |
 
 ### Limitations
@@ -347,6 +349,7 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `maxResults`        | integer | 100     | Max results returned                                                                     |
 | `excludeDir`        | array   | —       | Exclude directories                                                                      |
 | `includeBody`       | boolean | false   | Include source code body inline                                                          |
+| `includeDocComments`| boolean | false   | Expand body upward to include `///` (C#/Rust) or `/** */` (TypeScript) doc-comments. Implies `includeBody=true`. Adds `docCommentLines` field |
 | `maxBodyLines`      | integer | 100     | Max lines per definition body (0 = unlimited)                                            |
 | `maxTotalBodyLines` | integer | 500     | Max total body lines across all results (0 = unlimited)                                  |
 | `audit`             | boolean | false   | Return index coverage report instead of search results                                   |

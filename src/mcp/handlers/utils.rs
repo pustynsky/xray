@@ -489,6 +489,7 @@ pub(crate) fn inject_body_into_obj(
     total_body_lines_emitted: &mut usize,
     max_body_lines: usize,
     max_total_body_lines: usize,
+    include_doc_comments: bool,
 ) {
     // Check total budget
     if max_total_body_lines > 0 && *total_body_lines_emitted >= max_total_body_lines {
@@ -516,7 +517,7 @@ pub(crate) fn inject_body_into_obj(
             let total_file_lines = lines_vec.len();
 
             // 1-based to 0-based
-            let start_idx = (line_start as usize).saturating_sub(1);
+            let mut start_idx = (line_start as usize).saturating_sub(1);
             let end_idx = (line_end as usize).min(total_file_lines);
 
             // Stale data check
@@ -526,6 +527,16 @@ pub(crate) fn inject_body_into_obj(
                     line_end, total_file_lines
                 ));
             }
+
+            // Expand upward to capture doc comments if requested
+            let doc_comment_lines = if include_doc_comments && start_idx > 0 {
+                let doc_start = find_doc_comment_start(&lines_vec, start_idx);
+                let count = start_idx - doc_start;
+                start_idx = doc_start;
+                count
+            } else {
+                0
+            };
 
             let body_lines: Vec<&str> = if start_idx < total_file_lines {
                 lines_vec[start_idx..end_idx].to_vec()
@@ -557,6 +568,10 @@ pub(crate) fn inject_body_into_obj(
             obj["bodyStartLine"] = json!(start_idx + 1);
             obj["body"] = json!(body_array);
 
+            if doc_comment_lines > 0 {
+                obj["docCommentLines"] = json!(doc_comment_lines);
+            }
+
             if truncated {
                 obj["bodyTruncated"] = json!(true);
                 obj["totalBodyLines"] = json!(total_body_lines_in_def);
@@ -565,6 +580,71 @@ pub(crate) fn inject_body_into_obj(
             *total_body_lines_emitted += lines_to_emit;
         }
     }
+}
+
+/// Scan upward from `decl_start_idx` (0-based) to find the first line of a
+/// contiguous doc-comment block. Returns the 0-based index of the first
+/// doc-comment line, or `decl_start_idx` if no doc-comment is found.
+///
+/// Supports:
+/// - C#/Rust: `///` XML doc comments
+/// - TypeScript/JavaScript: `/** ... */` JSDoc blocks
+///
+/// Skips blank lines between the declaration and the comment block.
+/// Stops at the first non-comment, non-blank line.
+pub(crate) fn find_doc_comment_start(lines: &[&str], decl_start_idx: usize) -> usize {
+    if decl_start_idx == 0 {
+        return decl_start_idx;
+    }
+
+    let mut scan = decl_start_idx - 1;
+
+    // Phase 1: skip blank lines between declaration and potential comment
+    while scan > 0 && lines[scan].trim().is_empty() {
+        scan -= 1;
+    }
+    // If the line after skipping blanks is blank too (scan == 0 and blank), no comment
+    if lines[scan].trim().is_empty() {
+        return decl_start_idx;
+    }
+
+    // Phase 2: check if we're at a doc-comment line
+    if !is_doc_comment_line(lines[scan]) {
+        return decl_start_idx; // no doc-comment above
+    }
+
+    // Phase 3: scan upward through contiguous doc-comment lines
+    let comment_end = scan;
+    while scan > 0 {
+        let above = lines[scan - 1].trim();
+        if above.is_empty() {
+            // Allow at most one blank line within a JSDoc block (between /** and */)
+            // but not for /// style comments
+            break;
+        }
+        if is_doc_comment_line(lines[scan - 1]) {
+            scan -= 1;
+        } else {
+            break;
+        }
+    }
+
+    // Verify we actually found comment lines
+    if scan <= comment_end {
+        scan
+    } else {
+        decl_start_idx
+    }
+}
+
+/// Check if a line is a doc-comment line (trimmed).
+/// Matches: `///`, `/**`, ` * `, ` */`, `*` (JSDoc continuation)
+fn is_doc_comment_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed.starts_with("///")          // C#, Rust doc comments
+        || trimmed.starts_with("/**")   // JSDoc block start
+        || trimmed.starts_with("*/")    // JSDoc block end
+        || (trimmed.starts_with('*') && !trimmed.starts_with("**") || trimmed == "*") // JSDoc continuation: `* text` or bare `*`
 }
 
 // ─── Relevance ranking helpers ──────────────────────────────────────

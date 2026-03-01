@@ -144,7 +144,9 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         .unwrap_or_default();
 
     // Body injection parameters
-    let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false);
+    let include_doc_comments = args.get("includeDocComments").and_then(|v| v.as_bool()).unwrap_or(false);
+    let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false)
+        || include_doc_comments; // includeDocComments implies includeBody
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(300) as usize;
 
@@ -255,6 +257,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         limits: &limits,
         node_count: &node_count,
         include_body,
+        include_doc_comments,
         max_body_lines,
         max_total_body_lines,
         impact_analysis,
@@ -274,6 +277,7 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             &mut total_body_lines_emitted,
             max_body_lines,
             max_total_body_lines,
+            include_doc_comments,
         )
     } else {
         None
@@ -442,6 +446,7 @@ struct CallerTreeContext<'a> {
     limits: &'a CallerLimits,
     node_count: &'a AtomicUsize,
     include_body: bool,
+    include_doc_comments: bool,
     max_body_lines: usize,
     max_total_body_lines: usize,
     impact_analysis: bool,
@@ -861,6 +866,7 @@ fn build_root_method_info(
     total_body_lines_emitted: &mut usize,
     max_body_lines: usize,
     max_total_body_lines: usize,
+    include_doc_comments: bool,
 ) -> Option<Value> {
     let name_indices = def_idx.name_index.get(method_lower)?;
 
@@ -899,6 +905,7 @@ fn build_root_method_info(
             total_body_lines_emitted,
             max_body_lines,
             max_total_body_lines,
+            include_doc_comments,
         );
 
         return Some(node);
@@ -1153,6 +1160,7 @@ fn build_caller_tree(
                             total_body_lines_emitted,
                             ctx.max_body_lines,
                             ctx.max_total_body_lines,
+                            ctx.include_doc_comments,
                         );
                     }
 
@@ -1200,6 +1208,7 @@ fn build_caller_tree(
                     total_body_lines_emitted,
                     ctx.max_body_lines,
                     ctx.max_total_body_lines,
+                    ctx.include_doc_comments,
                 );
             }
 
@@ -1512,6 +1521,7 @@ fn build_callee_tree(
                         total_body_lines_emitted,
                         ctx.max_body_lines,
                         ctx.max_total_body_lines,
+                        ctx.include_doc_comments,
                     );
                 }
 
