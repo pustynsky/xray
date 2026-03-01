@@ -1027,6 +1027,48 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
+### T28f-doc: `serve` — search_definitions with `includeDocComments: true`
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<method_with_doc_comment>","includeDocComments":true}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with definition results
+- `body` array starts with the doc-comment lines (`///` for C#/Rust, `/**` for TypeScript)
+- `bodyStartLine` points to the first doc-comment line (before the method declaration)
+- `docCommentLines` field is present with the number of doc-comment lines
+- When `includeDocComments: true` is passed without `includeBody`, body is automatically included (implied)
+- Budget is respected: doc-comment lines count against `maxBodyLines` and `maxTotalBodyLines`
+
+**Negative test — without includeDocComments:**
+
+```powershell
+'{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<method_with_doc_comment>","includeBody":true}}}'
+```
+
+**Expected:**
+
+- `body` starts at the method declaration (no doc-comment lines)
+- `docCommentLines` is absent
+- `bodyStartLine` matches `line_start` from the definition index
+
+**Validates:** `includeDocComments` parameter expands body upward to capture `///` XML doc comments (C#/Rust) and `/** */` JSDoc blocks (TypeScript). Implies `includeBody=true`. Budget-aware.
+
+**Unit tests:** `test_find_doc_comment_start_csharp_triple_slash`, `test_find_doc_comment_start_typescript_jsdoc`, `test_find_doc_comment_start_rust_doc`, `test_find_doc_comment_start_no_comment`, `test_find_doc_comment_start_separated_by_code`, `test_find_doc_comment_start_with_blank_line_between`, `test_inject_body_with_doc_comments_csharp`, `test_inject_body_without_doc_comments_flag`, `test_inject_body_with_doc_comments_jsdoc`, `test_is_doc_comment_line_variants`, `test_find_doc_comment_start_at_file_start`, `test_find_doc_comment_start_decl_at_zero`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T28f: `serve` — search_definitions by attribute returns no duplicates
 
 **Command:**

@@ -29,6 +29,20 @@ After every code change, before completing the task, verify ALL of the following
 11. **Changelog** — `CHANGELOG.md` is updated with a concise entry describing the change (categorized as Features, Bug Fixes, Performance, or Internal)
 12. **Neutral names** — all class/method names in docs, tests, and tool descriptions are generic (e.g., `UserService`, `OrderProcessor`) — never expose internal/proprietary names
 
+**⚠️ Documentation gate before proposing commit** — do NOT propose creating a branch until ALL of the following are verified for every new parameter/feature:
+
+| # | File | What to update | When |
+|---|------|----------------|------|
+| 1 | `src/mcp/handlers/mod.rs` | Tool schema (`inputSchema` properties) | Always for new MCP parameters |
+| 2 | `src/tips.rs` | `parameter_examples()` entries | Always for new MCP parameters |
+| 3 | `docs/mcp-guide.md` | Parameter tables + response fields | Always for new MCP parameters |
+| 4 | `docs/cli-reference.md` | CLI flag documentation | Only if feature has CLI flags |
+| 5 | `docs/e2e-test-plan.md` | Test scenario | Always |
+| 6 | `CHANGELOG.md` | Feature/bugfix entry | Always |
+| 7 | `README.md` | Feature mention if user-facing | If it's a major feature |
+
+This table is a hard gate — every row must be checked before the commit proposal.
+
 ## Git Workflow — After All Tests Pass
 
 After all tests pass and the binary is reinstalled, propose creating a branch and committing:
@@ -89,3 +103,4 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 - **New response fields must be documented in tool descriptions** — when a feature adds new fields to the response (e.g., `rootMethod`, `bodyOmitted`), the tool schema description and `search_help` parameter examples must explicitly mention them. LLMs read tool descriptions to decide how to use the tool — if a response field isn't mentioned, the LLM will make a separate call to get that data. Example: `includeBody=true` adds a `rootMethod` object to the response — without documenting this, the LLM would still call `search_definitions` separately to get the root method body.
 - **Test before documenting** — the post-change checklist runs unit tests → install → E2E tests BEFORE updating documentation/changelog. Rationale: if E2E tests fail, the code needs fixing, which may invalidate documentation written earlier. Testing first avoids documenting features that don't work yet.
 - **Self-review catches what tests don't** — after all tests pass, ALWAYS re-read every modified function before documenting. Real example (2026-02-26): adding `readErrors`/`lossyUtf8Files` to grep.rs — the fields were added to 1 of 6 summary builders, passing all tests because no test checked the OTHER 5 code paths. Self-review caught this. Another: `baseType` fast-path (O(1) HashMap) silently hid substring results when an exact key existed — semantically different from the O(N) substring scan. Both bugs were invisible to the test suite but would have caused inconsistent behavior in production.
+- **Documentation checklist step 9 is not optional** — every new parameter/feature MUST be documented in ALL relevant places BEFORE proposing commit. The full list: (1) `src/mcp/handlers/mod.rs` tool schema, (2) `src/tips.rs` parameter examples, (3) `docs/mcp-guide.md` parameter tables + response fields, (4) `docs/cli-reference.md` if CLI-facing, (5) `docs/e2e-test-plan.md` test scenario, (6) `CHANGELOG.md`. Real example (2026-03-01): `includeDocComments` was added to code, tests, tips.rs, and mod.rs schema — but `docs/mcp-guide.md` parameter tables were missed until the user caught it. The checklist item 9 already covers this, but it was skipped in the rush to propose commit. Never skip documentation steps.
