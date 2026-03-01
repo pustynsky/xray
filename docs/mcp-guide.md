@@ -52,8 +52,8 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | Tool                         | Description                                                                                                                             |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
 | `search_grep`                | Search content index with TF-IDF ranking, regex, phrase, AND/OR                                                                         |
-| `search_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports `containsLine`, `includeBody`, `audit`. Relevance-ranked when name filter is active. Requires `--definitions` |
-| `search_callers`             | Find callers / callees and build recursive call tree. Requires `--definitions`                                                          |
+| `search_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports C#, TypeScript/TSX, Rust (tree-sitter) and SQL (regex). `containsLine`, `includeBody`, `audit`. Relevance-ranked when name filter is active. Requires `--definitions` |
+| `search_callers`             | Find callers / callees and build recursive call tree. Supports C#, TypeScript/TSX, and SQL (EXEC call chains). Requires `--definitions`  |
 | `search_find`                | Live filesystem walk (⚠️ slow for large dirs)                                                                                           |
 | `search_fast`                | Search pre-built file name index (instant). Supports comma-separated OR patterns. Results ranked: exact stem → prefix → contains        |
 | `search_info`                | Show all indexes with status, sizes, age                                                                                                |
@@ -172,7 +172,7 @@ When `responseTruncated: true` appears in the summary, narrow your query with `e
 
 ## `search_callers` — Call Tree
 
-Traces who calls a method (or what a method calls) and builds a hierarchical call tree. Combines the content index (grep) with the definition index (AST) to determine which method/class contains each call site. Replaces 7+ sequential `search_grep` + `read_file` calls with a single request. Supports C#, TypeScript/TSX, and SQL (call sites from stored procedure bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE).
+Traces who calls a method (or what a method calls) and builds a hierarchical call tree. Combines the content index (grep) with the definition index (AST) to determine which method/class contains each call site. Replaces 7+ sequential `search_grep` + `read_file` calls with a single request. Supports C#, TypeScript/TSX, and SQL (call sites from stored procedure bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE). For SQL, the `class` parameter maps to schema name (e.g., `class="dbo"`).
 
 ```json
 // Find all callers of ExecuteQueryAsync, 5 levels deep, excluding tests
@@ -329,7 +329,7 @@ When `includeBody: true`, each node in the call tree includes source code:
 
 ## `search_definitions` — Code Definitions
 
-Search code definitions: classes, methods, interfaces, enums, functions, type aliases, stored procedures. Requires `--definitions`.
+Search code definitions: classes, methods, interfaces, enums, functions, type aliases, stored procedures. Supports C#, TypeScript/TSX, and Rust via tree-sitter grammars; SQL via regex parser. Requires `--definitions`.
 
 Results are **relevance-ranked** when a `name` filter is active (non-regex): exact matches first, then prefix matches, then substring matches. Within the same match tier, type-level definitions (classes, interfaces, enums) sort before members (methods, properties), and shorter names before longer. See [Architecture — Relevance Ranking](architecture.md#relevance-ranking) for details.
 
@@ -704,7 +704,7 @@ Get commit history for a specific file. Returns commit hash, date, author, email
   "commits": [
     {"hash":"abc123...","date":"2025-01-15 10:30:00 +0000","author":"Alice","email":"alice@example.com","message":"Fix null check in main"}
   ],
-  "summary": {"totalCommits":1,"returned":1,"tool":"search_git_history"}
+  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":0.15,"hint":"(from cache)","tool":"search_git_history"}
 }
 ```
 
@@ -726,7 +726,7 @@ Get commit history with full diff/patch for a specific file. Same as `search_git
       "patch":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@\n+    if value.is_none() { return; }\n"
     }
   ],
-  "summary": {"totalCommits":1,"returned":1,"tool":"search_git_diff"}
+  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":1250.5,"tool":"search_git_diff"}
 }
 ```
 
@@ -756,7 +756,7 @@ The `path` parameter (or its backward-compatible alias `file`) accepts:
     {"rank":2,"name":"Bob","email":"bob@example.com","commits":17,"firstChange":"2024-06-10","lastChange":"2024-12-20"},
     {"rank":3,"name":"Carol","email":"carol@example.com","commits":5,"firstChange":"2024-09-05","lastChange":"2024-11-30"}
   ],
-  "summary": {"totalAuthors":3,"returned":3,"tool":"search_git_authors"}
+  "summary": {"totalCommits":64,"totalAuthors":3,"returned":3,"path":"src/main.rs","elapsedMs":0.08,"hint":"(from cache)","tool":"search_git_authors"}
 }
 ```
 
@@ -768,14 +768,14 @@ Get activity across all files in a repository for a date range. Returns a list o
 // Request
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","from":"2025-01-01","to":"2025-01-31"}}}
 
-// Response (abbreviated)
+// Response (abbreviated — from cache)
 {
   "activity": [
-    {"path":"src/main.rs","commitCount":12},
-    {"path":"src/lib.rs","commitCount":8},
-    {"path":"Cargo.toml","commitCount":3}
+    {"path":"src/main.rs","commitCount":12,"lastModified":"2025-01-31 18:45:00 +0000","authors":["Alice","Bob"]},
+    {"path":"src/lib.rs","commitCount":8,"lastModified":"2025-01-28 10:20:00 +0000","authors":["Alice"]},
+    {"path":"Cargo.toml","commitCount":3,"lastModified":"2025-01-15 09:00:00 +0000","authors":["Carol"]}
   ],
-  "summary": {"totalFiles":3,"totalCommits":23,"tool":"search_git_activity"}
+  "summary": {"filesChanged":3,"totalEntries":23,"commitsProcessed":150,"elapsedMs":0.12,"hint":"(from cache)","tool":"search_git_activity"}
 }
 ```
 
@@ -798,7 +798,7 @@ Get line-level attribution for a file or line range via `git blame`. Returns the
 
 // Response (abbreviated)
 {
-  "lines": [
+  "blame": [
     {"line":10,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"    public async Task<User> GetUserAsync(int id)"},
     {"line":11,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"    {"},
     {"line":12,"hash":"d4e5f6a7","author":"Bob","email":"bob@example.com","date":"2025-01-12 09:15:00 +0000","content":"        var user = await _repository.FindAsync(id);"},
@@ -806,7 +806,7 @@ Get line-level attribution for a file or line range via `git blame`. Returns the
     {"line":14,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"        return user;"},
     {"line":15,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"    }"}
   ],
-  "summary": {"totalLines":6,"file":"src/UserService.cs","startLine":10,"endLine":15,"tool":"search_git_blame"}
+  "summary": {"tool":"search_git_blame","file":"src/UserService.cs","lineRange":"10-15","uniqueAuthors":2,"uniqueCommits":2,"oldestLine":"2025-01-10","newestLine":"2025-01-12","elapsedMs":45.3}
 }
 ```
 

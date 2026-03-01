@@ -15,6 +15,9 @@ graph TB
         DIDX[search-index def-index]
         SERVE[search-index serve]
         INFO[search-index info]
+        DAUD[search-index def-audit]
+        CLEAN[search-index cleanup]
+        TIPS[search-index tips]
     end
 
     subgraph Core["Core Engine"]
@@ -22,6 +25,7 @@ graph TB
         TOK[Tokenizer]
         TFIDF[TF-IDF Scorer]
         TSP[tree-sitter Parser]
+        CSTATS[Code Stats<br/>Analyzer]
     end
 
     subgraph Indexes["Index Layer"]
@@ -46,6 +50,7 @@ graph TB
     INDEX --> WALK --> FI
     CIDX --> WALK --> TOK --> CI --> TRI
     DIDX --> WALK --> TSP --> DI
+    TSP --> CSTATS --> DI
     FAST --> FI
     GREP --> CI --> TFIDF
     SERVE --> PROTO --> HAND
@@ -102,25 +107,42 @@ Inverted view (actual storage):
 - File paths stored in a separate `Vec<String>` indexed by `file_id` — deduplication
 - `file_token_counts[file_id]` stores per-file token count for TF normalization
 
-**Optional watch-mode fields:**
+**Watch-mode fields:**
 
-- `forward: HashMap<u32, Vec<String>>` — reverse mapping for incremental removal
-- `path_to_id: HashMap<PathBuf, u32>` — path-based file lookup for watcher events
+- `path_to_id: Option<HashMap<PathBuf, u32>>` — path-based file lookup for watcher events (populated only with `--watch`)
+
+**Error tracking fields:**
+
+- `read_errors: usize` — number of files that failed to read during indexing (IO errors)
+- `lossy_file_count: usize` — number of files that required lossy UTF-8 conversion
 
 ### 3. Definition Index (AST Index)
 
-**Language-specific** structural code search using tree-sitter AST parsing (C# and TypeScript/TSX). Six cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus a pre-computed call graph:
+**Language-specific** structural code search using tree-sitter AST parsing (C#, TypeScript/TSX, Rust) and regex parsing (SQL). Ten cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus pre-computed call graphs and code complexity metrics:
 
 ```mermaid
 graph LR
     subgraph DefinitionIndex
         DEFS["definitions: Vec&lt;DefinitionEntry&gt;"]
-        NI["name_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
-        KI["kind_index: HashMap&lt;Kind, Vec&lt;u32&gt;&gt;"]
-        AI["attribute_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
-        BTI["base_type_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
-        FII["file_index: HashMap&lt;u32, Vec&lt;u32&gt;&gt;"]
-        MC["method_calls: HashMap&lt;u32, Vec&lt;CallSite&gt;&gt;"]
+
+        subgraph CatA["Category A: def_idx as values"]
+            NI["name_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
+            KI["kind_index: HashMap&lt;Kind, Vec&lt;u32&gt;&gt;"]
+            AI["attribute_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
+            BTI["base_type_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
+            FII["file_index: HashMap&lt;u32, Vec&lt;u32&gt;&gt;"]
+            SI["selector_index: HashMap&lt;String, Vec&lt;u32&gt;&gt;"]
+        end
+
+        subgraph CatB["Category B: def_idx as keys"]
+            MC["method_calls: HashMap&lt;u32, Vec&lt;CallSite&gt;&gt;"]
+            CS["code_stats: HashMap&lt;u32, CodeStats&gt;"]
+            TC["template_children: HashMap&lt;u32, Vec&lt;String&gt;&gt;"]
+        end
+
+        subgraph CatC["Category C: non-def_idx fields"]
+            EM["extension_methods: HashMap&lt;String, Vec&lt;String&gt;&gt;"]
+        end
     end
 
     NI -->|"index into"| DEFS
@@ -128,18 +150,74 @@ graph LR
     AI -->|"index into"| DEFS
     BTI -->|"index into"| DEFS
     FII -->|"index into"| DEFS
+    SI -->|"index into"| DEFS
     MC -->|"def_idx →"| DEFS
+    CS -->|"def_idx →"| DEFS
+    TC -->|"def_idx →"| DEFS
 ```
 
 Each `DefinitionEntry` contains: `name`, `kind`, `file_id`, `line_start..line_end`, `parent` (containing class), `signature`, `modifiers`, `attributes`, `base_types`.
 
 Each `CallSite` contains: `method_name`, `receiver_type` (resolved via field/constructor type declarations, DI-aware), `line`.
 
+**Secondary indexes (Category A)** — store `Vec<u32>` where each `u32` is a def_idx into `definitions`:
+
+| Index | Key | Purpose |
+|-------|-----|---------|
+| `name_index` | lowercased name | Name-based lookup |
+| `kind_index` | `DefinitionKind` enum | Filter by class/method/interface/etc. |
+| `attribute_index` | lowercased attribute | C# attribute lookup (e.g., `[Test]`, `[ServiceProvider]`) |
+| `base_type_index` | lowercased base type | Find implementations of an interface or base class |
+| `file_index` | file_id | All definitions in a file — source of truth for active definitions |
+| `selector_index` | Angular component selector | Map `<app-user-list>` to the `@Component` class |
+
+**Data indexes (Category B)** — store data keyed by def_idx:
+
+| Index | Value | Purpose |
+|-------|-------|---------|
+| `method_calls` | `Vec<CallSite>` | Pre-computed call sites for instant callee lookups (direction "down") |
+| `code_stats` | `CodeStats` | Cyclomatic/cognitive complexity, nesting, params, returns, calls, lambdas |
+| `template_children` | `Vec<String>` | Angular HTML template → child component selectors |
+
+**Auxiliary fields (Category C):**
+
+| Field | Purpose |
+|-------|---------|
+| `path_to_id` | Path → file_id lookup for watcher incremental updates |
+| `extension_methods` | C# extension method name → static class names containing the extension |
+| `parse_errors` | Files that failed to read during indexing |
+| `lossy_file_count` | Files read with lossy UTF-8 conversion |
+| `empty_file_ids` | Files parsed but producing 0 definitions |
+
 The `method_calls` map stores pre-computed call sites for each method/constructor, extracted during `def-index` build by walking AST `invocation_expression` and `member_access_expression` nodes. This enables instant callee lookups (direction "down") without runtime file I/O.
 
 The multi-index design enables compound queries: "find all public async methods in classes that implement `IQueryHandler` and have `[ServiceProvider]` attribute" — resolved via set intersection of index lookups.
 
-### 4. Trigram Index (Substring Search)
+### 4. Code Stats (Complexity Metrics)
+
+Each method/constructor/function gets complexity metrics computed during AST parsing via `walk_code_stats()` in `tree_sitter_utils.rs`. The metrics are stored in `DefinitionIndex.code_stats` keyed by def_idx.
+
+```rust
+pub struct CodeStats {
+    pub cyclomatic_complexity: u16,  // linearly independent paths (base=1)
+    pub cognitive_complexity: u16,   // SonarSource cognitive complexity (penalizes nesting)
+    pub max_nesting_depth: u8,       // deepest control flow nesting
+    pub param_count: u8,             // parameters in signature
+    pub return_count: u8,            // return + throw statements
+    pub call_count: u16,             // method/function calls (fan-out)
+    pub lambda_count: u8,            // lambda/arrow function expressions
+}
+```
+
+**Language-agnostic walker** — `CodeStatsConfig` struct defines which AST node names correspond to branching, case, return, etc. for each language. Currently configured for C#, TypeScript/TSX, and Rust.
+
+**Query API** (via `search_definitions`):
+
+- `sortBy` — sort results by any metric descending (e.g., `sortBy='cognitiveComplexity'` for worst methods first)
+- `minComplexity`, `minCognitive`, `minNesting`, `minParams`, `minReturns`, `minCalls` — filter thresholds (combine with AND)
+- `includeCodeStats` — include metrics in response (auto-enabled by `sortBy`/`min*`)
+
+### 5. Trigram Index (Substring Search)
 
 The trigram index enables fast substring matching within indexed tokens. It solves the compound-identifier problem: when the tokenizer produces a single token like `databaseconnectionfactory`, a search for `DatabaseConnection` would fail with exact token lookup. The trigram index makes this possible in ~0.07ms.
 
@@ -222,7 +300,7 @@ Rather than performing complex incremental updates to the trigram index on every
 
 This keeps the watcher fast (no O(n) index shifting) while amortizing the trigram rebuild cost.
 
-### 5. Git History Cache
+### 6. Git History Cache
 
 Background-built compact in-memory cache for sub-millisecond git history queries. Replaces 2–6 sec CLI calls with HashMap lookups when the cache is ready.
 
@@ -261,10 +339,12 @@ Arc<RwLock<Option<GitHistoryCache>>>
 | `search_git_authors` | ✅ | git log -- file | Aggregation by author |
 | `search_git_activity` | ✅ | git log --name-only | Path prefix matching |
 | `search_git_diff` | ❌ Always CLI | git diff | Diff data too large to cache |
+| `search_git_blame` | ❌ Always CLI | git blame | Blame data not cached |
+| `search_branch_status` | ❌ Always CLI | git status / rev-list | Branch metadata, not file-specific |
 
 **Module:** [`src/git/cache.rs`](../src/git/cache.rs) — self-contained, zero imports from `index.rs`, `definitions/`, or `mcp/`. Depends only on `std`, `serde`, `bincode`, `lz4_flex`.
 
-### 6. MCP Server
+### 7. MCP Server
 
 JSON-RPC 2.0 event loop over stdio. Designed for AI agent integration (VS Code Copilot, Roo, Claude).
 
@@ -279,7 +359,7 @@ sequenceDiagram
     Agent->>Server: initialize
     Server->>Agent: capabilities + tools
     Agent->>Server: tools/list
-    Server->>Agent: 13 tool definitions
+    Server->>Agent: 15 tool definitions
 
     Agent->>Server: tools/call search_grep
     Server->>Index: HashMap lookup + TF-IDF (~0.6ms measured)
@@ -290,6 +370,26 @@ sequenceDiagram
     Watcher->>Index: incremental update (~5ms from logs)
 ```
 
+**MCP Tools (15 total):**
+
+| # | Tool | Index/Source | Purpose |
+|---|------|-------------|---------|
+| 1 | `search_grep` | ContentIndex | Full-text search with TF-IDF, substring, phrase, regex |
+| 2 | `search_find` | Filesystem walk | Live file search (slow, fallback) |
+| 3 | `search_fast` | FileIndex | Pre-built file name search (~35ms) |
+| 4 | `search_definitions` | DefinitionIndex | Structural code search (classes, methods, etc.) |
+| 5 | `search_callers` | DefinitionIndex + ContentIndex | Call tree analysis (up/down), DI-aware |
+| 6 | `search_info` | All | Index status, sizes, age |
+| 7 | `search_help` | — | Best practices guide for LLM agents |
+| 8 | `search_reindex` | ContentIndex | Force rebuild content index |
+| 9 | `search_reindex_definitions` | DefinitionIndex | Force rebuild definition index |
+| 10 | `search_git_history` | GitHistoryCache / CLI | Commit history for a file |
+| 11 | `search_git_diff` | CLI only | Commit history with full diff/patch |
+| 12 | `search_git_authors` | GitHistoryCache / CLI | Top contributors for file/directory |
+| 13 | `search_git_activity` | GitHistoryCache / CLI | All changed files in a date range |
+| 14 | `search_git_blame` | CLI only | Per-line author/date/commit |
+| 15 | `search_branch_status` | CLI only | Current branch, ahead/behind, dirty files, fetch age |
+
 **Design decisions:**
 
 - **Stdio transport** — no HTTP overhead, direct pipe from VS Code process manager
@@ -297,9 +397,9 @@ sequenceDiagram
 - **Single-threaded event loop** — JSON-RPC is sequential; index reads use `RwLock` for watcher concurrency
 - **Indexes held in `Arc<RwLock<T>>`** — watcher thread writes, server thread reads; background build thread writes once at completion
 - **All logging to stderr** — stdout is exclusively for JSON-RPC protocol messages
-- **Response size truncation** — all tool responses are capped at ~32KB (~8K tokens) to prevent filling LLM context windows. Progressive truncation: cap line arrays → remove lineContent → cap matchedTokens → remove lines → reduce file count. Truncation metadata (`responseTruncated`, `truncationReason`, `hint`) is injected into the summary so the LLM knows to narrow its query.
+- **Response size truncation** — all tool responses are capped at **~16KB (~4K tokens)** to prevent filling LLM context windows. Progressive truncation: cap line arrays → remove lineContent → cap matchedTokens → remove lines → reduce file count. Truncation metadata (`responseTruncated`, `truncationReason`, `hint`) is injected into the summary so the LLM knows to narrow its query.
 
-### 7. File Watcher
+### 8. File Watcher
 
 OS-level filesystem notifications (via `notify` crate / `ReadDirectoryChangesW` on Windows) with debounced batch processing.
 
@@ -323,7 +423,7 @@ stateDiagram-v2
 4. Add new tokens to inverted index
 5. If definition index is loaded: re-parse with tree-sitter, update definition entries
 
-**Incremental batch path** (all file changes processed incrementally):
+**Full reindex path** (triggered by large batch of changes):
 
 - Full rebuild of content index from scratch
 - Triggered by git checkout, branch switch, large merges
@@ -343,7 +443,9 @@ graph LR
 
     C -->|tree-sitter parse| H[AST Trees]
     H -->|extract definitions| I[DefinitionEntries]
+    H -->|walk_code_stats| J2[CodeStats]
     I -->|build multi-index| J[DefinitionIndex]
+    J2 -->|attach to index| J
     J -->|bincode serialize| K[.code-structure file]
 ```
 
@@ -443,6 +545,40 @@ Direction "up" combines the content index (where does this token appear?) with t
 
 Direction "down" uses the pre-computed call graph — zero runtime file I/O. Call sites are extracted during `def-index` build with field type resolution (DI constructor parameter types → field types → receiver types).
 
+**Advanced features:**
+
+- **`includeBody`** — returns source code of each method in the call tree inline, plus a `rootMethod` object with the searched method's own body. Eliminates separate `search_definitions` calls.
+- **`includeDocComments`** — expands body upward to include doc-comments (`///` in C#/Rust, `/** */` JSDoc in TypeScript). Implies `includeBody=true`.
+- **`impactAnalysis`** — when `direction='up'`, identifies test methods in the caller chain. Test methods (detected via `[Test]`/`[Fact]`/`[Theory]`/`[TestMethod]`/`#[test]` attributes or `*.spec.ts`/`*.test.ts` file patterns) are marked with `isTest=true` and collected in a `testsCovering` array with full file path, depth, and call chain. Recursion stops at test methods.
+
+#### Caller Tree Verification
+
+The `search_callers` tool builds call trees by tracing method invocations through AST-parsed call-site data. Key design points:
+
+- **Call-site verification is mandatory** — methods without parsed call-site data are filtered out (no false-positive fallback)
+- **Expression body properties supported** — C# expression body properties (`public string Name => _service.GetName();`) have their call sites extracted and verified
+- **Lambda / arrow function calls captured** — call sites inside lambdas (C#) and arrow functions (TypeScript) in argument lists are recursively parsed
+- **Pre-filter uses class name and method name only** — base types and interfaces are not expanded during the pre-filter phase; inheritance verification happens during call-site validation via receiver type matching
+- **`direction=down` cross-class scoping** — when building callee trees, unqualified calls without a receiver type resolve only to methods in the caller's own class (prevents cross-class pollution at depth ≥ 2)
+- **Generic arity mismatch filter** — `new Foo<T>()` call sites skip non-generic classes with the same name (e.g., `new List<CatalogEntry>()` won't resolve to a non-generic `List` class)
+- **Built-in type blocklist** — 60+ built-in receiver types (Promise, Array, Map, String, Object, etc.) are excluded from `direction=down` resolution, preventing false positives like `Promise.resolve()` matching `Deferred.resolve()`
+- **Fuzzy DI interface matching** — finds callers through non-standard interface naming conventions (e.g., `IDataModelService` → `DataModelWebService`) using suffix-tolerant matching against the `base_type_index`
+- **Type inference for local variables** — cast expressions (`(Type)expr`), `as` expressions (`expr as Type`), method return types (`var x = GetStream()`), `await`/`Task<T>` unwrap (`var x = await GetStreamAsync()`), pattern matching (`if (obj is Type name)`, `case Type name:`), and extension method detection. Cross-class method return types are NOT resolved (only same-class methods)
+- **Local variable limitation** — calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected when the return type cannot be inferred. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported
+
+#### Angular Template Metadata
+
+Angular `@Component` class definitions are automatically enriched with template metadata during definition indexing:
+
+- **What it does** — extracts `selector` and `templateUrl` from the `@Component()` decorator, reads the paired `.html` file, and scans for custom elements (tags with hyphens) used in the template
+- **`search_definitions`** — Angular components include `selector` (e.g., `"app-user-profile"`) and `templateChildren` (list of child component selectors found in the HTML)
+- **Component tree navigation via `search_callers`**:
+  - `direction='down'` with a component class name → shows child components from the HTML template (recursive with `depth`)
+  - `direction='up'` with a selector (e.g., `"app-footer"`) → finds parent components that use it in their templates
+- **HTML content search** — add `html` to `--ext` / `ext` parameter for `search_grep` to search HTML template content
+
+**Limitations:** Only external templates (`templateUrl`), not inline `template:`. Only tags with hyphens (custom elements per HTML spec). `ng-*` tags are excluded (Angular built-ins). Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
+
 ## Indexing Triggers — When Does Indexing Happen?
 
 A single consolidated reference for all indexing scenarios. For detailed internals, see [Storage Model](storage.md), [Concurrency](concurrency.md), and [CLI Reference](cli-reference.md).
@@ -501,54 +637,89 @@ When the MCP server shuts down (stdin closes), it saves both in-memory indexes t
 src/
 ├── lib.rs                    # Public types: FileEntry, FileIndex, ContentIndex, Posting
 │                               tokenize(), clean_path() — shared by binary and benchmarks
+├── lib_tests.rs              # Unit tests for tokenizer, clean_path, indexing
+├── lib_property_tests.rs     # Property-based tests (proptest)
 ├── main.rs                   # Entry point (~30 lines): mod declarations, re-exports, fn main()
 ├── main_tests.rs             # Integration tests for CLI commands
 ├── index.rs                  # Index storage: save/load/build for FileIndex and ContentIndex
 │                               index_dir(), *_path_for(), build_index(), build_content_index()
+├── index_tests.rs            # Unit tests for index build/load/save
 ├── error.rs                  # SearchError enum (thiserror) — unified error type
+├── error_tests.rs            # Error handling tests
 ├── tips.rs                   # Best-practices guide text for search_help / CLI tips
+├── tips_tests.rs             # Tests for tips content and tool definition token budget
 │
 ├── git/                      # Git history: CLI tools + in-memory cache
 │   ├── mod.rs                # Phase 1 CLI functions (file_history, top_authors, repo_activity)
 │   ├── cache.rs              # GitHistoryCache: compact struct, streaming parser, query API,
 │   │                           disk persistence (save_to_disk/load_from_disk), HEAD validation
-│   ├── cache_tests.rs        # 49 unit tests (parser, queries, normalization, serialization)
+│   ├── cache_tests.rs        # Unit tests (parser, queries, normalization, serialization)
 │   └── git_tests.rs          # Git CLI integration tests
 │
 ├── cli/                      # CLI layer: argument parsing + command implementations
 │   ├── mod.rs                # Cli struct, Commands enum, cmd_find/fast/grep dispatch
 │   ├── args.rs               # All Args structs (FindArgs, IndexArgs, ContentIndexArgs, etc.)
-│   ├── info.rs               # cmd_info, cmd_info_json
-│   └── serve.rs              # cmd_serve — MCP server setup and launch
+│   ├── info.rs               # cmd_info, cmd_info_json, cmd_cleanup, cmd_def_audit
+│   ├── serve.rs              # cmd_serve — MCP server setup and launch
+│   ├── cli_tests.rs          # CLI command tests
+│   └── info_tests.rs         # Info/cleanup command tests
 │
-├── definitions/              # AST-based code definition index (tree-sitter)
+├── definitions/              # AST-based code definition index (tree-sitter + regex)
 │   ├── mod.rs                # build_definition_index() + re-exports
-│   ├── types.rs              # DefinitionKind, DefinitionEntry, DefinitionIndex, CallSite
+│   ├── types.rs              # DefinitionKind, DefinitionEntry, DefinitionIndex, CallSite, CodeStats
+│   ├── tree_sitter_utils.rs  # Shared tree-sitter helpers: node_text, find_child_by_kind,
+│   │                           walk_code_stats (complexity metrics), CodeStatsConfig
 │   ├── parser_csharp.rs      # C# AST parsing: walk/extract functions (~30 helpers)
+│   ├── parser_typescript.rs  # TypeScript/TSX AST parsing (classes, functions, interfaces, etc.)
+│   ├── parser_rust.rs        # Rust AST parsing (structs, enums, traits, impl blocks, functions)
 │   ├── parser_sql.rs         # SQL DDL parsing (regex-based: stored procs, tables, views, etc.)
 │   ├── storage.rs            # save/load/find definition index + def_index_path_for()
 │   ├── incremental.rs        # update_file_definitions, remove_file_definitions
-│   ├── definitions_tests.rs  # General definition tests (12 tests)
-│   ├── definitions_tests_csharp.rs   # C# parser tests (19 tests)
-│   └── definitions_tests_typescript.rs # TypeScript parser tests (32 tests)
+│   ├── definitions_tests.rs  # General definition tests
+│   ├── definitions_tests_csharp.rs   # C# parser tests
+│   ├── definitions_tests_typescript.rs # TypeScript parser tests
+│   ├── definitions_tests_rust.rs     # Rust parser tests
+│   ├── definitions_tests_sql.rs      # SQL parser tests
+│   ├── audit_tests.rs        # Definition index audit/coverage tests
+│   ├── storage_tests.rs      # Storage serialization tests
+│   └── tree_sitter_utils_tests.rs    # Tree-sitter utility + CodeStats tests
 │
 └── mcp/                      # MCP server layer
     ├── mod.rs                # Module exports
     ├── protocol.rs           # JSON-RPC 2.0 types (request, response, error)
+    ├── protocol_tests.rs     # Protocol serialization tests
     ├── server.rs             # Stdio event loop, method dispatch, graceful shutdown
+    ├── server_tests.rs       # Server lifecycle tests
     ├── watcher.rs            # File watcher, incremental index updates
-    └── handlers/             # Tool implementations (one file per tool)
+    ├── watcher_tests.rs      # Watcher integration tests
+    └── handlers/             # Tool implementations (one file per tool group)
         ├── mod.rs            # tool_definitions() + dispatch_tool() + reindex handlers
         ├── grep.rs           # handle_search_grep + phrase/substring helpers
         ├── find.rs           # handle_search_find
         ├── fast.rs           # handle_search_fast
-        ├── definitions.rs    # handle_search_definitions + body injection
-        ├── callers.rs        # handle_search_callers + caller/callee tree builders
-        ├── git.rs              # Git history MCP handlers (search_git_history/diff/authors/activity)
-        ├── utils.rs          # validate_search_dir, sorted_intersect, metrics helpers
-        ├── handlers_tests.rs           # General handler tests (77 tests)
-        ├── handlers_tests_csharp.rs    # C# handler tests (31 tests)
-        └── handlers_tests_typescript.rs # TypeScript handler tests (placeholder)
+        ├── definitions.rs    # handle_search_definitions + body/doccomment injection + audit
+        ├── callers.rs        # handle_search_callers + caller/callee tree builders + impactAnalysis
+        ├── git.rs            # Git history MCP handlers (history/diff/authors/activity/blame/branch_status)
+        ├── utils.rs          # validate_search_dir, sorted_intersect, metrics helpers,
+        │                       response size truncation, body injection utilities
+        ├── handlers_test_utils.rs    # Shared test infrastructure (mock contexts, helpers)
+        ├── handlers_tests.rs         # General handler tests
+        ├── handlers_tests_csharp.rs  # C# handler tests
+        ├── handlers_tests_csharp_callers.rs # C# caller analysis tests
+        ├── handlers_tests_typescript.rs     # TypeScript handler tests
+        ├── handlers_tests_rust.rs    # Rust handler tests
+        ├── handlers_tests_fast.rs    # File search handler tests
+        ├── handlers_tests_find.rs    # Find handler tests
+        ├── handlers_tests_grep.rs    # Grep handler tests
+        ├── handlers_tests_git.rs     # Git handler tests
+        ├── handlers_tests_misc.rs    # Miscellaneous handler tests
+        ├── grep_tests.rs            # Grep-specific unit tests
+        ├── grep_tests_additional.rs  # Additional grep tests
+        ├── callers_tests.rs         # Callers-specific unit tests
+        ├── callers_tests_additional.rs # Additional callers tests
+        ├── definitions_tests.rs     # Definitions handler unit tests
+        ├── git_handler_tests.rs     # Git handler unit tests
+        └── utils_tests.rs          # Utils/truncation unit tests
 ```
 
 **Dependency direction:** `cli/*` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions/*`. No circular dependencies. MCP layer depends on core index types but core has no knowledge of MCP. `main.rs` delegates to `cli::run()`.
@@ -560,7 +731,7 @@ The engine has two layers with **different language coverage**:
 | Layer | Tools | Language Support | How it works |
 | ----- | ----- | ---------------- | ------------ |
 | **Content search** | `search-index grep`, `content-index`, `search_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
-| **AST / structural search** | `search-index def-index`, `search_definitions`, `search_callers` (MCP) | **C# and TypeScript/TSX** (tree-sitter), **SQL** (regex) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. SQL uses a regex-based parser. Each language parser is optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-sql`). |
+| **AST / structural search** | `search-index def-index`, `search_definitions`, `search_callers` (MCP) | **C#, TypeScript/TSX, and Rust** (tree-sitter), **SQL** (regex) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. SQL uses a regex-based parser. Each language parser is optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-sql`, `lang-rust`). |
 
 ### AST Parser Status
 

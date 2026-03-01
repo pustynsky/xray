@@ -266,6 +266,8 @@ Index directory: C:\Users\you\AppData\Local\search-index
   [GIT]  branch=main  commits=12345  files=2500  authors=42  HEAD=abc123de  1.2 MB  0.5 hours
 ```
 
+> **Note:** `[GIT]` entries appear when the MCP server (`search-index serve`) builds a git history cache for the indexed directory. The git index is created automatically during `serve` and is not built by any standalone CLI command.
+
 ---
 
 ## `search-index cleanup` — Remove Orphaned or Directory-Specific Indexes
@@ -312,7 +314,7 @@ Removed 3 index file(s) for '.'.
 
 ## `search-index def-index` — Build Code Definition Index
 
-Parses source files using tree-sitter (C#, TypeScript/TSX) or regex (SQL) to extract structural code definitions (classes, methods, interfaces, enums, stored procedures, tables, views, etc.). **Unlike the content index, this is language-specific** — supports C#, TypeScript/TSX, and SQL. See [Supported Languages](architecture.md#supported-languages) for details.
+Parses source files using tree-sitter (C#, TypeScript/TSX, Rust) or regex (SQL) to extract structural code definitions (classes, methods, interfaces, enums, stored procedures, tables, views, etc.). **Unlike the content index, this is language-specific** — supports C#, TypeScript/TSX, Rust, and SQL. See [Supported Languages](architecture.md#supported-languages) for details.
 
 ```bash
 # Index C# files
@@ -324,8 +326,14 @@ search-index def-index --dir C:\Projects --ext ts
 # Index TypeScript + TSX files
 search-index def-index --dir C:\Projects --ext ts,tsx
 
+# Index Rust files
+search-index def-index --dir C:\Projects --ext rs
+
 # Index C# + TypeScript together (mixed-language project)
 search-index def-index --dir C:\Projects --ext cs,ts,tsx
+
+# Index all supported languages
+search-index def-index --dir C:\Projects --ext cs,ts,tsx,rs,sql
 
 # Custom thread count
 search-index def-index --dir C:\Projects --ext cs --threads 8
@@ -337,6 +345,7 @@ search-index def-index --dir C:\Projects --ext cs --threads 8
 | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
 | C# (.cs)               | classes, interfaces, structs, enums, records, methods, constructors, properties, fields, delegates, events, enum members        |
 | TypeScript (.ts, .tsx) | classes, interfaces, enums, functions, type aliases, variables (const/let/var), methods, constructors, properties, enum members |
+| Rust (.rs)             | structs, enums, traits, functions, methods, constructors (new/default), type aliases, consts, statics, fields, enum variants   |
 | SQL (.sql)             | stored procedures, tables, views, functions, user-defined types, indexes, columns, FK constraints (regex-based parser)          |
 
 Each definition includes: name, kind, file path, line range, full signature, modifiers (public/static/async/etc.), attributes/decorators (`[ServiceProvider]`, `@Injectable()`, etc.), base types/interfaces, and parent class.
@@ -361,22 +370,34 @@ Each definition includes: name, kind, file path, line range, full signature, mod
 | Flag                | Description                                     |
 | ------------------- | ----------------------------------------------- |
 | `-d, --dir <DIR>`   | Directory to scan recursively (default: `.`)    |
-| `-e, --ext <EXTS>`  | Extensions to parse (default: `cs,sql`)         |
+| `-e, --ext <EXTS>`  | Extensions to parse (default: `cs`)             |
 | `-t, --threads <N>` | Parallel parsing threads, 0 = auto (default: 0) |
 
 ---
 
-## `search def-audit` — Audit Definition Index Coverage
+## `search-index def-audit` — Audit Definition Index Coverage
 
 Loads a previously built `.code-structure` file from disk (instant, no rebuild) and reports which files have 0 definitions. Files >500 bytes with 0 definitions are flagged as "suspicious" — possible parse failures.
 
 ```bash
 # Show all suspicious files (>500B, 0 definitions)
-search def-audit --dir C:\Projects --ext cs
+search-index def-audit --dir C:\Projects --ext cs
 
 # Only flag files >2KB as suspicious
-search def-audit --dir C:\Projects --ext cs --min-bytes 2000
+search-index def-audit --dir C:\Projects --ext cs --min-bytes 2000
+
+# Also show files with lossy UTF-8 conversion
+search-index def-audit --dir C:\Projects --ext cs --show-lossy
 ```
+
+**Options:**
+
+| Flag                 | Description                                                 |
+| -------------------- | ----------------------------------------------------------- |
+| `-d, --dir <DIR>`    | Directory that was indexed (default: `.`)                   |
+| `-e, --ext <EXT>`    | Extensions that were indexed (default: `cs`)                |
+| `--min-bytes <N>`    | Min file size to flag as suspicious (default: 500)          |
+| `--show-lossy`       | Also show files that required lossy UTF-8 conversion        |
 
 **Example output:**
 
@@ -409,6 +430,9 @@ search-index serve --dir C:\Projects --ext cs,ts,tsx --watch --definitions
 
 # Mixed C# + SQL project
 search-index serve --dir C:\Projects --ext cs,sql --watch --definitions
+
+# Rust project
+search-index serve --dir C:\Projects --ext rs --watch --definitions
 ```
 
 **Options:**

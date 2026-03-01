@@ -43,9 +43,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Concurrency](docs/concurrency.md) | Thread model, lock strategy, watcher design |
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
-| [2026-02-21 Feature Release](docs/llm-testing-guide.md) | Design & implementation summary: git tools, branch awareness, call graph fixes, code metrics, performance |
-| [E2E Test Plan](docs/e2e-test-plan.md) | 40+ end-to-end test cases (24 CLI + 16 MCP) with automation script |
-| [Git History Cache Design](user-stories/git-history-cache-design.md) | Cache architecture, data structures, lifecycle, invalidation strategy |
+| [E2E Test Plan](docs/e2e-test-plan.md) | End-to-end test cases (CLI + MCP) with automation script |
 | [Changelog](CHANGELOG.md) | All notable changes organized by category (features, fixes, performance) |
 
 ## Features
@@ -68,7 +66,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **LZ4 index compression** — all index files compressed on disk with backward-compatible loading
 - **Branch awareness** — automatic `branchWarning` in search responses when working on non-main branches
 - **Graceful shutdown** — handles Ctrl+C (SIGTERM/SIGINT) by saving indexes to disk before exit, preserving incremental watcher updates
-- **Git history cache** — background-built compact in-memory cache (~7.6 MB for 50K commits) for sub-millisecond `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, and `search_git_blame` queries. Saved to disk (LZ4 compressed) for instant restart (~100 ms load vs ~59 sec rebuild). Auto-detects HEAD changes for cache invalidation. Supports `author` and `message` filters on history/diff/activity/authors tools. Use `noCache: true` to bypass the cache and query git CLI directly when cache may be stale. `search_git_authors` accepts file paths, directory paths, or no path (entire repo). `search_git_blame` provides line-level attribution via `git blame`
+- **Git history cache** — background-built compact in-memory cache for sub-millisecond git queries (`search_git_history`, `search_git_authors`, `search_git_activity`, `search_git_blame`). LZ4-compressed on disk for instant restart. See [Architecture](docs/architecture.md) for details
 
 ## Quick Start
 
@@ -150,33 +148,7 @@ The engine uses three independent index types plus a git history cache:
 
 Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX via tree-sitter; SQL via regex parser) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 
-### Caller Tree Verification
-
-The `search_callers` tool builds call trees by tracing method invocations through AST-parsed call-site data. Key design points:
-
-- **Call-site verification is mandatory** — methods without parsed call-site data are filtered out (no false-positive fallback)
-- **Expression body properties supported** — C# expression body properties (`public string Name => _service.GetName();`) have their call sites extracted and verified
-- **Lambda / arrow function calls captured** — call sites inside lambdas (C#) and arrow functions (TypeScript) in argument lists are recursively parsed
-- **Pre-filter uses class name and method name only** — base types and interfaces are not expanded during the pre-filter phase; inheritance verification happens during call-site validation via receiver type matching
-- **`direction=down` cross-class scoping** — when building callee trees, unqualified calls without a receiver type resolve only to methods in the caller's own class (prevents cross-class pollution at depth ≥ 2)
-- **Generic arity mismatch filter** — `new Foo<T>()` call sites skip non-generic classes with the same name (e.g., `new List<CatalogEntry>()` won't resolve to a non-generic `List` class)
-- **Built-in type blocklist** — 60+ built-in receiver types (Promise, Array, Map, String, Object, etc.) are excluded from `direction=down` resolution, preventing false positives like `Promise.resolve()` matching `Deferred.resolve()`
-- **Fuzzy DI interface matching** — finds callers through non-standard interface naming conventions (e.g., `IDataModelService` → `DataModelWebService`) using suffix-tolerant matching against the `base_type_index`
-- **Type inference for local variables** — cast expressions (`(Type)expr`), `as` expressions (`expr as Type`), method return types (`var x = GetStream()`), `await`/`Task<T>` unwrap (`var x = await GetStreamAsync()`), pattern matching (`if (obj is Type name)`, `case Type name:`), and extension method detection. Cross-class method return types are NOT resolved (only same-class methods)
-- **Local variable limitation** — calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected when the return type cannot be inferred. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported
-
-### Angular Template Metadata
-
-Angular `@Component` class definitions are automatically enriched with template metadata during definition indexing:
-
-- **What it does** — extracts `selector` and `templateUrl` from the `@Component()` decorator, reads the paired `.html` file, and scans for custom elements (tags with hyphens) used in the template
-- **`search_definitions`** — Angular components include `selector` (e.g., `"app-user-profile"`) and `templateChildren` (list of child component selectors found in the HTML)
-- **Component tree navigation via `search_callers`**:
-  - `direction='down'` with a component class name → shows child components from the HTML template (recursive with `depth`)
-  - `direction='up'` with a selector (e.g., `"app-footer"`) → finds parent components that use it in their templates
-- **HTML content search** — add `html` to `--ext` / `ext` parameter for `search_grep` to search HTML template content
-
-**Limitations:** Only external templates (`templateUrl`), not inline `template:`. Only tags with hyphens (custom elements per HTML spec). `ng-*` tags are excluded (Angular built-ins). Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
+For caller tree verification details (DI resolution, type inference, false-positive filtering) and Angular template metadata, see [Architecture](docs/architecture.md).
 
 ## Dependencies
 
@@ -189,37 +161,38 @@ Angular `@Component` class definitions are automatically enriched with template 
 | [serde_json](https://crates.io/crates/serde_json) | JSON serialization for MCP protocol |
 | [notify](https://crates.io/crates/notify) | Cross-platform filesystem notifications |
 | [dirs](https://crates.io/crates/dirs) | Platform-specific data directory paths |
-| [tree-sitter](https://crates.io/crates/tree-sitter) | Incremental parsing for code definition extraction |
-| [tracing](https://crates.io/crates/tracing) | Structured diagnostic logging |
+| [tree-sitter](https://crates.io/crates/tree-sitter) | Incremental parsing for code definition extraction (C#, TypeScript/TSX, Rust) |
+| [lz4_flex](https://crates.io/crates/lz4_flex) | LZ4 frame compression for index files on disk |
+| [mimalloc](https://crates.io/crates/mimalloc) | High-performance memory allocator |
+| [thiserror](https://crates.io/crates/thiserror) | Ergonomic error type definitions |
+| [tracing](https://crates.io/crates/tracing) + [tracing-subscriber](https://crates.io/crates/tracing-subscriber) | Structured diagnostic logging |
+| [ctrlc](https://crates.io/crates/ctrlc) | Graceful shutdown signal handling |
 | [criterion](https://crates.io/crates/criterion) | Statistical benchmarking (dev) |
 | [proptest](https://crates.io/crates/proptest) | Property-based testing (dev) |
 
 ## Testing
 
 ```bash
-# Run all tests (474 unit tests + 47 E2E tests)
+# Run all unit tests (~1200+)
 cargo test
 
 # Run benchmarks
 cargo bench
+
+# Run E2E tests (~60+ CLI + MCP tests)
+pwsh -File e2e-test.ps1
 ```
 
-Test files are split by language module for maintainability:
+Test files are split by language module for maintainability — see [Architecture](docs/architecture.md) for the full module structure. Key test categories:
 
-| Module | Test files |
+| Category | Coverage |
 |---|---|
-| `src/mcp/handlers/` | `handlers_tests.rs` (77 general), `handlers_tests_csharp.rs` (31 C#), `handlers_tests_typescript.rs` (TS), `handlers_tests_rust.rs` (6 Rust, `lang-rust` feature) |
-| `src/definitions/` | `definitions_tests.rs` (12 general), `definitions_tests_csharp.rs` (19 C#), `definitions_tests_typescript.rs` (32 TS), `definitions_tests_sql.rs` (SQL), `definitions_tests_rust.rs` (18 Rust, `lang-rust` feature) |
-| `src/git/` | `cache_tests.rs` (49 cache), `git_tests.rs` (git CLI) |
-| `src/` | `main_tests.rs` (35 general) |
-
-| Category | Tests |
-|---|---|
-| Unit tests | `clean_path` (path separator normalization), `tokenize`, staleness, serialization roundtrips, TF-IDF ranking |
+| Unit tests | Tokenizer, path normalization, staleness, serialization roundtrips, TF-IDF ranking |
 | Integration | Build + search ContentIndex, build FileIndex, MCP server end-to-end |
 | MCP Protocol | JSON-RPC parsing, initialize, tools/list, tools/call, notifications, errors |
-| Substring/Trigram | Trigram generation, index build, substring search, 13 e2e integration tests |
-| Definitions | C# parsing (tree-sitter), TypeScript/TSX parsing (tree-sitter), SQL parsing (regex-based), incremental update |
+| Substring/Trigram | Trigram generation, index build, substring search, integration tests |
+| Definitions | C# (tree-sitter), TypeScript/TSX (tree-sitter), Rust (tree-sitter), SQL (regex-based), incremental update |
+| Callers | Call tree up/down, DI resolution, overloads, cycles, impact analysis |
 | Git cache | Streaming parser, path normalization, query API, serialization roundtrip, disk persistence, HEAD validation |
 | Property tests | Tokenizer invariants, posting roundtrip, index consistency, TF-IDF ordering |
 | Benchmarks | Tokenizer throughput, index lookup latency, TF-IDF scoring, regex scan |

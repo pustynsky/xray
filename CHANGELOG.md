@@ -529,13 +529,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric                  | Value                       |
 | ----------------------- | --------------------------- |
-| Total PRs               | 28                          |
-| Features                | 20                          |
-| Bug Fixes               | 10                          |
-| Performance             | 3                           |
-| Internal                | 5                           |
-| Unit tests (latest)     | 903 (with lang-rust)        |
-| E2E tests (latest)      | 59                          |
+| Unit tests (latest)     | ~1240+ (with lang-rust)     |
+| E2E tests (latest)      | ~63                         |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |
 | Memory reduction        | 3.7 GB → 2.1 GB (−43%)      |
