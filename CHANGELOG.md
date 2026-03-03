@@ -6,6 +6,18 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-03-03
+
+### Internal
+
+- **Code review small fixes** — Four low-risk code hygiene improvements from full codebase review:
+  - `#[non_exhaustive]` on `SearchError` enum (`src/error.rs`) — semver-safe for future error variant additions
+  - `#[must_use]` on `ToolCallResult` struct (`src/mcp/protocol.rs`) — compiler warns if handler results are accidentally discarded
+  - Extracted `get_pmc()` helper in `src/index.rs` — deduplicates the 15-line Windows FFI `ProcessMemoryCounters` init + call block shared between `log_memory()` and `get_process_memory_info()`
+  - Renamed `CommitInfo` → `CachedCommit` in `src/git/cache.rs` — disambiguates from `git/mod.rs::CommitInfo` (different struct with different fields: string date vs i64 timestamp, optional patch vs subject-only)
+
+---
+
 ## 2026-03-01
 
 ### Features

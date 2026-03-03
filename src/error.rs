@@ -3,6 +3,7 @@
 use thiserror::Error;
 
 /// All errors that can occur in search operations.
+#[non_exhaustive]
 #[derive(Error, Debug)]
 pub enum SearchError {
     /// I/O error (file read/write, directory access)

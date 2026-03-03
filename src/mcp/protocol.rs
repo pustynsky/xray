@@ -84,6 +84,7 @@ pub struct ToolDefinition {
 }
 
 /// MCP tool call result content
+#[must_use]
 #[derive(Serialize, Debug)]
 pub struct ToolCallResult {
     pub content: Vec<ToolContent>,

@@ -83,8 +83,11 @@ pub struct GitHistoryCache {
 // ─── Query return types ─────────────────────────────────────────────
 
 /// Information about a single commit (returned from cache queries).
+///
+/// Named `CachedCommit` to distinguish from [`super::CommitInfo`] in `git/mod.rs`,
+/// which has different fields (string date, optional patch, `message` instead of `subject`).
 #[derive(Clone, Debug)]
-pub struct CommitInfo {
+pub struct CachedCommit {
     /// SHA-1 hash as 40-char hex string.
     pub hash: String,
     /// Unix timestamp (seconds since epoch).
@@ -575,7 +578,7 @@ impl GitHistoryCache {
         to: Option<i64>,
         author_filter: Option<&str>,
         message_filter: Option<&str>,
-    ) -> (Vec<CommitInfo>, usize) {
+    ) -> (Vec<CachedCommit>, usize) {
         let normalized = Self::normalize_path(file);
 
         let commit_ids = match self.file_commits.get(&normalized) {
@@ -594,7 +597,7 @@ impl GitHistoryCache {
 
         let message_filter_lower = message_filter.map(|m| m.to_lowercase());
 
-        let mut commits: Vec<CommitInfo> = commit_ids
+        let mut commits: Vec<CachedCommit> = commit_ids
             .iter()
             .filter_map(|&idx| {
                 let meta = self.commits.get(idx as usize)?;
@@ -893,8 +896,8 @@ impl GitHistoryCache {
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
     }
 
-    /// Convert a [`CommitMeta`] to a [`CommitInfo`] (resolving indices).
-    fn commit_meta_to_info(&self, meta: &CommitMeta) -> CommitInfo {
+    /// Convert a [`CommitMeta`] to a [`CachedCommit`] (resolving indices).
+    fn commit_meta_to_info(&self, meta: &CommitMeta) -> CachedCommit {
         let author = self
             .authors
             .get(meta.author_idx as usize)
@@ -912,7 +915,7 @@ impl GitHistoryCache {
             "<invalid subject>".to_string()
         };
 
-        CommitInfo {
+        CachedCommit {
             hash: bytes_to_hex(&meta.hash),
             timestamp: meta.timestamp,
             author_name: author.name,

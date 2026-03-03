@@ -159,16 +159,12 @@ pub fn log_response(tool: &str, elapsed_ms: f64, response_bytes: usize, response
     append_to_debug_log(response_body);
 }
 
-/// Log current process memory metrics (Working Set, Peak WS, Commit) to the debug log file.
+/// Query Windows process memory counters via FFI.
 ///
-/// When `--debug-log` is not passed, this is a fast no-op (single AtomicBool check).
-/// On non-Windows platforms, this is always a no-op.
+/// Returns `None` if the FFI call fails. Shared by [`log_memory()`] and
+/// [`get_process_memory_info()`] to avoid duplicating the 15-line init + call block.
 #[cfg(target_os = "windows")]
-pub fn log_memory(label: &str) {
-    if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
-        return;
-    }
-
+fn get_pmc() -> Option<win_ffi::ProcessMemoryCounters> {
     let mut pmc = win_ffi::ProcessMemoryCounters {
         cb: std::mem::size_of::<win_ffi::ProcessMemoryCounters>() as u32,
         PageFaultCount: 0,
@@ -190,9 +186,20 @@ pub fn log_memory(label: &str) {
         win_ffi::K32GetProcessMemoryInfo(win_ffi::GetCurrentProcess(), &mut pmc, pmc.cb)
     };
 
-    if ok == 0 {
+    if ok == 0 { None } else { Some(pmc) }
+}
+
+/// Log current process memory metrics (Working Set, Peak WS, Commit) to the debug log file.
+///
+/// When `--debug-log` is not passed, this is a fast no-op (single AtomicBool check).
+/// On non-Windows platforms, this is always a no-op.
+#[cfg(target_os = "windows")]
+pub fn log_memory(label: &str) {
+    if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
         return;
     }
+
+    let Some(pmc) = get_pmc() else { return };
 
     let ws_mb = pmc.WorkingSetSize as f64 / 1_048_576.0;
     let peak_mb = pmc.PeakWorkingSetSize as f64 / 1_048_576.0;
@@ -226,30 +233,9 @@ pub fn log_memory(_label: &str) {
 /// On non-Windows, returns an empty object.
 #[cfg(target_os = "windows")]
 pub fn get_process_memory_info() -> serde_json::Value {
-    let mut pmc = win_ffi::ProcessMemoryCounters {
-        cb: std::mem::size_of::<win_ffi::ProcessMemoryCounters>() as u32,
-        PageFaultCount: 0,
-        PeakWorkingSetSize: 0,
-        WorkingSetSize: 0,
-        QuotaPeakPagedPoolUsage: 0,
-        QuotaPagedPoolUsage: 0,
-        QuotaPeakNonPagedPoolUsage: 0,
-        QuotaNonPagedPoolUsage: 0,
-        PagefileUsage: 0,
-        PeakPagefileUsage: 0,
-    };
-
-    // SAFETY: GetCurrentProcess() returns a pseudo-handle (-1) that is always valid
-    // and does not need to be closed. K32GetProcessMemoryInfo is safe to call with
-    // a correctly-laid-out #[repr(C)] ProcessMemoryCounters struct initialized to zero,
-    // with cb set to the struct size. The function only writes within the struct bounds.
-    let ok = unsafe {
-        win_ffi::K32GetProcessMemoryInfo(win_ffi::GetCurrentProcess(), &mut pmc, pmc.cb)
-    };
-
-    if ok == 0 {
+    let Some(pmc) = get_pmc() else {
         return serde_json::json!({});
-    }
+    };
 
     let round1 = |v: f64| (v * 10.0).round() / 10.0;
     serde_json::json!({
