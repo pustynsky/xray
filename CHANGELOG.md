@@ -10,6 +10,11 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Features
 
+- **`search_edit` UX improvements — nearest match hints and skippedDetails** — Two diagnostic improvements to the `search_edit` MCP tool:
+  - **Nearest match hint on "text not found" errors** — When text, regex pattern, or anchor text is not found, the error message now includes a hint showing the most similar line in the file with its line number and similarity percentage (e.g., `Text not found: "Девять "израильтян"". Nearest match at line 2 (similarity 92%): "Девять «израильтян»"`). Uses char-level LCS ratio via the `similar` crate. Supports multi-line search with sliding window. Skipped for files > 500KB. Minimum similarity threshold: 40%. Helps LLM agents diagnose Unicode quote mismatches, case differences, and whitespace issues — eliminates 3-5 blind retry attempts.
+  - **`skippedDetails` in response for `skipIfNotFound`** — When edits are skipped via `skipIfNotFound=true`, the response now includes a `skippedDetails` array with `editIndex`, `search` text, and `reason` for each skipped edit (in addition to the existing `skippedEdits` count). Enables LLM agents to understand exactly which edits were skipped and why, instead of just seeing a count.
+  - 10 new unit tests (6 for nearest match, 4 for skippedDetails). All 1317 tests pass.
+
 - **`search_edit` improvements — multi-file, insert after/before, expectedContext** — Three enhancements to the `search_edit` MCP tool:
   - **Multi-file editing (`paths` parameter)** — New `paths` array parameter (mutually exclusive with `path`) applies the same edits/operations to multiple files in a single call. Transactional semantics: if any file fails validation or editing, none are written (all-or-nothing). Max 20 files per call. Response includes per-file `results` array and `summary` object with `filesEdited` and `totalApplied` counts.
   - **Insert after/before (`insertAfter`/`insertBefore`)** — New Mode B edit variant for inserting content relative to anchor text without replacing it. `{insertAfter: "using System.IO;", content: "using System.Linq;"}` inserts on the next line after the anchor. `insertBefore` inserts on the line before. Mutually exclusive with `search`/`replace`. Supports `occurrence` for targeting Nth match.

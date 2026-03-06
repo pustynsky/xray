@@ -1338,3 +1338,252 @@ fn test_skip_if_not_found_multi_file_response_shows_skipped_per_file() {
     assert_eq!(file2["skippedEdits"], 1, "File without match should have skippedEdits: 1");
     assert_eq!(file2["diff"], "(no changes)", "Skipped file should show no changes");
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// Nearest match hint tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_nearest_match_hint_different_quotes() {
+    // File has «quotes» but search uses "quotes" — should show nearest match
+    let (tmp, filename, _) = create_temp_file("line one\nДевять «израильтян» погибли\nline three\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "Девять \"израильтян\" погибли", "replace": "replaced" }
+        ]
+    }));
+
+    assert!(result.is_error, "Should fail when text not found");
+    let text = &result.content[0].text;
+    assert!(text.contains("Nearest match"), "Error should contain nearest match hint");
+    assert!(text.contains("line 2"), "Hint should show correct line number");
+    assert!(text.contains("similarity"), "Hint should show similarity percentage");
+}
+
+#[test]
+fn test_nearest_match_hint_partial_overlap() {
+    let (tmp, filename, _) = create_temp_file("function processData() {\n    return data;\n}\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "function processdata() {", "replace": "fn processData() {" }
+        ]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    // Should find the similar line (case difference)
+    assert!(text.contains("Nearest match"), "Should show nearest match for near-miss");
+}
+
+#[test]
+fn test_nearest_match_hint_no_good_match() {
+    let (tmp, filename, _) = create_temp_file("abc\ndef\nghi\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "zzzzzzzzzzzzzzzzz completely different", "replace": "x" }
+        ]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    // Similarity should be too low → no hint
+    assert!(!text.contains("Nearest match"), "Should NOT show hint for very low similarity");
+}
+
+#[test]
+fn test_nearest_match_hint_multiline_search() {
+    let (tmp, filename, _) = create_temp_file("line1\nfunction oldName() {\n    return 42;\n}\nline5\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "function oldname() {\n    return 42;\n}", "replace": "replaced" }
+        ]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    // Multi-line sliding window should find the matching block
+    assert!(text.contains("Nearest match"), "Should find nearest match for multiline search");
+    assert!(text.contains("line 2"), "Should identify the correct starting line");
+}
+
+#[test]
+fn test_nearest_match_hint_anchor_not_found() {
+    let (tmp, filename, _) = create_temp_file("using System;\nusing System.IO;\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "insertAfter": "using System.Io;", "content": "using System.Linq;" }
+        ]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    // "System.Io" vs "System.IO" — should find nearest match
+    assert!(text.contains("Nearest match"), "Anchor not found should show nearest match hint");
+}
+
+#[test]
+fn test_nearest_match_hint_regex_not_found() {
+    let (tmp, filename, _) = create_temp_file("int count = 10;\nmax = 20;\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "xyzzy\\d+", "replace": "0" }
+        ],
+        "regex": true
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    // regex "xyzzy\d+" won't match, but nearest_match_hint uses it as literal text
+    // The hint may or may not fire depending on similarity, but the error should contain "Pattern not found"
+    assert!(text.contains("Pattern not found"), "Should say pattern not found");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// skippedDetails tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_skipped_details_contains_edit_info() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "nonexistent_text", "replace": "x", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should succeed: {:?}", result);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    // skippedEdits count should be 1
+    assert_eq!(parsed["skippedEdits"], 1);
+
+    // skippedDetails should be an array with 1 entry
+    let details = parsed["skippedDetails"].as_array()
+        .expect("skippedDetails should be an array");
+    assert_eq!(details.len(), 1);
+
+    let detail = &details[0];
+    assert_eq!(detail["editIndex"], 0, "editIndex should be 0");
+    assert_eq!(detail["search"], "nonexistent_text", "search text should be preserved");
+    assert_eq!(detail["reason"], "text not found", "reason should describe the issue");
+}
+
+#[test]
+fn test_skipped_details_multiple_skips() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "missing_one", "replace": "x", "skipIfNotFound": true },
+            { "search": "hello", "replace": "goodbye" },
+            { "search": "missing_two", "replace": "y", "skipIfNotFound": true },
+            { "insertAfter": "missing_anchor", "content": "new", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should succeed with skipped edits: {:?}", result);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    // 3 edits skipped (indexes 0, 2, 3), 1 applied (index 1)
+    assert_eq!(parsed["skippedEdits"], 3, "Should report 3 skipped edits");
+
+    let details = parsed["skippedDetails"].as_array()
+        .expect("skippedDetails should be an array");
+    assert_eq!(details.len(), 3);
+
+    // Check each skipped edit
+    assert_eq!(details[0]["editIndex"], 0);
+    assert_eq!(details[0]["search"], "missing_one");
+    assert_eq!(details[0]["reason"], "text not found");
+
+    assert_eq!(details[1]["editIndex"], 2);
+    assert_eq!(details[1]["search"], "missing_two");
+    assert_eq!(details[1]["reason"], "text not found");
+
+    assert_eq!(details[2]["editIndex"], 3);
+    assert_eq!(details[2]["search"], "missing_anchor");
+    assert_eq!(details[2]["reason"], "anchor text not found");
+}
+
+#[test]
+fn test_skipped_details_multi_file_per_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _path1 = create_named_temp_file(tmp.path(), "has_it.txt", "old text here\n");
+    let _path2 = create_named_temp_file(tmp.path(), "no_it.txt", "different content\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["has_it.txt", "no_it.txt"],
+        "edits": [
+            { "search": "old", "replace": "new", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should succeed: {:?}", result);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    let results = parsed["results"].as_array().unwrap();
+
+    // File1: text found, no skipped details
+    let file1 = &results[0];
+    assert!(file1.get("skippedDetails").is_none(),
+        "File with match should not have skippedDetails");
+
+    // File2: text not found, skipped details present
+    let file2 = &results[1];
+    assert_eq!(file2["skippedEdits"], 1);
+    let details = file2["skippedDetails"].as_array().unwrap();
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["editIndex"], 0);
+    assert_eq!(details[0]["search"], "old");
+    assert_eq!(details[0]["reason"], "text not found");
+}
+
+#[test]
+fn test_skipped_details_regex_skip() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "nonexistent\\d+", "replace": "x", "skipIfNotFound": true }
+        ],
+        "regex": true
+    }));
+
+    assert!(!result.is_error, "Should succeed: {:?}", result);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    let details = parsed["skippedDetails"].as_array().unwrap();
+    assert_eq!(details.len(), 1);
+    assert_eq!(details[0]["reason"], "regex pattern not found");
+}

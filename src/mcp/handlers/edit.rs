@@ -14,6 +14,17 @@ use super::HandlerContext;
 /// Maximum number of files for multi-file edit (protection against abuse).
 const MAX_MULTI_FILE_PATHS: usize = 20;
 
+/// Maximum file size (in bytes) for nearest-match hint computation.
+/// Files larger than this skip the hint to avoid performance impact.
+const NEAREST_MATCH_MAX_FILE_SIZE: usize = 512_000; // 500 KB
+
+/// Minimum similarity ratio (0.0–1.0) for a nearest match to be reported.
+/// Below this threshold the hint is suppressed as unhelpful.
+const NEAREST_MATCH_MIN_SIMILARITY: f64 = 0.4;
+
+/// Maximum length of search/match text shown in hint messages.
+const NEAREST_MATCH_MAX_DISPLAY_LEN: usize = 150;
+
 /// Handle `search_edit` tool call.
 pub(crate) fn handle_search_edit(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // ── Parse path/paths ──
@@ -66,12 +77,22 @@ pub(crate) fn handle_search_edit(ctx: &HandlerContext, args: &Value) -> ToolCall
     }
 }
 
+/// Detail about a single skipped edit (when `skipIfNotFound=true`).
+struct SkippedEditDetail {
+    /// 0-based index of the edit in the edits array.
+    edit_index: usize,
+    /// The search/anchor text that was not found (truncated for display).
+    search_text: String,
+    /// Human-readable reason why the edit was skipped.
+    reason: String,
+}
+
 /// Result of editing a single file's content (in-memory, before writing).
 struct EditResult {
     modified_content: String,
     applied: usize,
     total_replacements: usize,
-    skipped_edits: usize,
+    skipped_details: Vec<SkippedEditDetail>,
     diff: String,
     lines_added: i64,
     lines_removed: i64,
@@ -123,7 +144,7 @@ fn apply_edits_to_content(
     is_regex: bool,
     expected_line_count: Option<usize>,
 ) -> Result<EditResult, String> {
-    let (modified_content, applied, total_replacements, skipped_edits) = if let Some(ops_array) = operations {
+    let (modified_content, applied, total_replacements, skipped_details) = if let Some(ops_array) = operations {
         // Mode A: Line-range operations
         let ops = parse_line_operations(ops_array)?;
 
@@ -140,7 +161,7 @@ fn apply_edits_to_content(
         }
 
         let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
-        (new_lines.join("\n"), applied_count, 0, 0)
+        (new_lines.join("\n"), applied_count, 0, Vec::new())
     } else if let Some(edits_array) = edits {
         // Mode B: Text-match edits
         let text_edits = parse_text_edits(edits_array)?;
@@ -166,7 +187,7 @@ fn apply_edits_to_content(
         modified_content,
         applied,
         total_replacements,
-        skipped_edits,
+        skipped_details,
         diff,
         lines_added,
         lines_removed,
@@ -229,8 +250,15 @@ fn handle_single_file_edit(
         response["totalReplacements"] = json!(edit_result.total_replacements);
     }
 
-    if edit_result.skipped_edits > 0 {
-        response["skippedEdits"] = json!(edit_result.skipped_edits);
+    if !edit_result.skipped_details.is_empty() {
+        response["skippedEdits"] = json!(edit_result.skipped_details.len());
+        response["skippedDetails"] = json!(edit_result.skipped_details.iter().map(|s| {
+            json!({
+                "editIndex": s.edit_index,
+                "search": s.search_text,
+                "reason": s.reason,
+            })
+        }).collect::<Vec<_>>());
     }
 
     if !edit_result.diff.is_empty() {
@@ -318,8 +346,15 @@ fn handle_multi_file_edit(
         if result.total_replacements > 0 {
             file_result["totalReplacements"] = json!(result.total_replacements);
         }
-        if result.skipped_edits > 0 {
-            file_result["skippedEdits"] = json!(result.skipped_edits);
+        if !result.skipped_details.is_empty() {
+            file_result["skippedEdits"] = json!(result.skipped_details.len());
+            file_result["skippedDetails"] = json!(result.skipped_details.iter().map(|s| {
+                json!({
+                    "editIndex": s.edit_index,
+                    "search": s.search_text,
+                    "reason": s.reason,
+                })
+            }).collect::<Vec<_>>());
         }
         if !result.diff.is_empty() {
             file_result["diff"] = json!(result.diff);
@@ -585,13 +620,13 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
     Ok(edits)
 }
 
-/// Apply text edits sequentially. Returns (new_content, total_replacements, skipped_count).
-fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, usize), String> {
+/// Apply text edits sequentially. Returns (new_content, total_replacements, skipped_details).
+fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, Vec<SkippedEditDetail>), String> {
     let mut result = content.to_string();
     let mut total_replacements = 0;
-    let mut skipped_count = 0;
+    let mut skipped_details: Vec<SkippedEditDetail> = Vec::new();
 
-    for edit in edits {
+    for (edit_index, edit) in edits.iter().enumerate() {
         if edit.insert_after.is_some() || edit.insert_before.is_some() {
             // Insert after/before mode
             let anchor = edit.insert_after.as_deref()
@@ -604,10 +639,15 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
             let matches: Vec<usize> = find_all_occurrences(&result, anchor);
             if matches.is_empty() {
                 if edit.skip_if_not_found {
-                    skipped_count += 1;
+                    skipped_details.push(SkippedEditDetail {
+                        edit_index,
+                        search_text: truncate_for_display(anchor),
+                        reason: "anchor text not found".to_string(),
+                    });
                     continue;
                 }
-                return Err(format!("Anchor text not found: \"{}\"", anchor));
+                let hint = nearest_match_hint(&result, anchor);
+                return Err(format!("Anchor text not found: \"{}\"{}", truncate_for_display(anchor), hint));
             }
 
             // Determine which occurrence to use
@@ -663,10 +703,15 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                 let count = re.find_iter(&result).count();
                 if count == 0 {
                     if edit.skip_if_not_found {
-                        skipped_count += 1;
+                        skipped_details.push(SkippedEditDetail {
+                            edit_index,
+                            search_text: truncate_for_display(search),
+                            reason: "regex pattern not found".to_string(),
+                        });
                         continue;
                     }
-                    return Err(format!("Pattern not found: \"{}\"", search));
+                    let hint = nearest_match_hint(&result, search);
+                    return Err(format!("Pattern not found: \"{}\"{}", truncate_for_display(search), hint));
                 }
 
                 // Check expectedContext on first match
@@ -713,10 +758,15 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                 let count = result.matches(search).count();
                 if count == 0 {
                     if edit.skip_if_not_found {
-                        skipped_count += 1;
+                        skipped_details.push(SkippedEditDetail {
+                            edit_index,
+                            search_text: truncate_for_display(search),
+                            reason: "text not found".to_string(),
+                        });
                         continue;
                     }
-                    return Err(format!("Text not found: \"{}\"", search));
+                    let hint = nearest_match_hint(&result, search);
+                    return Err(format!("Text not found: \"{}\"{}", truncate_for_display(search), hint));
                 }
 
                 // Check expectedContext on first match
@@ -760,7 +810,7 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
         }
     }
 
-    Ok((result, total_replacements, skipped_count))
+    Ok((result, total_replacements, skipped_details))
 }
 
 /// Find all occurrences of a literal string, returning their start positions.
@@ -797,6 +847,80 @@ fn check_expected_context(content: &str, match_pos: usize, _match_len: usize, ex
     }
 
     Ok(())
+}
+
+// ─── Nearest match hint ──────────────────────────────────────────────
+
+/// Truncate a string for display in error messages.
+fn truncate_for_display(s: &str) -> String {
+    if s.len() <= NEAREST_MATCH_MAX_DISPLAY_LEN {
+        s.to_string()
+    } else {
+        format!("{}…", &s[..s.floor_char_boundary(NEAREST_MATCH_MAX_DISPLAY_LEN)])
+    }
+}
+
+/// Find the nearest matching line/window in `content` for the given `search_text`.
+/// Returns a hint string to append to the error message, or empty string if no good match.
+///
+/// Algorithm:
+/// - For single-line search: compare each line with char-level similarity
+/// - For multi-line search: use sliding window of N lines, join and compare
+/// - Uses `similar::TextDiff::ratio()` for similarity scoring
+/// - Skips files > 500KB for performance
+fn nearest_match_hint(content: &str, search_text: &str) -> String {
+    // Skip for large files
+    if content.len() > NEAREST_MATCH_MAX_FILE_SIZE {
+        return String::new();
+    }
+
+    let search_lines: Vec<&str> = search_text.split('\n').collect();
+    let search_line_count = search_lines.len();
+    let content_lines: Vec<&str> = content.split('\n').collect();
+
+    if content_lines.is_empty() || search_text.is_empty() {
+        return String::new();
+    }
+
+    let mut best_similarity: f32 = 0.0;
+    let mut best_line_num: usize = 0; // 1-based
+    let mut best_text = String::new();
+
+    if search_line_count <= 1 {
+        // Single-line search: compare against each line
+        for (i, line) in content_lines.iter().enumerate() {
+            let ratio = similar::TextDiff::from_chars(search_text, line).ratio();
+            if ratio > best_similarity {
+                best_similarity = ratio;
+                best_line_num = i + 1;
+                best_text = line.to_string();
+            }
+        }
+    } else {
+        // Multi-line search: sliding window of search_line_count lines
+        if content_lines.len() >= search_line_count {
+            for i in 0..=(content_lines.len() - search_line_count) {
+                let window = content_lines[i..i + search_line_count].join("\n");
+                let ratio = similar::TextDiff::from_chars(search_text, &window).ratio();
+                if ratio > best_similarity {
+                    best_similarity = ratio;
+                    best_line_num = i + 1;
+                    best_text = window;
+                }
+            }
+        }
+    }
+
+    if best_similarity < NEAREST_MATCH_MIN_SIMILARITY as f32 {
+        return String::new();
+    }
+
+    let pct = (best_similarity * 100.0).round() as u32;
+    let display_text = truncate_for_display(&best_text);
+    format!(
+        ". Nearest match at line {} (similarity {}%): \"{}\"",
+        best_line_num, pct, display_text
+    )
 }
 
 // ─── Diff generation ─────────────────────────────────────────────────
