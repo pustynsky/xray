@@ -7665,5 +7665,40 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Status:** ✅ Covered by unit tests: `test_skip_if_not_found_single_file`, `test_skip_if_not_found_false_still_errors`, `test_skip_if_not_found_default_is_false`, `test_skip_if_not_found_multi_file_partial_match`, `test_skip_if_not_found_multi_file_without_flag_fails`, `test_skip_if_not_found_insert_after_anchor_missing`, `test_skip_if_not_found_regex_pattern_missing`, `test_skip_if_not_found_response_contains_skipped_edits_field`, `test_skip_if_not_found_multi_file_response_shows_skipped_per_file`
 
 ---
+
+#### T-EDIT-15: Nearest match hint on "text not found" error
+
+**Background:** When text, regex pattern, or anchor text is not found, the error message now includes a hint showing the most similar line in the file with its line number and similarity percentage.
+
+**Expected:**
+
+- Error message format: `Text not found: "<search>". Nearest match at line N (similarity M%): "<similar_text>"`
+- Hint includes line number (1-based) and similarity percentage
+- Hint suppressed when file > 500KB (performance protection)
+- Hint suppressed when best similarity < 40% (unhelpful)
+- Works for all three error types: "Text not found", "Pattern not found", "Anchor text not found"
+- Multiline search text uses sliding window of N lines for comparison
+- Display text truncated to 150 chars
+
+**Status:** ✅ Covered by unit tests: `test_nearest_match_hint_different_quotes`, `test_nearest_match_hint_partial_overlap`, `test_nearest_match_hint_no_good_match`, `test_nearest_match_hint_multiline_search`, `test_nearest_match_hint_anchor_not_found`, `test_nearest_match_hint_regex_not_found`
+
+---
+
+#### T-EDIT-16: skippedDetails in response for skipIfNotFound
+
+**Background:** When edits are skipped via `skipIfNotFound=true`, the response now includes a `skippedDetails` array alongside the existing `skippedEdits` count.
+
+**Expected:**
+
+- Response includes `skippedEdits` (count) AND `skippedDetails` (array)
+- Each entry in `skippedDetails` has: `editIndex` (0-based), `search` (the text that was not found), `reason` (human-readable)
+- Reason values: `"text not found"`, `"regex pattern not found"`, `"anchor text not found"`
+- Multiple skipped edits produce multiple entries in `skippedDetails`
+- Multi-file mode: `skippedDetails` is per-file in the `results` array
+- Files where all edits succeed: no `skippedDetails` field
+
+**Status:** ✅ Covered by unit tests: `test_skipped_details_contains_edit_info`, `test_skipped_details_multiple_skips`, `test_skipped_details_multi_file_per_file`, `test_skipped_details_regex_skip`
+
+---
 ---
 ---

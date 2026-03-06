@@ -371,10 +371,11 @@ pub fn parameter_examples() -> Value {
             "edits": "Mode B (text-match): [{search: 'old', replace: 'new'}] — replace all. [{search: 'old', replace: 'new', occurrence: 2}] — 2nd only. Insert after: [{insertAfter: 'using X;', content: 'using Y;'}]. Insert before: [{insertBefore: 'class Foo', content: '// comment'}]",
             "insertAfter_insertBefore": "Insert content on the line after/before an anchor text. Mutually exclusive with search/replace. Requires 'content' field. Use 'occurrence' to target Nth match (default: first). Example: {insertAfter: 'using System.IO;', content: 'using System.Linq;'}",
             "expectedContext": "Per-edit safety check: verify this text exists within ±5 lines of the match before applying. Example: {search: 'SemaphoreSlim(10)', replace: 'SemaphoreSlim(30)', expectedContext: 'var semaphore = new'}",
-            "skipIfNotFound": "Per-edit flag: if true, silently skip when search/anchor text is not found (default: false). Essential for multi-file 'paths' where not all files contain the target text. Without it, one missing file aborts the entire batch",
+            "skipIfNotFound": "Per-edit flag: if true, silently skip when search/anchor text is not found (default: false). Essential for multi-file 'paths' where not all files contain the target text. Without it, one missing file aborts the entire batch. Response includes 'skippedDetails' array with editIndex, search text, and reason for each skipped edit",
             "regex": "true -> treat edit search strings as regex with $1, $2 capture groups (Mode B search/replace only)",
             "dryRun": "true -> preview unified diff without writing file. Works with both single and multi-file",
-            "expectedLineCount": "Safety check: abort if file has different line count (prevents stale line numbers)"
+            "expectedLineCount": "Safety check: abort if file has different line count (prevents stale line numbers)",
+            "errorDiagnostics": "When text/anchor/pattern is not found, the error includes a nearest-match hint showing the most similar line in the file with line number and similarity percentage (e.g., 'Nearest match at line 5 (similarity 92%): ...'). Helps diagnose Unicode quote mismatches, case differences, and whitespace issues"
         }
     })
 }
@@ -511,7 +512,15 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("4. USE search_fast for file lookup -- 90x faster than search_find.\n");
     out.push_str("5. AIM for <=3 search calls per task. Call search_help for full guide with examples.\n");
     out.push_str("6. USE sortBy/min* in search_definitions for code health scans -- sortBy='cognitiveComplexity' ranks worst methods first.\n");
-    out.push_str("7. USE search_edit for file editing -- atomic line-range or text-match edits, no whitespace issues. PREFERRED over apply_diff.\n");
+    out.push_str("7. USE search_edit for file editing -- atomic line-range or text-match edits, no whitespace issues. Supports multi-file (paths), insert after/before, expectedContext.\n");
+
+    // --- FILE EDITING RULE ---
+    out.push_str("\nNEVER USE apply_diff, search_and_replace, or insert_content when search_edit is available.\n");
+    out.push_str("   ALWAYS USE search_edit for ALL file edits. It is atomic, handles whitespace correctly, and supports multi-file batch editing.\n");
+    out.push_str("   search_edit advantages: (1) atomic -- no partial apply failures, (2) no whitespace/indentation issues,\n");
+    out.push_str("   (3) multi-file batch editing (paths=[...]), (4) returns unified diff, (5) dryRun preview, (6) skipIfNotFound for partial matches.\n");
+    out.push_str("   For multi-file refactoring: search_edit paths=['file1','file2',...] edits=[{search:'old',replace:'new'}] -- one call instead of N.\n");
+    out.push_str("   For adding imports/usings: search_edit edits=[{insertAfter:'using X;',content:'using Y;'}] -- no line numbers needed.\n");
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("\nSTRATEGY RECIPES (aim for <=3 search calls per task):\n");

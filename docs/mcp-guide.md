@@ -660,6 +660,61 @@ Force rebuild the AST definition index (tree-sitter) and reload it into the serv
 
 ---
 
+## `search_edit` — File Editing
+
+Edit files by line-range operations or text-match replacements. Works on any text file (not limited to `--dir`). Supports multi-file editing, insert after/before, safety checks, and returns unified diff.
+
+### Response Fields
+
+| Response field     | When present                              | Description                                              |
+| ------------------ | ----------------------------------------- | -------------------------------------------------------- |
+| `applied`          | Always                                    | Number of edits processed                                |
+| `diff`             | Always                                    | Unified diff or `"(no changes)"`                         |
+| `linesAdded`       | Always                                    | Lines added (net)                                        |
+| `linesRemoved`     | Always                                    | Lines removed (net)                                      |
+| `newLineCount`     | Always                                    | Total lines after editing                                |
+| `totalReplacements`| Mode B with matches                       | Number of text replacements made                         |
+| `dryRun`           | Always (single-file)                      | Whether file was actually written                        |
+| `skippedEdits`     | `skipIfNotFound=true` with skipped edits  | Count of edits that were skipped                         |
+| `skippedDetails`   | `skipIfNotFound=true` with skipped edits  | Array of `{editIndex, search, reason}` per skipped edit  |
+| `results`          | Multi-file mode (`paths`)                 | Array of per-file results                                |
+| `summary`          | Multi-file mode (`paths`)                 | `{filesEdited, totalApplied, dryRun}`                    |
+
+### Error Diagnostics — Nearest Match Hint
+
+When search text, regex pattern, or anchor text is not found, the error message includes a **nearest match hint** showing the most similar line in the file:
+
+```
+Text not found: "Девять "израильтян"". Nearest match at line 2 (similarity 92%): "Девять «израильтян»"
+```
+
+**Behavior:**
+- Uses char-level LCS ratio (`similar::TextDiff`) for similarity scoring
+- Multi-line search text: sliding window of N lines for comparison
+- Suppressed for files > 500KB (performance protection)
+- Suppressed when best similarity < 40% (unhelpful)
+- Applied to all three error types: `"Text not found"`, `"Pattern not found"`, `"Anchor text not found"`
+
+### skipIfNotFound — Skipped Edit Details
+
+When `skipIfNotFound=true` is used and edits are skipped, the response includes detailed information about each skipped edit:
+
+```json
+{
+  "skippedEdits": 2,
+  "skippedDetails": [
+    { "editIndex": 0, "search": "SemaphoreSlim(10)", "reason": "text not found" },
+    { "editIndex": 3, "search": "missing_anchor", "reason": "anchor text not found" }
+  ]
+}
+```
+
+Possible `reason` values: `"text not found"`, `"regex pattern not found"`, `"anchor text not found"`.
+
+For full parameter documentation, see `search_help` → `parameterExamples` → `search_edit`.
+
+---
+
 ## Git History Tools
 
 Six MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `search_git_history`, `search_git_authors`, and `search_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `search_git_diff` and `search_git_blame` always use CLI.
