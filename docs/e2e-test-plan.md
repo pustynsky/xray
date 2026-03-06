@@ -791,7 +791,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- stdout: JSON-RPC response with 15 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`
+- stdout: JSON-RPC response with 16 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_edit`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`
 - Each tool has `name`, `description`, `inputSchema`
 - `search_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
 - Git tools have `repo` (required) and date filter parameters
@@ -5626,7 +5626,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- `tools` array contains 15 entries (9 original + 6 git)
+- `tools` array contains 16 entries (10 original + 6 git)
 - Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`
 - No `--git` flag needed
 
@@ -7443,5 +7443,131 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Status:** ✅ Covered by unit tests. Manual MCP test requires start/stop server workflow.
 
+
+### T-EDIT: `serve` — search_edit MCP tool (line-range and text-match modes)
+
+**Tool:** `search_edit`
+
+**Background:** `search_edit` provides reliable file editing with two modes: Mode A (line-range operations applied bottom-up to avoid offset cascade) and Mode B (text find-replace, literal or regex). Returns unified diff. Supports `dryRun` for preview without writing.
+
+#### T-EDIT-01: Mode A — Line-range replace
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"test.txt","operations":[{"startLine":2,"endLine":2,"content":"REPLACED"}]}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
+```
+
+**Expected:**
+
+- Line 2 replaced with "REPLACED"
+- Response contains `applied: 1`, `diff` with unified diff
+- File on disk is modified
+
+**Status:** ✅ Covered by unit tests: `test_mode_a_replace_single_line`, `test_mode_a_replace_range`, `test_mode_a_multiple_operations_bottom_up`
+
+---
+
+#### T-EDIT-02: Mode A — Insert before line
+
+**Expected:**
+
+- `endLine < startLine` inserts content before `startLine`
+- Existing lines are pushed down
+- File line count increases
+
+**Status:** ✅ Covered by unit test: `test_mode_a_insert_before_line`
+
+---
+
+#### T-EDIT-03: Mode A — Delete lines
+
+**Expected:**
+
+- Empty `content` with valid `startLine/endLine` range deletes those lines
+- File line count decreases
+
+**Status:** ✅ Covered by unit test: `test_mode_a_delete_lines`
+
+---
+
+#### T-EDIT-04: Mode B — Text find-replace (all occurrences)
+
+**Command (MCP):**
+
+```powershell
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"test.txt","edits":[{"search":"old","replace":"new"}]}}}'
+```
+
+**Expected:**
+
+- All occurrences of "old" replaced with "new"
+- Response contains `totalReplacements` count
+- Response contains unified diff
+
+**Status:** ✅ Covered by unit tests: `test_mode_b_literal_replace_all`, `test_mode_b_literal_replace_specific_occurrence`
+
+---
+
+#### T-EDIT-05: Mode B — Regex replace
+
+**Expected:**
+
+- `regex: true` enables regex pattern matching
+- Capture groups `$1`, `$2` work in replacement string
+- Pattern not found returns error
+
+**Status:** ✅ Covered by unit test: `test_mode_b_regex_replace`
+
+---
+
+#### T-EDIT-06: dryRun — Preview without writing
+
+**Expected:**
+
+- `dryRun: true` returns unified diff but does NOT modify the file
+- Response contains `dryRun: true`
+
+**Status:** ✅ Covered by unit test: `test_dry_run_does_not_write`
+
+---
+
+#### T-EDIT-07: Error handling
+
+**Expected errors:**
+
+- File not found → `"File not found: <path>"`
+- Both operations + edits → `"Specify 'operations' or 'edits', not both."`
+- Neither operations nor edits → `"Specify 'operations' (line-range) or 'edits' (text-match), not neither."`
+- Line out of range → `"startLine N out of range (file has M lines)"`
+- `expectedLineCount` mismatch → `"Expected N lines, file has M. File may have changed."`
+- Overlapping operations → `"Operations overlap at lines N-M"`
+- Search text not found → `"Text not found: \"...\""`
+
+**Status:** ✅ Covered by unit tests: `test_file_not_found_error`, `test_both_operations_and_edits_error`, `test_neither_operations_nor_edits_error`, `test_mode_a_out_of_range_error`, `test_mode_a_expected_line_count_mismatch`, `test_mode_a_overlap_error`, `test_mode_b_text_not_found_error`
+
+---
+
+#### T-EDIT-08: CRLF preservation
+
+**Expected:**
+
+- Files with CRLF line endings are preserved after editing
+- Editing normalizes to LF internally, then restores CRLF on write
+
+**Status:** ✅ Covered by unit test: `test_crlf_preservation`
+
+---
+
+#### T-EDIT-09: Automated E2E test
+
+**Automated:** Test T-EDIT in [`e2e-test.ps1`](../e2e-test.ps1) runs Mode A replace, Mode B replace, and dryRun scenarios in a parallel job with isolated temp directory.
+
+---
 ---
 ---

@@ -6,6 +6,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-03-06
+
+### Features
+
+- **`search_edit` MCP tool — reliable file editing** — New MCP tool providing atomic file editing with two modes: **Mode A (line-range operations)** — replace, insert, or delete lines by line number, applied bottom-up to avoid cascade offset failures that plague `apply_diff`; **Mode B (text-match edits)** — find-and-replace with literal or regex patterns, optional occurrence targeting. Returns unified diff (via `similar` crate). Supports `dryRun` for preview without writing, `expectedLineCount` safety check for stale line numbers, CRLF preservation, binary file detection, and both absolute and relative paths. Works on any text file (not limited to `--dir`). Tool count: 15 → 16 (at budget limit). 27 unit tests + 1 E2E test. New dependency: `similar = "2"` (lightweight, ~50KB, zero transitive deps).
+
+---
+
 ## 2026-03-03
 
 ### Internal

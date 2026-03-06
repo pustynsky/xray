@@ -1055,6 +1055,84 @@ $testBlocks += , {
     }
 }
 
+# T-EDIT: search_edit MCP tool — line-range replace, text-match replace, dryRun
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-EDIT search-edit-line-range-and-text-match"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_edit_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Create test file
+        Set-Content -Path (Join-Path $tmpDir "test.txt") -Value "line1`nline2`nline3`nline4`nline5"
+
+        # Test 1: Mode A — replace line 2
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + ($tmpDir -replace '\\', '/') + '/test.txt","operations":[{"startLine":2,"endLine":2,"content":"REPLACED"}]}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no response for Mode A" }
+        elseif ($jsonLine -match '"isError"\s*:\s*true') { $errors += "Mode A returned error" }
+
+        # Verify file was modified
+        $content = Get-Content -Path (Join-Path $tmpDir "test.txt") -Raw
+        if ($content -notmatch 'REPLACED') { $errors += "file not modified by Mode A" }
+        if ($content -match 'line2') { $errors += "line2 should have been replaced" }
+
+        # Test 2: Mode B — text replace
+        Set-Content -Path (Join-Path $tmpDir "test2.txt") -Value "hello world hello"
+        $msgs2 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + ($tmpDir -replace '\\', '/') + '/test2.txt","edits":[{"search":"hello","replace":"bye"}]}}}')
+        ) -join "`n"
+        $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        if (-not $jsonLine2) { $errors += "no response for Mode B" }
+        elseif ($jsonLine2 -match '"isError"\s*:\s*true') { $errors += "Mode B returned error" }
+
+        $content2 = Get-Content -Path (Join-Path $tmpDir "test2.txt") -Raw
+        if ($content2 -match 'hello') { $errors += "hello should have been replaced" }
+        if ($content2 -notmatch 'bye') { $errors += "bye not found after replace" }
+
+        # Test 3: dryRun — file should NOT be modified
+        Set-Content -Path (Join-Path $tmpDir "test3.txt") -Value "original content"
+        $msgs3 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + ($tmpDir -replace '\\', '/') + '/test3.txt","edits":[{"search":"original","replace":"modified"}],"dryRun":true}}}')
+        ) -join "`n"
+        $output3 = ($msgs3 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine3 = $output3 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        if (-not $jsonLine3) { $errors += "no response for dryRun" }
+        elseif ($jsonLine3 -match '"isError"\s*:\s*true') { $errors += "dryRun returned error" }
+
+        $content3 = Get-Content -Path (Join-Path $tmpDir "test3.txt") -Raw
+        if ($content3 -notmatch 'original') { $errors += "dryRun should not modify file" }
+
+        # Verify diff is in response
+        if ($jsonLine3 -and $jsonLine3 -notmatch 'diff') { $errors += "dryRun response missing diff" }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        if ($errors.Count -gt 0) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" }
+        }
+        return @{ Name = $name; Passed = $true; Output = "OK (Mode A replace + Mode B replace + dryRun verified)" }
+    } catch {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # --- Launch all parallel jobs ---
 $parallelJobs = @()
 foreach ($block in $testBlocks) {

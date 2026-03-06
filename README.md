@@ -154,6 +154,7 @@ For caller tree verification details (DI resolution, type inference, false-posit
 
 | Crate | Purpose |
 |---|---|
+| [similar](https://crates.io/crates/similar) | Unified diff generation for `search_edit` tool |
 | [ignore](https://crates.io/crates/ignore) | Parallel directory walking (from ripgrep) |
 | [clap](https://crates.io/crates/clap) | CLI argument parsing |
 | [regex](https://crates.io/crates/regex) | Regular expression support |

@@ -23,7 +23,7 @@ fn test_handle_tools_list() {
     assert_eq!(result["jsonrpc"], "2.0");
     assert_eq!(result["id"], 2);
     let tools = result["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 15);
+    assert_eq!(tools.len(), 16);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"search_grep"));
     assert!(names.contains(&"search_find"));
