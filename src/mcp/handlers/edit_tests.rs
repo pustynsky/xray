@@ -521,3 +521,161 @@ fn test_mode_b_multiple_edits_sequential() {
     let content = std::fs::read_to_string(&path).unwrap();
     assert_eq!(content, "int x = 100;\nint y = 200;\n");
 }
+// ─── Additional edge-case tests ──────────────────────────────────────
+
+#[test]
+fn test_mode_b_regex_capture_groups() {
+    let (tmp, filename, path) = create_temp_file("func getData() {}\nfunc setData() {}\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": r"func (\w+)\(\)", "replace": "fn $1()" }
+        ],
+        "regex": true
+    }));
+
+    assert!(!result.is_error, "Regex capture groups should work: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("fn getData()"), "Capture group $1 should be substituted");
+    assert!(content.contains("fn setData()"), "Second match should also be substituted");
+    assert!(!content.contains("func"), "Original 'func' should be replaced");
+}
+
+#[test]
+fn test_mode_a_insert_at_end_of_file() {
+    let (tmp, filename, path) = create_temp_file("line1\nline2\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Insert after the last line (startLine = 4 because split('\n') on "line1\nline2\n" gives ["line1", "line2", ""])
+    // Actually, for a file "line1\nline2\n", split('\n') gives ["line1", "line2", ""] — 3 elements
+    // Insert at position 4 (after element 3) = append
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 4, "endLine": 3, "content": "appended" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Insert at end should work: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("appended"), "Content should be appended");
+}
+
+#[test]
+fn test_mode_a_replace_last_line() {
+    let (tmp, filename, path) = create_temp_file("first\nsecond\nthird");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 3, "endLine": 3, "content": "LAST" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(content, "first\nsecond\nLAST");
+}
+
+#[test]
+fn test_mode_b_no_changes_when_same_text() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello", "replace": "hello" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["diff"], "(no changes)", "Same text should produce no diff");
+}
+
+#[test]
+fn test_mode_b_multiline_search_replace() {
+    let (tmp, filename, path) = create_temp_file("start\nold_line1\nold_line2\nend\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "old_line1\nold_line2", "replace": "new_block" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("new_block"), "Multi-line search should be replaced");
+    assert!(!content.contains("old_line1"), "Old content should be gone");
+    assert!(content.contains("start\n"), "Content before should be preserved");
+    assert!(content.contains("end\n"), "Content after should be preserved");
+}
+
+#[test]
+fn test_large_file_smoke() {
+    let mut content = String::new();
+    for i in 1..=200 {
+        content.push_str(&format!("line {}\n", i));
+    }
+    let (tmp, filename, path) = create_temp_file(&content);
+    let ctx = make_ctx(tmp.path());
+
+    // Replace line 100 and line 150 (bottom-up)
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 100, "endLine": 100, "content": "REPLACED_100" },
+            { "startLine": 150, "endLine": 150, "content": "REPLACED_150" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let result_content = std::fs::read_to_string(&path).unwrap();
+    assert!(result_content.contains("REPLACED_100"), "Line 100 should be replaced");
+    assert!(result_content.contains("REPLACED_150"), "Line 150 should be replaced");
+    assert!(result_content.contains("line 99\n"), "Line 99 should be preserved");
+    assert!(result_content.contains("line 101\n"), "Line 101 should be preserved");
+}
+
+#[test]
+fn test_mode_a_expected_line_count_match() {
+    let (tmp, filename, path) = create_temp_file("a\nb\nc\n");
+    let ctx = make_ctx(tmp.path());
+
+    // "a\nb\nc\n" split by '\n' gives ["a", "b", "c", ""] = 4 elements
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 2, "endLine": 2, "content": "B" }
+        ],
+        "expectedLineCount": 4
+    }));
+
+    assert!(!result.is_error, "Correct expectedLineCount should pass");
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("B"), "Edit should be applied");
+}
+
+#[test]
+fn test_mode_b_empty_search_error() {
+    let (tmp, filename, _) = create_temp_file("hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "", "replace": "x" }
+        ]
+    }));
+
+    assert!(result.is_error, "Empty search string should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("empty"), "Error should mention empty search");
+}
