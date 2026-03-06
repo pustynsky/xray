@@ -7644,5 +7644,26 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Status:** ✅ Covered by unit tests: `test_expected_context_match`, `test_expected_context_mismatch`, `test_expected_context_optional`, `test_expected_context_with_insert_after`, `test_expected_context_with_insert_after_mismatch`
 
 ---
+
+#### T-EDIT-14: skipIfNotFound — silently skip missing edits
+
+**Command (MCP):**
+
+```powershell
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"paths":["file1.cs","file2.cs"],"edits":[{"search":"SemaphoreSlim(10)","replace":"SemaphoreSlim(30)","skipIfNotFound":true}]}}}'
+```
+
+**Expected:**
+
+- Files containing the search text → edit applied normally
+- Files NOT containing the search text → silently skipped (no error)
+- Response includes `"skippedEdits": N` for each file where edits were skipped
+- `"diff": "(no changes)"` for skipped files
+- Without `skipIfNotFound` (default `false`) → error aborts entire operation
+- Works with all edit modes: literal search/replace, regex, insertAfter/insertBefore
+
+**Status:** ✅ Covered by unit tests: `test_skip_if_not_found_single_file`, `test_skip_if_not_found_false_still_errors`, `test_skip_if_not_found_default_is_false`, `test_skip_if_not_found_multi_file_partial_match`, `test_skip_if_not_found_multi_file_without_flag_fails`, `test_skip_if_not_found_insert_after_anchor_missing`, `test_skip_if_not_found_regex_pattern_missing`, `test_skip_if_not_found_response_contains_skipped_edits_field`, `test_skip_if_not_found_multi_file_response_shows_skipped_per_file`
+
+---
 ---
 ---

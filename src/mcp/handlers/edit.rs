@@ -71,6 +71,7 @@ struct EditResult {
     modified_content: String,
     applied: usize,
     total_replacements: usize,
+    skipped_edits: usize,
     diff: String,
     lines_added: i64,
     lines_removed: i64,
@@ -122,7 +123,7 @@ fn apply_edits_to_content(
     is_regex: bool,
     expected_line_count: Option<usize>,
 ) -> Result<EditResult, String> {
-    let (modified_content, applied, total_replacements) = if let Some(ops_array) = operations {
+    let (modified_content, applied, total_replacements, skipped_edits) = if let Some(ops_array) = operations {
         // Mode A: Line-range operations
         let ops = parse_line_operations(ops_array)?;
 
@@ -139,14 +140,14 @@ fn apply_edits_to_content(
         }
 
         let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
-        (new_lines.join("\n"), applied_count, 0)
+        (new_lines.join("\n"), applied_count, 0, 0)
     } else if let Some(edits_array) = edits {
         // Mode B: Text-match edits
         let text_edits = parse_text_edits(edits_array)?;
 
-        let (new_content, replacements) = apply_text_edits(normalized, &text_edits, is_regex)?;
+        let (new_content, replacements, skipped) = apply_text_edits(normalized, &text_edits, is_regex)?;
         let edit_count = text_edits.len();
-        (new_content, edit_count, replacements)
+        (new_content, edit_count, replacements, skipped)
     } else {
         unreachable!("Already validated that one of operations/edits is Some");
     };
@@ -165,6 +166,7 @@ fn apply_edits_to_content(
         modified_content,
         applied,
         total_replacements,
+        skipped_edits,
         diff,
         lines_added,
         lines_removed,
@@ -225,6 +227,10 @@ fn handle_single_file_edit(
 
     if edit_result.total_replacements > 0 {
         response["totalReplacements"] = json!(edit_result.total_replacements);
+    }
+
+    if edit_result.skipped_edits > 0 {
+        response["skippedEdits"] = json!(edit_result.skipped_edits);
     }
 
     if !edit_result.diff.is_empty() {
@@ -311,6 +317,9 @@ fn handle_multi_file_edit(
         });
         if result.total_replacements > 0 {
             file_result["totalReplacements"] = json!(result.total_replacements);
+        }
+        if result.skipped_edits > 0 {
+            file_result["skippedEdits"] = json!(result.skipped_edits);
         }
         if !result.diff.is_empty() {
             file_result["diff"] = json!(result.diff);
@@ -576,10 +585,11 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
     Ok(edits)
 }
 
-/// Apply text edits sequentially. Returns (new_content, total_replacements).
-fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize), String> {
+/// Apply text edits sequentially. Returns (new_content, total_replacements, skipped_count).
+fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, usize), String> {
     let mut result = content.to_string();
     let mut total_replacements = 0;
+    let mut skipped_count = 0;
 
     for edit in edits {
         if edit.insert_after.is_some() || edit.insert_before.is_some() {
@@ -594,7 +604,8 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
             let matches: Vec<usize> = find_all_occurrences(&result, anchor);
             if matches.is_empty() {
                 if edit.skip_if_not_found {
-                    continue; // silently skip this edit
+                    skipped_count += 1;
+                    continue;
                 }
                 return Err(format!("Anchor text not found: \"{}\"", anchor));
             }
@@ -652,7 +663,8 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                 let count = re.find_iter(&result).count();
                 if count == 0 {
                     if edit.skip_if_not_found {
-                        continue; // silently skip this edit
+                        skipped_count += 1;
+                        continue;
                     }
                     return Err(format!("Pattern not found: \"{}\"", search));
                 }
@@ -701,7 +713,8 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                 let count = result.matches(search).count();
                 if count == 0 {
                     if edit.skip_if_not_found {
-                        continue; // silently skip this edit
+                        skipped_count += 1;
+                        continue;
                     }
                     return Err(format!("Text not found: \"{}\"", search));
                 }
@@ -747,7 +760,7 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
         }
     }
 
-    Ok((result, total_replacements))
+    Ok((result, total_replacements, skipped_count))
 }
 
 /// Find all occurrences of a literal string, returning their start positions.

@@ -1288,3 +1288,53 @@ fn test_skip_if_not_found_regex_pattern_missing() {
     let content = std::fs::read_to_string(&path).unwrap();
     assert_eq!(content, "hello world\n", "File should be unchanged");
 }
+
+
+#[test]
+fn test_skip_if_not_found_response_contains_skipped_edits_field() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "nonexistent", "replace": "x", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should succeed: {:?}", result);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["skippedEdits"], 1, "Response should contain skippedEdits: 1");
+    assert_eq!(parsed["diff"], "(no changes)", "Diff should show no changes");
+}
+
+#[test]
+fn test_skip_if_not_found_multi_file_response_shows_skipped_per_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _path1 = create_named_temp_file(tmp.path(), "has_it.txt", "old text here\n");
+    let _path2 = create_named_temp_file(tmp.path(), "no_it.txt", "different content\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["has_it.txt", "no_it.txt"],
+        "edits": [
+            { "search": "old", "replace": "new", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should succeed: {:?}", result);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+
+    // File that had the text → no skippedEdits field
+    let results = parsed["results"].as_array().unwrap();
+    let file1 = &results[0];
+    assert!(file1.get("skippedEdits").is_none() || file1["skippedEdits"] == 0,
+        "File with match should not have skippedEdits");
+
+    // File that didn't have the text → skippedEdits: 1
+    let file2 = &results[1];
+    assert_eq!(file2["skippedEdits"], 1, "File without match should have skippedEdits: 1");
+    assert_eq!(file2["diff"], "(no changes)", "Skipped file should show no changes");
+}
