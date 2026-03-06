@@ -1055,6 +1055,153 @@ $testBlocks += , {
     }
 }
 
+# T-EDIT: search_edit MCP tool — line-range replace, text-match replace, dryRun
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-EDIT search-edit-line-range-and-text-match"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_edit_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Create test file
+        Set-Content -Path (Join-Path $tmpDir "test.txt") -Value "line1`nline2`nline3`nline4`nline5"
+
+        # Test 1: Mode A — replace line 2
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + ($tmpDir -replace '\\', '/') + '/test.txt","operations":[{"startLine":2,"endLine":2,"content":"REPLACED"}]}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no response for Mode A" }
+        elseif ($jsonLine -match '"isError"\s*:\s*true') { $errors += "Mode A returned error" }
+
+        # Verify file was modified
+        $content = Get-Content -Path (Join-Path $tmpDir "test.txt") -Raw
+        if ($content -notmatch 'REPLACED') { $errors += "file not modified by Mode A" }
+        if ($content -match 'line2') { $errors += "line2 should have been replaced" }
+
+        # Test 2: Mode B — text replace
+        Set-Content -Path (Join-Path $tmpDir "test2.txt") -Value "hello world hello"
+        $msgs2 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + ($tmpDir -replace '\\', '/') + '/test2.txt","edits":[{"search":"hello","replace":"bye"}]}}}')
+        ) -join "`n"
+        $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        if (-not $jsonLine2) { $errors += "no response for Mode B" }
+        elseif ($jsonLine2 -match '"isError"\s*:\s*true') { $errors += "Mode B returned error" }
+
+        $content2 = Get-Content -Path (Join-Path $tmpDir "test2.txt") -Raw
+        if ($content2 -match 'hello') { $errors += "hello should have been replaced" }
+        if ($content2 -notmatch 'bye') { $errors += "bye not found after replace" }
+
+        # Test 3: dryRun — file should NOT be modified
+        Set-Content -Path (Join-Path $tmpDir "test3.txt") -Value "original content"
+        $msgs3 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + ($tmpDir -replace '\\', '/') + '/test3.txt","edits":[{"search":"original","replace":"modified"}],"dryRun":true}}}')
+        ) -join "`n"
+        $output3 = ($msgs3 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine3 = $output3 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        if (-not $jsonLine3) { $errors += "no response for dryRun" }
+        elseif ($jsonLine3 -match '"isError"\s*:\s*true') { $errors += "dryRun returned error" }
+
+        $content3 = Get-Content -Path (Join-Path $tmpDir "test3.txt") -Raw
+        if ($content3 -notmatch 'original') { $errors += "dryRun should not modify file" }
+
+        # Verify diff is in response
+        if ($jsonLine3 -and $jsonLine3 -notmatch 'diff') { $errors += "dryRun response missing diff" }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        if ($errors.Count -gt 0) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" }
+        }
+        return @{ Name = $name; Passed = $true; Output = "OK (Mode A replace + Mode B replace + dryRun verified)" }
+    } catch {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-EDIT-MULTI: search_edit multi-file + insert after/before + expectedContext
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-EDIT-MULTI search-edit-multi-file-insert-context"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_edit_multi_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        $errors = @()
+
+        # Test 1: Multi-file replace
+        Set-Content -Path (Join-Path $tmpDir "a.txt") -Value "old text here"
+        Set-Content -Path (Join-Path $tmpDir "b.txt") -Value "old text there"
+        $pathA = ($tmpDir -replace '\\', '/') + '/a.txt'
+        $pathB = ($tmpDir -replace '\\', '/') + '/b.txt'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"paths":["' + $pathA + '","' + $pathB + '"],"edits":[{"search":"old","replace":"new"}]}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine -or $jsonLine -match '"isError"\s*:\s*true') { $errors += "multi-file replace failed" }
+        $ca = Get-Content -Path (Join-Path $tmpDir "a.txt") -Raw
+        $cb = Get-Content -Path (Join-Path $tmpDir "b.txt") -Raw
+        if ($ca -match 'old') { $errors += "a.txt still has old" }
+        if ($cb -match 'old') { $errors += "b.txt still has old" }
+        if ($jsonLine -notmatch 'filesEdited') { $errors += "missing filesEdited in summary" }
+
+        # Test 2: Insert after
+        Set-Content -Path (Join-Path $tmpDir "c.txt") -Value "using System;`nusing System.IO;`n`nclass Foo {}"
+        $pathC = ($tmpDir -replace '\\', '/') + '/c.txt'
+        $msgs2 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + $pathC + '","edits":[{"insertAfter":"using System.IO;","content":"using System.Linq;"}]}}}')
+        ) -join "`n"
+        $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine2 -or $jsonLine2 -match '"isError"\s*:\s*true') { $errors += "insertAfter failed" }
+        $cc = Get-Content -Path (Join-Path $tmpDir "c.txt") -Raw
+        if ($cc -notmatch 'System\.Linq') { $errors += "insertAfter content missing" }
+
+        # Test 3: expectedContext
+        Set-Content -Path (Join-Path $tmpDir "d.txt") -Value "var semaphore = new SemaphoreSlim(10);`nDoWork();"
+        $pathD = ($tmpDir -replace '\\', '/') + '/d.txt'
+        $msgs3 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + $pathD + '","edits":[{"search":"SemaphoreSlim(10)","replace":"SemaphoreSlim(30)","expectedContext":"var semaphore = new"}]}}}')
+        ) -join "`n"
+        $output3 = ($msgs3 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine3 = $output3 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine3 -or $jsonLine3 -match '"isError"\s*:\s*true') { $errors += "expectedContext replace failed" }
+        $cd = Get-Content -Path (Join-Path $tmpDir "d.txt") -Raw
+        if ($cd -notmatch 'SemaphoreSlim\(30\)') { $errors += "expectedContext edit not applied" }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        if ($errors.Count -gt 0) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" }
+        }
+        return @{ Name = $name; Passed = $true; Output = "OK (multi-file + insertAfter + expectedContext verified)" }
+    } catch {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # --- Launch all parallel jobs ---
 $parallelJobs = @()
 foreach ($block in $testBlocks) {

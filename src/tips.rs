@@ -280,6 +280,7 @@ pub fn tool_priority() -> Vec<ToolPriority> {
         ToolPriority { rank: 4, tool: "search_fast", description: "file name lookup (~35ms, any file)" },
         ToolPriority { rank: 5, tool: "search_find", description: "live walk (~3s, last resort)" },
         ToolPriority { rank: 6, tool: "search_branch_status", description: "call first when investigating production bugs" },
+        ToolPriority { rank: 7, tool: "search_edit", description: "reliable file editing -- line-range or text-match, atomic, no whitespace issues. Supports multi-file (paths), insert after/before, expectedContext" },
     ]
 }
 
@@ -362,6 +363,18 @@ pub fn parameter_examples() -> Value {
         },
         "search_branch_status": {
             "repo": "'.' — shows branch name, behind/ahead counts, dirty files, fetch age. Call FIRST when investigating production bugs"
+        },
+        "search_edit": {
+            "path": "File path — absolute or relative to server --dir. Works on any text file, not limited to indexed extensions. Mutually exclusive with 'paths'",
+            "paths": "Array of file paths for multi-file editing. Same edits/operations applied to ALL files. Transactional: if any file fails, none are written. Max 20 files. Response has 'results' array + 'summary'. Example: paths=['file1.cs', 'file2.cs', 'file3.cs']",
+            "operations": "Mode A (line-range): [{startLine: 5, endLine: 5, content: 'new line'}] — replace line 5. [{startLine: 3, endLine: 2, content: 'inserted'}] — insert before line 3 (endLine < startLine). [{startLine: 2, endLine: 4, content: ''}] — delete lines 2-4. Append to end: [{startLine: N+1, endLine: N, content: 'appended'}] where N = line count. Multiple ops applied bottom-up (no offset cascade)",
+            "edits": "Mode B (text-match): [{search: 'old', replace: 'new'}] — replace all. [{search: 'old', replace: 'new', occurrence: 2}] — 2nd only. Insert after: [{insertAfter: 'using X;', content: 'using Y;'}]. Insert before: [{insertBefore: 'class Foo', content: '// comment'}]",
+            "insertAfter_insertBefore": "Insert content on the line after/before an anchor text. Mutually exclusive with search/replace. Requires 'content' field. Use 'occurrence' to target Nth match (default: first). Example: {insertAfter: 'using System.IO;', content: 'using System.Linq;'}",
+            "expectedContext": "Per-edit safety check: verify this text exists within ±5 lines of the match before applying. Example: {search: 'SemaphoreSlim(10)', replace: 'SemaphoreSlim(30)', expectedContext: 'var semaphore = new'}",
+            "skipIfNotFound": "Per-edit flag: if true, silently skip when search/anchor text is not found (default: false). Essential for multi-file 'paths' where not all files contain the target text. Without it, one missing file aborts the entire batch",
+            "regex": "true -> treat edit search strings as regex with $1, $2 capture groups (Mode B search/replace only)",
+            "dryRun": "true -> preview unified diff without writing file. Works with both single and multi-file",
+            "expectedLineCount": "Safety check: abort if file has different line count (prevents stale line numbers)"
         }
     })
 }
@@ -498,6 +511,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("4. USE search_fast for file lookup -- 90x faster than search_find.\n");
     out.push_str("5. AIM for <=3 search calls per task. Call search_help for full guide with examples.\n");
     out.push_str("6. USE sortBy/min* in search_definitions for code health scans -- sortBy='cognitiveComplexity' ranks worst methods first.\n");
+    out.push_str("7. USE search_edit for file editing -- atomic line-range or text-match edits, no whitespace issues. PREFERRED over apply_diff.\n");
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("\nSTRATEGY RECIPES (aim for <=3 search calls per task):\n");

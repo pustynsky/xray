@@ -2,6 +2,7 @@
 
 mod callers;
 mod definitions;
+mod edit;
 mod fast;
 mod find;
 mod git;
@@ -374,6 +375,100 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
+            name: "search_edit".to_string(),
+            description: "Edit a file by line-range operations or text-match replacements. Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing. Works on any text file (not limited to --dir). Accepts absolute or relative paths. Supports multi-file editing via 'paths' parameter (transactional: all-or-nothing). PREFERRED over apply_diff for all file edits — atomic, no whitespace issues, minimal token cost.".to_string(),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "File path — absolute or relative to server --dir. Mutually exclusive with 'paths'."
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Array of file paths for multi-file editing. Same edits/operations applied to ALL files. Transactional: if any file fails, none are written. Max 20 files. Mutually exclusive with 'path'."
+                    },
+                    "operations": {
+                        "type": "array",
+                        "description": "Line-range edits (Mode A). Mutually exclusive with 'edits'. Applied bottom-up.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "startLine": {
+                                    "type": "integer",
+                                    "description": "1-based start line (inclusive)"
+                                },
+                                "endLine": {
+                                    "type": "integer",
+                                    "description": "1-based end line (inclusive). Set endLine = startLine-1 to INSERT before startLine without deleting."
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "Replacement content. Empty string deletes the line range. Newlines create multiple output lines."
+                                }
+                            },
+                            "required": ["startLine", "endLine", "content"]
+                        }
+                    },
+                    "edits": {
+                        "type": "array",
+                        "description": "Text-match edits (Mode B). Mutually exclusive with 'operations'. Applied sequentially. Each edit is either search/replace OR insertAfter/insertBefore.",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "search": {
+                                    "type": "string",
+                                    "description": "Text to find (literal or regex). Mutually exclusive with insertAfter/insertBefore."
+                                },
+                                "replace": {
+                                    "type": "string",
+                                    "description": "Replacement text. Supports $1, $2 capture groups when regex=true."
+                                },
+                                "occurrence": {
+                                    "type": "integer",
+                                    "description": "1-based occurrence to target. 0 or omitted = ALL occurrences (search/replace) or first occurrence (insertAfter/insertBefore)."
+                                },
+                                "insertAfter": {
+                                    "type": "string",
+                                    "description": "Anchor text — insert content on next line after this text. Mutually exclusive with search/replace and insertBefore."
+                                },
+                                "insertBefore": {
+                                    "type": "string",
+                                    "description": "Anchor text — insert content on line before this text. Mutually exclusive with search/replace and insertAfter."
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "Content to insert (required with insertAfter/insertBefore)."
+                                },
+                                "expectedContext": {
+                                    "type": "string",
+                                    "description": "Safety check: verify this text exists within ±5 lines of the match. Aborts if not found."
+                                },
+                                "skipIfNotFound": {
+                                    "type": "boolean",
+                                    "description": "If true, silently skip this edit when search/anchor text is not found (default: false). Useful with multi-file 'paths' where not all files contain the target text."
+                                }
+                            }
+                        }
+                    },
+                    "regex": {
+                        "type": "boolean",
+                        "description": "Treat edit search strings as regex (default: false). Only for Mode B search/replace."
+                    },
+                    "dryRun": {
+                        "type": "boolean",
+                        "description": "Preview diff without writing (default: false)"
+                    },
+                    "expectedLineCount": {
+                        "type": "integer",
+                        "description": "Safety check: if file has different line count, abort. Prevents stale line numbers."
+                    }
+                },
+                "required": []
+            }),
+        },
+        ToolDefinition {
             name: "search_help".to_string(),
             description: "Show best practices and usage tips for search-index tools. Call this when unsure which tool to use or how to optimize queries. Returns a concise guide with tool selection priorities, performance tiers, and common pitfalls.".to_string(),
             input_schema: json!({
@@ -506,6 +601,7 @@ pub fn dispatch_tool(
         "search_reindex_definitions" => handle_search_reindex_definitions(ctx, arguments),
         "search_definitions" => definitions::handle_search_definitions(ctx, arguments),
         "search_callers" => callers::handle_search_callers(ctx, arguments),
+        "search_edit" => edit::handle_search_edit(ctx, arguments),
         "search_help" => handle_search_help(),
         // Git history tools
         "search_git_history" | "search_git_diff" | "search_git_authors" | "search_git_activity" | "search_git_blame" | "search_branch_status" => {
