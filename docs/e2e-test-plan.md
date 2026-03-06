@@ -7569,5 +7569,80 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Automated:** Test T-EDIT in [`e2e-test.ps1`](../e2e-test.ps1) runs Mode A replace, Mode B replace, and dryRun scenarios in a parallel job with isolated temp directory.
 
 ---
+
+#### T-EDIT-10: Append mode (Mode A insert at end of file)
+
+**Expected:**
+
+- `{startLine: N+1, endLine: N, content: "appended"}` where N = line count → content appended after last line
+- Existing file content is preserved
+- This is NOT a new feature — it already works via Mode A insert mode. This test verifies documentation accuracy.
+
+**Status:** ✅ Covered by unit test: `test_mode_a_insert_at_end_of_file`
+
+---
+
+#### T-EDIT-11: Multi-file editing (`paths` parameter)
+
+**Command (MCP):**
+
+```powershell
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"paths":["file1.txt","file2.txt","file3.txt"],"edits":[{"search":"old","replace":"new"}]}}}'
+```
+
+**Expected:**
+
+- All 3 files modified with "old" → "new" replacement
+- Response contains `results` array (3 entries) and `summary` object
+- `summary.filesEdited` = 3, `summary.totalApplied` = 3
+- If any file fails → ALL files unchanged (transactional abort)
+- `paths` + `path` together → error ("not both")
+- Empty `paths` array → error
+- More than 20 paths → error
+
+**Status:** ✅ Covered by unit tests: `test_multi_file_all_succeed`, `test_multi_file_one_fails_aborts_all`, `test_multi_file_dry_run`, `test_multi_file_max_limit`, `test_multi_file_mutual_exclusive_with_path`, `test_multi_file_empty_paths`, `test_multi_file_file_not_found`
+
+---
+
+#### T-EDIT-12: Insert after/before anchor text
+
+**Command (MCP):**
+
+```powershell
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"file.cs","edits":[{"insertAfter":"using System.IO;","content":"using System.Linq;"}]}}}'
+```
+
+**Expected:**
+
+- "using System.Linq;" inserted on the line after "using System.IO;"
+- `insertBefore` inserts on the line before the anchor text
+- `insertAfter` + `insertBefore` together → error
+- `insertAfter` + `search`/`replace` together → error
+- `insertAfter` without `content` → error
+- Anchor text not found → error
+- `occurrence: 2` → insert after 2nd occurrence of anchor
+
+**Status:** ✅ Covered by unit tests: `test_insert_after_found`, `test_insert_before_found`, `test_insert_after_not_found`, `test_insert_after_specific_occurrence`, `test_insert_after_with_search_replace_error`, `test_insert_after_missing_content_error`, `test_insert_before_and_after_error`, `test_insert_after_at_last_line`, `test_insert_before_at_first_line`
+
+---
+
+#### T-EDIT-13: expectedContext safety check
+
+**Command (MCP):**
+
+```powershell
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"file.cs","edits":[{"search":"SemaphoreSlim(10)","replace":"SemaphoreSlim(30)","expectedContext":"var semaphore = new"}]}}}'
+```
+
+**Expected:**
+
+- Edit applied only if "var semaphore = new" exists within ±5 lines of the match
+- Context not found → error with descriptive message including line number
+- Works with both search/replace and insertAfter/insertBefore
+- Optional — omitting expectedContext works as before
+
+**Status:** ✅ Covered by unit tests: `test_expected_context_match`, `test_expected_context_mismatch`, `test_expected_context_optional`, `test_expected_context_with_insert_after`, `test_expected_context_with_insert_after_mismatch`
+
+---
 ---
 ---

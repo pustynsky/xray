@@ -1,6 +1,6 @@
 //! MCP tool handler for `search_edit` — reliable file editing with two modes:
 //! - Mode A (operations): line-range splice, applied bottom-up to avoid offset cascade
-//! - Mode B (edits): text find-replace, literal or regex
+//! - Mode B (edits): text find-replace, literal or regex, with insert after/before support
 
 use std::path::{Path, PathBuf};
 
@@ -11,14 +11,31 @@ use crate::mcp::protocol::ToolCallResult;
 use super::utils::json_to_string;
 use super::HandlerContext;
 
+/// Maximum number of files for multi-file edit (protection against abuse).
+const MAX_MULTI_FILE_PATHS: usize = 20;
+
 /// Handle `search_edit` tool call.
 pub(crate) fn handle_search_edit(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
-    // ── Parse arguments ──
-    let path_str = match args.get("path").and_then(|v| v.as_str()) {
-        Some(p) => p,
-        None => return ToolCallResult::error("Missing required parameter: 'path'".to_string()),
-    };
+    // ── Parse path/paths ──
+    let single_path = args.get("path").and_then(|v| v.as_str());
+    let multi_paths = args.get("paths").and_then(|v| v.as_array());
 
+    // Validate: path XOR paths
+    match (single_path, multi_paths) {
+        (Some(_), Some(_)) => {
+            return ToolCallResult::error(
+                "Specify 'path' (single file) or 'paths' (multiple files), not both.".to_string(),
+            );
+        }
+        (None, None) => {
+            return ToolCallResult::error(
+                "Missing required parameter: 'path' (single file) or 'paths' (array of files).".to_string(),
+            );
+        }
+        _ => {}
+    }
+
+    // ── Parse common arguments ──
     let operations = args.get("operations").and_then(|v| v.as_array());
     let edits = args.get("edits").and_then(|v| v.as_array());
     let is_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -28,33 +45,55 @@ pub(crate) fn handle_search_edit(ctx: &HandlerContext, args: &Value) -> ToolCall
     // ── Validate mode ──
     match (operations, edits) {
         (None, None) => {
-            return ToolCallResult::error("Specify 'operations' (line-range) or 'edits' (text-match), not neither.".to_string());
+            return ToolCallResult::error(
+                "Specify 'operations' (line-range) or 'edits' (text-match), not neither.".to_string(),
+            );
         }
         (Some(_), Some(_)) => {
-            return ToolCallResult::error("Specify 'operations' or 'edits', not both.".to_string());
+            return ToolCallResult::error(
+                "Specify 'operations' or 'edits', not both.".to_string(),
+            );
         }
         _ => {}
     }
 
-    // ── Resolve path ──
-    let resolved = resolve_path(&ctx.server_dir, path_str);
+    // ── Dispatch single vs multi-file ──
+    if let Some(paths_array) = multi_paths {
+        handle_multi_file_edit(ctx, paths_array, operations, edits, is_regex, dry_run, expected_line_count)
+    } else {
+        let path_str = single_path.unwrap(); // validated above
+        handle_single_file_edit(ctx, path_str, operations, edits, is_regex, dry_run, expected_line_count)
+    }
+}
+
+/// Result of editing a single file's content (in-memory, before writing).
+struct EditResult {
+    modified_content: String,
+    applied: usize,
+    total_replacements: usize,
+    diff: String,
+    lines_added: i64,
+    lines_removed: i64,
+    new_line_count: usize,
+}
+
+/// Read and validate a file, returning its content and line ending style.
+fn read_and_validate_file(server_dir: &str, path_str: &str) -> Result<(PathBuf, String, &'static str), String> {
+    let resolved = resolve_path(server_dir, path_str);
     if !resolved.exists() {
-        return ToolCallResult::error(format!("File not found: {}", path_str));
+        return Err(format!("File not found: {}", path_str));
     }
     if resolved.is_dir() {
-        return ToolCallResult::error(format!("Path is a directory, not a file: {}", path_str));
+        return Err(format!("Path is a directory, not a file: {}", path_str));
     }
 
-    // ── Read file ──
-    let raw_bytes = match std::fs::read(&resolved) {
-        Ok(b) => b,
-        Err(e) => return ToolCallResult::error(format!("Failed to read file: {}", e)),
-    };
+    let raw_bytes = std::fs::read(&resolved)
+        .map_err(|e| format!("Failed to read file '{}': {}", path_str, e))?;
 
     // Binary detection: check for null bytes in first 8KB
     let check_len = raw_bytes.len().min(8192);
     if raw_bytes[..check_len].contains(&0) {
-        return ToolCallResult::error("Binary file detected, not editable.".to_string());
+        return Err(format!("Binary file detected, not editable: {}", path_str));
     }
 
     let content = match std::str::from_utf8(&raw_bytes) {
@@ -62,104 +101,233 @@ pub(crate) fn handle_search_edit(ctx: &HandlerContext, args: &Value) -> ToolCall
         Err(_) => String::from_utf8_lossy(&raw_bytes).into_owned(),
     };
 
-    // ── Detect line ending style ──
     let line_ending = detect_line_ending(&content);
 
-    // ── Normalize to LF for processing ──
+    // Normalize to LF for processing
     let normalized = if line_ending == "\r\n" {
         content.replace("\r\n", "\n")
     } else {
         content
     };
 
-    // ── Dispatch to mode ──
+    Ok((resolved, normalized, line_ending))
+}
+
+/// Apply edits/operations to file content and return results.
+fn apply_edits_to_content(
+    path_str: &str,
+    normalized: &str,
+    operations: Option<&Vec<Value>>,
+    edits: Option<&Vec<Value>>,
+    is_regex: bool,
+    expected_line_count: Option<usize>,
+) -> Result<EditResult, String> {
     let (modified_content, applied, total_replacements) = if let Some(ops_array) = operations {
         // Mode A: Line-range operations
-        let ops = match parse_line_operations(ops_array) {
-            Ok(ops) => ops,
-            Err(e) => return ToolCallResult::error(e),
-        };
+        let ops = parse_line_operations(ops_array)?;
 
         let lines: Vec<&str> = normalized.split('\n').collect();
 
         // expectedLineCount check
         if let Some(expected) = expected_line_count {
             if lines.len() != expected {
-                return ToolCallResult::error(format!(
+                return Err(format!(
                     "Expected {} lines, file has {}. File may have changed.",
                     expected, lines.len()
                 ));
             }
         }
 
-        match apply_line_operations(&lines, ops) {
-            Ok(new_lines) => {
-                let applied_count = new_lines.1;
-                (new_lines.0.join("\n"), applied_count, 0)
-            }
-            Err(e) => return ToolCallResult::error(e),
-        }
+        let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
+        (new_lines.join("\n"), applied_count, 0)
     } else if let Some(edits_array) = edits {
         // Mode B: Text-match edits
-        let text_edits = match parse_text_edits(edits_array) {
-            Ok(edits) => edits,
-            Err(e) => return ToolCallResult::error(e),
-        };
+        let text_edits = parse_text_edits(edits_array)?;
 
-        match apply_text_edits(&normalized, &text_edits, is_regex) {
-            Ok((new_content, replacements)) => {
-                let edit_count = text_edits.len();
-                (new_content, edit_count, replacements)
-            }
-            Err(e) => return ToolCallResult::error(e),
-        }
+        let (new_content, replacements) = apply_text_edits(normalized, &text_edits, is_regex)?;
+        let edit_count = text_edits.len();
+        (new_content, edit_count, replacements)
     } else {
         unreachable!("Already validated that one of operations/edits is Some");
     };
 
-    // ── Generate unified diff ──
-    let diff = generate_unified_diff(path_str, &normalized, &modified_content);
+    // Generate unified diff
+    let diff = generate_unified_diff(path_str, normalized, &modified_content);
 
-    // ── Count changes ──
+    // Count changes
     let original_line_count = normalized.split('\n').count();
     let new_line_count = modified_content.split('\n').count();
-    let lines_added = new_line_count as i64 - original_line_count as i64;
-    let lines_removed = if lines_added < 0 { -lines_added } else { 0 };
-    let lines_added_positive = if lines_added > 0 { lines_added } else { 0 };
+    let lines_delta = new_line_count as i64 - original_line_count as i64;
+    let lines_removed = if lines_delta < 0 { -lines_delta } else { 0 };
+    let lines_added = if lines_delta > 0 { lines_delta } else { 0 };
 
-    // ── Write file (unless dryRun) ──
+    Ok(EditResult {
+        modified_content,
+        applied,
+        total_replacements,
+        diff,
+        lines_added,
+        lines_removed,
+        new_line_count,
+    })
+}
+
+/// Write modified content back to file, restoring original line endings.
+fn write_file_with_endings(resolved: &Path, content: &str, line_ending: &str) -> Result<(), String> {
+    let output = if line_ending == "\r\n" {
+        content.replace('\n', "\r\n")
+    } else {
+        content.to_string()
+    };
+
+    std::fs::write(resolved, output.as_bytes())
+        .map_err(|e| format!("Failed to write file: {}", e))
+}
+
+/// Handle single-file edit (original behavior).
+fn handle_single_file_edit(
+    ctx: &HandlerContext,
+    path_str: &str,
+    operations: Option<&Vec<Value>>,
+    edits: Option<&Vec<Value>>,
+    is_regex: bool,
+    dry_run: bool,
+    expected_line_count: Option<usize>,
+) -> ToolCallResult {
+    // Read and validate
+    let (resolved, normalized, line_ending) = match read_and_validate_file(&ctx.server_dir, path_str) {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(e),
+    };
+
+    // Apply edits
+    let edit_result = match apply_edits_to_content(path_str, &normalized, operations, edits, is_regex, expected_line_count) {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(e),
+    };
+
+    // Write file (unless dryRun)
     if !dry_run {
-        // Restore original line endings
-        let output = if line_ending == "\r\n" {
-            modified_content.replace('\n', "\r\n")
-        } else {
-            modified_content
-        };
-
-        if let Err(e) = std::fs::write(&resolved, output.as_bytes()) {
-            return ToolCallResult::error(format!("Failed to write file: {}", e));
+        if let Err(e) = write_file_with_endings(&resolved, &edit_result.modified_content, line_ending) {
+            return ToolCallResult::error(e);
         }
     }
 
-    // ── Build response ──
+    // Build response
     let mut response = json!({
         "path": path_str,
-        "applied": applied,
-        "linesAdded": lines_added_positive,
-        "linesRemoved": lines_removed,
-        "newLineCount": new_line_count,
+        "applied": edit_result.applied,
+        "linesAdded": edit_result.lines_added,
+        "linesRemoved": edit_result.lines_removed,
+        "newLineCount": edit_result.new_line_count,
         "dryRun": dry_run,
     });
 
-    if total_replacements > 0 {
-        response["totalReplacements"] = json!(total_replacements);
+    if edit_result.total_replacements > 0 {
+        response["totalReplacements"] = json!(edit_result.total_replacements);
     }
 
-    if !diff.is_empty() {
-        response["diff"] = json!(diff);
+    if !edit_result.diff.is_empty() {
+        response["diff"] = json!(edit_result.diff);
     } else {
         response["diff"] = json!("(no changes)");
     }
+
+    ToolCallResult::success(json_to_string(&response))
+}
+
+/// Handle multi-file edit with transactional semantics (all-or-nothing).
+fn handle_multi_file_edit(
+    ctx: &HandlerContext,
+    paths_array: &[Value],
+    operations: Option<&Vec<Value>>,
+    edits: Option<&Vec<Value>>,
+    is_regex: bool,
+    dry_run: bool,
+    expected_line_count: Option<usize>,
+) -> ToolCallResult {
+    // Validate paths array
+    if paths_array.is_empty() {
+        return ToolCallResult::error("'paths' array must not be empty.".to_string());
+    }
+    if paths_array.len() > MAX_MULTI_FILE_PATHS {
+        return ToolCallResult::error(format!(
+            "'paths' array has {} entries, maximum is {}.",
+            paths_array.len(), MAX_MULTI_FILE_PATHS
+        ));
+    }
+
+    // Parse path strings
+    let path_strings: Vec<&str> = match paths_array.iter()
+        .enumerate()
+        .map(|(i, v)| v.as_str().ok_or_else(|| format!("paths[{}]: expected string", i)))
+        .collect::<Result<Vec<&str>, String>>() {
+        Ok(ps) => ps,
+        Err(e) => return ToolCallResult::error(e),
+    };
+
+    // Phase 1: Read all files
+    let mut file_data: Vec<(&str, PathBuf, String, &'static str)> = Vec::with_capacity(path_strings.len());
+    for path_str in &path_strings {
+        match read_and_validate_file(&ctx.server_dir, path_str) {
+            Ok((resolved, normalized, line_ending)) => {
+                file_data.push((path_str, resolved, normalized, line_ending));
+            }
+            Err(e) => return ToolCallResult::error(format!("File '{}': {}", path_str, e)),
+        }
+    }
+
+    // Phase 2: Apply edits to all (in memory)
+    let mut edit_results: Vec<(&str, PathBuf, EditResult, &'static str)> = Vec::with_capacity(file_data.len());
+    for (path_str, resolved, normalized, line_ending) in file_data {
+        match apply_edits_to_content(path_str, &normalized, operations, edits, is_regex, expected_line_count) {
+            Ok(result) => {
+                edit_results.push((path_str, resolved, result, line_ending));
+            }
+            Err(e) => return ToolCallResult::error(format!("File '{}': {}", path_str, e)),
+        }
+    }
+
+    // Phase 3: Write all (only if !dry_run)
+    if !dry_run {
+        for (path_str, resolved, result, line_ending) in &edit_results {
+            if let Err(e) = write_file_with_endings(resolved, &result.modified_content, line_ending) {
+                return ToolCallResult::error(format!("File '{}': {}", path_str, e));
+            }
+        }
+    }
+
+    // Phase 4: Build response with per-file results
+    let mut total_applied: usize = 0;
+    let mut results_array = Vec::new();
+    for (path_str, _, result, _) in &edit_results {
+        total_applied += result.applied;
+        let mut file_result = json!({
+            "path": path_str,
+            "applied": result.applied,
+            "linesAdded": result.lines_added,
+            "linesRemoved": result.lines_removed,
+            "newLineCount": result.new_line_count,
+        });
+        if result.total_replacements > 0 {
+            file_result["totalReplacements"] = json!(result.total_replacements);
+        }
+        if !result.diff.is_empty() {
+            file_result["diff"] = json!(result.diff);
+        } else {
+            file_result["diff"] = json!("(no changes)");
+        }
+        results_array.push(file_result);
+    }
+
+    let response = json!({
+        "results": results_array,
+        "summary": {
+            "filesEdited": edit_results.len(),
+            "totalApplied": total_applied,
+            "dryRun": dry_run,
+        }
+    });
 
     ToolCallResult::success(json_to_string(&response))
 }
@@ -312,32 +480,98 @@ fn apply_line_operations(lines: &[&str], ops: Vec<LineOperation>) -> Result<(Vec
 
 // ─── Mode B: Text-match edits ────────────────────────────────────────
 
+/// Represents a single text edit operation.
+/// Supports two modes:
+/// - Search/replace: find `search` text and replace with `replace`
+/// - Insert after/before: find anchor text and insert `content` after/before it
 struct TextEdit {
-    search: String,
-    replace: String,
-    occurrence: usize, // 0 = all
+    /// Text to search for (literal or regex). Used in search/replace mode.
+    search: Option<String>,
+    /// Replacement text. Used in search/replace mode.
+    replace: Option<String>,
+    /// Which occurrence to target. 0 = all occurrences.
+    occurrence: usize,
+    /// Anchor text to insert AFTER. Mutually exclusive with search/replace.
+    insert_after: Option<String>,
+    /// Anchor text to insert BEFORE. Mutually exclusive with search/replace.
+    insert_before: Option<String>,
+    /// Content to insert (used with insert_after/insert_before).
+    content: Option<String>,
+    /// Expected context near the search/anchor text (±5 lines). Safety check.
+    expected_context: Option<String>,
+    /// If true, skip this edit silently when search/anchor text is not found (instead of returning error).
+    /// Useful with multi-file `paths` where not all files contain the target text.
+    skip_if_not_found: bool,
 }
 
 fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
     let mut edits = Vec::with_capacity(edits_array.len());
     for (i, edit) in edits_array.iter().enumerate() {
-        let search = edit.get("search")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("edits[{}]: missing or invalid 'search'", i))?
-            .to_string();
-        let replace = edit.get("replace")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| format!("edits[{}]: missing or invalid 'replace'", i))?
-            .to_string();
+        let search = edit.get("search").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let replace = edit.get("replace").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let insert_after = edit.get("insertAfter").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let insert_before = edit.get("insertBefore").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let content = edit.get("content").and_then(|v| v.as_str()).map(|s| s.to_string());
         let occurrence = edit.get("occurrence")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
+        let expected_context = edit.get("expectedContext").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let skip_if_not_found = edit.get("skipIfNotFound").and_then(|v| v.as_bool()).unwrap_or(false);
 
-        if search.is_empty() {
-            return Err(format!("edits[{}]: 'search' must not be empty", i));
+        let has_search_replace = search.is_some() || replace.is_some();
+        let has_insert = insert_after.is_some() || insert_before.is_some();
+
+        // Validate mutual exclusivity
+        if has_search_replace && has_insert {
+            return Err(format!(
+                "edits[{}]: 'search'/'replace' and 'insertAfter'/'insertBefore' are mutually exclusive",
+                i
+            ));
         }
 
-        edits.push(TextEdit { search, replace, occurrence });
+        if has_insert {
+            // Insert mode validation
+            if insert_after.is_some() && insert_before.is_some() {
+                return Err(format!(
+                    "edits[{}]: 'insertAfter' and 'insertBefore' are mutually exclusive",
+                    i
+                ));
+            }
+            if content.is_none() {
+                return Err(format!(
+                    "edits[{}]: 'content' is required when using 'insertAfter' or 'insertBefore'",
+                    i
+                ));
+            }
+            let anchor = insert_after.as_deref().or(insert_before.as_deref()).unwrap();
+            if anchor.is_empty() {
+                return Err(format!(
+                    "edits[{}]: anchor text must not be empty",
+                    i
+                ));
+            }
+        } else {
+            // Search/replace mode validation
+            let search_str = search.as_deref()
+                .ok_or_else(|| format!("edits[{}]: missing or invalid 'search'", i))?;
+            if replace.is_none() {
+                return Err(format!("edits[{}]: missing or invalid 'replace'", i));
+            }
+            if search_str.is_empty() {
+                return Err(format!("edits[{}]: 'search' must not be empty", i));
+            }
+        }
+
+        edits.push(TextEdit {
+            search,
+            replace,
+            occurrence,
+            insert_after,
+            insert_before,
+            content,
+            expected_context,
+            skip_if_not_found,
+        });
     }
     Ok(edits)
 }
@@ -348,85 +582,208 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
     let mut total_replacements = 0;
 
     for edit in edits {
-        if is_regex {
-            let re = Regex::new(&edit.search)
-                .map_err(|e| format!("Invalid regex '{}': {}", edit.search, e))?;
-            let count = re.find_iter(&result).count();
-            if count == 0 {
-                return Err(format!("Pattern not found: \"{}\"", edit.search));
+        if edit.insert_after.is_some() || edit.insert_before.is_some() {
+            // Insert after/before mode
+            let anchor = edit.insert_after.as_deref()
+                .or(edit.insert_before.as_deref())
+                .unwrap();
+            let insert_content = edit.content.as_deref().unwrap(); // validated in parse
+            let is_after = edit.insert_after.is_some();
+
+            // Find the anchor text
+            let matches: Vec<usize> = find_all_occurrences(&result, anchor);
+            if matches.is_empty() {
+                if edit.skip_if_not_found {
+                    continue; // silently skip this edit
+                }
+                return Err(format!("Anchor text not found: \"{}\"", anchor));
             }
-            match edit.occurrence {
+
+            // Determine which occurrence to use
+            let target_pos = match edit.occurrence {
                 0 => {
-                    result = re.replace_all(&result, edit.replace.as_str()).to_string();
-                    total_replacements += count;
+                    // Default: use first occurrence for insert
+                    matches[0]
                 }
                 n => {
-                    if n > count {
+                    if n > matches.len() {
                         return Err(format!(
-                            "Occurrence {} requested but pattern \"{}\" found only {} time(s)",
-                            n, edit.search, count
+                            "Occurrence {} requested but anchor \"{}\" found only {} time(s)",
+                            n, anchor, matches.len()
                         ));
                     }
-                    let mut current = 0usize;
-                    let replace_str = edit.replace.clone();
-                    result = re.replace_all(&result, |caps: &regex::Captures| {
-                        current += 1;
-                        if current == n {
-                            // Apply capture group substitution
-                            let mut out = replace_str.clone();
-                            for i in 0..caps.len() {
-                                if let Some(m) = caps.get(i) {
-                                    out = out.replace(&format!("${}", i), m.as_str());
-                                }
-                            }
-                            out
-                        } else {
-                            caps[0].to_string()
-                        }
-                    }).to_string();
-                    total_replacements += 1;
+                    matches[n - 1]
                 }
+            };
+
+            // Check expectedContext if present
+            if let Some(ref ctx_text) = edit.expected_context {
+                check_expected_context(&result, target_pos, anchor.len(), ctx_text)?;
             }
+
+            // Find the line containing the anchor
+            let anchor_end = target_pos + anchor.len();
+
+            if is_after {
+                // Insert after: find end of the line containing the anchor, insert on next line
+                let line_end = result[anchor_end..].find('\n')
+                    .map(|p| anchor_end + p)
+                    .unwrap_or(result.len());
+                let insert_text = format!("\n{}", insert_content);
+                result.insert_str(line_end, &insert_text);
+            } else {
+                // Insert before: find start of the line containing the anchor, insert before it
+                let line_start = result[..target_pos].rfind('\n')
+                    .map(|p| p + 1)
+                    .unwrap_or(0);
+                let insert_text = format!("{}\n", insert_content);
+                result.insert_str(line_start, &insert_text);
+            }
+
+            total_replacements += 1;
         } else {
-            // Literal search
-            let count = result.matches(&edit.search).count();
-            if count == 0 {
-                return Err(format!("Text not found: \"{}\"", edit.search));
-            }
-            match edit.occurrence {
-                0 => {
-                    result = result.replace(&edit.search, &edit.replace);
-                    total_replacements += count;
+            // Search/replace mode
+            let search = edit.search.as_deref().unwrap();
+            let replace = edit.replace.as_deref().unwrap();
+
+            if is_regex {
+                let re = Regex::new(search)
+                    .map_err(|e| format!("Invalid regex '{}': {}", search, e))?;
+                let count = re.find_iter(&result).count();
+                if count == 0 {
+                    if edit.skip_if_not_found {
+                        continue; // silently skip this edit
+                    }
+                    return Err(format!("Pattern not found: \"{}\"", search));
                 }
-                n => {
-                    if n > count {
-                        return Err(format!(
-                            "Occurrence {} requested but text \"{}\" found only {} time(s)",
-                            n, edit.search, count
-                        ));
+
+                // Check expectedContext on first match
+                if let Some(ref ctx_text) = edit.expected_context {
+                    if let Some(m) = re.find(&result) {
+                        check_expected_context(&result, m.start(), m.len(), ctx_text)?;
                     }
-                    let mut current = 0usize;
-                    let mut new_result = String::new();
-                    let mut remaining = result.as_str();
-                    while let Some(pos) = remaining.find(&edit.search) {
-                        current += 1;
-                        new_result.push_str(&remaining[..pos]);
-                        if current == n {
-                            new_result.push_str(&edit.replace);
-                        } else {
-                            new_result.push_str(&edit.search);
+                }
+
+                match edit.occurrence {
+                    0 => {
+                        result = re.replace_all(&result, replace).to_string();
+                        total_replacements += count;
+                    }
+                    n => {
+                        if n > count {
+                            return Err(format!(
+                                "Occurrence {} requested but pattern \"{}\" found only {} time(s)",
+                                n, search, count
+                            ));
                         }
-                        remaining = &remaining[pos + edit.search.len()..];
+                        let mut current = 0usize;
+                        let replace_str = replace.to_string();
+                        result = re.replace_all(&result, |caps: &regex::Captures| {
+                            current += 1;
+                            if current == n {
+                                // Apply capture group substitution
+                                let mut out = replace_str.clone();
+                                for i in 0..caps.len() {
+                                    if let Some(m) = caps.get(i) {
+                                        out = out.replace(&format!("${}", i), m.as_str());
+                                    }
+                                }
+                                out
+                            } else {
+                                caps[0].to_string()
+                            }
+                        }).to_string();
+                        total_replacements += 1;
                     }
-                    new_result.push_str(remaining);
-                    result = new_result;
-                    total_replacements += 1;
+                }
+            } else {
+                // Literal search
+                let count = result.matches(search).count();
+                if count == 0 {
+                    if edit.skip_if_not_found {
+                        continue; // silently skip this edit
+                    }
+                    return Err(format!("Text not found: \"{}\"", search));
+                }
+
+                // Check expectedContext on first match
+                if let Some(ref ctx_text) = edit.expected_context {
+                    if let Some(pos) = result.find(search) {
+                        check_expected_context(&result, pos, search.len(), ctx_text)?;
+                    }
+                }
+
+                match edit.occurrence {
+                    0 => {
+                        result = result.replace(search, replace);
+                        total_replacements += count;
+                    }
+                    n => {
+                        if n > count {
+                            return Err(format!(
+                                "Occurrence {} requested but text \"{}\" found only {} time(s)",
+                                n, search, count
+                            ));
+                        }
+                        let mut current = 0usize;
+                        let mut new_result = String::new();
+                        let mut remaining = result.as_str();
+                        while let Some(pos) = remaining.find(search) {
+                            current += 1;
+                            new_result.push_str(&remaining[..pos]);
+                            if current == n {
+                                new_result.push_str(replace);
+                            } else {
+                                new_result.push_str(search);
+                            }
+                            remaining = &remaining[pos + search.len()..];
+                        }
+                        new_result.push_str(remaining);
+                        result = new_result;
+                        total_replacements += 1;
+                    }
                 }
             }
         }
     }
 
     Ok((result, total_replacements))
+}
+
+/// Find all occurrences of a literal string, returning their start positions.
+fn find_all_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
+    let mut positions = Vec::new();
+    let mut start = 0;
+    while let Some(pos) = haystack[start..].find(needle) {
+        positions.push(start + pos);
+        start += pos + needle.len();
+    }
+    positions
+}
+
+/// Check that expectedContext text exists within ±5 lines of the match position.
+fn check_expected_context(content: &str, match_pos: usize, _match_len: usize, expected: &str) -> Result<(), String> {
+    // Find line number of the match
+    let match_line = content[..match_pos].matches('\n').count();
+
+    // Collect all lines
+    let lines: Vec<&str> = content.split('\n').collect();
+
+    // Define context window: ±5 lines around the match
+    let start_line = match_line.saturating_sub(5);
+    let end_line = (match_line + 5).min(lines.len().saturating_sub(1));
+
+    // Build context string from the window
+    let context_window: String = lines[start_line..=end_line].join("\n");
+
+    if !context_window.contains(expected) {
+        return Err(format!(
+            "Expected context \"{}\" not found near match at line {} (checked lines {}-{})",
+            expected, match_line + 1, start_line + 1, end_line + 1
+        ));
+    }
+
+    Ok(())
 }
 
 // ─── Diff generation ─────────────────────────────────────────────────

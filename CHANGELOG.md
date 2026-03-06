@@ -10,6 +10,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ### Features
 
+- **`search_edit` improvements — multi-file, insert after/before, expectedContext** — Three enhancements to the `search_edit` MCP tool:
+  - **Multi-file editing (`paths` parameter)** — New `paths` array parameter (mutually exclusive with `path`) applies the same edits/operations to multiple files in a single call. Transactional semantics: if any file fails validation or editing, none are written (all-or-nothing). Max 20 files per call. Response includes per-file `results` array and `summary` object with `filesEdited` and `totalApplied` counts.
+  - **Insert after/before (`insertAfter`/`insertBefore`)** — New Mode B edit variant for inserting content relative to anchor text without replacing it. `{insertAfter: "using System.IO;", content: "using System.Linq;"}` inserts on the next line after the anchor. `insertBefore` inserts on the line before. Mutually exclusive with `search`/`replace`. Supports `occurrence` for targeting Nth match.
+  - **Expected context safety (`expectedContext`)** — New per-edit safety check for Mode B. Verifies that a given text exists within ±5 lines of the match before applying the edit. Prevents editing the wrong match in files with many similar patterns (e.g., multiple `SemaphoreSlim` instances).
+  - **Skip if not found (`skipIfNotFound`)** — New per-edit boolean flag. When `true`, silently skips the edit if search/anchor text is not found (instead of aborting the entire operation). Essential for multi-file `paths` where not all files contain the target text. Default: `false` (preserves existing error behavior).
+  - **Append mode documented** — Documented existing append capability via Mode A insert: `{startLine: N+1, endLine: N, content: "appended"}` where N is the file's line count.
+  - Refactored handler into composable functions: `read_and_validate_file()`, `apply_edits_to_content()`, `write_file_with_endings()`, `handle_single_file_edit()`, `handle_multi_file_edit()`. 56 unit tests (was 27).
+
 - **`search_edit` MCP tool — reliable file editing** — New MCP tool providing atomic file editing with two modes: **Mode A (line-range operations)** — replace, insert, or delete lines by line number, applied bottom-up to avoid cascade offset failures that plague `apply_diff`; **Mode B (text-match edits)** — find-and-replace with literal or regex patterns, optional occurrence targeting. Returns unified diff (via `similar` crate). Supports `dryRun` for preview without writing, `expectedLineCount` safety check for stale line numbers, CRLF preservation, binary file detection, and both absolute and relative paths. Works on any text file (not limited to `--dir`). Tool count: 15 → 16 (at budget limit). 27 unit tests + 1 E2E test. New dependency: `similar = "2"` (lightweight, ~50KB, zero transitive deps).
 
 ---

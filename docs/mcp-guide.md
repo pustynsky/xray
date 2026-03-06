@@ -59,7 +59,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `search_info`                | Show all indexes with status, sizes, age                                                                                                |
 | `search_reindex`             | Force rebuild + reload content index                                                                                                    |
 | `search_reindex_definitions` | Force rebuild + reload definition index. Requires `--definitions`                                                                       |
-| `search_edit`                | Edit files by line-range operations or text-match replacements. Atomic (all-or-nothing), no whitespace issues, returns unified diff      |
+| `search_edit`                | Edit files by line-range operations or text-match replacements. Supports multi-file (`paths`), insert after/before, expectedContext. Atomic, returns unified diff |
 | `search_help`                | Best practices guide, strategy recipes, performance tiers                                                                               |
 | `search_git_history`         | Commit history for a file. Uses in-memory cache when available (sub-millisecond), falls back to CLI (~2–6 sec)                          |
 | `search_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |

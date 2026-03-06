@@ -19,6 +19,13 @@ fn create_temp_file(content: &str) -> (tempfile::TempDir, String, PathBuf) {
     (tmp, filename.to_string(), path)
 }
 
+/// Helper: create a temp file with a custom name, return full path.
+fn create_named_temp_file(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(&path, content).unwrap();
+    path
+}
+
 // ─── Mode A: Line-range operations ──────────────────────────────────
 
 #[test]
@@ -678,4 +685,606 @@ fn test_mode_b_empty_search_error() {
     assert!(result.is_error, "Empty search string should fail");
     let text = &result.content[0].text;
     assert!(text.contains("empty"), "Error should mention empty search");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Multi-file tests (Phase 1)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_multi_file_all_succeed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path1 = create_named_temp_file(tmp.path(), "file1.txt", "old text here\n");
+    let path2 = create_named_temp_file(tmp.path(), "file2.txt", "old text there\n");
+    let path3 = create_named_temp_file(tmp.path(), "file3.txt", "old text everywhere\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["file1.txt", "file2.txt", "file3.txt"],
+        "edits": [
+            { "search": "old", "replace": "new" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Multi-file edit should succeed: {:?}", result);
+
+    // All files should be modified
+    assert_eq!(std::fs::read_to_string(&path1).unwrap(), "new text here\n");
+    assert_eq!(std::fs::read_to_string(&path2).unwrap(), "new text there\n");
+    assert_eq!(std::fs::read_to_string(&path3).unwrap(), "new text everywhere\n");
+
+    // Response should have results array and summary
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["summary"]["filesEdited"], 3);
+    assert_eq!(parsed["summary"]["totalApplied"], 3);
+    assert_eq!(parsed["results"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn test_multi_file_one_fails_aborts_all() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path1 = create_named_temp_file(tmp.path(), "good1.txt", "old text\n");
+    let _path2 = create_named_temp_file(tmp.path(), "good2.txt", "no match here\n");
+    let ctx = make_ctx(tmp.path());
+
+    // file2 doesn't contain "old" → edit fails → ALL files should be unchanged
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["good1.txt", "good2.txt"],
+        "edits": [
+            { "search": "old", "replace": "new" }
+        ]
+    }));
+
+    assert!(result.is_error, "Should fail when one file has no match");
+
+    // CRITICAL: file1 should NOT be modified (transactional abort)
+    assert_eq!(std::fs::read_to_string(&path1).unwrap(), "old text\n",
+        "File1 should be unchanged after transactional abort");
+}
+
+#[test]
+fn test_multi_file_dry_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path1 = create_named_temp_file(tmp.path(), "dry1.txt", "hello world\n");
+    let path2 = create_named_temp_file(tmp.path(), "dry2.txt", "hello there\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["dry1.txt", "dry2.txt"],
+        "edits": [
+            { "search": "hello", "replace": "goodbye" }
+        ],
+        "dryRun": true
+    }));
+
+    assert!(!result.is_error, "dryRun should succeed: {:?}", result);
+
+    // Files should NOT be modified
+    assert_eq!(std::fs::read_to_string(&path1).unwrap(), "hello world\n");
+    assert_eq!(std::fs::read_to_string(&path2).unwrap(), "hello there\n");
+
+    // Response should have dryRun = true
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["summary"]["dryRun"], true);
+}
+
+#[test]
+fn test_multi_file_max_limit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    // Create 21 paths (over the 20 limit)
+    let paths: Vec<String> = (0..21).map(|i| format!("file{}.txt", i)).collect();
+
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": paths,
+        "edits": [
+            { "search": "x", "replace": "y" }
+        ]
+    }));
+
+    assert!(result.is_error, "Should fail with >20 files");
+    let text = &result.content[0].text;
+    assert!(text.contains("maximum"), "Error should mention maximum");
+}
+
+#[test]
+fn test_multi_file_mutual_exclusive_with_path() {
+    let (tmp, filename, _) = create_temp_file("hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "paths": [filename],
+        "edits": [
+            { "search": "hello", "replace": "bye" }
+        ]
+    }));
+
+    assert!(result.is_error, "path + paths should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("not both"), "Error should mention mutual exclusivity");
+}
+
+#[test]
+fn test_multi_file_empty_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": [],
+        "edits": [
+            { "search": "x", "replace": "y" }
+        ]
+    }));
+
+    assert!(result.is_error, "Empty paths array should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("empty"), "Error should mention empty");
+}
+
+#[test]
+fn test_multi_file_file_not_found() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_named_temp_file(tmp.path(), "exists.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["exists.txt", "missing.txt"],
+        "edits": [
+            { "search": "hello", "replace": "bye" }
+        ]
+    }));
+
+    assert!(result.is_error, "Missing file in paths should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("not found"), "Error should mention not found");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Insert after/before tests (Phase 2)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_insert_after_found() {
+    let (tmp, filename, path) = create_temp_file("using System;\nusing System.IO;\n\nclass Foo {}\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertAfter": "using System.IO;",
+                "content": "using System.Linq;"
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "Insert after should succeed: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = content.split('\n').collect();
+    assert_eq!(lines[0], "using System;");
+    assert_eq!(lines[1], "using System.IO;");
+    assert_eq!(lines[2], "using System.Linq;");
+    assert_eq!(lines[3], "");
+    assert_eq!(lines[4], "class Foo {}");
+}
+
+#[test]
+fn test_insert_before_found() {
+    let (tmp, filename, path) = create_temp_file("line1\nline2\nline3\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertBefore": "line2",
+                "content": "inserted_before"
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "Insert before should succeed: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = content.split('\n').collect();
+    assert_eq!(lines[0], "line1");
+    assert_eq!(lines[1], "inserted_before");
+    assert_eq!(lines[2], "line2");
+    assert_eq!(lines[3], "line3");
+}
+
+#[test]
+fn test_insert_after_not_found() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertAfter": "nonexistent anchor",
+                "content": "new line"
+            }
+        ]
+    }));
+
+    assert!(result.is_error, "Insert after non-existent anchor should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("not found"), "Error should mention not found");
+}
+
+#[test]
+fn test_insert_after_specific_occurrence() {
+    let (tmp, filename, path) = create_temp_file("marker\nother\nmarker\nend\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertAfter": "marker",
+                "content": "INSERTED",
+                "occurrence": 2
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "Insert after 2nd occurrence should succeed: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = content.split('\n').collect();
+    // First "marker" should NOT have insertion after it
+    assert_eq!(lines[0], "marker");
+    assert_eq!(lines[1], "other");
+    // Second "marker" should have insertion after it
+    assert_eq!(lines[2], "marker");
+    assert_eq!(lines[3], "INSERTED");
+    assert_eq!(lines[4], "end");
+}
+
+#[test]
+fn test_insert_after_with_search_replace_error() {
+    let (tmp, filename, _) = create_temp_file("hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "hello",
+                "replace": "bye",
+                "insertAfter": "hello",
+                "content": "new"
+            }
+        ]
+    }));
+
+    assert!(result.is_error, "search/replace + insertAfter should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("mutually exclusive"), "Error should mention mutual exclusivity");
+}
+
+#[test]
+fn test_insert_after_missing_content_error() {
+    let (tmp, filename, _) = create_temp_file("hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertAfter": "hello"
+            }
+        ]
+    }));
+
+    assert!(result.is_error, "insertAfter without content should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("content"), "Error should mention missing content");
+}
+
+#[test]
+fn test_insert_before_and_after_error() {
+    let (tmp, filename, _) = create_temp_file("hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertBefore": "hello",
+                "insertAfter": "hello",
+                "content": "new"
+            }
+        ]
+    }));
+
+    assert!(result.is_error, "insertBefore + insertAfter should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("mutually exclusive"), "Error should mention mutual exclusivity");
+}
+
+#[test]
+fn test_insert_after_at_last_line() {
+    let (tmp, filename, path) = create_temp_file("first\nlast");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertAfter": "last",
+                "content": "appended"
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "Insert after last line should succeed: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("last\nappended"), "Content should be appended after last line");
+}
+
+#[test]
+fn test_insert_before_at_first_line() {
+    let (tmp, filename, path) = create_temp_file("first line\nsecond line\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertBefore": "first line",
+                "content": "header"
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "Insert before first line should succeed: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<&str> = content.split('\n').collect();
+    assert_eq!(lines[0], "header");
+    assert_eq!(lines[1], "first line");
+    assert_eq!(lines[2], "second line");
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// expectedContext tests (Phase 3)
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_expected_context_match() {
+    let (tmp, filename, path) = create_temp_file("var semaphore = new SemaphoreSlim(10);\nDoWork();\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "SemaphoreSlim(10)",
+                "replace": "SemaphoreSlim(30)",
+                "expectedContext": "var semaphore = new"
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "expectedContext match should succeed: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("SemaphoreSlim(30)"), "Edit should be applied");
+}
+
+#[test]
+fn test_expected_context_mismatch() {
+    let (tmp, filename, _) = create_temp_file("var semaphore = new SemaphoreSlim(10);\nDoWork();\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "SemaphoreSlim(10)",
+                "replace": "SemaphoreSlim(30)",
+                "expectedContext": "this context does not exist"
+            }
+        ]
+    }));
+
+    assert!(result.is_error, "expectedContext mismatch should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("Expected context"), "Error should mention expected context");
+}
+
+#[test]
+fn test_expected_context_optional() {
+    let (tmp, filename, path) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    // No expectedContext → should work as before
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "hello",
+                "replace": "goodbye"
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "Without expectedContext should work normally");
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(content, "goodbye world\n");
+}
+
+#[test]
+fn test_expected_context_with_insert_after() {
+    let (tmp, filename, path) = create_temp_file("using System;\nusing System.IO;\n\nclass Foo {}\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertAfter": "using System.IO;",
+                "content": "using System.Linq;",
+                "expectedContext": "using System;"
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "expectedContext with insertAfter should succeed: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("using System.Linq;"), "Insert should work with context check");
+}
+
+#[test]
+fn test_expected_context_with_insert_after_mismatch() {
+    let (tmp, filename, _) = create_temp_file("using System;\nusing System.IO;\n\nclass Foo {}\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "insertAfter": "using System.IO;",
+                "content": "using System.Linq;",
+                "expectedContext": "wrong context text"
+            }
+        ]
+    }));
+
+    assert!(result.is_error, "expectedContext mismatch with insertAfter should fail");
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// skipIfNotFound tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_skip_if_not_found_single_file() {
+    let (tmp, filename, path) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Text not found, but skipIfNotFound=true → should succeed without changing file
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "nonexistent", "replace": "x", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "skipIfNotFound should not error: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(content, "hello world\n", "File should be unchanged");
+}
+
+#[test]
+fn test_skip_if_not_found_false_still_errors() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    // skipIfNotFound=false (default) → should error
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "nonexistent", "replace": "x", "skipIfNotFound": false }
+        ]
+    }));
+
+    assert!(result.is_error, "skipIfNotFound=false should error");
+}
+
+#[test]
+fn test_skip_if_not_found_default_is_false() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    // No skipIfNotFound → default is false → should error
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "nonexistent", "replace": "x" }
+        ]
+    }));
+
+    assert!(result.is_error, "Default (no skipIfNotFound) should error");
+}
+
+#[test]
+fn test_skip_if_not_found_multi_file_partial_match() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path1 = create_named_temp_file(tmp.path(), "has_it.txt", "old text here\n");
+    let path2 = create_named_temp_file(tmp.path(), "no_it.txt", "different content\n");
+    let ctx = make_ctx(tmp.path());
+
+    // file1 has "old", file2 doesn't → with skipIfNotFound=true, both should succeed
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["has_it.txt", "no_it.txt"],
+        "edits": [
+            { "search": "old", "replace": "new", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "skipIfNotFound multi-file should succeed: {:?}", result);
+
+    // file1 should be modified
+    assert_eq!(std::fs::read_to_string(&path1).unwrap(), "new text here\n");
+    // file2 should be unchanged
+    assert_eq!(std::fs::read_to_string(&path2).unwrap(), "different content\n");
+}
+
+#[test]
+fn test_skip_if_not_found_multi_file_without_flag_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path1 = create_named_temp_file(tmp.path(), "has_it.txt", "old text here\n");
+    let _path2 = create_named_temp_file(tmp.path(), "no_it.txt", "different content\n");
+    let ctx = make_ctx(tmp.path());
+
+    // file2 doesn't have "old" → without skipIfNotFound, should fail (transactional abort)
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["has_it.txt", "no_it.txt"],
+        "edits": [
+            { "search": "old", "replace": "new" }
+        ]
+    }));
+
+    assert!(result.is_error, "Without skipIfNotFound, multi-file should fail");
+    // file1 should NOT be modified (transactional abort)
+    assert_eq!(std::fs::read_to_string(&path1).unwrap(), "old text here\n");
+}
+
+#[test]
+fn test_skip_if_not_found_insert_after_anchor_missing() {
+    let (tmp, filename, path) = create_temp_file("line1\nline2\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "insertAfter": "nonexistent anchor", "content": "new line", "skipIfNotFound": true }
+        ]
+    }));
+
+    assert!(!result.is_error, "skipIfNotFound with insertAfter should not error: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(content, "line1\nline2\n", "File should be unchanged");
+}
+
+#[test]
+fn test_skip_if_not_found_regex_pattern_missing() {
+    let (tmp, filename, path) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "nonexistent\\d+", "replace": "x", "skipIfNotFound": true }
+        ],
+        "regex": true
+    }));
+
+    assert!(!result.is_error, "skipIfNotFound with regex should not error: {:?}", result);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(content, "hello world\n", "File should be unchanged");
 }

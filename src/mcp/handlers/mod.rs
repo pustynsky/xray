@@ -376,13 +376,18 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_edit".to_string(),
-            description: "Edit a file by line-range operations or text-match replacements. Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing. Works on any text file (not limited to --dir). Accepts absolute or relative paths. PREFERRED over apply_diff for all file edits — atomic, no whitespace issues, minimal token cost.".to_string(),
+            description: "Edit a file by line-range operations or text-match replacements. Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing. Works on any text file (not limited to --dir). Accepts absolute or relative paths. Supports multi-file editing via 'paths' parameter (transactional: all-or-nothing). PREFERRED over apply_diff for all file edits — atomic, no whitespace issues, minimal token cost.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "File path — absolute or relative to server --dir. No directory restrictions."
+                        "description": "File path — absolute or relative to server --dir. Mutually exclusive with 'paths'."
+                    },
+                    "paths": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Array of file paths for multi-file editing. Same edits/operations applied to ALL files. Transactional: if any file fails, none are written. Max 20 files. Mutually exclusive with 'path'."
                     },
                     "operations": {
                         "type": "array",
@@ -408,13 +413,13 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "edits": {
                         "type": "array",
-                        "description": "Text-match edits (Mode B). Mutually exclusive with 'operations'. Applied sequentially.",
+                        "description": "Text-match edits (Mode B). Mutually exclusive with 'operations'. Applied sequentially. Each edit is either search/replace OR insertAfter/insertBefore.",
                         "items": {
                             "type": "object",
                             "properties": {
                                 "search": {
                                     "type": "string",
-                                    "description": "Text to find (literal or regex)"
+                                    "description": "Text to find (literal or regex). Mutually exclusive with insertAfter/insertBefore."
                                 },
                                 "replace": {
                                     "type": "string",
@@ -422,15 +427,34 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                                 },
                                 "occurrence": {
                                     "type": "integer",
-                                    "description": "1-based occurrence to replace. 0 or omitted = replace ALL occurrences."
+                                    "description": "1-based occurrence to target. 0 or omitted = ALL occurrences (search/replace) or first occurrence (insertAfter/insertBefore)."
+                                },
+                                "insertAfter": {
+                                    "type": "string",
+                                    "description": "Anchor text — insert content on next line after this text. Mutually exclusive with search/replace and insertBefore."
+                                },
+                                "insertBefore": {
+                                    "type": "string",
+                                    "description": "Anchor text — insert content on line before this text. Mutually exclusive with search/replace and insertAfter."
+                                },
+                                "content": {
+                                    "type": "string",
+                                    "description": "Content to insert (required with insertAfter/insertBefore)."
+                                },
+                                "expectedContext": {
+                                    "type": "string",
+                                    "description": "Safety check: verify this text exists within ±5 lines of the match. Aborts if not found."
+                                },
+                                "skipIfNotFound": {
+                                    "type": "boolean",
+                                    "description": "If true, silently skip this edit when search/anchor text is not found (default: false). Useful with multi-file 'paths' where not all files contain the target text."
                                 }
-                            },
-                            "required": ["search", "replace"]
+                            }
                         }
                     },
                     "regex": {
                         "type": "boolean",
-                        "description": "Treat edit search strings as regex (default: false). Only for Mode B."
+                        "description": "Treat edit search strings as regex (default: false). Only for Mode B search/replace."
                     },
                     "dryRun": {
                         "type": "boolean",
@@ -441,7 +465,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "description": "Safety check: if file has different line count, abort. Prevents stale line numbers."
                     }
                 },
-                "required": ["path"]
+                "required": []
             }),
         },
         ToolDefinition {
