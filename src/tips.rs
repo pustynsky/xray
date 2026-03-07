@@ -514,9 +514,11 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("6. USE sortBy/min* in search_definitions for code health scans -- sortBy='cognitiveComplexity' ranks worst methods first.\n");
     out.push_str("7. USE search_edit for file editing -- atomic line-range or text-match edits, no whitespace issues. Supports multi-file (paths), insert after/before, expectedContext.\n");
 
-    // --- FILE EDITING RULE ---
+    // --- FILE EDITING RULE (DECISION TRIGGER pattern — forces LLM to stop and check before each edit) ---
     out.push_str("\nNEVER USE apply_diff, search_and_replace, or insert_content when search_edit is available.\n");
     out.push_str("   ALWAYS USE search_edit for ALL file edits. It is atomic, handles whitespace correctly, and supports multi-file batch editing.\n");
+    out.push_str("   DECISION TRIGGER: before ANY file edit, STOP and check which tool you are about to use.\n");
+    out.push_str("   If it is apply_diff, search_and_replace, or insert_content -> REPLACE with search_edit.\n");
     out.push_str("   search_edit advantages: (1) atomic -- no partial apply failures, (2) no whitespace/indentation issues,\n");
     out.push_str("   (3) multi-file batch editing (paths=[...]), (4) returns unified diff, (5) dryRun preview, (6) skipIfNotFound for partial matches.\n");
     out.push_str("   For multi-file refactoring: search_edit paths=['file1','file2',...] edits=[{search:'old',replace:'new'}] -- one call instead of N.\n");
