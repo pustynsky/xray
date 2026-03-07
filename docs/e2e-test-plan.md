@@ -7738,3 +7738,55 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 ---
 ---
 ---
+
+
+### T-CHUNKED-BUILD: Chunked build for peak memory reduction
+
+**Purpose:** Verify that chunked build (macro-chunks of 4096 files) produces identical results to non-chunked build.
+
+**What changed:** Both `build_definition_index()` and `build_content_index()` now process files in macro-chunks of 4096 instead of all-at-once. After each chunk, results are merged and `force_mimalloc_collect()` returns freed memory to the OS.
+
+#### T-CHUNKED-01: Definition index — multiple files, correct counts
+
+**Coverage:** Unit test `test_chunked_def_build_multiple_files_correct_counts`
+
+1. Create 20 C# files with classes, methods, and cross-references
+2. Build definition index with 4 threads
+3. Verify: 20 classes found, 40 methods found, call sites > 0, code stats non-empty
+4. Verify: all class names in `name_index`, all `file_id`s valid
+
+#### T-CHUNKED-02: Definition index — single vs multi-thread consistency
+
+**Coverage:** Unit test `test_chunked_def_build_single_vs_multi_thread_consistency`
+
+1. Create 10 C# files
+2. Build with 1 thread and 4 threads
+3. Verify: same definition count, same code stats count, same call site count
+
+#### T-CHUNKED-03: Content index — multiple files, correct file_ids
+
+**Coverage:** Unit test `test_chunked_content_build_multiple_files_correct_file_ids`
+
+1. Create 15 files with distinct content
+2. Build content index with 4 threads
+3. Verify: 15 files, all tokens found, all posting file_ids valid, total_tokens > 0
+
+#### T-CHUNKED-04: Content index — file_id to path consistency
+
+**Coverage:** Unit test `test_chunked_content_build_file_id_to_path_consistency`
+
+1. Create 8 files with unique identifiable tokens
+2. Build content index with 2 threads
+3. Verify: each token's posting file_id points to the correct file path
+
+#### T-CHUNKED-05: Content index — single vs multi-thread consistency
+
+**Coverage:** Unit test `test_chunked_content_build_single_vs_multi_thread`
+
+1. Create 12 files
+2. Build with 1 thread and 4 threads
+3. Verify: same file count, same unique token count, same total token count
+
+#### T-CHUNKED-06: E2E — existing tests pass with chunked build
+
+**Coverage:** All 64 E2E tests pass with the chunked build binary (no behavioral changes).

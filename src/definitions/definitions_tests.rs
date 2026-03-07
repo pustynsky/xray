@@ -1538,3 +1538,115 @@ fn test_update_file_definitions_file_becomes_unreadable() {
     assert!(!index.name_index.contains_key("goneservice"),
         "Old definitions should be removed when file becomes unreadable");
 }
+
+
+// ─── Chunked def-build tests ────────────────────────────────────────
+
+/// Verify that chunked def-build (MACRO_CHUNK_SIZE=4096) produces correct results
+/// when building an index with multiple files across potentially multiple sub-chunks.
+/// Tests that def count, call site count, code stats count, and name_index are correct.
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_chunked_def_build_multiple_files_correct_counts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Create 20 C# files with classes, methods, and cross-references
+    for i in 0..20 {
+        let content = format!(
+            r#"
+public class Service{i} {{
+    private readonly ILogger _logger;
+
+    public void Process{i}() {{
+        _logger.LogInformation("Processing");
+    }}
+
+    public int Calculate{i}(int x) {{
+        return x * {i};
+    }}
+}}
+"#,
+            i = i
+        );
+        std::fs::write(dir.join(format!("Service{}.cs", i)), content).unwrap();
+    }
+
+    let idx = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 4, // Use multiple threads to exercise sub-chunking
+    });
+
+    // Should find all 20 classes
+    assert_eq!(
+        idx.definitions.iter().filter(|d| d.kind == DefinitionKind::Class).count(),
+        20,
+        "Should find all 20 classes"
+    );
+
+    // Should find all 40 methods (2 per class × 20)
+    let method_count = idx.definitions.iter()
+        .filter(|d| d.kind == DefinitionKind::Method)
+        .count();
+    assert_eq!(method_count, 40, "Should find all 40 methods (2 per class)");
+
+    // Should have call sites (each method calls _logger.LogInformation)
+    let total_call_sites: usize = idx.method_calls.values().map(|v| v.len()).sum();
+    assert!(total_call_sites > 0, "Should have call sites from method bodies");
+
+    // Should have code stats for methods
+    assert!(!idx.code_stats.is_empty(), "Should have code stats for methods");
+
+    // All 20 class names should be in name_index
+    for i in 0..20 {
+        let name = format!("service{}", i);
+        assert!(idx.name_index.contains_key(&name),
+            "Should find class Service{} in name_index", i);
+    }
+
+    // file_ids should be consistent: each file_id in definitions should correspond
+    // to a valid file in idx.files
+    for def in &idx.definitions {
+        assert!((def.file_id as usize) < idx.files.len(),
+            "file_id {} should be within files range ({})", def.file_id, idx.files.len());
+    }
+}
+
+/// Verify that chunked def-build with a single thread produces same results
+/// as multi-threaded build (exercises different sub-chunk sizes).
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn test_chunked_def_build_single_vs_multi_thread_consistency() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    for i in 0..10 {
+        let content = format!(
+            "public class Item{i} {{ public void Execute{i}() {{ }} }}", i = i
+        );
+        std::fs::write(dir.join(format!("Item{}.cs", i)), content).unwrap();
+    }
+
+    let idx_single = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+    });
+
+    let idx_multi = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 4,
+    });
+
+    assert_eq!(idx_single.definitions.len(), idx_multi.definitions.len(),
+        "Single-threaded and multi-threaded builds should produce same def count");
+    assert_eq!(idx_single.code_stats.len(), idx_multi.code_stats.len(),
+        "Single-threaded and multi-threaded builds should produce same code stats count");
+
+    let calls_single: usize = idx_single.method_calls.values().map(|v| v.len()).sum();
+    let calls_multi: usize = idx_multi.method_calls.values().map(|v| v.len()).sum();
+    assert_eq!(calls_single, calls_multi,
+        "Single-threaded and multi-threaded builds should produce same call site count");
+}
