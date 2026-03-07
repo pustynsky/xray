@@ -8,6 +8,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-03-07
 
+### Performance
+- **Memory trim after `search_reindex` / `search_reindex_definitions`** — Both reindex MCP handlers now use the same drop-reload-mi_collect pattern as the server startup code (`serve.rs`). After building and saving the new index, the build result is dropped, `mi_collect(true)` is called, and the index is reloaded from disk for compact memory layout. A second `mi_collect` call after replacing the old index releases its freed pages to the OS. Previously, the reindex handlers did a simple in-place replacement without calling `force_mimalloc_collect()`, causing Working Set to grow by ~0.5–1 GB and never return to baseline. Memory logging (`log_memory`) added to both handlers for debug-mode verification.
+
 ### Features
 - **Atomic index save (crash-safe)** — `save_compressed` now writes to a `.tmp` file first, then renames over the target. If the process is killed mid-write, the original index file survives intact. Previously, `File::create` truncated the existing file before writing — a crash mid-write left a corrupt cache, forcing a full rebuild on next startup (96+ seconds for large repos). 2 new unit tests.
 

@@ -6993,11 +6993,45 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - WS after `reload` < WS at `finished` (reload is more compact than build)
 - Peak WS stays at or near the build-time peak (expected — Peak is high-water mark)
 
-**Validates:** `force_mimalloc_collect()` reduces Working Set after dropping build-time allocations. The same pattern applies to definition index and watcher bulk reindex.
+**Validates:** `force_mimalloc_collect()` reduces Working Set after dropping build-time allocations. The same pattern applies to definition index and both `search_reindex`/`search_reindex_definitions` MCP handlers.
 
 **Unit test:** `test_force_mimalloc_collect_does_not_panic`
 
-**Status:** Manual verification via `--memory-log`. The mi_collect call itself is tested for no-panic behavior.
+**Status:** Manual verification via `--debug-log`. The mi_collect call itself is tested for no-panic behavior.
+
+---
+
+### T-MI-COLLECT-REINDEX: `mi_collect(true)` — Memory decommit after MCP reindex
+
+**Background:** The `search_reindex` and `search_reindex_definitions` MCP handlers previously built a new index, saved it to disk, and replaced the old one in-memory — without calling `force_mimalloc_collect()` or reloading from disk. This left ~0.5–1 GB of fragmented memory in mimalloc's freelists, visible as elevated Working Set in Task Manager. The fix applies the same drop-reload-mi_collect pattern used during server startup: build → save → drop build result → mi_collect → reload from disk (compact layout) → replace in lock → mi_collect again.
+
+**Scenario:** Invoke `search_reindex_definitions` via MCP, then check memory with `search_info`.
+
+**Command (MCP):**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_reindex_definitions","arguments":{}}}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_info","arguments":{}}}'
+) -join "`n"
+echo $msgs | search-index serve --dir $TEST_DIR --ext $TEST_EXT --definitions --debug-log
+```
+
+**Expected:**
+
+- Reindex response: `status: "ok"` with metrics (files, definitions, callSites, sizeMb, rebuildTimeMs)
+- `rebuildTimeMs` includes drop+reload overhead (~1-3s on top of build time)
+- `search_info` Working Set returns to near-baseline after reindex (±100 MB)
+- Debug log (`--debug-log`) contains entries:
+  - `reindex: after drop+mi_collect (def)` — WS decreased after drop
+  - `reindex: after replace+mi_collect (def)` — WS decreased after old index drop
+- Same pattern applies to `search_reindex` (content index)
+
+**Validates:** `force_mimalloc_collect()` in reindex handlers returns freed pages to OS. Drop-reload pattern eliminates allocator fragmentation from build-time temporary allocations.
+
+**Status:** ✅ Covered by existing unit tests (`test_reindex_definitions_success`, `e2e_reindex_rebuilds_trigram`). Memory behavior verified manually with `--debug-log`.
 
 ---
 
