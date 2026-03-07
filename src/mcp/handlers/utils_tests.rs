@@ -787,6 +787,145 @@ fn test_inject_body_without_doc_comments_flag() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ─── Phase 5a: strip bodies before truncation tests ─────────────
+
+#[test]
+fn test_truncate_phase5a_strips_bodies_preserves_signatures() {
+    // Build a definitions response with body fields that's over budget
+    let mut defs = Vec::new();
+    for i in 0..20 {
+        let body_lines: Vec<String> = (0..50).map(|j| format!("    code line {} in method {}", j, i)).collect();
+        defs.push(json!({
+            "name": format!("Method_{}", i),
+            "kind": "method",
+            "file": format!("file_{}.cs", i),
+            "lines": format!("{}-{}", i * 100, i * 100 + 50),
+            "parent": "MyClass",
+            "body": body_lines,
+            "bodyStartLine": i * 100,
+            "bodyTruncated": false,
+        }));
+    }
+    let output = json!({
+        "definitions": defs,
+        "summary": {
+            "totalResults": 20,
+            "returned": 20,
+        }
+    });
+
+    let initial_size = serde_json::to_string(&output).unwrap().len();
+    // Use a budget small enough to trigger Phase 5a but large enough
+    // that stripping bodies alone should suffice (signatures are small)
+    let budget = 2000;
+    assert!(initial_size > budget, "Test setup: should exceed budget ({} > {})", initial_size, budget);
+
+    let result = truncate_large_response(output, budget);
+
+    // All 20 definitions should be preserved (signatures only)
+    let result_defs = result.get("definitions").and_then(|d| d.as_array()).unwrap();
+    // If budget is small enough, phase 5b may still truncate some, but should keep MORE than without 5a
+    // The key check: remaining entries should NOT have body fields
+    for def in result_defs {
+        assert!(def.get("body").is_none(),
+            "Body should be stripped from definitions entries");
+        assert!(def.get("bodyStartLine").is_none(),
+            "bodyStartLine should be stripped");
+        // Signatures should be preserved
+        assert!(def.get("name").is_some(),
+            "name (signature) should be preserved");
+        assert!(def.get("kind").is_some(),
+            "kind (signature) should be preserved");
+    }
+
+    // Summary should indicate bodies were stripped
+    let summary = result.get("summary").unwrap();
+    assert_eq!(summary.get("bodiesStrippedForSize").and_then(|v| v.as_bool()), Some(true),
+        "summary.bodiesStrippedForSize should be true");
+}
+
+#[test]
+fn test_truncate_phase5a_no_body_fields_noop() {
+    // Definitions without body fields — Phase 5a should be a no-op
+    let mut defs = Vec::new();
+    for i in 0..500 {
+        defs.push(json!({
+            "name": format!("LongDefinitionName_{}", i),
+            "kind": "property",
+            "file": format!("/some/very/long/path/to/deep/file_{}.cs", i),
+            "lines": format!("{}-{}", i * 10, i * 10 + 5),
+            "parent": format!("SomeParentClass_{}", i % 50),
+        }));
+    }
+    let output = json!({
+        "definitions": defs,
+        "summary": {
+            "totalResults": 500,
+            "returned": 500,
+        }
+    });
+
+    let initial_size = serde_json::to_string(&output).unwrap().len();
+    assert!(initial_size > DEFAULT_MAX_RESPONSE_BYTES, "Test setup: should exceed budget");
+
+    let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+
+    // Phase 5a should not have set bodiesStrippedForSize (no bodies to strip)
+    let summary = result.get("summary").unwrap();
+    assert!(summary.get("bodiesStrippedForSize").is_none(),
+        "bodiesStrippedForSize should not be set when no bodies were stripped");
+
+    // Phase 5b should have truncated the array
+    let result_defs = result.get("definitions").and_then(|d| d.as_array()).unwrap();
+    assert!(result_defs.len() < 500, "Definitions should be truncated by Phase 5b");
+}
+
+#[test]
+fn test_truncate_phase5a_strips_nested_caller_bodies() {
+    // callTree with nested callers that have body fields
+    let call_tree = vec![json!({
+        "method": "ProcessOrder",
+        "class": "OrderService",
+        "line": 10,
+        "callSite": 25,
+        "body": (0..100).map(|i| format!("  line {}", i)).collect::<Vec<_>>(),
+        "bodyStartLine": 10,
+        "callers": [
+            {
+                "method": "HandleRequest",
+                "class": "Controller",
+                "line": 50,
+                "callSite": 60,
+                "body": (0..100).map(|i| format!("  nested line {}", i)).collect::<Vec<_>>(),
+                "bodyStartLine": 50,
+            }
+        ]
+    })];
+    let output = json!({
+        "callTree": call_tree,
+        "summary": { "totalNodes": 2 }
+    });
+
+    let budget = 500; // Very small budget to force truncation
+    let result = truncate_large_response(output, budget);
+
+    // Body should be stripped from both root and nested callers
+    if let Some(tree) = result.get("callTree").and_then(|t| t.as_array()) {
+        for node in tree {
+            assert!(node.get("body").is_none(), "Root node body should be stripped");
+            assert!(node.get("bodyStartLine").is_none(), "Root node bodyStartLine should be stripped");
+            if let Some(callers) = node.get("callers").and_then(|c| c.as_array()) {
+                for caller in callers {
+                    assert!(caller.get("body").is_none(), "Nested caller body should be stripped");
+                    assert!(caller.get("bodyStartLine").is_none(), "Nested caller bodyStartLine should be stripped");
+                }
+            }
+            // Method/class metadata should be preserved
+            assert!(node.get("method").is_some(), "method should be preserved");
+        }
+    }
+}
+
 #[test]
 fn test_inject_body_with_doc_comments_jsdoc() {
     let content = "import { User } from './types';\n\

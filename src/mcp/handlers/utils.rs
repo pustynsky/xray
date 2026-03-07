@@ -337,10 +337,49 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         return output;
     }
 
-    // Phase 5: Generic fallback — truncate any top-level array that isn't "files"
+    // Phase 5a: Strip body fields from array entries to preserve signatures.
+    // Before truncating entire entries (Phase 5b), remove body content to see if
+    // that's enough to get under budget. This preserves method signatures/metadata.
+    let size_before_5a = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if size_before_5a > max_bytes {
+        let body_fields = &["body", "bodyStartLine", "bodyTruncated", "totalBodyLines", "docCommentLines"];
+        if let Some(obj) = output.as_object_mut() {
+            let mut stripped = false;
+            for key in &["definitions", "callTree", "containingDefinitions"] {
+                if let Some(arr) = obj.get_mut(*key).and_then(|v| v.as_array_mut()) {
+                    for entry in arr.iter_mut() {
+                        if let Some(entry_obj) = entry.as_object_mut() {
+                            for field in body_fields {
+                                if entry_obj.remove(*field).is_some() {
+                                    stripped = true;
+                                }
+                            }
+                            // Also strip body from nested callers/callees arrays
+                            strip_bodies_recursive(entry_obj, body_fields);
+                        }
+                    }
+                }
+            }
+            if stripped {
+                reasons.push("stripped body fields to preserve signatures".to_string());
+                if let Some(summary) = obj.get_mut("summary") {
+                    summary["bodiesStrippedForSize"] = json!(true);
+                }
+            }
+        }
+    }
+
+    // Check size after phase 5a
+    let size_after_5a = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    if size_after_5a <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    // Phase 5b: Generic fallback — truncate any top-level array that isn't "files"
     // (already handled above). This covers "definitions", "containingDefinitions",
     // "callTree", or any future tool response format.
-    let current_size = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+    let current_size = size_after_5a;
     if current_size > max_bytes
         && let Some(obj) = output.as_object_mut() {
             // Find the largest top-level array (skip "files" — already handled)
@@ -380,6 +419,22 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
 
     inject_truncation_metadata(&mut output, &reasons, initial_size);
     output
+}
+
+/// Recursively strip body fields from nested `callers`/`callees`/`children` arrays.
+fn strip_bodies_recursive(obj: &mut serde_json::Map<String, Value>, body_fields: &[&str]) {
+    for nested_key in &["callers", "callees", "children"] {
+        if let Some(arr) = obj.get_mut(*nested_key).and_then(|v| v.as_array_mut()) {
+            for entry in arr.iter_mut() {
+                if let Some(entry_obj) = entry.as_object_mut() {
+                    for field in body_fields {
+                        entry_obj.remove(*field);
+                    }
+                    strip_bodies_recursive(entry_obj, body_fields);
+                }
+            }
+        }
+    }
 }
 
 /// Add truncation metadata to the summary object.

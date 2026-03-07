@@ -184,6 +184,23 @@ fn test_render_instructions_single_extension() {
 }
 
 #[test]
+fn test_tips_contains_using_static_tip() {
+    let all_tips = tips();
+    let has_using_static = all_tips.iter().any(|t| t.rule.contains("using static"));
+    assert!(has_using_static, "Tips should contain a tip about 'using static'");
+}
+
+#[test]
+fn test_render_json_contains_using_static_tip() {
+    let json = render_json();
+    let practices = json["bestPractices"].as_array().unwrap();
+    let has_using_static = practices.iter().any(|p| {
+        p["rule"].as_str().unwrap_or("").contains("using static")
+    });
+    assert!(has_using_static, "JSON output should contain 'using static' tip");
+}
+
+#[test]
 fn test_all_renderers_consistent_tip_count() {
     let tip_count = tips().len();
     let json = render_json();

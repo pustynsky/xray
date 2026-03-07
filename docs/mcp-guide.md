@@ -319,6 +319,8 @@ When `includeBody: true`, each node in the call tree includes source code:
 | `bodyWarning`     | Body omitted                                     | Human-readable reason for omission                   |
 | `docCommentLines` | `includeDocComments=true` and doc-comment found   | Number of lines that are doc-comments (before method declaration) |
 | `rootMethod`      | `includeBody=true`                               | Top-level object with the searched method's own body |
+| `callSite`        | Always (caller nodes)                            | Line number of the first call site                   |
+| `callSites`       | >1 call sites in same caller                     | Array of all call site line numbers (e.g., `[273, 475, 486]`). Only present when a method is called multiple times within the same caller method. `callSite` is always the first element. |
 
 ### Limitations
 

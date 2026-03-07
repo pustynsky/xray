@@ -156,6 +156,11 @@ pub fn tips() -> Vec<Tip> {
             why: "impactAnalysis=true in search_callers traces callers upward and identifies test methods (via [Test]/[Fact]/[Theory]/[TestMethod]/#[test] attributes or *.spec.ts/*.test.ts files). Returns a 'testsCovering' array with all tests in the call chain. Use depth=5-7 for deep call chains. One call replaces manual multi-step investigation.",
             example: "MCP: search_callers method='SaveOrder' class='OrderService' direction='up' depth=5 impactAnalysis=true -> testsCovering: [{method: 'TestSaveOrder', class: 'OrderTests', file: 'src/OrderTests.cs', depth: 1, callChain: ['SaveOrder', 'TestSaveOrder']}]",
         },
+        Tip {
+            rule: "using static: search by defining class, not consuming class",
+            why: "search_definitions searches AST definition names. Methods imported via C# 'using static' are defined in their original class. Searching parent='ConsumingClass' will return 0 results. Search without parent filter or with parent='DefiningClass' instead.",
+            example: "Percentile() imported via 'using static PercentileHelper' -> search_definitions name='Percentile' (without parent) or parent='PercentileHelper'",
+        },
     ]
 }
 
@@ -292,7 +297,7 @@ pub fn tool_priority() -> Vec<ToolPriority> {
 pub fn parameter_examples() -> Value {
     json!({
         "search_definitions": {
-            "name": "Single: 'UserService'. Multi-term OR: 'UserService,IUserService,UserController' (finds ALL in one query). Naming variants: 'Order,IOrder,OrderFactory'. NOTE: name searches AST definition names (classes, methods, properties) -- NOT string literals or values inside code. Use search_grep for string content",
+            "name": "Single: 'UserService'. Multi-term OR: 'UserService,IUserService,UserController' (finds ALL in one query). Naming variants: 'Order,IOrder,OrderFactory'. NOTE: name searches AST definition names (classes, methods, properties) -- NOT string literals or values inside code. Use search_grep for string content. For methods via 'using static', search without parent filter",
             "containsLine": "file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService",
             "includeBody": "parent='UserService', includeBody=true, maxBodyLines=20 -> returns method bodies inline",
             "includeDocComments": "includeDocComments=true -> expands body upward to capture /// XML doc-comments (C#/Rust) or /** */ JSDoc (TypeScript) above the definition. Implies includeBody=true. Response includes 'docCommentLines' count. Budget-aware: counts against maxBodyLines",

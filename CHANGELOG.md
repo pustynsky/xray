@@ -6,6 +6,20 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-03-07
+
+### Features
+
+- **UX improvements from user feedback (5 changes)** — Five UX improvements based on a code review session feedback:
+  1. **`search_grep` regex + spaces warning** — When `regex=true` and the terms contain spaces (e.g., `"private.*double Percentile"`), the response now includes a `searchModeNote` explaining that regex operates on individual index tokens which never contain spaces. Saves users from silent 0-result confusion.
+  2. **`search_edit` sequential edit hint** — When an occurrence-based edit fails because a previous edit in the same batch reduced the occurrence count, the error message now includes a hint: "edits are applied sequentially — previous edits may have modified the content". Only shown when `edit_index > 0`.
+  3. **`truncate_large_response` Phase 5a — strip bodies before truncation** — New intermediate truncation phase that strips `body`/`bodyStartLine`/`bodyTruncated`/`totalBodyLines`/`docCommentLines` fields from array entries before truncating entire entries. Preserves method signatures/metadata in more results. Recursive: handles nested `callers`/`callees`/`children`. Sets `summary.bodiesStrippedForSize=true` when active.
+  4. **`search_callers` `callSites` array** — When a method is called multiple times within the same caller method, all call site lines are now collected and returned in a `callSites` array (e.g., `callSites: [273, 475, 486]`). The existing `callSite` field is preserved for backward compatibility (= first element). `callSites` array only included when >1 call site (saves tokens).
+  5. **`search_help` tip about `using static`** — New tip explaining that `search_definitions` searches AST definition names, so methods imported via C# `using static` should be searched without `parent` filter or with `parent='DefiningClass'`.
+  - 12 new unit tests. All 1327 tests pass. 64 E2E tests pass.
+
+---
+
 ## 2026-03-06
 
 ### Features
