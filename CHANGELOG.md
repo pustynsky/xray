@@ -9,6 +9,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ## 2026-03-07
 
 ### Features
+- **Atomic index save (crash-safe)** — `save_compressed` now writes to a `.tmp` file first, then renames over the target. If the process is killed mid-write, the original index file survives intact. Previously, `File::create` truncated the existing file before writing — a crash mid-write left a corrupt cache, forcing a full rebuild on next startup (96+ seconds for large repos). 2 new unit tests.
+
+- **Watcher readiness flags during reconciliation** — The file watcher now resets `content_ready`/`def_ready` flags before long reconciliation runs. MCP requests (`search_definitions`, `search_callers`, etc.) receive an instant "building, please retry" message instead of blocking for up to 52 seconds on the write lock. Previously, the readiness flags were only used during initial index loading, not during watcher reconciliation.
+
+- **Periodic autosave (every 10 minutes)** — The watcher thread now saves both content and definition indexes to disk every 10 minutes, protecting against data loss from forced process termination (e.g., VS Code killing the MCP server without graceful shutdown). Uses READ locks only — MCP queries are NOT blocked during save. 3 new unit tests.
+
+- **Shutdown debug logging** — Debug-log (`--debug-log`) now records memory metrics at shutdown start and completion, enabling post-mortem analysis of whether graceful shutdown was reached.
+
 
 - **UX improvements from user feedback (5 changes)** — Five UX improvements based on a code review session feedback:
   1. **`search_grep` regex + spaces warning** — When `regex=true` and the terms contain spaces (e.g., `"private.*double Percentile"`), the response now includes a `searchModeNote` explaining that regex operates on individual index tokens which never contain spaces. Saves users from silent 0-result confusion.

@@ -355,6 +355,8 @@ pub fn cmd_serve(args: ServeArgs) {
             extensions,
             args.debounce_ms,
             idx_base.clone(),
+            Arc::clone(&content_ready),
+            Arc::clone(&def_ready),
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }

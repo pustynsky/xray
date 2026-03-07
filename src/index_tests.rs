@@ -468,6 +468,49 @@ fn test_find_content_index_empty_expected_accepts_any() {
 }
 
 #[test]
+fn test_save_compressed_atomic_no_tmp_left_behind() {
+    // Atomic save should not leave a .tmp file after successful save
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("test.word-search");
+    let data: Vec<String> = vec!["hello".to_string(), "world".to_string()];
+    crate::index::save_compressed(&path, &data, "test").unwrap();
+
+    assert!(path.exists(), "Target file should exist after save");
+    // Verify .tmp file is cleaned up (appended, not with_extension)
+    let tmp_path = {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".tmp");
+        std::path::PathBuf::from(p)
+    };
+    assert!(!tmp_path.exists(), ".tmp file should NOT exist after successful save");
+    // Also check wrong .tmp path (with_extension) doesn't exist
+    assert!(!path.with_extension("tmp").exists(), "No with_extension tmp file either");
+
+    // Verify the saved file can be loaded back
+    let loaded: Vec<String> = crate::index::load_compressed(&path, "test").unwrap();
+    assert_eq!(loaded, data);
+}
+
+#[test]
+fn test_save_compressed_atomic_preserves_old_on_new_save() {
+    // Verify that a second save over an existing file works correctly
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("test.word-search");
+
+    // First save
+    let data1: Vec<String> = vec!["first".to_string()];
+    crate::index::save_compressed(&path, &data1, "test").unwrap();
+
+    // Second save (overwrite)
+    let data2: Vec<String> = vec!["second".to_string(), "updated".to_string()];
+    crate::index::save_compressed(&path, &data2, "test").unwrap();
+
+    // Should load the second version
+    let loaded: Vec<String> = crate::index::load_compressed(&path, "test").unwrap();
+    assert_eq!(loaded, data2);
+}
+
+#[test]
 fn test_build_index_nonexistent_dir_returns_error() {
     let result = crate::index::build_index(&crate::IndexArgs {
         dir: "/nonexistent/path/that/does/not/exist".to_string(),
