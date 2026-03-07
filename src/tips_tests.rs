@@ -152,8 +152,12 @@ fn test_render_instructions_empty_extensions() {
     // Should NOT contain NEVER READ (no definition-supported extensions)
     assert!(!text.contains("NEVER READ"),
         "Empty def_extensions should not produce NEVER READ block");
-    assert!(!text.contains("DECISION TRIGGER"),
-        "Empty def_extensions should not produce DECISION TRIGGER");
+    // The file-reading DECISION TRIGGER must NOT appear (no indexed extensions).
+    // But the file-editing DECISION TRIGGER SHOULD appear (always present).
+    // Count occurrences: should be exactly 1 (editing only, not reading).
+    let dt_count = text.matches("DECISION TRIGGER").count();
+    assert_eq!(dt_count, 1,
+        "Empty def_extensions should have 1 DECISION TRIGGER (editing), not {} (reading trigger should be absent)", dt_count);
     assert!(!text.contains("BATCH SPLIT"),
         "Empty def_extensions should not produce BATCH SPLIT");
     // Should contain fallback note
