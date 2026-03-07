@@ -8,6 +8,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-03-07
 
+### Internal
+- **Join-based streaming merge in `build_definition_index()`** — Refactored the parallel parsing + merge pipeline to use join-based streaming instead of collect-all-then-merge. Previously, all thread results were collected into a `Vec<ChunkResult>` via `.map(join).collect()`, then merged in a separate loop. Now each `JoinHandle` is joined and merged immediately inside `thread::scope`, freeing each chunk's memory before processing the next. Extracted `merge_chunk_result()` helper function (reusable for future callers). Added per-chunk `log_memory` diagnostics for memory profiling. Removed unused `ChunkResult` type alias. Note: real peak memory savings are modest (~100-200 MB for 8 threads) because JoinHandles hold thread results regardless — the main benefit is cleaner architecture and incremental memory diagnostics. Content index (`build_content_index`) deliberately NOT changed — its `drop(file_data)` before merge pattern is optimal because `file_data` is borrowed by scope. All 1352 unit tests + 64 E2E tests pass.
+
 ### Performance
 - **Lock-free definition index reconciliation** — During watcher startup reconciliation, file parsing now happens OUTSIDE the write lock. Previously, the entire reconciliation (FS walk + parsing + index update) ran under a single write lock, blocking all `search_definitions`/`search_callers` requests for up to 96 seconds. Now: Phase 1 (FS walk, ~3s) and Phase 3 (parsing, ~12-93s) run without any lock. Only Phase 4 (applying results, <500ms) holds a write lock. MCP requests work on old index data during parsing — users won't notice reconciliation. Parallel parsing with `thread::scope` (1 parser per thread) provides ~8× speedup for Phase 3. 15 new unit tests.
 

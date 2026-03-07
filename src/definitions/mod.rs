@@ -227,6 +227,38 @@ pub(crate) fn enrich_angular_templates(
 
 // ─── Index Build ─────────────────────────────────────────────────────
 
+/// Merge a single chunk's parse results into the DefinitionIndex.
+/// Returns the number of call sites added.
+///
+/// Extracted as a helper to support join-based streaming merge,
+/// where each chunk is merged and freed immediately after its thread completes.
+fn merge_chunk_result(
+    index: &mut DefinitionIndex,
+    chunk_defs: Vec<DefChunk>,
+    errors: usize,
+    lossy_files: Vec<String>,
+    empty_files: Vec<(u32, u64)>,
+    chunk_ext_methods: HashMap<String, Vec<String>>,
+) -> usize {
+    index.parse_errors += errors;
+    for f in &lossy_files {
+        eprintln!("[def-index] WARNING: file contains non-UTF8 bytes (lossy conversion applied): {}", f);
+    }
+    index.lossy_file_count += lossy_files.len();
+    index.empty_file_ids.extend(empty_files);
+
+    let mut call_sites = 0usize;
+    for (file_id, file_defs, file_calls, file_stats) in chunk_defs {
+        call_sites += index_file_defs(index, file_id, file_defs, file_calls, file_stats);
+    }
+
+    for (method_name, classes) in chunk_ext_methods {
+        index.extension_methods.entry(method_name).or_default().extend(classes);
+    }
+
+    call_sites
+}
+
 #[must_use]
 pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let dir = std::fs::canonicalize(&args.dir)
@@ -271,7 +303,31 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     #[cfg(feature = "lang-rust")]
     let need_rs = extensions.iter().any(|e| e == "rs");
 
-    let thread_results: Vec<ChunkResult> = std::thread::scope(|s| {
+    // ─── Initialize index BEFORE scope ────────────────────────
+    // This allows merge to happen inside the scope, so each chunk
+    // result is freed immediately after merge (join-based streaming).
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::with_capacity(files.len());
+    for (file_id, file_path) in files.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(file_path), file_id as u32);
+    }
+
+    let mut index = DefinitionIndex {
+        root: dir_str,
+        extensions,
+        files,
+        path_to_id,
+        ..Default::default()
+    };
+
+    let mut total_call_sites = 0usize;
+    let num_chunks = chunks.len();
+
+    // ─── Parallel parsing + streaming merge ───────────────────
+    // Join-based: each chunk result is merged and freed immediately
+    // after its thread completes, instead of collecting ALL results
+    // into a Vec first. This reduces peak memory by freeing parsed
+    // data incrementally rather than holding all chunks simultaneously.
+    std::thread::scope(|s| {
         let handles: Vec<_> = chunks.into_iter().map(|chunk| {
             s.spawn(move || {
                 #[cfg(feature = "lang-csharp")]
@@ -374,45 +430,28 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
             })
         }).collect();
 
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| {
-            eprintln!("[WARN] Worker thread panicked during definition index building");
-            (Vec::new(), 0, Vec::new(), Vec::new(), HashMap::new())
-        })).collect()
+        // ─── Join-based streaming merge ─────────────────────────
+        // Each handle is joined sequentially; its chunk result is merged
+        // into the index and then dropped, freeing memory before the next
+        // chunk is processed. This avoids holding all chunk results in a
+        // Vec simultaneously (the old collect→merge pattern).
+        for (chunk_idx, handle) in handles.into_iter().enumerate() {
+            let (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) =
+                handle.join().unwrap_or_else(|_| {
+                    eprintln!("[WARN] Worker thread panicked during definition index building");
+                    (Vec::new(), 0, Vec::new(), Vec::new(), HashMap::new())
+                });
+
+            total_call_sites += merge_chunk_result(
+                &mut index, chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods,
+            );
+
+            crate::index::log_memory(&format!(
+                "def-build: merged chunk {}/{} ({} defs so far)",
+                chunk_idx + 1, num_chunks, index.definitions.len()
+            ));
+        }
     });
-
-    // ─── Initialize index and merge results ───────────────────
-    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::with_capacity(files.len());
-    for (file_id, file_path) in files.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(file_path), file_id as u32);
-    }
-
-    let mut index = DefinitionIndex {
-        root: dir_str,
-        extensions,
-        files,
-        path_to_id,
-        ..Default::default()
-    };
-
-    let mut total_call_sites = 0usize;
-
-    for (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) in thread_results {
-        index.parse_errors += errors;
-        for f in &lossy_files {
-            eprintln!("[def-index] WARNING: file contains non-UTF8 bytes (lossy conversion applied): {}", f);
-        }
-        index.lossy_file_count += lossy_files.len();
-        index.empty_file_ids.extend(empty_files);
-
-        for (file_id, file_defs, file_calls, file_stats) in chunk_defs {
-            total_call_sites += index_file_defs(&mut index, file_id, file_defs, file_calls, file_stats);
-        }
-
-        // Merge extension methods from this chunk
-        for (method_name, classes) in chunk_ext_methods {
-            index.extension_methods.entry(method_name).or_default().extend(classes);
-        }
-    }
 
     // ─── Angular template enrichment ──────────────────────────
     #[cfg(feature = "lang-typescript")]

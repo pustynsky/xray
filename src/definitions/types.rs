@@ -255,9 +255,6 @@ pub type CsharpParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>,
 /// Chunk type used during parallel definition index building.
 pub type DefChunk = (u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>);
 
-/// Result type returned by each parsing thread during parallel index building.
-/// Contains: (chunks, parse_errors, lossy_files, empty_files, extension_methods)
-pub type ChunkResult = (Vec<DefChunk>, usize, Vec<String>, Vec<(u32, u64)>, HashMap<String, Vec<String>>);
 
 /// Parsed results for a single file — ready to be applied to the index.
 /// This struct is produced by `parse_file_standalone()` WITHOUT holding any lock,
