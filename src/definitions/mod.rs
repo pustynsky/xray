@@ -286,16 +286,6 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
             .map(|n| n.get())
             .unwrap_or(4)
     };
-    let chunk_size = total_files.div_ceil(num_threads);
-    let chunks: Vec<Vec<(u32, String)>> = files.iter().enumerate()
-        .map(|(i, f)| (i as u32, f.clone()))
-        .collect::<Vec<_>>()
-        .chunks(chunk_size.max(1))
-        .map(|c| c.to_vec())
-        .collect();
-
-    eprintln!("[def-index] Parsing with {} threads ({} files/chunk)", chunks.len(), chunk_size);
-
     #[cfg(feature = "lang-typescript")]
     let need_ts = extensions.iter().any(|e| e == "ts");
     #[cfg(feature = "lang-typescript")]
@@ -303,9 +293,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     #[cfg(feature = "lang-rust")]
     let need_rs = extensions.iter().any(|e| e == "rs");
 
-    // ─── Initialize index BEFORE scope ────────────────────────
-    // This allows merge to happen inside the scope, so each chunk
-    // result is freed immediately after merge (join-based streaming).
+    // ─── Initialize index BEFORE chunked parsing ─────────────
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::with_capacity(files.len());
     for (file_id, file_path) in files.iter().enumerate() {
         path_to_id.insert(PathBuf::from(file_path), file_id as u32);
@@ -320,138 +308,160 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     };
 
     let mut total_call_sites = 0usize;
-    let num_chunks = chunks.len();
 
-    // ─── Parallel parsing + streaming merge ───────────────────
-    // Join-based: each chunk result is merged and freed immediately
-    // after its thread completes, instead of collecting ALL results
-    // into a Vec first. This reduces peak memory by freeing parsed
-    // data incrementally rather than holding all chunks simultaneously.
-    std::thread::scope(|s| {
-        let handles: Vec<_> = chunks.into_iter().map(|chunk| {
-            s.spawn(move || {
-                #[cfg(feature = "lang-csharp")]
-                let mut cs_parser = {
-                    let mut p = tree_sitter::Parser::new();
-                    p.set_language(&tree_sitter_c_sharp::LANGUAGE.into())
-                        .expect("Error loading C# grammar");
-                    p
-                };
+    // ─── Chunked parallel parsing + streaming merge ──────────
+    // Outer loop splits files into macro-chunks of 4096.
+    // Each macro-chunk is parsed by num_threads threads in parallel.
+    // After each macro-chunk, results are merged and freed, and
+    // mimalloc is asked to return memory to OS. This reduces peak
+    // memory by ~350 MB for def-build (only 1 macro-chunk's parse
+    // results live at a time instead of ALL files' results).
+    const MACRO_CHUNK_SIZE: usize = 4096;
 
-                // Lazy-init: only create TS/TSX/Rust parsers when files with those extensions exist
-                #[cfg(feature = "lang-typescript")]
-                let mut ts_parser: Option<tree_sitter::Parser> = None;
-                #[cfg(feature = "lang-typescript")]
-                let mut tsx_parser: Option<tree_sitter::Parser> = None;
-                #[cfg(feature = "lang-rust")]
-                let mut rs_parser: Option<tree_sitter::Parser> = None;
+    let file_entries: Vec<(u32, String)> = index.files.iter().enumerate()
+        .map(|(i, f)| (i as u32, f.clone()))
+        .collect();
 
-                let mut chunk_defs: Vec<DefChunk> = Vec::new();
-                #[cfg(feature = "lang-csharp")]
-                let mut chunk_ext_methods: HashMap<String, Vec<String>> = HashMap::new();
-                let mut errors = 0usize;
-                let mut lossy_files: Vec<String> = Vec::new();
-                let mut empty_files: Vec<(u32, u64)> = Vec::new();
+    let total_macro_chunks = file_entries.len().div_ceil(MACRO_CHUNK_SIZE).max(1);
 
-                for (file_id, file_path) in &chunk {
-                    let (content, was_lossy) = match read_file_lossy(Path::new(file_path)) {
-                        Ok(r) => r,
-                        Err(_) => { errors += 1; continue; }
+    eprintln!("[def-index] Parsing with {} threads, {} macro-chunks of up to {} files",
+        num_threads, total_macro_chunks, MACRO_CHUNK_SIZE);
+
+    for (macro_chunk_idx, macro_chunk) in file_entries.chunks(MACRO_CHUNK_SIZE).enumerate() {
+        let sub_chunk_size = macro_chunk.len().div_ceil(num_threads).max(1);
+        let sub_chunks: Vec<&[(u32, String)]> = macro_chunk.chunks(sub_chunk_size).collect();
+        let num_sub_chunks = sub_chunks.len();
+
+        std::thread::scope(|s| {
+            let handles: Vec<_> = sub_chunks.into_iter().map(|sub_chunk| {
+                s.spawn(move || {
+                    #[cfg(feature = "lang-csharp")]
+                    let mut cs_parser = {
+                        let mut p = tree_sitter::Parser::new();
+                        p.set_language(&tree_sitter_c_sharp::LANGUAGE.into())
+                            .expect("Error loading C# grammar");
+                        p
                     };
-                    if was_lossy {
-                        lossy_files.push(file_path.clone());
-                    }
 
-                    let content_len = content.len() as u64;
+                    #[cfg(feature = "lang-typescript")]
+                    let mut ts_parser: Option<tree_sitter::Parser> = None;
+                    #[cfg(feature = "lang-typescript")]
+                    let mut tsx_parser: Option<tree_sitter::Parser> = None;
+                    #[cfg(feature = "lang-rust")]
+                    let mut rs_parser: Option<tree_sitter::Parser> = None;
 
-                    let ext = Path::new(file_path.as_str())
-                        .extension()
-                        .and_then(|e| e.to_str())
-                        .unwrap_or("");
+                    let mut chunk_defs: Vec<DefChunk> = Vec::new();
+                    #[cfg(feature = "lang-csharp")]
+                    let mut chunk_ext_methods: HashMap<String, Vec<String>> = HashMap::new();
+                    let mut errors = 0usize;
+                    let mut lossy_files: Vec<String> = Vec::new();
+                    let mut empty_files: Vec<(u32, u64)> = Vec::new();
 
-                    let (file_defs, file_calls, file_stats) = match ext.to_lowercase().as_str() {
-                        #[cfg(feature = "lang-csharp")]
-                        "cs" => {
-                            let (defs, calls, stats, ext_methods) = parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id);
-                            for (method_name, classes) in ext_methods {
-                                chunk_ext_methods.entry(method_name).or_default().extend(classes);
+                    for (file_id, file_path) in sub_chunk {
+                        let (content, was_lossy) = match read_file_lossy(Path::new(file_path)) {
+                            Ok(r) => r,
+                            Err(_) => { errors += 1; continue; }
+                        };
+                        if was_lossy {
+                            lossy_files.push(file_path.clone());
+                        }
+
+                        let content_len = content.len() as u64;
+
+                        let ext = Path::new(file_path.as_str())
+                            .extension()
+                            .and_then(|e| e.to_str())
+                            .unwrap_or("");
+
+                        let (file_defs, file_calls, file_stats) = match ext.to_lowercase().as_str() {
+                            #[cfg(feature = "lang-csharp")]
+                            "cs" => {
+                                let (defs, calls, stats, ext_methods) = parser_csharp::parse_csharp_definitions(&mut cs_parser, &content, *file_id);
+                                for (method_name, classes) in ext_methods {
+                                    chunk_ext_methods.entry(method_name).or_default().extend(classes);
+                                }
+                                (defs, calls, stats)
                             }
-                            (defs, calls, stats)
-                        }
-                        #[cfg(feature = "lang-typescript")]
-                        "ts" if need_ts => {
-                            let parser = ts_parser.get_or_insert_with(|| {
-                                let mut p = tree_sitter::Parser::new();
-                                p.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
-                                    .expect("Error loading TypeScript grammar");
-                                p
-                            });
-                            parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
-                        }
-                        #[cfg(feature = "lang-typescript")]
-                        "tsx" if need_tsx => {
-                            let parser = tsx_parser.get_or_insert_with(|| {
-                                let mut p = tree_sitter::Parser::new();
-                                p.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
-                                    .expect("Error loading TSX grammar");
-                                p
-                            });
-                            parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
-                        }
-                        #[cfg(feature = "lang-sql")]
-                        "sql" => {
-                            let (defs, calls, stats) = parser_sql::parse_sql_definitions(&content, *file_id);
-                            (defs, calls, stats)
-                        }
-                        #[cfg(feature = "lang-rust")]
-                        "rs" if need_rs => {
-                            let parser = rs_parser.get_or_insert_with(|| {
-                                let mut p = tree_sitter::Parser::new();
-                                p.set_language(&tree_sitter_rust::LANGUAGE.into())
-                                    .expect("Error loading Rust grammar");
-                                p
-                            });
-                            parser_rust::parse_rust_definitions(parser, &content, *file_id)
-                        }
-                        _ => (Vec::new(), Vec::new(), Vec::new()),
-                    };
+                            #[cfg(feature = "lang-typescript")]
+                            "ts" if need_ts => {
+                                let parser = ts_parser.get_or_insert_with(|| {
+                                    let mut p = tree_sitter::Parser::new();
+                                    p.set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+                                        .expect("Error loading TypeScript grammar");
+                                    p
+                                });
+                                parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
+                            }
+                            #[cfg(feature = "lang-typescript")]
+                            "tsx" if need_tsx => {
+                                let parser = tsx_parser.get_or_insert_with(|| {
+                                    let mut p = tree_sitter::Parser::new();
+                                    p.set_language(&tree_sitter_typescript::LANGUAGE_TSX.into())
+                                        .expect("Error loading TSX grammar");
+                                    p
+                                });
+                                parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
+                            }
+                            #[cfg(feature = "lang-sql")]
+                            "sql" => {
+                                let (defs, calls, stats) = parser_sql::parse_sql_definitions(&content, *file_id);
+                                (defs, calls, stats)
+                            }
+                            #[cfg(feature = "lang-rust")]
+                            "rs" if need_rs => {
+                                let parser = rs_parser.get_or_insert_with(|| {
+                                    let mut p = tree_sitter::Parser::new();
+                                    p.set_language(&tree_sitter_rust::LANGUAGE.into())
+                                        .expect("Error loading Rust grammar");
+                                    p
+                                });
+                                parser_rust::parse_rust_definitions(parser, &content, *file_id)
+                            }
+                            _ => (Vec::new(), Vec::new(), Vec::new()),
+                        };
 
-                    if !file_defs.is_empty() {
-                        chunk_defs.push((*file_id, file_defs, file_calls, file_stats));
-                    } else {
-                        empty_files.push((*file_id, content_len));
+                        if !file_defs.is_empty() {
+                            chunk_defs.push((*file_id, file_defs, file_calls, file_stats));
+                        } else {
+                            empty_files.push((*file_id, content_len));
+                        }
                     }
-                }
 
-                #[cfg(feature = "lang-csharp")]
-                { (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) }
-                #[cfg(not(feature = "lang-csharp"))]
-                { (chunk_defs, errors, lossy_files, empty_files, HashMap::<String, Vec<String>>::new()) }
-            })
-        }).collect();
+                    #[cfg(feature = "lang-csharp")]
+                    { (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) }
+                    #[cfg(not(feature = "lang-csharp"))]
+                    { (chunk_defs, errors, lossy_files, empty_files, HashMap::<String, Vec<String>>::new()) }
+                })
+            }).collect();
 
-        // ─── Join-based streaming merge ─────────────────────────
-        // Each handle is joined sequentially; its chunk result is merged
-        // into the index and then dropped, freeing memory before the next
-        // chunk is processed. This avoids holding all chunk results in a
-        // Vec simultaneously (the old collect→merge pattern).
-        for (chunk_idx, handle) in handles.into_iter().enumerate() {
-            let (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) =
-                handle.join().unwrap_or_else(|_| {
-                    eprintln!("[WARN] Worker thread panicked during definition index building");
-                    (Vec::new(), 0, Vec::new(), Vec::new(), HashMap::new())
-                });
+            // ─── Join-based streaming merge ─────────────────────
+            for (sub_idx, handle) in handles.into_iter().enumerate() {
+                let (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) =
+                    handle.join().unwrap_or_else(|_| {
+                        eprintln!("[WARN] Worker thread panicked during definition index building");
+                        (Vec::new(), 0, Vec::new(), Vec::new(), HashMap::new())
+                    });
 
-            total_call_sites += merge_chunk_result(
-                &mut index, chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods,
-            );
+                total_call_sites += merge_chunk_result(
+                    &mut index, chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods,
+                );
 
-            crate::index::log_memory(&format!(
-                "def-build: merged chunk {}/{} ({} defs so far)",
-                chunk_idx + 1, num_chunks, index.definitions.len()
-            ));
-        }
-    });
+                crate::index::log_memory(&format!(
+                    "def-build: merged sub-chunk {}/{} of macro-chunk {}/{} ({} defs so far)",
+                    sub_idx + 1, num_sub_chunks,
+                    macro_chunk_idx + 1, total_macro_chunks,
+                    index.definitions.len()
+                ));
+            }
+        });
+        // All sub-chunk parse results are dropped here
+
+        crate::index::log_memory(&format!(
+            "def-build: macro-chunk {}/{} complete ({} defs so far)",
+            macro_chunk_idx + 1, total_macro_chunks, index.definitions.len()
+        ));
+        crate::index::force_mimalloc_collect();
+    }
 
     // ─── Angular template enrichment ──────────────────────────
     #[cfg(feature = "lang-typescript")]

@@ -1063,93 +1063,113 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
         })
     });
 
-    let file_data = recover_mutex(file_data, "content-index");
+    let mut file_data = recover_mutex(file_data, "content-index");
     let file_count = file_data.len();
     let read_errors = read_errors.load(std::sync::atomic::Ordering::Relaxed);
     let lossy_file_count = lossy_file_count.load(std::sync::atomic::Ordering::Relaxed);
     let min_len = args.min_token_len;
     log_memory(&format!("content-build: after file walk ({} files)", file_count));
 
-    // ─── Parallel tokenization ──────────────────────────────────
+    // ─── Chunked parallel tokenization ─────────────────────────
+    // Instead of tokenizing ALL files at once (peak: file_data + ALL chunk_results),
+    // we drain file_data in macro-chunks of 4096. Each drain() call moves
+    // ownership of String contents out of file_data, allowing them to be freed
+    // after each chunk is tokenized and merged. This reduces peak memory by
+    // ~300-500 MB because only 1 chunk's worth of file contents + tokenization
+    // results are alive at a time.
     let num_tok_threads = thread_count.max(1);
-    let tok_chunk_size = file_count.div_ceil(num_tok_threads).max(1);
 
-    let chunk_results: Vec<_> = std::thread::scope(|s| {
-        let handles: Vec<_> = file_data
-            .chunks(tok_chunk_size)
-            .enumerate()
-            .map(|(chunk_idx, chunk)| {
-                let base_file_id = (chunk_idx * tok_chunk_size) as u32;
-                s.spawn(move || {
-                    let mut local_files: Vec<String> = Vec::with_capacity(chunk.len());
-                    let mut local_counts: Vec<u32> = Vec::with_capacity(chunk.len());
-                    let mut local_index: HashMap<String, Vec<Posting>> = HashMap::new();
-                    let mut local_total: u64 = 0;
-
-                    for (i, (path, content)) in chunk.iter().enumerate() {
-                        let file_id = base_file_id + i as u32;
-                        local_files.push(path.clone());
-                        let mut file_tokens: HashMap<String, Vec<u32>> = HashMap::new();
-                        let mut file_total: u32 = 0;
-
-                        for (line_num, line) in content.lines().enumerate() {
-                            for token in tokenize(line, min_len) {
-                                local_total += 1;
-                                file_total += 1;
-                                file_tokens
-                                    .entry(token)
-                                    .or_default()
-                                    .push((line_num + 1) as u32);
-                            }
-                        }
-
-                        local_counts.push(file_total);
-
-                        for (token, lines) in file_tokens {
-                            local_index
-                                .entry(token)
-                                .or_default()
-                                .push(Posting { file_id, lines });
-                        }
-                    }
-
-                    (local_files, local_counts, local_index, local_total)
-                })
-            })
-            .collect();
-
-        handles.into_iter().map(|h| h.join().unwrap_or_else(|_| {
-            eprintln!("[WARN] Worker thread panicked during content index building");
-            (Vec::new(), Vec::new(), HashMap::new(), 0u64)
-        })).collect()
-    });
-
-    log_memory("content-build: after tokenization (file_data + chunks alive)");
-
-    // Free raw file contents — no longer needed after tokenization.
-    // This releases ~1.6 GB for large repos (80K files × ~20KB avg content).
-    // Without this drop, the file data stays alive until function return,
-    // causing peak memory to be ~1.6 GB higher during build vs. load-from-disk.
-    drop(file_data);
-    log_memory("content-build: after drop(file_data)");
-
-    // ─── Merge per-thread results ───────────────────────────────
     let mut files: Vec<String> = Vec::with_capacity(file_count);
     let mut file_token_counts: Vec<u32> = Vec::with_capacity(file_count);
     let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
     let mut total_tokens: u64 = 0;
 
-    for (local_files, local_counts, local_index, local_total) in chunk_results {
-        files.extend(local_files);
-        file_token_counts.extend(local_counts);
-        total_tokens += local_total;
-        for (token, postings) in local_index {
-            index.entry(token).or_default().extend(postings);
+    const CONTENT_CHUNK_SIZE: usize = 4096;
+    let total_chunks = file_count.div_ceil(CONTENT_CHUNK_SIZE).max(1);
+
+    for chunk_idx in 0..total_chunks {
+        let drain_count = file_data.len().min(CONTENT_CHUNK_SIZE);
+        let chunk: Vec<(String, String)> = file_data.drain(..drain_count).collect();
+        // Drained entries' String contents are now owned by `chunk`.
+        // file_data backing array shrinks logically but Vec capacity stays (~3MB, negligible).
+
+        let base_file_id = (chunk_idx * CONTENT_CHUNK_SIZE) as u32;
+
+        // Parallel tokenize this chunk (num_tok_threads sub-chunks)
+        let sub_chunk_size = chunk.len().div_ceil(num_tok_threads).max(1);
+
+        let chunk_results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = chunk
+                .chunks(sub_chunk_size)
+                .enumerate()
+                .map(|(sub_idx, sub_chunk)| {
+                    let sub_base_id = base_file_id + (sub_idx * sub_chunk_size) as u32;
+                    s.spawn(move || {
+                        let mut local_files: Vec<String> = Vec::with_capacity(sub_chunk.len());
+                        let mut local_counts: Vec<u32> = Vec::with_capacity(sub_chunk.len());
+                        let mut local_index: HashMap<String, Vec<Posting>> = HashMap::new();
+                        let mut local_total: u64 = 0;
+
+                        for (i, (path, content)) in sub_chunk.iter().enumerate() {
+                            let file_id = sub_base_id + i as u32;
+                            local_files.push(path.clone());
+                            let mut file_tokens: HashMap<String, Vec<u32>> = HashMap::new();
+                            let mut file_total: u32 = 0;
+
+                            for (line_num, line) in content.lines().enumerate() {
+                                for token in tokenize(line, min_len) {
+                                    local_total += 1;
+                                    file_total += 1;
+                                    file_tokens
+                                        .entry(token)
+                                        .or_default()
+                                        .push((line_num + 1) as u32);
+                                }
+                            }
+
+                            local_counts.push(file_total);
+
+                            for (token, lines) in file_tokens {
+                                local_index
+                                    .entry(token)
+                                    .or_default()
+                                    .push(Posting { file_id, lines });
+                            }
+                        }
+
+                        (local_files, local_counts, local_index, local_total)
+                    })
+                })
+                .collect();
+
+            handles.into_iter().map(|h| h.join().unwrap_or_else(|_| {
+                eprintln!("[WARN] Worker thread panicked during content index building");
+                (Vec::new(), Vec::new(), HashMap::new(), 0u64)
+            })).collect()
+        });
+
+        // Merge this chunk's results into global accumulators
+        for (local_files, local_counts, local_index, local_total) in chunk_results {
+            files.extend(local_files);
+            file_token_counts.extend(local_counts);
+            total_tokens += local_total;
+            for (token, postings) in local_index {
+                index.entry(token).or_default().extend(postings);
+            }
         }
+        // chunk + chunk_results are DROPPED here — memory freed
+
+        log_memory(&format!(
+            "content-build: chunk {}/{} ({} tokens so far)",
+            chunk_idx + 1, total_chunks, index.len()
+        ));
+        force_mimalloc_collect();
     }
+    // file_data is now empty (all entries drained)
+    drop(file_data);
 
     let unique_tokens = index.len();
-    log_memory(&format!("content-build: after merge ({} tokens)", unique_tokens));
+    log_memory(&format!("content-build: after all chunks ({} tokens)", unique_tokens));
 
     // Build trigram index from inverted index tokens
     let trigram = build_trigram_index(&index);

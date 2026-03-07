@@ -740,3 +740,141 @@ fn test_estimate_git_cache_memory_nonempty() {
     assert!(estimate["commitCount"].as_u64().unwrap() > 0);
     assert!(estimate["authorCount"].as_u64().unwrap() > 0);
 }
+
+
+// ─── Chunked content-build tests ────────────────────────────────────
+
+/// Verify that chunked content-build (CONTENT_CHUNK_SIZE=4096) produces
+/// correct results with multiple files — file_ids sequential, all tokens found.
+#[test]
+fn test_chunked_content_build_multiple_files_correct_file_ids() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Create 15 files with distinct content
+    for i in 0..15 {
+        let content = format!(
+            "class Service{i} {{\n    void Process{i}() {{ }}\n}}\n",
+            i = i
+        );
+        std::fs::write(tmp.path().join(format!("file{}.cs", i)), content).unwrap();
+    }
+
+    let result = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.path().to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        max_age_hours: 24,
+        hidden: false,
+        no_ignore: false,
+        threads: 4, // Multi-threaded to exercise sub-chunking
+        min_token_len: 2,
+    });
+    assert!(result.is_ok(), "build_content_index should succeed");
+    let index = result.unwrap();
+
+    // Should have exactly 15 files
+    assert_eq!(index.files.len(), 15, "Should index all 15 files");
+
+    // file_token_counts should have same length as files
+    assert_eq!(index.file_token_counts.len(), 15,
+        "file_token_counts should match files count");
+
+    // All Service{i} tokens should be found in the index
+    for i in 0..15 {
+        let class_token = format!("service{}", i);
+        assert!(index.index.contains_key(&class_token),
+            "Should find token '{}' in index", class_token);
+    }
+
+    // Verify file_ids in postings are valid (within files range)
+    for (token, postings) in &index.index {
+        for posting in postings {
+            assert!((posting.file_id as usize) < index.files.len(),
+                "Posting for token '{}' has file_id {} but files.len() = {}",
+                token, posting.file_id, index.files.len());
+        }
+    }
+
+    // total_tokens should be positive
+    assert!(index.total_tokens > 0, "Should have positive total_tokens");
+}
+
+/// Verify file_id → file path mapping is consistent across chunked build.
+/// Each file_id should point to the correct file in the files Vec.
+#[test]
+fn test_chunked_content_build_file_id_to_path_consistency() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Create files with unique identifiable tokens
+    for i in 0..8 {
+        let content = format!("uniquetoken{}", i);
+        std::fs::write(tmp.path().join(format!("unique{}.cs", i)), content).unwrap();
+    }
+
+    let result = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.path().to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        max_age_hours: 24,
+        hidden: false,
+        no_ignore: false,
+        threads: 2,
+        min_token_len: 2,
+    });
+    let index = result.unwrap();
+
+    // For each unique token, the posting's file_id should point to a file
+    // whose path contains the corresponding number
+    for i in 0..8 {
+        let token = format!("uniquetoken{}", i);
+        if let Some(postings) = index.index.get(&token) {
+            for posting in postings {
+                let file_path = &index.files[posting.file_id as usize];
+                assert!(file_path.contains(&format!("unique{}", i)),
+                    "Token '{}' posting points to file '{}' which doesn't match expected 'unique{}'",
+                    token, file_path, i);
+            }
+        } else {
+            panic!("Token '{}' not found in index", token);
+        }
+    }
+}
+
+/// Verify single-thread and multi-thread content builds produce same token counts.
+#[test]
+fn test_chunked_content_build_single_vs_multi_thread() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    for i in 0..12 {
+        let content = format!(
+            "namespace App{i} {{ class Controller{i} {{ void Handle{i}() {{ }} }} }}",
+            i = i
+        );
+        std::fs::write(tmp.path().join(format!("ctrl{}.cs", i)), content).unwrap();
+    }
+
+    let idx_single = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.path().to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        max_age_hours: 24,
+        hidden: false,
+        no_ignore: false,
+        threads: 1,
+        min_token_len: 2,
+    }).unwrap();
+
+    let idx_multi = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.path().to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        max_age_hours: 24,
+        hidden: false,
+        no_ignore: false,
+        threads: 4,
+        min_token_len: 2,
+    }).unwrap();
+
+    assert_eq!(idx_single.files.len(), idx_multi.files.len(),
+        "Single and multi-thread should produce same file count");
+    assert_eq!(idx_single.index.len(), idx_multi.index.len(),
+        "Single and multi-thread should produce same unique token count");
+    assert_eq!(idx_single.total_tokens, idx_multi.total_tokens,
+        "Single and multi-thread should produce same total token count");
+}
