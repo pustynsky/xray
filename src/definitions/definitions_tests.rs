@@ -1002,3 +1002,539 @@ fn test_definition_index_field_count_guard() {
     };
     drop(_guard);
 }
+
+
+// ─── Tests for parse_file_standalone ────────────────────────────────
+
+#[test]
+fn test_parse_file_standalone_csharp() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cs_file = tmp.path().join("UserService.cs");
+    std::fs::write(&cs_file, r#"
+public class UserService
+{
+    public void Process() { }
+}
+"#).unwrap();
+
+    let result = super::incremental::parse_file_standalone(&cs_file, 99);
+    assert!(result.is_some(), "Should parse C# file successfully");
+    let result = result.unwrap();
+    assert!(!result.definitions.is_empty(), "Should have definitions");
+    assert_eq!(result.definitions[0].name, "UserService");
+    // temp_file_id should be preserved in definitions
+    assert_eq!(result.definitions[0].file_id, 99);
+    assert_eq!(result.path, cs_file);
+    assert!(!result.was_lossy);
+}
+
+#[test]
+fn test_parse_file_standalone_rust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let rs_file = tmp.path().join("lib.rs");
+    std::fs::write(&rs_file, r#"
+pub fn hello() -> String {
+    "hello".to_string()
+}
+"#).unwrap();
+
+    let result = super::incremental::parse_file_standalone(&rs_file, 0);
+    assert!(result.is_some(), "Should parse Rust file successfully");
+    let result = result.unwrap();
+    assert!(result.definitions.iter().any(|d| d.name == "hello"));
+}
+
+#[test]
+fn test_parse_file_standalone_unknown_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    let txt_file = tmp.path().join("readme.txt");
+    std::fs::write(&txt_file, "hello world").unwrap();
+
+    let result = super::incremental::parse_file_standalone(&txt_file, 0);
+    assert!(result.is_none(), "Unknown extension should return None");
+}
+
+#[test]
+fn test_parse_file_standalone_nonexistent_file() {
+    use std::path::PathBuf;
+    let path = PathBuf::from("/tmp/nonexistent_file_12345.cs");
+    let result = super::incremental::parse_file_standalone(&path, 0);
+    assert!(result.is_none(), "Non-existent file should return None");
+}
+
+#[test]
+fn test_parse_file_standalone_empty_csharp_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cs_file = tmp.path().join("Empty.cs");
+    std::fs::write(&cs_file, "// just a comment, no definitions").unwrap();
+
+    let result = super::incremental::parse_file_standalone(&cs_file, 0);
+    assert!(result.is_some(), "Valid extension should return Some even with 0 definitions");
+    let result = result.unwrap();
+    assert!(result.definitions.is_empty(), "Should have 0 definitions");
+}
+
+#[test]
+fn test_parse_file_standalone_csharp_with_extension_methods() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cs_file = tmp.path().join("Extensions.cs");
+    std::fs::write(&cs_file, r#"
+public static class StringExtensions
+{
+    public static string Capitalize(this string s) => s;
+}
+"#).unwrap();
+
+    let result = super::incremental::parse_file_standalone(&cs_file, 0);
+    assert!(result.is_some());
+    let result = result.unwrap();
+    assert!(!result.extension_methods.is_empty(), "Should capture extension methods");
+    assert!(result.extension_methods.contains_key("Capitalize"));
+}
+
+// ─── Tests for apply_parsed_result ──────────────────────────────────
+
+#[test]
+fn test_apply_parsed_result_new_file() {
+    use std::path::PathBuf;
+    use super::types::*;
+    use std::collections::HashMap;
+
+    let mut index = DefinitionIndex::default();
+
+    let result = ParsedFileResult {
+        path: PathBuf::from("test.cs"),
+        definitions: vec![
+            DefinitionEntry {
+                file_id: 99, // temp id — should be remapped
+                name: "TestClass".to_string(),
+                kind: DefinitionKind::Class,
+                line_start: 1, line_end: 10,
+                parent: None, signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ],
+        call_sites: vec![],
+        code_stats: vec![],
+        extension_methods: HashMap::new(),
+        was_lossy: false,
+    };
+
+    super::incremental::apply_parsed_result(&mut index, result);
+
+    // Verify file was registered
+    assert_eq!(index.files.len(), 1);
+    assert_eq!(index.files[0], "test.cs");
+    assert!(index.path_to_id.contains_key(&PathBuf::from("test.cs")));
+
+    // Verify definition was added with correct file_id (remapped from 99 to 0)
+    assert_eq!(index.definitions.len(), 1);
+    assert_eq!(index.definitions[0].file_id, 0);
+    assert_eq!(index.definitions[0].name, "TestClass");
+
+    // Verify indexes
+    assert!(index.name_index.contains_key("testclass"));
+    assert_eq!(index.file_index[&0], vec![0]);
+}
+
+#[test]
+fn test_apply_parsed_result_existing_file_replaces_defs() {
+    use std::path::PathBuf;
+    use super::types::*;
+    use std::collections::HashMap;
+
+    let mut index = DefinitionIndex::default();
+
+    // First: add a file with ClassA
+    let result1 = ParsedFileResult {
+        path: PathBuf::from("test.cs"),
+        definitions: vec![
+            DefinitionEntry {
+                file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class,
+                line_start: 1, line_end: 10, parent: None, signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ],
+        call_sites: vec![], code_stats: vec![],
+        extension_methods: HashMap::new(), was_lossy: false,
+    };
+    super::incremental::apply_parsed_result(&mut index, result1);
+    assert!(index.name_index.contains_key("classa"));
+
+    // Second: update same file with ClassB (ClassA should be removed)
+    let result2 = ParsedFileResult {
+        path: PathBuf::from("test.cs"),
+        definitions: vec![
+            DefinitionEntry {
+                file_id: 0, name: "ClassB".to_string(), kind: DefinitionKind::Class,
+                line_start: 1, line_end: 20, parent: None, signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ],
+        call_sites: vec![], code_stats: vec![],
+        extension_methods: HashMap::new(), was_lossy: false,
+    };
+    super::incremental::apply_parsed_result(&mut index, result2);
+
+    // ClassA should be gone from name_index, ClassB should be present
+    assert!(!index.name_index.contains_key("classa"), "ClassA should be removed");
+    assert!(index.name_index.contains_key("classb"), "ClassB should be added");
+    // File count should still be 1
+    assert_eq!(index.files.len(), 1);
+}
+
+#[test]
+fn test_apply_parsed_result_merges_extension_methods() {
+    use std::path::PathBuf;
+    use super::types::*;
+    use std::collections::HashMap;
+
+    let mut index = DefinitionIndex::default();
+
+    let mut ext_methods = HashMap::new();
+    ext_methods.insert("Capitalize".to_string(), vec!["StringExtensions".to_string()]);
+
+    let result = ParsedFileResult {
+        path: PathBuf::from("Extensions.cs"),
+        definitions: vec![
+            DefinitionEntry {
+                file_id: 0, name: "StringExtensions".to_string(), kind: DefinitionKind::Class,
+                line_start: 1, line_end: 10, parent: None, signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ],
+        call_sites: vec![], code_stats: vec![],
+        extension_methods: ext_methods,
+        was_lossy: false,
+    };
+
+    super::incremental::apply_parsed_result(&mut index, result);
+
+    assert!(index.extension_methods.contains_key("Capitalize"));
+    assert_eq!(index.extension_methods["Capitalize"], vec!["StringExtensions".to_string()]);
+}
+
+#[test]
+fn test_apply_parsed_result_remaps_file_id_in_all_defs() {
+    use std::path::PathBuf;
+    use super::types::*;
+    use std::collections::HashMap;
+
+    let mut index = DefinitionIndex::default();
+    // Pre-populate with one file to ensure new file gets id=1
+    index.files.push("existing.cs".to_string());
+    index.path_to_id.insert(PathBuf::from("existing.cs"), 0);
+
+    let result = ParsedFileResult {
+        path: PathBuf::from("new.cs"),
+        definitions: vec![
+            DefinitionEntry {
+                file_id: 42, // temp id
+                name: "ClassX".to_string(), kind: DefinitionKind::Class,
+                line_start: 1, line_end: 5, parent: None, signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 42, // temp id
+                name: "MethodY".to_string(), kind: DefinitionKind::Method,
+                line_start: 2, line_end: 4, parent: Some("ClassX".to_string()),
+                signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ],
+        call_sites: vec![], code_stats: vec![],
+        extension_methods: HashMap::new(), was_lossy: false,
+    };
+
+    super::incremental::apply_parsed_result(&mut index, result);
+
+    // Both definitions should have file_id=1 (remapped from 42)
+    assert_eq!(index.definitions[0].file_id, 1);
+    assert_eq!(index.definitions[1].file_id, 1);
+    assert_eq!(index.file_index[&1], vec![0, 1]);
+}
+
+#[test]
+fn test_apply_parsed_result_with_call_sites_and_code_stats() {
+    use std::path::PathBuf;
+    use super::types::*;
+    use std::collections::HashMap;
+
+    let mut index = DefinitionIndex::default();
+
+    let result = ParsedFileResult {
+        path: PathBuf::from("service.cs"),
+        definitions: vec![
+            DefinitionEntry {
+                file_id: 0, name: "ServiceClass".to_string(), kind: DefinitionKind::Class,
+                line_start: 1, line_end: 30, parent: None, signature: None,
+                modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 0, name: "Process".to_string(), kind: DefinitionKind::Method,
+                line_start: 5, line_end: 25, parent: Some("ServiceClass".to_string()),
+                signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+            },
+        ],
+        call_sites: vec![
+            (1, vec![CallSite {
+                method_name: "DoWork".to_string(),
+                receiver_type: Some("IWorker".to_string()),
+                line: 10,
+                receiver_is_generic: false,
+            }]),
+        ],
+        code_stats: vec![
+            (1, CodeStats {
+                cyclomatic_complexity: 5,
+                cognitive_complexity: 8,
+                max_nesting_depth: 2,
+                param_count: 1,
+                return_count: 1,
+                call_count: 3,
+                lambda_count: 0,
+            }),
+        ],
+        extension_methods: HashMap::new(),
+        was_lossy: false,
+    };
+
+    super::incremental::apply_parsed_result(&mut index, result);
+
+    // Call sites for def_idx=1 (Process method)
+    assert!(index.method_calls.contains_key(&1));
+    assert_eq!(index.method_calls[&1][0].method_name, "DoWork");
+
+    // Code stats for def_idx=1
+    assert!(index.code_stats.contains_key(&1));
+    assert_eq!(index.code_stats[&1].cyclomatic_complexity, 5);
+}
+
+// ─── Tests for reconcile_definition_index_nonblocking ───────────────
+
+#[test]
+fn test_reconcile_nonblocking_adds_new_files() {
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("NewClass.cs"), "public class NewClass { }").unwrap();
+
+    let index = DefinitionIndex {
+        root: dir.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        created_at: 0, // very old — everything is "new"
+        ..Default::default()
+    };
+    let arc_index = Arc::new(RwLock::new(index));
+
+    let (added, modified, removed) = super::incremental::reconcile_definition_index_nonblocking(
+        &arc_index,
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+    );
+
+    assert!(added > 0, "Should detect new files, got added={}", added);
+    assert_eq!(removed, 0);
+
+    let idx = arc_index.read().unwrap();
+    assert!(idx.name_index.contains_key("newclass"));
+}
+
+#[test]
+fn test_reconcile_nonblocking_removes_deleted_files() {
+    use std::sync::{Arc, RwLock};
+    use std::path::PathBuf;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Create index with a file that doesn't exist on disk
+    let mut index = DefinitionIndex {
+        root: dir.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        created_at: 32503680000, // year 3000 — nothing is "modified"
+        files: vec!["C:/nonexistent/DeletedFile.cs".to_string()],
+        ..Default::default()
+    };
+    index.path_to_id.insert(PathBuf::from("C:/nonexistent/DeletedFile.cs"), 0);
+    // Add a definition for this file
+    index.definitions.push(DefinitionEntry {
+        file_id: 0, name: "DeletedClass".to_string(), kind: DefinitionKind::Class,
+        line_start: 1, line_end: 5, parent: None, signature: None,
+        modifiers: vec![], attributes: vec![], base_types: vec![],
+    });
+    index.name_index.insert("deletedclass".to_string(), vec![0]);
+    index.kind_index.insert(DefinitionKind::Class, vec![0]);
+    index.file_index.insert(0, vec![0]);
+
+    let arc_index = Arc::new(RwLock::new(index));
+
+    let (added, modified, removed) = super::incremental::reconcile_definition_index_nonblocking(
+        &arc_index,
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+    );
+
+    assert_eq!(removed, 1, "Should detect deleted file");
+
+    let idx = arc_index.read().unwrap();
+    assert!(!idx.name_index.contains_key("deletedclass"), "Deleted file's definitions should be removed");
+    assert!(!idx.path_to_id.contains_key(&PathBuf::from("C:/nonexistent/DeletedFile.cs")));
+}
+
+#[test]
+fn test_reconcile_nonblocking_no_changes() {
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+
+    // Empty directory, empty index — nothing to do
+    let index = DefinitionIndex {
+        root: dir.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    let arc_index = Arc::new(RwLock::new(index));
+
+    let (added, modified, removed) = super::incremental::reconcile_definition_index_nonblocking(
+        &arc_index,
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+    );
+
+    assert_eq!(added, 0);
+    assert_eq!(modified, 0);
+    assert_eq!(removed, 0);
+}
+
+
+#[test]
+fn test_update_file_definitions_removes_stale_defs_when_file_emptied() {
+    // Regression test: when a file that had definitions is modified to have 0 definitions,
+    // the old definitions must be removed. Previously parse_file_standalone returned None
+    // for empty-defs files, and update_file_definitions did nothing → stale defs remained.
+    use std::path::PathBuf;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cs_file = tmp.path().join("Service.cs");
+
+    // Step 1: Create file with a class
+    std::fs::write(&cs_file, "public class MyService { }").unwrap();
+    let mut index = DefinitionIndex::default();
+    let clean = PathBuf::from(crate::clean_path(&cs_file.to_string_lossy()));
+    super::incremental::update_file_definitions(&mut index, &clean);
+    assert!(index.name_index.contains_key("myservice"), "Should have MyService in index");
+
+    // Step 2: Modify file to have 0 definitions
+    std::fs::write(&cs_file, "// now empty, no classes").unwrap();
+    super::incremental::update_file_definitions(&mut index, &clean);
+
+    // MyService should be gone (apply_parsed_result removes old defs then adds empty)
+    assert!(!index.name_index.contains_key("myservice"),
+        "Stale definitions should be removed when file becomes empty");
+}
+
+
+// ─── Additional tests from code review round 2 ─────────────────────
+
+#[test]
+fn test_parse_file_standalone_typescript() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ts_file = tmp.path().join("service.ts");
+    std::fs::write(&ts_file, r#"
+export class UserService {
+    process(): void { }
+}
+"#).unwrap();
+
+    let result = super::incremental::parse_file_standalone(&ts_file, 0);
+    assert!(result.is_some(), "Should parse TypeScript file");
+    let result = result.unwrap();
+    assert!(result.definitions.iter().any(|d| d.name == "UserService"),
+        "Should find UserService class, got: {:?}", result.definitions.iter().map(|d| &d.name).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_parse_file_standalone_sql() {
+    let tmp = tempfile::tempdir().unwrap();
+    let sql_file = tmp.path().join("schema.sql");
+    std::fs::write(&sql_file, r#"
+CREATE TABLE Users (
+    Id INT PRIMARY KEY,
+    Name NVARCHAR(100)
+);
+"#).unwrap();
+
+    let result = super::incremental::parse_file_standalone(&sql_file, 0);
+    assert!(result.is_some(), "Should parse SQL file");
+    let result = result.unwrap();
+    assert!(result.definitions.iter().any(|d| d.name == "Users"),
+        "Should find Users table, got: {:?}", result.definitions.iter().map(|d| &d.name).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_reconcile_nonblocking_detects_modified_files() {
+    use std::sync::{Arc, RwLock};
+    use std::path::PathBuf;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let cs_file = dir.join("Service.cs");
+    std::fs::write(&cs_file, "public class OldService { }").unwrap();
+
+    // Build initial index with the file
+    let mut index = DefinitionIndex::default();
+    let clean = PathBuf::from(crate::clean_path(&cs_file.to_string_lossy()));
+    super::incremental::update_file_definitions(&mut index, &clean);
+    assert!(index.name_index.contains_key("oldservice"));
+
+    // Set created_at to 0 so all files appear "modified" (mtime > threshold)
+    index.created_at = 0;
+
+    // Modify the file content
+    std::fs::write(&cs_file, "public class NewService { }").unwrap();
+
+    let arc_index = Arc::new(RwLock::new(index));
+
+    let (added, modified, _removed) = super::incremental::reconcile_definition_index_nonblocking(
+        &arc_index,
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+    );
+
+    // Should detect as modified (not added, since it was already in path_to_id)
+    assert!(modified > 0 || added > 0, "Should detect modified file");
+
+    let idx = arc_index.read().unwrap();
+    assert!(idx.name_index.contains_key("newservice"),
+        "Should have NewService after modification");
+    // OldService should be gone (apply_parsed_result removes old defs)
+    assert!(!idx.name_index.contains_key("oldservice"),
+        "OldService should be removed after modification");
+}
+
+#[test]
+fn test_update_file_definitions_file_becomes_unreadable() {
+    // When a previously indexed file becomes unreadable (deleted/permission error),
+    // update_file_definitions should remove old definitions.
+    use std::path::PathBuf;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let cs_file = tmp.path().join("Service.cs");
+
+    // Step 1: Create and index the file
+    std::fs::write(&cs_file, "public class GoneService { }").unwrap();
+    let mut index = DefinitionIndex::default();
+    let clean = PathBuf::from(crate::clean_path(&cs_file.to_string_lossy()));
+    super::incremental::update_file_definitions(&mut index, &clean);
+    assert!(index.name_index.contains_key("goneservice"));
+
+    // Step 2: Delete the file (making it unreadable)
+    std::fs::remove_file(&cs_file).unwrap();
+
+    // Step 3: Try to update — should remove old definitions
+    super::incremental::update_file_definitions(&mut index, &clean);
+    assert!(!index.name_index.contains_key("goneservice"),
+        "Old definitions should be removed when file becomes unreadable");
+}

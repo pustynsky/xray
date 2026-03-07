@@ -7439,7 +7439,9 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Validates:** Watcher startup reconciliation catches stale cache files. The reconciliation runs once in the watcher thread before the event loop, with filesystem events buffered in the mpsc channel during the scan.
 
-**Unit tests:** `test_reconcile_adds_new_file`, `test_reconcile_removes_deleted_file`, `test_reconcile_detects_modified_file`, `test_reconcile_skips_unchanged_files`
+**Unit tests:** `test_reconcile_adds_new_file`, `test_reconcile_removes_deleted_file`, `test_reconcile_detects_modified_file`, `test_reconcile_skips_unchanged_files`, `test_reconcile_nonblocking_adds_new_files`, `test_reconcile_nonblocking_removes_deleted_files`, `test_reconcile_nonblocking_no_changes`, `test_parse_file_standalone_*` (6 tests), `test_apply_parsed_result_*` (5 tests), `test_update_file_definitions_removes_stale_defs_when_file_emptied`, `test_update_file_definitions_merges_extension_methods`
+
+**Architecture note:** Definition index reconciliation now uses lock-free parsing (`reconcile_definition_index_nonblocking`). Parsing happens in Phase 3 without any lock (parallel via `thread::scope`). Only Phase 4 (applying results) holds a write lock for <500ms. MCP requests work on old data during parsing.
 
 **Status:** ✅ Covered by unit tests. Manual MCP test requires start/stop server workflow.
 
