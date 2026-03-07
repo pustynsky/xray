@@ -19,7 +19,7 @@ use tracing::{info, warn};
 
 use crate::mcp::protocol::{ToolCallResult, ToolDefinition};
 use crate::{
-    build_content_index, clean_path,
+    build_content_index, clean_path, load_content_index,
     save_content_index, ContentIndex, ContentIndexArgs,
     DEFAULT_MIN_TOKEN_LEN,
 };
@@ -852,6 +852,27 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let file_count = new_index.files.len();
     let token_count = new_index.index.len();
 
+    // Drop build result and reload from disk for compact memory layout
+    // (same pattern as serve.rs startup — eliminates allocator fragmentation)
+    drop(new_index);
+    crate::index::force_mimalloc_collect();
+    crate::index::log_memory("reindex: after drop+mi_collect (content)");
+
+    let new_index = match load_content_index(dir, &ext, &ctx.index_base) {
+        Ok(idx) => idx,
+        Err(e) => {
+            warn!(error = %e, "Failed to reload content index from disk after reindex, rebuilding");
+            match build_content_index(&ContentIndexArgs {
+                dir: dir.to_string(), ext: ext.clone(),
+                max_age_hours: 24, hidden: false, no_ignore: false,
+                threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+            }) {
+                Ok(idx) => idx,
+                Err(e2) => return ToolCallResult::error(format!("Failed to rebuild content index: {}", e2)),
+            }
+        }
+    };
+
     // Update in-memory cache
     match ctx.index.write() {
         Ok(mut idx) => {
@@ -859,6 +880,10 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         }
         Err(e) => return ToolCallResult::error(format!("Failed to update in-memory index: {}", e)),
     }
+
+    // Force mimalloc to return freed pages (old index) to OS
+    crate::index::force_mimalloc_collect();
+    crate::index::log_memory("reindex: after replace+mi_collect (content)");
 
     let elapsed = start.elapsed();
 
@@ -923,6 +948,22 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
         .map(|size| size as f64 / 1_048_576.0)
         .unwrap_or(0.0);
 
+    // Drop build result and reload from disk for compact memory layout
+    // (same pattern as serve.rs startup — eliminates allocator fragmentation)
+    drop(new_index);
+    crate::index::force_mimalloc_collect();
+    crate::index::log_memory("reindex: after drop+mi_collect (def)");
+
+    let new_index = match crate::definitions::load_definition_index(dir, &ext, &ctx.index_base) {
+        Ok(idx) => idx,
+        Err(e) => {
+            warn!(error = %e, "Failed to reload def index from disk after reindex, rebuilding");
+            crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+                dir: dir.to_string(), ext: ext.clone(), threads: 0,
+            })
+        }
+    };
+
     // Update in-memory cache
     match def_index_arc.write() {
         Ok(mut idx) => {
@@ -930,6 +971,10 @@ fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> Tool
         }
         Err(e) => return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e)),
     }
+
+    // Force mimalloc to return freed pages (old index) to OS
+    crate::index::force_mimalloc_collect();
+    crate::index::log_memory("reindex: after replace+mi_collect (def)");
 
     let elapsed = start.elapsed();
 
