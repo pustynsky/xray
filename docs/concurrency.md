@@ -263,7 +263,19 @@ sequenceDiagram
 
 ### Startup Reconciliation
 
-Before entering the event loop, the watcher performs reconciliation to catch files added/modified/removed while the server was offline:
+Before entering the event loop, the watcher performs reconciliation to catch files added/modified/removed while the server was offline.
+
+**Definition index** uses lock-free reconciliation (`reconcile_definition_index_nonblocking`):
+- Phase 1: Walk filesystem (NO lock) ~3s
+- Phase 2: Read lock to determine changed files (~instant)
+- Phase 3: Parse all changed files in parallel via `thread::scope` (NO lock) — the slow part
+- Phase 4: Write lock to apply results (<500ms)
+
+During Phase 3, MCP queries work normally on old index data — users don't notice reconciliation.
+
+**Content index** still uses synchronous reconciliation under a write lock.
+
+Reconciliation details:
 
 1. Walk the filesystem to collect all matching files with their mtime
 2. Compare against the in-memory index (loaded from disk cache):

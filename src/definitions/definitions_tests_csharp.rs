@@ -2217,3 +2217,53 @@ public class OuterBlock
         "Owner.m_service.Run() — inner class field type takes precedence in merged field_types"
     );
 }
+
+
+#[test]
+fn test_update_file_definitions_merges_extension_methods() {
+    // Regression test: update_file_definitions() previously discarded extension_methods (_ext)
+    // from parse_csharp_definitions(). This test verifies they are now merged into the index.
+    let tmp = tempfile::tempdir().unwrap();
+    let cs_file = tmp.path().join("Extensions.cs");
+    std::fs::write(&cs_file, r#"
+public static class StringExtensions
+{
+    public static string Capitalize(this string s) => s;
+    public static string Truncate(this string s, int len) => s;
+}
+"#).unwrap();
+
+    let mut index = DefinitionIndex::default();
+    let clean_path = PathBuf::from(crate::clean_path(&cs_file.to_string_lossy()));
+
+    // Call update_file_definitions (the incremental path)
+    super::incremental::update_file_definitions(&mut index, &clean_path);
+
+    // Verify extension methods were merged into the index
+    assert!(
+        !index.extension_methods.is_empty(),
+        "Extension methods should be populated after incremental update, got empty HashMap"
+    );
+
+    // Check specific extension methods
+    let capitalize_classes = index.extension_methods.get("Capitalize");
+    assert!(
+        capitalize_classes.is_some(),
+        "Expected 'Capitalize' in extension_methods, found keys: {:?}",
+        index.extension_methods.keys().collect::<Vec<_>>()
+    );
+    assert!(
+        capitalize_classes.unwrap().contains(&"StringExtensions".to_string()),
+        "Expected 'StringExtensions' in Capitalize's class list"
+    );
+
+    let truncate_classes = index.extension_methods.get("Truncate");
+    assert!(
+        truncate_classes.is_some(),
+        "Expected 'Truncate' in extension_methods"
+    );
+    assert!(
+        truncate_classes.unwrap().contains(&"StringExtensions".to_string()),
+        "Expected 'StringExtensions' in Truncate's class list"
+    );
+}
