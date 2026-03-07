@@ -21,7 +21,7 @@ pub fn start_watcher(
     debounce_ms: u64,
     index_base: PathBuf,
     content_ready: Arc<AtomicBool>,
-    def_ready: Arc<AtomicBool>,
+    _def_ready: Arc<AtomicBool>,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -44,16 +44,11 @@ pub fn start_watcher(
         content_ready.store(true, Ordering::Release);
 
         if let Some(ref def_idx) = def_index {
-            def_ready.store(false, Ordering::Release);
-            match def_idx.write() {
-                Ok(mut idx) => {
-                    definitions::reconcile_definition_index(&mut idx, &dir_str, &extensions);
-                }
-                Err(e) => {
-                    error!(error = %e, "Failed to acquire def index write lock for reconciliation");
-                }
-            }
-            def_ready.store(true, Ordering::Release);
+            // Non-blocking reconciliation: parse files OUTSIDE the lock, apply INSIDE.
+            // def_ready stays true — MCP requests work on old data during parsing.
+            definitions::reconcile_definition_index_nonblocking(
+                def_idx, &dir_str, &extensions
+            );
         }
 
         let mut dirty_files: HashSet<PathBuf> = HashSet::new();

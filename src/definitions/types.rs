@@ -259,6 +259,19 @@ pub type DefChunk = (u32, Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec
 /// Contains: (chunks, parse_errors, lossy_files, empty_files, extension_methods)
 pub type ChunkResult = (Vec<DefChunk>, usize, Vec<String>, Vec<(u32, u64)>, HashMap<String, Vec<String>>);
 
+/// Parsed results for a single file — ready to be applied to the index.
+/// This struct is produced by `parse_file_standalone()` WITHOUT holding any lock,
+/// and then applied to the index via `apply_parsed_result()` under a brief write lock.
+#[derive(Debug)]
+pub struct ParsedFileResult {
+    pub path: PathBuf,
+    pub definitions: Vec<DefinitionEntry>,
+    pub call_sites: Vec<(usize, Vec<CallSite>)>,
+    pub code_stats: Vec<(usize, CodeStats)>,
+    pub extension_methods: HashMap<String, Vec<String>>,
+    pub was_lossy: bool,
+}
+
 // ─── CLI Args ────────────────────────────────────────────────────────
 
 use clap::Parser;

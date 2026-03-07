@@ -8,6 +8,12 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-03-07
 
+### Performance
+- **Lock-free definition index reconciliation** — During watcher startup reconciliation, file parsing now happens OUTSIDE the write lock. Previously, the entire reconciliation (FS walk + parsing + index update) ran under a single write lock, blocking all `search_definitions`/`search_callers` requests for up to 96 seconds. Now: Phase 1 (FS walk, ~3s) and Phase 3 (parsing, ~12-93s) run without any lock. Only Phase 4 (applying results, <500ms) holds a write lock. MCP requests work on old index data during parsing — users won't notice reconciliation. Parallel parsing with `thread::scope` (1 parser per thread) provides ~8× speedup for Phase 3. 15 new unit tests.
+
+### Bug Fixes
+- **Extension methods lost during incremental C# updates** — `update_file_definitions()` discarded the 4th return value (`extension_methods`) from `parse_csharp_definitions()` as `_ext`, meaning extension methods were never updated during watcher debounce or reconciliation. Now correctly merged into `index.extension_methods`. Affects `search_callers` extension method resolution for incrementally-updated files. 1 new regression test.
+
 ### Features
 - **Atomic index save (crash-safe)** — `save_compressed` now writes to a `.tmp` file first, then renames over the target. If the process is killed mid-write, the original index file survives intact. Previously, `File::create` truncated the existing file before writing — a crash mid-write left a corrupt cache, forcing a full rebuild on next startup (96+ seconds for large repos). 2 new unit tests.
 
