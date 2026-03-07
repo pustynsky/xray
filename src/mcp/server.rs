@@ -145,7 +145,9 @@ pub fn run_server(ctx: HandlerContext) {
     }
 
     info!("stdin closed, saving indexes before shutdown...");
+    crate::index::log_memory("shutdown: saving indexes");
     save_indexes_on_shutdown(&ctx);
+    crate::index::log_memory("shutdown: complete");
     info!("Shutdown complete");
 }
 

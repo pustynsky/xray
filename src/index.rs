@@ -599,12 +599,26 @@ pub(crate) fn recover_mutex<T>(mutex: std::sync::Mutex<T>, label: &str) -> T {
 pub const LZ4_MAGIC: &[u8; 4] = b"LZ4S";
 
 /// Save a serializable value to a file with LZ4 frame compression.
-/// Writes magic bytes, then LZ4-compressed bincode data.
-/// Logs compression ratio and timing to stderr.
+///
+/// **Atomic write:** writes to a `.tmp` sibling file first, then renames
+/// over the target. If the process is killed mid-write, the original file
+/// remains intact (the `.tmp` file is left behind and ignored on load).
+///
+/// On Windows `fs::rename` is not strictly atomic (it can fail if the
+/// target is held open by another process), but it is crash-safe: if
+/// the process dies before rename completes, the old file survives.
 pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, label: &str) -> Result<(), SearchError> {
     let start = Instant::now();
 
-    let file = std::fs::File::create(path)?;
+    // Write to a temporary file first (atomic-save pattern)
+    // Append ".tmp" rather than replacing extension — preserves the original
+    // extension in the filename (e.g., "index.word-search.tmp" not "index.tmp").
+    let tmp_path = {
+        let mut p = path.as_os_str().to_owned();
+        p.push(".tmp");
+        PathBuf::from(p)
+    };
+    let file = std::fs::File::create(&tmp_path)?;
     let mut writer = BufWriter::new(file);
     writer.write_all(LZ4_MAGIC)?;
     let mut encoder = lz4_flex::frame::FrameEncoder::new(writer);
@@ -612,7 +626,15 @@ pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, la
     let mut writer = encoder.finish().map_err(std::io::Error::other)?;
     writer.flush()?;
 
-    let compressed_size = std::fs::metadata(path)?.len();
+    let compressed_size = std::fs::metadata(&tmp_path)?.len();
+
+    // Rename over the target — if process dies before this, old file survives
+    std::fs::rename(&tmp_path, path).map_err(|e| {
+        // Clean up tmp file on rename failure
+        let _ = std::fs::remove_file(&tmp_path);
+        e
+    })?;
+
     let elapsed = start.elapsed();
 
     eprintln!("[{}] Saved {:.1} MB (compressed) in {:.2}s to {}",

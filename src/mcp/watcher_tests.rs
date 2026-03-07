@@ -868,3 +868,115 @@ fn test_process_batch_returns_true_on_healthy_locks() {
     let result = process_batch(&index, &None, &mut dirty, &mut removed);
     assert!(result, "process_batch should return true when locks are healthy");
 }
+
+
+// ─── periodic_autosave tests ────────────────────────────────────────
+
+#[test]
+fn test_periodic_autosave_saves_both_indexes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    // Create a content index with real data
+    let content_index = Arc::new(RwLock::new(ContentIndex {
+        root: tmp.path().to_string_lossy().to_string(),
+        files: vec!["file.cs".to_string()],
+        index: {
+            let mut m = HashMap::new();
+            m.insert("token".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+            m
+        },
+        total_tokens: 1,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![1],
+        ..Default::default()
+    }));
+
+    // Create a definition index
+    let def_index = Arc::new(RwLock::new(crate::definitions::DefinitionIndex {
+        root: tmp.path().to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        files: vec!["file.cs".to_string()],
+        definitions: vec![crate::definitions::DefinitionEntry {
+            file_id: 0,
+            name: "TestClass".to_string(),
+            kind: crate::definitions::DefinitionKind::Class,
+            line_start: 1,
+            line_end: 10,
+            parent: None,
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }],
+        ..Default::default()
+    }));
+
+    // Call periodic_autosave
+    periodic_autosave(&content_index, &Some(def_index), index_base);
+
+    // Verify content index was saved to disk
+    let content_path = crate::index::content_index_path_for(
+        &tmp.path().to_string_lossy(), "cs", index_base
+    );
+    assert!(content_path.exists(), "Content index should be saved to disk: {:?}", content_path);
+
+    // Verify definition index was saved to disk
+    let def_path = crate::definitions::definition_index_path_for(
+        &tmp.path().to_string_lossy(), "cs", index_base
+    );
+    assert!(def_path.exists(), "Definition index should be saved to disk: {:?}", def_path);
+}
+
+#[test]
+fn test_periodic_autosave_skips_empty_indexes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    // Create empty indexes
+    let content_index = Arc::new(RwLock::new(ContentIndex::default()));
+    let def_index = Arc::new(RwLock::new(crate::definitions::DefinitionIndex::default()));
+
+    // Call periodic_autosave — should not write anything
+    periodic_autosave(&content_index, &Some(def_index), index_base);
+
+    // Verify no files written
+    let entries: Vec<_> = std::fs::read_dir(index_base)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.ends_with(".word-search") || name.ends_with(".code-structure")
+        })
+        .collect();
+    assert!(entries.is_empty(), "Empty indexes should not be saved to disk");
+}
+
+#[test]
+fn test_periodic_autosave_no_def_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let content_index = Arc::new(RwLock::new(ContentIndex {
+        root: tmp.path().to_string_lossy().to_string(),
+        files: vec!["file.cs".to_string()],
+        index: {
+            let mut m = HashMap::new();
+            m.insert("token".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+            m
+        },
+        total_tokens: 1,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![1],
+        ..Default::default()
+    }));
+
+    // No definition index
+    periodic_autosave(&content_index, &None, index_base);
+
+    // Content index should be saved
+    let content_path = crate::index::content_index_path_for(
+        &tmp.path().to_string_lossy(), "cs", index_base
+    );
+    assert!(content_path.exists(), "Content index should be saved even without def index");
+}

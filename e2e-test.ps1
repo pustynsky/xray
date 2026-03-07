@@ -108,8 +108,13 @@ try {
     $oldIdx = Get-ChildItem -Path $idxDir -Filter "*.idx" -ErrorAction SilentlyContinue
     $oldCidx = Get-ChildItem -Path $idxDir -Filter "*.cidx" -ErrorAction SilentlyContinue
     $oldDidx = Get-ChildItem -Path $idxDir -Filter "*.didx" -ErrorAction SilentlyContinue
+    $tmpFiles = Get-ChildItem -Path $idxDir -Filter "*.tmp" -ErrorAction SilentlyContinue
 
     $extPassed = $true
+    if ($tmpFiles) {
+        Write-Host "FAILED (.tmp files found — atomic save cleanup failed: $($tmpFiles.Name -join ', '))" -ForegroundColor Red
+        $extPassed = $false
+    }
     if (-not $fileListFiles) {
         Write-Host "FAILED (no .file-list files found)" -ForegroundColor Red
         $extPassed = $false

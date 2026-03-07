@@ -10,6 +10,8 @@ use tracing::{error, info, warn};
 use crate::{clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 /// Start a file watcher thread that incrementally updates the in-memory index
 pub fn start_watcher(
     index: Arc<RwLock<ContentIndex>>,
@@ -18,6 +20,8 @@ pub fn start_watcher(
     extensions: Vec<String>,
     debounce_ms: u64,
     index_base: PathBuf,
+    content_ready: Arc<AtomicBool>,
+    def_ready: Arc<AtomicBool>,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -30,12 +34,17 @@ pub fn start_watcher(
 
     std::thread::spawn(move || {
         let _watcher = watcher; // move watcher into thread to keep it alive
-        let _index_base = index_base; // keep for potential future use (e.g., periodic save)
 
         // ── Reconciliation: catch files added/modified/removed while server was offline ──
         // Watcher is already listening — events during reconciliation are buffered in rx channel.
+        // Reset readiness flags during reconciliation so MCP requests get
+        // an instant "building" message instead of blocking on the write lock.
+        content_ready.store(false, Ordering::Release);
         reconcile_content_index(&index, &dir_str, &extensions);
+        content_ready.store(true, Ordering::Release);
+
         if let Some(ref def_idx) = def_index {
+            def_ready.store(false, Ordering::Release);
             match def_idx.write() {
                 Ok(mut idx) => {
                     definitions::reconcile_definition_index(&mut idx, &dir_str, &extensions);
@@ -44,10 +53,13 @@ pub fn start_watcher(
                     error!(error = %e, "Failed to acquire def index write lock for reconciliation");
                 }
             }
+            def_ready.store(true, Ordering::Release);
         }
 
         let mut dirty_files: HashSet<PathBuf> = HashSet::new();
         let mut removed_files: HashSet<PathBuf> = HashSet::new();
+        let mut last_autosave = std::time::Instant::now();
+        const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(600); // 10 minutes
 
         loop {
             match rx.recv_timeout(Duration::from_millis(debounce_ms)) {
@@ -81,6 +93,11 @@ pub fn start_watcher(
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Debounce window expired — process batch
                     if dirty_files.is_empty() && removed_files.is_empty() {
+                        // Check periodic autosave
+                        if last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+                            periodic_autosave(&index, &def_index, &index_base);
+                            last_autosave = std::time::Instant::now();
+                        }
                         continue;
                     }
                     if !process_batch(&index, &def_index, &mut dirty_files, &mut removed_files) {
@@ -266,6 +283,59 @@ fn shrink_if_oversized(idx: &mut ContentIndex) {
         && p2id.capacity() > p2id.len() * 2 {
             p2id.shrink_to_fit();
         }
+}
+
+/// Periodically save in-memory indexes to disk to protect against data loss
+/// from forced process termination (e.g., VS Code killing the MCP server).
+///
+/// Takes READ locks only — MCP queries are NOT blocked during save.
+/// Watcher incremental updates (which need write locks) will be briefly delayed.
+fn periodic_autosave(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    index_base: &std::path::Path,
+) {
+    let start = std::time::Instant::now();
+    let mut saved = Vec::new();
+
+    // Save content index
+    match index.read() {
+        Ok(idx) => {
+            if !idx.files.is_empty() {
+                if let Err(e) = crate::save_content_index(&idx, index_base) {
+                    warn!(error = %e, "Periodic autosave: failed to save content index");
+                } else {
+                    saved.push(format!("content({} files)", idx.files.len()));
+                }
+            }
+        }
+        Err(e) => warn!(error = %e, "Periodic autosave: failed to read content index"),
+    }
+
+    // Save definition index
+    if let Some(def_idx) = def_index {
+        match def_idx.read() {
+            Ok(idx) => {
+                if !idx.files.is_empty() {
+                    if let Err(e) = crate::definitions::save_definition_index(&idx, index_base) {
+                        warn!(error = %e, "Periodic autosave: failed to save definition index");
+                    } else {
+                        saved.push(format!("def({} defs)", idx.definitions.len()));
+                    }
+                }
+            }
+            Err(e) => warn!(error = %e, "Periodic autosave: failed to read definition index"),
+        }
+    }
+
+    if !saved.is_empty() {
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        info!(
+            elapsed_ms = format_args!("{:.1}", elapsed_ms),
+            saved = %saved.join(", "),
+            "Periodic autosave complete"
+        );
+    }
 }
 
 /// Check if a path is inside a `.git` directory.
