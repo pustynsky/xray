@@ -450,10 +450,27 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         results.truncate(parsed.max_results);
     }
 
-    build_grep_response(
+    let mut result = build_grep_response(
         &results, &terms, total_files, total_occurrences,
         search_mode, &index, ctx, &grep_params,
-    )
+    );
+
+    // Warn when regex=true and terms contain spaces (tokens never have spaces)
+    if parsed.use_regex && parsed.terms_str.contains(' ') {
+        if let Some(text) = result.content.first_mut().map(|c| &mut c.text)
+            && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
+                if let Some(summary) = output.get_mut("summary") {
+                    summary["searchModeNote"] = serde_json::Value::String(
+                        "Regex operates on individual index tokens which never contain spaces. \
+                         Multi-word regex patterns like 'private.*double' will not match across tokens. \
+                         For multi-word search use phrase=true, or search individual terms separately with regex=true.".to_string(),
+                    );
+                }
+                *text = json_to_string(&output);
+            }
+    }
+
+    result
 }
 
 /// Check if a search term contains characters that the tokenizer strips.

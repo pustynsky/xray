@@ -2222,18 +2222,20 @@ fn test_passes_caller_file_filters_exclude_file() {
 
 #[test]
 fn test_build_caller_node_basic() {
-    let node = build_caller_node("doWork", Some("OrderService"), 10, 25, "src/OrderService.cs", vec![]);
+    let node = build_caller_node("doWork", Some("OrderService"), 10, &[25], "src/OrderService.cs", vec![]);
     assert_eq!(node["method"].as_str().unwrap(), "doWork");
     assert_eq!(node["class"].as_str().unwrap(), "OrderService");
     assert_eq!(node["line"].as_u64().unwrap(), 10);
     assert_eq!(node["callSite"].as_u64().unwrap(), 25);
     assert_eq!(node["file"].as_str().unwrap(), "OrderService.cs");
     assert!(node.get("callers").is_none());
+    // Single call site → callSites array should NOT be present
+    assert!(node.get("callSites").is_none(), "Single call site should not have callSites array");
 }
 
 #[test]
 fn test_build_caller_node_no_parent() {
-    let node = build_caller_node("doWork", None, 10, 25, "src/OrderService.cs", vec![]);
+    let node = build_caller_node("doWork", None, 10, &[25], "src/OrderService.cs", vec![]);
     assert_eq!(node["method"].as_str().unwrap(), "doWork");
     assert!(node.get("class").is_none());
 }
@@ -2241,15 +2243,27 @@ fn test_build_caller_node_no_parent() {
 #[test]
 fn test_build_caller_node_with_sub_callers() {
     let sub = vec![json!({"method": "run", "line": 5, "callSite": 12})];
-    let node = build_caller_node("doWork", Some("OrderService"), 10, 25, "src/OrderService.cs", sub);
+    let node = build_caller_node("doWork", Some("OrderService"), 10, &[25], "src/OrderService.cs", sub);
     assert!(node.get("callers").is_some());
     assert_eq!(node["callers"].as_array().unwrap().len(), 1);
 }
 
 #[test]
 fn test_build_caller_node_extracts_filename() {
-    let node = build_caller_node("doWork", None, 10, 25, "src/deep/nested/OrderService.cs", vec![]);
+    let node = build_caller_node("doWork", None, 10, &[25], "src/deep/nested/OrderService.cs", vec![]);
     assert_eq!(node["file"].as_str().unwrap(), "OrderService.cs");
+}
+
+#[test]
+fn test_build_caller_node_multiple_call_sites() {
+    // When a method is called 3 times within the same caller, callSites array should be present
+    let node = build_caller_node("doWork", Some("OrderService"), 10, &[25, 40, 55], "src/OrderService.cs", vec![]);
+    assert_eq!(node["callSite"].as_u64().unwrap(), 25, "callSite should be the first call site");
+    let call_sites = node["callSites"].as_array().expect("callSites array should be present for >1 call sites");
+    assert_eq!(call_sites.len(), 3);
+    assert_eq!(call_sites[0].as_u64().unwrap(), 25);
+    assert_eq!(call_sites[1].as_u64().unwrap(), 40);
+    assert_eq!(call_sites[2].as_u64().unwrap(), 55);
 }
 
 // ─── SQL Test 8: SP with no schema (parent=None) resolved via no-receiver call ──

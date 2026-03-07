@@ -489,3 +489,45 @@ fn test_merge_phrase_and_merges_lines() {
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].lines, vec![1, 2, 3, 5], "Lines should be merged, sorted, deduped");
 }
+
+// ─── regex + spaces searchModeNote tests ────────────────────────────
+
+#[test]
+fn test_regex_with_spaces_produces_search_mode_note() {
+    let _index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+
+    let result = handle_search_grep(&ctx, &json!({
+        "terms": "private.*double Percentile",
+        "regex": true
+    }));
+
+    // Should succeed (0 results is fine) and contain searchModeNote
+    assert!(!result.is_error, "regex search should succeed even with 0 results");
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let summary = &parsed["summary"];
+    assert!(summary.get("searchModeNote").is_some(),
+        "regex=true with spaces in terms should produce searchModeNote");
+    let note = summary["searchModeNote"].as_str().unwrap();
+    assert!(note.contains("tokens which never contain spaces"),
+        "searchModeNote should explain the issue");
+}
+
+#[test]
+fn test_regex_without_spaces_no_search_mode_note() {
+    let _index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+
+    let result = handle_search_grep(&ctx, &json!({
+        "terms": "I[A-Z]\\w+Cache",
+        "regex": true
+    }));
+
+    assert!(!result.is_error);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    let summary = &parsed["summary"];
+    assert!(summary.get("searchModeNote").is_none(),
+        "regex=true without spaces should NOT produce searchModeNote");
+}

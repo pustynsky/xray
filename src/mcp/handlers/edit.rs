@@ -620,6 +620,10 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
     Ok(edits)
 }
 
+/// Suffix added to occurrence errors when the edit is not the first in the batch.
+/// Explains that previous edits may have changed the content, reducing occurrence counts.
+const SEQUENTIAL_EDIT_HINT: &str = ". Note: edits are applied sequentially — previous edits in the same request may have modified the content, reducing the occurrence count";
+
 /// Apply text edits sequentially. Returns (new_content, total_replacements, skipped_details).
 fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, Vec<SkippedEditDetail>), String> {
     let mut result = content.to_string();
@@ -658,9 +662,10 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                 }
                 n => {
                     if n > matches.len() {
+                        let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
                         return Err(format!(
-                            "Occurrence {} requested but anchor \"{}\" found only {} time(s)",
-                            n, anchor, matches.len()
+                            "Occurrence {} requested but anchor \"{}\" found only {} time(s){}",
+                            n, anchor, matches.len(), hint
                         ));
                     }
                     matches[n - 1]
@@ -728,9 +733,10 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                     }
                     n => {
                         if n > count {
+                            let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
                             return Err(format!(
-                                "Occurrence {} requested but pattern \"{}\" found only {} time(s)",
-                                n, search, count
+                                "Occurrence {} requested but pattern \"{}\" found only {} time(s){}",
+                                n, search, count, hint
                             ));
                         }
                         let mut current = 0usize;
@@ -783,9 +789,10 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                     }
                     n => {
                         if n > count {
+                            let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
                             return Err(format!(
-                                "Occurrence {} requested but text \"{}\" found only {} time(s)",
-                                n, search, count
+                                "Occurrence {} requested but text \"{}\" found only {} time(s){}",
+                                n, search, count, hint
                             ));
                         }
                         let mut current = 0usize;

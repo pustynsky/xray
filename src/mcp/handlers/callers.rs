@@ -987,21 +987,27 @@ fn passes_caller_file_filters(
 }
 
 /// Build a JSON node for a single caller in the call tree.
-/// Includes method name, definition line, call site line, optional class, optional file name,
+/// Includes method name, definition line, call site line(s), optional class, optional file name,
 /// and optional sub-callers array.
+/// When `call_site_lines` has more than 1 entry, includes `callSites` array with all call lines.
 fn build_caller_node(
     caller_name: &str,
     caller_parent: Option<&str>,
     caller_line: u32,
-    call_site_line: u32,
+    call_site_lines: &[u32],
     file_path: &str,
     sub_callers: Vec<Value>,
 ) -> Value {
+    let first_call_site = call_site_lines.first().copied().unwrap_or(0);
     let mut node = json!({
         "method": caller_name,
         "line": caller_line,
-        "callSite": call_site_line,
+        "callSite": first_call_site,
     });
+    // Include callSites array only when there are multiple call sites (saves tokens)
+    if call_site_lines.len() > 1 {
+        node["callSites"] = json!(call_site_lines);
+    }
     if let Some(parent) = caller_parent {
         node["class"] = json!(parent);
     }
@@ -1063,11 +1069,22 @@ fn build_caller_tree(
 
     let definition_locations = collect_definition_locations(ctx.def_idx, &method_lower);
 
-    let mut callers: Vec<Value> = Vec::new();
-    let mut seen_callers: HashSet<String> = HashSet::new();
+    // Two-phase approach: first collect all call sites per caller, then build nodes.
+    // This allows us to gather ALL call site lines for a single caller method.
+    struct CallerInfo {
+        name: String,
+        parent: Option<String>,
+        line: u32,
+        di: u32,
+        file_path: String,
+        call_sites: Vec<u32>,
+    }
+
+    let mut caller_map: HashMap<String, CallerInfo> = HashMap::new();
+    let mut caller_order: Vec<String> = Vec::new(); // preserve insertion order
 
     for posting in postings {
-        if callers.len() >= ctx.limits.max_callers_per_level { break; }
+        if caller_map.len() >= ctx.limits.max_callers_per_level { break; }
         if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
         // If we have a parent class context, skip files that don't reference that class
@@ -1090,7 +1107,7 @@ fn build_caller_tree(
         };
 
         for &line in &posting.lines {
-            if callers.len() >= ctx.limits.max_callers_per_level { break; }
+            if caller_map.len() >= ctx.limits.max_callers_per_level && !caller_map.values().any(|_| true) { break; }
             if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
             if definition_locations.contains(&(def_fid, line)) { continue; }
@@ -1113,107 +1130,136 @@ fn build_caller_tree(
                 &caller_name,
                 caller_line
             );
-            if !seen_callers.insert(caller_key) { continue; }
 
-            ctx.node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-
-            // Impact analysis: check if this caller is a test method
-            if ctx.impact_analysis {
-                let caller_def = &ctx.def_idx.definitions[caller_di as usize];
-                if is_test_method(caller_def, file_path) {
-                    // Test method found — add to collector with full path, depth, callChain
-                    let mut chain = call_chain.to_vec();
-                    chain.push(caller_name.clone());
-                    let mut test_info = json!({
-                        "method": &caller_name,
-                        "line": caller_line,
-                        "file": file_path,
-                        "depth": current_depth + 1,
-                        "callChain": chain,
-                    });
-                    if let Some(ref parent) = caller_parent {
-                        test_info["class"] = json!(parent);
-                    }
-                    tests_found.push(test_info);
-
-                    let mut node = build_caller_node(
-                        &caller_name,
-                        caller_parent.as_deref(),
-                        caller_line,
-                        line,
-                        file_path,
-                        vec![], // no sub-callers — test is a leaf
-                    );
-                    node["isTest"] = json!(true);
-
-                    // Inject body if requested
-                    if ctx.include_body {
-                        let caller_line_end = ctx.def_idx.definitions.get(caller_di as usize)
-                            .map(|d| d.line_end)
-                            .unwrap_or(caller_line);
-                        inject_body_into_obj(
-                            &mut node,
-                            file_path,
-                            caller_line,
-                            caller_line_end,
-                            file_cache,
-                            total_body_lines_emitted,
-                            ctx.max_body_lines,
-                            ctx.max_total_body_lines,
-                            ctx.include_doc_comments,
-                        );
-                    }
-
-                    callers.push(node);
-                    continue; // don't recurse past test methods
+            if let Some(existing) = caller_map.get_mut(&caller_key) {
+                // Same caller method — just add the call site line
+                if !existing.call_sites.contains(&line) {
+                    existing.call_sites.push(line);
                 }
+            } else {
+                if caller_map.len() >= ctx.limits.max_callers_per_level { continue; }
+                caller_order.push(caller_key.clone());
+                caller_map.insert(caller_key, CallerInfo {
+                    name: caller_name,
+                    parent: caller_parent,
+                    line: caller_line,
+                    di: caller_di,
+                    file_path: file_path.clone(),
+                    call_sites: vec![line],
+                });
             }
+        }
+    }
 
-            // Recurse with the CALLER's parent class as the class filter.
-            let mut next_chain = call_chain.to_vec();
-            next_chain.push(caller_name.clone());
-            let sub_callers = build_caller_tree(
-                &caller_name,
-                caller_parent.as_deref(),
-                max_depth,
-                current_depth + 1,
-                ctx,
-                visited,
+    // Phase 2: Build nodes from collected caller info
+    let mut callers: Vec<Value> = Vec::new();
+
+    for caller_key in &caller_order {
+        let info = match caller_map.get(caller_key) {
+            Some(i) => i,
+            None => continue,
+        };
+
+        if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
+        ctx.node_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+
+        let mut sorted_call_sites = info.call_sites.clone();
+        sorted_call_sites.sort();
+
+        // Impact analysis: check if this caller is a test method
+        if ctx.impact_analysis {
+            let caller_def = &ctx.def_idx.definitions[info.di as usize];
+            if is_test_method(caller_def, &info.file_path) {
+                let mut chain = call_chain.to_vec();
+                chain.push(info.name.clone());
+                let mut test_info = json!({
+                    "method": &info.name,
+                    "line": info.line,
+                    "file": &info.file_path,
+                    "depth": current_depth + 1,
+                    "callChain": chain,
+                });
+                if let Some(ref parent) = info.parent {
+                    test_info["class"] = json!(parent);
+                }
+                tests_found.push(test_info);
+
+                let mut node = build_caller_node(
+                    &info.name,
+                    info.parent.as_deref(),
+                    info.line,
+                    &sorted_call_sites,
+                    &info.file_path,
+                    vec![], // no sub-callers — test is a leaf
+                );
+                node["isTest"] = json!(true);
+
+                if ctx.include_body {
+                    let caller_line_end = ctx.def_idx.definitions.get(info.di as usize)
+                        .map(|d| d.line_end)
+                        .unwrap_or(info.line);
+                    inject_body_into_obj(
+                        &mut node,
+                        &info.file_path,
+                        info.line,
+                        caller_line_end,
+                        file_cache,
+                        total_body_lines_emitted,
+                        ctx.max_body_lines,
+                        ctx.max_total_body_lines,
+                        ctx.include_doc_comments,
+                    );
+                }
+
+                callers.push(node);
+                continue;
+            }
+        }
+
+        // Recurse with the CALLER's parent class as the class filter.
+        let mut next_chain = call_chain.to_vec();
+        next_chain.push(info.name.clone());
+        let sub_callers = build_caller_tree(
+            &info.name,
+            info.parent.as_deref(),
+            max_depth,
+            current_depth + 1,
+            ctx,
+            visited,
+            file_cache,
+            total_body_lines_emitted,
+            tests_found,
+            &next_chain,
+        );
+
+        let mut node = build_caller_node(
+            &info.name,
+            info.parent.as_deref(),
+            info.line,
+            &sorted_call_sites,
+            &info.file_path,
+            sub_callers,
+        );
+
+        // Inject body if requested
+        if ctx.include_body {
+            let caller_line_end = ctx.def_idx.definitions.get(info.di as usize)
+                .map(|d| d.line_end)
+                .unwrap_or(info.line);
+            inject_body_into_obj(
+                &mut node,
+                &info.file_path,
+                info.line,
+                caller_line_end,
                 file_cache,
                 total_body_lines_emitted,
-                tests_found,
-                &next_chain,
+                ctx.max_body_lines,
+                ctx.max_total_body_lines,
+                ctx.include_doc_comments,
             );
-
-            let mut node = build_caller_node(
-                &caller_name,
-                caller_parent.as_deref(),
-                caller_line,
-                line,
-                file_path,
-                sub_callers,
-            );
-
-            // Inject body if requested
-            if ctx.include_body {
-                let caller_line_end = ctx.def_idx.definitions.get(caller_di as usize)
-                    .map(|d| d.line_end)
-                    .unwrap_or(caller_line);
-                inject_body_into_obj(
-                    &mut node,
-                    file_path,
-                    caller_line,
-                    caller_line_end,
-                    file_cache,
-                    total_body_lines_emitted,
-                    ctx.max_body_lines,
-                    ctx.max_total_body_lines,
-                    ctx.include_doc_comments,
-                );
-            }
-
-            callers.push(node);
         }
+
+        callers.push(node);
     }
 
     // Interface resolution: expand to find callers via interface implementations

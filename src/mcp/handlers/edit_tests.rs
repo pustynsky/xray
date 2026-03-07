@@ -1587,3 +1587,47 @@ fn test_skipped_details_regex_skip() {
     assert_eq!(details.len(), 1);
     assert_eq!(details[0]["reason"], "regex pattern not found");
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Sequential edit occurrence hint tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_sequential_edit_hint_when_previous_edit_reduces_occurrences() {
+    let (tmp, filename, _) = create_temp_file("foo bar foo baz foo\n");
+    let ctx = make_ctx(tmp.path());
+
+    // First edit replaces first "foo" with "qux", leaving 2 "foo"s.
+    // Second edit requests occurrence=3 of "foo" — only 2 remain.
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "foo", "replace": "qux", "occurrence": 1 },
+            { "search": "foo", "replace": "qux", "occurrence": 3 }
+        ]
+    }));
+
+    assert!(result.is_error, "Should fail when occurrence exceeds count after prior edits");
+    let text = &result.content[0].text;
+    assert!(text.contains("sequentially"),
+        "Error should mention sequential application when edit_index > 0. Got: {}", text);
+}
+
+#[test]
+fn test_no_sequential_hint_for_first_edit() {
+    let (tmp, filename, _) = create_temp_file("foo bar\n");
+    let ctx = make_ctx(tmp.path());
+
+    // First edit (index 0) requests occurrence=5 but only 1 exists.
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "foo", "replace": "qux", "occurrence": 5 }
+        ]
+    }));
+
+    assert!(result.is_error, "Should fail when occurrence exceeds count");
+    let text = &result.content[0].text;
+    assert!(!text.contains("sequentially"),
+        "Error should NOT mention sequential when edit_index == 0. Got: {}", text);
+}
