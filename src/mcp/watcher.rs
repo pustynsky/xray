@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use crate::{clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 
 /// Start a file watcher thread that incrementally updates the in-memory index
 pub fn start_watcher(
@@ -20,7 +20,7 @@ pub fn start_watcher(
     extensions: Vec<String>,
     debounce_ms: u64,
     index_base: PathBuf,
-    content_ready: Arc<AtomicBool>,
+    _content_ready: Arc<AtomicBool>,
     _def_ready: Arc<AtomicBool>,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
@@ -37,11 +37,9 @@ pub fn start_watcher(
 
         // ── Reconciliation: catch files added/modified/removed while server was offline ──
         // Watcher is already listening — events during reconciliation are buffered in rx channel.
-        // Reset readiness flags during reconciliation so MCP requests get
-        // an instant "building" message instead of blocking on the write lock.
-        content_ready.store(false, Ordering::Release);
+        // Non-blocking: MCP requests work on old data during reconciliation.
+        // Only the brief write lock in Phase 4 blocks readers.
         reconcile_content_index(&index, &dir_str, &extensions);
-        content_ready.store(true, Ordering::Release);
 
         if let Some(ref def_idx) = def_index {
             // Non-blocking reconciliation: parse files OUTSIDE the lock, apply INSIDE.
@@ -163,29 +161,51 @@ fn process_batch(
 /// Update the content index: purge stale postings, remove deleted files,
 /// re-tokenize modified/new files, and shrink oversized collections.
 ///
+/// **Non-blocking:** Tokenizes all dirty files OUTSIDE the lock (Phase 1),
+/// determines purge IDs under a brief READ lock (Phase 2), then applies
+/// purge + insertions under WRITE lock (Phase 3).
+/// Write lock time: from `500ms + N × 5ms` → `500ms + N × 0.1ms`.
+///
 /// Returns `false` if the RwLock is poisoned (prior panic), signaling the caller to stop.
 fn update_content_index(
     index: &Arc<RwLock<ContentIndex>>,
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
 ) -> bool {
-    match index.write() {
-        Ok(mut idx) => {
-            // Collect file_ids of all existing files to purge in one pass
-            let mut purge_ids: HashSet<u32> = HashSet::new();
+    // ── Phase 1: Tokenize all dirty files OUTSIDE the lock (~5ms × N) ──
+    // During this phase, MCP requests work normally on the current index data.
+    let tokenized: Vec<TokenizedFileResult> = dirty_clean.iter()
+        .filter_map(|path| tokenize_file_standalone(path))
+        .collect();
+
+    // ── Phase 2: Determine purge IDs (READ LOCK — instant) ──
+    let purge_ids: HashSet<u32> = match index.read() {
+        Ok(idx) => {
+            let mut ids = HashSet::new();
             if let Some(ref p2id) = idx.path_to_id {
                 for path in removed_clean {
                     if let Some(&fid) = p2id.get(path) {
-                        purge_ids.insert(fid);
+                        ids.insert(fid);
                     }
                 }
                 for path in dirty_clean {
                     if let Some(&fid) = p2id.get(path) {
-                        purge_ids.insert(fid);
+                        ids.insert(fid);
                     }
                 }
             }
+            ids
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to acquire content index read lock (poisoned)");
+            return false;
+        }
+    };
+    // READ lock released here
 
+    // ── Phase 3: Apply under WRITE LOCK (~500ms purge + ~0.1ms × N insert) ──
+    match index.write() {
+        Ok(mut idx) => {
             // Batch purge: ONE pass over inverted index removes all stale postings
             if !purge_ids.is_empty() {
                 // Subtract old token counts before purge
@@ -202,7 +222,6 @@ fn update_content_index(
 
             // Process removed files: update path_to_id and zero token counts
             for path in removed_clean {
-                // Two-step borrow: look up fid first, then mutate
                 let fid = idx.path_to_id.as_ref()
                     .and_then(|p2id| p2id.get(path).copied());
                 if let Some(fid) = fid {
@@ -215,17 +234,15 @@ fn update_content_index(
                 }
             }
 
-            // Process dirty files: re-tokenize and insert new postings
-            // (purge already done above via batch_purge_files)
-            for path in dirty_clean {
-                reindex_file_after_purge(&mut idx, path);
+            // Apply pre-tokenized results (just insert pre-computed postings)
+            for result in tokenized {
+                apply_tokenized_file(&mut idx, result);
             }
 
             // Mark trigram index as dirty — will be rebuilt lazily on next substring search
             idx.trigram_dirty = true;
 
             // Conditionally shrink collections after retain() to release excess capacity.
-            // Only shrink when capacity > 2 × len to avoid unnecessary realloc storms.
             shrink_if_oversized(&mut idx);
         }
         Err(e) => {
@@ -238,26 +255,52 @@ fn update_content_index(
 
 /// Update the definition index: remove deleted files, re-parse modified/new files.
 ///
+/// **Non-blocking:** Parses all dirty files OUTSIDE the write lock (Phase 1),
+/// then applies results + removals under a brief write lock (Phase 2).
+/// Write lock time: from `N × 30ms` → `N × 0.1ms`.
+///
 /// Returns `false` if the RwLock is poisoned (prior panic), signaling the caller to stop.
 fn update_definition_index(
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
 ) -> bool {
-    if let Some(def_idx) = def_index {
-        match def_idx.write() {
-            Ok(mut idx) => {
-                for path in removed_clean {
-                    definitions::remove_file_from_def_index(&mut idx, path);
-                }
-                for path in dirty_clean {
-                    definitions::update_file_definitions(&mut idx, path);
+    let Some(def_idx) = def_index else { return true };
+
+    // ── Phase 1: Parse all dirty files OUTSIDE the lock (~30ms × N) ──
+    // During this phase, MCP requests work normally on the current index data.
+    let parsed: Vec<definitions::ParsedFileResult> = dirty_clean.iter()
+        .enumerate()
+        .filter_map(|(i, path)| definitions::parse_file_standalone(path, i as u32))
+        .collect();
+
+    // Track which dirty paths produced a ParsedFileResult
+    let parsed_paths: HashSet<PathBuf> = parsed.iter().map(|r| r.path.clone()).collect();
+
+    // ── Phase 2: Apply under brief WRITE LOCK (~0.1ms × N + removals) ──
+    match def_idx.write() {
+        Ok(mut idx) => {
+            // Remove deleted files
+            for path in removed_clean {
+                definitions::remove_file_from_def_index(&mut idx, path);
+            }
+            // Apply parsed results
+            for result in parsed {
+                definitions::apply_parsed_result(&mut idx, result);
+            }
+            // Clean up dirty files that didn't produce a ParsedFileResult
+            // (e.g., read error, unsupported extension). Remove stale definitions.
+            for path in dirty_clean {
+                if !parsed_paths.contains(path) {
+                    if let Some(&fid) = idx.path_to_id.get(path) {
+                        definitions::remove_file_definitions(&mut idx, fid);
+                    }
                 }
             }
-            Err(e) => {
-                error!(error = %e, "Failed to acquire definition index write lock (poisoned)");
-                return false;
-            }
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to acquire definition index write lock (poisoned)");
+            return false;
         }
     }
     true
@@ -278,6 +321,69 @@ fn shrink_if_oversized(idx: &mut ContentIndex) {
         && p2id.capacity() > p2id.len() * 2 {
             p2id.shrink_to_fit();
         }
+}
+
+/// Result of tokenizing a file outside the ContentIndex lock.
+/// Contains pre-computed token → line_numbers map ready to be applied.
+struct TokenizedFileResult {
+    path: PathBuf,
+    tokens: HashMap<String, Vec<u32>>,  // token → line numbers
+    total_tokens: u32,
+}
+
+/// Tokenize a file WITHOUT any lock on ContentIndex.
+///
+/// Reads the file (lossy UTF-8), tokenizes, and returns the result.
+/// Used by non-blocking update paths to move I/O outside the write lock.
+fn tokenize_file_standalone(path: &Path) -> Option<TokenizedFileResult> {
+    let (content, _was_lossy) = crate::read_file_lossy(path).ok()?;
+    let mut tokens: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut total: u32 = 0;
+    for (line_num, line) in content.lines().enumerate() {
+        for token in tokenize(line, DEFAULT_MIN_TOKEN_LEN) {
+            total += 1;
+            tokens.entry(token).or_default().push((line_num + 1) as u32);
+        }
+    }
+    Some(TokenizedFileResult {
+        path: path.to_path_buf(),
+        tokens,
+        total_tokens: total,
+    })
+}
+
+/// Apply a pre-tokenized file to the ContentIndex under write lock.
+///
+/// For existing files (already in path_to_id), assumes old postings have been
+/// purged via `batch_purge_files`. For new files, assigns a new file_id.
+fn apply_tokenized_file(index: &mut ContentIndex, result: TokenizedFileResult) {
+    let file_id = if let Some(ref mut p2id) = index.path_to_id {
+        if let Some(&fid) = p2id.get(&result.path) {
+            fid  // existing file (already purged via batch_purge)
+        } else {
+            // new file — assign new file_id
+            let fid = index.files.len() as u32;
+            index.files.push(result.path.to_string_lossy().to_string());
+            p2id.insert(result.path, fid);
+            index.file_token_counts.push(0); // will be updated below
+            fid
+        }
+    } else {
+        return;
+    };
+
+    // Insert pre-computed postings into inverted index
+    for (token, lines) in result.tokens {
+        index.total_tokens += lines.len() as u64;
+        index.index.entry(token)
+            .or_default()
+            .push(Posting { file_id, lines });
+    }
+
+    // Update file token count
+    if (file_id as usize) < index.file_token_counts.len() {
+        index.file_token_counts[file_id as usize] = result.total_tokens;
+    }
 }
 
 /// Periodically save in-memory indexes to disk to protect against data loss
@@ -367,6 +473,10 @@ pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
 ///
 /// Uses brute-force scan of the inverted index to remove old postings for the file,
 /// avoiding the need for a forward index (which consumed ~1.5 GB of RAM).
+///
+/// Used by tests for verifying single-file update behavior.
+/// Production code uses the non-blocking `tokenize_file_standalone` + `apply_tokenized_file` path.
+#[cfg(test)]
 fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
     let path_str = path.to_string_lossy().to_string();
 
@@ -467,6 +577,10 @@ fn batch_purge_files(
 /// This function assumes the file's old postings have ALREADY been purged
 /// (via `batch_purge_files`). It only reads the file, tokenizes, and inserts.
 /// For new files (not in path_to_id), it assigns a new file_id.
+///
+/// Superseded by `tokenize_file_standalone` + `apply_tokenized_file` in production.
+#[cfg(test)]
+#[allow(dead_code)]
 fn reindex_file_after_purge(index: &mut ContentIndex, path: &Path) {
     let path_str = path.to_string_lossy().to_string();
 
@@ -516,6 +630,9 @@ fn reindex_file_after_purge(index: &mut ContentIndex, path: &Path) {
 ///
 /// For batch operations (git pull, git checkout), prefer `batch_purge_files` which
 /// removes multiple file_ids in a single pass — O(total_postings) regardless of N.
+///
+/// Used by tests and by `update_file_in_index` / `remove_file_from_index`.
+#[cfg(test)]
 fn purge_file_from_inverted_index(
     inverted: &mut std::collections::HashMap<String, Vec<Posting>>,
     file_id: u32,
@@ -530,6 +647,9 @@ fn purge_file_from_inverted_index(
 ///
 /// Uses brute-force scan of the inverted index instead of forward index lookup,
 /// saving ~1.5 GB of RAM at the cost of ~50-100ms per file removal.
+///
+/// Used by tests. Production code uses batch_purge-based removal.
+#[cfg(test)]
 fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
     if let Some(ref mut path_to_id) = index.path_to_id
         && let Some(&file_id) = path_to_id.get(path) {
@@ -560,10 +680,13 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
 /// - **Modified** files: exist in both but `mtime > index.created_at` → re-tokenize
 /// - **Deleted** files: exist in `path_to_id` but not on disk → remove
 ///
-/// Uses a 2-second safety margin on `created_at` to handle clock precision.
-/// Takes the write lock on the index for the duration of the update.
+/// **Non-blocking:** Uses a 4-phase pattern:
+/// - Phase 1: Walk filesystem (NO lock)
+/// - Phase 2: Determine changes (READ lock — instant)
+/// - Phase 3: Tokenize all new/modified files (NO lock)
+/// - Phase 4: batch_purge + apply (WRITE lock — brief)
 ///
-/// Returns `(added, modified, removed)` counts.
+/// Uses a 2-second safety margin on `created_at` to handle clock precision.
 fn reconcile_content_index(
     index: &Arc<RwLock<ContentIndex>>,
     dir: &str,
@@ -572,18 +695,7 @@ fn reconcile_content_index(
     let start = std::time::Instant::now();
     let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
 
-    // Read created_at before acquiring write lock
-    let created_at = match index.read() {
-        Ok(idx) => idx.created_at,
-        Err(e) => {
-            error!(error = %e, "Failed to read content index for reconciliation");
-            return;
-        }
-    };
-
-    let threshold = UNIX_EPOCH + Duration::from_secs(created_at.saturating_sub(2));
-
-    // Walk filesystem to collect all matching files with their mtime
+    // ── Phase 1: Walk filesystem (NO LOCK) ──
     let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
 
     let mut walker = WalkBuilder::new(&dir_path);
@@ -614,42 +726,103 @@ fn reconcile_content_index(
 
     let scanned = disk_files.len();
 
-    // Acquire write lock and perform reconciliation
-    match index.write() {
-        Ok(mut idx) => {
-            // Collect indexed paths for deletion check
-            let indexed_paths: HashSet<PathBuf> = idx.path_to_id
-                .as_ref()
-                .map(|p2id| p2id.keys().cloned().collect())
-                .unwrap_or_default();
+    // ── Phase 2: Determine changes (READ LOCK — instant) ──
+    let (to_tokenize, to_remove, purge_ids, added, modified) = match index.read() {
+        Ok(idx) => {
+            let threshold = UNIX_EPOCH + Duration::from_secs(idx.created_at.saturating_sub(2));
 
+            let mut to_tokenize: Vec<PathBuf> = Vec::new();
+            let mut to_remove: Vec<PathBuf> = Vec::new();
+            let mut purge_ids: HashSet<u32> = HashSet::new();
             let mut added = 0usize;
             let mut modified = 0usize;
-            let mut removed = 0usize;
 
-            // Check for new and modified files
-            for (path, mtime) in &disk_files {
-                let in_index = idx.path_to_id
-                    .as_ref()
-                    .is_some_and(|p2id| p2id.contains_key(path));
+            if let Some(ref p2id) = idx.path_to_id {
+                // Check for new and modified files
+                for (path, mtime) in &disk_files {
+                    if let Some(&fid) = p2id.get(path) {
+                        // Existing file — check if modified
+                        if *mtime > threshold {
+                            to_tokenize.push(path.clone());
+                            purge_ids.insert(fid);
+                            modified += 1;
+                        }
+                    } else {
+                        // New file
+                        to_tokenize.push(path.clone());
+                        added += 1;
+                    }
+                }
 
-                if !in_index {
-                    // NEW file
-                    update_file_in_index(&mut idx, path);
-                    added += 1;
-                } else if *mtime > threshold {
-                    // MODIFIED file
-                    update_file_in_index(&mut idx, path);
-                    modified += 1;
+                // Check for deleted files
+                for (path, &fid) in p2id.iter() {
+                    if !disk_files.contains_key(path) {
+                        to_remove.push(path.clone());
+                        purge_ids.insert(fid);
+                    }
                 }
             }
 
-            // Check for deleted files
-            for path in &indexed_paths {
-                if !disk_files.contains_key(path) {
-                    remove_file_from_index(&mut idx, path);
-                    removed += 1;
+            (to_tokenize, to_remove, purge_ids, added, modified)
+        }
+        Err(e) => {
+            error!(error = %e, "Failed to read content index for reconciliation");
+            return;
+        }
+    };
+    // READ lock released here
+
+    let removed = to_remove.len();
+
+    if to_tokenize.is_empty() && to_remove.is_empty() {
+        let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        info!(
+            scanned,
+            elapsed_ms = format_args!("{:.1}", elapsed_ms),
+            "Content index reconciliation: all files up to date"
+        );
+        return;
+    }
+
+    // ── Phase 3: Tokenize all new/modified files (NO LOCK) ──
+    // During this phase, MCP requests work normally on the old index data.
+    let tokenized: Vec<TokenizedFileResult> = to_tokenize.iter()
+        .filter_map(|path| tokenize_file_standalone(path))
+        .collect();
+
+    // ── Phase 4: Apply under WRITE LOCK (~500ms purge + ~0.1ms × N insert) ──
+    match index.write() {
+        Ok(mut idx) => {
+            // Batch purge stale postings
+            if !purge_ids.is_empty() {
+                for &fid in &purge_ids {
+                    let old_count = if (fid as usize) < idx.file_token_counts.len() {
+                        idx.file_token_counts[fid as usize] as u64
+                    } else {
+                        0u64
+                    };
+                    idx.total_tokens = idx.total_tokens.saturating_sub(old_count);
                 }
+                batch_purge_files(&mut idx.index, &purge_ids);
+            }
+
+            // Process removed files: update path_to_id and zero token counts
+            for path in &to_remove {
+                let fid = idx.path_to_id.as_ref()
+                    .and_then(|p2id| p2id.get(path).copied());
+                if let Some(fid) = fid {
+                    if (fid as usize) < idx.file_token_counts.len() {
+                        idx.file_token_counts[fid as usize] = 0;
+                    }
+                    if let Some(ref mut p2id) = idx.path_to_id {
+                        p2id.remove(path);
+                    }
+                }
+            }
+
+            // Apply pre-tokenized results
+            for result in tokenized {
+                apply_tokenized_file(&mut idx, result);
             }
 
             // Mark trigram as dirty if anything changed
@@ -666,7 +839,7 @@ fn reconcile_content_index(
                     modified,
                     removed,
                     elapsed_ms = format_args!("{:.1}", elapsed_ms),
-                    "Content index reconciliation complete"
+                    "Content index reconciliation complete (non-blocking)"
                 );
             } else {
                 info!(
@@ -677,7 +850,7 @@ fn reconcile_content_index(
             }
 
             crate::index::log_memory(&format!(
-                "watcher: content reconciliation (scanned={}, added={}, modified={}, removed={}, {:.0}ms)",
+                "watcher: content reconciliation non-blocking (scanned={}, added={}, modified={}, removed={}, {:.0}ms)",
                 scanned, added, modified, removed, elapsed_ms
             ));
         }
