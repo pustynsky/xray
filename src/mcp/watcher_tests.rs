@@ -980,3 +980,196 @@ fn test_periodic_autosave_no_def_index() {
     );
     assert!(content_path.exists(), "Content index should be saved even without def index");
 }
+
+
+// ─── Tests for non-blocking content index building blocks ───────────────
+
+#[test]
+fn test_tokenize_file_standalone_returns_tokens() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("test.cs");
+    std::fs::write(&file, "class UserService { HttpClient client; }").unwrap();
+
+    let result = tokenize_file_standalone(&file).unwrap();
+    assert_eq!(result.path, file);
+    assert!(result.total_tokens > 0, "should have tokens");
+    assert!(result.tokens.contains_key("userservice"), "should contain 'userservice' token");
+    assert!(result.tokens.contains_key("httpclient"), "should contain 'httpclient' token");
+    assert!(result.tokens.contains_key("client"), "should contain 'client' token");
+}
+
+#[test]
+fn test_tokenize_file_standalone_nonexistent_file_returns_none() {
+    let result = tokenize_file_standalone(Path::new("/nonexistent/path/file.cs"));
+    assert!(result.is_none(), "nonexistent file should return None");
+}
+
+#[test]
+fn test_tokenize_file_standalone_line_numbers_correct() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("test.cs");
+    std::fs::write(&file, "alpha\nbeta\nalpha").unwrap();
+
+    let result = tokenize_file_standalone(&file).unwrap();
+    let alpha_lines = result.tokens.get("alpha").unwrap();
+    assert_eq!(alpha_lines, &vec![1u32, 3], "alpha should appear on lines 1 and 3");
+    let beta_lines = result.tokens.get("beta").unwrap();
+    assert_eq!(beta_lines, &vec![2u32], "beta should appear on line 2");
+}
+
+#[test]
+fn test_apply_tokenized_file_new_file() {
+    let mut index = ContentIndex {
+        files: vec!["existing.cs".to_string()],
+        index: HashMap::new(),
+        total_tokens: 5,
+        file_token_counts: vec![5],
+        path_to_id: Some({
+            let mut m = HashMap::new();
+            m.insert(PathBuf::from("existing.cs"), 0u32);
+            m
+        }),
+        ..Default::default()
+    };
+
+    let result = TokenizedFileResult {
+        path: PathBuf::from("new_file.cs"),
+        tokens: {
+            let mut t = HashMap::new();
+            t.insert("hello".to_string(), vec![1u32]);
+            t.insert("world".to_string(), vec![1u32, 2]);
+            t
+        },
+        total_tokens: 3,
+    };
+
+    apply_tokenized_file(&mut index, result);
+
+    assert_eq!(index.files.len(), 2, "should have 2 files");
+    assert_eq!(index.files[1], "new_file.cs");
+    assert_eq!(index.total_tokens, 5 + 3, "total_tokens should be updated");
+    assert_eq!(index.file_token_counts[1], 3);
+    assert!(index.index.contains_key("hello"), "should have 'hello' in inverted index");
+    assert!(index.index.contains_key("world"), "should have 'world' in inverted index");
+
+    // Verify postings have correct file_id
+    let hello_postings = &index.index["hello"];
+    assert_eq!(hello_postings[0].file_id, 1);
+}
+
+#[test]
+fn test_apply_tokenized_file_existing_file() {
+    let mut index = ContentIndex {
+        files: vec!["file.cs".to_string()],
+        index: HashMap::new(),
+        total_tokens: 0,
+        file_token_counts: vec![0],
+        path_to_id: Some({
+            let mut m = HashMap::new();
+            m.insert(PathBuf::from("file.cs"), 0u32);
+            m
+        }),
+        ..Default::default()
+    };
+
+    let result = TokenizedFileResult {
+        path: PathBuf::from("file.cs"),
+        tokens: {
+            let mut t = HashMap::new();
+            t.insert("updated".to_string(), vec![1u32]);
+            t
+        },
+        total_tokens: 1,
+    };
+
+    apply_tokenized_file(&mut index, result);
+
+    assert_eq!(index.files.len(), 1, "should still have 1 file (existing)");
+    assert_eq!(index.total_tokens, 1, "total_tokens should be updated");
+    assert_eq!(index.file_token_counts[0], 1);
+    let postings = &index.index["updated"];
+    assert_eq!(postings[0].file_id, 0, "should use existing file_id");
+}
+
+#[test]
+fn test_apply_tokenized_file_no_path_to_id() {
+    let mut index = ContentIndex {
+        path_to_id: None,
+        ..Default::default()
+    };
+
+    let result = TokenizedFileResult {
+        path: PathBuf::from("file.cs"),
+        tokens: HashMap::new(),
+        total_tokens: 0,
+    };
+
+    // Should not panic — just return early
+    apply_tokenized_file(&mut index, result);
+    assert_eq!(index.total_tokens, 0);
+}
+
+#[test]
+fn test_nonblocking_update_content_index_tokens_consistent() {
+    let (tmp, index) = make_batch_test_setup();
+
+    // Modify file a
+    let file_a = tmp.path().join("a.cs");
+    std::fs::write(&file_a, "class NewClass { int value; }").unwrap();
+
+    let mut dirty = HashSet::new();
+    dirty.insert(file_a);
+    let mut removed = HashSet::new();
+
+    process_batch(&index, &None, &mut dirty, &mut removed);
+
+    let idx = index.read().unwrap();
+    // Verify total_tokens == sum of file_token_counts (consistency invariant)
+    let sum: u64 = idx.file_token_counts.iter().map(|&c| c as u64).sum();
+    assert_eq!(idx.total_tokens, sum,
+        "total_tokens ({}) should equal sum of file_token_counts ({}) after nonblocking update",
+        idx.total_tokens, sum);
+}
+
+#[test]
+fn test_nonblocking_update_content_index_new_file_tokens_consistent() {
+    let (tmp, index) = make_batch_test_setup();
+
+    // Add a new file
+    let file_c = tmp.path().join("c.cs");
+    std::fs::write(&file_c, "class Gamma { string name; }").unwrap();
+
+    let mut dirty = HashSet::new();
+    dirty.insert(file_c);
+    let mut removed = HashSet::new();
+
+    process_batch(&index, &None, &mut dirty, &mut removed);
+
+    let idx = index.read().unwrap();
+    let sum: u64 = idx.file_token_counts.iter().map(|&c| c as u64).sum();
+    assert_eq!(idx.total_tokens, sum,
+        "total_tokens ({}) should equal sum of file_token_counts ({}) after adding new file",
+        idx.total_tokens, sum);
+    assert_eq!(idx.files.len(), 3, "should have 3 files after adding new file");
+}
+
+#[test]
+fn test_nonblocking_update_content_index_remove_tokens_consistent() {
+    let (tmp, index) = make_batch_test_setup();
+
+    // Remove file a
+    let file_a = tmp.path().join("a.cs");
+    let clean_a = crate::clean_path(&file_a.to_string_lossy());
+
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+    removed.insert(PathBuf::from(&clean_a));
+
+    process_batch(&index, &None, &mut dirty, &mut removed);
+
+    let idx = index.read().unwrap();
+    let sum: u64 = idx.file_token_counts.iter().map(|&c| c as u64).sum();
+    assert_eq!(idx.total_tokens, sum,
+        "total_tokens ({}) should equal sum of file_token_counts ({}) after removal",
+        idx.total_tokens, sum);
+}
