@@ -1139,6 +1139,37 @@ $testBlocks += , {
 }
 
 # T-EDIT-MULTI: search_edit multi-file + insert after/before + expectedContext
+# T-MULTI-METHOD-CALLERS: multi-method batch returns results array
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-MULTI-METHOD callers-multi-method-batch"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_multi_method_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "service.ts") -Value "export class OrderService {`n    process(): void {`n        console.log('processing');`n    }`n    validate(): boolean {`n        return true;`n    }`n}"
+        Set-Content -Path (Join-Path $tmpDir "consumer.ts") -Value "import { OrderService } from './service';`n`nexport class Consumer {`n    run(): void {`n        const svc = new OrderService();`n        svc.process();`n        svc.validate();`n    }`n}"
+        & $Bin content-index -d $tmpDir -e ts 2>&1 | Out-Null
+        & $Bin def-index -d $tmpDir -e ts 2>&1 | Out-Null
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"process,validate","class":"OrderService","direction":"up","depth":1}}}') -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no JSON-RPC response)" } }
+        $errors = @()
+        if ($jsonLine -notmatch 'results') { $errors += 'missing results array' }
+        if ($jsonLine -notmatch 'totalMethods') { $errors += 'missing totalMethods in summary' }
+        if ($jsonLine -notmatch 'process') { $errors += 'process method not in results' }
+        if ($jsonLine -notmatch 'validate') { $errors += 'validate method not in results' }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (multi-method batch returned results array)" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 $testBlocks += , {
     param($Bin, $Dir, $Ext)
     $name = "T-EDIT-MULTI search-edit-multi-file-insert-context"

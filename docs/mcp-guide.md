@@ -213,7 +213,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 
 | Parameter            | Description                                                                                                                                         |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `method` (required)  | Method name to trace                                                                                                                                |
+| `method` (required)  | Method name to trace. Comma-separated for multi-method batch (e.g., `"Foo,Bar,Baz"`). Each method gets an independent call tree. Single method returns `{callTree}`, multiple returns `{results: [{method, callTree, nodesInTree}, ...]}` |
 | `class`              | Scope to a specific class. DI-aware: `class: "UserService"` also finds callers using `IUserService`. Works for both `"up"` and `"down"` directions. |
 | `direction`          | `"up"` = find callers (default), `"down"` = find callees                                                                                            |
 | `depth`              | Max recursion depth (default: 3, max: 10)                                                                                                           |
@@ -321,6 +321,59 @@ When `includeBody: true`, each node in the call tree includes source code:
 | `rootMethod`      | `includeBody=true`                               | Top-level object with the searched method's own body |
 | `callSite`        | Always (caller nodes)                            | Line number of the first call site                   |
 | `callSites`       | >1 call sites in same caller                     | Array of all call site line numbers (e.g., `[273, 475, 486]`). Only present when a method is called multiple times within the same caller method. `callSite` is always the first element. |
+
+### Multi-Method Batch
+
+Query multiple methods in a single call to reduce MCP round trips. Each method gets its own independent call tree with its own `maxTotalNodes` budget. `maxTotalBodyLines` is shared across all methods.
+
+```json
+// Request: trace callers of 3 methods at once
+{
+  "method": "GetUser,SaveOrder,ValidateInput",
+  "class": "OrderService",
+  "direction": "up",
+  "depth": 2
+}
+
+// Response: results array with per-method trees
+{
+  "results": [
+    {
+      "method": "GetUser",
+      "callTree": [...],
+      "nodesInTree": 5
+    },
+    {
+      "method": "SaveOrder",
+      "callTree": [...],
+      "nodesInTree": 12
+    },
+    {
+      "method": "ValidateInput",
+      "callTree": [...],
+      "nodesInTree": 3
+    }
+  ],
+  "query": {
+    "methods": ["GetUser", "SaveOrder", "ValidateInput"],
+    "class": "OrderService",
+    "direction": "up",
+    "depth": 2
+  },
+  "summary": {
+    "totalMethods": 3,
+    "totalNodes": 20,
+    "searchTimeMs": 0.45
+  }
+}
+```
+
+**Budget behavior:**
+- `maxTotalNodes` — per-method (each gets full budget independently)
+- `maxTotalBodyLines` — shared across all methods
+- Response size auto-scales: `max(base, 32KB × N methods)`, capped at 128KB
+
+**Backward compatibility:** Single-method calls (no comma) return the existing format with `callTree` at the top level. Multi-method calls return `results` array.
 
 ### Limitations
 

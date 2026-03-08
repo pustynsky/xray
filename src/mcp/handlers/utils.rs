@@ -345,6 +345,7 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         let body_fields = &["body", "bodyStartLine", "bodyTruncated", "totalBodyLines", "docCommentLines"];
         if let Some(obj) = output.as_object_mut() {
             let mut stripped = false;
+            // Strip bodies from top-level arrays
             for key in &["definitions", "callTree", "containingDefinitions"] {
                 if let Some(arr) = obj.get_mut(*key).and_then(|v| v.as_array_mut()) {
                     for entry in arr.iter_mut() {
@@ -356,6 +357,36 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
                             }
                             // Also strip body from nested callers/callees arrays
                             strip_bodies_recursive(entry_obj, body_fields);
+                        }
+                    }
+                }
+            }
+            // Strip bodies from multi-method batch results: results[].callTree[]
+            if let Some(results_arr) = obj.get_mut("results").and_then(|v| v.as_array_mut()) {
+                for result_entry in results_arr.iter_mut() {
+                    if let Some(result_obj) = result_entry.as_object_mut() {
+                        // Strip rootMethod body
+                        if let Some(root_method) = result_obj.get_mut("rootMethod") {
+                            if let Some(rm_obj) = root_method.as_object_mut() {
+                                for field in body_fields {
+                                    if rm_obj.remove(*field).is_some() {
+                                        stripped = true;
+                                    }
+                                }
+                            }
+                        }
+                        // Strip bodies from callTree entries
+                        if let Some(call_tree) = result_obj.get_mut("callTree").and_then(|v| v.as_array_mut()) {
+                            for entry in call_tree.iter_mut() {
+                                if let Some(entry_obj) = entry.as_object_mut() {
+                                    for field in body_fields {
+                                        if entry_obj.remove(*field).is_some() {
+                                            stripped = true;
+                                        }
+                                    }
+                                    strip_bodies_recursive(entry_obj, body_fields);
+                                }
+                            }
                         }
                     }
                 }

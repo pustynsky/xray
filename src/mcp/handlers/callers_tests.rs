@@ -2752,3 +2752,220 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
     assert_eq!(chain[1].as_str().unwrap(), "handle");
     assert_eq!(chain[2].as_str().unwrap(), "testHandle");
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Multi-method batch tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_multi_method_returns_results_array() {
+    // When method contains commas, response should have "results" array
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+        method_def(0, "validate", "OrderService", 20, 30),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "process,validate",
+        "depth": 1
+    }));
+    assert!(!result.is_error, "Multi-method should not error: {:?}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should have "results" array with 2 entries
+    let results = v["results"].as_array().expect("Should have results array");
+    assert_eq!(results.len(), 2, "Should have 2 method results");
+    assert_eq!(results[0]["method"].as_str().unwrap(), "process");
+    assert_eq!(results[1]["method"].as_str().unwrap(), "validate");
+
+    // Each result should have callTree
+    assert!(results[0].get("callTree").is_some(), "Each result should have callTree");
+    assert!(results[1].get("callTree").is_some(), "Each result should have callTree");
+
+    // Summary should have totalMethods
+    assert_eq!(v["summary"]["totalMethods"].as_u64().unwrap(), 2);
+
+    // Query should have methods array
+    let methods = v["query"]["methods"].as_array().expect("Should have methods in query");
+    assert_eq!(methods.len(), 2);
+}
+
+#[test]
+fn test_single_method_no_comma_returns_calltree_directly() {
+    // Single method (no comma) should return backward-compatible format
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "process",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should have callTree directly (not results array)
+    assert!(v.get("callTree").is_some(), "Single method should have callTree directly");
+    assert!(v.get("results").is_none(), "Single method should NOT have results array");
+
+    // Query should have "method" (string), not "methods" (array)
+    assert!(v["query"]["method"].is_string(), "Query should have method string");
+}
+
+#[test]
+fn test_multi_method_with_spaces_trimmed() {
+    // Spaces around method names should be trimmed
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+        method_def(0, "validate", "OrderService", 20, 30),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": " process , validate ",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = v["results"].as_array().expect("Should have results");
+    assert_eq!(results.len(), 2);
+    assert_eq!(results[0]["method"].as_str().unwrap(), "process");
+    assert_eq!(results[1]["method"].as_str().unwrap(), "validate");
+}
+
+#[test]
+fn test_multi_method_empty_after_split_returns_error() {
+    // Edge case: only commas and spaces
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": " , , ",
+        "depth": 1
+    }));
+    assert!(result.is_error, "Empty method list should return error");
+}
+
+#[test]
+fn test_multi_method_each_gets_independent_nodes() {
+    // Each method should get its own nodesInTree count
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+        method_def(0, "validate", "OrderService", 20, 30),
+        method_def(0, "save", "OrderService", 35, 45),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "process,validate,save",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results.len(), 3);
+
+    // Each should have nodesInTree field
+    for r in results {
+        assert!(r.get("nodesInTree").is_some(), "Each result should have nodesInTree");
+    }
+}
+
+#[test]
+fn test_multi_method_with_class_filter() {
+    // Class filter should be applied to all methods
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+        method_def(0, "validate", "OrderService", 20, 30),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "process,validate",
+        "class": "OrderService",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(v["query"]["class"].as_str().unwrap(), "OrderService");
+}
+
+#[test]
+fn test_multi_method_direction_down() {
+    // Multi-method should work with direction=down too
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+        method_def(0, "validate", "OrderService", 20, 30),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "process,validate",
+        "direction": "down",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(v["query"]["direction"].as_str().unwrap(), "down");
+    let results = v["results"].as_array().unwrap();
+    assert_eq!(results.len(), 2);
+}
