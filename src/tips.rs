@@ -321,7 +321,7 @@ pub fn parameter_examples() -> Value {
         },
         "search_callers": {
             "class": "'UserService' -> DI-aware: also finds callers using IUserService. SQL: class = schema name (e.g., class='dbo', class='Sales'). Without class, results mix callers from ALL classes/schemas with same method name",
-            "method": "'GetUserAsync'. Angular/TS only: pass a selector (e.g. 'app-header') as method with direction='up' to find parent components that embed it via templateChildren. Returns templateUsage: true for template-based relationships",
+            "method": "'GetUserAsync'. Multi-method batch: 'GetUserAsync,SaveChangesAsync,ValidateInput' -> returns independent call trees for each method in a single call (saves N-1 MCP round trips). Single method returns {callTree: [...]}, multiple returns {results: [{method, callTree, nodesInTree}, ...]} with shared body budget. Angular/TS only: pass a selector (e.g. 'app-header') as method with direction='up' to find parent components that embed it via templateChildren. Returns templateUsage: true for template-based relationships",
             "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees). Angular/TS only: 'down' with class name shows child components from HTML template (recursive with depth). 'up' with selector (e.g. 'app-header') finds parent components recursively — depth=3 traverses grandparents, great-grandparents etc. Parents nested in 'parents' field",
             "resolveInterfaces": "When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo",
             "includeBody": "includeBody=true -> each node in call tree includes 'body' (source lines) and 'bodyStartLine'. Also adds a top-level 'rootMethod' object with the searched method's own body. Eliminates the need for a separate search_definitions call. Default: false",
@@ -512,7 +512,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     // --- Quick reference (Phase 1: 5 bullets instead of 18 full tips) ---
     out.push_str("search-index MCP server -- Quick Reference\n\n");
     out.push_str("1. USE search_definitions for code exploration -- returns classes, methods, bodies, file paths in ONE call. Supports containsLine for stack traces, includeBody for source code.\n");
-    out.push_str("2. USE search_callers for call chains -- sub-millisecond full call tree. ALWAYS specify class parameter.\n");
+    out.push_str("2. USE search_callers for call chains -- sub-millisecond full call tree. ALWAYS specify class parameter. Comma-separated method for batch (method='Foo,Bar,Baz' returns independent trees in one call).\n");
     out.push_str("3. USE search_grep for content search -- substring ON by default, multi-term OR with commas, countOnly for reconnaissance.\n");
     out.push_str("4. USE search_fast for file lookup -- 90x faster than search_find.\n");
     out.push_str("5. AIM for <=3 search calls per task. Call search_help for full guide with examples.\n");

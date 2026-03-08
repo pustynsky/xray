@@ -97,11 +97,29 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         ),
     };
 
-    let method_name = match args.get("method").and_then(|v| v.as_str()) {
+    let method_raw = match args.get("method").and_then(|v| v.as_str()) {
         Some(m) => m.to_string(),
         None => return ToolCallResult::error("Missing required parameter: method".to_string()),
     };
     let class_filter = args.get("class").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+    // Multi-method support: split by comma
+    let methods: Vec<String> = method_raw.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if methods.is_empty() {
+        return ToolCallResult::error("method parameter is empty after parsing".to_string());
+    }
+
+    // For multi-method batch, delegate to batch handler
+    if methods.len() > 1 {
+        return handle_multi_method_callers(ctx, args, def_index, &methods, class_filter.as_deref());
+    }
+
+    // Single method — existing behavior (backward compatible)
+    let method_name = methods.into_iter().next().unwrap();
 
     let max_depth = {
         let raw = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
@@ -407,6 +425,228 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         }
         ToolCallResult::success(json_to_string(&output))
     }
+}
+
+// ─── Multi-method batch handler ──────────────────────────────────────
+
+/// Handle multi-method batch: run independent call trees for each method,
+/// return results grouped by method. Body budget is SHARED across all methods.
+/// Each method gets its own independent `maxTotalNodes` and `visited` set.
+fn handle_multi_method_callers(
+    ctx: &HandlerContext,
+    args: &Value,
+    def_index: &std::sync::Arc<std::sync::RwLock<DefinitionIndex>>,
+    methods: &[String],
+    class_filter: Option<&str>,
+) -> ToolCallResult {
+    // Parse common parameters (same as single-method)
+    let max_depth = {
+        let raw = args.get("depth").and_then(|v| v.as_u64()).unwrap_or(3);
+        if raw == 0 {
+            return ToolCallResult::error(
+                "depth must be >= 1. Use depth=1 to find direct callers without recursion.".to_string()
+            );
+        }
+        raw.min(10) as usize
+    };
+    let direction = {
+        let raw = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
+        let d = raw.to_lowercase();
+        if d != "up" && d != "down" {
+            return ToolCallResult::error(format!(
+                "Invalid direction '{}'. Must be 'up' or 'down'.", raw
+            ));
+        }
+        d
+    };
+    let ext_filter = args.get("ext").and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| ctx.server_ext.clone());
+    let resolve_interfaces = args.get("resolveInterfaces").and_then(|v| v.as_bool()).unwrap_or(true);
+    let max_callers_per_level = args.get("maxCallersPerLevel").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    let max_total_nodes = {
+        let raw = args.get("maxTotalNodes").and_then(|v| v.as_u64()).unwrap_or(200) as usize;
+        if raw == 0 { usize::MAX } else { raw }
+    };
+    let exclude_dir: Vec<String> = args.get("excludeDir")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
+        .unwrap_or_default();
+    let exclude_file: Vec<String> = args.get("excludeFile")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_lowercase())).collect())
+        .unwrap_or_default();
+    let include_doc_comments = args.get("includeDocComments").and_then(|v| v.as_bool()).unwrap_or(false);
+    let include_body = args.get("includeBody").and_then(|v| v.as_bool()).unwrap_or(false)
+        || include_doc_comments;
+    let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
+    let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(300) as usize;
+    let impact_analysis = args.get("impactAnalysis").and_then(|v| v.as_bool()).unwrap_or(false);
+    if impact_analysis && direction != "up" {
+        return ToolCallResult::error(
+            "impactAnalysis only works with direction='up'.".to_string()
+        );
+    }
+
+    let search_start = Instant::now();
+
+    let content_index = match ctx.index.read() {
+        Ok(idx) => idx,
+        Err(e) => return ToolCallResult::error(format!("Failed to acquire content index lock: {}", e)),
+    };
+    let def_idx = match def_index.read() {
+        Ok(idx) => idx,
+        Err(e) => return ToolCallResult::error(format!("Failed to acquire definition index lock: {}", e)),
+    };
+
+    // Shared mutable state across all methods:
+    // - file_cache: reuse file reads across methods (optimization)
+    // - total_body_lines_emitted: SHARED body budget (prevents response explosion)
+    let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total_body_lines_emitted: usize = 0;
+    let mut total_nodes_all: usize = 0;
+
+    let mut results: Vec<Value> = Vec::new();
+
+    for method_name in methods {
+        // Each method gets its OWN node_count and visited set (per-method budget)
+        let node_count = AtomicUsize::new(0);
+        let limits = CallerLimits { max_callers_per_level, max_total_nodes };
+
+        let caller_ctx = CallerTreeContext {
+            content_index: &content_index,
+            def_idx: &def_idx,
+            ext_filter: &ext_filter,
+            exclude_dir: &exclude_dir,
+            exclude_file: &exclude_file,
+            resolve_interfaces,
+            limits: &limits,
+            node_count: &node_count,
+            include_body,
+            include_doc_comments,
+            max_body_lines,
+            max_total_body_lines,
+            impact_analysis,
+        };
+
+        let method_lower = method_name.to_lowercase();
+
+        // Build root method info
+        let root_method = if include_body {
+            build_root_method_info(
+                &method_lower,
+                class_filter,
+                &def_idx,
+                &mut file_cache,
+                &mut total_body_lines_emitted,
+                max_body_lines,
+                max_total_body_lines,
+                include_doc_comments,
+            )
+        } else {
+            None
+        };
+
+        let mut method_result = json!({ "method": method_name });
+
+        if direction == "up" {
+            let mut visited: HashSet<String> = HashSet::new();
+            let mut tests_found: Vec<Value> = Vec::new();
+            let initial_chain = vec![method_name.clone()];
+            let tree = build_caller_tree(
+                method_name,
+                class_filter,
+                max_depth,
+                0,
+                &caller_ctx,
+                &mut visited,
+                &mut file_cache,
+                &mut total_body_lines_emitted,
+                &mut tests_found,
+                &initial_chain,
+            );
+            let tree = dedup_caller_tree(tree);
+            let method_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
+            total_nodes_all += method_nodes;
+
+            method_result["callTree"] = json!(tree);
+            method_result["nodesInTree"] = json!(method_nodes);
+
+            if let Some(root) = &root_method {
+                method_result["rootMethod"] = root.clone();
+            }
+
+            if impact_analysis && !tests_found.is_empty() {
+                // Dedup tests
+                tests_found.sort_by(|a, b| {
+                    let key = |v: &Value| format!("{}.{}.{}",
+                        v["class"].as_str().unwrap_or(""),
+                        v["method"].as_str().unwrap_or(""),
+                        v["file"].as_str().unwrap_or(""));
+                    key(a).cmp(&key(b))
+                });
+                tests_found.dedup_by(|a, b| {
+                    a["method"] == b["method"]
+                        && a["class"] == b["class"]
+                        && a["file"] == b["file"]
+                });
+                method_result["testsCovering"] = json!(tests_found);
+            }
+        } else {
+            let tree = build_callee_tree(
+                method_name,
+                class_filter,
+                max_depth,
+                0,
+                &caller_ctx,
+                &mut HashSet::new(),
+                &mut file_cache,
+                &mut total_body_lines_emitted,
+            );
+            let method_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
+            total_nodes_all += method_nodes;
+
+            method_result["callTree"] = json!(tree);
+            method_result["nodesInTree"] = json!(method_nodes);
+
+            if let Some(root) = &root_method {
+                method_result["rootMethod"] = root.clone();
+            }
+        }
+
+        results.push(method_result);
+    }
+
+    let search_elapsed = search_start.elapsed();
+    let mut summary = json!({
+        "totalMethods": methods.len(),
+        "totalNodes": total_nodes_all,
+        "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
+    });
+    if include_body {
+        summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
+    }
+    inject_branch_warning(&mut summary, ctx);
+
+    let mut output = json!({
+        "results": results,
+        "query": {
+            "methods": methods,
+            "direction": direction,
+            "depth": max_depth,
+            "maxCallersPerLevel": max_callers_per_level,
+            "maxTotalNodes": max_total_nodes,
+        },
+        "summary": summary,
+    });
+    if let Some(cls) = class_filter {
+        output["query"]["class"] = json!(cls);
+    }
+    if impact_analysis {
+        output["query"]["impactAnalysis"] = json!(true);
+    }
+
+    ToolCallResult::success(json_to_string(&output))
 }
 
 // ─── Internal helpers ───────────────────────────────────────────────

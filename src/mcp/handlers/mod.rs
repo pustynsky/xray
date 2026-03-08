@@ -309,7 +309,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                 "properties": {
                     "method": {
                         "type": "string",
-                        "description": "Method name to find callers/callees for."
+                        "description": "Method name to find callers/callees for. Comma-separated for multi-method batch (e.g., 'Foo,Bar,Baz'). Each method gets an independent call tree. Single method returns {callTree: [...]}, multiple methods return {results: [{method, callTree}, ...]}."
                     },
                     "class": {
                         "type": "string",
@@ -559,6 +559,13 @@ const SEARCH_HELP_MIN_RESPONSE_BYTES: usize = 32_768;
 /// and search_callers). Users can increase further via --max-response-kb CLI flag.
 const INCLUDE_BODY_MIN_RESPONSE_BYTES: usize = 65_536;
 
+/// Per-method response budget scaling for multi-method batch callers (32KB per method).
+/// E.g., 3 methods → max(base, 32KB × 3) = 96KB, capped at 128KB.
+const MULTI_METHOD_RESPONSE_BYTES_PER: usize = 32_768;
+
+/// Maximum response budget cap for multi-method batch (128KB).
+const MULTI_METHOD_RESPONSE_MAX: usize = 131_072;
+
 /// Returns true when a tool requires the content index to be ready.
 fn requires_content_index(tool_name: &str) -> bool {
     matches!(tool_name, "search_grep" | "search_fast" | "search_reindex")
@@ -615,7 +622,8 @@ pub fn dispatch_tool(
     }
 
     // Determine effective response budget:
-    // - search_help: 20KB (static reference content)
+    // - search_help: 32KB (static reference content)
+    // - Multi-method callers: 32KB × N, capped at 128KB
     // - Any tool with includeBody=true: 64KB (source code is large)
     // - Everything else: default (16KB)
     let has_include_body = arguments
@@ -627,8 +635,21 @@ pub fn dispatch_tool(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
+    // Count methods for multi-method budget scaling
+    let method_count = if tool_name == "search_callers" {
+        arguments.get("method").and_then(|v| v.as_str())
+            .map(|m| m.split(',').filter(|s| !s.trim().is_empty()).count())
+            .unwrap_or(1)
+    } else {
+        1
+    };
+
     let effective_max = if tool_name == "search_help" {
         ctx.max_response_bytes.max(SEARCH_HELP_MIN_RESPONSE_BYTES)
+    } else if tool_name == "search_callers" && method_count > 1 {
+        // Multi-method batch: scale budget proportionally, cap at 128KB
+        let scaled = MULTI_METHOD_RESPONSE_BYTES_PER * method_count;
+        ctx.max_response_bytes.max(scaled.min(MULTI_METHOD_RESPONSE_MAX))
     } else if has_include_body {
         ctx.max_response_bytes.max(INCLUDE_BODY_MIN_RESPONSE_BYTES)
     } else {

@@ -8,6 +8,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-03-08
 
+### Features
+- **Multi-method batch in `search_callers`** — The `method` parameter now accepts comma-separated method names (e.g., `"GetUser,SaveOrder,ValidateInput"`). Each method gets an independent call tree with its own `maxTotalNodes` budget. Body budget (`maxTotalBodyLines`) is shared across all methods. Single method returns the existing format (`{callTree: [...]}`); multiple methods return `{results: [{method, callTree, nodesInTree}, ...]}`. Response budget auto-scales: `max(base, 32KB × N)`, capped at 128KB. Truncation system (Phase 5a) strips bodies from nested `results[].callTree` before truncating entire results. 7 new unit tests + 1 E2E test (`T-MULTI-METHOD`). All 1373 unit tests pass, zero regressions.
+
 ### Internal
 - **Char-safe truncation in `extract_semantic_prefix`** — Replaced `combined[..MAX_PREFIX_LEN]` byte-slice with `.chars().take(MAX_PREFIX_LEN).collect()` for consistency with `sanitize_for_filename` style. No behavioral change (inputs are always ASCII after sanitization), but eliminates a potential future panic if the sanitization pipeline changes.
 
@@ -607,8 +610,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric                  | Value                       |
 | ----------------------- | --------------------------- |
-| Unit tests (latest)     | ~1366 (with lang-rust)      |
-| E2E tests (latest)      | 64                          |
+| Unit tests (latest)     | ~1373 (with lang-rust)      |
+| E2E tests (latest)      | 65                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |
 | Memory reduction        | 3.7 GB → 2.1 GB (−43%)      |

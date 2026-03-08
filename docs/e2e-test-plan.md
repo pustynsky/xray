@@ -7372,6 +7372,30 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 ---
 
+### T-MULTI-METHOD: `search_callers` — Multi-method batch returns results array
+
+**Tool:** `search_callers`
+
+**Background:** When `method` parameter contains commas (e.g., `"process,validate"`), `search_callers` returns independent call trees for each method in a single MCP call. This saves N-1 round trips. Each method gets its own `maxTotalNodes` budget. Body lines budget (`maxTotalBodyLines`) is shared across all methods. Response budget auto-scales with method count (32KB × N, capped at 128KB).
+
+**Scenario:** Create two TS files: service with `process()` and `validate()` methods, consumer that calls both. Send multi-method callers request with `method: "process,validate"`.
+
+**Expected:**
+- Response has `results` array with 2 entries (one per method)
+- Each entry has `method` name and `callTree` array
+- `summary` has `totalMethods: 2`
+- `query` has `methods` array (not single `method` string)
+
+**Backward compatibility:** Single method (no comma) returns the existing format with `callTree` at top level.
+
+**Unit tests:** `test_multi_method_returns_results_array`, `test_single_method_no_comma_returns_calltree_directly`, `test_multi_method_with_spaces_trimmed`, `test_multi_method_empty_after_split_returns_error`, `test_multi_method_each_gets_independent_nodes`, `test_multi_method_with_class_filter`, `test_multi_method_direction_down`
+
+**E2E test:** `T-MULTI-METHOD` in `e2e-test.ps1`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T-CALLERS-HINT: `search_callers` — Hint when 0 results with class filter
 
 **Tool:** `search_callers`
@@ -7790,3 +7814,4 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 #### T-CHUNKED-06: E2E — existing tests pass with chunked build
 
 **Coverage:** All 64 E2E tests pass with the chunked build binary (no behavioral changes).
+
