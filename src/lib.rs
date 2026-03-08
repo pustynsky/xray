@@ -161,7 +161,7 @@ pub fn extract_semantic_prefix(canonical: &std::path::Path) -> String {
             let combined = format!("{}_{}", parent, name);
             // Truncate the combined result
             if combined.len() > MAX_PREFIX_LEN {
-                combined[..MAX_PREFIX_LEN].to_string()
+                combined.chars().take(MAX_PREFIX_LEN).collect::<String>()
             } else {
                 combined
             }

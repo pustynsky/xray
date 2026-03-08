@@ -8,6 +8,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-03-08
 
+### Internal
+- **Char-safe truncation in `extract_semantic_prefix`** — Replaced `combined[..MAX_PREFIX_LEN]` byte-slice with `.chars().take(MAX_PREFIX_LEN).collect()` for consistency with `sanitize_for_filename` style. No behavioral change (inputs are always ASCII after sanitization), but eliminates a potential future panic if the sanitization pipeline changes.
+
 ### Performance
 - **Non-blocking incremental updates for content and definition indexes** — MCP requests are no longer blocked for 12-35 seconds during `git pull` / `git checkout`. Both `update_content_index()` and `update_definition_index()` in the watcher now perform heavy I/O (file reading, tokenization, tree-sitter parsing) OUTSIDE the write lock, holding it only for the brief apply phase. Content index: new `tokenize_file_standalone()` and `apply_tokenized_file()` building blocks move file I/O and tokenization outside the lock. Definition index: `parse_file_standalone()` (already existed) now called outside the write lock. Content startup reconciliation (`reconcile_content_index()`) restructured into 4 phases: FS walk (no lock) → determine changes (read lock) → tokenize (no lock) → apply (write lock). Write lock duration: content from `500ms + N × 5ms` → `500ms + N × 0.1ms`; definition from `N × 30ms` → `N × 0.1ms`. For git pull with 300 files: total MCP blocking reduced from ~12s to ~560ms. `content_ready` flag no longer set to false during reconciliation — MCP requests work on old data. 9 new unit tests. All 1366 unit tests + 64 E2E tests pass.
 
