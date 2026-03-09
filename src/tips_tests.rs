@@ -80,6 +80,12 @@ fn test_render_instructions_contains_key_terms() {
     assert!(text.contains("FILES DIRECTLY"), "instructions should have FILES DIRECTLY in prohibition");
     assert!(text.contains("DECISION TRIGGER"), "instructions should have decision trigger");
     assert!(text.contains("ONLY exception for"), "instructions should list exceptions for indexed file reading");
+    // Zero-result hints auto-follow rule
+    assert!(text.contains("ZERO-RESULT HINTS"), "instructions should have ZERO-RESULT HINTS auto-follow rule");
+    assert!(text.contains("AUTOMATICALLY follow the hint"), "instructions should tell LLM to auto-follow hints");
+    assert!(text.contains("NEAREST MATCH"), "instructions should have NEAREST MATCH auto-follow rule");
+    assert!(text.contains("KIND MISMATCH"), "instructions should have KIND MISMATCH auto-follow rule");
+    assert!(text.contains("NEVER ask the user whether to follow a hint"), "instructions should prohibit asking user about hints");
     // Removed sections should NOT be present
     assert!(!text.contains("Quick Reference"), "instructions should NOT have Quick Reference (replaced by TASK ROUTING)");
     assert!(!text.contains("TOOL PRIORITY"), "instructions should NOT have TOOL PRIORITY (replaced by TASK ROUTING)");
@@ -159,11 +165,11 @@ fn test_render_instructions_empty_extensions() {
     assert!(!text.contains("NEVER READ"),
         "Empty def_extensions should not produce NEVER READ block");
     // The file-reading DECISION TRIGGER must NOT appear (no indexed extensions).
-    // But the file-editing DECISION TRIGGER SHOULD appear (always present).
-    // Count occurrences: should be exactly 1 (editing only, not reading).
+    // But the file-editing DECISION TRIGGER and zero-result hints DECISION TRIGGER SHOULD appear (always present).
+    // Count occurrences: should be exactly 2 (editing + zero-result hints, not reading).
     let dt_count = text.matches("DECISION TRIGGER").count();
-    assert_eq!(dt_count, 1,
-        "Empty def_extensions should have 1 DECISION TRIGGER (editing), not {} (reading trigger should be absent)", dt_count);
+    assert_eq!(dt_count, 2,
+        "Empty def_extensions should have 2 DECISION TRIGGERs (editing + zero-result hints), not {} (reading trigger should be absent)", dt_count);
     // Should contain fallback note
     assert!(text.contains("search_definitions is not available"),
         "Empty def_extensions should have fallback note about search_definitions");

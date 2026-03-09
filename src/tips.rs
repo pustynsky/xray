@@ -576,6 +576,14 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("NEVER USE apply_diff, search_and_replace, or insert_content when search_edit is available.\n");
     out.push_str("   DECISION TRIGGER: before ANY file edit, STOP and switch to search_edit.\n");
     out.push_str("   search_edit: atomic, no whitespace issues, multi-file batch, dryRun preview.\n\n");
+    // --- ZERO-RESULT HINT AUTO-FOLLOW (cross-tool routing + same-tool corrections) ---
+    out.push_str("ZERO-RESULT HINTS: when a tool returns 0 results with a hint, AUTOMATICALLY follow the hint. Do NOT report the hint to the user and stop.\n");
+    out.push_str("   DECISION TRIGGER: if the response hint says 'Use search_grep for content search' — call search_grep immediately.\n");
+    out.push_str("   Same for any hint suggesting search_definitions, search_callers, or search_fast — follow the suggestion automatically.\n");
+    out.push_str("   NEAREST MATCH: if the hint says 'Nearest match: X' — re-call the SAME tool with name=X immediately.\n");
+    out.push_str("   KIND MISMATCH: if the hint says 'Did you mean kind=Y?' — re-call the SAME tool with kind=Y immediately.\n");
+    out.push_str("   RULE: NEVER ask the user whether to follow a hint. ALWAYS follow it automatically in the same turn.\n\n");
+
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task):\n");

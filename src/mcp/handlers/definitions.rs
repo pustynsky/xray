@@ -17,14 +17,14 @@ use serde_json::{json, Value};
 use crate::mcp::protocol::ToolCallResult;
 use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind, CodeStats};
 
-use super::utils::{inject_body_into_obj, inject_branch_warning, best_match_tier, json_to_string};
+use super::utils::{inject_body_into_obj, inject_branch_warning, best_match_tier, json_to_string, name_similarity};
 use super::HandlerContext;
 
 // ─── Parsed arguments struct ─────────────────────────────────────────
 
 /// Parsed and validated arguments for the search_definitions tool.
 /// Extracted from raw JSON [`Value`] by [`parse_definition_args`].
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(crate) struct DefinitionSearchArgs {
     pub name_filter: Option<String>,
     pub kind_filter: Option<String>,
@@ -249,6 +249,13 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     };
 
     let total_results = results.len();
+
+    // 6a. Auto-correction: if 0 results, try kind/name correction before generating hints
+    if total_results == 0 {
+        if let Some(corrected_result) = attempt_auto_correction(&index, &parsed, search_start, ctx) {
+            return corrected_result;
+        }
+    }
 
     // 7. Compute term breakdown (before truncation)
     let term_breakdown = compute_term_breakdown(&results, &def_to_term, &parsed);
@@ -888,6 +895,14 @@ fn build_search_summary(
                 bt, total_results
             ));
         }
+
+    // ─── Zero-result hints (A/B/C/D) ────────────────────────────────
+    // Generate contextual hints when search returns 0 results to help LLM self-correct.
+    // Only one hint per query (first matching wins). Guards ensure no overwrite of existing hints.
+    if total_results == 0 {
+        generate_zero_result_hints(index, args, &mut summary, ctx);
+    }
+
     if index.parse_errors > 0 {
         summary["readErrors"] = json!(index.parse_errors);
     }
@@ -1089,6 +1104,349 @@ fn collect_transitive_base_type_indices(
     result.dedup();
     result
 }
+
+// ─── Auto-correction for 0 results ───────────────────────────────────
+
+/// Attempt to auto-correct the query when 0 results are found.
+/// Tries two corrections in priority order:
+/// A. Kind mismatch — remove kind filter, find the correct kind, re-run
+/// B. Nearest name match — fix name to nearest match (≥85% similarity), re-run
+///
+/// Returns `Some(ToolCallResult)` with corrected results + `autoCorrection` metadata,
+/// or `None` if no correction produced results.
+fn attempt_auto_correction(
+    index: &DefinitionIndex,
+    original_args: &DefinitionSearchArgs,
+    search_start: Instant,
+    ctx: &HandlerContext,
+) -> Option<ToolCallResult> {
+    // A. Kind mismatch: kind filter is set + name/file filter exists
+    if let Some(ref original_kind) = original_args.kind_filter {
+        if original_args.name_filter.is_some() || original_args.file_filter.is_some() {
+            if let Some(result) = try_kind_correction(index, original_args, original_kind, search_start, ctx) {
+                return Some(result);
+            }
+        }
+    }
+
+    // B. Nearest name match (≥85% similarity)
+    if let Some(ref original_name) = original_args.name_filter {
+        if !original_args.use_regex {
+            if let Some(result) = try_name_correction(index, original_args, original_name, search_start, ctx) {
+                return Some(result);
+            }
+        }
+    }
+
+    None
+}
+
+/// Try auto-correcting a kind mismatch.
+/// Removes the kind filter, collects candidates, finds the most common kind,
+/// then re-runs the full pipeline with the corrected kind.
+fn try_kind_correction(
+    index: &DefinitionIndex,
+    original_args: &DefinitionSearchArgs,
+    original_kind: &str,
+    search_start: Instant,
+    ctx: &HandlerContext,
+) -> Option<ToolCallResult> {
+    let mut probe_args = original_args.clone();
+    probe_args.kind_filter = None;
+
+    let (candidates, _) = collect_candidates(index, &probe_args).ok()?;
+    let filtered = apply_entry_filters(index, &candidates, &probe_args);
+
+    if filtered.is_empty() {
+        return None;
+    }
+
+    // Summarize available kinds for the autoCorrection message
+    let mut kind_counts: HashMap<&str, usize> = HashMap::new();
+    for (_, def) in &filtered {
+        *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
+    }
+    let mut kinds_sorted: Vec<(&&str, &usize)> = kind_counts.iter().collect();
+    kinds_sorted.sort_by(|a, b| b.1.cmp(a.1));
+    let kinds_str: Vec<String> = kinds_sorted.iter()
+        .map(|(k, c)| format!("{} {}", c, k))
+        .collect();
+
+    // Return ALL results without kind filter (don't guess which kind the user wanted)
+    let mut corrected_args = original_args.clone();
+    corrected_args.kind_filter = None;
+
+    run_corrected_search(index, &corrected_args, search_start, ctx, json!({
+        "type": "kindCorrected",
+        "original": { "kind": original_kind },
+        "corrected": { "kind": null },
+        "availableKinds": kinds_str.join(", "),
+        "reason": format!(
+            "kind='{}' returned 0 results. Removed kind filter — found {} definitions ({})",
+            original_kind, filtered.len(), kinds_str.join(", ")
+        ),
+    }))
+}
+
+/// Try auto-correcting a name mismatch via nearest match (≥85% Jaro-Winkler).
+/// Finds the closest name in the definition index and re-runs the search.
+const AUTO_CORRECT_NAME_THRESHOLD: f64 = 0.80;
+
+fn try_name_correction(
+    index: &DefinitionIndex,
+    original_args: &DefinitionSearchArgs,
+    original_name: &str,
+    search_start: Instant,
+    ctx: &HandlerContext,
+) -> Option<ToolCallResult> {
+    let search_lower = original_name.to_lowercase();
+    let mut best_name: Option<String> = None;
+    let mut best_score: f64 = 0.0;
+
+    for (index_name, _) in &index.name_index {
+        let score = name_similarity(&search_lower, index_name);
+        if score >= AUTO_CORRECT_NAME_THRESHOLD && score > best_score {
+            best_score = score;
+            best_name = Some(index_name.clone());
+        }
+    }
+
+    let corrected_name = best_name?;
+
+    let mut corrected_args = original_args.clone();
+    corrected_args.name_filter = Some(corrected_name.clone());
+
+    run_corrected_search(index, &corrected_args, search_start, ctx, json!({
+        "type": "nameCorrected",
+        "original": { "name": original_name },
+        "corrected": { "name": &corrected_name },
+        "similarity": format!("{:.0}%", best_score * 100.0),
+        "reason": format!(
+            "name='{}' returned 0 results, auto-corrected to name='{}' ({:.0}% similarity)",
+            original_name, corrected_name, best_score * 100.0
+        ),
+    }))
+}
+
+/// Execute the full search pipeline with corrected args and inject autoCorrection metadata.
+/// Returns `Some(ToolCallResult)` if the corrected search produces results, `None` otherwise.
+fn run_corrected_search(
+    index: &DefinitionIndex,
+    args: &DefinitionSearchArgs,
+    search_start: Instant,
+    ctx: &HandlerContext,
+    auto_correction: Value,
+) -> Option<ToolCallResult> {
+    let (candidates, def_to_term) = collect_candidates(index, args).ok()?;
+    let mut results = apply_entry_filters(index, &candidates, args);
+
+    // Apply stats filters (ignore error — correction is best-effort)
+    let stats_info = apply_stats_filters(index, &mut results, args).ok()?;
+
+    let total_results = results.len();
+    if total_results == 0 {
+        return None; // Correction didn't produce results
+    }
+
+    let term_breakdown = compute_term_breakdown(&results, &def_to_term, args);
+    sort_results(&mut results, index, args);
+
+    if args.max_results > 0 && results.len() > args.max_results {
+        results.truncate(args.max_results);
+    }
+
+    let search_elapsed = search_start.elapsed();
+
+    let tool_result = format_search_output(
+        index, &results, args, total_results, &stats_info,
+        &term_breakdown, search_elapsed, ctx,
+    );
+
+    // Inject autoCorrection into the response summary
+    if let Some(content) = tool_result.content.first() {
+        if let Ok(mut output) = serde_json::from_str::<Value>(&content.text) {
+            if let Some(summary) = output.get_mut("summary") {
+                summary["autoCorrection"] = auto_correction;
+            }
+            return Some(ToolCallResult::success(json_to_string(&output)));
+        }
+    }
+
+    Some(tool_result)
+}
+
+// ─── Zero-result hint generation ─────────────────────────────────────
+
+/// Generate contextual hints when search_definitions returns 0 results.
+/// Helps LLMs self-correct common mistakes (wrong kind, typos, wrong tool).
+///
+/// Hint priority (first matching wins):
+/// A. Wrong `kind` — definitions exist with same name/file but different kind
+/// B. Nearest name — typo/wrong name, suggest closest match by edit distance
+/// C. File has definitions — file matches but other filters (name/kind/parent) are too narrow
+/// D. Name in content index — name exists as text but not as an AST definition name
+fn generate_zero_result_hints(
+    index: &DefinitionIndex,
+    args: &DefinitionSearchArgs,
+    summary: &mut Value,
+    ctx: &HandlerContext,
+) {
+    // Hint A: Wrong kind — find what kinds exist for matching name/file
+    if args.kind_filter.is_some()
+        && (args.name_filter.is_some() || args.file_filter.is_some())
+        && summary.get("hint").is_none()
+    {
+        let kind_str = args.kind_filter.as_ref().unwrap();
+        let mut kind_counts: HashMap<&str, usize> = HashMap::new();
+
+        if let Some(ref name) = args.name_filter {
+            // Find definitions matching name filter (ignoring kind)
+            let terms: Vec<String> = name.split(',')
+                .map(|s| s.trim().to_lowercase())
+                .filter(|s| !s.is_empty())
+                .collect();
+            for (n, indices) in &index.name_index {
+                if terms.iter().any(|t| n.contains(t.as_str())) {
+                    for &idx in indices {
+                        if let Some(def) = index.definitions.get(idx as usize) {
+                            // Also apply file filter if set
+                            if let Some(ref ff) = args.file_filter {
+                                if !file_matches_filter(index, def.file_id, ff) {
+                                    continue;
+                                }
+                            }
+                            *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        } else if let Some(ref ff) = args.file_filter {
+            // Only file filter, no name filter
+            for (&file_id, def_indices) in &index.file_index {
+                if file_matches_filter(index, file_id, ff) {
+                    for &idx in def_indices {
+                        if let Some(def) = index.definitions.get(idx as usize) {
+                            *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
+                        }
+                    }
+                }
+            }
+        }
+
+        if !kind_counts.is_empty() {
+            let total: usize = kind_counts.values().sum();
+            let mut kinds_sorted: Vec<(&&str, &usize)> = kind_counts.iter().collect();
+            kinds_sorted.sort_by(|a, b| b.1.cmp(a.1));
+            let kinds_str: Vec<String> = kinds_sorted.iter()
+                .map(|(k, c)| format!("{} {}", c, k))
+                .collect();
+            let top_kind = kinds_sorted[0].0;
+            summary["hint"] = json!(format!(
+                "0 results with kind='{}'. Without kind filter: {} definitions found ({}). Did you mean kind='{}'?",
+                kind_str, total, kinds_str.join(", "), top_kind
+            ));
+        }
+    }
+
+    // Hint C: File has definitions but other filters are too narrow
+    if args.file_filter.is_some()
+        && summary.get("hint").is_none()
+    {
+        let ff = args.file_filter.as_ref().unwrap();
+        let mut matching_file_defs = 0usize;
+        let mut matching_kinds: HashMap<&str, usize> = HashMap::new();
+
+        for (&file_id, def_indices) in &index.file_index {
+            if file_matches_filter(index, file_id, ff) {
+                for &idx in def_indices {
+                    if let Some(def) = index.definitions.get(idx as usize) {
+                        matching_file_defs += 1;
+                        *matching_kinds.entry(def.kind.as_str()).or_insert(0) += 1;
+                    }
+                }
+            }
+        }
+
+        if matching_file_defs > 0 {
+            let mut kinds_sorted: Vec<(&&str, &usize)> = matching_kinds.iter().collect();
+            kinds_sorted.sort_by(|a, b| b.1.cmp(a.1));
+            let kinds_str: Vec<String> = kinds_sorted.iter()
+                .map(|(k, c)| format!("{} {}", c, k))
+                .collect();
+
+            let mut extra = String::new();
+            if args.name_filter.is_some() {
+                extra.push_str(&format!(" search_definitions searches AST definition names, not string content. Use search_grep for content search."));
+            }
+
+            summary["hint"] = json!(format!(
+                "File '{}' has {} definitions ({}), but none match your other filters (name/kind/parent).{}",
+                ff, matching_file_defs, kinds_str.join(", "), extra
+            ));
+        }
+    }
+
+    // Hint B: Nearest name match — suggest closest name by edit distance
+    if args.name_filter.is_some()
+        && !args.use_regex
+        && summary.get("hint").is_none()
+    {
+        let search_name = args.name_filter.as_ref().unwrap().to_lowercase();
+        let mut best_match: Option<(String, usize)> = None;
+        let mut best_score: f64 = 0.0;
+
+        for (name, indices) in &index.name_index {
+            let score = name_similarity(&search_name, name);
+            if score > best_score && score > 0.8 {
+                best_score = score;
+                best_match = Some((name.clone(), indices.len()));
+            }
+        }
+
+        if let Some((name, count)) = best_match {
+            summary["hint"] = json!(format!(
+                "0 results for name='{}'. Nearest match: '{}' ({} definitions, similarity {:.0}%)",
+                search_name, name, count, best_score * 100.0
+            ));
+        }
+    }
+
+    // Hint D: Name found in content index but not in definitions
+    if args.name_filter.is_some()
+        && summary.get("hint").is_none()
+    {
+        let name = args.name_filter.as_ref().unwrap();
+        if ctx.content_ready.load(std::sync::atomic::Ordering::Acquire) {
+            if let Ok(content_idx) = ctx.index.read() {
+                let lower = name.to_lowercase();
+                if let Some(postings) = content_idx.index.get(&lower) {
+                    let file_count = postings.len();
+                    summary["hint"] = json!(format!(
+                        "'{}' not found as an AST definition name, but appears in {} files as text content. \
+                         search_definitions searches structural names (classes, methods, etc.), not arbitrary text. \
+                         Use search_grep terms='{}' for content search.",
+                        name, file_count, name
+                    ));
+                }
+            }
+        }
+    }
+}
+
+/// Check if a file (by file_id) matches a comma-separated file filter string.
+fn file_matches_filter(index: &DefinitionIndex, file_id: u32, filter: &str) -> bool {
+    let path = match index.files.get(file_id as usize) {
+        Some(p) => p,
+        None => return false,
+    };
+    let path_lower = path.replace('\\', "/").to_lowercase();
+    let terms: Vec<String> = filter.split(',')
+        .map(|s| s.trim().replace('\\', "/").to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    terms.iter().any(|t| path_lower.contains(t.as_str()))
+}
+
 
 #[cfg(test)]
 #[path = "definitions_tests.rs"]

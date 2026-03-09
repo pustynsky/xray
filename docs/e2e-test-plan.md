@@ -7461,6 +7461,143 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Status:** ✅ Covered by unit test (negative case; positive case requires 5000+ definitions)
 
+### T-ZERO-HINTS: `search_definitions` — Zero-result hints for LLM self-correction
+
+**Tool:** `search_definitions`
+
+**Background:** When `search_definitions` returns 0 results, the response `summary` now includes a contextual `hint` field with four types of suggestions (first matching wins): (A) wrong `kind` — definitions exist with same name/file but different kind; (B) nearest name — typo/wrong name, suggests closest match by Jaro-Winkler similarity (≥80%); (C) file has definitions — file matches but name/kind/parent filters are too narrow; (D) name in content index — name exists as text but not as AST definition. Zero overhead for successful queries.
+
+**Scenario A — wrong kind (most common):**
+
+```json
+{ "kind": "method", "file": "tips.rs" }
+```
+
+**Expected:**
+- `definitions` array is empty
+- `summary.hint` contains `"0 results with kind='method'"` and `"Did you mean kind='function'?"`
+
+**Scenario B — nearest name match:**
+
+```json
+{ "name": "GetUsr" }
+```
+
+**Expected:**
+- `definitions` array is empty
+- `summary.hint` contains `"Nearest match: 'getuser'"` with similarity percentage (if name_index has a close match)
+
+**Scenario C — file has definitions but name not found:**
+
+```json
+{ "file": "tips.rs", "name": "nonexistent_xyz" }
+```
+
+**Expected:**
+- `definitions` array is empty
+- `summary.hint` contains `"File 'tips.rs' has N definitions"` and `"Use search_grep for content search"`
+
+**Scenario D — name in content but not in defs:**
+
+```json
+{ "name": "inputSchema" }
+```
+
+**Expected:**
+- `definitions` array is empty
+- `summary.hint` contains `"not found as an AST definition name"` and `"Use search_grep"`
+
+**Negative test — no hint when results found:**
+
+```json
+{ "name": "UserService" }
+```
+
+**Expected:**
+- `definitions` array is non-empty
+- `summary.hint` is absent
+
+**Backward compatibility — existing property→field hint preserved:**
+
+```json
+{ "kind": "property" }
+```
+
+**Expected (when Field definitions exist):**
+- `summary.hint` contains `"kind='field'"` (original TypeScript hint, not overwritten by new hints)
+
+**Unit tests:** `test_hint_wrong_kind`, `test_hint_wrong_kind_with_file_filter`, `test_hint_file_has_defs_but_name_not_found`, `test_hint_nearest_name_match`, `test_hint_name_in_content_not_in_defs`, `test_hint_priority_kind_first`, `test_hint_no_hint_for_regex`, `test_hint_no_hint_when_results_found`, `test_hint_existing_property_field_hint_not_overwritten`, `test_file_matches_filter_helper`, `test_name_similarity_identical`, `test_name_similarity_completely_different`, `test_name_similarity_partial_match`, `test_name_similarity_typo`
+
+**Status:** ✅ Implemented
+
+---
+
+### T-AUTO-CORRECT: `search_definitions` — Auto-correction for kind mismatch and name typos
+
+**Tool:** `search_definitions`
+
+**Background:** When `search_definitions` returns 0 results, the server now automatically attempts to correct the query and return results in a single round-trip. Two auto-correction types: (A) **Kind mismatch** — if `kind` filter is set with `name` or `file` filter, the server removes the kind filter, finds the correct kind, and re-runs; (B) **Nearest name match** — if name has ≥85% Jaro-Winkler similarity to an indexed name, the server re-runs with the corrected name. If auto-correction produces results, the response includes an `autoCorrection` object in the `summary` explaining what was changed. If auto-correction produces 0 results, falls through to the regular hint system.
+
+**Scenario A — kind auto-correction:**
+
+```json
+{ "kind": "method", "file": "tips.rs" }
+```
+
+**Expected:**
+- `definitions` array is non-empty (auto-corrected to `kind='function'`)
+- `summary.autoCorrection.type` = `"kindCorrected"`
+- `summary.autoCorrection.original.kind` = `"method"`
+- `summary.autoCorrection.corrected.kind` = `"function"`
+- `summary.autoCorrection.reason` contains `"auto-corrected"`
+
+**Scenario B — name auto-correction:**
+
+```json
+{ "name": "hndl_search" }
+```
+
+**Expected:**
+- `definitions` array is non-empty (auto-corrected to nearest match)
+- `summary.autoCorrection.type` = `"nameCorrected"`
+- `summary.autoCorrection.original.name` = `"hndl_search"`
+- `summary.autoCorrection.corrected.name` contains the corrected name
+- `summary.autoCorrection.similarity` contains percentage string
+
+**Negative test — no auto-correction when results found:**
+
+```json
+{ "name": "UserService" }
+```
+
+**Expected:**
+- `definitions` array is non-empty
+- `summary.autoCorrection` is absent
+
+**Negative test — name too different, no auto-correction:**
+
+```json
+{ "name": "xyz_totally_unrelated" }
+```
+
+**Expected:**
+- `definitions` array is empty
+- `summary.autoCorrection` is absent (below 85% similarity threshold)
+- `summary.hint` may be present (regular hint system fallback)
+
+**Negative test — kind without name/file, no auto-correction:**
+
+```json
+{ "kind": "function" }
+```
+
+**Expected:**
+- `summary.autoCorrection` is absent (no name or file filter to identify user intent)
+
+**Unit tests:** `test_auto_correct_kind_method_to_function`, `test_auto_correct_kind_with_file_filter`, `test_auto_correct_kind_no_trigger_without_name_or_file`, `test_auto_correct_name_typo`, `test_auto_correct_name_below_threshold_no_correction`, `test_auto_correct_name_not_triggered_for_regex`, `test_auto_correct_kind_takes_priority_over_name`, `test_auto_correct_no_correction_when_results_found`, `test_auto_correct_preserves_other_filters`, `test_auto_correct_constant_threshold`
+
+**Status:** ✅ Implemented
+
 ---
 
 ### T-TOMBSTONE: Definition index tombstone compaction during `--watch`
