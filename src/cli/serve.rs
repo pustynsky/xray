@@ -142,6 +142,11 @@ pub fn cmd_serve(args: ServeArgs) {
             crate::index::log_memory("content-build: finished");
             if let Err(e) = save_content_index(&new_idx, &bg_idx_base) {
                 warn!(error = %e, "Failed to save content index to disk");
+            } else {
+                // Clean up old content indexes for the same root with different extensions
+                let exts_str = new_idx.extensions.join(",");
+                let saved_path = crate::content_index_path_for(&new_idx.root, &exts_str, &bg_idx_base);
+                crate::index::cleanup_stale_same_root_indexes(&bg_idx_base, &saved_path, &new_idx.root, "word-search");
             }
 
             // Drop build-time index and reload from disk to eliminate allocator
@@ -305,6 +310,11 @@ pub fn cmd_serve(args: ServeArgs) {
                 crate::index::log_memory("def-build: finished");
                 if let Err(e) = definitions::save_definition_index(&new_idx, &bg_idx_base) {
                     warn!(error = %e, "Failed to save definition index to disk");
+                } else {
+                    // Clean up old definition indexes for the same root with different extensions
+                    let exts_str = new_idx.extensions.join(",");
+                    let saved_path = definitions::definition_index_path_for(&new_idx.root, &exts_str, &bg_idx_base);
+                    crate::index::cleanup_stale_same_root_indexes(&bg_idx_base, &saved_path, &new_idx.root, "code-structure");
                 }
 
                 // Drop + reload to eliminate allocator fragmentation (same pattern)

@@ -878,3 +878,211 @@ fn test_chunked_content_build_single_vs_multi_thread() {
     assert_eq!(idx_single.total_tokens, idx_multi.total_tokens,
         "Single and multi-thread should produce same total token count");
 }
+
+// ─── find_content_index_for_dir meta-based optimization tests ─────
+
+/// Verify that find_content_index_for_dir skips non-matching indexes
+/// without loading the full index when .meta sidecar files are present.
+#[test]
+fn test_find_content_index_uses_meta_to_skip_non_matching_root() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    // Create two directories
+    let dir_a = tmp.path().join("project_a");
+    let dir_b = tmp.path().join("project_b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+
+    let root_a = crate::clean_path(&dir_a.to_string_lossy());
+    let root_b = crate::clean_path(&dir_b.to_string_lossy());
+
+    // Save content index for project_a
+    let idx_a = search_index::ContentIndex {
+        root: root_a.clone(),
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx_a, index_base).unwrap();
+
+    // Searching for project_b should NOT find project_a's index
+    // (meta sidecar has root=project_a which doesn't match project_b)
+    let result = crate::index::find_content_index_for_dir(&root_b, index_base, &[]);
+    assert!(result.is_none(),
+        "Should not find project_a's index when searching for project_b");
+
+    // Searching for project_a SHOULD find it
+    let result = crate::index::find_content_index_for_dir(&root_a, index_base, &[]);
+    assert!(result.is_some(),
+        "Should find project_a's index when searching for project_a");
+}
+
+/// Verify that find_content_index_for_dir works when .meta file is missing
+/// (fallback to read_root_from_index_file or full load).
+#[test]
+fn test_find_content_index_works_without_meta_sidecar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let root_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+    // Save content index (creates both .word-search and .word-search.meta)
+    let idx = search_index::ContentIndex {
+        root: root_str.clone(),
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string(), "md".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx, index_base).unwrap();
+
+    // Delete the .meta sidecar file to test the fallback path
+    for entry in std::fs::read_dir(index_base).unwrap().flatten() {
+        let path = entry.path();
+        if path.to_string_lossy().ends_with(".meta") {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    // Should still find the index via fallback (read_root_from_index_file)
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &["rs".to_string(), "md".to_string()]);
+    assert!(result.is_some(),
+        "Should find index even without .meta sidecar (fallback path)");
+}
+
+/// Verify that meta-based filtering correctly rejects extension mismatches.
+#[test]
+fn test_find_content_index_meta_rejects_extension_mismatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let root_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+    // Save content index with only "rs" extension
+    let idx = search_index::ContentIndex {
+        root: root_str.clone(),
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx, index_base).unwrap();
+
+    // Request "rs,md" — meta should reject because "md" is not in cached extensions
+    let expected = vec!["rs".to_string(), "md".to_string()];
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &expected);
+    assert!(result.is_none(),
+        "Meta-based filtering should reject when cached extensions don't include all expected");
+}
+
+// ─── cleanup_stale_same_root_indexes tests ─────
+
+/// Verify that cleanup_stale_same_root_indexes removes old indexes for the same root.
+#[test]
+fn test_cleanup_stale_same_root_removes_old_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let root_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+    // Save content index with "rs" extension
+    let idx1 = search_index::ContentIndex {
+        root: root_str.clone(),
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx1, index_base).unwrap();
+
+    // Count .word-search files
+    let count_ws = || -> usize {
+        std::fs::read_dir(index_base).unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "word-search"))
+            .count()
+    };
+    assert_eq!(count_ws(), 1, "Should have 1 content index after first save");
+
+    // Save content index with "rs,md" extensions (different hash)
+    let idx2 = search_index::ContentIndex {
+        root: root_str.clone(),
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string(), "md".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx2, index_base).unwrap();
+    assert_eq!(count_ws(), 2, "Should have 2 content indexes before cleanup");
+
+    // Now run cleanup (simulating what serve.rs does after background build)
+    let new_path = crate::content_index_path_for(&root_str, "rs,md", index_base);
+    crate::index::cleanup_stale_same_root_indexes(index_base, &new_path, &root_str, "word-search");
+
+    // Old "rs" index should be cleaned up
+    assert_eq!(count_ws(), 1, "Should have 1 content index after cleanup");
+
+    // Verify the remaining index is the new one
+    let result = crate::index::find_content_index_for_dir(&root_str, index_base, &["rs".to_string(), "md".to_string()]);
+    assert!(result.is_some(), "Should find the new rs,md index");
+}
+
+/// Verify that cleanup does NOT remove indexes for different root directories.
+#[test]
+fn test_cleanup_stale_same_root_does_not_clean_other_roots() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let dir_a = tmp.path().join("project_a");
+    let dir_b = tmp.path().join("project_b");
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+
+    let root_a = crate::clean_path(&dir_a.to_string_lossy());
+    let root_b = crate::clean_path(&dir_b.to_string_lossy());
+
+    // Save content index for project_a with "rs"
+    let idx_a = search_index::ContentIndex {
+        root: root_a.clone(),
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx_a, index_base).unwrap();
+
+    // Save content index for project_b with "rs"
+    let idx_b = search_index::ContentIndex {
+        root: root_b.clone(),
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx_b, index_base).unwrap();
+
+    let count_ws = || -> usize {
+        std::fs::read_dir(index_base).unwrap()
+            .flatten()
+            .filter(|e| e.path().extension().is_some_and(|ext| ext == "word-search"))
+            .count()
+    };
+    assert_eq!(count_ws(), 2, "Should have 2 content indexes (one per project)");
+
+    // Save new content index for project_a with "rs,md"
+    let idx_a2 = search_index::ContentIndex {
+        root: root_a.clone(),
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string(), "md".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx_a2, index_base).unwrap();
+
+    // Run cleanup for project_a
+    let new_path = crate::content_index_path_for(&root_a, "rs,md", index_base);
+    crate::index::cleanup_stale_same_root_indexes(index_base, &new_path, &root_a, "word-search");
+
+    // Should still have 2 indexes: new project_a + untouched project_b
+    assert_eq!(count_ws(), 2, "Should still have 2 content indexes (cleanup only affects same root)");
+}
