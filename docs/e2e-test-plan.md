@@ -1845,6 +1845,32 @@ echo $input | cargo run -- serve -d $TEST_DIR -e $TEST_EXT
 
 ### T42b: `tips` / `search_help` — Query budget and multi-term tips present
 
+### T42c: `tips` / `search_help` — Code Review strategy recipe present
+
+**Goal:** Verify the "Code Review / Story Evaluation" strategy recipe is included in `search_help` and CLI `tips` output.
+
+**Steps:**
+1. Run `search-index tips` and verify output contains "Code Review / Story Evaluation"
+2. Via MCP `search_help`, verify `strategyRecipes` array contains a recipe with `name: "Code Review / Story Evaluation"`
+3. Verify the recipe has 3 steps and 3 antiPatterns
+
+**Expected:** Recipe present in both CLI and MCP output with correct structure.
+
+**Covered by:** `test_render_json_has_strategy_recipes`, `test_all_renderers_consistent_tip_count`, `T42` E2E test (checks for strategy recipes in tips output).
+
+### T-DYNAMIC-HELP: `search_help` dynamic language scope
+
+**Goal:** Verify `search_help` shows actual language list instead of static "languages with definition parser support".
+
+**Steps:**
+1. Start MCP server with `--ext rs --definitions`
+2. Call `search_help`
+3. Verify `bestPractices` array contains a tip with "Language scope" containing "Rust"
+4. Verify `toolPriority` entries for search_callers and search_definitions contain "Rust"
+5. Verify they do NOT contain "languages with definition parser support"
+
+**Covered by:** `test_tips_no_hardcoded_language_lists`, `test_all_renderers_consistent_tip_count`.
+
 **Command (CLI):**
 
 ```powershell

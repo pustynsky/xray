@@ -737,8 +737,7 @@ pub fn dispatch_tool(
 // ─── Small inline handlers ──────────────────────────────────────────
 
 fn handle_search_help(ctx: &HandlerContext) -> ToolCallResult {
-    let _ = ctx; // Will be used in Phase 2 for dynamic tips
-    let help = crate::tips::render_json();
+    let help = crate::tips::render_json(&ctx.def_extensions);
     ToolCallResult::success(utils::json_to_string(&help))
 }
 

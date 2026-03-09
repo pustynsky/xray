@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn test_tips_not_empty() {
-    assert!(!tips().is_empty());
+    assert!(!tips(&[]).is_empty());
 }
 
 #[test]
@@ -12,14 +12,15 @@ fn test_performance_tiers_not_empty() {
 
 #[test]
 fn test_tool_priority_not_empty() {
-    assert!(!tool_priority().is_empty());
+    assert!(!tool_priority(&[]).is_empty());
 }
 
 #[test]
 fn test_render_cli_contains_all_tips() {
-    let output = render_cli();
-    for tip in tips() {
-        assert!(output.contains(tip.rule), "CLI output missing tip: {}", tip.rule);
+    let exts = vec!["rs".to_string()];
+    let output = render_cli(&exts);
+    for tip in tips(&exts) {
+        assert!(output.contains(&*tip.rule), "CLI output missing tip: {}", tip.rule);
     }
 }
 
@@ -30,14 +31,15 @@ fn test_strategies_not_empty() {
 
 #[test]
 fn test_render_json_has_best_practices() {
-    let json = render_json();
+    let exts = vec!["rs".to_string()];
+    let json = render_json(&exts);
     let practices = json["bestPractices"].as_array().unwrap();
-    assert_eq!(practices.len(), tips().len());
+    assert_eq!(practices.len(), tips(&exts).len());
 }
 
 #[test]
 fn test_render_json_has_strategy_recipes() {
-    let json = render_json();
+    let json = render_json(&[]);
     let recipes = json["strategyRecipes"].as_array().unwrap();
     assert_eq!(recipes.len(), strategies().len());
     // Each recipe has required fields
@@ -107,7 +109,7 @@ fn test_render_instructions_contains_key_terms() {
 /// Windows cmd.exe (CP437/CP866) cannot display these characters correctly.
 #[test]
 fn test_render_cli_is_ascii_safe() {
-    let output = render_cli();
+    let output = render_cli(&vec!["rs".to_string()]);
     for (i, ch) in output.chars().enumerate() {
         assert!(
             ch.is_ascii() || ch == '\n' || ch == '\r',
@@ -120,7 +122,7 @@ fn test_render_cli_is_ascii_safe() {
 
 #[test]
 fn test_render_json_has_parameter_examples() {
-    let json = render_json();
+    let json = render_json(&vec!["rs".to_string()]);
     let examples = &json["parameterExamples"];
     assert!(examples.is_object(), "parameterExamples should be an object");
     // Key tools should have examples
@@ -201,14 +203,14 @@ fn test_render_instructions_single_extension() {
 
 #[test]
 fn test_tips_contains_using_static_tip() {
-    let all_tips = tips();
+    let all_tips = tips(&[]);
     let has_using_static = all_tips.iter().any(|t| t.rule.contains("using static"));
     assert!(has_using_static, "Tips should contain a tip about 'using static'");
 }
 
 #[test]
 fn test_render_json_contains_using_static_tip() {
-    let json = render_json();
+    let json = render_json(&[]);
     let practices = json["bestPractices"].as_array().unwrap();
     let has_using_static = practices.iter().any(|p| {
         p["rule"].as_str().unwrap_or("").contains("using static")
@@ -338,15 +340,16 @@ fn test_instructions_no_redundant_sections() {
 
 #[test]
 fn test_all_renderers_consistent_tip_count() {
-    let tip_count = tips().len();
-    let json = render_json();
+    let exts = vec!["rs".to_string()];
+    let tip_count = tips(&exts).len();
+    let json = render_json(&exts);
     let practices = json["bestPractices"].as_array().unwrap();
     assert_eq!(practices.len(), tip_count, "JSON and tips() count mismatch");
 
     // Verify CLI output mentions each tip rule
-    let cli = render_cli();
-    for tip in tips() {
-        assert!(cli.contains(tip.rule), "CLI output missing tip: {}", tip.rule);
+    let cli = render_cli(&exts);
+    for tip in tips(&exts) {
+        assert!(cli.contains(&*tip.rule), "CLI output missing tip: {}", tip.rule);
     }
 
     // Verify strategy recipes are consistent across renderers
@@ -569,7 +572,7 @@ fn test_tool_definitions_cs_rs_sql() {
 /// Language lists should only appear in dynamic tool descriptions (via format_supported_languages).
 #[test]
 fn test_tips_no_hardcoded_language_lists() {
-    for tip in tips() {
+    for tip in tips(&[]) {
         assert!(!tip.rule.contains("C#, TypeScript/TSX, and SQL"),
             "Tip rule should not hardcode 'C#, TypeScript/TSX, and SQL'. Found in: {}", tip.rule);
         assert!(!tip.why.contains("def-index supports C# and TypeScript/TSX"),
@@ -580,11 +583,11 @@ fn test_tips_no_hardcoded_language_lists() {
         assert!(!tip.why.contains("non-C#/TS"),
             "Tip why should not hardcode 'non-C#/TS'. Found in: {}", tip.why);
     }
-    for tp in tool_priority() {
+    for tp in tool_priority(&[]) {
         assert!(!tp.description.contains("C#, TypeScript/TSX, and SQL"),
             "ToolPriority should not hardcode 'C#, TypeScript/TSX, and SQL'. Found in: {}", tp.description);
         assert!(!tp.description.contains("C#, TypeScript/TSX, SQL"),
-            "ToolPriority should not hardcode 'C#, TypeScript/TSX, SQL'. Found in: {}", tp.description);
+            "ToolPriority should not hardcode 'C#, TypeScript/TSX, SQL'. Found in: {}", &*tp.description);
     }
     // Strategy anti-patterns should not hardcode specific extensions
     for strat in strategies() {
