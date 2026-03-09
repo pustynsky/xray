@@ -1089,3 +1089,31 @@ fn test_inject_body_body_line_range_with_none_is_full_body() {
     assert_eq!(body[0].as_str().unwrap(), "line 3");
     assert_eq!(body[5].as_str().unwrap(), "line 8");
 }
+
+
+// ─── name_similarity tests ─────────────────────────────────────────
+
+#[test]
+fn test_name_similarity_identical() {
+    let score = name_similarity("handle_search", "handle_search");
+    assert!((score - 1.0).abs() < 0.001, "Identical strings should have score 1.0, got {}", score);
+}
+
+#[test]
+fn test_name_similarity_completely_different() {
+    let score = name_similarity("abc", "xyz");
+    assert!(score < 0.3, "Completely different strings should score low, got {}", score);
+}
+
+#[test]
+fn test_name_similarity_partial_match() {
+    let score = name_similarity("handle_search_callers", "handle_search_definitions");
+    assert!(score > 0.5, "Partial match should score above 0.5, got {}", score);
+    assert!(score < 1.0, "Partial match should not be 1.0, got {}", score);
+}
+
+#[test]
+fn test_name_similarity_typo() {
+    let score = name_similarity("userservice", "userservise");
+    assert!(score > 0.8, "Typo should have high similarity, got {}", score);
+}

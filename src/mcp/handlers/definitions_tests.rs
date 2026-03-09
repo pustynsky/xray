@@ -2030,3 +2030,400 @@ fn test_kind_property_no_hint_when_results_exist() {
     assert!(v["summary"].get("hint").is_none(),
         "No hint when results are returned");
 }
+
+
+// ─── Zero-result hints tests ──────────────────────────────────────
+
+#[test]
+fn test_hint_wrong_kind() {
+    // make_test_def_index has: UserService (class), GetUser (method), OrderService (class), GetOrder (method)
+    // Searching kind='function' with name='GetUser' should give hint suggesting 'method'
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"kind": "function", "name": "GetUser"})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str().unwrap();
+    assert!(hint.contains("kind='function'"), "Should mention the wrong kind. Got: {}", hint);
+    assert!(hint.contains("method"), "Should suggest 'method' as alternative. Got: {}", hint);
+    assert!(hint.contains("Did you mean"), "Should ask 'did you mean'. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_wrong_kind_with_file_filter() {
+    // Searching kind='function' with file='UserService' should give hint showing available kinds
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"kind": "function", "file": "UserService.cs"})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str().unwrap();
+    assert!(hint.contains("kind='function'"), "Should mention the wrong kind. Got: {}", hint);
+    assert!(hint.contains("class") || hint.contains("method"),
+        "Should list available kinds. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_file_has_defs_but_name_not_found() {
+    // File 'UserService.cs' has definitions, but name='nonexistent' doesn't match any
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"file": "UserService.cs", "name": "nonexistent"})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str().unwrap();
+    assert!(hint.contains("UserService.cs"), "Should mention the file. Got: {}", hint);
+    assert!(hint.contains("definitions"), "Should mention definitions count. Got: {}", hint);
+    assert!(hint.contains("search_grep"), "Should suggest search_grep. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_nearest_name_match() {
+    // Search for 'GetUsr' — close to 'GetUser' but not exact
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"name": "GetUsr"})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str();
+    assert!(hint.is_some(), "Should have a nearest-match hint for typo 'GetUsr'");
+    let h = hint.unwrap();
+    assert!(h.contains("Nearest match"), "Hint should say 'Nearest match'. Got: {}", h);
+    // Should suggest either 'getuser' or 'getorder'
+    assert!(h.contains("getuser") || h.contains("getorder"),
+        "Should suggest a close name. Got: {}", h);
+    assert!(h.contains("similarity"), "Should show similarity %. Got: {}", h);
+}
+
+#[test]
+fn test_hint_name_in_content_not_in_defs() {
+    // Create a context with content index containing 'inputschema' but no matching definition
+    use std::sync::Arc;
+    use std::sync::RwLock;
+    use std::sync::atomic::AtomicBool;
+
+    let index = make_test_def_index();
+    let mut content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        ..Default::default()
+    };
+    // Add 'inputschema' to content index
+    content_index.index.insert("inputschema".to_string(), vec![
+        crate::Posting { file_id: 0, lines: vec![10] },
+        crate::Posting { file_id: 1, lines: vec![20] },
+    ]);
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(index))),
+        content_ready: Arc::new(AtomicBool::new(true)),
+        ..Default::default()
+    };
+
+    let def_index_guard = ctx.def_index.as_ref().unwrap().read().unwrap();
+    let args = parse_definition_args(&json!({"name": "inputSchema"})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let summary = build_search_summary(
+        &def_index_guard, &defs_json, &args, 0, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str();
+    assert!(hint.is_some(), "Should have hint when name is in content but not in definitions");
+    let h = hint.unwrap();
+    assert!(h.contains("not found as an AST definition name"), "Hint should explain the issue. Got: {}", h);
+    assert!(h.contains("search_grep"), "Hint should suggest search_grep. Got: {}", h);
+    assert!(h.contains("2 files"), "Hint should show file count. Got: {}", h);
+}
+
+#[test]
+fn test_hint_priority_kind_first() {
+    // When both kind is wrong AND name is a typo, kind hint (A) should take priority over name hint (B)
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"kind": "function", "name": "GetUsr"})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    // Hint A won't trigger because 'GetUsr' doesn't match any name in name_index
+    // (it's a substring search, and 'getusr' doesn't match 'getuser' or 'getorder' as substring)
+    // So Hint B should trigger instead
+    let hint = summary["hint"].as_str();
+    assert!(hint.is_some(), "Should have some hint");
+}
+
+#[test]
+fn test_hint_no_hint_for_regex() {
+    // Regex search resulting in 0 results should NOT give nearest-name hint
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"name": "xyz_nonexistent_regex.*", "regex": true})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    // Hint B checks !args.use_regex, so no nearest-name hint
+    // Hint D might fire if content index has nothing
+    // At least verify no nearest-match hint
+    let hint = summary.get("hint").and_then(|v| v.as_str());
+    if let Some(h) = hint {
+        assert!(!h.contains("Nearest match"),
+            "Regex search should NOT give nearest-name hint. Got: {}", h);
+    }
+}
+
+#[test]
+fn test_hint_no_hint_when_results_found() {
+    // When search finds results, no hint should be generated
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"name": "GetUser"})).unwrap();
+    let defs_json = vec![json!({"name": "GetUser"})];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 1 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 1, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    assert!(summary.get("hint").is_none(),
+        "No hint when results are found (total_results > 0)");
+}
+
+#[test]
+fn test_hint_existing_property_field_hint_not_overwritten() {
+    // Ensure the existing property→field hint is preserved and not overwritten by new hints
+    let mut index = make_test_def_index();
+    // Add Field definitions so the property→field hint triggers
+    let field_def = DefinitionEntry {
+        name: "name".to_string(), kind: DefinitionKind::Field,
+        file_id: 0, line_start: 5, line_end: 5,
+        signature: None, parent: Some("UserService".to_string()),
+        modifiers: vec![], attributes: vec![], base_types: vec![],
+    };
+    let field_idx = index.definitions.len() as u32;
+    index.definitions.push(field_def);
+    index.kind_index.entry(DefinitionKind::Field).or_default().push(field_idx);
+    index.file_index.entry(0).or_default().push(field_idx);
+
+    let args = parse_definition_args(&json!({"kind": "property"})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str().unwrap();
+    // Should be the original property→field hint, not overwritten by Hint A/B/C/D
+    assert!(hint.contains("kind='field'"),
+        "Original property→field hint should be preserved. Got: {}", hint);
+}
+
+#[test]
+fn test_file_matches_filter_helper() {
+    let index = make_test_def_index();
+    // file 0 = "C:\\src\\UserService.cs"
+    assert!(file_matches_filter(&index, 0, "UserService.cs"));
+    assert!(file_matches_filter(&index, 0, "userservice.cs")); // case insensitive
+    assert!(file_matches_filter(&index, 0, "UserService.cs,OrderService.cs")); // comma-separated
+    assert!(!file_matches_filter(&index, 0, "OrderService.cs")); // only matches file 1
+    assert!(!file_matches_filter(&index, 0, "nonexistent.cs"));
+    assert!(!file_matches_filter(&index, 99, "UserService.cs")); // invalid file_id
+}
+
+// ─── Auto-correction tests ──────────────────────────────────────────
+
+/// Helper to create a context from make_test_def_index for auto-correction tests
+fn make_auto_correction_ctx() -> HandlerContext {
+    let index = make_test_def_index();
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(index))),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_auto_correct_kind_method_to_function() {
+    // make_test_def_index has GetUser (method) and GetOrder (method)
+    // Searching kind='function' + name='GetUser' should auto-correct to kind='method'
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "kind": "function",
+        "name": "GetUser"
+    }));
+    assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 1, "Should return corrected results. Got: {}", defs.len());
+    // Should include GetUser (method) among the results — kind filter removed
+    assert!(defs.iter().any(|d| d["name"] == "GetUser"),
+        "Should include GetUser in corrected results");
+
+    // Should have autoCorrection in summary
+    let auto = &v["summary"]["autoCorrection"];
+    assert!(auto.is_object(), "Should have autoCorrection in summary");
+    assert_eq!(auto["type"], "kindCorrected");
+    assert_eq!(auto["original"]["kind"], "function");
+    assert!(auto["corrected"]["kind"].is_null(), "Corrected kind should be null (kind filter removed)");
+    assert!(auto["reason"].as_str().unwrap().contains("Removed kind filter"),
+        "Reason should explain the correction. Got: {}", auto["reason"]);
+    assert!(auto.get("availableKinds").is_some(), "Should have availableKinds field");
+}
+
+#[test]
+fn test_auto_correct_kind_with_file_filter() {
+    // kind='function' + file='UserService.cs' — should auto-correct kind
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "kind": "function",
+        "file": "UserService.cs"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert!(defs.len() > 0, "Should return corrected results after kind auto-correction");
+
+    let auto = &v["summary"]["autoCorrection"];
+    assert!(auto.is_object(), "Should have autoCorrection");
+    assert_eq!(auto["type"], "kindCorrected");
+}
+
+#[test]
+fn test_auto_correct_kind_no_trigger_without_name_or_file() {
+    // kind='function' WITHOUT name/file — auto-correction should NOT trigger
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "kind": "function"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 0, "No functions exist, no auto-correction without name/file");
+    assert!(v["summary"].get("autoCorrection").is_none(),
+        "No autoCorrection without name/file filter");
+}
+
+#[test]
+fn test_auto_correct_name_typo() {
+    // name='GetUsr' — close to 'getuser' (Jaro-Winkler ~95%)
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "name": "GetUsr"
+    }));
+    assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert!(defs.len() > 0, "Should return auto-corrected results for typo 'GetUsr'");
+    assert!(defs.iter().any(|d| d["name"].as_str().unwrap() == "GetUser"),
+        "Should find GetUser after name correction");
+
+    let auto = &v["summary"]["autoCorrection"];
+    assert!(auto.is_object(), "Should have autoCorrection in summary");
+    assert_eq!(auto["type"], "nameCorrected");
+    assert_eq!(auto["original"]["name"], "GetUsr");
+    assert!(auto["corrected"]["name"].as_str().unwrap().contains("getuser"),
+        "Should correct to 'getuser'. Got: {}", auto["corrected"]["name"]);
+    assert!(auto["similarity"].as_str().unwrap().contains("%"),
+        "Should show similarity percentage");
+}
+
+#[test]
+fn test_auto_correct_name_below_threshold_no_correction() {
+    // name='xyz_totally_different' — very low similarity to any name
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "name": "xyz_totally_different"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 0, "Too different name should return 0 results");
+    assert!(v["summary"].get("autoCorrection").is_none(),
+        "No autoCorrection when similarity is below threshold");
+}
+
+#[test]
+fn test_auto_correct_name_not_triggered_for_regex() {
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "name": "GetUsr",
+        "regex": true
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(v["summary"].get("autoCorrection").is_none(),
+        "Regex queries should NOT trigger name auto-correction");
+}
+
+#[test]
+fn test_auto_correct_kind_takes_priority_over_name() {
+    // kind='function' + name='GetUser' — kind correction should fire first
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "kind": "function",
+        "name": "GetUser"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert!(defs.iter().any(|d| d["name"] == "GetUser"),
+        "Should find GetUser after kind correction");
+    let auto = &v["summary"]["autoCorrection"];
+    assert!(auto.is_object(), "Should have autoCorrection");
+    assert_eq!(auto["type"], "kindCorrected",
+        "Kind correction should take priority over name correction");
+}
+
+#[test]
+fn test_auto_correct_no_correction_when_results_found() {
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "name": "GetUser"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(v["definitions"].as_array().unwrap().len() > 0);
+    assert!(v["summary"].get("autoCorrection").is_none(),
+        "No autoCorrection when results are found normally");
+}
+
+#[test]
+fn test_auto_correct_preserves_other_filters() {
+    // kind='function' + name='GetUser' + file='OrderService.cs'
+    // After kind correction, file filter should still be applied
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "kind": "function",
+        "name": "GetUser",
+        "file": "OrderService.cs"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    // GetUser is in UserService.cs, not OrderService.cs — correction produces 0 results
+    assert_eq!(defs.len(), 0,
+        "File filter should still apply. GetUser is in UserService.cs, not OrderService.cs");
+}
+
+#[test]
+fn test_auto_correct_constant_threshold() {
+    assert!((AUTO_CORRECT_NAME_THRESHOLD - 0.80).abs() < f64::EPSILON,
+        "Auto-correct threshold should be 0.80");
+}

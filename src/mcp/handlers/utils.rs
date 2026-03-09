@@ -754,6 +754,17 @@ fn is_doc_comment_line(line: &str) -> bool {
         || (trimmed.starts_with('*') && !trimmed.starts_with("**") || trimmed == "*") // JSDoc continuation: `* text` or bare `*`
 }
 
+// ─── Name similarity helper ─────────────────────────────────────────
+
+/// Compute similarity ratio between two strings (0.0 – 1.0).
+/// Uses Jaro-Winkler distance — optimized for short identifiers and typo detection.
+/// Gives bonus for matching prefixes, which aligns with typical LLM errors
+/// (e.g., `GetUsr` → `GetUser`, `hndl_search` → `handle_search`).
+/// Useful for fuzzy name matching when search_definitions returns 0 results.
+pub(crate) fn name_similarity(a: &str, b: &str) -> f64 {
+    strsim::jaro_winkler(a, b)
+}
+
 // ─── Relevance ranking helpers ──────────────────────────────────────
 
 /// Returns the best (lowest) match tier for a name against a list of search terms.
