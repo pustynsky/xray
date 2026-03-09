@@ -6,6 +6,19 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-03-09
+
+### Bug Fixes
+- **`search_edit` — CRLF normalization and trailing whitespace auto-retry** — Three improvements to eliminate the most common `search_edit` false-negative failure mode ("Text not found" at 100% similarity):
+  - **Part A (bug fix)**: All text fields in `search_edit` edits (`search`, `replace`, `insertAfter`, `insertBefore`, `content`, `expectedContext`) now have CRLF line endings normalized to LF before matching. Previously, `read_and_validate_file()` normalized the file content to LF, but the search text from JSON input was used as-is — if the client/LLM sent `\r\n`, exact match was guaranteed to fail.
+  - **Part B (UX improvement)**: When a literal text search or anchor lookup finds 0 matches, `search_edit` now automatically retries with trailing whitespace stripped from each line of the search text. If the trimmed search succeeds, the edit is applied with a `"warnings"` array in the response (e.g., `"edits[0]: text matched after trimming trailing whitespace"`). This eliminates the most common LLM failure mode — invisible trailing spaces added by the model. Auto-retry is skipped for regex mode (trailing whitespace changes regex semantics) and when the trimmed text is empty (prevents `str.matches("")` infinite matches).
+  - **Part C (diagnostics)**: When `nearest_match_hint` reports ≥99% similarity, the error now includes a byte-level diff showing the first divergent byte (e.g., `"First difference at byte 47: search has 0x20 (space), file has 0x0A (newline)"`). Also reports length differences (e.g., `"Search text is 3 byte(s) longer than file text"`). Helps diagnose invisible whitespace issues when auto-retry doesn't apply.
+  - Self-review found and fixed 2 additional bugs: (1) `expectedContext` field was not CRLF-normalized, (2) all-whitespace search text after trimming could cause empty-string match with infinite results.
+  - New response field: `"warnings"` array on single-file and multi-file responses when auto-retry fires.
+  - 22 new unit tests. All 1400 unit tests + 65 E2E tests pass.
+
+---
+
 ## 2026-03-08
 
 ### Features
@@ -612,7 +625,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric                  | Value                       |
 | ----------------------- | --------------------------- |
-| Unit tests (latest)     | ~1373 (with lang-rust)      |
+| Unit tests (latest)     | ~1400 (with lang-rust)      |
 | E2E tests (latest)      | 65                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |
