@@ -252,6 +252,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                         "type": "integer",
                         "description": "Max total body lines across all results (default: 500, 0=unlimited)"
                     },
+                    "bodyLineStart": {
+                        "type": "integer",
+                        "description": "Filter body to start at this absolute file line number (1-based, inclusive). Use with bodyLineEnd to extract a precise slice from a large method body, avoiding response truncation. Example: containsLine=1335, bodyLineStart=1330, bodyLineEnd=1345 returns only 15 lines of the body."
+                    },
+                    "bodyLineEnd": {
+                        "type": "integer",
+                        "description": "Filter body to end at this absolute file line number (1-based, inclusive). Use with bodyLineStart for precise body extraction."
+                    },
                     "audit": {
                         "type": "boolean",
                         "description": "Return index coverage report instead of search results. (default: false)"
@@ -365,6 +373,14 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     "maxTotalBodyLines": {
                         "type": "integer",
                         "description": "Max total body lines across all methods in the tree (default: 300, 0=unlimited)"
+                    },
+                    "bodyLineStart": {
+                        "type": "integer",
+                        "description": "Filter rootMethod body to start at this absolute file line number (1-based). Only affects rootMethod body, not caller bodies."
+                    },
+                    "bodyLineEnd": {
+                        "type": "integer",
+                        "description": "Filter rootMethod body to end at this absolute file line number (1-based). Use with bodyLineStart for precise extraction."
                     },
                     "impactAnalysis": {
                         "type": "boolean",

@@ -299,6 +299,7 @@ pub fn parameter_examples() -> Value {
         "search_definitions": {
             "name": "Single: 'UserService'. Multi-term OR: 'UserService,IUserService,UserController' (finds ALL in one query). Naming variants: 'Order,IOrder,OrderFactory'. NOTE: name searches AST definition names (classes, methods, properties) -- NOT string literals or values inside code. Use search_grep for string content. For methods via 'using static', search without parent filter",
             "containsLine": "file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService",
+            "bodyLineStart/End": "containsLine=1335, bodyLineStart=1330, bodyLineEnd=1345 -> returns only 15 lines of a 363-line method body, avoiding response truncation. Use when you know which lines you need from a large method.",
             "includeBody": "parent='UserService', includeBody=true, maxBodyLines=20 -> returns method bodies inline",
             "includeDocComments": "includeDocComments=true -> expands body upward to capture /// XML doc-comments (C#/Rust) or /** */ JSDoc (TypeScript) above the definition. Implies includeBody=true. Response includes 'docCommentLines' count. Budget-aware: counts against maxBodyLines",
             "sortBy": "sortBy='cognitiveComplexity' maxResults=20 -> 20 most complex methods. sortBy='lines' -> longest definitions",

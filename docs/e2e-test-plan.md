@@ -1066,6 +1066,38 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 **Unit tests:** `test_find_doc_comment_start_csharp_triple_slash`, `test_find_doc_comment_start_typescript_jsdoc`, `test_find_doc_comment_start_rust_doc`, `test_find_doc_comment_start_no_comment`, `test_find_doc_comment_start_separated_by_code`, `test_find_doc_comment_start_with_blank_line_between`, `test_inject_body_with_doc_comments_csharp`, `test_inject_body_without_doc_comments_flag`, `test_inject_body_with_doc_comments_jsdoc`, `test_is_doc_comment_line_variants`, `test_find_doc_comment_start_at_file_start`, `test_find_doc_comment_start_decl_at_zero`
 
 **Status:** ✅ Implemented
+---
+
+### T28g-body-range: `serve` — search_definitions with `bodyLineStart`/`bodyLineEnd` (precise body extraction)
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<long_method>","includeBody":true,"bodyLineStart":1330,"bodyLineEnd":1345}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
+```
+
+**Expected:**
+
+- `body` array contains only lines within the [bodyLineStart, bodyLineEnd] range, intersected with the method's actual line range
+- `bodyStartLine` reflects the filtered start (e.g., 1330, not the method's original start line)
+- If the requested range is completely outside the method's range → `body` is an empty array (no panic)
+- Doc comment expansion (`includeDocComments`) is automatically skipped when `bodyLineStart` is set
+- `maxBodyLines` still applies on top of the filtered range (caps from the start of the filtered body)
+- When `bodyLineStart`/`bodyLineEnd` are both absent → full body returned (backward compatible)
+
+**Use case:** When `search_definitions` with `includeBody=true maxBodyLines=0` on a 363-line method exceeds the 64KB response budget, causing Phase 5a to strip all body fields. With `bodyLineStart`/`bodyLineEnd`, the caller can request only the 15 lines they need, staying well under budget.
+
+**Also supported in `search_callers`:** `bodyLineStart`/`bodyLineEnd` filter the `rootMethod` body only (caller node bodies are unaffected).
+
+**Unit tests:** `test_inject_body_body_line_range_filter`, `test_inject_body_body_line_start_only`, `test_inject_body_body_line_end_only`, `test_inject_body_body_line_range_outside_method`, `test_inject_body_body_line_range_with_none_is_full_body`, `test_search_definitions_body_line_range_filter`, `test_search_definitions_contains_line_with_body_line_range`, `test_search_callers_root_method_body_line_range`
+
+**Status:** ✅ Implemented
+
 
 ---
 

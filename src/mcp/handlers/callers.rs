@@ -167,6 +167,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         || include_doc_comments; // includeDocComments implies includeBody
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(300) as usize;
+    let body_line_start = args.get("bodyLineStart").and_then(|v| v.as_u64()).map(|v| v as u32);
+    let body_line_end = args.get("bodyLineEnd").and_then(|v| v.as_u64()).map(|v| v as u32);
 
     // Impact analysis parameter
     let impact_analysis = args.get("impactAnalysis").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -296,6 +298,8 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             max_body_lines,
             max_total_body_lines,
             include_doc_comments,
+            body_line_start,
+            body_line_end,
         )
     } else {
         None
@@ -481,6 +485,8 @@ fn handle_multi_method_callers(
         || include_doc_comments;
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(30) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(300) as usize;
+    let body_line_start = args.get("bodyLineStart").and_then(|v| v.as_u64()).map(|v| v as u32);
+    let body_line_end = args.get("bodyLineEnd").and_then(|v| v.as_u64()).map(|v| v as u32);
     let impact_analysis = args.get("impactAnalysis").and_then(|v| v.as_bool()).unwrap_or(false);
     if impact_analysis && direction != "up" {
         return ToolCallResult::error(
@@ -542,6 +548,8 @@ fn handle_multi_method_callers(
                 max_body_lines,
                 max_total_body_lines,
                 include_doc_comments,
+                body_line_start,
+                body_line_end,
             )
         } else {
             None
@@ -1107,6 +1115,8 @@ fn build_root_method_info(
     max_body_lines: usize,
     max_total_body_lines: usize,
     include_doc_comments: bool,
+    body_line_start: Option<u32>,
+    body_line_end: Option<u32>,
 ) -> Option<Value> {
     let name_indices = def_idx.name_index.get(method_lower)?;
 
@@ -1146,6 +1156,7 @@ fn build_root_method_info(
             max_body_lines,
             max_total_body_lines,
             include_doc_comments,
+            body_line_start, body_line_end,
         );
 
         return Some(node);
@@ -1448,6 +1459,7 @@ fn build_caller_tree(
                         ctx.max_body_lines,
                         ctx.max_total_body_lines,
                         ctx.include_doc_comments,
+                        None, None,
                     );
                 }
 
@@ -1496,6 +1508,7 @@ fn build_caller_tree(
                 ctx.max_body_lines,
                 ctx.max_total_body_lines,
                 ctx.include_doc_comments,
+                None, None,
             );
         }
 
@@ -1808,6 +1821,7 @@ fn build_callee_tree(
                         ctx.max_body_lines,
                         ctx.max_total_body_lines,
                         ctx.include_doc_comments,
+                        None, None,
                     );
                 }
 
