@@ -7792,6 +7792,25 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Status:** ✅ Covered by unit tests: `test_skipped_details_contains_edit_info`, `test_skipped_details_multiple_skips`, `test_skipped_details_multi_file_per_file`, `test_skipped_details_regex_skip`
 
 ---
+
+#### T-EDIT-17: Whitespace normalization — CRLF and trailing whitespace auto-retry
+
+**Background:** `search_edit` now normalizes CRLF in search text and auto-retries with trailing whitespace stripped when exact match fails. When auto-retry succeeds, a `warnings` array is included in the response.
+
+**Expected:**
+
+- Search text with `\r\n` matches LF-normalized file content (CRLF normalized at parse time)
+- Search text with trailing spaces matches file content without trailing spaces (auto-retry with warning)
+- Anchor text with trailing spaces matches file content without trailing spaces (auto-retry with warning)
+- Response includes `"warnings"` array when auto-retry fires (e.g., `"edits[0]: text matched after trimming trailing whitespace"`)
+- No warnings when exact match succeeds (no auto-retry needed)
+- All-whitespace search text (`"  "`) does NOT panic or produce infinite matches — gracefully fails with "text not found"
+- `expectedContext` with CRLF is normalized and matches LF file content
+- High-similarity (≥99%) error hints include byte-level diff (e.g., `"First difference at byte N: search has 0x20 (space), file has 0x09 (tab)"`)
+
+**Status:** ✅ Covered by 22 unit tests: `test_crlf_in_search_text_is_normalized`, `test_crlf_in_anchor_text_is_normalized`, `test_crlf_in_replace_text_is_normalized`, `test_trailing_whitespace_in_search_auto_retry`, `test_trailing_whitespace_in_anchor_auto_retry`, `test_no_trailing_whitespace_no_warning`, `test_trailing_whitespace_both_sides_no_retry_needed`, `test_trailing_whitespace_retry_fails_gracefully`, `test_trailing_whitespace_skip_if_not_found_with_retry`, `test_byte_diff_hint_trailing_space`, `test_byte_diff_hint_length_difference`, `test_describe_byte_common_whitespace`, `test_strip_trailing_whitespace_per_line`, `test_normalize_crlf`, `test_byte_level_diff_hint_different_bytes`, `test_byte_level_diff_hint_length_difference`, `test_byte_level_diff_hint_identical`, `test_all_whitespace_search_does_not_panic`, `test_expected_context_crlf_normalized`
+
+---
 ---
 ---
 

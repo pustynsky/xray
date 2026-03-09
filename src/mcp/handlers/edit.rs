@@ -93,6 +93,7 @@ struct EditResult {
     applied: usize,
     total_replacements: usize,
     skipped_details: Vec<SkippedEditDetail>,
+    warnings: Vec<String>,
     diff: String,
     lines_added: i64,
     lines_removed: i64,
@@ -144,7 +145,7 @@ fn apply_edits_to_content(
     is_regex: bool,
     expected_line_count: Option<usize>,
 ) -> Result<EditResult, String> {
-    let (modified_content, applied, total_replacements, skipped_details) = if let Some(ops_array) = operations {
+    let (modified_content, applied, total_replacements, skipped_details, warnings) = if let Some(ops_array) = operations {
         // Mode A: Line-range operations
         let ops = parse_line_operations(ops_array)?;
 
@@ -161,14 +162,14 @@ fn apply_edits_to_content(
         }
 
         let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
-        (new_lines.join("\n"), applied_count, 0, Vec::new())
+        (new_lines.join("\n"), applied_count, 0, Vec::new(), Vec::new())
     } else if let Some(edits_array) = edits {
         // Mode B: Text-match edits
         let text_edits = parse_text_edits(edits_array)?;
 
-        let (new_content, replacements, skipped) = apply_text_edits(normalized, &text_edits, is_regex)?;
+        let (new_content, replacements, skipped, edit_warnings) = apply_text_edits(normalized, &text_edits, is_regex)?;
         let edit_count = text_edits.len();
-        (new_content, edit_count, replacements, skipped)
+        (new_content, edit_count, replacements, skipped, edit_warnings)
     } else {
         unreachable!("Already validated that one of operations/edits is Some");
     };
@@ -188,6 +189,7 @@ fn apply_edits_to_content(
         applied,
         total_replacements,
         skipped_details,
+        warnings,
         diff,
         lines_added,
         lines_removed,
@@ -259,6 +261,10 @@ fn handle_single_file_edit(
                 "reason": s.reason,
             })
         }).collect::<Vec<_>>());
+    }
+
+    if !edit_result.warnings.is_empty() {
+        response["warnings"] = json!(edit_result.warnings);
     }
 
     if !edit_result.diff.is_empty() {
@@ -355,6 +361,9 @@ fn handle_multi_file_edit(
                     "reason": s.reason,
                 })
             }).collect::<Vec<_>>());
+        }
+        if !result.warnings.is_empty() {
+            file_result["warnings"] = json!(result.warnings);
         }
         if !result.diff.is_empty() {
             file_result["diff"] = json!(result.diff);
@@ -548,18 +557,51 @@ struct TextEdit {
     skip_if_not_found: bool,
 }
 
+/// Normalize CRLF line endings to LF in a string.
+/// This ensures search text from JSON input matches LF-normalized file content.
+fn normalize_crlf(s: &str) -> String {
+    if s.contains("\r\n") {
+        s.replace("\r\n", "\n")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Strip trailing whitespace from each line of a string.
+/// Used for fuzzy-retry when exact match fails due to invisible trailing spaces.
+fn strip_trailing_whitespace_per_line(s: &str) -> String {
+    s.lines()
+        .map(|line| line.trim_end())
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+/// Describe a byte for diagnostic messages (hex + human-readable name).
+fn describe_byte(b: u8) -> String {
+    match b {
+        b' ' => format!("0x{:02X} (space)", b),
+        b'\t' => format!("0x{:02X} (tab)", b),
+        b'\n' => format!("0x{:02X} (newline)", b),
+        b'\r' => format!("0x{:02X} (carriage return)", b),
+        0xC2 => format!("0x{:02X} (possible non-breaking space start)", b),
+        b if b.is_ascii_graphic() => format!("0x{:02X} ('{}')", b, b as char),
+        b => format!("0x{:02X}", b),
+    }
+}
+
 fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
     let mut edits = Vec::with_capacity(edits_array.len());
     for (i, edit) in edits_array.iter().enumerate() {
-        let search = edit.get("search").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let replace = edit.get("replace").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let insert_after = edit.get("insertAfter").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let insert_before = edit.get("insertBefore").and_then(|v| v.as_str()).map(|s| s.to_string());
-        let content = edit.get("content").and_then(|v| v.as_str()).map(|s| s.to_string());
+        // Part A: Normalize CRLF in all text fields to match LF-normalized file content
+        let search = edit.get("search").and_then(|v| v.as_str()).map(normalize_crlf);
+        let replace = edit.get("replace").and_then(|v| v.as_str()).map(normalize_crlf);
+        let insert_after = edit.get("insertAfter").and_then(|v| v.as_str()).map(normalize_crlf);
+        let insert_before = edit.get("insertBefore").and_then(|v| v.as_str()).map(normalize_crlf);
+        let content = edit.get("content").and_then(|v| v.as_str()).map(normalize_crlf);
         let occurrence = edit.get("occurrence")
             .and_then(|v| v.as_u64())
             .unwrap_or(0) as usize;
-        let expected_context = edit.get("expectedContext").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let expected_context = edit.get("expectedContext").and_then(|v| v.as_str()).map(normalize_crlf);
         let skip_if_not_found = edit.get("skipIfNotFound").and_then(|v| v.as_bool()).unwrap_or(false);
 
         let has_search_replace = search.is_some() || replace.is_some();
@@ -624,11 +666,12 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
 /// Explains that previous edits may have changed the content, reducing occurrence counts.
 const SEQUENTIAL_EDIT_HINT: &str = ". Note: edits are applied sequentially — previous edits in the same request may have modified the content, reducing the occurrence count";
 
-/// Apply text edits sequentially. Returns (new_content, total_replacements, skipped_details).
-fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, Vec<SkippedEditDetail>), String> {
+/// Apply text edits sequentially. Returns (new_content, total_replacements, skipped_details, warnings).
+fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, Vec<SkippedEditDetail>, Vec<String>), String> {
     let mut result = content.to_string();
     let mut total_replacements = 0;
     let mut skipped_details: Vec<SkippedEditDetail> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for (edit_index, edit) in edits.iter().enumerate() {
         if edit.insert_after.is_some() || edit.insert_before.is_some() {
@@ -639,8 +682,26 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
             let insert_content = edit.content.as_deref().unwrap(); // validated in parse
             let is_after = edit.insert_after.is_some();
 
-            // Find the anchor text
-            let matches: Vec<usize> = find_all_occurrences(&result, anchor);
+            // Find the anchor text (with trailing-whitespace auto-retry)
+            let trimmed_anchor = strip_trailing_whitespace_per_line(anchor);
+            let anchor_trimmed = trimmed_anchor != anchor;
+            let exact_matches = find_all_occurrences(&result, anchor);
+            let (matches, effective_anchor) = if !exact_matches.is_empty() {
+                (exact_matches, anchor)
+            } else if anchor_trimmed && !trimmed_anchor.is_empty() {
+                let trimmed_matches = find_all_occurrences(&result, &trimmed_anchor);
+                if !trimmed_matches.is_empty() {
+                    warnings.push(format!(
+                        "edits[{}]: anchor matched after trimming trailing whitespace",
+                        edit_index
+                    ));
+                    (trimmed_matches, trimmed_anchor.as_str())
+                } else {
+                    (vec![], anchor)
+                }
+            } else {
+                (vec![], anchor)
+            };
             if matches.is_empty() {
                 if edit.skip_if_not_found {
                     skipped_details.push(SkippedEditDetail {
@@ -653,6 +714,7 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                 let hint = nearest_match_hint(&result, anchor);
                 return Err(format!("Anchor text not found: \"{}\"{}", truncate_for_display(anchor), hint));
             }
+            let anchor = effective_anchor;
 
             // Determine which occurrence to use
             let target_pos = match edit.occurrence {
@@ -760,9 +822,27 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                     }
                 }
             } else {
-                // Literal search
+                // Literal search (with trailing-whitespace auto-retry)
+                let trimmed_search = strip_trailing_whitespace_per_line(search);
+                let search_was_trimmed = trimmed_search != search;
                 let count = result.matches(search).count();
-                if count == 0 {
+                let (effective_search, effective_count) = if count > 0 {
+                    (search, count)
+                } else if search_was_trimmed && !trimmed_search.is_empty() {
+                    let trimmed_count = result.matches(trimmed_search.as_str()).count();
+                    if trimmed_count > 0 {
+                        warnings.push(format!(
+                            "edits[{}]: text matched after trimming trailing whitespace",
+                            edit_index
+                        ));
+                        (trimmed_search.as_str(), trimmed_count)
+                    } else {
+                        (search, 0)
+                    }
+                } else {
+                    (search, 0)
+                };
+                if effective_count == 0 {
                     if edit.skip_if_not_found {
                         skipped_details.push(SkippedEditDetail {
                             edit_index,
@@ -774,6 +854,8 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                     let hint = nearest_match_hint(&result, search);
                     return Err(format!("Text not found: \"{}\"{}", truncate_for_display(search), hint));
                 }
+                let search = effective_search;
+                let count = effective_count;
 
                 // Check expectedContext on first match
                 if let Some(ref ctx_text) = edit.expected_context {
@@ -817,7 +899,7 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
         }
     }
 
-    Ok((result, total_replacements, skipped_details))
+    Ok((result, total_replacements, skipped_details, warnings))
 }
 
 /// Find all occurrences of a literal string, returning their start positions.
@@ -924,10 +1006,56 @@ fn nearest_match_hint(content: &str, search_text: &str) -> String {
 
     let pct = (best_similarity * 100.0).round() as u32;
     let display_text = truncate_for_display(&best_text);
+
+    // Part C: When similarity is very high (≥99%), add byte-level diff diagnostic
+    let byte_diff_hint = if best_similarity >= 0.99 {
+        byte_level_diff_hint(search_text, &best_text)
+    } else {
+        String::new()
+    };
+
     format!(
-        ". Nearest match at line {} (similarity {}%): \"{}\"",
-        best_line_num, pct, display_text
+        ". Nearest match at line {} (similarity {}%): \"{}\"{}",
+        best_line_num, pct, display_text, byte_diff_hint
     )
+}
+
+/// Generate a byte-level diff hint showing the first difference between two strings.
+/// Used when similarity is ≥99% to help identify invisible whitespace differences.
+fn byte_level_diff_hint(search: &str, found: &str) -> String {
+    let search_bytes = search.as_bytes();
+    let found_bytes = found.as_bytes();
+
+    // Find first different byte
+    for (i, (s, f)) in search_bytes.iter().zip(found_bytes.iter()).enumerate() {
+        if s != f {
+            return format!(
+                ". First difference at byte {}: search has {}, file has {}",
+                i, describe_byte(*s), describe_byte(*f)
+            );
+        }
+    }
+
+    // If one is a prefix of the other
+    if search_bytes.len() != found_bytes.len() {
+        let shorter = search_bytes.len().min(found_bytes.len());
+        if search_bytes.len() > found_bytes.len() {
+            let extra_byte = search_bytes[shorter];
+            return format!(
+                ". Search text is {} byte(s) longer than file text. Extra content starts with {}",
+                search_bytes.len() - found_bytes.len(), describe_byte(extra_byte)
+            );
+        } else {
+            let extra_byte = found_bytes[shorter];
+            return format!(
+                ". File text is {} byte(s) longer than search text. Extra content starts with {}",
+                found_bytes.len() - search_bytes.len(), describe_byte(extra_byte)
+            );
+        }
+    }
+
+    // Identical bytes — shouldn't happen if we got here, but be safe
+    String::new()
 }
 
 // ─── Diff generation ─────────────────────────────────────────────────

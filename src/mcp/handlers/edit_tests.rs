@@ -1631,3 +1631,322 @@ fn test_no_sequential_hint_for_first_edit() {
     assert!(!text.contains("sequentially"),
         "Error should NOT mention sequential when edit_index == 0. Got: {}", text);
 }
+
+
+// ─── Part A: CRLF normalization in search text ──────────────────────
+
+#[test]
+fn test_crlf_in_search_text_is_normalized() {
+    // File has LF line endings (normalized by read_and_validate_file)
+    let (tmp, filename, _) = create_temp_file("line one\nline two\nline three\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Search text uses CRLF — should still match after normalization
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "line one\r\nline two", "replace": "LINE ONE\nLINE TWO" }
+        ]
+    }));
+
+    assert!(!result.is_error, "CRLF in search text should be normalized to match LF file. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("LINE ONE\nLINE TWO"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_crlf_in_anchor_text_is_normalized() {
+    let (tmp, filename, _) = create_temp_file("using System;\nusing System.IO;\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Anchor uses CRLF — should still match
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "insertAfter": "using System;\r\n", "content": "using System.Linq;" }
+        ]
+    }));
+
+    // Note: the anchor "using System;\r\n" after CRLF normalization becomes "using System;\n"
+    // which should find "using System;\n" in the file content
+    assert!(!result.is_error, "CRLF in anchor should be normalized. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+}
+
+#[test]
+fn test_crlf_in_replace_text_is_normalized() {
+    let (tmp, filename, _) = create_temp_file("old text\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "old text", "replace": "new\r\ntext" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    // Replace text CRLF should be normalized to LF
+    assert!(content.contains("new\ntext"), "Replace CRLF should be normalized to LF");
+}
+
+// ─── Part B: Auto-retry with trailing whitespace strip ──────────────
+
+#[test]
+fn test_trailing_whitespace_in_search_auto_retry() {
+    // File has NO trailing whitespace
+    let (tmp, filename, _) = create_temp_file("function hello() {\n    return 42;\n}\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Search text has trailing spaces (LLM artifact)
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "function hello() {  \n    return 42;  \n}", "replace": "function hello() {\n    return 43;\n}" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should auto-retry with stripped trailing whitespace. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let text = &result.content[0].text;
+    assert!(text.contains("warnings"), "Response should contain warnings about whitespace trimming");
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("return 43;"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_trailing_whitespace_in_anchor_auto_retry() {
+    let (tmp, filename, _) = create_temp_file("line one\nline two\nline three\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Anchor has trailing spaces
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "insertAfter": "line one  ", "content": "inserted line" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should auto-retry anchor with stripped trailing whitespace. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let text = &result.content[0].text;
+    assert!(text.contains("warnings"), "Response should contain warnings");
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("inserted line"), "Insert should have been applied");
+}
+
+#[test]
+fn test_no_trailing_whitespace_no_warning() {
+    // When there's no trailing whitespace issue, no warning should appear
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello world", "replace": "goodbye world" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let text = &result.content[0].text;
+    assert!(!text.contains("warnings"), "No warnings when exact match succeeds");
+}
+
+#[test]
+fn test_trailing_whitespace_both_sides_no_retry_needed() {
+    // File HAS trailing whitespace and search text matches exactly
+    let (tmp, filename, _) = create_temp_file("hello world  \n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello world  ", "replace": "goodbye world" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let text = &result.content[0].text;
+    assert!(!text.contains("warnings"), "No warnings when exact match succeeds (both have trailing spaces)");
+}
+
+#[test]
+fn test_trailing_whitespace_retry_fails_gracefully() {
+    // File has completely different content — retry shouldn't help
+    let (tmp, filename, _) = create_temp_file("alpha beta gamma\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "totally different text  ", "replace": "x" }
+        ]
+    }));
+
+    assert!(result.is_error, "Should still fail when text is truly not found");
+}
+
+#[test]
+fn test_trailing_whitespace_skip_if_not_found_with_retry() {
+    // With skipIfNotFound=true, trailing whitespace retry should still work
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello world  ", "replace": "goodbye", "skipIfNotFound": false }
+        ]
+    }));
+
+    // This should auto-retry and succeed (not skip)
+    assert!(!result.is_error, "Should auto-retry successfully. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+}
+
+// ─── Part C: Hex diff diagnostics at ≥99% similarity ────────────────
+
+#[test]
+fn test_byte_diff_hint_trailing_space() {
+    // File has "hello" but search has "hello " (trailing space)
+    // Since trailing whitespace auto-retry catches this case, we need a case
+    // where the difference is NOT trailing whitespace (e.g., tab vs space)
+    let (tmp, filename, _) = create_temp_file("hello\tworld\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello world", "replace": "x" }
+        ]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    // Should show nearest match with byte diff since similarity is very high
+    assert!(text.contains("Nearest match"), "Should show nearest match hint");
+    // The hint should show byte difference (tab vs space)
+    assert!(text.contains("First difference") || text.contains("similarity"),
+        "Should show byte-level diff or high similarity. Got: {}", text);
+}
+
+#[test]
+fn test_byte_diff_hint_length_difference() {
+    // Test where search is longer than file content at that line
+    let (tmp, filename, _) = create_temp_file("abc\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "abcd", "replace": "x" }
+        ]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    // "abc" vs "abcd" — similarity should be high enough for a hint
+    assert!(text.contains("Nearest match"), "Should show nearest match for near-miss. Got: {}", text);
+}
+
+#[test]
+fn test_describe_byte_common_whitespace() {
+    // Unit test for describe_byte helper
+    assert!(super::describe_byte(b' ').contains("space"));
+    assert!(super::describe_byte(b'\t').contains("tab"));
+    assert!(super::describe_byte(b'\n').contains("newline"));
+    assert!(super::describe_byte(b'\r').contains("carriage return"));
+    assert!(super::describe_byte(b'A').contains("'A'"));
+}
+
+#[test]
+fn test_strip_trailing_whitespace_per_line() {
+    assert_eq!(
+        super::strip_trailing_whitespace_per_line("hello  \nworld\t\n"),
+        "hello\nworld"
+    );
+    assert_eq!(
+        super::strip_trailing_whitespace_per_line("no trailing"),
+        "no trailing"
+    );
+    assert_eq!(
+        super::strip_trailing_whitespace_per_line("  leading preserved  "),
+        "  leading preserved"
+    );
+}
+
+#[test]
+fn test_normalize_crlf() {
+    assert_eq!(super::normalize_crlf("hello\r\nworld"), "hello\nworld");
+    assert_eq!(super::normalize_crlf("no crlf here"), "no crlf here");
+    assert_eq!(super::normalize_crlf("a\r\nb\r\nc"), "a\nb\nc");
+}
+
+#[test]
+fn test_byte_level_diff_hint_different_bytes() {
+    let hint = super::byte_level_diff_hint("hello world", "hello\tworld");
+    assert!(hint.contains("First difference at byte 5"), "Got: {}", hint);
+    assert!(hint.contains("space"), "Should describe space");
+    assert!(hint.contains("tab"), "Should describe tab");
+}
+
+#[test]
+fn test_byte_level_diff_hint_length_difference() {
+    let hint = super::byte_level_diff_hint("hello world!", "hello world");
+    assert!(hint.contains("Search text is 1 byte(s) longer"), "Got: {}", hint);
+
+    let hint2 = super::byte_level_diff_hint("hello", "hello world");
+    assert!(hint2.contains("File text is 6 byte(s) longer"), "Got: {}", hint2);
+}
+
+#[test]
+fn test_byte_level_diff_hint_identical() {
+    let hint = super::byte_level_diff_hint("same", "same");
+    assert!(hint.is_empty(), "Should be empty for identical strings");
+}
+
+
+// ─── Self-review regression tests ───────────────────────────────────
+
+#[test]
+fn test_all_whitespace_search_does_not_panic() {
+    // Regression: search text "  " after trim becomes "", which would cause
+    // result.matches("").count() to return huge number. Should gracefully fail.
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "  ", "replace": "x" }
+        ]
+    }));
+
+    // "  " (two spaces) is not in the file, and after trim becomes "" which should NOT match anything
+    assert!(result.is_error, "All-whitespace search that doesn't match should error");
+}
+
+#[test]
+fn test_expected_context_crlf_normalized() {
+    // Regression: expectedContext was not CRLF-normalized, so CRLF in expectedContext
+    // would never match LF-normalized file content
+    let (tmp, filename, _) = create_temp_file("line one\nline two\nline three\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "line two",
+                "replace": "LINE TWO",
+                "expectedContext": "line one\r\nline two"
+            }
+        ]
+    }));
+
+    assert!(!result.is_error, "CRLF in expectedContext should be normalized. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+}
