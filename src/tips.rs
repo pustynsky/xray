@@ -565,9 +565,9 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         let ext_dotted: Vec<String> = def_extensions.iter().map(|e| format!(".{}", e)).collect();
         let ext_list = ext_dotted.join("/");
         out.push_str(&format!("NEVER READ {} FILES DIRECTLY. ALWAYS use search_definitions includeBody=true.\n", ext_list));
-        out.push_str(&format!("   DECISION TRIGGER: before ANY file read, check extension. If {} -> search_definitions.\n", ext_list));
-        out.push_str("   If .md/.json/.xml/.config -> reading directly is OK.\n");
-        out.push_str(&format!("   ONLY exception for {}: editing (need exact line numbers for diffs).\n\n", ext_list));
+        out.push_str(&format!("   DECISION TRIGGER: before reading ANY file — for ANY reason (exploration, validation, fact-checking, reviewing, debugging) — check extension. If {} -> search_definitions includeBody=true.\n", ext_list));
+        out.push_str(&format!("   If the file extension is NOT in {} -> reading directly is OK.\n", ext_list));
+        out.push_str(&format!("   ONLY exception for {}: editing (need exact line numbers for search_edit).\n\n", ext_list));
     } else {
         out.push_str("NOTE: search_definitions is not available for the configured file extensions. Use search_grep for content search.\n\n");
     }
