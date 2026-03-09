@@ -41,6 +41,8 @@ pub(crate) struct DefinitionSearchArgs {
     pub include_doc_comments: bool,
     pub max_body_lines: usize,
     pub max_total_body_lines: usize,
+    pub body_line_start: Option<u32>,
+    pub body_line_end: Option<u32>,
     pub audit: bool,
     pub audit_min_bytes: u64,
     pub cross_validate: bool,
@@ -110,6 +112,8 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         || include_doc_comments; // includeDocComments implies includeBody
     let max_body_lines = args.get("maxBodyLines").and_then(|v| v.as_u64()).unwrap_or(100) as usize;
     let max_total_body_lines = args.get("maxTotalBodyLines").and_then(|v| v.as_u64()).unwrap_or(500) as usize;
+    let body_line_start = args.get("bodyLineStart").and_then(|v| v.as_u64()).map(|v| v as u32);
+    let body_line_end = args.get("bodyLineEnd").and_then(|v| v.as_u64()).map(|v| v as u32);
     let audit = args.get("audit").and_then(|v| v.as_bool()).unwrap_or(false);
     let audit_min_bytes = args.get("auditMinBytes")
         .and_then(|v| v.as_u64())
@@ -165,6 +169,8 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         include_doc_comments,
         max_body_lines,
         max_total_body_lines,
+        body_line_start,
+        body_line_end,
         audit,
         audit_min_bytes,
         cross_validate,
@@ -359,6 +365,7 @@ fn handle_contains_line_mode(
                         &mut file_cache, &mut total_body_lines_emitted,
                         args.max_body_lines, args.max_total_body_lines,
                         args.include_doc_comments,
+                        args.body_line_start, args.body_line_end,
                     );
                 }
                 containing_defs.push(obj);
@@ -812,6 +819,7 @@ fn format_definition_entry(
             file_cache, total_body_lines_emitted,
             args.max_body_lines, args.max_total_body_lines,
             args.include_doc_comments,
+            args.body_line_start, args.body_line_end,
         );
     }
 

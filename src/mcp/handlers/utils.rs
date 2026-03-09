@@ -576,6 +576,8 @@ pub(crate) fn inject_body_into_obj(
     max_body_lines: usize,
     max_total_body_lines: usize,
     include_doc_comments: bool,
+    body_line_start: Option<u32>,
+    body_line_end: Option<u32>,
 ) {
     // Check total budget
     if max_total_body_lines > 0 && *total_body_lines_emitted >= max_total_body_lines {
@@ -604,7 +606,24 @@ pub(crate) fn inject_body_into_obj(
 
             // 1-based to 0-based
             let mut start_idx = (line_start as usize).saturating_sub(1);
-            let end_idx = (line_end as usize).min(total_file_lines);
+            let mut end_idx = (line_end as usize).min(total_file_lines);
+
+            // Apply body line range filter (absolute file line numbers, 1-based)
+            // This narrows the body to only the lines within [bodyLineStart, bodyLineEnd],
+            // intersected with the definition's own line range.
+            if let Some(bls) = body_line_start {
+                start_idx = start_idx.max((bls as usize).saturating_sub(1));
+            }
+            if let Some(ble) = body_line_end {
+                end_idx = end_idx.min(ble as usize);
+            }
+
+            // Ensure start doesn't exceed end after line range filtering
+            if start_idx > end_idx {
+                obj["bodyStartLine"] = json!(start_idx + 1);
+                obj["body"] = json!(Vec::<&str>::new());
+                return;
+            }
 
             // Stale data check
             if line_end as usize > total_file_lines {
@@ -614,8 +633,10 @@ pub(crate) fn inject_body_into_obj(
                 ));
             }
 
-            // Expand upward to capture doc comments if requested
-            let doc_comment_lines = if include_doc_comments && start_idx > 0 {
+            // Expand upward to capture doc comments if requested.
+            // Skip doc comment expansion when bodyLineStart is set — the user
+            // wants a precise line range, so we respect their explicit start.
+            let doc_comment_lines = if include_doc_comments && start_idx > 0 && body_line_start.is_none() {
                 let doc_start = find_doc_comment_start(&lines_vec, start_idx);
                 let count = start_idx - doc_start;
                 start_idx = doc_start;

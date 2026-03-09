@@ -601,6 +601,52 @@ fn test_search_definitions_enum_member_kind() {
     cleanup_tmp(&tmp);
 }
 
+#[test] fn test_search_definitions_body_line_range_filter() {
+    let (ctx, tmp) = make_ctx_with_real_files();
+    // DoWork has 6 body lines starting at line 3
+    // Request only lines 5-6 (middle of the method)
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "DoWork",
+        "includeBody": true,
+        "bodyLineStart": 5,
+        "bodyLineEnd": 6
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 1);
+    let body = defs[0]["body"].as_array().unwrap();
+    assert_eq!(body.len(), 2, "bodyLineStart=5, bodyLineEnd=6 should return 2 lines, got {}", body.len());
+    assert_eq!(defs[0]["bodyStartLine"], 5, "bodyStartLine should be 5 (filtered)");
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_search_definitions_contains_line_with_body_line_range() {
+    let (ctx, tmp) = make_ctx_with_real_files();
+    // DoWork method is in MyService.cs at lines 3-8
+    // Use containsLine to find the method, then bodyLineStart/End to narrow the body
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "MyService.cs",
+        "containsLine": 5,
+        "includeBody": true,
+        "bodyLineStart": 5,
+        "bodyLineEnd": 7
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let containing = output["containingDefinitions"].as_array().unwrap();
+    // Should find DoWork (innermost) and MyService (parent class)
+    assert!(containing.len() >= 1, "Should find definitions containing line 5, got {}", containing.len());
+    // The innermost definition (DoWork, lines 3-8) body should be filtered to lines 5-7
+    let dowork = &containing[0];
+    assert_eq!(dowork["name"].as_str(), Some("DoWork"));
+    let body = dowork["body"].as_array().unwrap();
+    assert_eq!(body.len(), 3, "Body should be 3 lines (5-7), got {}", body.len());
+    assert_eq!(dowork["bodyStartLine"].as_u64().unwrap(), 5,
+        "bodyStartLine should be 5 (filtered by bodyLineStart)");
+    cleanup_tmp(&tmp);
+}
+
 #[test] fn test_search_definitions_max_body_lines_truncation() {
     let (ctx, tmp) = make_ctx_with_real_files();
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "Process", "includeBody": true, "maxBodyLines": 5}));

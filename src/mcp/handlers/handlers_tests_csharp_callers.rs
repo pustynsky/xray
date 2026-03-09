@@ -2322,3 +2322,46 @@ fn test_search_callers_include_body_root_method_down() {
 
     cleanup_callers_body_ctx(&tmp);
 }
+
+#[test]
+fn test_search_callers_root_method_body_line_range() {
+    // bodyLineStart/bodyLineEnd should filter rootMethod body to the specified line range
+    let (ctx, tmp) = make_callers_body_ctx();
+
+    // First, get the full rootMethod body to know the line numbers
+    let result_full = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "SubmitOrder",
+        "class": "OrderService",
+        "depth": 1,
+        "includeBody": true
+    }));
+    assert!(!result_full.is_error, "Error: {}", result_full.content[0].text);
+    let output_full: Value = serde_json::from_str(&result_full.content[0].text).unwrap();
+    let root_full = output_full.get("rootMethod").expect("Should have rootMethod");
+    let full_start = root_full["bodyStartLine"].as_u64().unwrap();
+    let full_body = root_full["body"].as_array().unwrap();
+    let full_len = full_body.len();
+    assert!(full_len >= 3, "SubmitOrder should have at least 3 body lines, got {}", full_len);
+
+    // Now request only 2 lines from the middle of the body
+    let target_start = full_start + 2; // skip first 2 lines
+    let target_end = full_start + 3;   // take 2 lines
+    let result = dispatch_tool(&ctx, "search_callers", &json!({
+        "method": "SubmitOrder",
+        "class": "OrderService",
+        "depth": 1,
+        "includeBody": true,
+        "bodyLineStart": target_start,
+        "bodyLineEnd": target_end
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let root = output.get("rootMethod").expect("Should have rootMethod with bodyLineStart/End");
+    let filtered_body = root["body"].as_array().unwrap();
+    assert_eq!(filtered_body.len(), 2,
+        "bodyLineStart/End should filter rootMethod to 2 lines, got {}", filtered_body.len());
+    assert_eq!(root["bodyStartLine"].as_u64().unwrap(), target_start,
+        "bodyStartLine should reflect the filtered range");
+
+    cleanup_callers_body_ctx(&tmp);
+}

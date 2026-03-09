@@ -742,6 +742,7 @@ fn test_inject_body_with_doc_comments_csharp() {
     // line_start=6 (1-based, [Authorize] line), line_end=10
     inject_body_into_obj(
         &mut obj, &file_str, 6, 10, &mut cache, &mut total, 100, 500, true,
+        None, None,
     );
 
     // Body should start at the /// line (line 3, 1-based)
@@ -776,6 +777,7 @@ fn test_inject_body_without_doc_comments_flag() {
     // line_start=4, line_end=6, include_doc_comments=false
     inject_body_into_obj(
         &mut obj, &file_str, 4, 6, &mut cache, &mut total, 100, 500, false,
+        None, None,
     );
 
     assert_eq!(obj["bodyStartLine"], 4, "bodyStartLine should be 4 (no expansion)");
@@ -950,6 +952,7 @@ fn test_inject_body_with_doc_comments_jsdoc() {
     // line_start=7 (export async function), line_end=9
     inject_body_into_obj(
         &mut obj, &file_str, 7, 9, &mut cache, &mut total, 100, 500, true,
+        None, None,
     );
 
     assert_eq!(obj["bodyStartLine"], 3, "bodyStartLine should be 3 (/** line)");
@@ -959,4 +962,130 @@ fn test_inject_body_with_doc_comments_jsdoc() {
         "First body line should be the JSDoc start");
 
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// ─── bodyLineStart / bodyLineEnd tests ──────────────────────────────
+
+#[test]
+fn test_inject_body_body_line_range_filter() {
+    // Create a 10-line file
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big.cs");
+    let content = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+    std::fs::write(&file, &content).unwrap();
+    let file_str = file.to_string_lossy().to_string();
+
+    // Method spans lines 3-8 (1-based)
+    let mut obj = json!({});
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total = 0usize;
+
+    // Request only lines 5-7 from the body
+    inject_body_into_obj(
+        &mut obj, &file_str, 3, 8, &mut cache, &mut total, 0, 0, false,
+        Some(5), Some(7),
+    );
+
+    let body = obj["body"].as_array().unwrap();
+    assert_eq!(body.len(), 3, "Should return 3 lines (5,6,7)");
+    assert_eq!(body[0].as_str().unwrap(), "line 5");
+    assert_eq!(body[1].as_str().unwrap(), "line 6");
+    assert_eq!(body[2].as_str().unwrap(), "line 7");
+    assert_eq!(obj["bodyStartLine"], 5, "bodyStartLine should be 5 (filtered)");
+}
+
+#[test]
+fn test_inject_body_body_line_start_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big2.cs");
+    let content = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+    std::fs::write(&file, &content).unwrap();
+    let file_str = file.to_string_lossy().to_string();
+
+    // Method spans lines 2-9, request bodyLineStart=6 (no end)
+    let mut obj = json!({});
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total = 0usize;
+
+    inject_body_into_obj(
+        &mut obj, &file_str, 2, 9, &mut cache, &mut total, 0, 0, false,
+        Some(6), None,
+    );
+
+    let body = obj["body"].as_array().unwrap();
+    assert_eq!(body.len(), 4, "Should return lines 6-9 (4 lines)");
+    assert_eq!(body[0].as_str().unwrap(), "line 6");
+    assert_eq!(body[3].as_str().unwrap(), "line 9");
+    assert_eq!(obj["bodyStartLine"], 6);
+}
+
+#[test]
+fn test_inject_body_body_line_end_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big3.cs");
+    let content = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+    std::fs::write(&file, &content).unwrap();
+    let file_str = file.to_string_lossy().to_string();
+
+    // Method spans lines 2-9, request bodyLineEnd=5 (no start)
+    let mut obj = json!({});
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total = 0usize;
+
+    inject_body_into_obj(
+        &mut obj, &file_str, 2, 9, &mut cache, &mut total, 0, 0, false,
+        None, Some(5),
+    );
+
+    let body = obj["body"].as_array().unwrap();
+    assert_eq!(body.len(), 4, "Should return lines 2-5 (4 lines)");
+    assert_eq!(body[0].as_str().unwrap(), "line 2");
+    assert_eq!(body[3].as_str().unwrap(), "line 5");
+    assert_eq!(obj["bodyStartLine"], 2);
+}
+
+#[test]
+fn test_inject_body_body_line_range_outside_method() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big4.cs");
+    let content = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+    std::fs::write(&file, &content).unwrap();
+    let file_str = file.to_string_lossy().to_string();
+
+    // Method spans lines 3-5, request lines 7-9 (completely outside)
+    let mut obj = json!({});
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total = 0usize;
+
+    inject_body_into_obj(
+        &mut obj, &file_str, 3, 5, &mut cache, &mut total, 0, 0, false,
+        Some(7), Some(9),
+    );
+
+    let body = obj["body"].as_array().unwrap();
+    assert_eq!(body.len(), 0, "Should return empty body when range is outside method");
+}
+
+#[test]
+fn test_inject_body_body_line_range_with_none_is_full_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("big5.cs");
+    let content = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
+    std::fs::write(&file, &content).unwrap();
+    let file_str = file.to_string_lossy().to_string();
+
+    // Method spans lines 3-8, no body line filter
+    let mut obj = json!({});
+    let mut cache: HashMap<String, Option<String>> = HashMap::new();
+    let mut total = 0usize;
+
+    inject_body_into_obj(
+        &mut obj, &file_str, 3, 8, &mut cache, &mut total, 0, 0, false,
+        None, None,
+    );
+
+    let body = obj["body"].as_array().unwrap();
+    assert_eq!(body.len(), 6, "Should return full body (lines 3-8)");
+    assert_eq!(body[0].as_str().unwrap(), "line 3");
+    assert_eq!(body[5].as_str().unwrap(), "line 8");
 }
