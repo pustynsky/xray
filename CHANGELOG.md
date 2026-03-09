@@ -8,6 +8,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ## 2026-03-09
 
+### Features
+- **Task Routing table in MCP instructions** — Replaced three redundant instruction sections (CRITICAL block, Quick Reference, Tool Priority) with a single auto-generated TASK ROUTING table. The table maps user tasks to recommended tools (task-first framing: "Read source code → search_definitions") and is context-aware: definition-dependent routes (search_definitions, search_callers) are filtered out when `def_extensions` is empty. Added fallback rule for uncertainty: "If unsure whether a file type is supported, use search_info or search_grep first." Instructions reduced from ~1800 to ~1200 tokens. DECISION TRIGGERs for file reading and editing are preserved (shortened). 12 new unit tests including tool-name validation between routing table and tool_definitions(). Golden scenarios added to E2E test plan for manual behavioral validation.
+- **Routing hints in tool descriptions** — Added "Preferred for..." routing hints to `search_definitions` and `search_grep` tool descriptions. These hints are read by LLMs at every tool-selection decision point — the most reliable surface for influencing tool choice. `search_fast` and `search_edit` already had equivalent hints.
+
 ### Bug Fixes
 - **`search_edit` — CRLF normalization and trailing whitespace auto-retry** — Three improvements to eliminate the most common `search_edit` false-negative failure mode ("Text not found" at 100% similarity):
   - **Part A (bug fix)**: All text fields in `search_edit` edits (`search`, `replace`, `insertAfter`, `insertBefore`, `content`, `expectedContext`) now have CRLF line endings normalized to LF before matching. Previously, `read_and_validate_file()` normalized the file content to LF, but the search text from JSON input was used as-is — if the client/LLM sent `\r\n`, exact match was guaranteed to fail.

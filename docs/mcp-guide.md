@@ -43,7 +43,11 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
    > **Tip:** Include non-code file extensions like `csproj`, `xml`, `config`, `manifestxml` in `--ext` to search NuGet dependencies, project settings, connection strings, and other configuration files alongside your code.
 
-4. **Restart VS Code** — the MCP server starts automatically. Your MCP-compatible AI agent (Roo Code, Cline, etc.) now has access to all MCP tools. The server also sends an `instructions` field during MCP initialization with best practices for tool selection.
+4. **Restart VS Code** — the MCP server starts automatically. Your MCP-compatible AI agent (Roo Code, Cline, etc.) now has access to all MCP tools. The server also sends an `instructions` field during MCP initialization with best practices for tool selection. The instructions include:
+   - **TASK ROUTING table** — maps user tasks to recommended tools (auto-generated, context-aware based on indexed file extensions)
+   - **DECISION TRIGGERs** — hard prohibitions for file reading and editing that redirect LLM to search-index tools
+   - **Fallback rule** — guidance for uncertain file types
+   - **Strategy Recipes** — multi-step workflow patterns for common tasks
 
 5. **Verify** — ask the AI: _"Use search_grep to find all files containing HttpClient"_
 

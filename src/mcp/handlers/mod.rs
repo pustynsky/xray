@@ -37,7 +37,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
     let mut tools = vec![
         ToolDefinition {
             name: "search_grep".to_string(),
-            description: "Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results. Comma-separated phrases with spaces are searched independently (OR/AND).".to_string(),
+            description: "Preferred for content/pattern search across indexed files. Use before built-in text/regex search for indexed file types. Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results. Comma-separated phrases with spaces are searched independently (OR/AND).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -186,7 +186,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_definitions".to_string(),
-            description: "Search code definitions -- classes, interfaces, methods, properties, enums. Uses pre-built tree-sitter AST index for instant results (~0.001s). LANGUAGE-SPECIFIC: Supports C# and TypeScript/TSX (tree-sitter grammars). SQL supported via regex parser (.sql files: stored procedures, tables, views, functions, types, indexes, columns, call sites from SP bodies). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
+            description: "Preferred for indexed source-code exploration and definition body retrieval. Use before generic file-reading tools when the target file type is indexed. Search code definitions -- classes, interfaces, methods, properties, enums. Uses pre-built tree-sitter AST index for instant results (~0.001s). LANGUAGE-SPECIFIC: Supports C# and TypeScript/TSX (tree-sitter grammars). SQL supported via regex parser (.sql files: stored procedures, tables, views, functions, types, indexes, columns, call sites from SP bodies). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
