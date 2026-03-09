@@ -3,6 +3,68 @@
 
 use serde_json::{json, Value};
 
+/// Map file extensions to human-readable language names for tool descriptions.
+/// Separates tree-sitter languages from regex-based (SQL).
+/// Deduplicates (ts+tsx → one "TypeScript/TSX").
+///
+/// Examples:
+/// - `["rs"]` → `"Rust"`
+/// - `["cs", "ts", "tsx"]` → `"C# and TypeScript/TSX"`
+/// - `["cs", "rs", "ts", "sql"]` → `"C#, Rust, and TypeScript/TSX. SQL supported via regex parser"
+pub fn format_supported_languages(def_extensions: &[String]) -> String {
+    let mut tree_sitter_langs: Vec<&str> = Vec::new();
+    let mut regex_langs: Vec<&str> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let has_ts = def_extensions.iter().any(|e| e == "ts");
+    let has_tsx = def_extensions.iter().any(|e| e == "tsx");
+    let ts_label = match (has_ts, has_tsx) {
+        (true, true) => "TypeScript/TSX",
+        (true, false) => "TypeScript",
+        (false, true) => "TSX",
+        (false, false) => "", // neither present, won't be used
+    };
+
+    for ext in def_extensions {
+        let (lang, is_tree_sitter) = match ext.as_str() {
+            "cs" => ("C#", true),
+            "ts" | "tsx" => (ts_label, true),
+            "rs" => ("Rust", true),
+            "sql" => ("SQL", false),
+            _ => continue,
+        };
+        if seen.insert(lang) {
+            if is_tree_sitter {
+                tree_sitter_langs.push(lang);
+            } else {
+                regex_langs.push(lang);
+            }
+        }
+    }
+
+    let ts_part = format_lang_list(&tree_sitter_langs);
+    let regex_part = format_lang_list(&regex_langs);
+
+    match (ts_part.is_empty(), regex_part.is_empty()) {
+        (true, true) => String::new(),
+        (false, true) => ts_part,
+        (true, false) => format!("{} (regex-based parser)", regex_part),
+        (false, false) => format!("{}. {} supported via regex parser", ts_part, regex_part),
+    }
+}
+
+fn format_lang_list(langs: &[&str]) -> String {
+    match langs.len() {
+        0 => String::new(),
+        1 => langs[0].to_string(),
+        2 => format!("{} and {}", langs[0], langs[1]),
+        _ => {
+            let (last, rest) = langs.split_last().unwrap();
+            format!("{}, and {}", rest.join(", "), last)
+        }
+    }
+}
+
 /// A single best practice tip.
 pub struct Tip {
     pub rule: &'static str,
@@ -152,7 +214,7 @@ pub fn tips() -> Vec<Tip> {
         },
         Tip {
             rule: "Read method source: use includeBody=true instead of reading files",
-            why: "search_definitions with includeBody=true returns method body inline, eliminating read_file round-trips. BEFORE reading any .cs/.ts file, try search_definitions with includeBody=true first. Use maxBodyLines/maxTotalBodyLines for budget. Only read files directly for non-C#/TS content (markdown, JSON, XML) or when you need exact line numbers for editing.",
+            why: "search_definitions with includeBody=true returns method body inline, eliminating read_file round-trips. BEFORE reading any indexed source file, try search_definitions with includeBody=true first. Use maxBodyLines/maxTotalBodyLines for budget. Only read files directly for non-indexed content (markdown, JSON, XML, config) or when you need exact line numbers for editing.",
             example: "MCP: search_definitions parent='UserService', includeBody=true, maxBodyLines=20. Also: search_definitions name='Program,Startup,OrderService' includeBody=true -> reads multiple classes at once, faster than multiple read_file calls",
         },
         Tip {
@@ -171,9 +233,9 @@ pub fn tips() -> Vec<Tip> {
             example: "search-index grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms='Newtonsoft.Json', ext='csproj'",
         },
         Tip {
-            rule: "Language scope: content search = any language, AST = C#, TypeScript/TSX, and SQL",
-            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / def-index supports C# and TypeScript/TSX (tree-sitter) and SQL (regex-based). search_callers uses call-graph analysis -- supports C#, TypeScript/TSX (DI-aware, inject() support, interface resolution), and SQL (SP-to-SP EXEC call chains). SQL class parameter = schema name (dbo, Sales). Tables/views excluded from call graph (data, not code).",
-            example: "search-index grep works on -e rs,py,js,xml,json | search_definitions supports .cs, .ts, .tsx, .sql | search_callers supports .cs, .ts, .tsx, .sql (SP EXEC call chains, class=schema)",
+            rule: "Language scope: content search = any language, AST = languages with definition parser support",
+            why: "search_grep / content-index use a language-agnostic tokenizer -- works with any text file (C#, Rust, Python, JS, XML, etc.). search_definitions / def-index uses AST parsing for languages configured with --definitions (see search_definitions tool description for current list). search_callers uses call-graph analysis for the same languages (DI-aware, inject() support, interface resolution). SQL uses regex-based parser with SP-to-SP EXEC call chains (class parameter = schema name). Tables/views excluded from call graph (data, not code).",
+            example: "search-index grep works on any -e extension | search_definitions/search_callers work only on extensions with definition parser support (check tool descriptions for current list)",
         },
         Tip {
             rule: "Response truncation: large results are auto-capped at ~16KB",
@@ -235,7 +297,7 @@ pub fn strategies() -> Vec<Strategy> {
             ],
             anti_patterns: &[
                 "Don't use list_files + read_file to explore architecture -- search_definitions returns classes, methods, file paths, and source code in ONE call",
-                "Don't read .cs/.ts files to see source code -- search_definitions includeBody=true returns it directly. read_file is ONLY for non-indexed files (markdown, JSON, XML, config) or for editing (need exact line numbers)",
+                "Don't read indexed source files to see source code -- search_definitions includeBody=true returns it directly. read_file is ONLY for non-indexed files (markdown, JSON, XML, config) or for editing (need exact line numbers)",
                 "Don't search one kind at a time (class, then interface, then enum) -- omit kind filter to get everything at once",
                 "Don't use countOnly first then re-query with body -- go straight to includeBody=true with maxBodyLines",
                 "Don't search for file names separately if search_definitions already found them (results include file paths)",
@@ -338,8 +400,8 @@ pub fn performance_tiers() -> Vec<PerfTier> {
 
 pub fn tool_priority() -> Vec<ToolPriority> {
     vec![
-        ToolPriority { rank: 1, tool: "search_callers", description: "call trees up/down (<1ms, C#, TypeScript/TSX, and SQL)" },
-        ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, functions, interfaces, typeAliases, variables, containsLine (C#, TypeScript/TSX, SQL)" },
+        ToolPriority { rank: 1, tool: "search_callers", description: "call trees up/down (<1ms, languages with definition parser support)" },
+        ToolPriority { rank: 2, tool: "search_definitions", description: "structural: classes, methods, functions, interfaces, typeAliases, variables, containsLine (languages with definition parser support)" },
         ToolPriority { rank: 3, tool: "search_grep", description: "content: exact/OR/AND, substring, phrase, regex (any language)" },
         ToolPriority { rank: 4, tool: "search_fast", description: "file name lookup (~35ms, any file)" },
         ToolPriority { rank: 5, tool: "search_find", description: "live walk (~3s, last resort)" },
@@ -567,7 +629,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         out.push_str(&format!("NEVER READ {} FILES DIRECTLY. ALWAYS use search_definitions includeBody=true.\n", ext_list));
         out.push_str(&format!("   DECISION TRIGGER: before reading ANY file — for ANY reason (exploration, validation, fact-checking, reviewing, debugging) — check extension. If {} -> search_definitions includeBody=true.\n", ext_list));
         out.push_str(&format!("   If the file extension is NOT in {} -> reading directly is OK.\n", ext_list));
-        out.push_str(&format!("   ONLY exception for {}: editing (need exact line numbers for search_edit).\n\n", ext_list));
+        out.push_str(&format!("   ONLY exception for {}: editing (need exact line numbers for search_edit).\n", ext_list));
+        out.push_str(&format!("   EXAMPLE: instead of reading handler.{} directly, use: search_definitions file='handler.{}' includeBody=true maxBodyLines=0\n\n", def_extensions[0], def_extensions[0]));
     } else {
         out.push_str("NOTE: search_definitions is not available for the configured file extensions. Use search_grep for content search.\n\n");
     }

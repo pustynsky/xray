@@ -518,6 +518,26 @@ pub fn cmd_serve(args: ServeArgs) {
     }
 
     let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
+    // Compute def_extensions for dynamic tool descriptions.
+    // IMPORTANT: use the RAW intersection of --ext and definition_extensions(),
+    // NOT the post-fallback def_exts. The fallback ("cs" when no overlap) is
+    // for index building, but tool descriptions must reflect actual languages.
+    // This matches what server.rs does for render_instructions in initialize.
+    // Parse server ext from exts_for_load (String) since extensions (Vec<String>)
+    // was moved into start_watcher above.
+    let server_exts_for_desc: Vec<&str> = exts_for_load.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let def_extensions_vec: Vec<String> = if args.definitions {
+        supported_def_langs.iter()
+            .filter(|lang| server_exts_for_desc.iter().any(|e| e.eq_ignore_ascii_case(lang)))
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let ctx = mcp::handlers::HandlerContext {
         index,
         def_index,
@@ -531,6 +551,7 @@ pub fn cmd_serve(args: ServeArgs) {
         git_cache,
         git_cache_ready,
         current_branch,
+        def_extensions: def_extensions_vec,
     };
     mcp::server::run_server(ctx);
 }

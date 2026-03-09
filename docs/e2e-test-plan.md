@@ -7952,6 +7952,58 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 ---
 
 
+### T-DYNAMIC-DESCS: Dynamic tool descriptions based on active extensions
+
+**Tool:** `tools/list` via MCP server
+
+**Background:** Tool descriptions for `search_definitions`, `search_callers`, and `search_reindex_definitions` now dynamically include the supported language list based on the server's configured `--ext` and compiled parser support. Previously hardcoded "C# and TypeScript/TSX".
+
+**Scenario A — Rust-only project:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext rs --definitions
+```
+
+**Expected:**
+
+- `search_definitions` description contains "Rust"
+- `search_definitions` description does NOT contain "C#" or "TypeScript"
+- `search_callers` description contains "Rust"
+- `search_reindex_definitions` description contains "Rust"
+
+**Scenario B — No definition parsers:**
+
+```powershell
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
+```
+
+**Expected:**
+
+- `search_definitions` description contains "not available"
+- `search_callers` description contains "not available"
+
+**Scenario C — Mixed with SQL:**
+
+```powershell
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,rs,sql --definitions
+```
+
+**Expected:**
+
+- `search_definitions` description contains "C# and Rust" AND "SQL supported via regex parser"
+
+**Unit tests:** `test_tool_definitions_rust_only`, `test_tool_definitions_empty_extensions`, `test_tool_definitions_cs_ts_tsx`, `test_tool_definitions_with_sql_only`, `test_tool_definitions_cs_rs_sql`, `test_tool_definitions_reindex_defs_dynamic`, `test_tools_list_dynamic_descriptions_rust`, `test_tools_list_dynamic_descriptions_empty`, `test_format_supported_languages_*` (12 tests), `test_initialize_consistent_with_tools_list_*` (3 tests)
+
+**Status:** ✅ Implemented
+
+---
+
+
 ### T-CHUNKED-BUILD: Chunked build for peak memory reduction
 
 **Purpose:** Verify that chunked build (macro-chunks of 4096 files) produces identical results to non-chunked build.
