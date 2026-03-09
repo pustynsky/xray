@@ -32,6 +32,65 @@ pub struct Strategy {
     pub anti_patterns: &'static [&'static str],
 }
 
+/// Task routing record for auto-generated TASK ROUTING table in MCP instructions.
+/// Maps a user task to the recommended tool, with scope filtering by def_extensions.
+pub struct TaskRouting {
+    /// Task description (task-first framing, e.g., "Read/explore source code")
+    pub task: &'static str,
+    /// Tool name (no arguments — table answers "WHICH tool", not "HOW to call")
+    pub tool: &'static str,
+    /// Whether this routing requires definition index (filtered when def_extensions is empty)
+    pub requires_definitions: bool,
+}
+
+/// Returns all task routing records. Filtered by `def_extensions` at render time.
+pub fn task_routings() -> Vec<TaskRouting> {
+    vec![
+        // --- Require definition index ---
+        TaskRouting {
+            task: "Read/explore source code",
+            tool: "search_definitions",
+            requires_definitions: true,
+        },
+        TaskRouting {
+            task: "Find method/class at a known line number",
+            tool: "search_definitions",
+            requires_definitions: true,
+        },
+        TaskRouting {
+            task: "Find callers or callees of a method",
+            tool: "search_callers",
+            requires_definitions: true,
+        },
+        TaskRouting {
+            task: "Code complexity / health scan",
+            tool: "search_definitions",
+            requires_definitions: true,
+        },
+        // --- Always available ---
+        TaskRouting {
+            task: "Search file contents (text, patterns)",
+            tool: "search_grep",
+            requires_definitions: false,
+        },
+        TaskRouting {
+            task: "Find a file by name",
+            tool: "search_fast",
+            requires_definitions: false,
+        },
+        TaskRouting {
+            task: "Edit a file (any modification)",
+            tool: "search_edit",
+            requires_definitions: false,
+        },
+        TaskRouting {
+            task: "Git blame / history / authorship",
+            tool: "search_git_blame / search_git_history / search_git_authors",
+            requires_definitions: false,
+        },
+    ]
+}
+
 // ─── Single source of truth ─────────────────────────────────────────
 
 pub fn tips() -> Vec<Tip> {
@@ -474,64 +533,52 @@ pub fn render_json() -> Value {
 
 /// Render tips as compact text for MCP initialize instructions field.
 ///
-/// Design principles (see docs/TODO-hint-optimization.md):
+/// Design principles:
 /// - Machine-targeted: no emoji, use ALL CAPS for emphasis
 /// - Client-agnostic: no Roo/Cline-specific tool names (read_file, list_files)
-/// - Compact: 5 key bullets + strategy recipes + tool priority (not all 18 tips)
+/// - Task-first routing: "Need X? -> use Y" instead of per-tool prohibitions
+/// - Compact: Task Routing table + DECISION TRIGGERs + strategy recipes
 /// - Full tips available via search_help tool
 ///
 /// `def_extensions` — the file extensions that have definition parser support
 /// (intersection of server --ext and definition_extensions()). Used to dynamically
-/// generate the "NEVER READ" instruction so it covers exactly the right file types.
+/// filter task routing entries and generate the "NEVER READ" instruction.
 pub fn render_instructions(def_extensions: &[&str]) -> String {
     let mut out = String::new();
 
-    // --- PREFER block (Phase 0: client-agnostic, no emoji, CAPS emphasis) ---
-    out.push_str("CRITICAL: ALWAYS use search-index tools for code exploration. They are 90-1000x faster than file browsing.\n");
-    out.push_str("   search_definitions -- classes, methods, source code, file paths in ONE call. DO NOT browse directories then read files.\n");
-    out.push_str("   search_callers -- full call trees in <1ms. DO NOT search for callers manually.\n");
-    out.push_str("   search_grep -- content search across 100K+ files instantly. DO NOT use regex-based file search.\n");
-    out.push_str("   search_fast -- file name lookup in ~35ms. DO NOT walk the filesystem.\n\n");
+    // --- TASK ROUTING TABLE (replaces CRITICAL block + Quick Reference + Tool Priority) ---
+    out.push_str("TASK ROUTING (check BEFORE using any built-in tool):\n");
+    for tr in task_routings() {
+        if tr.requires_definitions && def_extensions.is_empty() {
+            continue;
+        }
+        out.push_str(&format!("  {} -> {}\n", tr.task, tr.tool));
+    }
+    out.push_str("Use built-in equivalents only when the requested file type or task is not supported by this server.\n");
+    out.push_str("If uncertain whether a file type is supported, use search_info or search_grep first. Do not default to raw file reading.\n\n");
 
-    // --- FILE READING RULE (strongest possible: NEVER + decision trigger + batch split) ---
-    // Dynamically generate from the actually-indexed definition extensions.
-    // When no definition-supported extensions are configured (e.g., --ext xml),
-    // skip the NEVER READ block entirely to avoid misleading instructions.
+    // --- FILE READING DECISION TRIGGER (shortened, only if def_extensions non-empty) ---
+    // Rationale: the dominant observed failure mode is LLM defaulting to built-in
+    // file readers for indexed source files. A hard prohibition is intentionally
+    // retained because softer phrasing has historically failed to redirect tool choice.
     if !def_extensions.is_empty() {
         let ext_dotted: Vec<String> = def_extensions.iter().map(|e| format!(".{}", e)).collect();
         let ext_list = ext_dotted.join("/");
-        out.push_str(&format!("NEVER READ {} FILES DIRECTLY. ALWAYS use search_definitions includeBody=true instead.\n", ext_list));
-        out.push_str("   DECISION TRIGGER: before ANY file read, check each file's extension.\n");
-        out.push_str(&format!("   If the file is {} -> use search_definitions name='ClassName' includeBody=true maxBodyLines=30 (or file='path' containsLine=N includeBody=true). Use maxBodyLines to control output size for large classes.\n", ext_list));
-        out.push_str("   If the file is .md, .json, .xml, .config, .csproj, or other non-definition-indexed -> reading directly is OK.\n");
-        out.push_str(&format!("   BATCH SPLIT: if you need both {} and .md files, make TWO calls: search_definitions for indexed files, direct read for .md files. Do NOT batch them into one direct read.\n", ext_list));
-        out.push_str(&format!("   ONLY exceptions for {}: (1) editing (need exact line numbers for diffs), (2) search_definitions returned an error or is unavailable.\n\n", ext_list));
+        out.push_str(&format!("NEVER READ {} FILES DIRECTLY. ALWAYS use search_definitions includeBody=true.\n", ext_list));
+        out.push_str(&format!("   DECISION TRIGGER: before ANY file read, check extension. If {} -> search_definitions.\n", ext_list));
+        out.push_str("   If .md/.json/.xml/.config -> reading directly is OK.\n");
+        out.push_str(&format!("   ONLY exception for {}: editing (need exact line numbers for diffs).\n\n", ext_list));
     } else {
         out.push_str("NOTE: search_definitions is not available for the configured file extensions. Use search_grep for content search.\n\n");
     }
 
-    // --- Quick reference (Phase 1: 5 bullets instead of 18 full tips) ---
-    out.push_str("search-index MCP server -- Quick Reference\n\n");
-    out.push_str("1. USE search_definitions for code exploration -- returns classes, methods, bodies, file paths in ONE call. Supports containsLine for stack traces, includeBody for source code.\n");
-    out.push_str("2. USE search_callers for call chains -- sub-millisecond full call tree. ALWAYS specify class parameter. Comma-separated method for batch (method='Foo,Bar,Baz' returns independent trees in one call).\n");
-    out.push_str("3. USE search_grep for content search -- substring ON by default, multi-term OR with commas, countOnly for reconnaissance.\n");
-    out.push_str("4. USE search_fast for file lookup -- 90x faster than search_find.\n");
-    out.push_str("5. AIM for <=3 search calls per task. Call search_help for full guide with examples.\n");
-    out.push_str("6. USE sortBy/min* in search_definitions for code health scans -- sortBy='cognitiveComplexity' ranks worst methods first.\n");
-    out.push_str("7. USE search_edit for file editing -- atomic line-range or text-match edits, no whitespace issues. Supports multi-file (paths), insert after/before, expectedContext.\n");
-
-    // --- FILE EDITING RULE (DECISION TRIGGER pattern — forces LLM to stop and check before each edit) ---
-    out.push_str("\nNEVER USE apply_diff, search_and_replace, or insert_content when search_edit is available.\n");
-    out.push_str("   ALWAYS USE search_edit for ALL file edits. It is atomic, handles whitespace correctly, and supports multi-file batch editing.\n");
-    out.push_str("   DECISION TRIGGER: before ANY file edit, STOP and check which tool you are about to use.\n");
-    out.push_str("   If it is apply_diff, search_and_replace, or insert_content -> REPLACE with search_edit.\n");
-    out.push_str("   search_edit advantages: (1) atomic -- no partial apply failures, (2) no whitespace/indentation issues,\n");
-    out.push_str("   (3) multi-file batch editing (paths=[...]), (4) returns unified diff, (5) dryRun preview, (6) skipIfNotFound for partial matches.\n");
-    out.push_str("   For multi-file refactoring: search_edit paths=['file1','file2',...] edits=[{search:'old',replace:'new'}] -- one call instead of N.\n");
-    out.push_str("   For adding imports/usings: search_edit edits=[{insertAfter:'using X;',content:'using Y;'}] -- no line numbers needed.\n");
+    // --- FILE EDITING DECISION TRIGGER (shortened) ---
+    out.push_str("NEVER USE apply_diff, search_and_replace, or insert_content when search_edit is available.\n");
+    out.push_str("   DECISION TRIGGER: before ANY file edit, STOP and switch to search_edit.\n");
+    out.push_str("   search_edit: atomic, no whitespace issues, multi-file batch, dryRun preview.\n\n");
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
-    out.push_str("\nSTRATEGY RECIPES (aim for <=3 search calls per task):\n");
+    out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task):\n");
     for strat in strategies() {
         out.push_str(&format!("  [{}] {}\n", strat.name, strat.when));
         for step in strat.steps {
@@ -539,17 +586,10 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         }
     }
 
-    // --- Tool priority (kept unchanged) ---
-    out.push_str("\nTOOL PRIORITY:\n");
-    for tp in tool_priority() {
-        // Use ASCII -- for CLI compatibility instead of em-dash
-        out.push_str(&format!("  {}. {} -- {}\n", tp.rank, tp.tool, tp.description));
-    }
-
     // --- Git tools (brief mention) ---
     out.push_str("\nGit tools: search_git_history, search_git_authors, search_git_activity, search_git_blame, search_branch_status -- use for code history/blame/authorship investigations. Call search_help for details.\n");
 
-    // --- Soft reference to search_help (Phase 4: no urgency) ---
+    // --- Soft reference to search_help ---
     out.push_str("\nCall search_help for detailed best practices with examples.\n");
 
     out

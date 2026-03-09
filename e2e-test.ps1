@@ -1238,6 +1238,27 @@ $testBlocks += , {
     }
 }
 
+# T-TASK-ROUTING: Verify MCP initialize response contains TASK ROUTING in instructions
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-TASK-ROUTING mcp-instructions-task-routing"
+    try {
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*1' } | Select-Object -Last 1
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no initialize response)" } }
+        $errors = @()
+        if ($jsonLine -notmatch 'TASK ROUTING') { $errors += "missing TASK ROUTING in instructions" }
+        if ($jsonLine -notmatch 'NEVER READ') { $errors += "missing NEVER READ decision trigger" }
+        if ($jsonLine -notmatch 'DECISION TRIGGER') { $errors += "missing DECISION TRIGGER" }
+        if ($jsonLine -notmatch 'uncertain') { $errors += "missing fallback rule" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK" }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
+}
+
 # --- Launch all parallel jobs ---
 $parallelJobs = @()
 foreach ($block in $testBlocks) {

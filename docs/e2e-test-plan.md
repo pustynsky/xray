@@ -7866,3 +7866,57 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 
 **Coverage:** All 64 E2E tests pass with the chunked build binary (no behavioral changes).
 
+
+
+---
+
+## Task Routing — Tool Selection Golden Scenarios
+
+These scenarios validate that LLM instructions correctly route tool selection toward search-index MCP tools instead of built-in client tools. **Manual validation in a real MCP-connected client is required for acceptance.**
+
+#### T-ROUTING-01: Source code exploration → search_definitions
+
+**User prompt:** "Show me the UserService class"
+**Expected tool:** `search_definitions` with `includeBody=true`
+**Forbidden first choice:** Built-in file reading on .cs/.ts file
+**Pass criteria:** LLM calls search_definitions, not read_file/list_files
+
+#### T-ROUTING-02: Call chain investigation → search_callers
+
+**User prompt:** "Who calls ProcessOrder?"
+**Expected tool:** `search_callers` with `class` parameter
+**Forbidden first choice:** `search_grep` for method name
+**Pass criteria:** LLM calls search_callers, not search_grep or manual file reading
+
+#### T-ROUTING-03: File editing → search_edit
+
+**User prompt:** "Fix the typo on line 42 of OrderService.cs"
+**Expected tool:** `search_edit`
+**Forbidden first choice:** `apply_diff`, `search_and_replace`, or `insert_content`
+**Pass criteria:** LLM calls search_edit, not apply_diff
+
+#### T-ROUTING-04: Content search → search_grep
+
+**User prompt:** "Find all files containing 'retry'"
+**Expected tool:** `search_grep`
+**Forbidden first choice:** Built-in regex/content search tool
+**Pass criteria:** LLM calls search_grep
+
+#### T-ROUTING-05: Non-indexed file → built-in read is acceptable
+
+**User prompt:** "Read the settings.xml config"
+**Expected tool:** Built-in file reading (OK — XML not indexed by search_definitions)
+**Forbidden first choice:** `search_definitions` (would fail — no XML parser)
+**Pass criteria:** LLM uses built-in read tool, does not hallucinate search_definitions for XML
+
+#### T-ROUTING-06: Instructions structure validation (automated)
+
+**Coverage:** Unit tests `test_task_routing_*`, `test_routing_tool_names_exist_in_definitions`, `test_routing_critical_tools_have_hints`, `test_instructions_token_budget`, `test_instructions_no_redundant_sections`, `test_instructions_fallback_rule`
+
+1. TASK ROUTING table present in instructions
+2. Definition-dependent routes filtered when def_extensions is empty
+3. All routing tool names exist in tool_definitions()
+4. Routing-critical tools have routing hints in descriptions
+5. Instructions token budget ≤1500 (after consolidation)
+6. Removed sections (Quick Reference, TOOL PRIORITY, CRITICAL block) not present
+7. Fallback rule for uncertainty present

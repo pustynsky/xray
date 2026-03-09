@@ -51,10 +51,11 @@ fn test_initialize_includes_instructions() {
     let result = InitializeResult::new(crate::definitions::definition_extensions());
     let json = serde_json::to_value(&result).unwrap();
     let instructions = json["instructions"].as_str().unwrap();
+    assert!(instructions.contains("TASK ROUTING"), "instructions should have TASK ROUTING table");
     assert!(instructions.contains("search_fast"), "instructions should mention search_fast");
-    assert!(instructions.contains("search_find"), "instructions should mention search_find");
-    assert!(instructions.contains("substring"), "instructions should mention substring search");
     assert!(instructions.contains("search_callers"), "instructions should mention search_callers");
+    assert!(instructions.contains("search_grep"), "instructions should mention search_grep");
+    assert!(instructions.contains("search_edit"), "instructions should mention search_edit");
     assert!(instructions.contains("class"), "instructions should mention class parameter");
     assert!(instructions.contains("includeBody"), "instructions should mention includeBody");
     assert!(instructions.contains("countOnly"), "instructions should mention countOnly");

@@ -53,16 +53,17 @@ fn test_render_json_has_strategy_recipes() {
 #[test]
 fn test_render_instructions_contains_key_terms() {
     let text = render_instructions(crate::definitions::definition_extensions());
-    // Core tools mentioned
+    // Core tools mentioned (via TASK ROUTING table)
     assert!(text.contains("search_fast"), "instructions should mention search_fast");
     assert!(text.contains("search_callers"), "instructions should mention search_callers");
     assert!(text.contains("search_definitions"), "instructions should mention search_definitions");
     assert!(text.contains("search_grep"), "instructions should mention search_grep");
-    // Key features mentioned in 5 bullets
-    assert!(text.contains("substring"), "instructions should mention substring");
-    assert!(text.contains("containsLine"), "instructions should mention containsLine");
+    assert!(text.contains("search_edit"), "instructions should mention search_edit");
+    // TASK ROUTING table present
+    assert!(text.contains("TASK ROUTING"), "instructions should have TASK ROUTING table");
+    assert!(text.contains("check BEFORE using any built-in tool"), "TASK ROUTING should have routing directive");
+    // Key features mentioned in strategy recipes / DECISION TRIGGERs
     assert!(text.contains("includeBody"), "instructions should mention includeBody");
-    assert!(text.contains("countOnly"), "instructions should mention countOnly");
     // search_help reference (soft, not urgent)
     assert!(text.contains("search_help"), "instructions should mention search_help");
     assert!(!text.contains("IMPORTANT: Call search_help first"), "instructions should NOT have urgent search_help prompt");
@@ -70,9 +71,6 @@ fn test_render_instructions_contains_key_terms() {
     assert!(text.contains("STRATEGY RECIPES"), "instructions should include strategy recipes");
     assert!(text.contains("Architecture Exploration"), "instructions should include arch exploration recipe");
     assert!(text.contains("<=3 search calls"), "instructions should mention query budget");
-    // PREFER block -- client-agnostic, no emoji, CAPS emphasis
-    assert!(text.contains("CRITICAL: ALWAYS use search-index tools"), "instructions should have CRITICAL PREFER block");
-    assert!(text.contains("DO NOT browse directories"), "instructions should use DO NOT framing");
     // Dynamic extension list: verify all definition extensions appear in the NEVER READ rule
     for ext in crate::definitions::definition_extensions() {
         assert!(text.contains(&format!(".{}", ext)),
@@ -80,9 +78,16 @@ fn test_render_instructions_contains_key_terms() {
     }
     assert!(text.contains("NEVER READ"), "instructions should have absolute prohibition on reading indexed files");
     assert!(text.contains("FILES DIRECTLY"), "instructions should have FILES DIRECTLY in prohibition");
-    assert!(text.contains("DECISION TRIGGER"), "instructions should have decision trigger for file extension check");
-    assert!(text.contains("BATCH SPLIT"), "instructions should have batch split instruction for mixed .cs + .md reads");
-    assert!(text.contains("ONLY exceptions for"), "instructions should list exceptions for indexed file reading");
+    assert!(text.contains("DECISION TRIGGER"), "instructions should have decision trigger");
+    assert!(text.contains("ONLY exception for"), "instructions should list exceptions for indexed file reading");
+    // Removed sections should NOT be present
+    assert!(!text.contains("Quick Reference"), "instructions should NOT have Quick Reference (replaced by TASK ROUTING)");
+    assert!(!text.contains("TOOL PRIORITY"), "instructions should NOT have TOOL PRIORITY (replaced by TASK ROUTING)");
+    assert!(!text.contains("CRITICAL: ALWAYS use search-index tools"), "instructions should NOT have old CRITICAL block");
+    assert!(!text.contains("BATCH SPLIT"), "instructions should NOT have BATCH SPLIT (removed)");
+    assert!(!text.contains("TRAP"), "instructions should NOT have TRAP (removed)");
+    // Fallback rule
+    assert!(text.contains("uncertain"), "instructions should have fallback rule for uncertainty");
     // No emoji in machine-targeted text
     assert!(!text.contains('⚠'), "instructions should not contain emoji (machine-targeted text)");
     assert!(!text.contains('⚡'), "instructions should not contain emoji (machine-targeted text)");
@@ -146,6 +151,7 @@ fn test_tool_definitions_token_budget() {
 
 /// Empty def_extensions: NEVER READ block should be skipped,
 /// fallback note about search_definitions unavailability should appear.
+/// TASK ROUTING should contain only universal tools.
 #[test]
 fn test_render_instructions_empty_extensions() {
     let text = render_instructions(&[]);
@@ -158,14 +164,18 @@ fn test_render_instructions_empty_extensions() {
     let dt_count = text.matches("DECISION TRIGGER").count();
     assert_eq!(dt_count, 1,
         "Empty def_extensions should have 1 DECISION TRIGGER (editing), not {} (reading trigger should be absent)", dt_count);
-    assert!(!text.contains("BATCH SPLIT"),
-        "Empty def_extensions should not produce BATCH SPLIT");
     // Should contain fallback note
     assert!(text.contains("search_definitions is not available"),
         "Empty def_extensions should have fallback note about search_definitions");
-    // Core tools should still be mentioned (PREFER block is always present)
+    // TASK ROUTING should be present but WITHOUT definition-dependent tools
+    assert!(text.contains("TASK ROUTING"), "should have TASK ROUTING even with empty extensions");
     assert!(text.contains("search_grep"), "should still mention search_grep");
     assert!(text.contains("search_fast"), "should still mention search_fast");
+    assert!(text.contains("search_edit"), "should still mention search_edit");
+    assert!(!text.contains("Read/explore source code"),
+        "should NOT have definition-dependent task routing when def_extensions is empty");
+    assert!(!text.contains("Find callers"),
+        "should NOT have callers routing when def_extensions is empty");
     assert!(text.contains("STRATEGY RECIPES"), "should still include strategy recipes");
 }
 
@@ -199,6 +209,126 @@ fn test_render_json_contains_using_static_tip() {
     });
     assert!(has_using_static, "JSON output should contain 'using static' tip");
 }
+
+// ─── New tests for Task Routing ─────────────────────────────────────
+
+#[test]
+fn test_task_routings_not_empty() {
+    assert!(!task_routings().is_empty(), "task_routings() should not be empty");
+}
+
+#[test]
+fn test_task_routing_with_definitions() {
+    let text = render_instructions(&["cs", "ts"]);
+    assert!(text.contains("TASK ROUTING"), "should have TASK ROUTING");
+    // Definition-dependent routes should be present
+    assert!(text.contains("Read/explore source code"), "should have source code exploration route");
+    assert!(text.contains("Find callers or callees"), "should have callers route");
+    assert!(text.contains("Code complexity"), "should have code health route");
+    // Universal routes always present
+    assert!(text.contains("Search file contents"), "should have grep route");
+    assert!(text.contains("Find a file by name"), "should have fast route");
+    assert!(text.contains("Edit a file"), "should have edit route");
+    assert!(text.contains("Git blame"), "should have git route");
+}
+
+#[test]
+fn test_task_routing_without_definitions() {
+    let text = render_instructions(&[]);
+    assert!(text.contains("TASK ROUTING"), "should have TASK ROUTING even without defs");
+    // Definition-dependent task descriptions should NOT be in routing table
+    assert!(!text.contains("Read/explore source code"), "should NOT have definition-dependent routing");
+    assert!(!text.contains("Find callers or callees"), "should NOT have callers routing");
+    assert!(!text.contains("Code complexity"), "should NOT have code health routing");
+    // Universal routes always present
+    assert!(text.contains("search_grep"), "should mention search_grep");
+    assert!(text.contains("search_fast"), "should mention search_fast");
+    assert!(text.contains("search_edit"), "should mention search_edit");
+    assert!(text.contains("search_git_blame"), "should mention git tools");
+}
+
+#[test]
+fn test_task_routing_always_has_universal_tools() {
+    for exts in [&[][..], &["cs"], &["cs", "ts", "rs"]] {
+        let text = render_instructions(exts);
+        assert!(text.contains("search_grep"), "search_grep should always be in routing (exts: {:?})", exts);
+        assert!(text.contains("search_fast"), "search_fast should always be in routing (exts: {:?})", exts);
+        assert!(text.contains("search_edit"), "search_edit should always be in routing (exts: {:?})", exts);
+    }
+}
+
+/// Validate that all tool names referenced in task_routings() actually exist
+/// in tool_definitions(). Prevents routing drift when tools are renamed.
+#[test]
+fn test_routing_tool_names_exist_in_definitions() {
+    use crate::mcp::handlers::tool_definitions;
+    let tool_names: Vec<String> = tool_definitions().iter().map(|t| t.name.clone()).collect();
+    for tr in task_routings() {
+        // Tool field may contain multiple tools separated by " / "
+        for tool_name in tr.tool.split(" / ") {
+            let tool_name = tool_name.trim();
+            assert!(
+                tool_names.contains(&tool_name.to_string()),
+                "TaskRouting references tool '{}' (task: '{}') which does not exist in tool_definitions(). \
+                 Available tools: {:?}",
+                tool_name, tr.task, tool_names
+            );
+        }
+    }
+}
+
+/// Routing-critical tools must contain a routing hint in their description.
+#[test]
+fn test_routing_critical_tools_have_hints() {
+    use crate::mcp::handlers::tool_definitions;
+    let tools = tool_definitions();
+    let routing_critical = ["search_definitions", "search_grep", "search_fast", "search_edit"];
+    for tool_name in routing_critical {
+        let tool = tools.iter().find(|t| t.name == tool_name)
+            .unwrap_or_else(|| panic!("tool '{}' not found", tool_name));
+        assert!(
+            tool.description.contains("Preferred") || tool.description.contains("PREFERRED"),
+            "Routing-critical tool '{}' should contain a routing hint ('Preferred'/'PREFERRED') in its description. \
+             Current description starts with: '{}'",
+            tool_name, &tool.description[..80.min(tool.description.len())]
+        );
+    }
+}
+
+/// Instructions should contain fallback rule for uncertainty.
+#[test]
+fn test_instructions_fallback_rule() {
+    let text = render_instructions(&["cs"]);
+    assert!(text.contains("uncertain"), "instructions should contain uncertainty fallback");
+    assert!(text.contains("search_info"), "fallback should mention search_info");
+    assert!(text.contains("Do not default to raw file reading"), "fallback should discourage raw reads");
+}
+
+/// Instructions token budget: should be shorter after consolidation.
+/// Measured with word_count / 0.75 approximation (same as tool_definitions test).
+#[test]
+fn test_instructions_token_budget() {
+    let text = render_instructions(&["cs", "ts", "tsx", "sql", "rs"]);
+    let word_count = text.split_whitespace().count();
+    let approx_tokens = (word_count as f64 / 0.75) as usize;
+    // After consolidation: target <=1500 tokens (was ~1800 before)
+    assert!(
+        approx_tokens < 1500,
+        "Instructions exceed token budget: ~{} tokens ({} words). \
+         Target: <1500 after consolidation. Remove redundant sections.",
+        approx_tokens, word_count
+    );
+}
+
+/// Instructions should NOT contain removed sections.
+#[test]
+fn test_instructions_no_redundant_sections() {
+    let text = render_instructions(&["cs", "ts"]);
+    assert!(!text.contains("Quick Reference"), "Quick Reference should be removed (replaced by TASK ROUTING)");
+    assert!(!text.contains("TOOL PRIORITY"), "TOOL PRIORITY should be removed (replaced by TASK ROUTING)");
+    assert!(!text.contains("CRITICAL: ALWAYS use search-index tools"), "Old CRITICAL block should be removed");
+}
+
 
 #[test]
 fn test_all_renderers_consistent_tip_count() {
