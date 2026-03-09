@@ -222,9 +222,12 @@ pub struct ServeArgs {
     #[arg(short, long, default_value = ".")]
     pub dir: String,
 
-    /// File extensions to index, comma-separated.
-    #[arg(short, long, default_value = "cs")]
-    pub ext: String,
+    /// File extensions to index.
+    /// Accepts comma-separated ("rs,md") or space-separated ("rs" "md") values.
+    /// In mcp.json args array, each extension can be a separate element:
+    ///   ["--ext", "rs", "md"]  or  ["--ext", "rs,md"]
+    #[arg(short, long, default_value = "cs", num_args = 1..)]
+    pub ext: Vec<String>,
 
     /// Watch for file changes and update index incrementally.
     #[arg(long)]

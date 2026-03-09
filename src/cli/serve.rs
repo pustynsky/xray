@@ -19,8 +19,12 @@ use super::args::{ServeArgs, ContentIndexArgs};
 
 pub fn cmd_serve(args: ServeArgs) {
     let dir_str = args.dir.clone();
-    let ext_str = args.ext.clone();
-    let extensions: Vec<String> = ext_str.split(',').map(|s| s.trim().to_lowercase()).collect();
+    // Flatten multi-value --ext: supports both ["rs", "md"] and ["rs,md"]
+    let extensions: Vec<String> = args.ext.iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
     let exts_for_load = extensions.join(",");
 
     let log_level = match args.log_level.as_str() {
