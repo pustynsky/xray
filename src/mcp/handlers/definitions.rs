@@ -1191,6 +1191,9 @@ fn try_kind_correction(
 /// Try auto-correcting a name mismatch via nearest match (≥85% Jaro-Winkler).
 /// Finds the closest name in the definition index and re-runs the search.
 const AUTO_CORRECT_NAME_THRESHOLD: f64 = 0.80;
+/// Minimum length ratio (shorter/longer) for auto-correction to fire.
+/// Prevents partial-match corrections like "search_definitions" → "search" (ratio 6/18 = 0.33).
+const AUTO_CORRECT_MIN_LENGTH_RATIO: f64 = 0.6;
 
 fn try_name_correction(
     index: &DefinitionIndex,
@@ -1206,6 +1209,14 @@ fn try_name_correction(
     for (index_name, _) in &index.name_index {
         let score = name_similarity(&search_lower, index_name);
         if score >= AUTO_CORRECT_NAME_THRESHOLD && score > best_score {
+            // Guard: reject corrections where query and match differ too much in length.
+            // Jaro-Winkler inflates similarity for shared prefixes (e.g., "search_definitions" vs "search" = 87%)
+            // but 6/18 = 33% length ratio reveals it's a partial match, not a typo.
+            let length_ratio = search_lower.len().min(index_name.len()) as f64
+                / search_lower.len().max(index_name.len()) as f64;
+            if length_ratio < AUTO_CORRECT_MIN_LENGTH_RATIO {
+                continue;
+            }
             best_score = score;
             best_name = Some(index_name.clone());
         }

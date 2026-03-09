@@ -19,6 +19,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 - **Expanded zero-result hint auto-follow in LLM instructions** — Strengthened the ZERO-RESULT HINTS rule in `render_instructions()` to cover two previously missing hint types: NEAREST MATCH (re-call same tool with corrected name) and KIND MISMATCH (re-call with suggested kind). Added hard rule: "NEVER ask the user whether to follow a hint." 3 new test assertions.
 
 ### Bug Fixes
+- **Auto-correction length ratio guard** — Fixed false auto-corrections in `search_definitions` where partial name matches (e.g., `name="search_definitions"` → `"search"`) were incorrectly treated as typos due to Jaro-Winkler inflating similarity for shared prefixes (87% similarity, but only 33% length ratio). Added `AUTO_CORRECT_MIN_LENGTH_RATIO = 0.6` constant: auto-correction now requires both ≥80% similarity AND ≥60% length ratio (shorter/longer). Short typos (`"GetUsr"` → `"getuser"`, ratio 86%) and similar-length typos (`"UserServise"` → `"userservice"`, ratio 100%) still auto-correct correctly. Without this fix, the zero-result hint system was bypassed by the false correction, preventing the LLM from receiving the correct hint (e.g., "use search_grep for content search"). 4 new unit tests. All 1470 unit tests + 66 E2E tests pass.
+
 - **`search_edit` — CRLF normalization and trailing whitespace auto-retry** — Three improvements to eliminate the most common `search_edit` false-negative failure mode ("Text not found" at 100% similarity):
   - **Part A (bug fix)**: All text fields in `search_edit` edits (`search`, `replace`, `insertAfter`, `insertBefore`, `content`, `expectedContext`) now have CRLF line endings normalized to LF before matching. Previously, `read_and_validate_file()` normalized the file content to LF, but the search text from JSON input was used as-is — if the client/LLM sent `\r\n`, exact match was guaranteed to fail.
   - **Part B (UX improvement)**: When a literal text search or anchor lookup finds 0 matches, `search_edit` now automatically retries with trailing whitespace stripped from each line of the search text. If the trimmed search succeeds, the edit is applied with a `"warnings"` array in the response (e.g., `"edits[0]: text matched after trimming trailing whitespace"`). This eliminates the most common LLM failure mode — invisible trailing spaces added by the model. Auto-retry is skipped for regex mode (trailing whitespace changes regex semantics) and when the trimmed text is empty (prevents `str.matches("")` infinite matches).
@@ -635,7 +637,7 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric                  | Value                       |
 | ----------------------- | --------------------------- |
-| Unit tests (latest)     | ~1462 (with lang-rust)      |
+| Unit tests (latest)     | ~1470 (with lang-rust)      |
 | E2E tests (latest)      | 66                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |

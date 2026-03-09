@@ -2427,3 +2427,60 @@ fn test_auto_correct_constant_threshold() {
     assert!((AUTO_CORRECT_NAME_THRESHOLD - 0.80).abs() < f64::EPSILON,
         "Auto-correct threshold should be 0.80");
 }
+
+#[test]
+fn test_auto_correct_length_ratio_constant() {
+    assert!((AUTO_CORRECT_MIN_LENGTH_RATIO - 0.6).abs() < f64::EPSILON,
+        "Auto-correct min length ratio should be 0.6");
+}
+
+#[test]
+fn test_auto_correct_name_blocked_by_length_ratio() {
+    // name='UserServiceController' — closest match is 'userservice' (11 chars vs 21 chars).
+    // Length ratio = 11/21 = 0.52 < 0.6 threshold → auto-correction should NOT fire.
+    // Even if Jaro-Winkler similarity is high due to shared prefix.
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "name": "UserServiceController"
+    }));
+    assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 0, "Should return 0 results (length ratio too low for auto-correction)");
+    // Should NOT have autoCorrection — should have hint instead
+    let auto = &v["summary"]["autoCorrection"];
+    assert!(auto.is_null(), "Should NOT have autoCorrection when length ratio is below threshold. Got: {}", auto);
+}
+
+#[test]
+fn test_auto_correct_name_typo_passes_length_ratio() {
+    // name='GetUsr' (6 chars) — closest match is 'getuser' (7 chars).
+    // Length ratio = 6/7 = 0.86 ≥ 0.6 → auto-correction should fire.
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "name": "GetUsr"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let auto = &v["summary"]["autoCorrection"];
+    assert!(auto.is_object(), "Short typo should trigger auto-correction (length ratio OK)");
+    assert_eq!(auto["type"], "nameCorrected");
+}
+
+#[test]
+fn test_auto_correct_name_typo_passes_length_ratio_similar_length() {
+    // name='UserServise' (11 chars, typo: 's' instead of 'c') — closest match is 'userservice' (11 chars).
+    // Length ratio = 11/11 = 1.0 ≥ 0.6 → auto-correction should fire.
+    // This is NOT a substring match, so normal search returns 0 results → auto-correction kicks in.
+    let ctx = make_auto_correction_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "name": "UserServise"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let auto = &v["summary"]["autoCorrection"];
+    assert!(auto.is_object(), "Typo with similar length should trigger auto-correction (length ratio OK)");
+    assert_eq!(auto["type"], "nameCorrected");
+    assert!(auto["corrected"]["name"].as_str().unwrap().contains("userservice"),
+        "Should correct to 'userservice'");
+}

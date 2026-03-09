@@ -7602,6 +7602,51 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 ### T-TOMBSTONE: Definition index tombstone compaction during `--watch`
 
+### T-AUTO-CORRECT-LENGTH-RATIO: Auto-correction length ratio guard
+
+**Tool:** `search_definitions`
+
+**Background:** The auto-correction feature could falsely correct partial name matches where Jaro-Winkler similarity was high due to shared prefixes but the names had very different lengths (e.g., `"search_definitions"` → `"search"`, 87% similarity but 33% length ratio). The length ratio guard requires ≥60% length ratio (`min(len1,len2)/max(len1,len2)`) in addition to ≥80% similarity.
+
+**Scenario A — partial match blocked:**
+
+```json
+{ "name": "UserServiceController" }
+```
+
+**Expected:**
+
+- 0 results (no auto-correction)
+- `summary.autoCorrection` is absent (length ratio 11/21 = 0.52 < 0.6 threshold)
+- `summary.hint` may be present (regular hint system fallback)
+
+**Scenario B — short typo passes:**
+
+```json
+{ "name": "GetUsr" }
+```
+
+**Expected:**
+
+- Auto-correction fires: `summary.autoCorrection.type` = `"nameCorrected"`
+- Length ratio 6/7 = 0.86 ≥ 0.6
+
+**Scenario C — similar-length typo passes:**
+
+```json
+{ "name": "UserServise" }
+```
+
+**Expected:**
+
+- Auto-correction fires: `summary.autoCorrection.type` = `"nameCorrected"`
+- Length ratio 11/11 = 1.0 ≥ 0.6
+
+**Unit tests:** `test_auto_correct_length_ratio_constant`, `test_auto_correct_name_blocked_by_length_ratio`, `test_auto_correct_name_typo_passes_length_ratio`, `test_auto_correct_name_typo_passes_length_ratio_similar_length`
+
+**Status:** ✅ Implemented
+
+
 **Tool:** `search-index serve --watch --definitions`
 
 **Background:** When the file watcher incrementally updates definitions, old entries remain in the `definitions` Vec as tombstones. This causes `definitions.len()` to grow monotonically, inflating `totalDefinitions` and wasting memory. The fix adds auto-compaction when tombstone ratio exceeds 3× and reports active count instead of Vec length.
