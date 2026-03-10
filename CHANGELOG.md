@@ -9,6 +9,13 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ## 2026-03-10
 
 ### Features
+- **Caller deprioritization: production callers before test callers** — When `search_callers` truncates results by `maxCallersPerLevel` (default: 10), production callers now always appear before test callers. Previously, callers were returned in content index order (file_id), so a method with 10 test callers and 2 production callers would show only test callers, completely hiding production usage. Three improvements:
+  1. **Test deprioritization** — callers sorted: non-test first, test last. Test detection uses file path heuristics (`_tests.rs`, `.test.ts`, `.spec.ts`, `/tests/`, `/test/`) and attribute markers (`#[test]`, `[Fact]`, `[Theory]`, `[TestMethod]`)
+  2. **Popularity secondary sort** — within each group (production/test), callers sorted by "popularity" (total postings for the caller's name in content index, DESC). More-referenced callers appear first
+  3. **impactAnalysis preservation** — when `impactAnalysis=true`, test callers NOT truncated (needed for `testsCovering`). Only non-test callers subject to `maxCallersPerLevel`
+  - Safety cap: collection phase uses `maxCallersPerLevel × 3` for sort headroom
+  - 16 new unit tests. All 1506 unit tests + 66 E2E tests pass.
+
 - **LLM guidance improvements based on session analysis** — Six improvements to reduce LLM tool call waste when exploring codebases. Based on analysis of a real session log where an LLM made 9 tool calls (5 directory listings + 2 search_definitions) instead of the optimal 1-2 calls:
 
 - **`containsLine` body optimization** — When `containsLine` is used with `includeBody=true`, body is now emitted **only for the innermost (most specific) definition**. Parent definitions (e.g., the containing class) receive a `bodyOmitted` hint instead of consuming the body budget with potentially hundreds of lines. This eliminates a common UX issue where LLMs needed 3+ retries to get a method's body via `containsLine` because the parent class body consumed the entire `maxTotalBodyLines` budget. Single-match results (no parent) are unaffected. No new parameters — behavior change is automatic in `containsLine` mode. 3 new unit tests.
