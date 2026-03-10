@@ -649,13 +649,13 @@ If auto-correction produces 0 results, it falls through to the regular hint syst
 
 ## `search_fast` — File Name Search
 
-Search pre-built file name index for instant file lookup (~35ms vs ~3s for live filesystem walk). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Results are relevance-ranked: exact stem match → prefix match → contains match.
+Search pre-built file name index for instant file lookup (~35ms vs ~3s for live filesystem walk). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Supports `pattern='*'` or empty pattern with `dir` for wildcard listing (all files/directories). Results are relevance-ranked: exact stem match → prefix match → contains match (ranking skipped for wildcard).
 
 ### Parameters
 
 | Parameter   | Type    | Default          | Description                                                  |
 | ----------- | ------- | ---------------- | ------------------------------------------------------------ |
-| `pattern`   | string  | —                | File name pattern (required). Comma-separated for multi-term OR |
+| `pattern`   | string  | —                | File name pattern (required). Comma-separated for multi-term OR. Use `'*'` to list all entries. Empty string with `dir` also lists all |
 | `dir`       | string  | server's `--dir` | Directory to search                                          |
 | `ext`       | string  | —                | Filter by extension                                          |
 | `regex`     | boolean | false            | Treat as regex                                               |

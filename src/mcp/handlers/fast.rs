@@ -12,15 +12,26 @@ use super::HandlerContext;
 use super::utils::{best_match_tier, inject_branch_warning, json_to_string};
 
 pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
-    let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
+    let raw_pattern = args.get("pattern").and_then(|v| v.as_str());
+    let dir_provided = args.get("dir").and_then(|v| v.as_str()).is_some();
+
+    // Determine if this is a "list all" (wildcard) request:
+    //   pattern="*"          → wildcard
+    //   pattern="" + dir set → wildcard (convenient shortcut)
+    //   pattern="" no dir    → error
+    let is_wildcard = match raw_pattern {
+        Some("*") => true,
+        Some("") if dir_provided => true,
         Some("") => return ToolCallResult::error(
-            "Empty pattern. Provide a file name or pattern to search for. \
-             To explore code in a directory, use search_definitions file='<dir>' includeBody=false. \
-             To list all files in a directory, use a pattern like '*'.".to_string()
+            "Empty pattern without dir. Either provide a pattern to search for, \
+             or specify dir to list all files in a directory (pattern='' or pattern='*'). \
+             Do NOT fall back to built-in list_files or list_directory.".to_string()
         ),
-        Some(p) => p.to_string(),
         None => return ToolCallResult::error("Missing required parameter: pattern".to_string()),
+        _ => false,
     };
+
+    let pattern = raw_pattern.unwrap_or("").to_string();
 
     let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir).to_string();
     let ext = args.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string());
@@ -106,7 +117,9 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
             .unwrap_or("");
         let search_name = if ignore_case { name.to_lowercase() } else { name.to_string() };
 
-        let matched = if let Some(ref regexes) = re_list {
+        let matched = if is_wildcard {
+            true // wildcard → everything matches
+        } else if let Some(ref regexes) = re_list {
             regexes.iter().any(|re| re.is_match(&search_name))
         } else {
             search_terms.iter().any(|term| search_name.contains(term.as_str()))
@@ -125,7 +138,8 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
     }
 
     // ── Relevance ranking: exact match first, then prefix, then contains ──
-    if !count_only {
+    // Skip ranking for wildcard (no search terms to rank against)
+    if !count_only && !is_wildcard {
         results.sort_by(|a, b| {
             let path_a = a["path"].as_str().unwrap_or("");
             let path_b = b["path"].as_str().unwrap_or("");

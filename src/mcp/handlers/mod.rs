@@ -132,11 +132,11 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_fast".to_string(),
-            description: "PREFERRED file lookup tool — searches pre-built file name index. 90x+ faster than search_find (~35ms vs ~3s for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Always use this instead of search_find for file name lookups.".to_string(),
+            description: "PREFERRED file lookup tool — searches pre-built file name index. 90x+ faster than search_find (~35ms vs ~3s for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Supports pattern='*' or empty pattern with dir to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files, list_directory, or search_find.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "File name pattern. Comma-separated for multi-term OR." },
+                    "pattern": { "type": "string", "description": "File name pattern. Comma-separated for multi-term OR. Use '*' to list all entries. Empty string with dir also lists all." },
                     "dir": { "type": "string", "description": "Directory to search" },
                     "ext": { "type": "string", "description": "Filter by extension" },
                     "regex": { "type": "boolean", "description": "Treat as regex" },
