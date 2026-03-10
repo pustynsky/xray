@@ -22,6 +22,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
   6. **New anti-pattern in Architecture Exploration strategy** — "Don't browse directories (list_files, list_directory, search_fast with empty pattern)"
 
   All changes are static strings — zero runtime cost. All 1474 unit tests + 66 E2E tests pass.
+### Bug Fixes
+- **`search_fast` `dirsOnly` + `ext` filter returned 0 results** — When `search_fast` was called with `dirsOnly=true` and `ext="cs"`, it returned 0 results because the `ext` filter was applied to directory entries, which have no file extension. This was the root cause of suboptimal LLM queries observed in session analysis where `search_fast pattern="Dlp" ext="cs" dirsOnly=true` returned 0 results. Fix: `ext` filter is now skipped when `dirsOnly=true`. Response includes `summary.hint: "ext filter ignored when dirsOnly=true (directories have no file extension)"`. Tool schema description updated. 4 new unit tests. All 1487 unit tests + 66 E2E tests pass.
+
 
 ---
 

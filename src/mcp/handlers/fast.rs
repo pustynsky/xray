@@ -80,6 +80,11 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
         None
     };
 
+    // ext filter is meaningless for directories (they have no file extension),
+    // so we skip it when dirsOnly=true and emit a hint in the response.
+    let ext_ignored_for_dirs = dirs_only && ext.is_some();
+    let effective_ext = if dirs_only { &None } else { &ext };
+
     let mut results: Vec<Value> = Vec::new();
     let mut match_count = 0usize;
 
@@ -87,7 +92,7 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
         if dirs_only && !entry.is_dir { continue; }
         if files_only && entry.is_dir { continue; }
 
-        if let Some(ref ext_f) = ext {
+        if let Some(ext_f) = effective_ext {
             let path = Path::new(&entry.path);
             let matches_ext = path.extension()
                 .and_then(|e| e.to_str())
@@ -149,6 +154,9 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
         "totalIndexed": index.entries.len(),
         "searchTimeMs": elapsed.as_secs_f64() * 1000.0,
     });
+    if ext_ignored_for_dirs {
+        summary["hint"] = json!("ext filter ignored when dirsOnly=true (directories have no file extension)");
+    }
     inject_branch_warning(&mut summary, ctx);
     let output = json!({
         "files": results,

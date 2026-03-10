@@ -660,7 +660,7 @@ Search pre-built file name index for instant file lookup (~35ms vs ~3s for live 
 | `ext`       | string  | —                | Filter by extension                                          |
 | `regex`     | boolean | false            | Treat as regex                                               |
 | `ignoreCase`| boolean | false            | Case-insensitive                                             |
-| `dirsOnly`  | boolean | false            | Show only directories                                        |
+| `dirsOnly`  | boolean | false            | Show only directories. When true, `ext` filter is ignored (directories have no extension); response includes a hint |
 | `filesOnly` | boolean | false            | Show only files                                              |
 | `countOnly` | boolean | false            | Count only                                                   |
 
