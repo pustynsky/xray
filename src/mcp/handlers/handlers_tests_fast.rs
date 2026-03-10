@@ -286,3 +286,112 @@ fn test_search_fast_empty_pattern_returns_error() {
         "Error should mention 'empty', got: {}", result.content[0].text);
     cleanup_tmp(&tmp);
 }
+
+
+/// BUG: dirsOnly + ext filter should NOT filter out directories.
+/// Previously, ext="cs" combined with dirsOnly=true returned 0 results because
+/// directories have no file extension. The fix skips the ext filter for dirsOnly.
+#[test]
+fn test_search_fast_dirs_only_ignores_ext_filter() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_dirsext_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create a subdirectory "Services" with a .cs file inside
+    let sub = tmp_dir.join("Services");
+    let _ = std::fs::create_dir_all(&sub);
+    let file_in_sub = sub.join("OrderService.cs");
+    { let mut f = std::fs::File::create(&file_in_sub).unwrap(); writeln!(f, "// svc").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+
+    // dirsOnly=true + ext="cs" should find the "Services" directory (ext is ignored for dirs)
+    let result = handle_search_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true, "ext": "cs"}));
+    assert!(!result.is_error, "dirsOnly + ext should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
+        "dirsOnly + ext should find directories (ext ignored). Got 0 matches.");
+    // Verify the hint is emitted
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("ext filter ignored"),
+        "Should emit a hint about ext being ignored, got: '{}'", hint);
+    // All results should be directories
+    for entry in output["files"].as_array().unwrap() {
+        assert_eq!(entry["isDir"], true, "dirsOnly should only return directories");
+    }
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Regression guard: dirsOnly without ext should continue to work.
+#[test]
+fn test_search_fast_dirs_only_without_ext() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_dirsnoext_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    let sub = tmp_dir.join("Controllers");
+    let _ = std::fs::create_dir_all(&sub);
+    let file_in_sub = sub.join("ApiController.cs");
+    { let mut f = std::fs::File::create(&file_in_sub).unwrap(); writeln!(f, "// ctrl").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+
+    // dirsOnly=true without ext should work fine
+    let result = handle_search_fast(&ctx, &json!({"pattern": "Controllers", "dirsOnly": true}));
+    assert!(!result.is_error, "dirsOnly without ext should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
+        "Should find 'Controllers' directory");
+    // No hint about ext being ignored (ext was not provided)
+    assert!(output["summary"]["hint"].is_null(),
+        "Should NOT emit ext-ignored hint when ext is not provided");
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Verify ext filter still works correctly for filesOnly (regression).
+#[test]
+fn test_search_fast_files_only_with_ext_still_filters() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_filesext_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    { let mut f = std::fs::File::create(&tmp_dir.join("Report.cs")).unwrap(); writeln!(f, "// cs").unwrap(); }
+    { let mut f = std::fs::File::create(&tmp_dir.join("Report.txt")).unwrap(); writeln!(f, "// txt").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+
+    // filesOnly + ext="cs" should only return Report.cs, not Report.txt
+    let result = handle_search_fast(&ctx, &json!({"pattern": "Report", "filesOnly": true, "ext": "cs"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalMatches"], 1,
+        "filesOnly + ext='cs' should match only Report.cs, not Report.txt");
+    let files = output["files"].as_array().unwrap();
+    assert!(files[0]["path"].as_str().unwrap().contains("Report.cs"),
+        "Should match Report.cs");
+
+    cleanup_tmp(&tmp_dir);
+}

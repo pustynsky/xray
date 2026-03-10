@@ -141,7 +141,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "ext": { "type": "string", "description": "Filter by extension" },
                     "regex": { "type": "boolean", "description": "Treat as regex" },
                     "ignoreCase": { "type": "boolean", "description": "Case-insensitive" },
-                    "dirsOnly": { "type": "boolean", "description": "Show only directories" },
+                    "dirsOnly": { "type": "boolean", "description": "Show only directories. When true, ext filter is ignored (directories have no extension)" },
                     "filesOnly": { "type": "boolean", "description": "Show only files" },
                     "countOnly": { "type": "boolean", "description": "Count only" }
                 },

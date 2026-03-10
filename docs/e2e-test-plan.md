@@ -3802,6 +3802,26 @@ returns only file entries.
 
 **Unit test:** [`test_search_fast_dirs_only_and_files_only`](../src/mcp/handlers/handlers_tests.rs)
 
+#### T79b: `search_fast` — `dirsOnly` with `ext` filter (ext ignored)
+
+**Tool:** `search_fast`
+
+**Scenario:** Setting `dirsOnly: true` with `ext: "cs"` should find directories (ext is ignored
+for directory searches because directories have no file extension). Response includes a hint.
+
+**Expected:**
+
+- `dirsOnly: true` + `ext: "cs"` — returns directories matching the pattern (ext ignored)
+- `summary.hint` contains `"ext filter ignored when dirsOnly=true"`
+- All results are directories (`isDir: true`)
+- `filesOnly: true` + `ext: "cs"` — ext still filters correctly (only `.cs` files)
+
+**Unit tests:** [`test_search_fast_dirs_only_ignores_ext_filter`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_dirs_only_without_ext`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_files_only_with_ext_still_filters`](../src/mcp/handlers/handlers_tests_fast.rs)
+
+**Status:** ✅ Implemented
+
+---
+
 ---
 
 #### T80: `search_fast` — Regex mode
