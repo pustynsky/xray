@@ -336,6 +336,7 @@ fn handle_contains_line_mode(
     let mut containing_defs: Vec<Value> = Vec::new();
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
+    let mut total_body_lines_available: usize = 0;
 
     for (file_id, file_path) in index.files.iter().enumerate() {
         if !file_path.replace('\\', "/").to_lowercase().contains(&file_substr) {
@@ -350,7 +351,7 @@ fn handle_contains_line_mode(
             // Sort by range size (smallest first = most specific)
             matching.sort_by_key(|d| d.line_end - d.line_start);
 
-            for def in &matching {
+            for (i, def) in matching.iter().enumerate() {
                 let mut obj = json!({
                     "name": def.name,
                     "kind": def.kind.as_str(),
@@ -367,13 +368,23 @@ fn handle_contains_line_mode(
                     obj["modifiers"] = json!(def.modifiers);
                 }
                 if args.include_body {
-                    inject_body_into_obj(
-                        &mut obj, file_path, def.line_start, def.line_end,
-                        &mut file_cache, &mut total_body_lines_emitted,
-                        args.max_body_lines, args.max_total_body_lines,
-                        args.include_doc_comments,
-                        args.body_line_start, args.body_line_end,
-                    );
+                    if i == 0 {
+                        // Track available lines for innermost only (parents don't emit body)
+                        total_body_lines_available += (def.line_end.saturating_sub(def.line_start) + 1) as usize;
+                        // Innermost definition (smallest range) — emit full body
+                        inject_body_into_obj(
+                            &mut obj, file_path, def.line_start, def.line_end,
+                            &mut file_cache, &mut total_body_lines_emitted,
+                            args.max_body_lines, args.max_total_body_lines,
+                            args.include_doc_comments,
+                            args.body_line_start, args.body_line_end,
+                        );
+                    } else {
+                        // Parent definition — metadata only, skip body to save budget
+                        obj["bodyOmitted"] = json!(
+                            "parent definition - use includeBody with name filter to get full body"
+                        );
+                    }
                 }
                 containing_defs.push(obj);
             }
@@ -387,6 +398,9 @@ fn handle_contains_line_mode(
     });
     if args.include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
+        if total_body_lines_emitted < total_body_lines_available {
+            summary["totalBodyLinesAvailable"] = json!(total_body_lines_available);
+        }
     }
     inject_branch_warning(&mut summary, ctx);
     let output = json!({
@@ -752,6 +766,10 @@ fn format_search_output(
 ) -> ToolCallResult {
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
+    // Count total body lines available (before truncation) for size hint
+    let total_body_lines_available: usize = if args.include_body {
+        results.iter().map(|(_, def)| (def.line_end.saturating_sub(def.line_start) + 1) as usize).sum()
+    } else { 0 };
 
     let defs_json: Vec<Value> = results.iter().map(|(def_idx_value, def)| {
         format_definition_entry(
@@ -763,7 +781,7 @@ fn format_search_output(
     let summary = build_search_summary(
         index, &defs_json, args, total_results,
         stats_info, term_breakdown, total_body_lines_emitted,
-        search_elapsed, ctx,
+        total_body_lines_available, search_elapsed, ctx,
     );
 
     let output = json!({
@@ -859,6 +877,7 @@ fn build_search_summary(
     stats_info: &StatsFilterInfo,
     term_breakdown: &Option<Value>,
     total_body_lines_emitted: usize,
+    total_body_lines_available: usize,
     search_elapsed: std::time::Duration,
     ctx: &HandlerContext,
 ) -> Value {
@@ -911,6 +930,9 @@ fn build_search_summary(
     }
     if args.include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
+        if total_body_lines_emitted < total_body_lines_available {
+            summary["totalBodyLinesAvailable"] = json!(total_body_lines_available);
+        }
     }
     if let Some(ref sort_field) = args.sort_by {
         summary["sortedBy"] = json!(sort_field);

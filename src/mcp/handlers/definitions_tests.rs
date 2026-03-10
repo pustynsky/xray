@@ -1771,7 +1771,7 @@ fn test_build_search_summary_basic_fields() {
     let elapsed = std::time::Duration::from_millis(5);
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 10, &stats_info, &None, 0, elapsed, &ctx);
+        &index, &defs_json, &args, 10, &stats_info, &None, 0, 0, elapsed, &ctx);
     assert_eq!(summary["totalResults"], 10);
     assert_eq!(summary["returned"], 2);
     assert_eq!(summary["indexFiles"], 2); // 2 files in make_test_def_index
@@ -1786,7 +1786,7 @@ fn test_build_search_summary_sorted_by_field() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     assert_eq!(summary["sortedBy"], "cognitiveComplexity");
 }
@@ -1799,7 +1799,7 @@ fn test_build_search_summary_stats_filters_applied() {
     let stats_info = StatsFilterInfo { applied: true, before_count: 10 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 1, &stats_info, &None, 0,
+        &index, &defs_json, &args, 1, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     assert_eq!(summary["statsFiltersApplied"], true);
     assert_eq!(summary["beforeStatsFilter"], 10);
@@ -1814,7 +1814,7 @@ fn test_build_search_summary_code_stats_unavailable() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     assert_eq!(summary["codeStatsAvailable"], false);
 }
@@ -1827,7 +1827,7 @@ fn test_build_search_summary_body_lines_reported() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 42,
+        &index, &defs_json, &args, 0, &stats_info, &None, 42, 0,
         std::time::Duration::ZERO, &ctx);
     assert_eq!(summary["totalBodyLinesReturned"], 42);
 }
@@ -1840,7 +1840,7 @@ fn test_build_search_summary_no_body_lines_when_not_requested() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     assert!(summary.get("totalBodyLinesReturned").is_none(),
         "No body → no totalBodyLinesReturned");
@@ -1855,14 +1855,14 @@ fn test_build_search_summary_read_errors_only_when_nonzero() {
 
     // No errors → field absent
     let summary = build_search_summary(
-        &index, &[], &args, 0, &stats_info, &None, 0,
+        &index, &[], &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     assert!(summary.get("readErrors").is_none());
 
     // With errors → field present
     index.parse_errors = 3;
     let summary2 = build_search_summary(
-        &index, &[], &args, 0, &stats_info, &None, 0,
+        &index, &[], &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     assert_eq!(summary2["readErrors"], 3);
 }
@@ -1876,7 +1876,7 @@ fn test_build_search_summary_term_breakdown_injected() {
     let ctx = HandlerContext::default();
     let breakdown = Some(json!({"term1": 5, "term2": 3}));
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &breakdown, 0,
+        &index, &defs_json, &args, 0, &stats_info, &breakdown, 0, 0,
         std::time::Duration::ZERO, &ctx);
     assert!(summary.get("termBreakdown").is_some());
     assert_eq!(summary["termBreakdown"]["term1"], 5);
@@ -2044,7 +2044,7 @@ fn test_hint_wrong_kind() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     let hint = summary["hint"].as_str().unwrap();
     assert!(hint.contains("kind='function'"), "Should mention the wrong kind. Got: {}", hint);
@@ -2061,7 +2061,7 @@ fn test_hint_wrong_kind_with_file_filter() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     let hint = summary["hint"].as_str().unwrap();
     assert!(hint.contains("kind='function'"), "Should mention the wrong kind. Got: {}", hint);
@@ -2078,7 +2078,7 @@ fn test_hint_file_has_defs_but_name_not_found() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     let hint = summary["hint"].as_str().unwrap();
     assert!(hint.contains("UserService.cs"), "Should mention the file. Got: {}", hint);
@@ -2095,7 +2095,7 @@ fn test_hint_nearest_name_match() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     let hint = summary["hint"].as_str();
     assert!(hint.is_some(), "Should have a nearest-match hint for typo 'GetUsr'");
@@ -2137,7 +2137,7 @@ fn test_hint_name_in_content_not_in_defs() {
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let summary = build_search_summary(
-        &def_index_guard, &defs_json, &args, 0, &stats_info, &None, 0,
+        &def_index_guard, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     let hint = summary["hint"].as_str();
     assert!(hint.is_some(), "Should have hint when name is in content but not in definitions");
@@ -2156,7 +2156,7 @@ fn test_hint_priority_kind_first() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     // Hint A won't trigger because 'GetUsr' doesn't match any name in name_index
     // (it's a substring search, and 'getusr' doesn't match 'getuser' or 'getorder' as substring)
@@ -2174,7 +2174,7 @@ fn test_hint_no_hint_for_regex() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     // Hint B checks !args.use_regex, so no nearest-name hint
     // Hint D might fire if content index has nothing
@@ -2195,7 +2195,7 @@ fn test_hint_no_hint_when_results_found() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 1 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 1, &stats_info, &None, 0,
+        &index, &defs_json, &args, 1, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     assert!(summary.get("hint").is_none(),
         "No hint when results are found (total_results > 0)");
@@ -2222,7 +2222,7 @@ fn test_hint_existing_property_field_hint_not_overwritten() {
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
     let summary = build_search_summary(
-        &index, &defs_json, &args, 0, &stats_info, &None, 0,
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
         std::time::Duration::ZERO, &ctx);
     let hint = summary["hint"].as_str().unwrap();
     // Should be the original property→field hint, not overwritten by Hint A/B/C/D

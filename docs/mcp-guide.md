@@ -404,7 +404,7 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | `baseTypeTransitive`| boolean | false   | With `baseType`, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType |
 | `file`              | string  | —       | Filter by file path substring. Comma-separated for multi-term OR                         |
 | `parent`            | string  | —       | Filter by parent class name                                                              |
-| `containsLine`      | integer | —       | Find definition containing a line number (requires `file`)                               |
+| `containsLine`      | integer | —       | Find definition containing a line number (requires `file`). With `includeBody=true`, body is emitted only for innermost definition; parents get `bodyOmitted` |
 | `regex`             | boolean | false   | Treat `name` as regex                                                                    |
 | `maxResults`        | integer | 100     | Max results returned                                                                     |
 | `excludeDir`        | array   | —       | Exclude directories                                                                      |
@@ -428,6 +428,8 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 
 Find which method/class contains a given line number. No more `read_file` just to figure out "what method is on line 812".
 
+With `includeBody=true`, body is emitted **only for the innermost (most specific) definition**. Parent definitions receive `bodyOmitted` with a hint instead — this maximizes the body budget for the target method.
+
 ```json
 // Request
 { "file": "QueryService.cs", "containsLine": 812 }
@@ -441,6 +443,32 @@ Find which method/class contains a given line number. No more `read_file` just t
 }
 ```
 
+With `includeBody=true`:
+
+```json
+// Request
+{ "file": "QueryService.cs", "containsLine": 812, "includeBody": true }
+
+// Response: innermost gets body, parent gets bodyOmitted
+{
+  "containingDefinitions": [
+    {
+      "name": "ExecuteQueryAsync",
+      "kind": "method",
+      "lines": "766-830",
+      "parent": "QueryService",
+      "body": ["public async Task<Result> ExecuteQueryAsync(...)", "{", "    ..."]
+    },
+    {
+      "name": "QueryService",
+      "kind": "class",
+      "lines": "1-900",
+      "bodyOmitted": "parent definition - use includeBody with name filter to get full body"
+    }
+  ]
+}
+```
+
 ### `includeBody` — Return Source Code Inline
 
 Retrieve the actual source code of definitions without a separate `read_file` call. Three-level protection prevents response explosion:
@@ -450,6 +478,8 @@ Retrieve the actual source code of definitions without a separate `read_file` ca
 - **`maxResults`** — caps the number of definitions returned (default: 100)
 
 When a definition's body exceeds `maxBodyLines`, the `body` array is truncated and `bodyTruncated: true` is set. When the global `maxTotalBodyLines` budget is exhausted, remaining definitions receive `bodyOmitted: true` with a `bodyWarning` message. If the source file cannot be read, `bodyError` is returned instead.
+
+When body is truncated, the summary includes `totalBodyLinesAvailable` — the total body lines that would have been returned without truncation. Use this value to calibrate `maxTotalBodyLines` for a retry (e.g., if `totalBodyLinesReturned: 500` and `totalBodyLinesAvailable: 2300`, set `maxTotalBodyLines: 2300`). The field is absent when all bodies fit within the budget.
 
 ```json
 // Request

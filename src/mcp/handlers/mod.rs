@@ -250,7 +250,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "containsLine": {
                         "type": "integer",
-                        "description": "Find definition(s) containing this line number. Returns innermost method + parent class. Requires 'file' parameter."
+                        "description": "Find definition(s) containing this line number. Returns innermost method + parent class. Requires 'file' parameter. With includeBody=true, body is emitted ONLY for the innermost (most specific) definition; parent definitions get 'bodyOmitted' hint instead — this maximizes body budget for the target method."
                     },
                     "regex": {
                         "type": "boolean",

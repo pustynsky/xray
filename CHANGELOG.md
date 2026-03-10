@@ -6,6 +6,25 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-03-10
+
+### Features
+- **LLM guidance improvements based on session analysis** — Six improvements to reduce LLM tool call waste when exploring codebases. Based on analysis of a real session log where an LLM made 9 tool calls (5 directory listings + 2 search_definitions) instead of the optimal 1-2 calls:
+
+- **`containsLine` body optimization** — When `containsLine` is used with `includeBody=true`, body is now emitted **only for the innermost (most specific) definition**. Parent definitions (e.g., the containing class) receive a `bodyOmitted` hint instead of consuming the body budget with potentially hundreds of lines. This eliminates a common UX issue where LLMs needed 3+ retries to get a method's body via `containsLine` because the parent class body consumed the entire `maxTotalBodyLines` budget. Single-match results (no parent) are unaffected. No new parameters — behavior change is automatic in `containsLine` mode. 3 new unit tests.
+- **Body truncation size hint (`totalBodyLinesAvailable`)** — When `search_definitions` or `search_callers` truncate body output due to `maxTotalBodyLines` or `maxBodyLines` budget, the summary now includes `totalBodyLinesAvailable` — the total body lines that would have been returned without truncation. This eliminates "blind retry" (LLM doesn't know what `maxTotalBodyLines` value to use) and "unnecessary retry" (LLM retries when only 10 of 510 lines were truncated). The field is only present when `totalBodyLinesReturned < totalBodyLinesAvailable`. Also added `totalBodyLinesReturned` to single-method `search_callers` responses (previously only in multi-method batch). 3 new unit tests.
+
+  1. **ANTI-PATTERNS section in MCP instructions** — Added 4 top anti-patterns directly in `render_instructions()` output (seen at every session start), including "NEVER browse directories to explore code structure" and "Use excludeDir to skip test files"
+  2. **New task routing: "Explore a module"** — Added explicit routing "Explore a module / understand directory structure → search_definitions" to the TASK ROUTING table
+  3. **Architecture Exploration recipe: excludeDir** — Step 1 now includes `excludeDir=['test','Test','Mock']` and hints at `file='<dirname>'` for directory-level exploration
+  4. **search_fast empty-pattern guidance** — Error message now suggests `search_definitions file='<dir>'` for code exploration and `pattern='*'` for file listing
+  5. **search_definitions file parameter enriched** — Tool schema description now says "Use file='<dirname>' to explore an entire module"
+  6. **New anti-pattern in Architecture Exploration strategy** — "Don't browse directories (list_files, list_directory, search_fast with empty pattern)"
+
+  All changes are static strings — zero runtime cost. All 1474 unit tests + 66 E2E tests pass.
+
+---
+
 ## 2026-03-09
 
 ### Features

@@ -333,7 +333,7 @@ pub fn strategies() -> Vec<Strategy> {
             name: "Stack Trace / Bug Investigation",
             when: "User provides a stack trace, error at file:line, or asks 'what method is at line N'",
             steps: &[
-                "Step 1 - Identify method (1 call): search_definitions file='FileName.cs' containsLine=42 includeBody=true -> returns the method + its parent class with source code",
+                "Step 1 - Identify method (1 call): search_definitions file='FileName.cs' containsLine=42 includeBody=true -> returns the method body (innermost) + parent class metadata (body omitted to save budget)",
                 "Step 2 (optional) - Trace callers (1 call): search_callers method='<method from step 1>' class='<class from step 1>' depth=2 -> who triggered this code path",
             ],
             anti_patterns: &[
@@ -464,9 +464,9 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
     json!({
         "search_definitions": {
             "name": "Single: 'UserService'. Multi-term OR: 'UserService,IUserService,UserController' (finds ALL in one query). Naming variants: 'Order,IOrder,OrderFactory'. NOTE: name searches AST definition names (classes, methods, properties) -- NOT string literals or values inside code. Use search_grep for string content. For methods via 'using static', search without parent filter",
-            "containsLine": "file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService",
+            "containsLine": "file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService. With includeBody=true, body is emitted ONLY for innermost definition; parent gets 'bodyOmitted' hint (saves body budget for target method)",
             "bodyLineStart/End": "containsLine=1335, bodyLineStart=1330, bodyLineEnd=1345 -> returns only 15 lines of a 363-line method body, avoiding response truncation. Use when you know which lines you need from a large method.",
-            "includeBody": "parent='UserService', includeBody=true, maxBodyLines=20 -> returns method bodies inline",
+            "includeBody": "parent='UserService', includeBody=true, maxBodyLines=20 -> returns method bodies inline. When body is truncated, summary includes totalBodyLinesAvailable — use it to calibrate maxTotalBodyLines for retry",
             "includeDocComments": "includeDocComments=true -> expands body upward to capture /// XML doc-comments (C#/Rust) or /** */ JSDoc (TypeScript) above the definition. Implies includeBody=true. Response includes 'docCommentLines' count. Budget-aware: counts against maxBodyLines",
             "sortBy": "sortBy='cognitiveComplexity' maxResults=20 -> 20 most complex methods. sortBy='lines' -> longest definitions",
             "attribute": "'ApiController', 'Authorize', 'ServiceProvider'",

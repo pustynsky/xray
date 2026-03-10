@@ -995,7 +995,16 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - Result includes `"containingDefinitions"` array
 - Each containing definition has a `"bodyStartLine"` (integer, 1-based) and `"body"` array (string array of source lines)
 
-**Validates:** `includeBody` works together with `containsLine` mode, body is attached to containing definitions.
+**Validates:** `includeBody` works together with `containsLine` mode. Body is emitted only for the innermost (most specific) definition. Parent definitions receive `bodyOmitted` hint instead of body — this maximizes body budget for the target method.
+
+**New assertions (containsLine body optimization):**
+
+- First element in `containingDefinitions` (innermost) has `body` array and `bodyStartLine`
+- Second element (parent class) has `bodyOmitted` string (e.g., `"parent definition - use includeBody with name filter to get full body"`)
+- Second element does NOT have `body` field
+- When only one definition matches (no parent), body is emitted normally (no `bodyOmitted`)
+
+**Unit tests:** `test_contains_line_body_only_for_innermost`, `test_contains_line_body_line_range_only_on_innermost`, `test_contains_line_single_match_gets_body_normally`
 
 **Note:** Replace `<known_file>` and `<known_line>` with a file path and line number known to be inside a definition.
 
