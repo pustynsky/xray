@@ -3845,15 +3845,18 @@ matching.
 
 **Tool:** `search_fast`
 
-**Scenario:** Passing an empty string as the pattern is handled gracefully without panicking.
+**Scenario:** Passing an empty string as the pattern without `dir` returns an error. Passing an empty string with `dir` returns all entries (wildcard).
 
 **Expected:**
 
-- No panic or crash
-- Returns 0 matches (or all entries, depending on implementation)
+- `pattern: ""` without `dir` → error mentioning "Do NOT fall back"
+- `pattern: ""` with `dir` → wildcard listing of that directory
+- `pattern: "*"` → wildcard listing (all entries match)
+- `pattern: "*"` with `dirsOnly: true` → only directories listed
+- No panic or crash in any case
 - Clean response with valid JSON structure
 
-**Unit test:** [`test_search_fast_empty_pattern`](../src/mcp/handlers/handlers_tests.rs)
+**Unit tests:** [`test_search_fast_empty_pattern`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_empty_pattern_returns_error`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_empty_pattern_with_dir`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_empty_pattern_without_dir_still_errors`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_wildcard_star`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_wildcard_star_dirs_only`](../src/mcp/handlers/handlers_tests_fast.rs)
 
 ---
 

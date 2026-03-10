@@ -147,6 +147,11 @@ pub fn task_routings() -> Vec<TaskRouting> {
             requires_definitions: false,
         },
         TaskRouting {
+            task: "List files or subdirectories in a folder",
+            tool: "search_fast",
+            requires_definitions: false,
+        },
+        TaskRouting {
             task: "Edit a file (any modification)",
             tool: "search_edit",
             requires_definitions: false,
@@ -500,7 +505,7 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "limitation": "Only finds direct invocations (obj.Method(args)). Does NOT find method group/delegate references (e.g., list.Where(IsValid), Func<bool> f = svc.Check). Use search_grep for those."
         },
         "search_fast": {
-            "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term"
+            "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term. Wildcard: '*' or '' (empty with dir) lists ALL entries. Use with dirsOnly=true for subdirectory listing: pattern='*', dir='src/services', dirsOnly=true"
         },
         "search_git_history": {
             "repo": "'.' (current directory) or absolute path to git repo",
@@ -699,21 +704,29 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("NEVER USE apply_diff, search_and_replace, or insert_content when search_edit is available.\n");
     out.push_str("   DECISION TRIGGER: before ANY file edit, STOP and switch to search_edit.\n");
     out.push_str("   search_edit: atomic, no whitespace issues, multi-file batch, dryRun preview.\n\n");
-    // --- ZERO-RESULT HINT AUTO-FOLLOW (cross-tool routing + same-tool corrections) ---
-    out.push_str("ZERO-RESULT HINTS: when a tool returns 0 results with a hint, AUTOMATICALLY follow the hint. Do NOT report the hint to the user and stop.\n");
+    // --- RESPONSE HINT AUTO-FOLLOW (cross-tool routing + same-tool corrections) ---
+    out.push_str("RESPONSE HINTS: when ANY search-index tool response includes a hint (zero results, errors, warnings, or suggestions), AUTOMATICALLY follow the hint in the same turn. Do NOT report the hint to the user and stop. Do NOT fall back to built-in tools when a hint provides an alternative.\n");
     out.push_str("   DECISION TRIGGER: if the response hint says 'Use search_grep for content search' — call search_grep immediately.\n");
     out.push_str("   Same for any hint suggesting search_definitions, search_callers, or search_fast — follow the suggestion automatically.\n");
     out.push_str("   NEAREST MATCH: if the hint says 'Nearest match: X' — re-call the SAME tool with name=X immediately.\n");
     out.push_str("   KIND MISMATCH: if the hint says 'Did you mean kind=Y?' — re-call the SAME tool with kind=Y immediately.\n");
     out.push_str("   RULE: NEVER ask the user whether to follow a hint. ALWAYS follow it automatically in the same turn.\n\n");
 
+    // --- ERROR RECOVERY (prevent fallback to built-in tools on MCP errors) ---
+    out.push_str("ERROR RECOVERY: when a search-index tool returns an error:\n");
+    out.push_str("   1. Read the error message for hints or alternative tool suggestions\n");
+    out.push_str("   2. If hint suggests another search-index tool → use that tool immediately\n");
+    out.push_str("   3. If hint suggests different parameters → retry with those parameters\n");
+    out.push_str("   4. NEVER fall back to built-in tools (list_files, list_directory, directory_tree) as error recovery\n");
+    out.push_str("   5. Only use built-in tools if the file type is NOT indexed by search-index\n\n");
 
     // --- Top anti-patterns (extracted from strategy recipes) ---
     out.push_str("ANTI-PATTERNS (most common mistakes — each one wastes 3-5 extra tool calls):\n");
     out.push_str("  - NEVER list or browse directories to explore code — search_definitions file='<dir>' returns ALL classes/methods/interfaces in ONE call\n");
     out.push_str("  - NEVER read indexed source files directly — use search_definitions includeBody=true (returns source code inline)\n");
     out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — omit kind filter to get everything at once\n");
-    out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n\n");
+    out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n");
+    out.push_str("  - NEVER use list_files, list_directory, or directory_tree for ANY purpose when search-index is connected — even for simple directory listing. Use search_fast pattern='*' dir='<path>' dirsOnly=true for directory listing, or search_definitions file='<dir>' for code structure\n\n");
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task):\n");

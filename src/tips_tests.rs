@@ -82,12 +82,22 @@ fn test_render_instructions_contains_key_terms() {
     assert!(text.contains("FILES DIRECTLY"), "instructions should have FILES DIRECTLY in prohibition");
     assert!(text.contains("DECISION TRIGGER"), "instructions should have decision trigger");
     assert!(text.contains("ONLY exception for"), "instructions should list exceptions for indexed file reading");
-    // Zero-result hints auto-follow rule
-    assert!(text.contains("ZERO-RESULT HINTS"), "instructions should have ZERO-RESULT HINTS auto-follow rule");
+    // Response hints auto-follow rule (renamed from ZERO-RESULT HINTS)
+    assert!(text.contains("RESPONSE HINTS"), "instructions should have RESPONSE HINTS auto-follow rule");
+    assert!(!text.contains("ZERO-RESULT HINTS"), "instructions should NOT have old ZERO-RESULT HINTS (renamed to RESPONSE HINTS)");
     assert!(text.contains("AUTOMATICALLY follow the hint"), "instructions should tell LLM to auto-follow hints");
     assert!(text.contains("NEAREST MATCH"), "instructions should have NEAREST MATCH auto-follow rule");
     assert!(text.contains("KIND MISMATCH"), "instructions should have KIND MISMATCH auto-follow rule");
     assert!(text.contains("NEVER ask the user whether to follow a hint"), "instructions should prohibit asking user about hints");
+    // Error recovery rule
+    assert!(text.contains("ERROR RECOVERY"), "instructions should have ERROR RECOVERY rule");
+    assert!(text.contains("NEVER fall back to built-in tools"), "ERROR RECOVERY should prohibit fallback");
+    // Anti-patterns should explicitly mention built-in tools to prohibit them
+    assert!(text.contains("list_files"), "ANTI-PATTERNS should mention list_files as prohibited");
+    assert!(text.contains("list_directory"), "ANTI-PATTERNS should mention list_directory as prohibited");
+    assert!(text.contains("directory_tree"), "ANTI-PATTERNS should mention directory_tree as prohibited");
+    // Task routing should include directory listing
+    assert!(text.contains("List files or subdirectories"), "TASK ROUTING should include directory listing");
     // Removed sections should NOT be present
     assert!(!text.contains("Quick Reference"), "instructions should NOT have Quick Reference (replaced by TASK ROUTING)");
     assert!(!text.contains("TOOL PRIORITY"), "instructions should NOT have TOOL PRIORITY (replaced by TASK ROUTING)");
@@ -99,9 +109,8 @@ fn test_render_instructions_contains_key_terms() {
     // No emoji in machine-targeted text
     assert!(!text.contains('⚠'), "instructions should not contain emoji (machine-targeted text)");
     assert!(!text.contains('⚡'), "instructions should not contain emoji (machine-targeted text)");
-    // No Roo-specific tool names
+    // No Roo-specific tool names in non-prohibition context
     assert!(!text.contains("read_file"), "instructions should not reference Roo-specific read_file");
-    assert!(!text.contains("list_files"), "instructions should not reference Roo-specific list_files");
     assert!(!text.contains("list_code_definition_names"), "instructions should not reference Roo-specific list_code_definition_names");
 }
 
@@ -236,6 +245,7 @@ fn test_task_routing_with_definitions() {
     // Universal routes always present
     assert!(text.contains("Search file contents"), "should have grep route");
     assert!(text.contains("Find a file by name"), "should have fast route");
+    assert!(text.contains("List files or subdirectories"), "should have directory listing route");
     assert!(text.contains("Edit a file"), "should have edit route");
     assert!(text.contains("Git blame"), "should have git route");
 }
@@ -253,6 +263,7 @@ fn test_task_routing_without_definitions() {
     assert!(text.contains("search_fast"), "should mention search_fast");
     assert!(text.contains("search_edit"), "should mention search_edit");
     assert!(text.contains("search_git_blame"), "should mention git tools");
+    assert!(text.contains("List files or subdirectories"), "should have directory listing route even without defs");
 }
 
 #[test]
@@ -319,12 +330,13 @@ fn test_instructions_token_budget() {
     let text = render_instructions(&["cs", "ts", "tsx", "sql", "rs"]);
     let word_count = text.split_whitespace().count();
     let approx_tokens = (word_count as f64 / 0.75) as usize;
-    // After consolidation + CRITICAL OVERRIDE: target <=1700 tokens
-    // The override block (~100 tokens) is justified — prevents 5-10 wasted tool calls per session
+    // After consolidation + CRITICAL OVERRIDE + ERROR RECOVERY + ANTI-PATTERNS: target <=1900 tokens
+    // The override block (~100 tokens) + ERROR RECOVERY (~100 tokens) + expanded ANTI-PATTERNS (~40 tokens)
+    // are justified — prevent LLM fallback to built-in tools (saves 3-5 wasted tool calls per session)
     assert!(
-        approx_tokens < 1700,
+        approx_tokens < 1900,
         "Instructions exceed token budget: ~{} tokens ({} words). \
-         Target: <1700 (includes CRITICAL OVERRIDE block). Remove redundant sections.",
+         Target: <1900 (includes CRITICAL OVERRIDE + ERROR RECOVERY blocks). Remove redundant sections.",
         approx_tokens, word_count
     );
 }

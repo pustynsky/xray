@@ -9,6 +9,15 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ## 2026-03-10
 
 ### Features
+- **search_fast wildcard listing (`pattern='*'` and empty pattern with `dir`)** — `search_fast` now supports wildcard listing: `pattern='*'` matches all entries, and `pattern=''` with a `dir` parameter also lists all entries in that directory. Use with `dirsOnly=true` to list subdirectories. Previously, `pattern='*'` did a literal search for the `*` character (matching 0 files), and empty pattern always returned an error. The error message for empty pattern without `dir` now includes "Do NOT fall back to built-in list_files or list_directory". Relevance ranking is skipped for wildcard queries. 5 new unit tests.
+
+- **Fallback prevention: RESPONSE HINTS, ERROR RECOVERY, and strengthened ANTI-PATTERNS** — Six improvements to LLM instructions (`src/tips.rs`) to prevent fallback from search-index MCP tools to built-in tools:
+  1. **ZERO-RESULT HINTS → RESPONSE HINTS** — broadened from "0 results with a hint" to "ANY response with a hint (zero results, errors, warnings, or suggestions)" with explicit "Do NOT fall back to built-in tools" directive
+  2. **ERROR RECOVERY** — new rule: when a search-index tool returns an error, read the error message for hints, retry with suggested parameters, NEVER fall back to built-in tools
+  3. **TASK ROUTING** — added "List files or subdirectories in a folder → search_fast" mapping
+  4. **ANTI-PATTERNS** — added explicit prohibition: "NEVER use list_files, list_directory, or directory_tree for ANY purpose when search-index is connected"
+  5. **Tool description** — `search_fast` description now mentions wildcard support and "ALWAYS use this instead of built-in list_files, list_directory"
+  6. **Parameter examples** — `search_fast.pattern` examples updated with wildcard usage
 - **Caller deprioritization: production callers before test callers** — When `search_callers` truncates results by `maxCallersPerLevel` (default: 10), production callers now always appear before test callers. Previously, callers were returned in content index order (file_id), so a method with 10 test callers and 2 production callers would show only test callers, completely hiding production usage. Three improvements:
   1. **Test deprioritization** — callers sorted: non-test first, test last. Test detection uses file path heuristics (`_tests.rs`, `.test.ts`, `.spec.ts`, `/tests/`, `/test/`) and attribute markers (`#[test]`, `[Fact]`, `[Theory]`, `[TestMethod]`)
   2. **Popularity secondary sort** — within each group (production/test), callers sorted by "popularity" (total postings for the caller's name in content index, DESC). More-referenced callers appear first

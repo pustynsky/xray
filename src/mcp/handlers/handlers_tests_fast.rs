@@ -166,21 +166,18 @@ fn test_search_fast_regex_mode() {
 
     cleanup_tmp(&tmp);
 }
-/// T76 — search_fast empty pattern edge case.
+/// T76 — search_fast empty pattern without dir → error.
 #[test]
 fn test_search_fast_empty_pattern() {
     let (ctx, tmp) = make_search_fast_ctx();
 
+    // Empty pattern WITHOUT dir → error
     let result = handle_search_fast(&ctx, &json!({"pattern": ""}));
-
-    if result.is_error {
-        assert!(result.content[0].text.contains("Missing") || result.content[0].text.contains("pattern") || result.content[0].text.contains("empty"),
-            "Error should mention missing/empty pattern, got: {}", result.content[0].text);
-    } else {
-        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-        assert_eq!(output["summary"]["totalMatches"], 0,
-            "Empty pattern should return 0 matches");
-    }
+    assert!(result.is_error, "Empty pattern without dir should return an error");
+    assert!(result.content[0].text.to_lowercase().contains("empty"),
+        "Error should mention 'empty', got: {}", result.content[0].text);
+    assert!(result.content[0].text.contains("Do NOT fall back"),
+        "Error should warn against fallback, got: {}", result.content[0].text);
 
     cleanup_tmp(&tmp);
 }
@@ -276,14 +273,118 @@ fn test_search_fast_ranking_shorter_stem_first() {
 
     cleanup_tmp(&tmp_dir);
 }
-/// BUG-5: search_fast with pattern="" should return error.
+/// BUG-5: search_fast with pattern="" without dir should return error.
 #[test]
 fn test_search_fast_empty_pattern_returns_error() {
     let (ctx, tmp) = make_search_fast_ctx();
     let result = handle_search_fast(&ctx, &json!({"pattern": ""}));
-    assert!(result.is_error, "Empty pattern should return an error");
+    assert!(result.is_error, "Empty pattern without dir should return an error");
     assert!(result.content[0].text.to_lowercase().contains("empty"),
         "Error should mention 'empty', got: {}", result.content[0].text);
+    assert!(result.content[0].text.contains("Do NOT fall back"),
+        "Error should warn against fallback, got: {}", result.content[0].text);
+    cleanup_tmp(&tmp);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+// Wildcard listing tests
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Wildcard pattern="*" returns all files and directories.
+#[test]
+fn test_search_fast_wildcard_star() {
+    let (ctx, tmp) = make_search_fast_ctx();
+    // make_search_fast_ctx creates 6 files: ModelSchemaStorage.cs, ModelSchemaManager.cs,
+    // ScannerJobState.cs, WorkspaceInfoUtils.cs, UserService.cs, OtherFile.txt
+    let result = handle_search_fast(&ctx, &json!({"pattern": "*"}));
+    assert!(!result.is_error, "Wildcard '*' should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let matches = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(matches >= 6, "Wildcard '*' should match at least 6 entries (files), got {}", matches);
+    cleanup_tmp(&tmp);
+}
+
+/// Wildcard pattern="*" with dirsOnly returns only directories.
+#[test]
+fn test_search_fast_wildcard_star_dirs_only() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_wc_dirs_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create subdirectories and files
+    for sub in &["Actions", "Cache", "ContentScan", "Evaluation"] {
+        let _ = std::fs::create_dir_all(tmp_dir.join(sub));
+        let f_path = tmp_dir.join(sub).join("dummy.cs");
+        { let mut f = std::fs::File::create(&f_path).unwrap(); writeln!(f, "// dummy").unwrap(); }
+    }
+    { let mut f = std::fs::File::create(&tmp_dir.join("RootFile.cs")).unwrap(); writeln!(f, "// root").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+
+    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    assert!(!result.is_error, "Wildcard + dirsOnly should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let matches = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(matches >= 4, "Should find at least 4 directories, got {}", matches);
+
+    // All results should be directories
+    for entry in output["files"].as_array().unwrap() {
+        assert_eq!(entry["isDir"], true, "dirsOnly should only return directories, got: {}", entry);
+    }
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Empty pattern with dir specified → wildcard listing (not an error).
+#[test]
+fn test_search_fast_empty_pattern_with_dir() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_wc_empty_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create some files
+    for name in &["Alpha.cs", "Beta.cs", "Gamma.txt"] {
+        let mut f = std::fs::File::create(&tmp_dir.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+    let sub = tmp_dir.join("SubDir");
+    let _ = std::fs::create_dir_all(&sub);
+    { let mut f = std::fs::File::create(&sub.join("Inner.cs")).unwrap(); writeln!(f, "// inner").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str.clone(), index_base: idx_base, ..Default::default() };
+
+    // Empty pattern + dir → wildcard (not an error)
+    let result = handle_search_fast(&ctx, &json!({"pattern": "", "dir": dir_str}));
+    assert!(!result.is_error, "Empty pattern WITH dir should be wildcard, not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let matches = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(matches >= 4, "Empty pattern + dir should list all entries (at least 4: 3 files + 1 dir + 1 inner file), got {}", matches);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Empty pattern without dir → still an error (unchanged behavior).
+#[test]
+fn test_search_fast_empty_pattern_without_dir_still_errors() {
+    let (ctx, tmp) = make_search_fast_ctx();
+    let result = handle_search_fast(&ctx, &json!({"pattern": ""}));
+    assert!(result.is_error, "Empty pattern without dir should still be an error");
+    assert!(result.content[0].text.contains("Do NOT fall back"),
+        "Error should contain anti-fallback warning, got: {}", result.content[0].text);
     cleanup_tmp(&tmp);
 }
 
