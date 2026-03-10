@@ -673,6 +673,55 @@ fn test_build_content_index_sets_format_version() {
         "build_content_index should set format_version to CONTENT_INDEX_VERSION");
 }
 
+#[test]
+fn test_content_index_old_format_without_version_field_does_not_crash() {
+    // Simulate an old-format index file by saving a struct WITHOUT format_version
+    // using raw bincode. When loaded by new code, the 4-byte shift in binary layout
+    // causes garbled Vec lengths. The 2 GB deserialization limit in load_compressed
+    // must prevent OOM/abort — returning Err instead.
+    #[derive(serde::Serialize)]
+    struct OldContentIndex {
+        root: String,
+        // no format_version field!
+        created_at: u64,
+        max_age_secs: u64,
+        files: Vec<String>,
+        index: std::collections::HashMap<String, Vec<search_index::Posting>>,
+        total_tokens: u64,
+        extensions: Vec<String>,
+        file_token_counts: Vec<u32>,
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let old_idx = OldContentIndex {
+        root: tmp.path().to_string_lossy().to_string(),
+        created_at: 1741600000,
+        max_age_secs: 86400,
+        files: vec!["file.cs".to_string()],
+        index: std::collections::HashMap::new(),
+        total_tokens: 10,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![10],
+    };
+
+    // Save using the same compressed format
+    let path = tmp.path().join("test.word-search");
+    crate::index::save_compressed(&path, &old_idx, "test").unwrap();
+
+    // Try loading as new ContentIndex — should return Err, NOT crash/abort
+    let result = crate::index::load_compressed::<search_index::ContentIndex>(&path, "test");
+    // We don't care whether it returns Ok (with garbled data) or Err —
+    // the key assertion is that we REACH this line without crashing.
+    // If the deserialization attempted a multi-TB allocation, the process would abort
+    // before reaching this assert.
+    if let Ok(idx) = &result {
+        // If it somehow deserialized, the version should be garbage (not 1)
+        assert_ne!(idx.format_version, search_index::CONTENT_INDEX_VERSION,
+            "Old format should not accidentally produce correct version");
+    }
+    // If Err — that's the expected, correct outcome
+}
+
 // ─── estimate_definition_index_memory — nonempty test ────────────
 
 #[test]

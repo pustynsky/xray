@@ -276,6 +276,87 @@ catch {
     Remove-Item -Recurse -Force $t59dir -ErrorAction SilentlyContinue
 }
 
+# T-FORMAT-VERSION: stale index version doesn't crash server
+Write-Host -NoNewline "  T-FORMAT-VERSION stale-index-rebuild ... "
+$total++
+try {
+    $tvDir = Join-Path $env:TEMP "search_e2e_fmtver_$PID"
+    if (Test-Path $tvDir) { Remove-Item -Recurse -Force $tvDir }
+    New-Item -ItemType Directory -Path $tvDir | Out-Null
+    Set-Content -Path (Join-Path $tvDir "hello.cs") -Value "class Hello { void Run() { } }"
+
+    $searchBin2 = (Get-Command search-index.exe -ErrorAction SilentlyContinue).Source
+    if (-not $searchBin2) { $searchBin2 = ".\target\debug\search-index.exe" }
+
+    # Create a stale index with format_version=0 using the hidden test command
+    $ErrorActionPreference = "Continue"
+    & $searchBin2 test-create-stale-index -d $tvDir -e cs --version 0 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Start serve — it should detect version mismatch and rebuild, NOT crash
+    $tvPsi = New-Object System.Diagnostics.ProcessStartInfo
+    $tvPsi.FileName = $searchBin2
+    $tvPsi.Arguments = "serve --dir `"$tvDir`" --ext cs"
+    $tvPsi.UseShellExecute = $false
+    $tvPsi.RedirectStandardInput = $true
+    $tvPsi.RedirectStandardOutput = $true
+    $tvPsi.RedirectStandardError = $true
+    $tvPsi.CreateNoWindow = $true
+
+    $tvProc = New-Object System.Diagnostics.Process
+    $tvProc.StartInfo = $tvPsi
+
+    $tvStderr = New-Object System.Text.StringBuilder
+    $tvErrHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+    $tvErrEvent = Register-ObjectEvent -InputObject $tvProc -EventName ErrorDataReceived -Action $tvErrHandler -MessageData $tvStderr
+
+    $tvProc.Start() | Out-Null
+    $tvProc.BeginErrorReadLine()
+
+    $tvInitReq = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+    $tvProc.StandardInput.WriteLine($tvInitReq)
+
+    # Wait for server to start and load/rebuild index
+    Start-Sleep -Seconds 3
+
+    $tvProc.StandardInput.Close()
+    if (-not $tvProc.WaitForExit(10000)) {
+        $tvProc.Kill()
+        $tvProc.WaitForExit(5000) | Out-Null
+    }
+    Start-Sleep -Milliseconds 200
+
+    Unregister-Event -SourceIdentifier $tvErrEvent.Name -ErrorAction SilentlyContinue
+
+    $tvStderrText = $tvStderr.ToString()
+    $tvExitCode = $tvProc.ExitCode
+
+    # Server should detect version mismatch, rebuild, and start successfully.
+    # Exit code -1 is normal when stdin is closed (serve shutdown).
+    if (($tvExitCode -eq 0 -or $tvExitCode -eq -1) -and ($tvStderrText -match "version mismatch|Format version mismatch|Cannot read format version|Building content index|MCP server ready")) {
+        # Verify we see version mismatch OR successful rebuild message
+        Write-Host "OK" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        Write-Host "FAILED (exit=$tvExitCode)" -ForegroundColor Red
+        Write-Host "    stderr: $tvStderrText" -ForegroundColor Yellow
+        $failed++
+    }
+
+    if (!$tvProc.HasExited) { $tvProc.Kill() }
+    $tvProc.Dispose()
+    Remove-Item -Recurse -Force $tvDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    if ($tvProc -and !$tvProc.HasExited) { $tvProc.Kill() }
+    if ($tvProc) { $tvProc.Dispose() }
+    if ($tvErrEvent) { Unregister-Event -SourceIdentifier $tvErrEvent.Name -ErrorAction SilentlyContinue }
+    Remove-Item -Recurse -Force $tvDir -ErrorAction SilentlyContinue
+}
+
 # === PARALLEL TEST SECTION ===
 # These tests are independent: MCP callers tests use isolated temp directories,
 # Git MCP tests are read-only. Safe to run concurrently via Start-Job.

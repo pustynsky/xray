@@ -83,6 +83,10 @@ pub(crate) enum Commands {
 
     /// Show best practices and tips.
     Tips,
+
+    /// Create a stale content index with format_version=0 (for E2E testing).
+    #[command(hide = true)]
+    TestCreateStaleIndex(TestCreateStaleIndexArgs),
 }
 
 // ─── Main entry point ───────────────────────────────────────────────
@@ -127,6 +131,7 @@ pub fn run() {
             print!("{}", crate::tips::render_cli(&all_exts));
             Ok(())
         },
+        Commands::TestCreateStaleIndex(args) => cmd_test_create_stale_index(args),
     };
 
     if let Err(e) = result {
@@ -136,6 +141,28 @@ pub fn run() {
 }
 
 // ─── Small commands ─────────────────────────────────────────────────
+
+/// Hidden test helper: build a content index then overwrite format_version.
+fn cmd_test_create_stale_index(args: TestCreateStaleIndexArgs) -> Result<(), SearchError> {
+    let idx_base = index_dir();
+    // Build a real content index first
+    let mut idx = build_content_index(&ContentIndexArgs {
+        dir: args.dir.clone(),
+        ext: args.ext.clone(),
+        max_age_hours: 24,
+        hidden: false,
+        no_ignore: false,
+        threads: 0,
+        min_token_len: 2,
+    })?;
+    // Override format_version to simulate stale/old index
+    idx.format_version = args.version;
+    save_content_index(&idx, &idx_base)?;
+    let exts_str = idx.extensions.join(",");
+    let path = content_index_path_for(&idx.root, &exts_str, &idx_base);
+    eprintln!("Created stale content index (version={}) at {}", args.version, path.display());
+    Ok(())
+}
 
 fn cmd_index(args: IndexArgs) -> Result<(), SearchError> {
     let idx_base = index_dir();

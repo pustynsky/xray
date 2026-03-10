@@ -671,10 +671,21 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
         message: format!("read error (magic bytes): {}", e),
     })?;
 
+    // Cap deserialization at 2 GB to prevent OOM/abort from corrupted indexes.
+    // When format_version changes shift the binary layout, garbled length fields
+    // can cause bincode to attempt multi-TB allocations → process abort.
+    // Using fixint_encoding() + allow_trailing_bytes() matches the legacy
+    // bincode::serialize()/deserialize() wire format.
+    use bincode::Options;
+    let bincode_opts = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .allow_trailing_bytes()
+        .with_limit(2_000_000_000); // 2 GB
+
     let result = if &magic == LZ4_MAGIC {
         // Compressed format
         let decoder = lz4_flex::frame::FrameDecoder::new(reader);
-        bincode::deserialize_from(decoder).map_err(|e| SearchError::IndexLoad {
+        bincode_opts.deserialize_from(decoder).map_err(|e| SearchError::IndexLoad {
             path: path_str.clone(),
             message: format!("LZ4 deserialization failed: {}", e),
         })?
@@ -692,7 +703,7 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
             })?;
             buf
         };
-        bincode::deserialize(&data).map_err(|e| SearchError::IndexLoad {
+        bincode_opts.deserialize(&data).map_err(|e| SearchError::IndexLoad {
             path: path_str.clone(),
             message: format!("deserialization failed: {}", e),
         })?
@@ -754,21 +765,32 @@ pub fn save_content_index(index: &ContentIndex, index_base: &std::path::Path) ->
 
 pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<ContentIndex, SearchError> {
     let path = content_index_path_for(dir, exts, index_base);
-    let idx: ContentIndex = load_compressed(&path, "content-index")?;
-    if idx.format_version != CONTENT_INDEX_VERSION {
-        eprintln!(
-            "[content-index] Format version mismatch (found {}, expected {}), will rebuild",
-            idx.format_version, CONTENT_INDEX_VERSION
-        );
-        return Err(SearchError::IndexLoad {
-            path: path.display().to_string(),
-            message: format!(
-                "format version mismatch: found {}, expected {}",
-                idx.format_version, CONTENT_INDEX_VERSION
-            ),
-        });
+
+    // Fast version check BEFORE full deserialization — reads ~100 bytes via LZ4
+    // streaming decompression, not the whole file. Prevents OOM/abort from
+    // deserializing old indexes whose shifted binary layout causes garbled Vec lengths.
+    match read_format_version_from_index_file(&path) {
+        Some(v) if v != CONTENT_INDEX_VERSION => {
+            eprintln!(
+                "[content-index] Format version mismatch (found {}, expected {}), will rebuild",
+                v, CONTENT_INDEX_VERSION
+            );
+            return Err(SearchError::IndexLoad {
+                path: path.display().to_string(),
+                message: format!("format version mismatch: found {}, expected {}", v, CONTENT_INDEX_VERSION),
+            });
+        }
+        None => {
+            eprintln!("[content-index] Cannot read format version from {}, will rebuild", path.display());
+            return Err(SearchError::IndexLoad {
+                path: path.display().to_string(),
+                message: "cannot read format version (legacy or corrupt index)".to_string(),
+            });
+        }
+        Some(_) => {} // version matches, proceed to full load
     }
-    Ok(idx)
+
+    load_compressed(&path, "content-index")
 }
 
 /// Try to find any content index (.word-search) file matching the given directory.
@@ -814,14 +836,21 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
                     continue;
                 }
             }
-            // Metadata matches — load the full index
-            match load_compressed::<ContentIndex>(&path, "content-index") {
-                Ok(index) if index.format_version == CONTENT_INDEX_VERSION => return Some(index),
-                Ok(index) => {
+            // Metadata matches — check version before full load
+            match read_format_version_from_index_file(&path) {
+                Some(v) if v != CONTENT_INDEX_VERSION => {
                     eprintln!("[find_content_index] Skipping {} — format version mismatch (found {}, expected {})",
-                        path.display(), index.format_version, CONTENT_INDEX_VERSION);
+                        path.display(), v, CONTENT_INDEX_VERSION);
                     continue;
                 }
+                None => {
+                    eprintln!("[find_content_index] Cannot read version from {}, skipping", path.display());
+                    continue;
+                }
+                Some(_) => {}
+            }
+            match load_compressed::<ContentIndex>(&path, "content-index") {
+                Ok(index) => return Some(index),
                 Err(e) => {
                     eprintln!("[find_content_index] Metadata matched but load failed for {}: {}", path.display(), e);
                     continue;
@@ -829,19 +858,27 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
             }
         }
 
-        // ── Fallback: no .meta sidecar — try lightweight root check ──
+        // ── Fallback: no .meta sidecar — try lightweight root + version check ──
         if let Some(root) = read_root_from_index_file(&path) {
             if root != clean {
                 continue; // root doesn't match — skip without loading
             }
         }
-        // Root matches or couldn't be read — must load full index to check
-        match load_compressed::<ContentIndex>(&path, "content-index") {
-            Ok(index) if index.format_version != CONTENT_INDEX_VERSION => {
+        // Check version before full deserialization
+        match read_format_version_from_index_file(&path) {
+            Some(v) if v != CONTENT_INDEX_VERSION => {
                 eprintln!("[find_content_index] Skipping {} — format version mismatch (found {}, expected {})",
-                    path.display(), index.format_version, CONTENT_INDEX_VERSION);
+                    path.display(), v, CONTENT_INDEX_VERSION);
                 continue;
             }
+            None => {
+                eprintln!("[find_content_index] Cannot read version from {}, skipping", path.display());
+                continue;
+            }
+            Some(_) => {}
+        }
+        // Root + version OK — load full index
+        match load_compressed::<ContentIndex>(&path, "content-index") {
             Ok(index) => {
                 if index.root == clean {
                     // Validate that cached index has ALL expected extensions
@@ -897,6 +934,37 @@ fn read_root_from_index_file(path: &std::path::Path) -> Option<String> {
 /// to get the root directory from a file-list index without full deserialization.
 pub fn read_root_from_index_file_pub(path: &std::path::Path) -> Option<String> {
     read_root_from_index_file(path)
+}
+
+/// Read `format_version` from an index file without deserializing the whole struct.
+/// Layout: `root: String` (8-byte len + N bytes) then `format_version: u32` (4 bytes).
+/// Returns `None` if the file is too short or unreadable (legacy index without version).
+pub fn read_format_version_from_index_file(path: &std::path::Path) -> Option<u32> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut magic = [0u8; 4];
+    file.read_exact(&mut magic).ok()?;
+
+    let reader: Box<dyn Read> = if &magic == LZ4_MAGIC {
+        Box::new(lz4_flex::frame::FrameDecoder::new(BufReader::new(file)))
+    } else {
+        file.seek(SeekFrom::Start(0)).ok()?;
+        Box::new(BufReader::new(file))
+    };
+
+    let mut reader = reader;
+
+    // Skip root: String (8-byte length prefix + N bytes)
+    let mut len_buf = [0u8; 8];
+    reader.read_exact(&mut len_buf).ok()?;
+    let len = u64::from_le_bytes(len_buf) as usize;
+    if len > 4096 { return None; } // sanity check
+    let mut skip_buf = vec![0u8; len];
+    reader.read_exact(&mut skip_buf).ok()?;
+
+    // Read format_version: u32 (4 bytes, little-endian)
+    let mut ver_buf = [0u8; 4];
+    reader.read_exact(&mut ver_buf).ok()?;
+    Some(u32::from_le_bytes(ver_buf))
 }
 
 /// Remove stale index files for the same root directory but with a different hash.

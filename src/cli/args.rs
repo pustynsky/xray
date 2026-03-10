@@ -155,6 +155,22 @@ pub struct CleanupArgs {
     pub dir: Option<String>,
 }
 
+/// Hidden test helper: create a content index with a specific format_version (for E2E testing).
+#[derive(Parser, Debug)]
+pub struct TestCreateStaleIndexArgs {
+    /// Directory to index
+    #[arg(short, long)]
+    pub dir: String,
+
+    /// File extensions to index (comma-separated)
+    #[arg(short, long, default_value = "cs")]
+    pub ext: String,
+
+    /// Format version to write (0 = simulate legacy/stale index)
+    #[arg(long, default_value = "0")]
+    pub version: u32,
+}
+
 #[derive(Parser, Debug)]
 #[command(after_long_help = r#"WHAT IS MCP:
   Model Context Protocol (MCP) is a JSON-RPC 2.0 protocol over stdio that

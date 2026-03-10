@@ -29,21 +29,31 @@ pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Pa
 #[allow(dead_code)]
 pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
     let path = definition_index_path_for(dir, exts, index_base);
-    let idx: DefinitionIndex = crate::index::load_compressed(&path, "definition-index")?;
-    if idx.format_version != super::types::DEFINITION_INDEX_VERSION {
-        eprintln!(
-            "[definition-index] Format version mismatch (found {}, expected {}), will rebuild",
-            idx.format_version, super::types::DEFINITION_INDEX_VERSION
-        );
-        return Err(crate::SearchError::IndexLoad {
-            path: path.display().to_string(),
-            message: format!(
-                "format version mismatch: found {}, expected {}",
-                idx.format_version, super::types::DEFINITION_INDEX_VERSION
-            ),
-        });
+
+    // Fast version check BEFORE full deserialization — reads ~100 bytes via LZ4
+    // streaming decompression. Prevents OOM/abort from old indexes with shifted layout.
+    match crate::index::read_format_version_from_index_file(&path) {
+        Some(v) if v != super::types::DEFINITION_INDEX_VERSION => {
+            eprintln!(
+                "[definition-index] Format version mismatch (found {}, expected {}), will rebuild",
+                v, super::types::DEFINITION_INDEX_VERSION
+            );
+            return Err(crate::SearchError::IndexLoad {
+                path: path.display().to_string(),
+                message: format!("format version mismatch: found {}, expected {}", v, super::types::DEFINITION_INDEX_VERSION),
+            });
+        }
+        None => {
+            eprintln!("[definition-index] Cannot read format version from {}, will rebuild", path.display());
+            return Err(crate::SearchError::IndexLoad {
+                path: path.display().to_string(),
+                message: "cannot read format version (legacy or corrupt index)".to_string(),
+            });
+        }
+        Some(_) => {} // version matches, proceed to full load
     }
-    Ok(idx)
+
+    crate::index::load_compressed(&path, "definition-index")
 }
 
 /// Try to find any definition index for a directory.
@@ -92,14 +102,21 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
                     continue;
                 }
             }
-            // Metadata matches — load the full index
-            match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
-                Ok(index) if index.format_version == super::types::DEFINITION_INDEX_VERSION => return Some(index),
-                Ok(index) => {
+            // Metadata matches — check version before full load (reads ~100 bytes, 1 LZ4 block)
+            match crate::index::read_format_version_from_index_file(&path) {
+                Some(v) if v != super::types::DEFINITION_INDEX_VERSION => {
                     eprintln!("[find_definition_index] Skipping {} — format version mismatch (found {}, expected {})",
-                        path.display(), index.format_version, super::types::DEFINITION_INDEX_VERSION);
+                        path.display(), v, super::types::DEFINITION_INDEX_VERSION);
                     continue;
                 }
+                None => {
+                    eprintln!("[find_definition_index] Cannot read version from {}, skipping", path.display());
+                    continue;
+                }
+                Some(_) => {}
+            }
+            match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
+                Ok(index) => return Some(index),
                 Err(e) => {
                     eprintln!("[find_definition_index] Metadata matched but load failed for {}: {}", path.display(), e);
                     continue;
@@ -107,7 +124,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
             }
         }
 
-        // ── Fallback: no .meta sidecar — try lightweight root check ──
+        // ── Fallback: no .meta sidecar — try lightweight root + version check ──
         if let Some(root) = crate::index::read_root_from_index_file_pub(&path) {
             let root_canonical = std::fs::canonicalize(&root)
                 .map(|p| clean_path(&p.to_string_lossy()))
@@ -116,13 +133,21 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
                 continue; // root doesn't match — skip without loading
             }
         }
-        // Root matches or couldn't be read — must load full index to check
-        match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
-            Ok(index) if index.format_version != super::types::DEFINITION_INDEX_VERSION => {
+        // Check version before full deserialization (reads ~100 bytes, 1 LZ4 block)
+        match crate::index::read_format_version_from_index_file(&path) {
+            Some(v) if v != super::types::DEFINITION_INDEX_VERSION => {
                 eprintln!("[find_definition_index] Skipping {} — format version mismatch (found {}, expected {})",
-                    path.display(), index.format_version, super::types::DEFINITION_INDEX_VERSION);
+                    path.display(), v, super::types::DEFINITION_INDEX_VERSION);
                 continue;
             }
+            None => {
+                eprintln!("[find_definition_index] Cannot read version from {}, skipping", path.display());
+                continue;
+            }
+            Some(_) => {}
+        }
+        // Root + version OK — load full index
+        match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
             Ok(index) => {
                 let idx_root = std::fs::canonicalize(&index.root)
                     .map(|p| clean_path(&p.to_string_lossy()))
