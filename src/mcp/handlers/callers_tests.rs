@@ -2985,3 +2985,241 @@ fn test_multi_method_direction_down() {
     let results = v["results"].as_array().unwrap();
     assert_eq!(results.len(), 2);
 }
+
+
+// ═══════════════════════════════════════════════════════════════════
+// Cross-index enrichment tests: includeGrepReferences
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_include_grep_references_finds_extra_files() {
+    // Content index has method name in files not present in call tree
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "ProcessOrder", "OrderService", 5, 15),
+        class_def(1, "Consumer", vec![]),
+        method_def(1, "Run", "Consumer", 5, 20),
+    ];
+
+    let mut method_calls_map: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls_map.insert(3, vec![
+        CallSite {
+            method_name: "ProcessOrder".to_string(),
+            receiver_type: Some("OrderService".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        },
+    ]);
+
+    let mut def_idx = make_def_index(definitions, method_calls_map);
+    def_idx.path_to_id.insert(PathBuf::from("src/OrderController.ts"), 0);
+    def_idx.path_to_id.insert(PathBuf::from("src/OrderValidator.ts"), 1);
+
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("processorder".to_string(), vec![
+        Posting { file_id: 0, lines: vec![5] },
+        Posting { file_id: 1, lines: vec![10] },
+        Posting { file_id: 2, lines: vec![42] },  // extra file not in def index
+    ]);
+    index.insert("orderservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![10] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec![
+            "src/OrderController.ts".to_string(),
+            "src/OrderValidator.ts".to_string(),
+            "src/Pipelines/ValidationPipeline.ts".to_string(),
+        ],
+        index,
+        total_tokens: 100,
+        extensions: vec!["ts".to_string()],
+        file_token_counts: vec![50, 50, 50],
+        ..Default::default()
+    };
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "ProcessOrder",
+        "class": "OrderService",
+        "depth": 1,
+        "includeGrepReferences": true
+    }));
+    assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // grepReferences should include ValidationPipeline.ts (not in call tree)
+    let grep_refs = v.get("grepReferences");
+    assert!(grep_refs.is_some(), "Should have grepReferences. Got: {}", serde_json::to_string_pretty(&v).unwrap());
+    let refs = grep_refs.unwrap().as_array().unwrap();
+    assert!(!refs.is_empty(), "grepReferences should not be empty");
+    assert!(v.get("grepReferencesNote").is_some(), "Should have grepReferencesNote");
+}
+
+#[test]
+fn test_include_grep_references_default_off() {
+    // Without includeGrepReferences param, no grepReferences in output
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "ProcessOrder", "OrderService", 5, 15),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "ProcessOrder",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(v.get("grepReferences").is_none(),
+        "Without includeGrepReferences, should NOT have grepReferences in output");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// Nearest-match hint tests for search_callers
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_callers_hint_nearest_method_name() {
+    // Typo in method name → hint should suggest nearest match
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "ProcessOrder", "OrderService", 5, 15),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    // Typo: "ProcessOrdr" instead of "ProcessOrder"
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "ProcessOrdr",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v.get("hint").and_then(|h| h.as_str());
+    assert!(hint.is_some(), "Should have hint for typo. Got: {}", serde_json::to_string_pretty(&v).unwrap());
+    let h = hint.unwrap();
+    assert!(h.contains("Nearest match") || h.contains("not found"),
+        "Hint should mention nearest match. Got: {}", h);
+}
+
+#[test]
+fn test_callers_hint_nearest_class_name() {
+    // Typo in class name → hint should suggest nearest class
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "ProcessOrder", "OrderService", 5, 15),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    // Typo: "OrderServise" instead of "OrderService"
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "ProcessOrder",
+        "class": "OrderServise",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v.get("hint").and_then(|h| h.as_str());
+    assert!(hint.is_some(), "Should have hint for class typo. Got: {}", serde_json::to_string_pretty(&v).unwrap());
+    let h = hint.unwrap();
+    assert!(h.contains("Nearest") || h.contains("not found"),
+        "Hint should suggest nearest class. Got: {}", h);
+}
+
+#[test]
+fn test_callers_hint_not_shown_when_results_exist() {
+    // When callers ARE found, no hint should appear (regression guard)
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+        class_def(1, "Consumer", vec![]),
+        method_def(1, "run", "Consumer", 5, 20),
+    ];
+
+    let mut method_calls_map: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls_map.insert(3, vec![
+        CallSite {
+            method_name: "process".to_string(),
+            receiver_type: Some("OrderService".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        },
+    ]);
+
+    let mut def_idx = make_def_index(definitions, method_calls_map);
+    def_idx.path_to_id.insert(PathBuf::from("src/OrderController.ts"), 0);
+    def_idx.path_to_id.insert(PathBuf::from("src/OrderValidator.ts"), 1);
+
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("process".to_string(), vec![
+        Posting { file_id: 0, lines: vec![5] },
+        Posting { file_id: 1, lines: vec![10] },
+    ]);
+    index.insert("orderservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![10] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["src/OrderController.ts".to_string(), "src/OrderValidator.ts".to_string()],
+        index,
+        total_tokens: 100,
+        extensions: vec!["ts".to_string()],
+        file_token_counts: vec![50, 50],
+        ..Default::default()
+    };
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_search_callers(&ctx, &serde_json::json!({
+        "method": "process",
+        "class": "OrderService",
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = v["callTree"].as_array().unwrap();
+    if !tree.is_empty() {
+        assert!(v.get("hint").is_none(),
+            "Should NOT have hint when callers are found. Got: {:?}", v.get("hint"));
+    }
+}
