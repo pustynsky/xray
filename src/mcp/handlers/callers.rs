@@ -99,6 +99,41 @@ fn is_test_method(def: &DefinitionEntry, file_path: &str) -> bool {
     false
 }
 
+/// Check if a file path indicates a test file.
+/// Covers: Rust `_tests.rs`, TypeScript/JavaScript `.spec.ts`/`.test.ts`,
+/// and directory conventions (`/tests/`, `/test/`).
+fn is_test_file(path: &str) -> bool {
+    let lower = path.to_lowercase();
+    lower.contains("_tests.")
+        || lower.contains(".test.")
+        || lower.contains(".spec.")
+        || lower.contains("/tests/")
+        || lower.contains("\\tests\\")
+        || lower.contains("/test/")
+        || lower.contains("\\test\\")
+}
+
+/// Popularity proxy: total posting line count for a method name across all files.
+/// O(1) HashMap lookup. Used as a secondary sort key to prioritize more-referenced
+/// callers within the same group (test vs non-test).
+fn caller_popularity(content_index: &ContentIndex, method_name: &str) -> usize {
+    content_index.index
+        .get(&method_name.to_lowercase())
+        .map(|postings| postings.iter().map(|p| p.lines.len()).sum())
+        .unwrap_or(0)
+}
+
+/// Check if a caller (identified by its CallerInfo) is a test method or resides in a test file.
+fn is_test_caller(def_idx: &DefinitionIndex, di: u32, file_path: &str) -> bool {
+    if is_test_file(file_path) {
+        return true;
+    }
+    if let Some(def) = def_idx.definitions.get(di as usize) {
+        return is_test_method(def, file_path);
+    }
+    false
+}
+
 /// Built-in JavaScript/TypeScript types whose methods should never be resolved
 /// to user-defined classes. When a call site has one of these as its receiver type,
 /// we skip candidate matching to avoid false positives (e.g., Promise.resolve()
@@ -1400,8 +1435,12 @@ fn build_caller_tree(
     let mut caller_map: HashMap<String, CallerInfo> = HashMap::new();
     let mut caller_order: Vec<String> = Vec::new(); // preserve insertion order
 
+    // Safety cap: collect more callers than needed so we can sort test vs non-test
+    // before truncating. This avoids scanning ALL postings for popular tokens.
+    let collection_limit = ctx.limits.max_callers_per_level * 3;
+
     for posting in postings {
-        if caller_map.len() >= ctx.limits.max_callers_per_level { break; }
+        if caller_map.len() >= collection_limit { break; }
         if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
         // If we have a parent class context, skip files that don't reference that class
@@ -1424,7 +1463,7 @@ fn build_caller_tree(
         };
 
         for &line in &posting.lines {
-            if caller_map.len() >= ctx.limits.max_callers_per_level && !caller_map.values().any(|_| true) { break; }
+            if caller_map.len() >= collection_limit { break; }
             if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
             if definition_locations.contains(&(def_fid, line)) { continue; }
@@ -1454,7 +1493,7 @@ fn build_caller_tree(
                     existing.call_sites.push(line);
                 }
             } else {
-                if caller_map.len() >= ctx.limits.max_callers_per_level { continue; }
+                if caller_map.len() >= collection_limit { continue; }
                 caller_order.push(caller_key.clone());
                 caller_map.insert(caller_key, CallerInfo {
                     name: caller_name,
@@ -1466,6 +1505,47 @@ fn build_caller_tree(
                 });
             }
         }
+    }
+
+    // Phase 1.5: Sort callers — non-test first (primary), popularity DESC (secondary)
+    // Then truncate to max_callers_per_level (with impactAnalysis exception for tests)
+    caller_order.sort_by(|a, b| {
+        let info_a = &caller_map[a];
+        let info_b = &caller_map[b];
+        let is_test_a = is_test_caller(ctx.def_idx, info_a.di, &info_a.file_path);
+        let is_test_b = is_test_caller(ctx.def_idx, info_b.di, &info_b.file_path);
+
+        // Primary: non-test (false=0) before test (true=1)
+        is_test_a.cmp(&is_test_b)
+            // Secondary: more popular callers first (DESC)
+            .then_with(|| {
+                let pop_a = caller_popularity(ctx.content_index, &info_a.name);
+                let pop_b = caller_popularity(ctx.content_index, &info_b.name);
+                pop_b.cmp(&pop_a)
+            })
+    });
+
+    // Truncate: apply maxCallersPerLevel limit
+    if ctx.impact_analysis {
+        // When impactAnalysis is enabled, don't truncate test callers —
+        // they're needed for the testsCovering array.
+        // Keep: up to max_callers_per_level non-test callers + ALL test callers.
+        let non_test_end = caller_order.iter()
+            .position(|k| is_test_caller(ctx.def_idx, caller_map[k].di, &caller_map[k].file_path))
+            .unwrap_or(caller_order.len());
+        if non_test_end > ctx.limits.max_callers_per_level {
+            // Too many non-test callers: truncate non-test portion, keep all tests
+            let tests: Vec<String> = caller_order.split_off(ctx.limits.max_callers_per_level);
+            // tests now contains: remaining non-test (if any) + all test callers
+            // We need to keep only test callers from `tests`
+            let test_keys: Vec<String> = tests.into_iter()
+                .filter(|k| is_test_caller(ctx.def_idx, caller_map[k].di, &caller_map[k].file_path))
+                .collect();
+            caller_order.extend(test_keys);
+        }
+        // If non_test_end <= max_callers_per_level, all non-test fit + all tests stay
+    } else {
+        caller_order.truncate(ctx.limits.max_callers_per_level);
     }
 
     // Phase 2: Build nodes from collected caller info

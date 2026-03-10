@@ -4040,6 +4040,30 @@ sibling directory rejection, path traversal rejection, and absolute path rejecti
 
 #### T-CALLERS-AMBIGUITY: `search_callers` — Ambiguity warning variants (3 tests)
 
+---
+
+### T-CALLERS-DEPRIORITIZE: `search_callers` — Test caller deprioritization (5 tests)
+
+**Scenario:** When `search_callers` truncates results by `maxCallersPerLevel`, production callers
+appear before test callers. Within each group, callers are sorted by popularity (posting count DESC).
+With `impactAnalysis=true`, test callers are NOT truncated.
+
+**Unit tests:**
+
+- [`test_callers_deprioritize_tests_production_first`](../src/mcp/handlers/callers_tests_additional.rs) — 2 production + 8 test callers, maxCallersPerLevel=10 → production callers first in results
+- [`test_callers_deprioritize_tests_truncation`](../src/mcp/handlers/callers_tests_additional.rs) — 2 production + 8 test callers, maxCallersPerLevel=5 → 2 production + 3 test
+- [`test_callers_popularity_sort_within_production`](../src/mcp/handlers/callers_tests_additional.rs) — more-referenced production caller appears before less-referenced one
+- [`test_callers_impact_analysis_keeps_all_tests`](../src/mcp/handlers/callers_tests_additional.rs) — impactAnalysis=true + maxCallersPerLevel=5 → 2 production + all 8 test callers preserved
+- [`test_callers_only_tests_no_production`](../src/mcp/handlers/callers_tests_additional.rs) — 0 production + 5 test callers, maxCallersPerLevel=3 → 3 test callers
+
+**Helper function tests:**
+
+- `test_is_test_file_rust_convention`, `test_is_test_file_typescript_conventions`, `test_is_test_file_directory_conventions`, `test_is_test_file_production_files`, `test_is_test_file_case_insensitive`
+- `test_is_test_caller_by_file_path`, `test_is_test_caller_by_attribute`, `test_is_test_caller_production`
+- `test_caller_popularity_basic`, `test_caller_popularity_case_insensitive`
+
+**Status:** ✅ Covered by 16 unit tests
+
 **Scenario:** When searching for callers without specifying the `class` parameter,
 the response includes an ambiguity warning showing which classes contain the method.
 The warning is truncated for common methods with many implementations.
