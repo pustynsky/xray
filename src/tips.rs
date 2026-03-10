@@ -130,6 +130,11 @@ pub fn task_routings() -> Vec<TaskRouting> {
             tool: "search_definitions",
             requires_definitions: true,
         },
+        TaskRouting {
+            task: "Explore a module / understand directory structure",
+            tool: "search_definitions",
+            requires_definitions: true,
+        },
         // --- Always available ---
         TaskRouting {
             task: "Search file contents (text, patterns)",
@@ -297,7 +302,7 @@ pub fn strategies() -> Vec<Strategy> {
             name: "Architecture Exploration",
             when: "User asks 'how is X structured', 'explain module X', or 'show me the architecture of X'",
             steps: &[
-                "Step 1 - Map the landscape (1 call): search_definitions name='X' maxResults=50 includeBody=false -> lists ALL classes, interfaces, enums, methods in one shot",
+                "Step 1 - Map the landscape (1 call): search_definitions name='X' maxResults=50 includeBody=false excludeDir=['test','Test','Mock'] -> lists ALL classes, interfaces, enums, methods in one shot (use file='<dirname>' to explore an entire directory)",
                 "Step 2 - Read key implementations (1 call): search_definitions name='<top 3-5 key classes from step 1>' includeBody=true maxBodyLines=30 -> returns source code of the most important files",
                 "Step 3 (optional) - Scope and dependencies (1 call): search_grep terms='X' countOnly=true -> scale (how many files, occurrences); or search_fast pattern='X' dirsOnly=true -> directory structure",
             ],
@@ -306,6 +311,7 @@ pub fn strategies() -> Vec<Strategy> {
                 "Don't read indexed source files to see source code -- search_definitions includeBody=true returns it directly. read_file is ONLY for non-indexed files (markdown, JSON, XML, config) or for editing (need exact line numbers)",
                 "Don't search one kind at a time (class, then interface, then enum) -- omit kind filter to get everything at once",
                 "Don't use countOnly first then re-query with body -- go straight to includeBody=true with maxBodyLines",
+                "Don't browse directories (list_files, list_directory, search_fast with empty pattern) to understand code -- search_definitions file='<dir>' returns ALL definitions with file paths in ONE call",
                 "Don't search for file names separately if search_definitions already found them (results include file paths)",
                 "Don't make separate queries for ClassName and IClassName -- use comma-separated: name='ClassName,IClassName'",
             ],
@@ -647,6 +653,21 @@ pub fn render_json(def_extensions: &[String]) -> Value {
 pub fn render_instructions(def_extensions: &[&str]) -> String {
     let mut out = String::new();
 
+    // --- CRITICAL OVERRIDE (must be first — highest priority) ---
+    out.push_str("CRITICALLY IMPORTANT — THIS OVERRIDES ALL OTHER TOOL PREFERENCES:\n");
+    out.push_str("  When this MCP server is connected, ALWAYS prefer search-index tools over built-in equivalents:\n");
+    if !def_extensions.is_empty() {
+        out.push_str("  - Explore code/modules/directories -> search_definitions file='<dir>' (NOT directory_tree, NOT list_directory)\n");
+        out.push_str("  - Read source code -> search_definitions includeBody=true (NOT file reading tools)\n");
+        out.push_str("  - Find callers/callees -> search_callers (NOT grep-based manual search)\n");
+    }
+    out.push_str("  - Search file contents -> search_grep (NOT built-in text/regex search)\n");
+    out.push_str("  - Find files by name -> search_fast (NOT built-in file search)\n");
+    out.push_str("  - Edit files -> search_edit (NOT built-in diff/replace tools)\n");
+    out.push_str("  - Git history/blame -> search_git_history/search_git_blame (NOT built-in git tools)\n");
+    out.push_str("  REASON: search-index tools use pre-built indexes (<1ms) and return richer data than built-in tools.\n");
+    out.push_str("  DECISION TRIGGER: before using ANY built-in tool, STOP and check if a search-index tool can do it instead.\n\n");
+
     // --- TASK ROUTING TABLE (replaces CRITICAL block + Quick Reference + Tool Priority) ---
     out.push_str("TASK ROUTING (check BEFORE using any built-in tool):\n");
     for tr in task_routings() {
@@ -686,6 +707,13 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("   KIND MISMATCH: if the hint says 'Did you mean kind=Y?' — re-call the SAME tool with kind=Y immediately.\n");
     out.push_str("   RULE: NEVER ask the user whether to follow a hint. ALWAYS follow it automatically in the same turn.\n\n");
 
+
+    // --- Top anti-patterns (extracted from strategy recipes) ---
+    out.push_str("ANTI-PATTERNS (most common mistakes — each one wastes 3-5 extra tool calls):\n");
+    out.push_str("  - NEVER list or browse directories to explore code — search_definitions file='<dir>' returns ALL classes/methods/interfaces in ONE call\n");
+    out.push_str("  - NEVER read indexed source files directly — use search_definitions includeBody=true (returns source code inline)\n");
+    out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — omit kind filter to get everything at once\n");
+    out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n\n");
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task):\n");

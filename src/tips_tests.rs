@@ -167,11 +167,11 @@ fn test_render_instructions_empty_extensions() {
     assert!(!text.contains("NEVER READ"),
         "Empty def_extensions should not produce NEVER READ block");
     // The file-reading DECISION TRIGGER must NOT appear (no indexed extensions).
-    // But the file-editing DECISION TRIGGER and zero-result hints DECISION TRIGGER SHOULD appear (always present).
-    // Count occurrences: should be exactly 2 (editing + zero-result hints, not reading).
+    // But the critical override, file-editing, and zero-result hints DECISION TRIGGERs SHOULD appear (always present).
+    // Count occurrences: should be exactly 3 (critical override + editing + zero-result hints, not reading).
     let dt_count = text.matches("DECISION TRIGGER").count();
-    assert_eq!(dt_count, 2,
-        "Empty def_extensions should have 2 DECISION TRIGGERs (editing + zero-result hints), not {} (reading trigger should be absent)", dt_count);
+    assert_eq!(dt_count, 3,
+        "Empty def_extensions should have 3 DECISION TRIGGERs (critical override + editing + zero-result hints), not {} (reading trigger should be absent)", dt_count);
     // Should contain fallback note
     assert!(text.contains("search_definitions is not available"),
         "Empty def_extensions should have fallback note about search_definitions");
@@ -319,11 +319,12 @@ fn test_instructions_token_budget() {
     let text = render_instructions(&["cs", "ts", "tsx", "sql", "rs"]);
     let word_count = text.split_whitespace().count();
     let approx_tokens = (word_count as f64 / 0.75) as usize;
-    // After consolidation: target <=1500 tokens (was ~1800 before)
+    // After consolidation + CRITICAL OVERRIDE: target <=1700 tokens
+    // The override block (~100 tokens) is justified — prevents 5-10 wasted tool calls per session
     assert!(
-        approx_tokens < 1500,
+        approx_tokens < 1700,
         "Instructions exceed token budget: ~{} tokens ({} words). \
-         Target: <1500 after consolidation. Remove redundant sections.",
+         Target: <1700 (includes CRITICAL OVERRIDE block). Remove redundant sections.",
         approx_tokens, word_count
     );
 }

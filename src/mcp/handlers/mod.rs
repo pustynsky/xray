@@ -204,16 +204,15 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                 "Definition index not available for current file extensions. Use search_grep for content search.".to_string()
             } else {
                 format!(
-                    "Preferred for indexed source-code exploration and definition body retrieval. \
-                     Use before generic file-reading tools when the target file type is indexed. \
-                     Search code definitions -- classes, interfaces, methods, properties, enums. \
+                    "PREFERRED for code exploration AND module structure discovery. \
+                     REPLACES directory listing for understanding code — use file='<dirname>' to get ALL classes, methods, \
+                     interfaces in ONE call (more informative than directory tree which only shows file names). \
+                     Search code definitions — classes, interfaces, methods, properties, enums. \
                      Uses pre-built AST index for instant results (~0.001s). \
                      LANGUAGE-SPECIFIC: Supports {}. \
                      Requires server started with --definitions flag. \
-                     Supports 'containsLine' to find which method/class contains a given line number \
-                     (no more manual read_file!). \
-                     Supports 'includeBody' to return actual source code inline, \
-                     eliminating read_file calls.",
+                     Supports 'containsLine' to find which method/class contains a given line number. \
+                     Supports 'includeBody' to return actual source code inline.",
                     lang_list
                 )
             },
@@ -243,7 +242,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Filter by file path substring. Comma-separated for multi-term OR."
+                        "description": "Filter by file path substring. Comma-separated for multi-term OR. Use file='<dirname>' to explore an entire module — returns all definitions in files matching this directory path."
                     },
                     "parent": {
                         "type": "string",
