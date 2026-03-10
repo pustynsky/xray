@@ -301,6 +301,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
     let mut index = DefinitionIndex {
         root: dir_str,
+        format_version: types::DEFINITION_INDEX_VERSION,
         extensions,
         files,
         path_to_id,

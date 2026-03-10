@@ -1910,10 +1910,10 @@ fn build_callee_tree(
 /// To reduce false positives, the stem must be at least 4 characters.
 fn is_implementation_of(class_name: &str, interface_name: &str) -> bool {
     // Must start with "I" followed by uppercase
-    if !interface_name.starts_with('I') || interface_name.len() < 2 {
-        return false;
-    }
-    let second_char = interface_name.chars().nth(1).unwrap();
+    let second_char = match interface_name.strip_prefix('I').and_then(|s| s.chars().next()) {
+        Some(c) => c,
+        None => return false,
+    };
     if !second_char.is_uppercase() {
         return false;
     }

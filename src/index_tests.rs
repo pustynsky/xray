@@ -406,6 +406,7 @@ fn test_find_content_index_skips_stale_extensions() {
     // Save a content index with only "cs" extension
     let idx = search_index::ContentIndex {
         root: root_str.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["cs".to_string()],
         ..Default::default()
@@ -431,6 +432,7 @@ fn test_find_content_index_accepts_superset() {
     // Save a content index with "cs,sql,md" extensions
     let idx = search_index::ContentIndex {
         root: root_str.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["cs".to_string(), "sql".to_string(), "md".to_string()],
         ..Default::default()
@@ -455,6 +457,7 @@ fn test_find_content_index_empty_expected_accepts_any() {
 
     let idx = search_index::ContentIndex {
         root: root_str.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["cs".to_string()],
         ..Default::default()
@@ -593,6 +596,81 @@ fn test_compressed_file_smaller_than_uncompressed() {
     assert!(compressed_size < uncompressed_size,
         "Compressed ({}) should be smaller than uncompressed ({})",
         compressed_size, uncompressed_size);
+}
+
+// ─── Content index format_version tests ──────────────────────────
+
+#[test]
+fn test_content_index_format_version_correct_loads_ok() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut idx = search_index::ContentIndex::default();
+    idx.format_version = search_index::CONTENT_INDEX_VERSION;
+    idx.root = tmp.path().to_string_lossy().to_string();
+    idx.extensions = vec!["rs".to_string()];
+
+    // Save to the expected path
+    let path = crate::index::content_index_path_for(
+        &idx.root, "rs", tmp.path(),
+    );
+    crate::index::save_compressed(&path, &idx, "test").unwrap();
+
+    let result = crate::index::load_content_index(&idx.root, "rs", tmp.path());
+    assert!(result.is_ok(), "Loading content index with correct version should succeed");
+    assert_eq!(result.unwrap().format_version, search_index::CONTENT_INDEX_VERSION);
+}
+
+#[test]
+fn test_content_index_format_version_mismatch_returns_err() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut idx = search_index::ContentIndex::default();
+    idx.format_version = 999; // wrong version
+    idx.root = tmp.path().to_string_lossy().to_string();
+    idx.extensions = vec!["rs".to_string()];
+
+    let path = crate::index::content_index_path_for(
+        &idx.root, "rs", tmp.path(),
+    );
+    crate::index::save_compressed(&path, &idx, "test").unwrap();
+
+    let result = crate::index::load_content_index(&idx.root, "rs", tmp.path());
+    assert!(result.is_err(), "Loading content index with wrong version should fail");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("format version mismatch"), "Error should mention version mismatch, got: {}", err);
+}
+
+#[test]
+fn test_content_index_format_version_legacy_zero_returns_err() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut idx = search_index::ContentIndex::default();
+    idx.format_version = 0; // legacy index without version
+    idx.root = tmp.path().to_string_lossy().to_string();
+    idx.extensions = vec!["rs".to_string()];
+
+    let path = crate::index::content_index_path_for(
+        &idx.root, "rs", tmp.path(),
+    );
+    crate::index::save_compressed(&path, &idx, "test").unwrap();
+
+    let result = crate::index::load_content_index(&idx.root, "rs", tmp.path());
+    assert!(result.is_err(), "Loading legacy content index (version 0) should fail");
+}
+
+#[test]
+fn test_build_content_index_sets_format_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("file.rs"), "fn main() {}").unwrap();
+    let result = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.path().to_string_lossy().to_string(),
+        ext: "rs".to_string(),
+        max_age_hours: 24,
+        hidden: false,
+        no_ignore: false,
+        threads: 1,
+        min_token_len: 2,
+    });
+    assert!(result.is_ok());
+    assert_eq!(result.unwrap().format_version, search_index::CONTENT_INDEX_VERSION,
+        "build_content_index should set format_version to CONTENT_INDEX_VERSION");
 }
 
 // ─── estimate_definition_index_memory — nonempty test ────────────
@@ -900,6 +978,7 @@ fn test_find_content_index_uses_meta_to_skip_non_matching_root() {
     // Save content index for project_a
     let idx_a = search_index::ContentIndex {
         root: root_a.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -932,6 +1011,7 @@ fn test_find_content_index_works_without_meta_sidecar() {
     // Save content index (creates both .word-search and .word-search.meta)
     let idx = search_index::ContentIndex {
         root: root_str.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string(), "md".to_string()],
         ..Default::default()
@@ -965,6 +1045,7 @@ fn test_find_content_index_meta_rejects_extension_mismatch() {
     // Save content index with only "rs" extension
     let idx = search_index::ContentIndex {
         root: root_str.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -993,6 +1074,7 @@ fn test_cleanup_stale_same_root_removes_old_index() {
     // Save content index with "rs" extension
     let idx1 = search_index::ContentIndex {
         root: root_str.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -1011,6 +1093,7 @@ fn test_cleanup_stale_same_root_removes_old_index() {
     // Save content index with "rs,md" extensions (different hash)
     let idx2 = search_index::ContentIndex {
         root: root_str.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string(), "md".to_string()],
         ..Default::default()
@@ -1047,6 +1130,7 @@ fn test_cleanup_stale_same_root_does_not_clean_other_roots() {
     // Save content index for project_a with "rs"
     let idx_a = search_index::ContentIndex {
         root: root_a.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -1056,6 +1140,7 @@ fn test_cleanup_stale_same_root_does_not_clean_other_roots() {
     // Save content index for project_b with "rs"
     let idx_b = search_index::ContentIndex {
         root: root_b.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -1073,6 +1158,7 @@ fn test_cleanup_stale_same_root_does_not_clean_other_roots() {
     // Save new content index for project_a with "rs,md"
     let idx_a2 = search_index::ContentIndex {
         root: root_a.clone(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string(), "md".to_string()],
         ..Default::default()

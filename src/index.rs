@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use search_index::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex};
+use search_index::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -754,7 +754,21 @@ pub fn save_content_index(index: &ContentIndex, index_base: &std::path::Path) ->
 
 pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<ContentIndex, SearchError> {
     let path = content_index_path_for(dir, exts, index_base);
-    load_compressed(&path, "content-index")
+    let idx: ContentIndex = load_compressed(&path, "content-index")?;
+    if idx.format_version != CONTENT_INDEX_VERSION {
+        eprintln!(
+            "[content-index] Format version mismatch (found {}, expected {}), will rebuild",
+            idx.format_version, CONTENT_INDEX_VERSION
+        );
+        return Err(SearchError::IndexLoad {
+            path: path.display().to_string(),
+            message: format!(
+                "format version mismatch: found {}, expected {}",
+                idx.format_version, CONTENT_INDEX_VERSION
+            ),
+        });
+    }
+    Ok(idx)
 }
 
 /// Try to find any content index (.word-search) file matching the given directory.
@@ -802,7 +816,12 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
             }
             // Metadata matches — load the full index
             match load_compressed::<ContentIndex>(&path, "content-index") {
-                Ok(index) => return Some(index),
+                Ok(index) if index.format_version == CONTENT_INDEX_VERSION => return Some(index),
+                Ok(index) => {
+                    eprintln!("[find_content_index] Skipping {} — format version mismatch (found {}, expected {})",
+                        path.display(), index.format_version, CONTENT_INDEX_VERSION);
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("[find_content_index] Metadata matched but load failed for {}: {}", path.display(), e);
                     continue;
@@ -818,6 +837,11 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
         }
         // Root matches or couldn't be read — must load full index to check
         match load_compressed::<ContentIndex>(&path, "content-index") {
+            Ok(index) if index.format_version != CONTENT_INDEX_VERSION => {
+                eprintln!("[find_content_index] Skipping {} — format version mismatch (found {}, expected {})",
+                    path.display(), index.format_version, CONTENT_INDEX_VERSION);
+                continue;
+            }
             Ok(index) => {
                 if index.root == clean {
                     // Validate that cached index has ALL expected extensions
@@ -1291,6 +1315,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
 
     Ok(ContentIndex {
         root: root_str,
+        format_version: CONTENT_INDEX_VERSION,
         created_at: now,
         max_age_secs: args.max_age_hours * 3600,
         files,

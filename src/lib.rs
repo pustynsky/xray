@@ -298,9 +298,18 @@ pub fn generate_trigrams(token: &str) -> Vec<String> {
 ///
 /// The core data structure for content search. Maps every token
 /// to the files and line numbers where it appears.
+/// Format version for ContentIndex. Bump when changing the struct layout.
+/// Loading an index with a different version triggers a rebuild.
+pub const CONTENT_INDEX_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ContentIndex {
     pub root: String,
+    /// Format version — used to detect stale indexes after schema changes.
+    /// Placed after `root` so that `read_root_from_index_file()` can still
+    /// read root as the first bincode field.
+    #[serde(default)]
+    pub format_version: u32,
     pub created_at: u64,
     pub max_age_secs: u64,
     /// file_id → file path
@@ -395,6 +404,7 @@ impl Default for ContentIndex {
     fn default() -> Self {
         ContentIndex {
             root: String::new(),
+            format_version: 0,
             created_at: 0,
             max_age_secs: 3600,
             files: Vec::new(),

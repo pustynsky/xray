@@ -812,6 +812,22 @@ fn test_is_implementation_of_no_false_positive() {
     assert!(!is_implementation_of("Foo", "I"));
 }
 
+#[test]
+fn test_is_implementation_of_edge_cases_no_panic() {
+    // Empty string
+    assert!(!is_implementation_of("Foo", ""));
+    // Single char "I" — already tested above, but confirm no panic
+    assert!(!is_implementation_of("Foo", "I"));
+    // "I" followed by lowercase — not a valid interface
+    assert!(!is_implementation_of("Foo", "Ifoo"));
+    // Multi-byte second char after "I" — should not panic
+    assert!(!is_implementation_of("Foo", "Iй"));
+    // Pure non-ASCII
+    assert!(!is_implementation_of("Foo", "йцу"));
+    // Two chars, second is uppercase — valid interface pattern
+    assert!(is_implementation_of("X", "IX"));
+}
+
 // ─── Test 20: Fuzzy DI interface matching via verify_call_site_target ──
 
 #[test]

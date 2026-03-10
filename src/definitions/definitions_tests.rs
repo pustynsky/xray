@@ -965,6 +965,7 @@ fn test_index_file_defs_duplicate_base_types() {
 fn test_definition_index_field_count_guard() {
     let _guard = DefinitionIndex {
         root: String::new(),
+        format_version: 0,
         created_at: 0,
         extensions: Vec::new(),
         files: Vec::new(),

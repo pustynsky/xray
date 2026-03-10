@@ -178,10 +178,19 @@ pub struct CallSite {
 //
 // Fields are categorized below by their relationship to def_idx.
 
+/// Format version for DefinitionIndex. Bump when changing the struct layout.
+/// Loading an index with a different version triggers a rebuild.
+pub const DEFINITION_INDEX_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize, Debug)]
 #[derive(Default)]
 pub struct DefinitionIndex {
     pub root: String,
+    /// Format version — used to detect stale indexes after schema changes.
+    /// Placed after `root` so that `read_root_from_index_file()` can still
+    /// read root as the first bincode field.
+    #[serde(default)]
+    pub format_version: u32,
     pub created_at: u64,
     pub extensions: Vec<String>,
     /// file_id -> file path

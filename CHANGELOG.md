@@ -25,6 +25,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ### Bug Fixes
 - **`search_fast` `dirsOnly` + `ext` filter returned 0 results** — When `search_fast` was called with `dirsOnly=true` and `ext="cs"`, it returned 0 results because the `ext` filter was applied to directory entries, which have no file extension. This was the root cause of suboptimal LLM queries observed in session analysis where `search_fast pattern="Dlp" ext="cs" dirsOnly=true` returned 0 results. Fix: `ext` filter is now skipped when `dirsOnly=true`. Response includes `summary.hint: "ext filter ignored when dirsOnly=true (directories have no file extension)"`. Tool schema description updated. 4 new unit tests. All 1487 unit tests + 66 E2E tests pass.
 
+### Internal
+- **`format_version` for ContentIndex and DefinitionIndex** — Added `format_version: u32` field (with `CONTENT_INDEX_VERSION` / `DEFINITION_INDEX_VERSION` constants) to both index types, following the existing pattern in `GitHistoryCache`. When loading an index from disk, the version is validated — a mismatch triggers an automatic rebuild instead of silently using stale data with `#[serde(default)]` zeros for new fields. Version checks are applied in `load_content_index`, `load_definition_index`, `find_content_index_for_dir`, and `find_definition_index_for_dir`. Field is placed after `root` in the struct to preserve compatibility with `read_root_from_index_file()` which reads the first bincode field. 7 new unit tests + existing tests updated.
+- **Fix `.unwrap()` in `is_implementation_of()`** — Replaced `interface_name.chars().nth(1).unwrap()` with safe `match` pattern using `strip_prefix('I').and_then(|s| s.chars().next())`. While the panic was unreachable in practice (guard + ASCII-only identifiers), the fix is idiomatic Rust. 1 new edge-case test.
+
 
 ---
 

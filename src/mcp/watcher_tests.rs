@@ -18,6 +18,7 @@ fn make_test_index() -> ContentIndex {
 
     ContentIndex {
         root: ".".to_string(),
+        format_version: search_index::CONTENT_INDEX_VERSION,
         files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
         index: idx,
         total_tokens: 100,

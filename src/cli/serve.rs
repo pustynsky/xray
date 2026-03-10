@@ -59,6 +59,7 @@ pub fn cmd_serve(args: ServeArgs) {
     // Create an empty ContentIndex so the event loop can start immediately
     let empty_index = ContentIndex {
         root: dir_str.clone(),
+        format_version: 0,
         created_at: 0,
         max_age_secs: 86400,
         files: Vec::new(),
@@ -248,6 +249,7 @@ pub fn cmd_serve(args: ServeArgs) {
         // Create an empty DefinitionIndex placeholder
         let empty_def = definitions::DefinitionIndex {
             root: dir_str.clone(),
+            format_version: 0,
             created_at: 0,
             extensions: def_exts.split(',').map(|s| s.to_string()).collect(),
             files: Vec::new(),

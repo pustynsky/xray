@@ -8209,3 +8209,28 @@ These scenarios validate that LLM instructions correctly route tool selection to
 5. Instructions token budget ≤1500 (after consolidation)
 6. Removed sections (Quick Reference, TOOL PRIORITY, CRITICAL block) not present
 7. Fallback rule for uncertainty present
+
+
+---
+
+## T-FORMAT-VERSION: Index format version validation
+
+**Scenario:** After upgrading the binary, old indexes (with format_version=0 or mismatched version) are rejected and rebuilt automatically.
+
+**What is tested:**
+1. `load_content_index` rejects indexes with wrong `format_version` → returns error → serve rebuilds
+2. `load_definition_index` rejects indexes with wrong `format_version` → returns error → serve rebuilds
+3. `find_content_index_for_dir` also checks `format_version` — prevents fallback from bypassing version check
+4. `find_definition_index_for_dir` also checks `format_version`
+5. Newly built indexes (`build_content_index`, `build_definition_index`) set `format_version` to current constant
+
+**Coverage:** Unit tests only (7 tests in `index_tests.rs` and `storage_tests.rs`). Not CLI-testable because version mismatch requires a pre-existing stale index file on disk.
+
+**Unit test names:**
+- `test_content_index_format_version_correct_loads_ok`
+- `test_content_index_format_version_mismatch_returns_err`
+- `test_content_index_format_version_legacy_zero_returns_err`
+- `test_build_content_index_sets_format_version`
+- `test_def_index_format_version_correct_loads_ok`
+- `test_def_index_format_version_mismatch_returns_err`
+- `test_def_index_format_version_legacy_zero_returns_err`

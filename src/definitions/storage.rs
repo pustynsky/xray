@@ -29,7 +29,21 @@ pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Pa
 #[allow(dead_code)]
 pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
     let path = definition_index_path_for(dir, exts, index_base);
-    crate::index::load_compressed(&path, "definition-index")
+    let idx: DefinitionIndex = crate::index::load_compressed(&path, "definition-index")?;
+    if idx.format_version != super::types::DEFINITION_INDEX_VERSION {
+        eprintln!(
+            "[definition-index] Format version mismatch (found {}, expected {}), will rebuild",
+            idx.format_version, super::types::DEFINITION_INDEX_VERSION
+        );
+        return Err(crate::SearchError::IndexLoad {
+            path: path.display().to_string(),
+            message: format!(
+                "format version mismatch: found {}, expected {}",
+                idx.format_version, super::types::DEFINITION_INDEX_VERSION
+            ),
+        });
+    }
+    Ok(idx)
 }
 
 /// Try to find any definition index for a directory.
@@ -80,7 +94,12 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
             }
             // Metadata matches — load the full index
             match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
-                Ok(index) => return Some(index),
+                Ok(index) if index.format_version == super::types::DEFINITION_INDEX_VERSION => return Some(index),
+                Ok(index) => {
+                    eprintln!("[find_definition_index] Skipping {} — format version mismatch (found {}, expected {})",
+                        path.display(), index.format_version, super::types::DEFINITION_INDEX_VERSION);
+                    continue;
+                }
                 Err(e) => {
                     eprintln!("[find_definition_index] Metadata matched but load failed for {}: {}", path.display(), e);
                     continue;
@@ -99,6 +118,11 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
         }
         // Root matches or couldn't be read — must load full index to check
         match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
+            Ok(index) if index.format_version != super::types::DEFINITION_INDEX_VERSION => {
+                eprintln!("[find_definition_index] Skipping {} — format version mismatch (found {}, expected {})",
+                    path.display(), index.format_version, super::types::DEFINITION_INDEX_VERSION);
+                continue;
+            }
             Ok(index) => {
                 let idx_root = std::fs::canonicalize(&index.root)
                     .map(|p| clean_path(&p.to_string_lossy()))

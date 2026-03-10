@@ -5,6 +5,7 @@ use crate::definitions::DefinitionIndex;
 fn save_test_def_index(root: &str, exts: &[&str], index_base: &std::path::Path) {
     let idx = DefinitionIndex {
         root: root.to_string(),
+        format_version: crate::definitions::DEFINITION_INDEX_VERSION,
         extensions: exts.iter().map(|s| s.to_string()).collect(),
         ..Default::default()
     };
@@ -183,4 +184,58 @@ fn test_find_def_index_meta_rejects_extension_mismatch() {
     let result = find_definition_index_for_dir(&root_str, index_base, &expected);
     assert!(result.is_none(),
         "Meta-based filtering should reject when cached extensions don't include all expected");
+}
+
+// ─── Definition index format_version tests ──────────────────────────
+
+#[test]
+fn test_def_index_format_version_correct_loads_ok() {
+    use crate::definitions::DEFINITION_INDEX_VERSION;
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+    let mut idx = crate::definitions::DefinitionIndex::default();
+    idx.format_version = DEFINITION_INDEX_VERSION;
+    idx.root = root.clone();
+    idx.extensions = vec!["rs".to_string()];
+
+    let path = definition_index_path_for(&root, "rs", tmp.path());
+    crate::index::save_compressed(&path, &idx, "test").unwrap();
+
+    let result = load_definition_index(&root, "rs", tmp.path());
+    assert!(result.is_ok(), "Loading definition index with correct version should succeed");
+    assert_eq!(result.unwrap().format_version, DEFINITION_INDEX_VERSION);
+}
+
+#[test]
+fn test_def_index_format_version_mismatch_returns_err() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+    let mut idx = crate::definitions::DefinitionIndex::default();
+    idx.format_version = 999; // wrong version
+    idx.root = root.clone();
+    idx.extensions = vec!["rs".to_string()];
+
+    let path = definition_index_path_for(&root, "rs", tmp.path());
+    crate::index::save_compressed(&path, &idx, "test").unwrap();
+
+    let result = load_definition_index(&root, "rs", tmp.path());
+    assert!(result.is_err(), "Loading definition index with wrong version should fail");
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("format version mismatch"), "Error should mention version mismatch, got: {}", err);
+}
+
+#[test]
+fn test_def_index_format_version_legacy_zero_returns_err() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+    let mut idx = crate::definitions::DefinitionIndex::default();
+    idx.format_version = 0; // legacy
+    idx.root = root.clone();
+    idx.extensions = vec!["rs".to_string()];
+
+    let path = definition_index_path_for(&root, "rs", tmp.path());
+    crate::index::save_compressed(&path, &idx, "test").unwrap();
+
+    let result = load_definition_index(&root, "rs", tmp.path());
+    assert!(result.is_err(), "Loading legacy definition index (version 0) should fail");
 }
