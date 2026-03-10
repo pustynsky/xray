@@ -206,12 +206,12 @@ AVAILABLE TOOLS (exposed via MCP):
   search_git_blame   -- Line-by-line git blame for a file or line range
   search_branch_status-- Show current git branch status, behind/ahead counts, dirty files
   search_help        -- Show tips and best practices for effective search tool usage
-  search_reindex_definitions -- Re-index code definitions (tree-sitter). Requires --definitions
+  search_reindex_definitions -- Re-index code definitions (AST parser). Requires --definitions
 
 HOW IT WORKS:
   1. On startup: loads (or builds) content index into RAM (~0.7-1.6s one-time)
   2. With --definitions: loads cached definition index from disk (~1.5s),
-     or builds it using tree-sitter on first use (~16-32s for 48K files)
+     or builds it using AST parsers on first use (~16-32s for 48K files)
   3. Starts JSON-RPC event loop on stdin/stdout
   4. All search queries use in-memory index (~0.6-4ms per query)
   5. With --watch: file changes update both indexes incrementally (<1s/file)
@@ -222,9 +222,12 @@ pub struct ServeArgs {
     #[arg(short, long, default_value = ".")]
     pub dir: String,
 
-    /// File extensions to index, comma-separated.
-    #[arg(short, long, default_value = "cs")]
-    pub ext: String,
+    /// File extensions to index.
+    /// Accepts comma-separated ("rs,md") or space-separated ("rs" "md") values.
+    /// In mcp.json args array, each extension can be a separate element:
+    ///   ["--ext", "rs", "md"]  or  ["--ext", "rs,md"]
+    #[arg(short, long, default_value = "cs", num_args = 1..)]
+    pub ext: Vec<String>,
 
     /// Watch for file changes and update index incrementally.
     #[arg(long)]
@@ -238,7 +241,7 @@ pub struct ServeArgs {
     #[arg(long, default_value = "info")]
     pub log_level: String,
 
-    /// Also load (or build) a code definition index using tree-sitter.
+    /// Also load (or build) a code definition index using AST parsers.
     #[arg(long)]
     pub definitions: bool,
 

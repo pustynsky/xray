@@ -676,6 +676,148 @@ fn test_search_definitions_enum_member_kind() {
     cleanup_tmp(&tmp);
 }
 
+#[test] fn test_contains_line_body_only_for_innermost() {
+    // containsLine + includeBody should emit body ONLY for innermost definition.
+    // Parent definitions get bodyOmitted instead.
+    let (ctx, tmp) = make_ctx_with_real_files();
+    // MyService.cs: MyService class (1-15), DoWork method (3-8)
+    // Line 5 is inside DoWork → both match, DoWork is innermost
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "MyService.cs",
+        "containsLine": 5,
+        "includeBody": true
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 2, "Should find 2 containing definitions (DoWork + MyService)");
+
+    // First (innermost) = DoWork — should have body
+    assert_eq!(defs[0]["name"], "DoWork");
+    assert!(defs[0]["body"].is_array(), "Innermost should have body array");
+    assert!(defs[0]["body"].as_array().unwrap().len() > 0, "Innermost body should not be empty");
+    assert!(defs[0].get("bodyOmitted").is_none(), "Innermost should NOT have bodyOmitted");
+
+    // Second (parent) = MyService — should have bodyOmitted, no body
+    assert_eq!(defs[1]["name"], "MyService");
+    assert!(defs[1].get("body").is_none(), "Parent should NOT have body");
+    assert!(defs[1]["bodyOmitted"].is_string(), "Parent should have bodyOmitted hint");
+    assert!(defs[1]["bodyOmitted"].as_str().unwrap().contains("parent definition"),
+        "bodyOmitted should contain hint text");
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_contains_line_body_line_range_only_on_innermost() {
+    // bodyLineStart/bodyLineEnd should apply only to the innermost definition
+    let (ctx, tmp) = make_ctx_with_real_files();
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "MyService.cs",
+        "containsLine": 5,
+        "includeBody": true,
+        "bodyLineStart": 4,
+        "bodyLineEnd": 6
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 2);
+
+    // Innermost (DoWork) — body should be filtered to lines 4-6
+    assert_eq!(defs[0]["name"], "DoWork");
+    let body = defs[0]["body"].as_array().unwrap();
+    assert_eq!(body.len(), 3, "Body should be 3 lines (4-6)");
+    assert_eq!(defs[0]["bodyStartLine"].as_u64().unwrap(), 4);
+
+    // Parent (MyService) — should still have bodyOmitted, not body
+    assert_eq!(defs[1]["name"], "MyService");
+    assert!(defs[1].get("body").is_none(), "Parent should NOT have body even with bodyLineStart/End");
+    assert!(defs[1]["bodyOmitted"].is_string());
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_contains_line_single_match_gets_body_normally() {
+    // When containsLine matches only ONE definition (no parent), body should emit as usual
+    let (ctx, tmp) = make_ctx_with_real_files();
+    // BigFile.cs: BigClass (1-25), Process (5-24)
+    // Line 2 is inside BigClass but NOT inside Process → only BigClass matches (single match)
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "file": "BigFile.cs",
+        "containsLine": 2,
+        "includeBody": true
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 1, "Only BigClass should match line 2");
+    assert_eq!(defs[0]["name"], "BigClass");
+    // Single match is innermost (i=0) — should have body
+    assert!(defs[0]["body"].is_array(), "Single match should have body");
+    assert!(defs[0]["body"].as_array().unwrap().len() > 0);
+    assert!(defs[0].get("bodyOmitted").is_none(), "Single match should NOT have bodyOmitted");
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_body_truncation_size_hint_present_when_truncated() {
+    // When maxTotalBodyLines causes truncation, totalBodyLinesAvailable should appear
+    let (ctx, tmp) = make_ctx_with_real_files();
+    // BigFile.cs: BigClass has 25 lines, Process has 20 lines. Total bodies = 25 + 20 = 45 lines
+    // But maxTotalBodyLines=5 → truncation occurs
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "parent": "BigClass",
+        "includeBody": true,
+        "maxTotalBodyLines": 5
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+    let returned = summary["totalBodyLinesReturned"].as_u64().unwrap();
+    assert!(returned <= 5, "Should return at most 5 body lines, got {}", returned);
+    assert!(summary.get("totalBodyLinesAvailable").is_some(),
+        "totalBodyLinesAvailable should be present when body is truncated");
+    let available = summary["totalBodyLinesAvailable"].as_u64().unwrap();
+    assert!(available > returned,
+        "available ({}) should be > returned ({})", available, returned);
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_body_truncation_size_hint_absent_when_not_truncated() {
+    // When all bodies fit within budget, totalBodyLinesAvailable should NOT appear
+    let (ctx, tmp) = make_ctx_with_real_files();
+    // DoWork method is 6 lines (3-8). maxTotalBodyLines=500 → no truncation
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "DoWork",
+        "includeBody": true,
+        "maxTotalBodyLines": 500
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+    assert!(summary.get("totalBodyLinesReturned").is_some(),
+        "totalBodyLinesReturned should be present");
+    assert!(summary.get("totalBodyLinesAvailable").is_none(),
+        "totalBodyLinesAvailable should NOT be present when all bodies fit");
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_body_truncation_size_hint_accurate_value() {
+    // Verify totalBodyLinesAvailable reflects actual definition line counts
+    let (ctx, tmp) = make_ctx_with_real_files();
+    // BigFile.cs: Process method (lines 5-24) = 20 lines. maxTotalBodyLines=10 → truncated
+    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+        "name": "Process",
+        "includeBody": true,
+        "maxTotalBodyLines": 10
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+    let returned = summary["totalBodyLinesReturned"].as_u64().unwrap();
+    assert_eq!(returned, 10, "Should return exactly 10 body lines");
+    let available = summary["totalBodyLinesAvailable"].as_u64().unwrap();
+    assert_eq!(available, 20, "Process method is 20 lines (5-24)");
+    cleanup_tmp(&tmp);
+}
+
 #[test] fn test_search_definitions_file_cache() {
     let (ctx, tmp) = make_ctx_with_real_files();
     let result = dispatch_tool(&ctx, "search_definitions", &json!({"parent": "MyService", "includeBody": true}));

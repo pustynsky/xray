@@ -212,21 +212,16 @@ fn handle_request(
 ) -> Value {
     match method {
         "initialize" => {
-            // Compute definition-supported extensions from server config
-            let server_exts: Vec<&str> = ctx.server_ext.split(',')
-                .map(|s| s.trim())
-                .filter(|s| !s.is_empty())
-                .collect();
-            let def_extensions: Vec<&str> = definitions::definition_extensions().iter()
-                .filter(|ext| server_exts.iter().any(|se| se.eq_ignore_ascii_case(ext)))
-                .copied()
-                .collect();
-            let result = InitializeResult::new(&def_extensions);
+            // Use ctx.def_extensions (computed once in serve.rs) to ensure
+            // initialize instructions are consistent with tools/list descriptions.
+            // Both must use the same def_extensions source.
+            let def_ext_refs: Vec<&str> = ctx.def_extensions.iter().map(|s| s.as_str()).collect();
+            let result = InitializeResult::new(&def_ext_refs);
             let result_val = safe_to_value(result, &id);
             safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)
         }
         "tools/list" => {
-            let tools = handlers::tool_definitions();
+            let tools = handlers::tool_definitions(&ctx.def_extensions);
             let result = ToolsListResult { tools };
             let result_val = safe_to_value(result, &id);
             safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)

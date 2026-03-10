@@ -995,7 +995,16 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - Result includes `"containingDefinitions"` array
 - Each containing definition has a `"bodyStartLine"` (integer, 1-based) and `"body"` array (string array of source lines)
 
-**Validates:** `includeBody` works together with `containsLine` mode, body is attached to containing definitions.
+**Validates:** `includeBody` works together with `containsLine` mode. Body is emitted only for the innermost (most specific) definition. Parent definitions receive `bodyOmitted` hint instead of body — this maximizes body budget for the target method.
+
+**New assertions (containsLine body optimization):**
+
+- First element in `containingDefinitions` (innermost) has `body` array and `bodyStartLine`
+- Second element (parent class) has `bodyOmitted` string (e.g., `"parent definition - use includeBody with name filter to get full body"`)
+- Second element does NOT have `body` field
+- When only one definition matches (no parent), body is emitted normally (no `bodyOmitted`)
+
+**Unit tests:** `test_contains_line_body_only_for_innermost`, `test_contains_line_body_line_range_only_on_innermost`, `test_contains_line_single_match_gets_body_normally`
 
 **Note:** Replace `<known_file>` and `<known_line>` with a file path and line number known to be inside a definition.
 
@@ -1844,6 +1853,32 @@ echo $input | cargo run -- serve -d $TEST_DIR -e $TEST_EXT
 ---
 
 ### T42b: `tips` / `search_help` — Query budget and multi-term tips present
+
+### T42c: `tips` / `search_help` — Code Review strategy recipe present
+
+**Goal:** Verify the "Code Review / Story Evaluation" strategy recipe is included in `search_help` and CLI `tips` output.
+
+**Steps:**
+1. Run `search-index tips` and verify output contains "Code Review / Story Evaluation"
+2. Via MCP `search_help`, verify `strategyRecipes` array contains a recipe with `name: "Code Review / Story Evaluation"`
+3. Verify the recipe has 3 steps and 3 antiPatterns
+
+**Expected:** Recipe present in both CLI and MCP output with correct structure.
+
+**Covered by:** `test_render_json_has_strategy_recipes`, `test_all_renderers_consistent_tip_count`, `T42` E2E test (checks for strategy recipes in tips output).
+
+### T-DYNAMIC-HELP: `search_help` dynamic language scope
+
+**Goal:** Verify `search_help` shows actual language list instead of static "languages with definition parser support".
+
+**Steps:**
+1. Start MCP server with `--ext rs --definitions`
+2. Call `search_help`
+3. Verify `bestPractices` array contains a tip with "Language scope" containing "Rust"
+4. Verify `toolPriority` entries for search_callers and search_definitions contain "Rust"
+5. Verify they do NOT contain "languages with definition parser support"
+
+**Covered by:** `test_tips_no_hardcoded_language_lists`, `test_all_renderers_consistent_tip_count`.
 
 **Command (CLI):**
 
@@ -7602,6 +7637,51 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 ### T-TOMBSTONE: Definition index tombstone compaction during `--watch`
 
+### T-AUTO-CORRECT-LENGTH-RATIO: Auto-correction length ratio guard
+
+**Tool:** `search_definitions`
+
+**Background:** The auto-correction feature could falsely correct partial name matches where Jaro-Winkler similarity was high due to shared prefixes but the names had very different lengths (e.g., `"search_definitions"` → `"search"`, 87% similarity but 33% length ratio). The length ratio guard requires ≥60% length ratio (`min(len1,len2)/max(len1,len2)`) in addition to ≥80% similarity.
+
+**Scenario A — partial match blocked:**
+
+```json
+{ "name": "UserServiceController" }
+```
+
+**Expected:**
+
+- 0 results (no auto-correction)
+- `summary.autoCorrection` is absent (length ratio 11/21 = 0.52 < 0.6 threshold)
+- `summary.hint` may be present (regular hint system fallback)
+
+**Scenario B — short typo passes:**
+
+```json
+{ "name": "GetUsr" }
+```
+
+**Expected:**
+
+- Auto-correction fires: `summary.autoCorrection.type` = `"nameCorrected"`
+- Length ratio 6/7 = 0.86 ≥ 0.6
+
+**Scenario C — similar-length typo passes:**
+
+```json
+{ "name": "UserServise" }
+```
+
+**Expected:**
+
+- Auto-correction fires: `summary.autoCorrection.type` = `"nameCorrected"`
+- Length ratio 11/11 = 1.0 ≥ 0.6
+
+**Unit tests:** `test_auto_correct_length_ratio_constant`, `test_auto_correct_name_blocked_by_length_ratio`, `test_auto_correct_name_typo_passes_length_ratio`, `test_auto_correct_name_typo_passes_length_ratio_similar_length`
+
+**Status:** ✅ Implemented
+
+
 **Tool:** `search-index serve --watch --definitions`
 
 **Background:** When the file watcher incrementally updates definitions, old entries remain in the `definitions` Vec as tombstones. This causes `definitions.len()` to grow monotonically, inflating `totalDefinitions` and wasting memory. The fix adds auto-compaction when tombstone ratio exceeds 3× and reports active count instead of Vec length.
@@ -7949,6 +8029,58 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 
 ---
 ---
+---
+
+
+### T-DYNAMIC-DESCS: Dynamic tool descriptions based on active extensions
+
+**Tool:** `tools/list` via MCP server
+
+**Background:** Tool descriptions for `search_definitions`, `search_callers`, and `search_reindex_definitions` now dynamically include the supported language list based on the server's configured `--ext` and compiled parser support. Previously hardcoded "C# and TypeScript/TSX".
+
+**Scenario A — Rust-only project:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/list"}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext rs --definitions
+```
+
+**Expected:**
+
+- `search_definitions` description contains "Rust"
+- `search_definitions` description does NOT contain "C#" or "TypeScript"
+- `search_callers` description contains "Rust"
+- `search_reindex_definitions` description contains "Rust"
+
+**Scenario B — No definition parsers:**
+
+```powershell
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
+```
+
+**Expected:**
+
+- `search_definitions` description contains "not available"
+- `search_callers` description contains "not available"
+
+**Scenario C — Mixed with SQL:**
+
+```powershell
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,rs,sql --definitions
+```
+
+**Expected:**
+
+- `search_definitions` description contains "C# and Rust" AND "SQL supported via regex parser"
+
+**Unit tests:** `test_tool_definitions_rust_only`, `test_tool_definitions_empty_extensions`, `test_tool_definitions_cs_ts_tsx`, `test_tool_definitions_with_sql_only`, `test_tool_definitions_cs_rs_sql`, `test_tool_definitions_reindex_defs_dynamic`, `test_tools_list_dynamic_descriptions_rust`, `test_tools_list_dynamic_descriptions_empty`, `test_format_supported_languages_*` (12 tests), `test_initialize_consistent_with_tools_list_*` (3 tests)
+
+**Status:** ✅ Implemented
+
 ---
 
 

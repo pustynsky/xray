@@ -320,11 +320,11 @@ fn test_search_help_response_structure() {
     assert!(!priority.is_empty(), "toolPriority should not be empty");
 
     // Verify counts match the source of truth
-    assert_eq!(practices.len(), crate::tips::tips().len(),
+    assert_eq!(practices.len(), crate::tips::tips(&[]).len(),
         "bestPractices count should match tips::tips()");
     assert_eq!(recipes.len(), crate::tips::strategies().len(),
         "strategyRecipes count should match tips::strategies()");
-    assert_eq!(priority.len(), crate::tips::tool_priority().len(),
+    assert_eq!(priority.len(), crate::tips::tool_priority(&[]).len(),
         "toolPriority count should match tips::tool_priority()");
 }
 

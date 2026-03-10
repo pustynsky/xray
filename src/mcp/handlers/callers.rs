@@ -15,6 +15,47 @@ use search_index::generate_trigrams;
 use super::HandlerContext;
 use super::utils::{inject_body_into_obj, inject_branch_warning, json_to_string, sorted_intersect};
 
+/// Compute total body lines available from a call tree (for size hint).
+/// Walks the JSON tree and sums body lines: `body.len()` for emitted bodies,
+/// `totalBodyLines` for truncated bodies. Does NOT count `bodyOmitted` nodes
+/// (those were skipped due to budget, but we know they had lines available).
+fn compute_body_lines_from_tree(tree: &[Value], root_method: Option<&Value>) -> (usize, usize) {
+    let mut emitted: usize = 0;
+    let mut available: usize = 0;
+
+    fn walk(node: &Value, emitted: &mut usize, available: &mut usize) {
+        if let Some(body) = node.get("body").and_then(|v| v.as_array()) {
+            let len = body.len();
+            *emitted += len;
+            if let Some(total) = node.get("totalBodyLines").and_then(|v| v.as_u64()) {
+                *available += total as usize; // truncated: available = totalBodyLines
+            } else {
+                *available += len; // not truncated: available = emitted
+            }
+        } else if node.get("bodyOmitted").is_some() {
+            // Body was skipped due to budget — we don't know exact lines, skip
+            // (inject_body_into_obj doesn't record the original line count for omitted nodes)
+        }
+        // Recurse into sub-callers/callees
+        for key in &["callers", "callees", "children"] {
+            if let Some(children) = node.get(key).and_then(|v| v.as_array()) {
+                for child in children {
+                    walk(child, emitted, available);
+                }
+            }
+        }
+    }
+
+    for node in tree {
+        walk(node, &mut emitted, &mut available);
+    }
+    // Include rootMethod body
+    if let Some(root) = root_method {
+        walk(root, &mut emitted, &mut available);
+    }
+    (emitted, available)
+}
+
 /// Test attribute markers (lowercase) used to identify test methods.
 /// Covers: NUnit [Test], xUnit [Fact]/[Theory], MSTest [TestMethod],
 /// Rust #[test]/#[tokio::test], and similar frameworks.
@@ -334,6 +375,13 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             "truncated": truncated,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
+        if include_body {
+            summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
+            let (_, tree_available) = compute_body_lines_from_tree(&tree, root_method.as_ref());
+            if total_body_lines_emitted < tree_available {
+                summary["totalBodyLinesAvailable"] = json!(tree_available);
+            }
+        }
         inject_branch_warning(&mut summary, ctx);
         let mut output = json!({
             "callTree": tree,
@@ -401,6 +449,13 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             "totalNodes": total_nodes,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
+        if include_body {
+            summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
+            let (_, tree_available) = compute_body_lines_from_tree(&tree, root_method.as_ref());
+            if total_body_lines_emitted < tree_available {
+                summary["totalBodyLinesAvailable"] = json!(tree_available);
+            }
+        }
         inject_branch_warning(&mut summary, ctx);
         let mut output = json!({
             "callTree": tree,
@@ -633,6 +688,17 @@ fn handle_multi_method_callers(
     });
     if include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
+        // Compute available from all result trees
+        let mut total_available: usize = 0;
+        for result in &results {
+            let tree = result["callTree"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
+            let root = result.get("rootMethod");
+            let (_, avail) = compute_body_lines_from_tree(tree, root);
+            total_available += avail;
+        }
+        if total_body_lines_emitted < total_available {
+            summary["totalBodyLinesAvailable"] = json!(total_available);
+        }
     }
     inject_branch_warning(&mut summary, ctx);
 

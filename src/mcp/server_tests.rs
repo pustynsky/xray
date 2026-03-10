@@ -116,40 +116,39 @@ fn test_safe_to_value_returns_error_on_serialization_failure() {
     assert_eq!(result["result"]["ok"], true);
 }
 
-/// Test that the def_extensions filtering logic in initialize correctly
-/// intersects server_ext with definition_extensions().
-/// server_ext="cs,xml" should produce def_extensions=["cs"] (xml has no parser).
-#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+/// Test that initialize uses ctx.def_extensions (not server_ext) for instructions.
+/// def_extensions=["cs"] should produce "NEVER READ .cs" but not .xml.
 #[test]
 fn test_initialize_def_extension_filtering() {
-    // server_ext="cs,xml" → only "cs" has a definition parser
+    // def_extensions=["cs"] → "NEVER READ .cs FILES DIRECTLY"
     let mut ctx = make_ctx();
     ctx.server_ext = "cs,xml".to_string();
+    ctx.def_extensions = vec!["cs".to_string()];
     let result = handle_request(&ctx, "initialize", &None, json!(1));
     let instructions = result["result"]["instructions"].as_str().unwrap();
     assert!(instructions.contains(".cs"),
         "instructions should mention .cs (has parser)");
-    // .xml should NOT appear in the NEVER READ line (no definition parser)
-    // The NEVER READ line looks like "NEVER READ .cs FILES DIRECTLY"
-    // Check that .xml doesn't appear between "NEVER READ" and "FILES DIRECTLY"
+    // .xml should NOT appear (not in def_extensions)
     assert!(!instructions.contains("NEVER READ .xml"),
         "instructions should NOT mention .xml in NEVER READ (no parser). Got:\n{}", instructions);
     assert!(!instructions.contains(".xml FILES DIRECTLY"),
         "instructions should NOT have .xml in file reading rule");
 
-    // server_ext="xml" → no definition extensions at all
+    // def_extensions=[] → no definition extensions at all (no --definitions flag)
     let mut ctx2 = make_ctx();
     ctx2.server_ext = "xml".to_string();
+    ctx2.def_extensions = vec![]; // no --definitions
     let result2 = handle_request(&ctx2, "initialize", &None, json!(2));
     let instructions2 = result2["result"]["instructions"].as_str().unwrap();
     assert!(!instructions2.contains("NEVER READ"),
-        "xml-only server should NOT have NEVER READ block");
+        "empty def_extensions should NOT have NEVER READ block");
     assert!(instructions2.contains("search_definitions is not available"),
-        "xml-only server should have fallback note");
+        "empty def_extensions should have fallback note");
 
-    // server_ext="cs,ts,sql" → all three have parsers
+    // def_extensions=["cs","ts","sql"] → all three mentioned
     let mut ctx3 = make_ctx();
     ctx3.server_ext = "cs,ts,sql".to_string();
+    ctx3.def_extensions = vec!["cs".to_string(), "ts".to_string(), "sql".to_string()];
     let result3 = handle_request(&ctx3, "initialize", &None, json!(3));
     let instructions3 = result3["result"]["instructions"].as_str().unwrap();
     assert!(instructions3.contains(".cs"), "should contain .cs");
@@ -157,6 +156,71 @@ fn test_initialize_def_extension_filtering() {
     assert!(instructions3.contains(".sql"), "should contain .sql");
     assert!(instructions3.contains("NEVER READ"), "should have NEVER READ block");
 }
+
+/// Verify that tools/list response includes dynamic language descriptions
+/// based on ctx.def_extensions.
+#[test]
+fn test_tools_list_dynamic_descriptions_rust() {
+    let mut ctx = make_ctx();
+    ctx.def_extensions = vec!["rs".to_string()];
+    let result = handle_request(&ctx, "tools/list", &None, json!(2));
+    let tools = result["result"]["tools"].as_array().unwrap();
+    let def_tool = tools.iter().find(|t| t["name"] == "search_definitions").unwrap();
+    let desc = def_tool["description"].as_str().unwrap();
+    assert!(desc.contains("Rust"),
+        "tools/list search_definitions should mention 'Rust' when def_extensions=[rs]. Got: {}", desc);
+    assert!(!desc.contains("C#"),
+        "tools/list search_definitions should NOT mention C# for rs-only config");
+}
+
+#[test]
+fn test_tools_list_dynamic_descriptions_empty() {
+    let ctx = make_ctx(); // default: def_extensions = []
+    let result = handle_request(&ctx, "tools/list", &None, json!(2));
+    let tools = result["result"]["tools"].as_array().unwrap();
+    let def_tool = tools.iter().find(|t| t["name"] == "search_definitions").unwrap();
+    let desc = def_tool["description"].as_str().unwrap();
+    assert!(desc.contains("not available"),
+        "tools/list search_definitions should say 'not available' when def_extensions is empty");
+}
+
+/// Regression test for Bug 1: initialize and tools/list must use the SAME def_extensions.
+/// When def_extensions is empty (no --definitions flag), initialize should NOT say "NEVER READ".
+#[test]
+fn test_initialize_consistent_with_tools_list_empty_def_extensions() {
+    let ctx = make_ctx(); // default: def_extensions = [], server_ext = "cs"
+    let init_result = handle_request(&ctx, "initialize", &None, json!(1));
+    let instructions = init_result["result"]["instructions"].as_str().unwrap();
+    // With empty def_extensions (no --definitions), instructions should NOT say "NEVER READ"
+    assert!(!instructions.contains("NEVER READ"),
+        "initialize with empty def_extensions should NOT produce NEVER READ block. \
+         This would contradict tools/list which says 'not available'. Got:\n{}",
+        &instructions[..200.min(instructions.len())]);
+    // Should contain fallback note instead
+    assert!(instructions.contains("search_definitions is not available"),
+        "initialize with empty def_extensions should have fallback note");
+}
+
+/// Regression test: initialize with def_extensions=["rs"] must say "NEVER READ .rs" and
+/// tools/list search_definitions must say "Rust" — both from ctx.def_extensions.
+#[test]
+fn test_initialize_consistent_with_tools_list_rust() {
+    let mut ctx = make_ctx();
+    ctx.def_extensions = vec!["rs".to_string()];
+    // initialize
+    let init_result = handle_request(&ctx, "initialize", &None, json!(1));
+    let instructions = init_result["result"]["instructions"].as_str().unwrap();
+    assert!(instructions.contains("NEVER READ .rs FILES DIRECTLY"),
+        "initialize with def_extensions=[rs] should say NEVER READ .rs");
+    // tools/list
+    let tools_result = handle_request(&ctx, "tools/list", &None, json!(2));
+    let tools = tools_result["result"]["tools"].as_array().unwrap();
+    let def_tool = tools.iter().find(|t| t["name"] == "search_definitions").unwrap();
+    let desc = def_tool["description"].as_str().unwrap();
+    assert!(desc.contains("Rust"),
+        "tools/list search_definitions should mention 'Rust'");
+}
+
 
 #[test]
 fn test_shutdown_flag_initially_false_and_can_be_set() {

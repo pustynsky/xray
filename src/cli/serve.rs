@@ -19,8 +19,12 @@ use super::args::{ServeArgs, ContentIndexArgs};
 
 pub fn cmd_serve(args: ServeArgs) {
     let dir_str = args.dir.clone();
-    let ext_str = args.ext.clone();
-    let extensions: Vec<String> = ext_str.split(',').map(|s| s.trim().to_lowercase()).collect();
+    // Flatten multi-value --ext: supports both ["rs", "md"] and ["rs,md"]
+    let extensions: Vec<String> = args.ext.iter()
+        .flat_map(|s| s.split(','))
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
     let exts_for_load = extensions.join(",");
 
     let log_level = match args.log_level.as_str() {
@@ -142,6 +146,11 @@ pub fn cmd_serve(args: ServeArgs) {
             crate::index::log_memory("content-build: finished");
             if let Err(e) = save_content_index(&new_idx, &bg_idx_base) {
                 warn!(error = %e, "Failed to save content index to disk");
+            } else {
+                // Clean up old content indexes for the same root with different extensions
+                let exts_str = new_idx.extensions.join(",");
+                let saved_path = crate::content_index_path_for(&new_idx.root, &exts_str, &bg_idx_base);
+                crate::index::cleanup_stale_same_root_indexes(&bg_idx_base, &saved_path, &new_idx.root, "word-search");
             }
 
             // Drop build-time index and reload from disk to eliminate allocator
@@ -305,6 +314,11 @@ pub fn cmd_serve(args: ServeArgs) {
                 crate::index::log_memory("def-build: finished");
                 if let Err(e) = definitions::save_definition_index(&new_idx, &bg_idx_base) {
                     warn!(error = %e, "Failed to save definition index to disk");
+                } else {
+                    // Clean up old definition indexes for the same root with different extensions
+                    let exts_str = new_idx.extensions.join(",");
+                    let saved_path = definitions::definition_index_path_for(&new_idx.root, &exts_str, &bg_idx_base);
+                    crate::index::cleanup_stale_same_root_indexes(&bg_idx_base, &saved_path, &new_idx.root, "code-structure");
                 }
 
                 // Drop + reload to eliminate allocator fragmentation (same pattern)
@@ -518,6 +532,26 @@ pub fn cmd_serve(args: ServeArgs) {
     }
 
     let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
+    // Compute def_extensions for dynamic tool descriptions.
+    // IMPORTANT: use the RAW intersection of --ext and definition_extensions(),
+    // NOT the post-fallback def_exts. The fallback ("cs" when no overlap) is
+    // for index building, but tool descriptions must reflect actual languages.
+    // This matches what server.rs does for render_instructions in initialize.
+    // Parse server ext from exts_for_load (String) since extensions (Vec<String>)
+    // was moved into start_watcher above.
+    let server_exts_for_desc: Vec<&str> = exts_for_load.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let def_extensions_vec: Vec<String> = if args.definitions {
+        supported_def_langs.iter()
+            .filter(|lang| server_exts_for_desc.iter().any(|e| e.eq_ignore_ascii_case(lang)))
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     let ctx = mcp::handlers::HandlerContext {
         index,
         def_index,
@@ -531,6 +565,7 @@ pub fn cmd_serve(args: ServeArgs) {
         git_cache,
         git_cache_ready,
         current_branch,
+        def_extensions: def_extensions_vec,
     };
     mcp::server::run_server(ctx);
 }

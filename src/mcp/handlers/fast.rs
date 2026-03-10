@@ -14,7 +14,9 @@ use super::utils::{best_match_tier, inject_branch_warning, json_to_string};
 pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some("") => return ToolCallResult::error(
-            "Empty pattern. Provide a file name or pattern to search for.".to_string()
+            "Empty pattern. Provide a file name or pattern to search for. \
+             To explore code in a directory, use search_definitions file='<dir>' includeBody=false. \
+             To list all files in a directory, use a pattern like '*'.".to_string()
         ),
         Some(p) => p.to_string(),
         None => return ToolCallResult::error("Missing required parameter: pattern".to_string()),

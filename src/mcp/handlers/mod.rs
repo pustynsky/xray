@@ -32,8 +32,11 @@ pub(crate) use self::callers::find_containing_method;
 #[cfg(test)]
 pub(crate) use self::callers::resolve_call_site;
 
-/// Return all tool definitions for tools/list
-pub fn tool_definitions() -> Vec<ToolDefinition> {
+/// Return all tool definitions for tools/list.
+/// `def_extensions` — file extensions with definition parser support (e.g., ["cs", "rs"]).
+/// Used to dynamically generate language lists in search_definitions and search_callers descriptions.
+pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
+    let lang_list = crate::tips::format_supported_languages(def_extensions);
     let mut tools = vec![
         ToolDefinition {
             name: "search_grep".to_string(),
@@ -171,7 +174,18 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_reindex_definitions".to_string(),
-            description: "Force rebuild the AST definition index (tree-sitter) and reload it into the server's in-memory cache. Returns build metrics: files parsed, definitions extracted, call sites, codeStatsEntries (methods with complexity metrics), parse errors, build time, and index size. After rebuild, code stats are available for includeCodeStats/sortBy/min* queries. Requires server started with --definitions flag.".to_string(),
+            description: if def_extensions.is_empty() {
+                "Definition index not available. Start server with --definitions flag.".to_string()
+            } else {
+                format!(
+                    "Force rebuild the definition index and reload it into the server's in-memory cache. \
+                     Supports {}. Returns build metrics: files parsed, definitions extracted, call sites, \
+                     codeStatsEntries (methods with complexity metrics), parse errors, build time, and index size. \
+                     After rebuild, code stats are available for includeCodeStats/sortBy/min* queries. \
+                     Requires server started with --definitions flag.",
+                    lang_list
+                )
+            },
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -186,7 +200,22 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_definitions".to_string(),
-            description: "Preferred for indexed source-code exploration and definition body retrieval. Use before generic file-reading tools when the target file type is indexed. Search code definitions -- classes, interfaces, methods, properties, enums. Uses pre-built tree-sitter AST index for instant results (~0.001s). LANGUAGE-SPECIFIC: Supports C# and TypeScript/TSX (tree-sitter grammars). SQL supported via regex parser (.sql files: stored procedures, tables, views, functions, types, indexes, columns, call sites from SP bodies). Requires server started with --definitions flag. Supports 'containsLine' to find which method/class contains a given line number (no more manual read_file!). Supports 'includeBody' to return actual source code inline, eliminating read_file calls.".to_string(),
+            description: if def_extensions.is_empty() {
+                "Definition index not available for current file extensions. Use search_grep for content search.".to_string()
+            } else {
+                format!(
+                    "PREFERRED for code exploration AND module structure discovery. \
+                     REPLACES directory listing for understanding code — use file='<dirname>' to get ALL classes, methods, \
+                     interfaces in ONE call (more informative than directory tree which only shows file names). \
+                     Search code definitions — classes, interfaces, methods, properties, enums. \
+                     Uses pre-built AST index for instant results (~0.001s). \
+                     LANGUAGE-SPECIFIC: Supports {}. \
+                     Requires server started with --definitions flag. \
+                     Supports 'containsLine' to find which method/class contains a given line number. \
+                     Supports 'includeBody' to return actual source code inline.",
+                    lang_list
+                )
+            },
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -213,7 +242,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "file": {
                         "type": "string",
-                        "description": "Filter by file path substring. Comma-separated for multi-term OR."
+                        "description": "Filter by file path substring. Comma-separated for multi-term OR. Use file='<dirname>' to explore an entire module — returns all definitions in files matching this directory path."
                     },
                     "parent": {
                         "type": "string",
@@ -221,7 +250,7 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
                     },
                     "containsLine": {
                         "type": "integer",
-                        "description": "Find definition(s) containing this line number. Returns innermost method + parent class. Requires 'file' parameter."
+                        "description": "Find definition(s) containing this line number. Returns innermost method + parent class. Requires 'file' parameter. With includeBody=true, body is emitted ONLY for the innermost (most specific) definition; parent definitions get 'bodyOmitted' hint instead — this maximizes body budget for the target method."
                     },
                     "regex": {
                         "type": "boolean",
@@ -311,7 +340,20 @@ pub fn tool_definitions() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_callers".to_string(),
-            description: "RECOMMENDED for call chain analysis -- find all callers of a method and build a call tree (up or down) in a SINGLE sub-millisecond request. Supports C# and TypeScript/TSX. DI-aware. Returns a hierarchical call tree with method signatures, file paths, and line numbers. Always specify the 'class' parameter to avoid mixing callers from unrelated classes. Requires server started with --definitions flag. Limitation: calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected because the tool uses AST parsing without type inference. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported.".to_string(),
+            description: if def_extensions.is_empty() {
+                "Call chain analysis not available — definition index not configured. Start server with --definitions flag.".to_string()
+            } else {
+                format!(
+                    "RECOMMENDED for call chain analysis -- find all callers of a method and build a call tree \
+                     (up or down) in a SINGLE sub-millisecond request. Supports {}. DI-aware. Returns a hierarchical \
+                     call tree with method signatures, file paths, and line numbers. Always specify the 'class' parameter \
+                     to avoid mixing callers from unrelated classes. Requires server started with --definitions flag. \
+                     Limitation: calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be \
+                     detected because the tool uses AST parsing without type inference. DI-injected fields, `this`/`base` \
+                     calls, and direct receiver calls are fully supported.",
+                    lang_list
+                )
+            },
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -528,6 +570,10 @@ pub struct HandlerContext {
     /// Current checked-out branch name (detected at server startup).
     /// Used to inject branchWarning into index-based tool responses.
     pub current_branch: Option<String>,
+    /// File extensions with definition parser support (e.g., ["cs", "ts", "tsx", "rs"]).
+    /// Computed as intersection of --ext and definition_extensions() at startup.
+    /// Used to dynamically generate tool descriptions with correct language lists.
+    pub def_extensions: Vec<String>,
 }
 
 impl Default for HandlerContext {
@@ -545,6 +591,7 @@ impl Default for HandlerContext {
             git_cache: Arc::new(RwLock::new(None)),
             git_cache_ready: Arc::new(AtomicBool::new(false)),
             current_branch: None,
+            def_extensions: Vec::new(),
         }
     }
 }
@@ -625,7 +672,7 @@ pub fn dispatch_tool(
         "search_definitions" => definitions::handle_search_definitions(ctx, arguments),
         "search_callers" => callers::handle_search_callers(ctx, arguments),
         "search_edit" => edit::handle_search_edit(ctx, arguments),
-        "search_help" => handle_search_help(),
+        "search_help" => handle_search_help(ctx),
         // Git history tools
         "search_git_history" | "search_git_diff" | "search_git_authors" | "search_git_activity" | "search_git_blame" | "search_branch_status" => {
             git::dispatch_git_tool(ctx, tool_name, arguments)
@@ -688,8 +735,8 @@ pub fn dispatch_tool(
 
 // ─── Small inline handlers ──────────────────────────────────────────
 
-fn handle_search_help() -> ToolCallResult {
-    let help = crate::tips::render_json();
+fn handle_search_help(ctx: &HandlerContext) -> ToolCallResult {
+    let help = crate::tips::render_json(&ctx.def_extensions);
     ToolCallResult::success(utils::json_to_string(&help))
 }
 

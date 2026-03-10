@@ -121,7 +121,12 @@ pub fn run() {
             }
             Ok(())
         },
-        Commands::Tips => { print!("{}", crate::tips::render_cli()); Ok(()) },
+        Commands::Tips => {
+            let all_exts: Vec<String> = crate::definitions::definition_extensions()
+                .iter().map(|s| s.to_string()).collect();
+            print!("{}", crate::tips::render_cli(&all_exts));
+            Ok(())
+        },
     };
 
     if let Err(e) = result {

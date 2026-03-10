@@ -766,6 +766,11 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
 ///
 /// This prevents a stale cache (e.g., built with `--ext cs` only) from
 /// being used when the server now requires `--ext cs,sql`.
+///
+/// **Optimization:** Uses `.meta` sidecar files to check root and extensions
+/// without loading the full index (~200 bytes vs 100+ MB). Falls back to
+/// `read_root_from_index_file` if no sidecar exists. Only loads the full
+/// index after metadata confirms a match.
 pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expected_exts: &[String]) -> Option<ContentIndex> {
     if !index_base.exists() {
         return None;
@@ -775,27 +780,62 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
 
     for entry in fs::read_dir(index_base).ok()?.flatten() {
         let path = entry.path();
-        if path.extension().is_some_and(|e| e == "word-search") {
+        if !path.extension().is_some_and(|e| e == "word-search") {
+            continue;
+        }
+
+        // ── Fast filter via .meta sidecar (~200 bytes, no full deserialization) ──
+        if let Some(meta) = load_index_meta(&path) {
+            if meta.root != clean {
+                continue; // root doesn't match — skip without loading
+            }
+            // Check extension superset from metadata
+            if !expected_exts.is_empty() {
+                let has_all = expected_exts.iter().all(|ext|
+                    meta.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
+                );
+                if !has_all {
+                    eprintln!("[find_content_index] Skipping {} — extensions mismatch (cached: {:?}, expected: {:?})",
+                        path.display(), meta.extensions, expected_exts);
+                    continue;
+                }
+            }
+            // Metadata matches — load the full index
             match load_compressed::<ContentIndex>(&path, "content-index") {
-                Ok(index) => {
-                    if index.root == clean {
-                        // Validate that cached index has ALL expected extensions
-                        if !expected_exts.is_empty() {
-                            let has_all = expected_exts.iter().all(|ext|
-                                index.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
-                            );
-                            if !has_all {
-                                eprintln!("[find_content_index] Skipping {} — extensions mismatch (cached: {:?}, expected: {:?})",
-                                    path.display(), index.extensions, expected_exts);
-                                continue;
-                            }
-                        }
-                        return Some(index);
-                    }
-                }
+                Ok(index) => return Some(index),
                 Err(e) => {
-                    eprintln!("[find_content_index] Skipping {}: {}", path.display(), e);
+                    eprintln!("[find_content_index] Metadata matched but load failed for {}: {}", path.display(), e);
+                    continue;
                 }
+            }
+        }
+
+        // ── Fallback: no .meta sidecar — try lightweight root check ──
+        if let Some(root) = read_root_from_index_file(&path) {
+            if root != clean {
+                continue; // root doesn't match — skip without loading
+            }
+        }
+        // Root matches or couldn't be read — must load full index to check
+        match load_compressed::<ContentIndex>(&path, "content-index") {
+            Ok(index) => {
+                if index.root == clean {
+                    // Validate that cached index has ALL expected extensions
+                    if !expected_exts.is_empty() {
+                        let has_all = expected_exts.iter().all(|ext|
+                            index.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
+                        );
+                        if !has_all {
+                            eprintln!("[find_content_index] Skipping {} — extensions mismatch (cached: {:?}, expected: {:?})",
+                                path.display(), index.extensions, expected_exts);
+                            continue;
+                        }
+                    }
+                    return Some(index);
+                }
+            }
+            Err(e) => {
+                eprintln!("[find_content_index] Skipping {}: {}", path.display(), e);
             }
         }
     }
@@ -833,6 +873,62 @@ fn read_root_from_index_file(path: &std::path::Path) -> Option<String> {
 /// to get the root directory from a file-list index without full deserialization.
 pub fn read_root_from_index_file_pub(path: &std::path::Path) -> Option<String> {
     read_root_from_index_file(path)
+}
+
+/// Remove stale index files for the same root directory but with a different hash.
+///
+/// When the user changes `--ext` (e.g., `rs` → `rs,md`), a new index file is
+/// created with a different hash. The old index file remains on disk as an orphan.
+/// This function cleans up such orphans after a new index is successfully saved.
+///
+/// Uses `.meta` sidecar for fast root comparison (~200 bytes). Falls back to
+/// `read_root_from_index_file` (~100 bytes) if no sidecar exists.
+///
+/// Only removes files with the same extension (`word-search` or `code-structure`)
+/// to avoid accidentally deleting definition indexes when saving content indexes.
+pub fn cleanup_stale_same_root_indexes(
+    index_base: &std::path::Path,
+    newly_saved_path: &std::path::Path,
+    root: &str,
+    extension: &str,
+) {
+    let entries = match fs::read_dir(index_base) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+
+        // Only check files with the same extension (e.g., "word-search")
+        if !path.extension().is_some_and(|e| e == extension) {
+            continue;
+        }
+
+        // Skip the newly saved file
+        if path == newly_saved_path {
+            continue;
+        }
+
+        // Check root via meta sidecar (fast) or header (fallback)
+        let file_root = if let Some(meta) = load_index_meta(&path) {
+            Some(meta.root)
+        } else {
+            read_root_from_index_file(&path)
+        };
+
+        if let Some(ref file_root) = file_root {
+            if file_root == root {
+                // Same root, different hash → stale index
+                if fs::remove_file(&path).is_ok() {
+                    eprintln!("[cleanup] Removed stale {} index: {} (same root, different extensions)",
+                        extension, path.display());
+                    // Also remove sidecar .meta file
+                    let _ = fs::remove_file(meta_path_for(&path));
+                }
+            }
+        }
+    }
 }
 
 /// Remove orphaned index files whose root directory no longer exists on disk.

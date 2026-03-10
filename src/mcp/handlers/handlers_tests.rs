@@ -10,13 +10,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 #[test]
 fn test_tool_definitions_count() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     assert_eq!(tools.len(), 16);
 }
 
 #[test]
 fn test_tool_definitions_names() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"search_grep"));
     assert!(names.contains(&"search_find"));
@@ -32,7 +32,7 @@ fn test_tool_definitions_names() {
 
 #[test]
 fn test_tool_definitions_have_schemas() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     for tool in &tools {
         assert!(tool.input_schema.is_object(), "Tool {} should have an object schema", tool.name);
         assert_eq!(tool.input_schema["type"], "object");
@@ -41,7 +41,7 @@ fn test_tool_definitions_have_schemas() {
 
 #[test]
 fn test_all_tools_have_required_field() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     for tool in &tools {
         assert!(
             tool.input_schema.get("required").is_some(),
@@ -62,7 +62,7 @@ fn test_all_tools_have_required_field() {
 
 #[test]
 fn test_search_grep_required_fields() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     let grep = tools.iter().find(|t| t.name == "search_grep").unwrap();
     let required = grep.input_schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 1);
@@ -71,7 +71,7 @@ fn test_search_grep_required_fields() {
 
 #[test]
 fn test_search_find_has_slow_warning() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     let find = tools.iter().find(|t| t.name == "search_find").unwrap();
     assert!(find.description.contains("SLOW") || find.description.contains("search_fast"), "search_find should discourage use and point to search_fast");
 }
@@ -94,6 +94,7 @@ fn test_handler_context_field_count_guard() {
         git_cache: Arc::new(RwLock::new(None)),
         git_cache_ready: Arc::new(AtomicBool::new(false)),
         current_branch: None,
+        def_extensions: Vec::new(),
     };
     drop(_guard);
 }
@@ -112,6 +113,7 @@ fn test_handler_context_default_values() {
     assert!(!ctx.git_cache_ready.load(std::sync::atomic::Ordering::Relaxed), "git_cache_ready should default to false");
     assert!(ctx.def_index.is_none());
     assert!(ctx.current_branch.is_none());
+    assert!(ctx.def_extensions.is_empty(), "def_extensions should default to empty Vec");
 }
 
 fn make_empty_ctx() -> HandlerContext {
@@ -193,7 +195,7 @@ fn test_reindex_definitions_no_def_index() {
 
 #[test]
 fn test_reindex_definitions_has_schema() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     let tool = tools.iter().find(|t| t.name == "search_reindex_definitions").unwrap();
     let props = tool.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("dir"), "Should have dir parameter");
@@ -216,7 +218,7 @@ fn test_contains_line_requires_file() {
 
 #[test]
 fn test_search_callers_has_required_params() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     let callers = tools.iter().find(|t| t.name == "search_callers").unwrap();
     let required = callers.input_schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 1);
@@ -225,7 +227,7 @@ fn test_search_callers_has_required_params() {
 
 #[test]
 fn test_search_callers_has_limit_params() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     let callers = tools.iter().find(|t| t.name == "search_callers").unwrap();
     let props = callers.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("maxCallersPerLevel"), "Should have maxCallersPerLevel");
@@ -234,7 +236,7 @@ fn test_search_callers_has_limit_params() {
 
 #[test]
 fn test_search_definitions_has_contains_line() {
-    let tools = tool_definitions();
+    let tools = tool_definitions(&vec!["cs".to_string()]);
     let defs = tools.iter().find(|t| t.name == "search_definitions").unwrap();
     let props = defs.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("containsLine"), "Should have containsLine parameter");
