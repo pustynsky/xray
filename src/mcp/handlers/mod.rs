@@ -333,6 +333,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "minCalls": {
                         "type": "integer",
                         "description": "Min call count (fan-out). Auto-enables includeCodeStats."
+                    },
+                    "includeUsageCount": {
+                        "type": "boolean",
+                        "description": "Add usageCount to each definition — number of files containing this name in content index (not call count). Useful for dead code detection (usageCount=0 or 1). Counts ALL text occurrences including comments and strings. (default: false)"
                     }
                 },
                 "required": []
@@ -427,6 +431,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "impactAnalysis": {
                         "type": "boolean",
                         "description": "When true with direction='up', identifies test methods in the caller chain. Test methods (detected via [Test]/[Fact]/[Theory]/[TestMethod]/#[test] attributes or *.spec.ts/*.test.ts file patterns) are marked with isTest=true and collected in a 'testsCovering' array with full file path, depth (distance from target), and callChain (array of method names from target to test). Recursion stops at test methods. (default: false)"
+                    },
+                    "includeGrepReferences": {
+                        "type": "boolean",
+                        "description": "Add grepReferences[] — files containing the method name as text but NOT in the call tree. Catches delegate usage, method groups, reflection. Skipped for method names shorter than 4 characters to avoid noise. (default: false)"
                     }
                 },
                 "required": ["method"]

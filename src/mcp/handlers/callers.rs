@@ -13,7 +13,7 @@ use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionK
 use search_index::generate_trigrams;
 
 use super::HandlerContext;
-use super::utils::{inject_body_into_obj, inject_branch_warning, json_to_string, sorted_intersect};
+use super::utils::{inject_body_into_obj, inject_branch_warning, json_to_string, name_similarity, sorted_intersect};
 
 /// Compute total body lines available from a call tree (for size hint).
 /// Walks the JSON tree and sums body lines: `body.len()` for emitted bodies,
@@ -454,11 +454,27 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
             output["query"]["impactAnalysis"] = json!(true);
         }
 
-        if tree.is_empty() && class_filter.is_some() {
-            output["hint"] = json!(
-                "No callers found. Possible reasons: (1) calls go through extension methods or DI wrappers, (2) class filter is too narrow. Try without 'class' parameter or with the interface name."
-            );
+        // Nearest-match hints when callTree is empty
+        if tree.is_empty() {
+            let hint = generate_callers_hint(&method_name, class_filter.as_deref(), &def_idx);
+            if let Some(h) = hint {
+                output["hint"] = json!(h);
+            }
         }
+
+        // Cross-index enrichment: grep references not in call tree
+        let include_grep_refs = args.get("includeGrepReferences").and_then(|v| v.as_bool()).unwrap_or(false);
+        if include_grep_refs && method_name.len() >= 4 {
+            let tree_files = collect_files_from_tree(&tree);
+            let grep_refs = build_grep_references(&method_name, &content_index, &tree_files);
+            if !grep_refs.is_empty() {
+                output["grepReferences"] = json!(grep_refs);
+                output["grepReferencesNote"] = json!(
+                    "Text references not captured by AST call analysis. May include delegate usage, method groups, reflection, or comments."
+                );
+            }
+        }
+
         if let Some(ref warning) = ambiguity_warning {
             output["warning"] = json!(warning);
         }
@@ -506,11 +522,27 @@ pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolC
         if let Some(root) = &root_method {
             output["rootMethod"] = root.clone();
         }
-        if tree.is_empty() && class_filter.is_some() {
-            output["hint"] = json!(
-                "No callees found. Possible reasons: (1) method body not parsed, (2) class filter is too narrow. Try without 'class' parameter or with the interface name."
-            );
+        // Nearest-match hints when callTree is empty
+        if tree.is_empty() {
+            let hint = generate_callers_hint(&method_name, class_filter.as_deref(), &def_idx);
+            if let Some(h) = hint {
+                output["hint"] = json!(h);
+            }
         }
+
+        // Cross-index enrichment: grep references not in call tree
+        let include_grep_refs = args.get("includeGrepReferences").and_then(|v| v.as_bool()).unwrap_or(false);
+        if include_grep_refs && method_name.len() >= 4 {
+            let tree_files = collect_files_from_tree(&tree);
+            let grep_refs = build_grep_references(&method_name, &content_index, &tree_files);
+            if !grep_refs.is_empty() {
+                output["grepReferences"] = json!(grep_refs);
+                output["grepReferencesNote"] = json!(
+                    "Text references not captured by AST call analysis. May include delegate usage, method groups, reflection, or comments."
+                );
+            }
+        }
+
         if let Some(ref warning) = ambiguity_warning {
             output["warning"] = json!(warning);
         }
@@ -756,6 +788,159 @@ fn handle_multi_method_callers(
     }
 
     ToolCallResult::success(json_to_string(&output))
+}
+
+// ─── Nearest-match hints for callers ─────────────────────────────────
+
+/// Generate a nearest-match hint when callTree is empty.
+/// Checks both method name and class name for typos using Jaro-Winkler similarity.
+/// Falls back to a generic hint if both names exist but no call sites were found.
+fn generate_callers_hint(
+    method_name: &str,
+    class_filter: Option<&str>,
+    def_idx: &DefinitionIndex,
+) -> Option<String> {
+    let method_lower = method_name.to_lowercase();
+    let mut hint_parts: Vec<String> = Vec::new();
+
+    // A. Nearest method name — check if method exists in index
+    let method_exists = def_idx.name_index.get(&method_lower)
+        .map(|indices| indices.iter().any(|&i| {
+            def_idx.definitions.get(i as usize)
+                .is_some_and(|d| matches!(d.kind,
+                    DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+                    | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction))
+        }))
+        .unwrap_or(false);
+
+    if !method_exists {
+        let mut best_score = 0.0f64;
+        let mut best_name = String::new();
+        for (name, indices) in &def_idx.name_index {
+            // Only consider callable definitions
+            let has_callable = indices.iter().any(|&i| {
+                def_idx.definitions.get(i as usize)
+                    .is_some_and(|d| matches!(d.kind,
+                        DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+                        | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction))
+            });
+            if !has_callable { continue; }
+
+            let score = name_similarity(&method_lower, name);
+            if score > best_score && score > 0.75 {
+                best_score = score;
+                best_name = name.clone();
+            }
+        }
+        if !best_name.is_empty() {
+            hint_parts.push(format!(
+                "Method '{}' not found. Nearest match: '{}' (similarity {:.0}%)",
+                method_name, best_name, best_score * 100.0
+            ));
+        }
+    }
+
+    // B. Nearest class name (if class filter is set)
+    if let Some(cls) = class_filter {
+        let cls_lower = cls.to_lowercase();
+        // Pre-filter: collect class/interface/struct names from kind_index
+        let class_exists = def_idx.name_index.get(&cls_lower)
+            .map(|indices| indices.iter().any(|&i| {
+                def_idx.definitions.get(i as usize)
+                    .is_some_and(|d| matches!(d.kind,
+                        DefinitionKind::Class | DefinitionKind::Interface | DefinitionKind::Struct | DefinitionKind::Record))
+            }))
+            .unwrap_or(false);
+
+        if !class_exists {
+            let mut best_score = 0.0f64;
+            let mut best_class = String::new();
+            for (name, indices) in &def_idx.name_index {
+                let has_type = indices.iter().any(|&i| {
+                    def_idx.definitions.get(i as usize)
+                        .is_some_and(|d| matches!(d.kind,
+                            DefinitionKind::Class | DefinitionKind::Interface | DefinitionKind::Struct | DefinitionKind::Record))
+                });
+                if !has_type { continue; }
+
+                let score = name_similarity(&cls_lower, name);
+                if score > best_score && score > 0.75 {
+                    best_score = score;
+                    best_class = name.clone();
+                }
+            }
+            if !best_class.is_empty() {
+                hint_parts.push(format!(
+                    "Class '{}' not found. Nearest: '{}' (similarity {:.0}%)",
+                    cls, best_class, best_score * 100.0
+                ));
+            }
+        }
+    }
+
+    // C. Fallback generic hint — method and class both exist but no callers found
+    if hint_parts.is_empty() && class_filter.is_some() {
+        hint_parts.push(
+            "No callers found. Possible reasons: (1) calls go through extension methods or DI wrappers, (2) class filter is too narrow. Try without 'class' parameter or with the interface name.".to_string()
+        );
+    }
+
+    if hint_parts.is_empty() {
+        None
+    } else {
+        Some(hint_parts.join(". "))
+    }
+}
+
+// ─── Cross-index grep references ─────────────────────────────────────
+
+/// Collect all file paths from a call tree (recursive).
+/// Used to exclude files already in the call tree from grep references.
+fn collect_files_from_tree(tree: &[Value]) -> HashSet<String> {
+    let mut files = HashSet::new();
+    for node in tree {
+        if let Some(f) = node.get("file").and_then(|v| v.as_str()) {
+            files.insert(f.to_string());
+        }
+        // Recurse into sub-callers (direction=up) and sub-callees (direction=down)
+        for key in &["callers", "callees", "children"] {
+            if let Some(children) = node.get(key).and_then(|v| v.as_array()) {
+                files.extend(collect_files_from_tree(children));
+            }
+        }
+    }
+    files
+}
+
+/// Build grep references: files containing the method name as text
+/// but NOT in the call tree. Uses the content index for O(1) lookup.
+fn build_grep_references(
+    method_name: &str,
+    content_index: &ContentIndex,
+    tree_files: &HashSet<String>,
+) -> Vec<Value> {
+    let method_lower = method_name.to_lowercase();
+    let postings = match content_index.index.get(&method_lower) {
+        Some(p) => p,
+        None => return Vec::new(),
+    };
+
+    let mut grep_refs: Vec<Value> = Vec::new();
+    for posting in postings {
+        if let Some(file) = content_index.files.get(posting.file_id as usize) {
+            // Compare by filename only (call tree stores filenames, not full paths)
+            let fname = Path::new(file).file_name()
+                .and_then(|f| f.to_str())
+                .unwrap_or(file);
+            if !tree_files.contains(fname) {
+                grep_refs.push(json!({
+                    "file": file,
+                    "tokenCount": posting.lines.len(),
+                }));
+            }
+        }
+    }
+    grep_refs
 }
 
 // ─── Internal helpers ───────────────────────────────────────────────

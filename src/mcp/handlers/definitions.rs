@@ -55,6 +55,8 @@ pub(crate) struct DefinitionSearchArgs {
     pub min_returns: Option<u8>,
     pub min_calls: Option<u16>,
     pub include_code_stats: bool,
+    // Cross-index enrichment
+    pub include_usage_count: bool,
 }
 
 impl DefinitionSearchArgs {
@@ -153,6 +155,8 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
     let include_code_stats = args.get("includeCodeStats").and_then(|v| v.as_bool()).unwrap_or(false)
         || has_stats;
 
+    let include_usage_count = args.get("includeUsageCount").and_then(|v| v.as_bool()).unwrap_or(false);
+
     Ok(DefinitionSearchArgs {
         name_filter,
         kind_filter,
@@ -182,6 +186,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         min_returns,
         min_calls,
         include_code_stats,
+        include_usage_count,
     })
 }
 
@@ -387,6 +392,21 @@ fn handle_contains_line_mode(
                     }
                 }
                 containing_defs.push(obj);
+            }
+        }
+    }
+
+    // Cross-index enrichment: add usageCount from content index
+    if args.include_usage_count {
+        if let Ok(content_idx) = ctx.index.read() {
+            for obj in &mut containing_defs {
+                if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                    let name_lower = name.to_lowercase();
+                    let count = content_idx.index.get(&name_lower)
+                        .map(|postings| postings.len())
+                        .unwrap_or(0);
+                    obj["usageCount"] = json!(count);
+                }
             }
         }
     }
@@ -771,12 +791,27 @@ fn format_search_output(
         results.iter().map(|(_, def)| (def.line_end.saturating_sub(def.line_start) + 1) as usize).sum()
     } else { 0 };
 
-    let defs_json: Vec<Value> = results.iter().map(|(def_idx_value, def)| {
+    let mut defs_json: Vec<Value> = results.iter().map(|(def_idx_value, def)| {
         format_definition_entry(
             index, *def_idx_value, def, args,
             &mut file_cache, &mut total_body_lines_emitted,
         )
     }).collect();
+
+    // Cross-index enrichment: add usageCount from content index
+    if args.include_usage_count {
+        if let Ok(content_idx) = ctx.index.read() {
+            for obj in &mut defs_json {
+                if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
+                    let name_lower = name.to_lowercase();
+                    let count = content_idx.index.get(&name_lower)
+                        .map(|postings| postings.len())
+                        .unwrap_or(0);
+                    obj["usageCount"] = json!(count);
+                }
+            }
+        }
+    }
 
     let summary = build_search_summary(
         index, &defs_json, args, total_results,
