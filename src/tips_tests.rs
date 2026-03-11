@@ -182,8 +182,8 @@ fn test_render_instructions_empty_extensions() {
     // But the critical override, file-editing, and zero-result hints DECISION TRIGGERs SHOULD appear (always present).
     // Count occurrences: should be exactly 3 (critical override + editing + zero-result hints, not reading).
     let dt_count = text.matches("DECISION TRIGGER").count();
-    assert_eq!(dt_count, 3,
-        "Empty def_extensions should have 3 DECISION TRIGGERs (critical override + editing + zero-result hints), not {} (reading trigger should be absent)", dt_count);
+    assert_eq!(dt_count, 4,
+        "Empty def_extensions should have 4 DECISION TRIGGERs (critical override + editing + search_files + zero-result hints), not {} (reading trigger should be absent)", dt_count);
     // Should contain fallback note
     assert!(text.contains("search_definitions is not available"),
         "Empty def_extensions should have fallback note about search_definitions");
@@ -597,6 +597,46 @@ fn test_tool_definitions_cs_rs_sql() {
         "search_reindex_definitions should contain tree-sitter languages");
     assert!(reindex_tool.description.contains("SQL supported via regex parser"),
         "search_reindex_definitions should mention SQL via regex parser");
+}
+
+// ─── Tests for Hint E prompt changes (B + C) ────────────────────────
+
+#[test]
+fn test_task_routing_has_non_code_files_entry() {
+    let routings = task_routings();
+    let non_code = routings.iter().find(|r| r.task.contains("non-code"));
+    assert!(non_code.is_some(), "task_routings should have entry for non-code files");
+    let entry = non_code.unwrap();
+    assert_eq!(entry.tool, "search_grep", "non-code files should route to search_grep");
+    assert!(!entry.requires_definitions, "non-code files routing should not require definitions");
+}
+
+#[test]
+fn test_instructions_non_code_routing_in_output() {
+    let text = render_instructions(&["cs"]);
+    assert!(text.contains("non-code files"),
+        "Instructions should mention non-code files routing");
+    assert!(text.contains("XML"),
+        "Non-code files routing should mention XML");
+}
+
+#[test]
+fn test_instructions_anti_pattern_unsupported_defs() {
+    let text = render_instructions(&["cs", "rs"]);
+    assert!(text.contains("NEVER use search_definitions for non-"),
+        "Instructions should have anti-pattern for unsupported definition extensions. Got:\n{}", text);
+    assert!(text.contains("XML"),
+        "Anti-pattern should mention XML as unsupported for search_definitions");
+    assert!(text.contains("search_grep instead"),
+        "Anti-pattern should suggest search_grep as alternative");
+}
+
+#[test]
+fn test_instructions_anti_pattern_absent_without_defs() {
+    // When no def extensions, the anti-pattern about "NEVER use search_definitions for non-X" should not appear
+    let text = render_instructions(&[]);
+    assert!(!text.contains("NEVER use search_definitions for non-"),
+        "Anti-pattern should NOT appear when def_extensions is empty");
 }
 
 /// Regression test: tips(), tool_priority(), and strategy anti_patterns should NOT contain

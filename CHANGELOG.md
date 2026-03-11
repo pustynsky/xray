@@ -9,6 +9,17 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ## 2026-03-11
 
 ### Features
+- **Hint E: Unsupported file extension detection in `search_definitions`** — When `search_definitions` is called with a `file` filter containing an extension not supported by the definition index (e.g., `.xml`, `.json`, `.config`), a new Hint E fires before all other hints. It checks whether the extension is indexed by the content index and gives a targeted recommendation: either "Use search_grep" (if in content index) or "Use read_file" (if not in any index). This prevents the common LLM pattern of calling `search_definitions` for non-code files, getting 0 results with no guidance, and falling back to `read_file` instead of `search_grep`. Guard: skipped when `def_extensions` is empty. 5 new unit tests.
+
+- **Task routing for non-code files** — Added "Read/search non-code files (XML, JSON, config, YAML, MD, txt) → search_grep" to the TASK ROUTING table in LLM instructions. Previously, non-code files had no explicit routing entry.
+
+- **Anti-pattern for `search_definitions` on non-code files** — Added "NEVER use search_definitions for non-.cs/.rs/etc files — it only supports AST parsing for those extensions. Use search_grep instead" to the ANTI-PATTERNS block. Dynamically lists supported extensions. Only emitted when `def_extensions` is non-empty. 4 new tips_tests.
+
+- **Strengthened LLM tool routing instructions (B+C+D)** — Three prompt improvements to prevent LLM fallback to built-in tools:
+  1. **DECISION TRIGGER for search_files** — Added "before calling search_files — STOP. Use search_grep instead" (previously missing — LLMs defaulted to Roo Code's built-in `search_files`).
+  2. **Concrete anti-pattern pairs** — Anti-pattern "NEVER read indexed source files directly" now includes `file='X' includeBody=true maxBodyLines=0` usage example.
+  3. **search_definitions tool description enhanced** — Added "REPLACES read_file for indexed source files" and "Only these extensions are indexed — for other file types use search_grep" to the tool description. LLMs read tool descriptions at every tool-selection decision.
+
 - **Strengthened `search_edit` override to prevent LLM fallback to `apply_diff`** — Three changes to reduce the dominant failure mode where LLMs default to Roo Code's built-in `apply_diff` instead of `search_edit`:
   1. **Tool description front-loaded** — `search_edit` description now starts with "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content" (moved from the end). LLMs read tool descriptions at every tool-selection decision — front-loading the override matches the proven pattern from `search_find`'s "[SLOW — USE search_fast INSTEAD]".
   2. **ANTI-PATTERNS expanded** — Added "NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit" to the anti-patterns block (previously only covered `list_files`/`directory_tree`/`list_directory`).

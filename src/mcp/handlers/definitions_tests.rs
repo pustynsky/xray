@@ -2555,3 +2555,102 @@ fn test_include_usage_count_default_off() {
             serde_json::to_string_pretty(def).unwrap());
     }
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// Hint E: Unsupported file extension in definition index
+// ═══════════════════════════════════════════════════════════════════
+
+/// Helper: create HandlerContext with def_extensions and server_ext configured
+fn make_hint_e_ctx() -> HandlerContext {
+    let index = make_test_def_index();
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string(), "xml".to_string()],
+        ..Default::default()
+    };
+    super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(index))),
+        server_ext: "cs,xml,config,md".to_string(),
+        def_extensions: vec!["cs".to_string()],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_hint_e_xml_extension_suggests_search_grep() {
+    // file='something.xml' → Hint E should fire because .xml is not in def_extensions
+    // but IS in server_ext (content index)
+    let ctx = make_hint_e_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "file": "config.xml"
+    }));
+    assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["hint"].as_str()
+        .expect("Should have hint for unsupported extension");
+    assert!(hint.contains(".xml"), "Hint should mention .xml extension. Got: {}", hint);
+    assert!(hint.contains("search_grep"), "Hint should suggest search_grep. Got: {}", hint);
+    assert!(hint.contains("content index"), "Hint should mention content index. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_e_md_extension_not_in_content_index_suggests_read_file() {
+    // file='notes.xyz' → .xyz is not in def_extensions AND not in server_ext
+    // Should suggest read_file
+    let ctx = make_hint_e_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "file": "notes.xyz"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["hint"].as_str()
+        .expect("Should have hint for completely unsupported extension");
+    assert!(hint.contains(".xyz"), "Hint should mention .xyz extension. Got: {}", hint);
+    assert!(hint.contains("read_file"), "Hint should suggest read_file. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_e_cs_extension_no_hint() {
+    // file='UserService.cs' → .cs IS in def_extensions → Hint E should NOT fire
+    let ctx = make_hint_e_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "file": "UserService.cs"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    // Should find definitions (UserService.cs has defs in test index)
+    assert!(!defs.is_empty(), "Should find definitions for .cs file");
+    // No Hint E — result found normally
+    assert!(v["summary"].get("hint").is_none() || v["summary"]["hint"].is_null(),
+        "Should NOT have Hint E for supported extension .cs");
+}
+
+#[test]
+fn test_hint_e_case_insensitive_extension() {
+    // file='Config.XML' (uppercase) → should still match .xml as unsupported
+    let ctx = make_hint_e_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "file": "Config.XML"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["hint"].as_str()
+        .expect("Should have hint for .XML (case-insensitive)");
+    assert!(hint.contains("search_grep"), "Hint should suggest search_grep for .XML. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_e_comma_separated_file_filter() {
+    // file='foo.xml,bar.xml' → first term has unsupported extension → Hint E fires
+    let ctx = make_hint_e_ctx();
+    let result = handle_search_definitions(&ctx, &json!({
+        "file": "foo.xml,bar.xml"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["hint"].as_str()
+        .expect("Should have hint for comma-separated unsupported extensions");
+    assert!(hint.contains("search_grep"), "Hint should suggest search_grep. Got: {}", hint);
+}

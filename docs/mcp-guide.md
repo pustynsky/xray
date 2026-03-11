@@ -605,10 +605,11 @@ Check if all files in the repository are properly indexed. Files >500 bytes with
 
 When `search_definitions` returns 0 results, the response `summary` may include a `hint` field with a contextual suggestion to help correct the query. This is particularly useful for LLM agents that may use wrong `kind` values across languages or confuse `search_definitions` with `search_grep`.
 
-Four types of hints are generated (first matching wins):
+Five types of hints are generated (first matching wins):
 
 | Hint | When | Example |
 |------|------|---------|
+| **Unsupported extension** | `file` filter has extension not in `def_extensions` (checked first — highest priority) | If in content index: `"Extension '.xml' is not in the definition index. However, .xml files ARE indexed in the content index. Use search_grep."` If not in any index: `"Extension '.xyz' is not supported by any index. Use read_file."` |
 | **Wrong kind** | `kind` filter set + `name` or `file` filter set, but definitions exist with different kinds | `"0 results with kind='method'. Without kind filter: 8 defs found (5 function, 2 struct). Did you mean kind='function'?"` |
 | **File has definitions** | `file` filter matches files with definitions, but other filters (name/kind/parent) are too narrow | `"File 'tips.rs' has 8 definitions (5 function, 2 struct), but none match your other filters."` |
 | **Nearest name** | `name` filter set (non-regex), closest name in index has ≥80% Jaro-Winkler similarity | `"0 results for name='getusr'. Nearest match: 'getuser' (1 definition, similarity 96%)"` |

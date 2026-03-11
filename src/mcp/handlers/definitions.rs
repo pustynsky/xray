@@ -1359,6 +1359,52 @@ fn generate_zero_result_hints(
     summary: &mut Value,
     ctx: &HandlerContext,
 ) {
+    // Hint E: File filter extension not supported by definition index
+    // Must be checked FIRST — most actionable hint for unsupported file types.
+    // Skip when def_extensions is empty (no AST parsers configured — can't distinguish supported vs unsupported).
+    if !ctx.def_extensions.is_empty() {
+    if let Some(ref ff) = args.file_filter {
+        if summary.get("hint").is_none() {
+            // Check each comma-separated term for an unsupported extension
+            let terms: Vec<&str> = ff.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            for term in &terms {
+                if let Some(dot_pos) = term.rfind('.') {
+                    let ext_lower = term[dot_pos + 1..].to_lowercase();
+                    if !ext_lower.is_empty()
+                        && !ctx.def_extensions.iter().any(|e| e == &ext_lower)
+                    {
+                        let def_supported = ctx.def_extensions.iter()
+                            .map(|e| format!(".{}", e)).collect::<Vec<_>>().join(", ");
+
+                        // Check if extension is in content index (server_ext)
+                        let content_exts: Vec<&str> = ctx.server_ext.split(',')
+                            .map(|s| s.trim()).collect();
+                        let in_content_index = content_exts.iter()
+                            .any(|e| e.eq_ignore_ascii_case(&ext_lower));
+
+                        if in_content_index {
+                            summary["hint"] = json!(format!(
+                                "Extension '.{}' is not in the definition index (AST parsing supports: {}). \
+                                 However, .{} files ARE indexed in the content index. \
+                                 Use search_grep terms='<query>' ext='{}' showLines=true for content search.",
+                                ext_lower, def_supported, ext_lower, ext_lower
+                            ));
+                        } else {
+                            summary["hint"] = json!(format!(
+                                "Extension '.{}' is not supported by any index \
+                                 (definition index supports: {}, content index supports: {}). \
+                                 Use read_file to access this file directly.",
+                                ext_lower, def_supported, ctx.server_ext
+                            ));
+                        }
+                        return;
+                    }
+                }
+            }
+        }
+    }
+    } // end Hint E def_extensions guard
+
     // Hint A: Wrong kind — find what kinds exist for matching name/file
     if args.kind_filter.is_some()
         && (args.name_filter.is_some() || args.file_filter.is_some())

@@ -207,9 +207,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "PREFERRED for code exploration AND module structure discovery. \
                      REPLACES directory listing for understanding code — use file='<dirname>' to get ALL classes, methods, \
                      interfaces in ONE call (more informative than directory tree which only shows file names). \
+                     REPLACES read_file for indexed source files — use includeBody=true maxBodyLines=0 to get full file content. \
                      Search code definitions — classes, interfaces, methods, properties, enums. \
                      Uses pre-built AST index for instant results (~0.001s). \
-                     LANGUAGE-SPECIFIC: Supports {}. \
+                     LANGUAGE-SPECIFIC: Supports {}. Only these extensions are indexed — for other file types (XML, JSON, config, MD) use search_grep. \
                      Requires server started with --definitions flag. \
                      Supports 'containsLine' to find which method/class contains a given line number. \
                      Supports 'includeBody' to return actual source code inline.",

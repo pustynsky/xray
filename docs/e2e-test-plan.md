@@ -7612,6 +7612,69 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Status:** ✅ Implemented
 
+### T-HINT-E: `search_definitions` — Unsupported file extension hint
+
+**Tool:** `search_definitions`
+
+**Background:** When `search_definitions` is called with a `file` filter containing an extension not supported by the definition index (e.g., `.xml`, `.json`, `.config`), a new Hint E fires before all other hints. It checks whether the extension is indexed by the content index (`server_ext`) and gives a targeted recommendation: "Use search_grep" (if in content index) or "Use read_file" (if not indexed at all). Guard: skipped when `def_extensions` is empty.
+
+**Scenario A — extension in content index but not in definition index:**
+
+```json
+{ "file": "config.xml" }
+```
+
+**Expected:**
+- `definitions` array is empty (0 results)
+- `summary.hint` contains `".xml"`
+- `summary.hint` contains `"search_grep"`
+- `summary.hint` contains `"content index"`
+
+**Scenario B — extension not in any index:**
+
+```json
+{ "file": "data.xyz" }
+```
+
+**Expected:**
+- `definitions` array is empty
+- `summary.hint` contains `".xyz"`
+- `summary.hint` contains `"read_file"`
+
+**Scenario C — supported extension (no Hint E):**
+
+```json
+{ "file": "UserService.cs" }
+```
+
+**Expected:**
+- `definitions` array is non-empty (definitions found normally)
+- No Hint E in `summary.hint`
+
+**Scenario D — case-insensitive extension:**
+
+```json
+{ "file": "Config.XML" }
+```
+
+**Expected:**
+- `summary.hint` contains `"search_grep"` (treats `.XML` same as `.xml`)
+
+**Scenario E — comma-separated file filter:**
+
+```json
+{ "file": "foo.xml,bar.xml" }
+```
+
+**Expected:**
+- Hint E fires for first unsupported extension
+
+**Unit tests:** `test_hint_e_xml_extension_suggests_search_grep`, `test_hint_e_md_extension_not_in_content_index_suggests_read_file`, `test_hint_e_cs_extension_no_hint`, `test_hint_e_case_insensitive_extension`, `test_hint_e_comma_separated_file_filter`
+
+**Status:** ✅ Implemented
+
+---
+
 ---
 
 ### T-AUTO-CORRECT: `search_definitions` — Auto-correction for kind mismatch and name typos
@@ -8221,21 +8284,23 @@ These scenarios validate that LLM instructions correctly route tool selection to
 #### T-ROUTING-05: Non-indexed file → built-in read is acceptable
 
 **User prompt:** "Read the settings.xml config"
-**Expected tool:** Built-in file reading (OK — XML not indexed by search_definitions)
-**Forbidden first choice:** `search_definitions` (would fail — no XML parser)
-**Pass criteria:** LLM uses built-in read tool, does not hallucinate search_definitions for XML
+**Expected tool:** `search_grep` (XML is in content index, not definition index)
+**Forbidden first choice:** `search_definitions` (would fail — no XML parser, but now returns Hint E directing to search_grep)
+**Pass criteria:** LLM either uses search_grep directly (via task routing) or calls search_definitions, gets Hint E, then auto-follows to search_grep
 
 #### T-ROUTING-06: Instructions structure validation (automated)
 
-**Coverage:** Unit tests `test_task_routing_*`, `test_routing_tool_names_exist_in_definitions`, `test_routing_critical_tools_have_hints`, `test_instructions_token_budget`, `test_instructions_no_redundant_sections`, `test_instructions_fallback_rule`
+**Coverage:** Unit tests `test_task_routing_*`, `test_routing_tool_names_exist_in_definitions`, `test_routing_critical_tools_have_hints`, `test_instructions_token_budget`, `test_instructions_no_redundant_sections`, `test_instructions_fallback_rule`, `test_task_routing_has_non_code_files_entry`, `test_instructions_non_code_routing_in_output`, `test_instructions_anti_pattern_unsupported_defs`, `test_instructions_anti_pattern_absent_without_defs`
 
 1. TASK ROUTING table present in instructions
 2. Definition-dependent routes filtered when def_extensions is empty
 3. All routing tool names exist in tool_definitions()
 4. Routing-critical tools have routing hints in descriptions
-5. Instructions token budget ≤1500 (after consolidation)
+5. Instructions token budget ≤2000 (after adding non-code routing + anti-pattern)
 6. Removed sections (Quick Reference, TOOL PRIORITY, CRITICAL block) not present
 7. Fallback rule for uncertainty present
+8. Non-code files routing entry present when def_extensions non-empty
+9. Anti-pattern for unsupported definition extensions present when def_extensions non-empty
 
 
 ---
