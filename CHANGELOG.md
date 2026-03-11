@@ -13,7 +13,9 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
   1. **Tool description front-loaded** — `search_edit` description now starts with "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content" (moved from the end). LLMs read tool descriptions at every tool-selection decision — front-loading the override matches the proven pattern from `search_find`'s "[SLOW — USE search_fast INSTEAD]".
   2. **ANTI-PATTERNS expanded** — Added "NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit" to the anti-patterns block (previously only covered `list_files`/`directory_tree`/`list_directory`).
   3. **DECISION TRIGGER made concrete** — Changed from abstract "before ANY file edit" to naming exact built-in tools: "before calling apply_diff, search_and_replace, insert_content, or write_to_file (for edits) — STOP. Use search_edit instead."
-  - Root cause: Roo Code's system prompt explicitly tells the LLM to use `apply_diff` in its RULES section, which has higher authority than MCP instructions. These changes maximize the competing signal at every lever available to MCP servers (tool description, anti-patterns, decision trigger). 4 new unit tests. All 1520 unit tests + 67 E2E tests pass.
+  4. **maxBodyLines=0 explained** — The EXAMPLE line now includes "(0=unlimited, returns full file)" to prevent LLMs from falling back to `read_file` when they need an entire file (LLMs didn't know `maxBodyLines=0` means unlimited).
+  5. **Built-in file search anti-pattern** — Added "NEVER use built-in file search (regex/text search across files) when search_grep is available" to ANTI-PATTERNS.
+  - Root cause: Roo Code's system prompt explicitly tells the LLM to use `apply_diff` in its RULES section, which has higher authority than MCP instructions. These changes maximize the competing signal at every lever available to MCP servers (tool description, anti-patterns, decision trigger). Token budget raised from 1900 to 2000. 4 new unit tests. All 1520 unit tests + 67 E2E tests pass.
 
 ---
 

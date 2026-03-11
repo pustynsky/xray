@@ -349,13 +349,13 @@ fn test_instructions_token_budget() {
     let text = render_instructions(&["cs", "ts", "tsx", "sql", "rs"]);
     let word_count = text.split_whitespace().count();
     let approx_tokens = (word_count as f64 / 0.75) as usize;
-    // After consolidation + CRITICAL OVERRIDE + ERROR RECOVERY + ANTI-PATTERNS: target <=1900 tokens
-    // The override block (~100 tokens) + ERROR RECOVERY (~100 tokens) + expanded ANTI-PATTERNS (~40 tokens)
+    // After consolidation + CRITICAL OVERRIDE + ERROR RECOVERY + ANTI-PATTERNS: target <=2000 tokens
+    // The override block (~100 tokens) + ERROR RECOVERY (~100 tokens) + expanded ANTI-PATTERNS (~60 tokens)
     // are justified — prevent LLM fallback to built-in tools (saves 3-5 wasted tool calls per session)
     assert!(
-        approx_tokens < 1900,
+        approx_tokens < 2000,
         "Instructions exceed token budget: ~{} tokens ({} words). \
-         Target: <1900 (includes CRITICAL OVERRIDE + ERROR RECOVERY blocks). Remove redundant sections.",
+         Target: <2000 (includes CRITICAL OVERRIDE + ERROR RECOVERY + ANTI-PATTERNS blocks). Remove redundant sections.",
         approx_tokens, word_count
     );
 }

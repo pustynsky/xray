@@ -697,7 +697,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         out.push_str(&format!("   DECISION TRIGGER: before reading ANY file — for ANY reason (exploration, validation, fact-checking, reviewing, debugging) — check extension. If {} -> search_definitions includeBody=true.\n", ext_list));
         out.push_str(&format!("   If the file extension is NOT in {} -> reading directly is OK.\n", ext_list));
         out.push_str(&format!("   ONLY exception for {}: editing (need exact line numbers for search_edit).\n", ext_list));
-        out.push_str(&format!("   EXAMPLE: instead of reading handler.{} directly, use: search_definitions file='handler.{}' includeBody=true maxBodyLines=0\n\n", def_extensions[0], def_extensions[0]));
+        out.push_str(&format!("   EXAMPLE: instead of reading handler.{} directly, use: search_definitions file='handler.{}' includeBody=true maxBodyLines=0 (0=unlimited, returns full file)\n\n", def_extensions[0], def_extensions[0]));
     } else {
         out.push_str("NOTE: search_definitions is not available for the configured file extensions. Use search_grep for content search.\n\n");
     }
@@ -729,7 +729,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — omit kind filter to get everything at once\n");
     out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n");
     out.push_str("  - NEVER use list_files, list_directory, or directory_tree for ANY purpose when search-index is connected — even for simple directory listing. Use search_fast pattern='*' dir='<path>' dirsOnly=true for directory listing, or search_definitions file='<dir>' for code structure\n");
-    out.push_str("  - NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit — search_edit is atomic, handles whitespace correctly, supports multi-file batch, and costs fewer tokens\n\n");
+    out.push_str("  - NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit — search_edit is atomic, handles whitespace correctly, supports multi-file batch, and costs fewer tokens\n");
+    out.push_str("  - NEVER use built-in file search (regex/text search across files) when search_grep is available — search_grep uses pre-built inverted index (<1ms vs seconds)\n\n");
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task):\n");
