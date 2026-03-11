@@ -2,13 +2,16 @@
 
 Inverted index + AST-based code intelligence engine for large-scale codebases. Millisecond content search, structural code navigation (classes, methods, call trees), and native MCP server for AI agent integration — in a single statically-linked Rust binary.
 
-**Measured on a real C# codebase with 49,000 files, 846K definitions ([full benchmarks](docs/benchmarks.md)):**
+**Measured on a real production codebase with 66K files, 878K definitions ([full benchmarks](docs/benchmarks.md)):**
 
 | Metric | Value |
 |---|---|
-| Indexed content search (MCP, in-memory) | **0.6–4ms** per query (**250–6,500×** faster than live scan/ripgrep) |
-| Call tree (3 levels) | **0.5ms** |
-| Find interface implementations | **0.6ms** |
+| Indexed content search (MCP, in-memory) | **1.7–2.3ms** per query (substring, typical) |
+| Content search — high-frequency term | **~15ms** (208K occurrences) |
+| Call tree — callees (direction=down) | **0.5ms** |
+| Call tree — callers (direction=up, depth 3) | **3–11ms** |
+| Find implementations (baseType) | **1.3ms** |
+| Find by attribute | **0.4ms** |
 | Index build | **7–16s** (content), **16–32s** (AST definitions) — varies by CPU |
 | Incremental update | **<1s** per file change (content + AST re-parse) |
 | Index load from disk | **0.7–1.6s** (242 MB content index) |
@@ -20,7 +23,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 | Scenario | Without search-index | With search-index* |
 |---|---|---|
-| 🐛 **Debug a stack trace** — find the exact method, trace all callers to the API entry point | ~5 min per stack frame | **3 seconds** |
+| 🐛 **Debug a stack trace** — find the exact method, trace all callers to the API entry point | ~5 min per stack frame | **< 15 seconds** |
 | 🏗️ **Understand unfamiliar code** — map classes, call trees, and dependencies of a module you've never seen | ~40 min of manual exploration | **2 minutes** |
 | 📝 **Review a PR** — check who else calls changed methods, spot missing patterns | ~8 min of searching | **<1 second** |
 | 🔄 **Refactor safely** — find every caller, every implementation, every DI registration | multiple manual searches | **one `search_callers` call** |

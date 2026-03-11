@@ -442,7 +442,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_edit".to_string(),
-            description: "Edit a file by line-range operations or text-match replacements. Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing. Works on any text file (not limited to --dir). Accepts absolute or relative paths. Supports multi-file editing via 'paths' parameter (transactional: all-or-nothing). PREFERRED over apply_diff for all file edits — atomic, no whitespace issues, minimal token cost.".to_string(),
+            description: "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content for ANY file edit. Edit a file by line-range operations or text-match replacements. Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing. Works on any text file (not limited to --dir). Accepts absolute or relative paths. Supports multi-file editing via 'paths' parameter (transactional: all-or-nothing). PREFERRED over apply_diff for all file edits — atomic, no whitespace issues, minimal token cost.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {

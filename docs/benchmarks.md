@@ -157,7 +157,7 @@ Comprehensive comparison of MCP `tools/call` JSON-RPC queries vs `rg` (ripgrep v
 
 - **What it tests**: Recursive caller tracing with depth
 - **MCP**: `search_callers method="InitializeIndexAsync" class="StorageIndexManager" depth=3 excludeDir=["test","Test","Mock"]`
-  → Returns 48-node hierarchical call tree in 0.49ms
+  → Returns 48-node hierarchical call tree in ~0.5–11ms (varies by direction and graph density)
 - **rg**: No equivalent. Would require 7+ sequential `rg` + `read_file` calls (estimated 5+ minutes of agent round-trips)
 
 ## File Count Differences: MCP vs ripgrep
@@ -231,16 +231,17 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 | **Exclusion filters**              | ~0.025 ms                | 915,000×             | Path-based filtering on indexed data                       |
 | **AST definitions**                | 0.6–38.7 ms              | 780–89,000×          | Depends on query type (name, baseType, regex)              |
 | **AST defs + includeBody**         | ~33 ms                   | 1,310×               | Includes file I/O to read source code                      |
-| **Call tree (3 levels)**           | ~0.5 ms                  | ∞ (no rg equivalent) | Recursive traversal, zero file I/O                         |
+| **Call tree — callees (down)**     | ~0.5 ms                  | ∞ (no rg equivalent) | Pre-computed call graph traversal                          |
+| **Call tree — callers (up, depth 3)** | ~3–11 ms              | ∞ (no rg equivalent) | Recursive graph walk with DI resolution                    |
 
-**Note:** These latencies are stable and unchanged by recent optimizations. Core algorithm complexity remains the same; synthetic benchmarks show 25–37% micro-optimization gains in pure computational layers (tokenization, TF-IDF).
+**Note:** Callee traversal (direction=down) remains at ~0.5ms. Caller traversal (direction=up) is ~3–11ms due to DI resolution, test deprioritization, and popularity sorting features added since the initial benchmarks. Content search and index lookups remain stable.
 
 ### Unique Capabilities (no rg equivalent)
 
 | Capability             | Tool                 | What it does                                                                                                         |
 | ---------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
 | **AST definitions**    | `search_definitions` | Find classes/methods/interfaces by name, kind, parent, base type, attributes — with inline source code               |
-| **Call trees**         | `search_callers`     | Build hierarchical caller/callee trees across the entire codebase in < 1ms                                           |
+| **Call trees**         | `search_callers`     | Build hierarchical caller/callee trees in ~0.5ms (callees) to ~3–11ms (callers with DI resolution)                   |
 | **Structured results** | `search_grep`        | TF-IDF ranked files with occurrence counts, line numbers, context groups                                             |
 | **Substring matching** | `search_grep`        | Default `substring=true` matches inside compound identifiers (e.g., `UserMapper` finds `DeleteUserMapperCacheEntry`) |
 
@@ -269,7 +270,8 @@ Verified measurements from two machines:
 | `search_definitions` | containsLine                           | 7.7 ms                 | —                      |
 | `search_definitions` | Attribute filter                       | 29.2 ms                | —                      |
 | `search_definitions` | With includeBody                       | ~33 ms                 | —                      |
-| `search_callers`     | Call tree (3 levels)                   | 0.5 ms                 | —                      |
+| `search_callers`     | Call tree — callees (down)             | 0.5 ms                 | —                      |
+| `search_callers`     | Call tree — callers (up, depth 3)      | 3–11 ms                | —                      |
 | `search_find`        | Live filesystem walk                   | —                      | 983 ms                 |
 
 ## File Name Search
@@ -379,7 +381,8 @@ Measured on 48,779-file C# codebase (see `docs/run-benchmarks.ps1` for automated
 | Phrase search (MCP)             | ~34s    | ~345ms                                | **100×**              |
 | Regex search (MCP)              | ~34s    | 61–68ms                               | **500–555×**          |
 | AST definitions (MCP)           | 39–56s  | 0.6–38.7ms                            | **780–89,000×**       |
-| Call tree (MCP)                 | N/A     | ~0.5ms                                | ∞                     |
+| Call tree — callees (MCP)       | N/A     | ~0.5ms                                | ∞                     |
+| Call tree — callers (MCP)       | N/A     | ~3–11ms                               | ∞                     |
 | Index build (content, one-time) | N/A     | 7–16s                                 | —                     |
 | Index build (defs, one-time)    | N/A     | 16–32s                                | —                     |
 | Disk overhead                   | None    | ~327 MB (LZ4 compressed content+defs) | —                     |

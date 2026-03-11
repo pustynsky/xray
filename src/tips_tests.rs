@@ -96,6 +96,9 @@ fn test_render_instructions_contains_key_terms() {
     assert!(text.contains("list_files"), "ANTI-PATTERNS should mention list_files as prohibited");
     assert!(text.contains("list_directory"), "ANTI-PATTERNS should mention list_directory as prohibited");
     assert!(text.contains("directory_tree"), "ANTI-PATTERNS should mention directory_tree as prohibited");
+    assert!(text.contains("NEVER use apply_diff"), "ANTI-PATTERNS should mention apply_diff as prohibited");
+    assert!(text.contains("search_and_replace"), "ANTI-PATTERNS should mention search_and_replace as prohibited");
+    assert!(text.contains("insert_content"), "ANTI-PATTERNS should mention insert_content as prohibited");
     // Task routing should include directory listing
     assert!(text.contains("List files or subdirectories"), "TASK ROUTING should include directory listing");
     // Removed sections should NOT be present
@@ -294,6 +297,22 @@ fn test_routing_tool_names_exist_in_definitions() {
             );
         }
     }
+}
+
+/// search_edit description must START with "ALWAYS USE THIS" override.
+/// This is the strongest lever for preventing LLM fallback to apply_diff.
+#[test]
+fn test_search_edit_description_starts_with_override() {
+    use crate::mcp::handlers::tool_definitions;
+    let tools = tool_definitions(&vec!["rs".to_string()]);
+    let edit_tool = tools.iter().find(|t| t.name == "search_edit")
+        .expect("search_edit tool not found");
+    assert!(
+        edit_tool.description.starts_with("ALWAYS USE THIS instead of apply_diff"),
+        "search_edit description must start with 'ALWAYS USE THIS instead of apply_diff' override. \
+         Current start: '{}'",
+        &edit_tool.description[..80.min(edit_tool.description.len())]
+    );
 }
 
 /// Routing-critical tools must contain a routing hint in their description.

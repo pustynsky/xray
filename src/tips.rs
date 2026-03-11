@@ -704,7 +704,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
 
     // --- FILE EDITING DECISION TRIGGER (shortened) ---
     out.push_str("NEVER USE apply_diff, search_and_replace, or insert_content when search_edit is available.\n");
-    out.push_str("   DECISION TRIGGER: before ANY file edit, STOP and switch to search_edit.\n");
+    out.push_str("   DECISION TRIGGER: before calling apply_diff, search_and_replace, insert_content, or write_to_file (for edits) — STOP. Use search_edit instead.\n");
     out.push_str("   search_edit: atomic, no whitespace issues, multi-file batch, dryRun preview.\n\n");
     // --- RESPONSE HINT AUTO-FOLLOW (cross-tool routing + same-tool corrections) ---
     out.push_str("RESPONSE HINTS: when ANY search-index tool response includes a hint (zero results, errors, warnings, or suggestions), AUTOMATICALLY follow the hint in the same turn. Do NOT report the hint to the user and stop. Do NOT fall back to built-in tools when a hint provides an alternative.\n");
@@ -728,7 +728,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  - NEVER read indexed source files directly — use search_definitions includeBody=true (returns source code inline)\n");
     out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — omit kind filter to get everything at once\n");
     out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n");
-    out.push_str("  - NEVER use list_files, list_directory, or directory_tree for ANY purpose when search-index is connected — even for simple directory listing. Use search_fast pattern='*' dir='<path>' dirsOnly=true for directory listing, or search_definitions file='<dir>' for code structure\n\n");
+    out.push_str("  - NEVER use list_files, list_directory, or directory_tree for ANY purpose when search-index is connected — even for simple directory listing. Use search_fast pattern='*' dir='<path>' dirsOnly=true for directory listing, or search_definitions file='<dir>' for code structure\n");
+    out.push_str("  - NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit — search_edit is atomic, handles whitespace correctly, supports multi-file batch, and costs fewer tokens\n\n");
 
     // --- Strategy recipes (kept unchanged -- highest-value content) ---
     out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task):\n");

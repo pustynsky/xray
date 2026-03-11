@@ -14,9 +14,9 @@ Real-world use cases, future ideas, and a case study demonstrating deep architec
 
 ```
 Need to find something?
-├── Know the FILE NAME?        → search_fast       (~35ms)
+├── Know the FILE NAME?        → search_fast       (~25ms)
 ├── Know the CLASS or METHOD?  → search_definitions (~1ms)
-├── Need a CALL CHAIN?         → search_callers     (<1ms)
+├── Need a CALL CHAIN?         → search_callers     (~3-11ms)
 ├── Need TEXT CONTENT?         → search_grep        (~1ms)
 ├── Need FILE COUNT only?      → search_grep countOnly=true
 └── Not sure?                  → search_help
@@ -54,7 +54,7 @@ Total: ~2 minutes + manual analysis
 {"file": "OrderManager.cs", "containsLine": 145}
 → ProcessOrderAsync (lines 120-160), class: OrderManager
 
-// 2. Trace callers (< 1ms)
+// 2. Trace callers (~3-11ms)
 {"method": "ProcessOrderAsync", "class": "OrderManager", "depth": 3}
 → OrderController.CreateOrder (line 56)
     └── OrderManager.ProcessOrderAsync (line 145)
@@ -70,7 +70,7 @@ Total: 3 milliseconds
 </td></tr>
 </table>
 
-**Speedup: ~40,000×**
+**Speedup: ~20,000×**
 
 ---
 
@@ -83,7 +83,7 @@ Total: 3 milliseconds
 {"name": "PaymentModule", "maxResults": 50, "includeBody": false}
 → PaymentService, IPaymentGateway, PaymentValidator, PaymentController...
 
-// Step 2: Trace call chain from API to data layer (<1ms)
+// Step 2: Trace call chain from API to data layer (~3-11ms)
 {"method": "ProcessPayment", "class": "PaymentService", "depth": 5, "direction": "down"}
 → PaymentService.ProcessPayment
     ├── PaymentValidator.ValidateRequest
@@ -135,7 +135,7 @@ Total: ~8 minutes
 </td><td>
 
 ```json
-// "Who else calls this?" (<1ms)
+// "Who else calls this?" (~3-11ms)
 {"method": "UpdateOrder", "class": "OrderService", "depth": 2}
 → 3 callers found in call tree
 
@@ -165,7 +165,7 @@ Total: <3 milliseconds
 {"terms": "OrderService", "substring": true, "showLines": true, "contextLines": 2}
 → 34 files, 89 occurrences (with surrounding code)
 
-// Confirm all callers (<1ms)
+// Confirm all callers (~3-11ms)
 {"method": "ProcessOrder", "class": "OrderService", "depth": 5}
 → full caller tree
 
@@ -191,7 +191,7 @@ Total: <3 milliseconds
 {"parent": "FeatureXManager", "kind": "method"}
 → 14 methods
 
-// How deep? (<1ms)
+// How deep? (~3-11ms)
 {"method": "ExecuteFeatureX", "class": "FeatureXManager", "depth": 5}
 → call tree shows 3 layers deep, touches 2 external services
 ```
@@ -272,8 +272,8 @@ Total: <3 milliseconds
 
 | Scenario | Without | With | Speedup |
 |---|---|---|---|
-| Single task (20 searches) | ~17 min | ~0.2 sec | **5,000×** |
-| Stack trace (1 frame) | ~5 min | ~3 sec | **100×** |
+| Single task (20 searches) | ~17 min | ~0.5 sec | **2,000×** |
+| Stack trace (1 frame) | ~5 min | ~15 sec | **20×** |
 | Code review (10 questions) | ~8 min | ~0.1 sec | **5,000×** |
 | Architecture doc | ~40 min | ~2 min | **20×** |
 | Task scope estimation | ~5 min | ~30 sec | **10×** |
@@ -336,7 +336,7 @@ Using only `search_definitions`, `search_callers`, and `search_grep`:
 {"name": "PostTrigger", "parent": "ApiController", "includeBody": true}
 → full source: validates input → checks throttling → creates job → schedules → returns 202
 
-// Trace who calls the worker method (<1ms)
+// Trace who calls the worker method (~3-11ms)
 {"method": "RunScanAsync", "class": "Manager", "depth": 3, "direction": "up"}
 → WorkerService.RunScanRequest → Manager.RunScanAsync
 
@@ -395,7 +395,7 @@ All of this was done **without reading any documentation** — purely by navigat
 
 ## Why search-index Makes All of This Possible
 
-**AST index + call graph + inverted text index in one tool** at **<1ms per query** across **65K+ files**.
+**AST index + call graph + inverted text index in one tool** at **sub-millisecond to low single-digit milliseconds per query** across **65K+ files**.
 
 Without it, each scenario requires minutes of ripgrep per query, manual file navigation, or heavyweight tools like Roslyn/CodeQL with long cold starts.
 

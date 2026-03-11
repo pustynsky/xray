@@ -6,6 +6,17 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-03-11
+
+### Features
+- **Strengthened `search_edit` override to prevent LLM fallback to `apply_diff`** — Three changes to reduce the dominant failure mode where LLMs default to Roo Code's built-in `apply_diff` instead of `search_edit`:
+  1. **Tool description front-loaded** — `search_edit` description now starts with "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content" (moved from the end). LLMs read tool descriptions at every tool-selection decision — front-loading the override matches the proven pattern from `search_find`'s "[SLOW — USE search_fast INSTEAD]".
+  2. **ANTI-PATTERNS expanded** — Added "NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit" to the anti-patterns block (previously only covered `list_files`/`directory_tree`/`list_directory`).
+  3. **DECISION TRIGGER made concrete** — Changed from abstract "before ANY file edit" to naming exact built-in tools: "before calling apply_diff, search_and_replace, insert_content, or write_to_file (for edits) — STOP. Use search_edit instead."
+  - Root cause: Roo Code's system prompt explicitly tells the LLM to use `apply_diff` in its RULES section, which has higher authority than MCP instructions. These changes maximize the competing signal at every lever available to MCP servers (tool description, anti-patterns, decision trigger). 4 new unit tests. All 1520 unit tests + 67 E2E tests pass.
+
+---
+
 ## 2026-03-10
 
 ### Features
@@ -696,8 +707,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric                  | Value                       |
 | ----------------------- | --------------------------- |
-| Unit tests (latest)     | ~1470 (with lang-rust)      |
-| E2E tests (latest)      | 66                          |
+| Unit tests (latest)     | ~1520 (with lang-rust)      |
+| E2E tests (latest)      | 67                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |
 | Memory reduction        | 3.7 GB → 2.1 GB (−43%)      |
