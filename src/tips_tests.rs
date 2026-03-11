@@ -364,6 +364,8 @@ fn test_instructions_token_budget() {
 #[test]
 fn test_instructions_no_redundant_sections() {
     let text = render_instructions(&["cs", "ts"]);
+    assert!(text.contains("=== SEARCH_INDEX_POLICY ==="), "Instructions should include named policy wrapper");
+    assert!(text.contains("================================"), "Instructions should include policy closing marker");
     assert!(!text.contains("Quick Reference"), "Quick Reference should be removed (replaced by TASK ROUTING)");
     assert!(!text.contains("TOOL PRIORITY"), "TOOL PRIORITY should be removed (replaced by TASK ROUTING)");
     assert!(!text.contains("CRITICAL: ALWAYS use search-index tools"), "Old CRITICAL block should be removed");

@@ -1714,6 +1714,76 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts,sql
 
 ---
 
+### T39b: `serve` — MCP initialize instructions include named policy wrapper
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- JSON-RPC response `result.instructions` starts with `=== SEARCH_INDEX_POLICY ===`
+- `result.instructions` ends with `================================`
+- Instructions body still contains the existing routing / strategy guidance
+
+**Validates:** MCP initialization rematerializes a stable named policy anchor for the agent before any tool call.
+
+---
+
+### T39c: `serve` — Successful JSON tool responses include policy reminder and next-step hint
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- Successful JSON response contains `summary.policyReminder`
+- `summary.policyReminder` contains `SEARCH_INDEX_POLICY`
+- Selected tools such as `search_grep` include `summary.nextStepHint`
+- Error responses do not gain `policyReminder` / `nextStepHint`
+- Successful non-JSON responses remain unchanged
+
+**Validates:** Response guidance is injected only into successful JSON tool results and survives normal tool dispatch.
+
+---
+
+### T40a: `serve` — `search_help` includes policy reminder but omits next-step hint
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_help","arguments":{}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- Successful JSON response contains `summary.policyReminder`
+- `summary.nextStepHint` is absent
+- Response is still subject to the dedicated `search_help` response budget
+
+**Validates:** `search_help` participates in policy re-materialization without emitting a misleading next-step tool hint.
+
+---
+
+
 ### T40: `serve` — MCP search_help returns best practices
 
 **Command:**

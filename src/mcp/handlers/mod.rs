@@ -693,6 +693,8 @@ pub fn dispatch_tool(
         return result;
     }
 
+    let result = utils::inject_response_guidance(result, tool_name);
+
     // Determine effective response budget:
     // - search_help: 32KB (static reference content)
     // - Multi-method callers: 32KB × N, capped at 128KB
@@ -729,12 +731,11 @@ pub fn dispatch_tool(
     };
 
     if ctx.metrics {
-        // inject_metrics uses ctx.max_response_bytes internally — override for search_help
         if tool_name == "search_help" {
             // search_help is static content, no need for metrics injection
             utils::truncate_response_if_needed(result, effective_max)
         } else {
-            utils::inject_metrics(result, ctx, dispatch_start)
+            utils::inject_metrics(result, ctx, dispatch_start, effective_max)
         }
     } else {
         // Even without metrics, apply response size truncation

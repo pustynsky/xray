@@ -51,6 +51,7 @@ fn test_initialize_includes_instructions() {
     let result = InitializeResult::new(crate::definitions::definition_extensions());
     let json = serde_json::to_value(&result).unwrap();
     let instructions = json["instructions"].as_str().unwrap();
+    assert!(instructions.contains("=== SEARCH_INDEX_POLICY ==="), "instructions should have named policy wrapper");
     assert!(instructions.contains("TASK ROUTING"), "instructions should have TASK ROUTING table");
     assert!(instructions.contains("search_fast"), "instructions should mention search_fast");
     assert!(instructions.contains("search_callers"), "instructions should mention search_callers");

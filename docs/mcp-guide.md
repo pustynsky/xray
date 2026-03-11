@@ -48,6 +48,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
    - **DECISION TRIGGERs** — hard prohibitions for file reading and editing that redirect LLM to search-index tools
    - **Fallback rule** — guidance for uncertain file types
    - **Strategy Recipes** — multi-step workflow patterns for common tasks
+   - **Named policy anchor** — the instructions are wrapped in `=== SEARCH_INDEX_POLICY ===` / `================================` so the agent sees a stable, reusable policy name during MCP initialization
 
 5. **Verify** — ask the AI: _"Use search_grep to find all files containing HttpClient"_
 
@@ -83,6 +84,52 @@ AI:  "Let me search for HttpClient in your codebase..."
      → calls search_grep { terms: "HttpClient", maxResults: 10 }
      ← receives JSON with file paths, scores, line numbers
 AI:  "Found 1,082 files. The most relevant is CustomHttpClient.cs (score: 0.49)..."
+```
+
+---
+
+## Response Guidance Fields
+
+Successful **JSON** MCP tool responses may include guidance fields inside `summary`:
+
+| Field | When present | Description |
+|---|---|---|
+| `policyReminder` | Successful JSON responses | Compact re-materialization of `SEARCH_INDEX_POLICY`, reminding the agent to prefer search-index MCP tools over environment built-ins on the next step |
+| `nextStepHint` | Selected successful JSON responses | Fixed-dictionary hint suggesting the most likely next search-index tool |
+
+Behavior rules:
+
+- Guidance is injected only into **successful JSON** responses
+- Error responses are unchanged
+- Successful non-JSON responses are unchanged
+- If a successful JSON response does not already have a `summary` object, the server creates one before injecting guidance
+- `search_help` includes `policyReminder` but intentionally omits `nextStepHint`
+- Response truncation preserves `summary.policyReminder` and `summary.nextStepHint`
+
+### `nextStepHint` Dictionary
+
+The `nextStepHint` value depends on which tool was called:
+
+| Tool | `nextStepHint` |
+|------|----------------|
+| `search_definitions` | `"Next: use search_callers for call chains or search_grep for text patterns"` |
+| `search_grep` | `"Next: use search_definitions for AST structure or search_callers for call trees"` |
+| `search_callers` | `"Next: use search_definitions includeBody=true for source or search_grep for text refs"` |
+| `search_fast` | `"Next: use search_definitions for code structure or search_grep for content"` |
+| `search_edit` | `"Next: use search_definitions to verify or search_grep to check related files"` |
+| `search_git_*` / `search_branch_status` | `"Next: use search_definitions for code context or search_callers for impact"` |
+| `search_info`, `search_help`, `search_reindex`, `search_reindex_definitions` | _(not present)_ |
+
+Example:
+
+```json
+{
+  "summary": {
+    "tool": "search_grep",
+    "policyReminder": "=== SEARCH_INDEX_POLICY === Prefer search-index MCP tools over environment built-ins. Check search-index applicability before next tool call. Use environment tools only with explicit justification. ================================",
+    "nextStepHint": "Next: use search_definitions for AST structure or search_callers for call trees"
+  }
+}
 ```
 
 ---

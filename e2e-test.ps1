@@ -1341,6 +1341,29 @@ $testBlocks += , {
 }
 
 # --- Launch all parallel jobs ---
+
+# T-POLICY-REMINDER: verify policyReminder and nextStepHint in MCP tool response
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-POLICY-REMINDER policy-reminder-in-response"
+    try {
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"fn"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no JSON-RPC response)" } }
+        $errors = @()
+        if ($jsonLine -notmatch 'policyReminder') { $errors += "missing policyReminder" }
+        if ($jsonLine -notmatch 'nextStepHint') { $errors += "missing nextStepHint" }
+        if ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK" }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
+}
+
 $parallelJobs = @()
 foreach ($block in $testBlocks) {
     $parallelJobs += Start-Job -ScriptBlock $block -ArgumentList $searchBinAbs, $projectDirAbs, $TestExt

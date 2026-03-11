@@ -18,6 +18,8 @@ use std::sync::{Arc, RwLock};
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), ..Default::default() };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["policyReminder"].as_str().is_some());
+    assert!(output["summary"]["nextStepHint"].as_str().is_some());
     assert!(output["summary"].get("responseBytes").is_none());
     assert!(output["summary"].get("estimatedTokens").is_none());
 }
@@ -29,6 +31,8 @@ use std::sync::{Arc, RwLock};
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
     let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["policyReminder"].as_str().is_some());
+    assert!(output["summary"]["nextStepHint"].as_str().is_some());
     assert!(output["summary"]["searchTimeMs"].as_f64().is_some());
     assert!(output["summary"]["responseBytes"].as_u64().is_some());
     assert!(output["summary"]["estimatedTokens"].as_u64().is_some());
@@ -40,6 +44,49 @@ use std::sync::{Arc, RwLock};
     let result = dispatch_tool(&ctx, "search_grep", &json!({}));
     assert!(result.is_error);
     assert!(!result.content[0].text.contains("searchTimeMs"));
+    assert!(!result.content[0].text.contains("policyReminder"));
+}
+
+#[test]
+fn test_search_help_has_policy_but_no_next_step_hint() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "search_help", &json!({}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["policyReminder"].as_str().is_some());
+    assert!(output["summary"].get("nextStepHint").is_none());
+}
+
+#[test]
+fn test_search_info_has_policy_but_no_next_step_hint() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "search_info", &json!({}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["policyReminder"].as_str().is_some());
+    assert!(output["summary"].get("nextStepHint").is_none());
+}
+
+#[test]
+fn test_search_reindex_has_policy_but_no_next_step_hint() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "search_reindex", &json!({}));
+    // search_reindex with empty ctx may error (no dir), but if it returns success JSON, verify guidance
+    if !result.is_error {
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(output["summary"]["policyReminder"].as_str().is_some());
+        assert!(output["summary"].get("nextStepHint").is_none());
+    }
+}
+
+#[test]
+fn test_search_reindex_definitions_has_policy_but_no_next_step_hint() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
+    // search_reindex_definitions with empty ctx may error (no def_index), but if it returns success JSON, verify guidance
+    if !result.is_error {
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(output["summary"]["policyReminder"].as_str().is_some());
+        assert!(output["summary"].get("nextStepHint").is_none());
+    }
 }
 
 #[test] fn test_metrics_search_time_is_positive() {

@@ -335,6 +335,23 @@ fn test_truncate_response_if_needed_small() {
 }
 
 #[test]
+fn test_inject_response_guidance_creates_summary() {
+    let result = ToolCallResult::success(r#"{"files":[]}"#.to_string());
+    let result = inject_response_guidance(result, "search_grep");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output.get("summary").is_some());
+    assert!(output["summary"]["policyReminder"].as_str().is_some());
+    assert!(output["summary"]["nextStepHint"].as_str().is_some());
+}
+
+#[test]
+fn test_inject_response_guidance_skips_non_json_success() {
+    let result = ToolCallResult::success("plain text".to_string());
+    let result = inject_response_guidance(result, "search_grep");
+    assert_eq!(result.content[0].text, "plain text");
+}
+
+#[test]
 fn test_truncate_definitions_array() {
     // Build a search_definitions-style response with many definitions — way over budget
     let mut defs = Vec::new();
@@ -421,6 +438,33 @@ fn test_truncate_grep_hint_unchanged() {
         "Grep hint should mention countOnly, got: {}", hint);
     assert!(!hint.contains("kind"),
         "Grep hint should NOT mention definitions filters, got: {}", hint);
+}
+
+#[test]
+fn test_truncate_preserves_guidance_fields() {
+    let mut files = Vec::new();
+    for i in 0..1000 {
+        files.push(json!({
+            "path": format!("/some/long/path/to/file_{}.cs", i),
+            "score": 0.001,
+            "occurrences": 1,
+            "lines": [1],
+        }));
+    }
+    let output = json!({
+        "files": files,
+        "summary": {
+            "totalFiles": 1000,
+            "totalOccurrences": 1000,
+            "policyReminder": "policy",
+            "nextStepHint": "hint"
+        }
+    });
+
+    let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+    let summary = result.get("summary").unwrap();
+    assert_eq!(summary.get("policyReminder").and_then(|v| v.as_str()), Some("policy"));
+    assert_eq!(summary.get("nextStepHint").and_then(|v| v.as_str()), Some("hint"));
 }
 
 // ─── best_match_tier relevance ranking tests ─────────────────────
