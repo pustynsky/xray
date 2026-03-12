@@ -235,9 +235,9 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
             example: "MCP: search_definitions parent='UserService', includeBody=true, maxBodyLines=20. Also: search_definitions name='Program,Startup,OrderService' includeBody=true -> reads multiple classes at once, faster than multiple read_file calls".into(),
         },
         Tip {
-            rule: "Body budgets: 0 means unlimited".into(),
-            why: "Default limits: 100 lines/def, 500 total. Set maxBodyLines=0, maxTotalBodyLines=0 for unlimited output.".into(),
-            example: "MCP: search_definitions parent='UserService', includeBody=true, maxBodyLines=0, maxTotalBodyLines=0".into(),
+            rule: "Body budgets: manage with maxBodyLines and maxTotalBodyLines".into(),
+            why: "Default limits: 100 lines/def, 500 total. Strategies: (1) Wide overview: includeBody=true maxBodyLines=30 -- gets first 30 lines of many methods. (2) Targeted read: name='SpecificMethod' includeBody=true maxBodyLines=0 -- full body of one method. (3) Unlimited: maxBodyLines=0 maxTotalBodyLines=0 -- removes all limits (large response). If response contains definitions with 'bodyOmitted', narrow with name='<specific names>' to read them individually.".into(),
+            example: "Overview: includeBody=true maxBodyLines=30. Targeted: name='ProcessOrder' includeBody=true maxBodyLines=0. Unlimited: maxBodyLines=0, maxTotalBodyLines=0. After bodyOmitted: name='OmittedMethod1,OmittedMethod2' includeBody=true".into(),
         },
         Tip {
             rule: "Reconnaissance: use countOnly=true".into(),

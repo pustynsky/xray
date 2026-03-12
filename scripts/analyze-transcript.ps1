@@ -240,6 +240,30 @@ function Get-ParamDiff {
 function Analyze-TruncationCause {
     param([hashtable]$episode)
     $causes = @()
+
+    # Check response data for response-size-limit indicators
+    $resultText = $episode._result_raw
+    if ($resultText -match 'capped lines' -or $resultText -match 'removed lineContent' -or $resultText -match 'lineContentOmitted') {
+        $causes += 'response_size_limit'
+    }
+    # Detect when returned < maxResults despite totalResults > returned (byte budget exceeded)
+    $returnedMatch = [regex]::Match($resultText, '"returned"\s*:\s*(\d+)')
+    $totalMatch = [regex]::Match($resultText, '"totalResults"\s*:\s*(\d+)')
+    if ($returnedMatch.Success -and $totalMatch.Success) {
+        $returned = [int]$returnedMatch.Groups[1].Value
+        $total = [int]$totalMatch.Groups[1].Value
+        try {
+            $args_ = $episode._call_args | ConvertFrom-Json -ErrorAction Stop
+            $maxR = if ($args_.maxResults) { [int]$args_.maxResults } else { 100 }
+            if ($returned -lt $maxR -and $total -gt $returned) {
+                # Truncated below maxResults — byte budget was the limit
+                if ($causes -notcontains 'response_size_limit') {
+                    $causes += 'response_size_limit'
+                }
+            }
+        } catch {}
+    }
+
     try {
         $args_ = $episode._call_args | ConvertFrom-Json -ErrorAction Stop
         # Wide file scope (no specific file or very broad path)
@@ -268,13 +292,25 @@ function Has-Hint {
     return ($resultText -match '"hint"\s*:' -or $resultText -match '"nextStepHint"\s*:')
 }
 
+function Has-CorrectionHint {
+    param([string]$resultText)
+    # Only truncation/correction hints, not informational nextStepHint
+    return ($resultText -match '"hint"\s*:\s*"[^"]*(?:truncat|narrow|reduce|filter|scope)[^"]*"')
+}
+
 function Extract-Hints {
     param([string]$resultText)
-    [System.Collections.Generic.List[string]]$hints = @()
+    [System.Collections.Generic.List[hashtable]]$hints = @()
     $m = [regex]::Match($resultText, '"hint"\s*:\s*"([^"]+)"')
-    if ($m.Success) { $hints.Add($m.Groups[1].Value) }
+    if ($m.Success) {
+        $hintText = $m.Groups[1].Value
+        $isCorrective = $hintText -match '(?i)truncat|narrow|reduce|filter|scope|too many'
+        $hints.Add(@{ text = $hintText; type = if ($isCorrective) { 'correction' } else { 'informational' } })
+    }
     $m = [regex]::Match($resultText, '"nextStepHint"\s*:\s*"([^"]+)"')
-    if ($m.Success) { $hints.Add($m.Groups[1].Value) }
+    if ($m.Success) {
+        $hints.Add(@{ text = $m.Groups[1].Value; type = 'informational' })
+    }
     return @(,$hints)
 }
 
@@ -464,20 +500,44 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
     }
 
     # hint_followed / hint_ignored
-    if ($ep._hints.Count -gt 0) {
+    # Only correction hints count for ignored metric; informational nextStepHints are skipped
+    $correctionHints = @($ep._hints | Where-Object { $_.type -eq 'correction' })
+    $infoHints = @($ep._hints | Where-Object { $_.type -eq 'informational' })
+
+    if ($correctionHints.Count -gt 0) {
         $hintFollowed = $false
-        if ($e + 1 -lt $episodes.Count) {
-            $nextEp = $episodes[$e + 1]
-            foreach ($hint in $ep._hints) {
-                # Check if next episode's tool or params relate to the hint
-                if ($hint -match 'search_grep' -and $nextEp.tool -eq 'search_grep') { $hintFollowed = $true }
-                elseif ($hint -match 'search_definitions' -and $nextEp.tool -eq 'search_definitions') { $hintFollowed = $true }
-                elseif ($hint -match 'search_callers' -and $nextEp.tool -eq 'search_callers') { $hintFollowed = $true }
-                elseif ($hint -match 'search_fast' -and $nextEp.tool -eq 'search_fast') { $hintFollowed = $true }
+        # Check next 2 MCP episodes (model may do built-in calls between MCP calls)
+        $lookAhead = [math]::Min($e + 2, $episodes.Count - 1)
+        for ($la = $e + 1; $la -le $lookAhead; $la++) {
+            $nextEp = $episodes[$la]
+            foreach ($hint in $correctionHints) {
+                $hintText = $hint.text
+                if ($hintText -match 'search_grep' -and $nextEp.tool -eq 'search_grep') { $hintFollowed = $true }
+                elseif ($hintText -match 'search_definitions' -and $nextEp.tool -eq 'search_definitions') { $hintFollowed = $true }
+                elseif ($hintText -match 'search_callers' -and $nextEp.tool -eq 'search_callers') { $hintFollowed = $true }
+                elseif ($hintText -match 'search_fast' -and $nextEp.tool -eq 'search_fast') { $hintFollowed = $true }
+                # Also count as followed if same tool with different params (progressive refinement)
+                elseif ($nextEp.tool -eq $ep.tool -and $nextEp.server -eq $ep.server -and $nextEp._call_args -ne $ep._call_args) { $hintFollowed = $true }
             }
         }
         if ($hintFollowed) { $ep.tags.Add('hint_followed') }
         else { $ep.tags.Add('hint_ignored') }
+    }
+    elseif ($infoHints.Count -gt 0) {
+        # Informational hints: check if followed but don't flag as ignored
+        $hintFollowed = $false
+        if ($e + 1 -lt $episodes.Count) {
+            $nextEp = $episodes[$e + 1]
+            foreach ($hint in $infoHints) {
+                $hintText = $hint.text
+                if ($hintText -match 'search_grep' -and $nextEp.tool -eq 'search_grep') { $hintFollowed = $true }
+                elseif ($hintText -match 'search_definitions' -and $nextEp.tool -eq 'search_definitions') { $hintFollowed = $true }
+                elseif ($hintText -match 'search_callers' -and $nextEp.tool -eq 'search_callers') { $hintFollowed = $true }
+                elseif ($hintText -match 'search_fast' -and $nextEp.tool -eq 'search_fast') { $hintFollowed = $true }
+            }
+        }
+        if ($hintFollowed) { $ep.tags.Add('hint_followed') }
+        # Don't add 'hint_ignored' for informational hints — it's not a problem
     }
 }
 
