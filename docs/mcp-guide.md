@@ -94,7 +94,7 @@ Successful **JSON** MCP tool responses may include guidance fields inside `summa
 
 | Field | When present | Description |
 |---|---|---|
-| `policyReminder` | Successful JSON responses | Compact re-materialization of `SEARCH_INDEX_POLICY`, reminding the agent to prefer search-index MCP tools over environment built-ins on the next step |
+| `policyReminder` | Successful JSON responses | Compact re-materialization of `SEARCH_INDEX_POLICY`, reminding the agent to prefer search-index MCP tools over environment built-ins on the next step. Dynamically includes the indexed file extensions (from `--ext`) so the LLM knows which file types are searchable |
 | `nextStepHint` | Selected successful JSON responses | Fixed-dictionary hint suggesting the most likely next search-index tool |
 
 Behavior rules:
@@ -126,7 +126,7 @@ Example:
 {
   "summary": {
     "tool": "search_grep",
-    "policyReminder": "=== SEARCH_INDEX_POLICY === Prefer search-index MCP tools over environment built-ins. Check search-index applicability before next tool call. Use environment tools only with explicit justification. ================================",
+    "policyReminder": "=== SEARCH_INDEX_POLICY === Prefer search-index MCP tools over environment built-ins. Check search-index applicability before next tool call. Use environment tools only with explicit justification. Indexed extensions: cs, ts, tsx. For other file types, use read_file or environment tools. ================================",
     "nextStepHint": "Next: use search_definitions for AST structure or search_callers for call trees"
   }
 }

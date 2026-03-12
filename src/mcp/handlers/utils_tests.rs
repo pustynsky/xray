@@ -337,18 +337,50 @@ fn test_truncate_response_if_needed_small() {
 #[test]
 fn test_inject_response_guidance_creates_summary() {
     let result = ToolCallResult::success(r#"{"files":[]}"#.to_string());
-    let result = inject_response_guidance(result, "search_grep");
+    let result = inject_response_guidance(result, "search_grep", "rs, md");
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output.get("summary").is_some());
-    assert!(output["summary"]["policyReminder"].as_str().is_some());
+    let reminder = output["summary"]["policyReminder"].as_str().unwrap();
+    assert!(reminder.contains("SEARCH_INDEX_POLICY"), "should contain policy header");
+    assert!(reminder.contains("Indexed extensions: rs, md"), "should contain indexed extensions");
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
 }
 
 #[test]
 fn test_inject_response_guidance_skips_non_json_success() {
     let result = ToolCallResult::success("plain text".to_string());
-    let result = inject_response_guidance(result, "search_grep");
+    let result = inject_response_guidance(result, "search_grep", "rs, md");
     assert_eq!(result.content[0].text, "plain text");
+}
+
+#[test]
+fn test_inject_response_guidance_empty_ext() {
+    let result = ToolCallResult::success(r#"{"files":[]}"#.to_string());
+    let result = inject_response_guidance(result, "search_grep", "");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let reminder = output["summary"]["policyReminder"].as_str().unwrap();
+    assert!(reminder.contains("SEARCH_INDEX_POLICY"), "should contain policy header");
+    assert!(!reminder.contains("Indexed extensions"), "should NOT contain extensions when empty");
+}
+
+#[test]
+fn test_build_policy_reminder_with_extensions() {
+    let reminder = build_policy_reminder("rs, md");
+    assert!(reminder.contains("Indexed extensions: rs, md"));
+    assert!(reminder.contains("For other file types"));
+}
+
+#[test]
+fn test_build_policy_reminder_empty_ext() {
+    let reminder = build_policy_reminder("");
+    assert!(!reminder.contains("Indexed extensions"));
+    assert!(reminder.contains("SEARCH_INDEX_POLICY"));
+}
+
+#[test]
+fn test_build_policy_reminder_whitespace_only_ext() {
+    let reminder = build_policy_reminder("  ");
+    assert!(!reminder.contains("Indexed extensions"));
 }
 
 #[test]

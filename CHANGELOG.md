@@ -13,6 +13,10 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 - **`search_definitions` auto-summary for broad queries** — When `search_definitions` finds more results than `maxResults` and no `name` filter is set (and `includeBody` is false), it automatically returns a **directory-grouped summary** (`autoSummary`) instead of truncated entries. Each group shows: subdirectory name, total definition count, counts by kind (class, method, etc.), and top-3 largest classes/interfaces by line count. Includes a contextual `hint` with concrete subdirectory and class name suggestions. This eliminates the "map then read" pattern where LLMs needed `search_fast dirsOnly=true` + multiple narrowing `search_definitions` calls to explore large code modules. To get individual definitions, add a `name` filter or narrow the `file` scope. Updated Architecture Exploration strategy recipe and anti-patterns in LLM instructions. 11 new unit tests. All 1547 unit tests pass.
 
+- **Dynamic `policyReminder` with indexed extensions** — `summary.policyReminder` in every successful MCP response now dynamically includes the server's `--ext` file extensions (e.g., `"Indexed extensions: rs, md. For other file types, use read_file or environment tools."`). This proactively prevents LLMs from calling search-index tools for non-indexed file types (e.g., `.ps1`), which previously caused wasted round-trips with 0 results. When `--ext` is empty, the extensions line is omitted. 5 new unit tests.
+
+- **`search_grep` zero-result hint for non-indexed extensions** — When `search_grep` returns 0 results and the `ext` filter targets a non-indexed extension (not in `--ext`), the response now includes a `summary.hint` explaining that the extension is not in the content index and suggesting `read_file`. Only fires when `ext` filter is explicitly set — no noise on generic zero-result searches. 5 new unit tests.
+
 ---
 
 

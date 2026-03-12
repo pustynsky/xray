@@ -370,6 +370,64 @@ fn build_grep_response(
     ToolCallResult::success(json_to_string(&output))
 }
 
+/// When grep returns 0 results and `ext` filter targets a non-indexed extension,
+/// inject a hint explaining why no results were found.
+/// Only fires when ext filter is explicitly set — avoids noise on generic searches.
+fn inject_grep_ext_hint(
+    result: &mut ToolCallResult,
+    ext_filter: &Option<String>,
+    ctx: &HandlerContext,
+) {
+    // Only hint when ext filter is explicitly set
+    let ext_str = match ext_filter {
+        Some(e) => e,
+        None => return,
+    };
+
+    let text = match result.content.first() {
+        Some(c) => &c.text,
+        None => return,
+    };
+
+    let mut output: Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Check if totalFiles == 0
+    let total_files = output.pointer("/summary/totalFiles")
+        .and_then(|v| v.as_u64()).unwrap_or(1); // default to 1 = no hint
+    if total_files > 0 { return; }
+
+    // Parse server extensions
+    let server_exts: Vec<&str> = ctx.server_ext
+        .split(|c: char| c == ',' || c.is_whitespace())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    // Find non-indexed extensions in the filter
+    let non_indexed: Vec<&str> = ext_str.split(',')
+        .map(|s| s.trim())
+        .filter(|e| !e.is_empty() && !server_exts.iter().any(|s| s.eq_ignore_ascii_case(e)))
+        .collect();
+
+    if non_indexed.is_empty() { return; }
+
+    let hint = format!(
+        "Extension(s) '{}' not in content index (indexed: {}). \
+         Use read_file for these file types.",
+        non_indexed.join(", "),
+        ctx.server_ext,
+    );
+
+    if let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) {
+        summary.insert("hint".to_string(), json!(hint));
+    }
+
+    result.content[0].text = json_to_string(&output);
+}
+
+
 pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let parsed = match parse_grep_args(args, &ctx.server_dir) {
         Ok(p) => p,
@@ -402,7 +460,9 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
 
     // --- Substring search mode
     if parsed.use_substring {
-        return handle_substring_search(ctx, &index, &parsed.terms_str, &grep_params);
+        let mut result = handle_substring_search(ctx, &index, &parsed.terms_str, &grep_params);
+        inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+        return result;
     }
 
     // --- Phrase search mode
@@ -415,7 +475,9 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
         if phrases.is_empty() {
             return ToolCallResult::error("No search terms provided".to_string());
         }
-        return handle_multi_phrase_search(ctx, &index, &phrases, &grep_params);
+        let mut result = handle_multi_phrase_search(ctx, &index, &phrases, &grep_params);
+        inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+        return result;
     }
 
     // --- Normal token search
@@ -469,6 +531,8 @@ pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCall
                 *text = json_to_string(&output);
             }
     }
+
+    inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
 
     result
 }

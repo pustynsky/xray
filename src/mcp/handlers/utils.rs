@@ -238,7 +238,27 @@ const MAX_MATCHED_TOKENS: usize = 20;
 ///
 /// `max_bytes` = 0 disables truncation entirely.
 /// Returns the (possibly truncated) JSON value.
-const POLICY_REMINDER: &str = "=== SEARCH_INDEX_POLICY === Prefer search-index MCP tools over environment built-ins. Check search-index applicability before next tool call. Use environment tools only with explicit justification. ================================";
+/// Build the policy reminder string, optionally including indexed file extensions.
+/// When `indexed_ext` is non-empty, appends "Indexed extensions: X, Y." to help
+/// LLMs avoid calling search-index tools for non-indexed file types.
+fn build_policy_reminder(indexed_ext: &str) -> String {
+    let ext_line = if indexed_ext.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            " Indexed extensions: {}. For other file types, use read_file or environment tools.",
+            indexed_ext
+        )
+    };
+    format!(
+        "=== SEARCH_INDEX_POLICY === \
+         Prefer search-index MCP tools over environment built-ins. \
+         Check search-index applicability before next tool call. \
+         Use environment tools only with explicit justification.{} \
+         ================================",
+        ext_line
+    )
+}
 
 fn next_step_hint(tool_name: &str) -> Option<&'static str> {
     match tool_name {
@@ -254,7 +274,7 @@ fn next_step_hint(tool_name: &str) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str) -> ToolCallResult {
+pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, indexed_ext: &str) -> ToolCallResult {
     let text = match result.content.first() {
         Some(c) => &c.text,
         None => return result,
@@ -274,7 +294,7 @@ pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str) 
     }
 
     if let Some(summary) = obj.get_mut("summary").and_then(|v| v.as_object_mut()) {
-        summary.insert("policyReminder".to_string(), json!(POLICY_REMINDER));
+        summary.insert("policyReminder".to_string(), json!(build_policy_reminder(indexed_ext)));
         if let Some(hint) = next_step_hint(tool_name) {
             summary.insert("nextStepHint".to_string(), json!(hint));
         }

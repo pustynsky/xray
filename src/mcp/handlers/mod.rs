@@ -697,7 +697,7 @@ pub fn dispatch_tool(
         return result;
     }
 
-    let result = utils::inject_response_guidance(result, tool_name);
+    let result = utils::inject_response_guidance(result, tool_name, &ctx.server_ext);
 
     // Determine effective response budget:
     // - search_help: 32KB (static reference content)

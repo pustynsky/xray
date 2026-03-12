@@ -531,3 +531,88 @@ fn test_regex_without_spaces_no_search_mode_note() {
     assert!(summary.get("searchModeNote").is_none(),
         "regex=true without spaces should NOT produce searchModeNote");
 }
+
+// ─── inject_grep_ext_hint tests ─────────────────────────────────────
+
+#[test]
+fn test_inject_grep_ext_hint_non_indexed_ext_adds_hint() {
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs md".to_string();
+
+    let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let ext_filter = Some("ps1".to_string());
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap();
+    assert!(hint.contains("ps1"), "hint should mention the non-indexed extension");
+    assert!(hint.contains("not in content index"), "hint should explain why");
+    assert!(hint.contains("read_file"), "hint should suggest alternative");
+}
+
+#[test]
+fn test_inject_grep_ext_hint_indexed_ext_no_hint() {
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs md".to_string();
+
+    let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let ext_filter = Some("rs".to_string());
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("hint").is_none(),
+        "Should NOT add hint when ext IS indexed but just 0 results");
+}
+
+#[test]
+fn test_inject_grep_ext_hint_no_ext_filter_no_hint() {
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs md".to_string();
+
+    let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let ext_filter: Option<String> = None;
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("hint").is_none(),
+        "Should NOT add hint when no ext filter is set");
+}
+
+#[test]
+fn test_inject_grep_ext_hint_positive_results_no_hint() {
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs md".to_string();
+
+    let json_text = r#"{"files":[{"path":"test.ps1"}],"summary":{"totalFiles":1,"totalOccurrences":2}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let ext_filter = Some("ps1".to_string());
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("hint").is_none(),
+        "Should NOT add hint when there are positive results");
+}
+
+#[test]
+fn test_inject_grep_ext_hint_mixed_ext_filter() {
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs md".to_string();
+
+    let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let ext_filter = Some("rs,ps1".to_string()); // rs is indexed, ps1 is not
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap();
+    assert!(hint.contains("ps1"), "hint should mention non-indexed ps1");
+    assert!(!hint.contains("'rs"), "hint should NOT mention indexed rs");
+}

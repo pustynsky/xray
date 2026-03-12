@@ -1752,9 +1752,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 - Successful JSON response contains `summary.policyReminder`
 - `summary.policyReminder` contains `SEARCH_INDEX_POLICY`
+- `summary.policyReminder` contains `Indexed extensions:` with the server's `--ext` values
 - Selected tools such as `search_grep` include `summary.nextStepHint`
 - Error responses do not gain `policyReminder` / `nextStepHint`
 - Successful non-JSON responses remain unchanged
+- `search_grep` with `ext` filter targeting non-indexed extension and 0 results → `summary.hint` explains the extension is not indexed
 
 **Validates:** Response guidance is injected only into successful JSON tool results and survives normal tool dispatch.
 
