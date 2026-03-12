@@ -507,8 +507,8 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
 
     # hint_followed / hint_ignored
     # Only correction hints count for ignored metric; informational nextStepHints are skipped
-    $correctionHints = @($ep._hints | Where-Object { $_.type -eq 'correction' })
-    $infoHints = @($ep._hints | Where-Object { $_.type -eq 'informational' })
+    $correctionHints = @($ep._hints | Where-Object { $_ -is [hashtable] -and $_['type'] -eq 'correction' })
+    $infoHints = @($ep._hints | Where-Object { $_ -is [hashtable] -and $_['type'] -eq 'informational' })
 
     if ($correctionHints.Count -gt 0) {
         $hintFollowed = $false
