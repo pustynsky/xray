@@ -284,6 +284,35 @@ function Analyze-TruncationCause {
     }
     catch {}
 
+    # Tool-specific truncation markers
+    $toolName = $episode.tool
+    if ($toolName -eq 'search_callers') {
+        # Callers: body truncation, maxTotalNodes, maxCallersPerLevel
+        if ($resultText -match '"bodyTruncated"\s*:\s*true' -or $resultText -match 'bodyOmitted') {
+            $causes += 'body_truncation'
+        }
+        if ($resultText -match 'maxTotalNodes' -or $resultText -match 'truncated.*nodes') {
+            $causes += 'max_total_nodes'
+        }
+        if ($resultText -match '"callTree"\s*:\s*\[\]' -and $resultText -match '"hint"') {
+            $causes += 'no_callers_found (DI/interface mismatch)'
+        }
+        # Callers includeBody responses are typically small but truncated by body budget
+        if ($resultText -match '"body"' -and $episode.response_size_bytes -gt 3000) {
+            if ($causes.Count -eq 0) { $causes += 'body_budget_limit (inferred)' }
+        }
+    }
+    elseif ($toolName -eq 'search_definitions') {
+        # Definitions: totalDefinitions > returned count
+        $totalDefsMatch = [regex]::Match($resultText, '"totalDefinitions"\s*:\s*(\d+)')
+        $defsArrayMatch = [regex]::Match($resultText, '"definitions"\s*:\s*\[')
+        if ($totalDefsMatch.Success -and $defsArrayMatch.Success) {
+            if ($causes -notcontains 'response_size_limit') {
+                $causes += 'definitions_truncated'
+            }
+        }
+    }
+
     # Fallback: infer response_size_limit from response size when no specific markers found
     if ($episode.response_size_bytes -gt 15000 -and $causes -notcontains 'response_size_limit') {
         $causes += 'response_size_limit (inferred from response size)'
@@ -707,12 +736,39 @@ foreach ($entry in $toolScorecard.GetEnumerator()) {
 }
 
 # Wasted bytes on truncated-then-refined responses
+# Only count as waste if the next call is a RETRY or SCOPE NARROWING of the same query,
+# not a completely different query (which is normal exploration workflow)
 $wastedBytes = 0
 for ($e = 0; $e -lt $episodes.Count; $e++) {
     $ep = $episodes[$e]
     if ($ep.response_status -eq 'partial' -and $e + 1 -lt $episodes.Count) {
-        if ($episodes[$e + 1].tags -contains 'progressive_refinement') {
-            $wastedBytes += $ep.response_size_bytes
+        $nextEp = $episodes[$e + 1]
+        if ($nextEp.tags -contains 'progressive_refinement' -or $nextEp.tags -contains 'retry') {
+            # Check if next call is actually narrowing the SAME query (not a completely different one)
+            $isRealWaste = $false
+            if ($nextEp.tags -contains 'retry') {
+                $isRealWaste = $true  # Exact retry is always waste
+            }
+            elseif ($nextEp.tool -eq $ep.tool -and $nextEp.server -eq $ep.server) {
+                # Same tool progressive refinement: check if params overlap significantly
+                try {
+                    $prevParams = $ep._call_args | ConvertFrom-Json -ErrorAction Stop
+                    $nextParams = $nextEp._call_args | ConvertFrom-Json -ErrorAction Stop
+                    # If the same 'name' or 'method' or 'file' param exists in both, it's scope narrowing = waste
+                    $sharedKeys = @('name', 'method', 'file', 'terms')
+                    foreach ($key in $sharedKeys) {
+                        $pVal = if ($prevParams.PSObject.Properties[$key]) { "$($prevParams.$key)" } else { '' }
+                        $nVal = if ($nextParams.PSObject.Properties[$key]) { "$($nextParams.$key)" } else { '' }
+                        if ($pVal -and $nVal -and $pVal -eq $nVal) {
+                            $isRealWaste = $true
+                            break
+                        }
+                    }
+                } catch { $isRealWaste = $true }  # If can't parse, assume waste (conservative)
+            }
+            if ($isRealWaste) {
+                $wastedBytes += $ep.response_size_bytes
+            }
         }
     }
 }
