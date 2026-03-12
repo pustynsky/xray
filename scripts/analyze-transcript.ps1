@@ -283,6 +283,12 @@ function Analyze-TruncationCause {
         if (-not $args_.name) { $causes += "no_name_filter" }
     }
     catch {}
+
+    # Fallback: infer response_size_limit from response size when no specific markers found
+    if ($episode.response_size_bytes -gt 15000 -and $causes -notcontains 'response_size_limit') {
+        $causes += 'response_size_limit (inferred from response size)'
+    }
+
     if ($causes.Count -eq 0) { return 'unknown' }
     return $causes -join ', '
 }
@@ -594,6 +600,11 @@ if ($hasCompletion) {
                 $selfAnalysis['improvement_ideas'] = @($ideasMatch | ForEach-Object { $_.Groups[1].Value.Trim() })
             }
         }
+
+        # Fallback: if hasSelfAnalysis but no specific patterns matched, extract raw text
+        if ($selfAnalysis.Count -eq 0) {
+            $selfAnalysis['raw_text'] = (Summarize-Text $completionText 500)
+        }
     }
 }
 
@@ -882,6 +893,9 @@ if ($hasSelfAnalysis) {
         foreach ($idea in $selfAnalysis.improvement_ideas) {
             [void]$md.AppendLine("  - $idea")
         }
+    }
+    if ($selfAnalysis.ContainsKey('raw_text')) {
+        [void]$md.AppendLine("- **Raw self-analysis**: $($selfAnalysis.raw_text)")
     }
     [void]$md.AppendLine("")
 }
