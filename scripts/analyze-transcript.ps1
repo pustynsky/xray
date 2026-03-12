@@ -135,6 +135,74 @@ function Extract-BuiltinToolCalls {
     return @(,$tools)
 }
 
+function Extract-BuiltinToolCallDetails {
+    <#
+    .SYNOPSIS
+        Extracts detailed information about built-in tool calls, including file paths
+        and extensions for read_file and search_files calls.
+    #>
+    param([string]$text)
+    [System.Collections.Generic.List[hashtable]]$details = @()
+
+    # read_file: extract file paths from <read_file><args><file><path>...</path></file></args></read_file>
+    $readFileBlocks = [regex]::Matches($text, '<read_file>\s*<args>(.*?)</args>\s*</read_file>', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    foreach ($m in $readFileBlocks) {
+        $pathMatches = [regex]::Matches($m.Groups[1].Value, '<path>(.*?)</path>')
+        $paths = @($pathMatches | ForEach-Object { $_.Groups[1].Value.Trim() })
+        $extensions = @($paths | ForEach-Object {
+            $ext = [System.IO.Path]::GetExtension($_)
+            if ($ext) { $ext.TrimStart('.').ToLower() }
+        } | Where-Object { $_ })
+        $details.Add(@{
+            tool = 'read_file'
+            paths = $paths
+            extensions = @($extensions | Sort-Object -Unique)
+        })
+    }
+
+    # search_files: extract path and regex
+    $searchFilesBlocks = [regex]::Matches($text, '<search_files>\s*(.*?)\s*</search_files>', [System.Text.RegularExpressions.RegexOptions]::Singleline)
+    foreach ($m in $searchFilesBlocks) {
+        $pathMatch = [regex]::Match($m.Groups[1].Value, '<path>(.*?)</path>')
+        $regexMatch = [regex]::Match($m.Groups[1].Value, '<regex>(.*?)</regex>')
+        $searchPath = if ($pathMatch.Success) { $pathMatch.Groups[1].Value.Trim() } else { '' }
+        $searchRegex = if ($regexMatch.Success) { $regexMatch.Groups[1].Value.Trim() } else { '' }
+        $details.Add(@{
+            tool = 'search_files'
+            searchPath = $searchPath
+            searchRegex = $searchRegex
+            paths = @($searchPath)
+            extensions = @()
+        })
+    }
+
+    # Other built-in tools (simple detection, no path extraction needed)
+    $simpleTools = @('update_todo_list', 'apply_diff', 'write_to_file', 'execute_command',
+                     'insert_content', 'search_and_replace', 'attempt_completion', 'ask_followup_question')
+    foreach ($tool in $simpleTools) {
+        $toolPattern = "<$tool>"
+        if ($text.Contains($toolPattern)) {
+            $details.Add(@{ tool = $tool; paths = @(); extensions = @() })
+        }
+    }
+
+    return @(,$details)
+}
+
+function Extract-IndexedExtensions {
+    <#
+    .SYNOPSIS
+        Extracts the list of indexed file extensions from policyReminder in MCP responses.
+        Pattern: "Indexed extensions: ts" or "Indexed extensions: xml,config,txt,ts"
+    #>
+    param([string]$resultText)
+    $m = [regex]::Match($resultText, 'Indexed extensions:\s*([a-zA-Z0-9,]+)')
+    if ($m.Success) {
+        return @($m.Groups[1].Value -split ',' | ForEach-Object { $_.Trim().ToLower() } | Where-Object { $_ })
+    }
+    return @()
+}
+
 function Summarize-Text {
     param([string]$text, [int]$maxLen = 200)
     if ($text.Length -le $maxLen) { return $text }
@@ -453,6 +521,11 @@ function Extract-Hints {
 [System.Collections.Generic.List[hashtable]]$episodes = @()
 $builtinCallCount = 0
 $builtinCallDetails = @{}
+[System.Collections.Generic.List[hashtable]]$builtinCallDetailsList = @()
+[System.Collections.Generic.List[string]]$indexedExtensions = @()
+$mcpAvailable = $true  # assume available until first error
+$mcpBecameAvailable = $false  # tracks if MCP recovered after errors
+[System.Collections.Generic.List[hashtable]]$policyViolations = @()
 $taskDescription = ''
 $completionText = ''
 
@@ -469,7 +542,7 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
 
     if ($turn.role -ne 'assistant') { continue }
 
-    # Count built-in tools
+    # Count built-in tools (simple counts for backward compat)
     $builtins = Extract-BuiltinToolCalls $turn.content
     foreach ($bt in $builtins) {
         if ($bt -eq 'attempt_completion') {
@@ -480,6 +553,44 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
         $builtinCallCount++
         if (-not $builtinCallDetails.ContainsKey($bt)) { $builtinCallDetails[$bt] = 0 }
         $builtinCallDetails[$bt]++
+    }
+
+    # Detailed built-in tool extraction (paths, extensions, policy violations)
+    $builtinDetails = Extract-BuiltinToolCallDetails $turn.content
+    foreach ($bd in $builtinDetails) {
+        if ($bd.tool -eq 'attempt_completion') { continue }
+        $builtinCallDetailsList.Add($bd)
+
+        # Check for policy violations: read_file for indexed file types
+        if ($bd.tool -eq 'read_file' -and $indexedExtensions.Count -gt 0 -and $bd.extensions.Count -gt 0) {
+            foreach ($ext in $bd.extensions) {
+                if ($indexedExtensions -contains $ext) {
+                    $policyViolations.Add(@{
+                        turn = $i
+                        tool = 'read_file'
+                        paths = $bd.paths
+                        extension = $ext
+                        mcp_available = $mcpAvailable
+                        suggested_alternative = 'search_definitions includeBody=true maxBodyLines=0'
+                        reason = "read_file used for .$ext file (indexed extension) — should use search_definitions"
+                    })
+                    break  # one violation per call
+                }
+            }
+        }
+
+        # Check for policy violations: search_files when search_grep is available
+        if ($bd.tool -eq 'search_files' -and $indexedExtensions.Count -gt 0) {
+            $policyViolations.Add(@{
+                turn = $i
+                tool = 'search_files'
+                paths = $bd.paths
+                extension = ''
+                mcp_available = $mcpAvailable
+                suggested_alternative = 'search_grep'
+                reason = 'search_files used instead of search_grep (search-index MCP available)'
+            })
+        }
     }
 
     # Extract MCP tool calls
@@ -531,6 +642,25 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
         $status = Classify-ResponseStatus $resultContent
         $responseSummary = Extract-ResponseSummary $resultContent
         $responseSize = [System.Text.Encoding]::UTF8.GetByteCount($resultContent)
+
+        # Track MCP availability (for policy violation context)
+        if ($call.server -eq 'search-index') {
+            if ($status.status -eq 'error') {
+                $mcpAvailable = $false
+            }
+            else {
+                if (-not $mcpAvailable) { $mcpBecameAvailable = $true }
+                $mcpAvailable = $true
+            }
+
+            # Extract indexed extensions from policyReminder (once)
+            if ($indexedExtensions.Count -eq 0 -and $status.status -ne 'error') {
+                $extractedExts = Extract-IndexedExtensions $resultContent
+                foreach ($ext in $extractedExts) {
+                    $indexedExtensions.Add($ext)
+                }
+            }
+        }
 
         # Compute param_diff from previous episode (if same tool)
         $paramDiff = ''
@@ -885,6 +1015,23 @@ if ($wastedBytes -gt 0) {
     $recommendations += "[efficiency] ${wastedKB}KB wasted on truncated responses that were immediately refined. Server-side auto-narrowing could eliminate this."
 }
 
+# Policy violation recommendations
+if ($policyViolations.Count -gt 0) {
+    $readFileViolations = @($policyViolations | Where-Object { $_.tool -eq 'read_file' })
+    $searchFilesViolations = @($policyViolations | Where-Object { $_.tool -eq 'search_files' })
+    if ($readFileViolations.Count -gt 0) {
+        $violatedExts = @($readFileViolations | ForEach-Object { $_.extension } | Sort-Object -Unique) -join ', .'
+        $recommendations += "[policy] $($readFileViolations.Count) read_file call(s) for indexed file types (.$violatedExts) should have used search_definitions includeBody=true."
+    }
+    if ($searchFilesViolations.Count -gt 0) {
+        $recommendations += "[policy] $($searchFilesViolations.Count) search_files call(s) should have used search_grep (search-index MCP was available)."
+    }
+    $mcpUnavailableViolations = @($policyViolations | Where-Object { -not $_.mcp_available })
+    if ($mcpUnavailableViolations.Count -gt 0) {
+        $recommendations += "[policy] $($mcpUnavailableViolations.Count) violation(s) occurred while MCP was unavailable (justified fallback)."
+    }
+}
+
 # Truncation root causes
 $truncationCauses = @{}
 foreach ($ep in $episodes) {
@@ -927,6 +1074,20 @@ foreach ($ep in $episodes) {
     $cleanEpisodes += $clean
 }
 
+# Build clean policy violations for output (strip internal fields)
+$cleanViolations = @()
+foreach ($pv in $policyViolations) {
+    $cleanViolations += @{
+        turn                  = $pv.turn
+        tool                  = $pv.tool
+        paths                 = $pv.paths
+        extension             = $pv.extension
+        mcp_available         = $pv.mcp_available
+        suggested_alternative = $pv.suggested_alternative
+        reason                = $pv.reason
+    }
+}
+
 $report = @{
     session        = @{
         source_file        = $fileName
@@ -934,11 +1095,13 @@ $report = @{
         total_mcp_calls    = $episodes.Count
         total_builtin_calls = $builtinCallCount
         builtin_tools      = $builtinCallDetails
+        indexed_extensions = @($indexedExtensions)
         phases             = $phases
     }
-    tool_scorecard = $toolScorecard
-    episodes       = $cleanEpisodes
-    summary        = $summary
+    tool_scorecard     = $toolScorecard
+    episodes           = $cleanEpisodes
+    policy_violations  = $cleanViolations
+    summary            = $summary
 }
 
 # ============================================================
@@ -1089,6 +1252,33 @@ if ($truncationCauses.Count -gt 0) {
     [void]$md.AppendLine("")
 }
 
+# Policy Violations
+if ($policyViolations.Count -gt 0) {
+    [void]$md.AppendLine("## Policy Violations")
+    [void]$md.AppendLine("")
+    [void]$md.AppendLine("**Indexed extensions detected**: $($indexedExtensions -join ', ')")
+    [void]$md.AppendLine("**Total violations**: $($policyViolations.Count)")
+    [void]$md.AppendLine("")
+    [void]$md.AppendLine("| # | Tool | Extension | MCP Available | Suggested Alternative | File Path |")
+    [void]$md.AppendLine("|---|------|-----------|---------------|----------------------|-----------|")
+    $pvIdx = 0
+    foreach ($pv in $policyViolations) {
+        $pvIdx++
+        $mcpStatus = if ($pv.mcp_available) { '✅ yes' } else { '❌ no' }
+        $filePath = if ($pv.paths.Count -gt 0) { (Summarize-Text ($pv.paths -join ', ') 80) } else { '-' }
+        $extDisplay = if ($pv.extension) { ".$($pv.extension)" } else { '-' }
+        [void]$md.AppendLine("| $pvIdx | $($pv.tool) | $extDisplay | $mcpStatus | $($pv.suggested_alternative) | $filePath |")
+    }
+    [void]$md.AppendLine("")
+}
+elseif ($indexedExtensions.Count -gt 0) {
+    [void]$md.AppendLine("## Policy Violations")
+    [void]$md.AppendLine("")
+    [void]$md.AppendLine("**Indexed extensions detected**: $($indexedExtensions -join ', ')")
+    [void]$md.AppendLine("No policy violations detected. ✅")
+    [void]$md.AppendLine("")
+}
+
 # Waste summary
 if ($wastedBytes -gt 0) {
     $wastedKB = [math]::Round($wastedBytes / 1024, 1)
@@ -1104,4 +1294,5 @@ Write-Host ""
 Write-Host "=== Quick Summary ==="
 Write-Host "Episodes: $($episodes.Count) MCP calls, $builtinCallCount built-in calls"
 Write-Host "Statuses: success=$($statusCounts.success), partial=$($statusCounts.partial), empty=$($statusCounts.empty), error=$($statusCounts.error)"
+Write-Host "Policy violations: $($policyViolations.Count)$(if ($indexedExtensions.Count -gt 0) { " (indexed: $($indexedExtensions -join ','))" } else { ' (no indexed extensions detected)' })"
 Write-Host "Self-analysis: $(if ($hasSelfAnalysis) { 'yes' } else { 'no' })"
