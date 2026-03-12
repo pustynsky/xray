@@ -513,7 +513,9 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "includeGrepReferences": "includeGrepReferences=true -> adds grepReferences[] with files containing the method name as text but NOT in the call tree. Catches delegate usage, method groups, reflection. Skipped for method names < 4 chars. Each entry has file + tokenCount. For line-level detail, use search_grep with showLines=true"
         },
         "search_fast": {
-            "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term. Wildcard: '*' or '' (empty with dir) lists ALL entries. Use with dirsOnly=true for subdirectory listing: pattern='*', dir='src/services', dirsOnly=true"
+            "pattern": "Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor' finds files matching ANY term. Wildcard: '*' or '' (empty with dir) lists ALL entries. Use with dirsOnly=true for subdirectory listing: pattern='*', dir='src/services', dirsOnly=true",
+            "dirsOnly": "When true with wildcard pattern, returns directories sorted by fileCount descending (largest modules first). Each directory entry includes 'fileCount' — total files recursively. Useful for identifying important modules in large repos",
+            "maxDepth": "Limit directory depth for dirsOnly results (1=immediate children only, 2=two levels). Default: unlimited. Use maxDepth=1 to avoid truncation on large repos"
         },
         "search_git_history": {
             "repo": "'.' (current directory) or absolute path to git repo",

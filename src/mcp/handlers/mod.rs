@@ -132,7 +132,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "search_fast".to_string(),
-            description: "PREFERRED file lookup tool — searches pre-built file name index. 90x+ faster than search_find (~35ms vs ~3s for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Supports pattern='*' or empty pattern with dir to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files, list_directory, or search_find.".to_string(),
+            description: "PREFERRED file lookup tool — searches pre-built file name index. 90x+ faster than search_find (~35ms vs ~3s for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Supports pattern='*' or empty pattern with dir to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files, list_directory, or search_find. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -141,9 +141,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "ext": { "type": "string", "description": "Filter by extension" },
                     "regex": { "type": "boolean", "description": "Treat as regex" },
                     "ignoreCase": { "type": "boolean", "description": "Case-insensitive" },
-                    "dirsOnly": { "type": "boolean", "description": "Show only directories. When true, ext filter is ignored (directories have no extension)" },
+                    "dirsOnly": { "type": "boolean", "description": "Show only directories. When true with wildcard pattern, returns directories sorted by fileCount descending (largest first). Useful for identifying important modules. ext filter is ignored (directories have no extension)" },
                     "filesOnly": { "type": "boolean", "description": "Show only files" },
-                    "countOnly": { "type": "boolean", "description": "Count only" }
+                    "countOnly": { "type": "boolean", "description": "Count only" },
+                    "maxDepth": { "type": "integer", "description": "Max directory depth for dirsOnly results (1=immediate children only). Default: unlimited" }
                 },
                 "required": ["pattern"]
             }),

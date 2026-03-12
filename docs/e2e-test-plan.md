@@ -3916,6 +3916,63 @@ returns only file entries.
 
 **Unit test:** [`test_search_fast_dirs_only_and_files_only`](../src/mcp/handlers/handlers_tests.rs)
 
+#### T79a: `search_fast` — `dirsOnly` + wildcard returns `fileCount` sorted by size
+
+**Tool:** `search_fast`
+
+**Scenario:** When `dirsOnly=true` with wildcard pattern (`*` or empty pattern with `dir`), results include a `fileCount` field for each directory (recursive file count) and are sorted by `fileCount` descending (largest modules first). This helps LLMs quickly identify the most important modules in large repos.
+
+**Expected:**
+
+- Each directory entry includes `fileCount` (integer ≥ 0)
+- Directories sorted by `fileCount` descending
+- Empty directories have `fileCount: 0`
+- Non-wildcard `dirsOnly` queries do NOT include `fileCount` (backward compatible)
+- `isDir: true` for all entries
+
+**Unit tests:** [`test_search_fast_dirsonly_wildcard_filecount`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_dirsonly_non_wildcard_no_filecount`](../src/mcp/handlers/handlers_tests_fast.rs)
+
+**Status:** ✅ Implemented
+
+---
+
+#### T79c: `search_fast` — `maxDepth` limits directory depth
+
+**Tool:** `search_fast`
+
+**Scenario:** The `maxDepth` parameter limits directory traversal depth relative to the base directory. `maxDepth=1` returns only immediate subdirectories, `maxDepth=2` goes two levels deep, etc.
+
+**Expected:**
+
+- `maxDepth=1` returns only immediate children (depth 1)
+- `maxDepth=2` includes subdirectories up to 2 levels deep
+- No `maxDepth` → full recursion (existing behavior)
+- Applies to both files and directories
+
+**Unit test:** [`test_search_fast_max_depth`](../src/mcp/handlers/handlers_tests_fast.rs)
+
+**Status:** ✅ Implemented
+
+---
+
+#### T79d: `search_fast` — `dirsOnly` truncation hint for large results
+
+**Tool:** `search_fast`
+
+**Scenario:** When `dirsOnly=true` wildcard returns more than 150 directories without `maxDepth`, the summary includes a hint recommending `maxDepth=1` or `search_definitions` for code exploration.
+
+**Expected:**
+
+- `match_count > 150` without `maxDepth` → `summary.hint` contains "maxDepth"
+- With `maxDepth` set → no truncation hint
+- `ext_ignored_for_dirs` hint may be overwritten by truncation hint (truncation is more important)
+
+**Unit test:** [`test_search_fast_dirsonly_truncation_hint`](../src/mcp/handlers/handlers_tests_fast.rs)
+
+**Status:** ✅ Implemented
+
+---
+
 #### T79b: `search_fast` — `dirsOnly` with `ext` filter (ext ignored)
 
 **Tool:** `search_fast`

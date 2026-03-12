@@ -1,5 +1,6 @@
 //! search_fast handler: pre-built file name index search.
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -40,6 +41,7 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
     let dirs_only = args.get("dirsOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let files_only = args.get("filesOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let count_only = args.get("countOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+    let max_depth = args.get("maxDepth").and_then(|v| v.as_u64()).map(|d| d as usize);
 
     let start = Instant::now();
 
@@ -96,12 +98,58 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
     let ext_ignored_for_dirs = dirs_only && ext.is_some();
     let effective_ext = if dirs_only { &None } else { &ext };
 
+    // Build file-count-per-directory map (only when dirsOnly + wildcard, not count_only)
+    let file_counts: HashMap<&str, usize> = if dirs_only && is_wildcard && !count_only {
+        let dir_normalized = dir.replace('\\', "/");
+        let dir_prefix = if dir_normalized != ctx.server_dir.replace('\\', "/") {
+            format!("{}/", dir_normalized)
+        } else {
+            String::new()
+        };
+        let mut counts: HashMap<&str, usize> = HashMap::new();
+        for entry in &index.entries {
+            if entry.is_dir { continue; }
+            let path = entry.path.as_str();
+            // Only count files under the requested dir
+            if !dir_prefix.is_empty() && !path.starts_with(dir_prefix.as_str()) {
+                continue;
+            }
+            // Walk up all ancestor directories and increment their counts
+            let mut pos = path.len();
+            while let Some(slash) = path[..pos].rfind('/') {
+                let ancestor = &path[..slash];
+                *counts.entry(ancestor).or_insert(0) += 1;
+                pos = slash;
+            }
+        }
+        counts
+    } else {
+        HashMap::new()
+    };
+
+    // Compute base depth for maxDepth filtering.
+    // Use index.root (same path format as entry.path) to avoid Windows path mismatches
+    // where dir might be "." or use backslashes while entry.path uses forward slashes.
+    let base_depth = if max_depth.is_some() {
+        index.root.replace('\\', "/").matches('/').count()
+    } else {
+        0
+    };
+
     let mut results: Vec<Value> = Vec::new();
     let mut match_count = 0usize;
 
     for entry in &index.entries {
         if dirs_only && !entry.is_dir { continue; }
         if files_only && entry.is_dir { continue; }
+
+        // maxDepth filtering
+        if let Some(md) = max_depth {
+            let entry_depth = entry.path.matches('/').count();
+            if entry_depth.saturating_sub(base_depth) > md {
+                continue;
+            }
+        }
 
         if let Some(ext_f) = effective_ext {
             let path = Path::new(&entry.path);
@@ -128,16 +176,35 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
         if matched {
             match_count += 1;
             if !count_only {
-                results.push(json!({
-                    "path": entry.path,
-                    "size": entry.size,
-                    "isDir": entry.is_dir,
-                }));
+                if dirs_only && is_wildcard {
+                    let fc = file_counts.get(entry.path.as_str()).copied().unwrap_or(0);
+                    results.push(json!({
+                        "path": entry.path,
+                        "size": entry.size,
+                        "isDir": true,
+                        "fileCount": fc,
+                    }));
+                } else {
+                    results.push(json!({
+                        "path": entry.path,
+                        "size": entry.size,
+                        "isDir": entry.is_dir,
+                    }));
+                }
             }
         }
     }
 
-    // ── Relevance ranking: exact match first, then prefix, then contains ──
+    // ── Sorting ──
+    // For wildcard + dirsOnly: sort by fileCount descending (largest modules first)
+    if !count_only && is_wildcard && dirs_only {
+        results.sort_by(|a, b| {
+            let fc_b = b["fileCount"].as_u64().unwrap_or(0);
+            let fc_a = a["fileCount"].as_u64().unwrap_or(0);
+            fc_b.cmp(&fc_a)
+        });
+    }
+    // Relevance ranking: exact match first, then prefix, then contains
     // Skip ranking for wildcard (no search terms to rank against)
     if !count_only && !is_wildcard {
         results.sort_by(|a, b| {
@@ -170,6 +237,13 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
     });
     if ext_ignored_for_dirs {
         summary["hint"] = json!("ext filter ignored when dirsOnly=true (directories have no file extension)");
+    }
+    // Hint when dirsOnly results are likely to be truncated
+    if dirs_only && match_count > 150 && max_depth.is_none() {
+        summary["hint"] = json!(
+            "Too many directories. Use maxDepth=1 for immediate children only, \
+             or use search_definitions file='<dir>' for code-level module overview with autoSummary."
+        );
     }
     inject_branch_warning(&mut summary, ctx);
     let output = json!({

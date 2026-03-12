@@ -496,3 +496,327 @@ fn test_search_fast_files_only_with_ext_still_filters() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// fileCount enrichment + sorting + maxDepth tests
+// ═══════════════════════════════════════════════════════════════════════
+
+/// dirsOnly + wildcard returns fileCount for each directory, sorted by fileCount descending.
+#[test]
+fn test_search_fast_dirsonly_wildcard_filecount() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create directory structure:
+    //   BigModule/       (3 files)
+    //   SmallModule/     (1 file)
+    //   EmptyModule/     (0 files — dir only)
+    //   BigModule/Sub/   (2 files — nested, so BigModule total = 5)
+    let big = tmp_dir.join("BigModule");
+    let small = tmp_dir.join("SmallModule");
+    let empty = tmp_dir.join("EmptyModule");
+    let sub = big.join("Sub");
+    for d in &[&big, &small, &empty, &sub] {
+        let _ = std::fs::create_dir_all(d);
+    }
+    // BigModule: 3 files at top
+    for name in &["A.cs", "B.cs", "C.cs"] {
+        let mut f = std::fs::File::create(big.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+    // BigModule/Sub: 2 files
+    for name in &["D.cs", "E.cs"] {
+        let mut f = std::fs::File::create(sub.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+    // SmallModule: 1 file
+    {
+        let mut f = std::fs::File::create(small.join("F.cs")).unwrap();
+        writeln!(f, "// F").unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: dir_str,
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    assert!(!result.is_error, "dirsOnly wildcard should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    // Should have at least 4 directories: BigModule, BigModule/Sub, SmallModule, EmptyModule
+    assert!(files.len() >= 4, "Should find at least 4 directories, got {}", files.len());
+
+    // All entries should have fileCount
+    for entry in files {
+        assert!(entry.get("fileCount").is_some(),
+            "Each directory entry should have fileCount, got: {}", entry);
+    }
+
+    // Find BigModule and SmallModule entries
+    let big_entry = files.iter().find(|e| {
+        let p = e["path"].as_str().unwrap();
+        p.ends_with("BigModule") && !p.contains("Sub")
+    });
+    let small_entry = files.iter().find(|e| e["path"].as_str().unwrap().ends_with("SmallModule"));
+    let empty_entry = files.iter().find(|e| e["path"].as_str().unwrap().ends_with("EmptyModule"));
+
+    assert!(big_entry.is_some(), "BigModule should be in results");
+    assert!(small_entry.is_some(), "SmallModule should be in results");
+    assert!(empty_entry.is_some(), "EmptyModule should be in results");
+
+    // BigModule should have fileCount=5 (3 direct + 2 in Sub)
+    let big_fc = big_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(big_fc, 5, "BigModule fileCount should be 5 (3 direct + 2 in Sub), got {}", big_fc);
+
+    // SmallModule should have fileCount=1
+    let small_fc = small_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(small_fc, 1, "SmallModule fileCount should be 1, got {}", small_fc);
+
+    // EmptyModule should have fileCount=0
+    let empty_fc = empty_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(empty_fc, 0, "EmptyModule fileCount should be 0, got {}", empty_fc);
+
+    // Sorted by fileCount descending: BigModule (5) should be before SmallModule (1)
+    let big_pos = files.iter().position(|e| {
+        let p = e["path"].as_str().unwrap();
+        p.ends_with("BigModule") && !p.contains("Sub")
+    }).unwrap();
+    let small_pos = files.iter().position(|e| e["path"].as_str().unwrap().ends_with("SmallModule")).unwrap();
+    assert!(big_pos < small_pos,
+        "BigModule (fileCount=5, pos={}) should come before SmallModule (fileCount=1, pos={})",
+        big_pos, small_pos);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Non-wildcard dirsOnly does NOT add fileCount.
+#[test]
+fn test_search_fast_dirsonly_non_wildcard_no_filecount() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_nw_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    let sub = tmp_dir.join("Services");
+    let _ = std::fs::create_dir_all(&sub);
+    { let mut f = std::fs::File::create(sub.join("Svc.cs")).unwrap(); writeln!(f, "// svc").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: dir_str,
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    let result = handle_search_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    assert!(!files.is_empty(), "Should find Services directory");
+
+    // Non-wildcard: should NOT have fileCount
+    for entry in files {
+        assert!(entry.get("fileCount").is_none(),
+            "Non-wildcard dirsOnly should not have fileCount, got: {}", entry);
+    }
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// maxDepth=1 returns only immediate subdirectories.
+#[test]
+fn test_search_fast_max_depth() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_md_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create: src/ → src/controllers/ → src/controllers/deep/
+    let src = tmp_dir.join("src");
+    let controllers = src.join("controllers");
+    let deep = controllers.join("deep");
+    for d in &[&src, &controllers, &deep] {
+        let _ = std::fs::create_dir_all(d);
+    }
+    // Files at each level
+    { let mut f = std::fs::File::create(src.join("main.rs")).unwrap(); writeln!(f, "// main").unwrap(); }
+    { let mut f = std::fs::File::create(controllers.join("ctrl.rs")).unwrap(); writeln!(f, "// ctrl").unwrap(); }
+    { let mut f = std::fs::File::create(deep.join("inner.rs")).unwrap(); writeln!(f, "// inner").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["rs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: dir_str.clone(),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // maxDepth=1: only immediate children (src/)
+    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    assert!(!result.is_error, "maxDepth should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    // Should find "src" but NOT "src/controllers" or "src/controllers/deep"
+    let paths: Vec<&str> = files.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    assert!(paths.iter().any(|p| p.ends_with("src")),
+        "maxDepth=1 should find 'src', got: {:?}", paths);
+    assert!(!paths.iter().any(|p| p.contains("controllers")),
+        "maxDepth=1 should NOT find 'src/controllers', got: {:?}", paths);
+
+    // maxDepth=2: should find src and src/controllers, but not deep
+    let result2 = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 2}));
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let files2 = output2["files"].as_array().unwrap();
+    let paths2: Vec<&str> = files2.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    assert!(paths2.iter().any(|p| p.contains("controllers") && !p.contains("deep")),
+        "maxDepth=2 should find 'src/controllers', got: {:?}", paths2);
+    assert!(!paths2.iter().any(|p| p.contains("deep")),
+        "maxDepth=2 should NOT find 'src/controllers/deep', got: {:?}", paths2);
+
+    // No maxDepth: all directories
+    let result3 = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+    let files3 = output3["files"].as_array().unwrap();
+    let paths3: Vec<&str> = files3.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    assert!(paths3.iter().any(|p| p.contains("deep")),
+        "No maxDepth should find 'src/controllers/deep', got: {:?}", paths3);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Truncation hint is emitted when dirsOnly matches > 150 directories without maxDepth.
+#[test]
+fn test_search_fast_dirsonly_truncation_hint() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_hint_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create 160 directories to trigger the hint (> 150)
+    for i in 0..160 {
+        let sub = tmp_dir.join(format!("dir_{:03}", i));
+        let _ = std::fs::create_dir_all(&sub);
+        let mut f = std::fs::File::create(sub.join("file.cs")).unwrap();
+        writeln!(f, "// {}", i).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: dir_str,
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // Without maxDepth: should get truncation hint
+    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("maxDepth"),
+        "Should suggest maxDepth when >150 dirs. Hint: '{}'", hint);
+
+    // With maxDepth: should NOT get truncation hint
+    let result2 = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let hint2 = output2["summary"]["hint"].as_str().unwrap_or("");
+    assert!(!hint2.contains("maxDepth"),
+        "Should NOT suggest maxDepth when maxDepth is already set. Hint: '{}'", hint2);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+
+/// Regression: maxDepth works when server_dir differs from index.root
+/// (e.g., server_dir="." but index.root is the full absolute path).
+/// Bug: base_depth was computed from `dir` (which defaults to server_dir),
+/// not from `index.root`. When server_dir=".", base_depth=0 but entry paths
+/// have full paths with 3+ slashes, so all entries were filtered out.
+#[test]
+fn test_search_fast_max_depth_server_dir_mismatch() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_md_mismatch_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create: src/ → src/sub/
+    let src = tmp_dir.join("src");
+    let sub = src.join("sub");
+    for d in &[&src, &sub] {
+        let _ = std::fs::create_dir_all(d);
+    }
+    { let mut f = std::fs::File::create(src.join("a.rs")).unwrap(); writeln!(f, "// a").unwrap(); }
+    { let mut f = std::fs::File::create(sub.join("b.rs")).unwrap(); writeln!(f, "// b").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["rs".to_string()], ..Default::default() };
+
+    // KEY: server_dir is "." (like real MCP), but index.root is the full path
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: ".".to_string(),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // maxDepth=1 should return root + src (not 0 results)
+    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    assert!(!result.is_error, "maxDepth with server_dir mismatch should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    let paths: Vec<&str> = files.iter().map(|e| e["path"].as_str().unwrap()).collect();
+    assert!(!paths.is_empty(),
+        "maxDepth=1 should return results even when server_dir='.' differs from index.root. Got 0 results.");
+    assert!(paths.iter().any(|p| p.ends_with("src")),
+        "maxDepth=1 should find 'src', got: {:?}", paths);
+    assert!(!paths.iter().any(|p| p.contains("sub")),
+        "maxDepth=1 should NOT find 'src/sub', got: {:?}", paths);
+
+    cleanup_tmp(&tmp_dir);
+}
