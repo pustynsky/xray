@@ -3680,6 +3680,48 @@ matching line content in the compact grouped format.
 
 ---
 
+### search_definitions — Auto-Summary
+
+#### T-AS1: `search_definitions` — Auto-summary triggered on broad query
+
+**Input:**
+```json
+{ "name": "search_definitions", "arguments": { "file": "src/", "maxResults": 3 } }
+```
+
+**Expected:**
+- Response contains `autoSummary` object (not `definitions` array)
+- `autoSummary.groups` is a non-empty array
+- Each group has `directory`, `total`, `counts`, `topDefinitions`
+- `summary.autoSummaryMode` is `true`
+- `summary.returned` is `0`
+- `autoSummary.hint` contains `file=` and `name=`
+
+#### T-AS2: `search_definitions` — Auto-summary NOT triggered with name filter
+
+**Input:**
+```json
+{ "name": "search_definitions", "arguments": { "file": "src/", "name": "handle", "maxResults": 3 } }
+```
+
+**Expected:**
+- Response contains `definitions` array (normal format)
+- No `autoSummary` field
+
+#### T-AS3: `search_definitions` — Auto-summary NOT triggered when results fit
+
+**Input:**
+```json
+{ "name": "search_definitions", "arguments": { "file": "src/", "maxResults": 10000 } }
+```
+
+**Expected:**
+- Response contains `definitions` array (normal format)
+- No `autoSummary` field
+
+---
+
+
 ### search_definitions
 
 #### T69: `search_definitions` — Regex name filter

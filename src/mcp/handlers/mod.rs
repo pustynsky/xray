@@ -213,7 +213,11 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                      LANGUAGE-SPECIFIC: Supports {}. Only these extensions are indexed — for other file types (XML, JSON, config, MD) use search_grep. \
                      Requires server started with --definitions flag. \
                      Supports 'containsLine' to find which method/class contains a given line number. \
-                     Supports 'includeBody' to return actual source code inline.",
+                     Supports 'includeBody' to return actual source code inline. \
+                     When results exceed maxResults and no name filter is set, automatically returns a \
+                     directory-grouped summary (autoSummary) with definition counts per subdirectory and \
+                     top-3 largest classes/interfaces per group, instead of truncated entries. \
+                     Add a name filter or narrow the file scope to get individual definitions.",
                     lang_list
                 )
             },

@@ -6,6 +6,14 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 ---
 
+## 2026-03-12
+
+### Features
+- **`search_definitions` auto-summary for broad queries** — When `search_definitions` finds more results than `maxResults` and no `name` filter is set (and `includeBody` is false), it automatically returns a **directory-grouped summary** (`autoSummary`) instead of truncated entries. Each group shows: subdirectory name, total definition count, counts by kind (class, method, etc.), and top-3 largest classes/interfaces by line count. Includes a contextual `hint` with concrete subdirectory and class name suggestions. This eliminates the "map then read" pattern where LLMs needed `search_fast dirsOnly=true` + multiple narrowing `search_definitions` calls to explore large code modules. To get individual definitions, add a `name` filter or narrow the `file` scope. Updated Architecture Exploration strategy recipe and anti-patterns in LLM instructions. 11 new unit tests. All 1547 unit tests pass.
+
+---
+
+
 ## 2026-03-11
 
 ### Features

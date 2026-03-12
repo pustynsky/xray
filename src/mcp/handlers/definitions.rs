@@ -268,14 +268,19 @@ pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> T
     // 8. Sort results
     sort_results(&mut results, &index, &parsed);
 
-    // 9. Apply max results
+    // 9. Auto-summary: if results won't fit AND it's a broad query, return grouped summary
+    if should_auto_summary(&parsed, total_results) {
+        return build_auto_summary(&index, &results, &parsed, total_results, search_start, ctx);
+    }
+
+    // 10. Apply max results
     if parsed.max_results > 0 && results.len() > parsed.max_results {
         results.truncate(parsed.max_results);
     }
 
     let search_elapsed = search_start.elapsed();
 
-    // 10. Format output
+    // 11. Format output
     format_search_output(&index, &results, &parsed, total_results, &stats_info,
                          &term_breakdown, search_elapsed, ctx)
 }
@@ -1544,6 +1549,163 @@ fn generate_zero_result_hints(
                 }
             }
         }
+    }
+}
+
+// ─── Auto-summary for broad queries ──────────────────────────────────
+
+/// Container kinds eligible for topDefinitions (classes, interfaces, etc.)
+const CONTAINER_KINDS: &[DefinitionKind] = &[
+    DefinitionKind::Class,
+    DefinitionKind::Interface,
+    DefinitionKind::Struct,
+    DefinitionKind::Enum,
+    DefinitionKind::Record,
+];
+
+/// Check whether auto-summary should activate instead of returning truncated entries.
+/// Conditions: broad query (no name filter, no body) with more results than maxResults.
+fn should_auto_summary(args: &DefinitionSearchArgs, total_results: usize) -> bool {
+    args.max_results > 0
+        && total_results > args.max_results
+        && args.name_filter.is_none()
+        && !args.include_body
+}
+
+/// Internal accumulator for grouping definitions by directory.
+#[derive(Default)]
+struct AutoSummaryGroup {
+    counts: HashMap<String, usize>,
+    /// (name, line_count) for container kinds — used to pick topDefinitions
+    containers: Vec<(String, u32)>,
+}
+
+impl AutoSummaryGroup {
+    fn add(&mut self, def: &DefinitionEntry) {
+        let kind_name = def.kind.as_str().to_string();
+        *self.counts.entry(kind_name).or_insert(0) += 1;
+        if CONTAINER_KINDS.contains(&def.kind) {
+            let line_count = def.line_end.saturating_sub(def.line_start) + 1;
+            self.containers.push((def.name.clone(), line_count));
+        }
+    }
+
+    fn total(&self) -> usize {
+        self.counts.values().sum()
+    }
+
+    fn top_definitions(&self, n: usize) -> Vec<String> {
+        let mut sorted = self.containers.clone();
+        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.truncate(n);
+        sorted.into_iter().map(|(name, _)| name).collect()
+    }
+}
+
+/// Build a directory-grouped summary instead of returning truncated entries.
+/// Called when should_auto_summary() returns true.
+fn build_auto_summary(
+    index: &DefinitionIndex,
+    results: &[(u32, &DefinitionEntry)],
+    args: &DefinitionSearchArgs,
+    total_results: usize,
+    search_start: Instant,
+    ctx: &HandlerContext,
+) -> ToolCallResult {
+    let file_filter_base = args.file_filter.as_deref().unwrap_or("");
+    let mut groups: HashMap<String, AutoSummaryGroup> = HashMap::new();
+
+    for (_, def) in results {
+        let file_path = match index.files.get(def.file_id as usize) {
+            Some(p) => p.as_str(),
+            None => continue,
+        };
+        let group_key = extract_group_directory(file_path, file_filter_base);
+        groups.entry(group_key).or_default().add(def);
+    }
+
+    // Sort groups by total count desc
+    let mut sorted_groups: Vec<(String, AutoSummaryGroup)> = groups.into_iter().collect();
+    sorted_groups.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+
+    // Format JSON groups
+    let groups_json: Vec<Value> = sorted_groups.iter().map(|(dir, data)| {
+        let top = data.top_definitions(3);
+        json!({
+            "directory": dir,
+            "total": data.total(),
+            "counts": data.counts,
+            "topDefinitions": top,
+        })
+    }).collect();
+
+    // Build contextual hint
+    let hint = if let Some((largest_dir, largest_data)) = sorted_groups.first() {
+        let top_name = largest_data.containers.iter()
+            .max_by_key(|(_, lc)| *lc)
+            .map(|(n, _)| n.as_str())
+            .unwrap_or("...");
+        format!(
+            "Use file='{}' to explore the largest group, or name='{}' for a specific class",
+            largest_dir, top_name
+        )
+    } else {
+        "Narrow with file or name filter".to_string()
+    };
+
+    let active_definitions: usize = index.file_index.values().map(|v| v.len()).sum();
+    let mut summary = json!({
+        "totalResults": total_results,
+        "returned": 0,
+        "autoSummaryMode": true,
+        "searchTimeMs": search_start.elapsed().as_secs_f64() * 1000.0,
+        "indexFiles": index.files.len(),
+        "totalDefinitions": active_definitions,
+    });
+    inject_branch_warning(&mut summary, ctx);
+
+    let output = json!({
+        "autoSummary": {
+            "groups": groups_json,
+            "totalDefinitions": total_results,
+            "groupCount": sorted_groups.len(),
+            "hint": hint,
+        },
+        "summary": summary,
+    });
+
+    ToolCallResult::success(json_to_string(&output))
+}
+
+/// Extract the group directory from a file path relative to a file_filter base.
+///
+/// If file_filter="Services/", file_path=".../Services/Auth/UserService.cs" → "Auth"
+/// If the file is directly in base: ".../Services/Helpers.cs" → "(root)"
+/// Without file_filter: groups by first path component.
+fn extract_group_directory(file_path: &str, file_filter_base: &str) -> String {
+    let normalized = file_path.replace('\\', "/");
+
+    // Find where the base ends in the file path (case-insensitive)
+    let relative = if !file_filter_base.is_empty() {
+        let base_norm = file_filter_base.replace('\\', "/").to_lowercase();
+        let lower = normalized.to_lowercase();
+        if let Some(pos) = lower.find(&base_norm) {
+            &normalized[pos + base_norm.len()..]
+        } else {
+            &normalized
+        }
+    } else {
+        &normalized
+    };
+
+    // Strip leading slash
+    let relative = relative.strip_prefix('/').unwrap_or(relative);
+
+    // Take first path component as group
+    if let Some(sep_pos) = relative.find('/') {
+        relative[..sep_pos].to_string()
+    } else {
+        "(root)".to_string()
     }
 }
 

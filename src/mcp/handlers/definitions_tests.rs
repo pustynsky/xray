@@ -2654,3 +2654,259 @@ fn test_hint_e_comma_separated_file_filter() {
         .expect("Should have hint for comma-separated unsupported extensions");
     assert!(hint.contains("search_grep"), "Hint should suggest search_grep. Got: {}", hint);
 }
+
+
+// ─── Auto-summary tests ──────────────────────────────────────────────
+
+/// Build a DefinitionIndex with definitions spread across multiple subdirectories
+/// for testing auto-summary grouping.
+fn make_auto_summary_test_index() -> DefinitionIndex {
+    let definitions = vec![
+        // SubDir A: 2 classes + 1 method
+        DefinitionEntry {
+            name: "BigService".to_string(), kind: DefinitionKind::Class,
+            file_id: 0, line_start: 1, line_end: 200,  // 200 lines — largest
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "SmallHelper".to_string(), kind: DefinitionKind::Class,
+            file_id: 0, line_start: 201, line_end: 220,  // 20 lines
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "DoWork".to_string(), kind: DefinitionKind::Method,
+            file_id: 0, line_start: 10, line_end: 30,
+            signature: None, parent: Some("BigService".to_string()), modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        // SubDir B: 1 class + 1 interface + 1 method
+        DefinitionEntry {
+            name: "OrderProcessor".to_string(), kind: DefinitionKind::Class,
+            file_id: 1, line_start: 1, line_end: 150,  // 150 lines
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "IOrderService".to_string(), kind: DefinitionKind::Interface,
+            file_id: 1, line_start: 160, line_end: 180,  // 21 lines
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "ProcessOrder".to_string(), kind: DefinitionKind::Method,
+            file_id: 1, line_start: 10, line_end: 50,
+            signature: None, parent: Some("OrderProcessor".to_string()), modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        // Root level file (no subdirectory)
+        DefinitionEntry {
+            name: "Startup".to_string(), kind: DefinitionKind::Class,
+            file_id: 2, line_start: 1, line_end: 50,  // 50 lines
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\Services\\Auth\\BigService.cs".to_string(),
+            "C:\\src\\Services\\Orders\\OrderProcessor.cs".to_string(),
+            "C:\\src\\Services\\Startup.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(), base_type_index: HashMap::new(),
+        file_index, path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
+    }
+}
+
+#[test]
+fn test_should_auto_summary_triggers_on_overflow() {
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 3})).unwrap();
+    assert!(should_auto_summary(&args, 7), "should trigger: 7 results > maxResults 3");
+}
+
+#[test]
+fn test_should_auto_summary_not_triggered_when_results_fit() {
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 100})).unwrap();
+    assert!(!should_auto_summary(&args, 7), "should NOT trigger: 7 results <= maxResults 100");
+}
+
+#[test]
+fn test_should_auto_summary_not_triggered_with_name_filter() {
+    let args = parse_definition_args(&json!({"file": "Services/", "name": "BigService", "maxResults": 3})).unwrap();
+    assert!(!should_auto_summary(&args, 7), "should NOT trigger: name filter is set");
+}
+
+#[test]
+fn test_should_auto_summary_not_triggered_with_include_body() {
+    let args = parse_definition_args(&json!({"file": "Services/", "includeBody": true, "maxResults": 3})).unwrap();
+    assert!(!should_auto_summary(&args, 7), "should NOT trigger: includeBody is set");
+}
+
+#[test]
+fn test_auto_summary_groups_by_directory() {
+    let index = make_auto_summary_test_index();
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 3})).unwrap();
+
+    // Collect all candidates (simulating the handler flow)
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+
+    assert!(total_results > args.max_results, "precondition: results should exceed maxResults");
+
+    let result = build_auto_summary(
+        &index, &results, &args, total_results,
+        std::time::Instant::now(), &super::super::HandlerContext::default(),
+    );
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Should have autoSummary, not definitions
+    assert!(output.get("autoSummary").is_some(), "should have autoSummary");
+    assert!(output.get("definitions").is_none(), "should NOT have definitions array");
+
+    let auto_summary = &output["autoSummary"];
+    let groups = auto_summary["groups"].as_array().unwrap();
+    assert!(groups.len() >= 2, "should have at least 2 groups (Auth, Orders)");
+
+    // Verify group structure
+    for group in groups {
+        assert!(group.get("directory").is_some(), "group should have directory");
+        assert!(group.get("total").is_some(), "group should have total");
+        assert!(group.get("counts").is_some(), "group should have counts");
+        assert!(group.get("topDefinitions").is_some(), "group should have topDefinitions");
+    }
+
+    // summary should indicate autoSummaryMode
+    let summary = &output["summary"];
+    assert_eq!(summary["autoSummaryMode"], true);
+    assert_eq!(summary["returned"], 0);
+    assert_eq!(summary["totalResults"], total_results);
+}
+
+#[test]
+fn test_auto_summary_top_definitions_by_size() {
+    let index = make_auto_summary_test_index();
+    let args = parse_definition_args(&json!({"file": "Services/Auth", "maxResults": 1})).unwrap();
+
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+
+    let result = build_auto_summary(
+        &index, &results, &args, total_results,
+        std::time::Instant::now(), &super::super::HandlerContext::default(),
+    );
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let groups = output["autoSummary"]["groups"].as_array().unwrap();
+
+    // Find the Auth group
+    let auth_group = groups.iter().find(|g| {
+        let dir = g["directory"].as_str().unwrap_or("");
+        dir.contains("Auth") || dir == "(root)"
+    });
+    assert!(auth_group.is_some(), "should have a group containing Auth definitions");
+
+    let top_defs = auth_group.unwrap()["topDefinitions"].as_array().unwrap();
+    // BigService (200 lines) should be first
+    if !top_defs.is_empty() {
+        assert_eq!(top_defs[0].as_str().unwrap(), "BigService",
+            "largest class should be first in topDefinitions");
+    }
+}
+
+#[test]
+fn test_auto_summary_counts_by_kind() {
+    let index = make_auto_summary_test_index();
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 1})).unwrap();
+
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+
+    let result = build_auto_summary(
+        &index, &results, &args, total_results,
+        std::time::Instant::now(), &super::super::HandlerContext::default(),
+    );
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let groups = output["autoSummary"]["groups"].as_array().unwrap();
+
+    // Sum all counts across groups
+    let mut total_class = 0usize;
+    let mut total_method = 0usize;
+    for group in groups {
+        let counts = group["counts"].as_object().unwrap();
+        total_class += counts.get("class").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        total_method += counts.get("method").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    }
+    assert!(total_class >= 3, "should have at least 3 classes total: got {}", total_class);
+    assert!(total_method >= 2, "should have at least 2 methods total: got {}", total_method);
+}
+
+#[test]
+fn test_auto_summary_hint_contains_concrete_names() {
+    let index = make_auto_summary_test_index();
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 1})).unwrap();
+
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+
+    let result = build_auto_summary(
+        &index, &results, &args, total_results,
+        std::time::Instant::now(), &super::super::HandlerContext::default(),
+    );
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["autoSummary"]["hint"].as_str().unwrap();
+
+    // Hint should mention file= and name= with concrete values
+    assert!(hint.contains("file="), "hint should suggest file= filter: {}", hint);
+    assert!(hint.contains("name="), "hint should suggest name= filter: {}", hint);
+}
+
+#[test]
+fn test_extract_group_directory_with_base() {
+    assert_eq!(
+        extract_group_directory("C:/src/Services/Auth/UserService.cs", "Services/"),
+        "Auth"
+    );
+    assert_eq!(
+        extract_group_directory("C:\\src\\Services\\Orders\\OrderProcessor.cs", "Services/"),
+        "Orders"
+    );
+}
+
+#[test]
+fn test_extract_group_directory_root_file() {
+    assert_eq!(
+        extract_group_directory("C:/src/Services/Startup.cs", "Services/"),
+        "(root)"
+    );
+}
+
+#[test]
+fn test_extract_group_directory_no_base() {
+    // Without base filter, groups by first component
+    let result = extract_group_directory("src/Controllers/HomeController.cs", "");
+    assert_eq!(result, "src");
+}

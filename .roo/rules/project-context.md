@@ -1,5 +1,7 @@
 # Project Rules
 
+Talk to user in Russian if not specified otherwise.
+
 ## Post-Change Checklist
 
 After every code change, before completing the task, verify ALL of the following:
@@ -89,6 +91,43 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 - Example: `docs/todo_approved_2026-02-28_override-caller-tracking.md`
 - Language: Russian (unless explicitly requested otherwise)
 - Must include: problem description, solution approach, implementation plan with code sketches, acceptance criteria
+
+## MCP Transcript Analysis Workflow
+
+The project includes a transcript analyzer script (`scripts/analyze-transcript.ps1`) that evaluates MCP tool quality from exported session logs.
+
+### When to use
+
+When the user provides a path to an exported Roo Code session log (`.md` file) and asks to analyze it:
+
+1. **Run the analyzer**: `pwsh -File scripts/analyze-transcript.ps1 -InputFile <path-to-log.md>`
+2. **Read the generated report**: `<path-to-log.md>.report.md` and `<path-to-log.md>.report.json`
+3. **Analyze the results**:
+   - Review the **Tool Quality Scorecard** — which tools have low utilization_rate, high truncation, many refinement chains?
+   - Review **Automated Recommendations** — what does the script suggest?
+   - Review **Truncation Root Causes** — what parameters cause truncation?
+   - Review **Efficiency** — how many KB wasted on truncated-then-refined responses?
+   - Review **Model Self-Analysis** (if present) — what did the model say about tool quality?
+4. **Assess action items**: Are there real problems with search-index code, or is this just expected behavior?
+5. **If action items exist** — create a user story in Russian at `docs/user-stories/todo_approved_{date}_{feature-name}.md` with:
+   - Concrete examples from the analyzed episodes (params, param_diff, thinking_before, reaction_after)
+   - Quantitative metrics (truncation rate, wasted bytes, refinement chains)
+   - Proposed solutions with code-level implementation hints
+   - Acceptance criteria with measurable targets (re-run same prompt, compare metrics)
+6. **Assess the analyzer itself**: Can the script output be improved? Are there false positives/negatives? Missing metrics? If yes — fix the script.
+
+### Script location and usage
+
+```
+pwsh -File scripts/analyze-transcript.ps1 -InputFile session.md [-OutputJson report.json] [-OutputMd report.md]
+```
+
+Output: JSON + Markdown reports with episodes, tool scorecard, recommendations, truncation root causes, efficiency metrics.
+
+### Related artifacts
+
+- User story for the analyzer: `docs/user-stories/todo_approved_2026-03-12_mcp-transcript-analyzer.md`
+- Example improvement story derived from analysis: `docs/user-stories/todo_approved_2026-03-12_search-definitions-ux-improvements.md`
 
 ## Lessons Learned
 

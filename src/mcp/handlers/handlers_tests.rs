@@ -262,13 +262,15 @@ fn test_search_definitions_max_results_zero_means_unlimited() {
 #[test]
 fn test_search_definitions_max_results_one_caps_output() {
     let ctx = make_ctx_with_defs();
+    // Use name filter to bypass autoSummary (which triggers when results > maxResults without name filter)
     let result = dispatch_tool(&ctx, "search_definitions", &json!({
-        "maxResults": 1
+        "maxResults": 1,
+        "name": "Service"
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let returned = output["definitions"].as_array().unwrap().len();
-    assert_eq!(returned, 1, "maxResults=1 should return exactly 1 definition");
+    assert_eq!(returned, 1, "maxResults=1 with name filter should return exactly 1 definition");
 }
 
 #[test]

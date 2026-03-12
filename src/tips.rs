@@ -312,7 +312,7 @@ pub fn strategies() -> Vec<Strategy> {
             name: "Architecture Exploration",
             when: "User asks 'how is X structured', 'explain module X', or 'show me the architecture of X'",
             steps: &[
-                "Step 1 - Map the landscape (1 call): search_definitions name='X' maxResults=50 includeBody=false excludeDir=['test','Test','Mock'] -> lists ALL classes, interfaces, enums, methods in one shot (use file='<dirname>' to explore an entire directory)",
+                "Step 1 - Map the landscape (1 call): search_definitions file='<dirname>' excludeDir=['test','Test','Mock'] -> if many results, returns autoSummary with directory grouping and top classes per subdirectory. If few results, returns full definition list. Use file='<subdir>' to drill into specific groups",
                 "Step 2 - Read key implementations (1 call): search_definitions name='<top 3-5 key classes from step 1>' includeBody=true maxBodyLines=30 -> returns source code of the most important files",
                 "Step 3 (optional) - Scope and dependencies (1 call): search_grep terms='X' countOnly=true -> scale (how many files, occurrences); or search_fast pattern='X' dirsOnly=true -> directory structure",
             ],
@@ -321,7 +321,7 @@ pub fn strategies() -> Vec<Strategy> {
                 "Don't read indexed source files to see source code -- search_definitions includeBody=true returns it directly. read_file is ONLY for non-indexed files (markdown, JSON, XML, config) or for editing (need exact line numbers)",
                 "Don't search one kind at a time (class, then interface, then enum) -- omit kind filter to get everything at once",
                 "Don't use countOnly first then re-query with body -- go straight to includeBody=true with maxBodyLines",
-                "Don't browse directories (list_files, list_directory, search_fast with empty pattern) to understand code -- search_definitions file='<dir>' returns ALL definitions with file paths in ONE call",
+                "Don't browse directories (list_files, list_directory, search_fast with empty pattern) to understand code -- search_definitions file='<dir>' returns ALL definitions with file paths in ONE call. For large modules, autoSummary kicks in with directory grouping",
                 "Don't search for file names separately if search_definitions already found them (results include file paths)",
                 "Don't make separate queries for ClassName and IClassName -- use comma-separated: name='ClassName,IClassName'",
             ],
@@ -488,7 +488,8 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "includeCodeStats": "Each method gets: lines, cyclomaticComplexity, cognitiveComplexity, maxNestingDepth, paramCount, returnCount, callCount, lambdaCount",
             "audit": "Shows: total files, files with/without definitions, read errors, lossy UTF-8, suspicious files (large files with 0 definitions)",
             "angular": "Angular @Component classes include 'selector' and 'templateChildren' in output, showing which child components are used in the template",
-            "includeUsageCount": "includeUsageCount=true -> each definition gets usageCount (number of files containing this name in content index). usageCount=0 or 1 = potential dead code. Counts ALL text occurrences including comments/strings. Exact token match only"
+            "includeUsageCount": "includeUsageCount=true -> each definition gets usageCount (number of files containing this name in content index). usageCount=0 or 1 = potential dead code. Counts ALL text occurrences including comments/strings. Exact token match only",
+            "autoSummary": "Triggered automatically when results > maxResults and no name filter. Returns directory-grouped overview with counts and top-3 definitions per subdirectory. To get individual definitions instead, add name filter or narrow file scope"
         },
         "search_grep": {
             "terms": "Token: 'HttpClient'. Multi-term OR: 'HttpClient,ILogger,Task'. Multi-term AND (mode='and'): 'ServiceProvider,IUserService'. Phrase (phrase=true): 'new HttpClient'. Regex (regex=true): 'I.*Cache'",
@@ -742,6 +743,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  - NEVER use list_files, list_directory, or directory_tree for ANY purpose when search-index is connected — even for simple directory listing. Use search_fast pattern='*' dir='<path>' dirsOnly=true for directory listing, or search_definitions file='<dir>' for code structure\n");
     out.push_str("  - NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit — search_edit is atomic, handles whitespace correctly, supports multi-file batch, and costs fewer tokens\n");
     out.push_str("  - NEVER use search_files (built-in regex/text search) — use search_grep instead (<1ms vs seconds, pre-built inverted index)\n");
+    out.push_str("  - NEVER call search_fast dirsOnly=true to explore code modules — search_definitions file='<dir>' auto-generates directory-grouped summary (autoSummary) when results are too many to list individually\n");
     if !def_extensions.is_empty() {
         let ext_dotted: Vec<String> = def_extensions.iter().map(|e| format!(".{}", e)).collect();
         out.push_str(&format!(

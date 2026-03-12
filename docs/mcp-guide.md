@@ -693,6 +693,62 @@ For name corrections, the object also includes `"similarity": "95%"`.
 
 If auto-correction produces 0 results, it falls through to the regular hint system described above.
 
+### Auto-Summary for Broad Queries
+
+When `search_definitions` finds more results than `maxResults` and **no `name` filter** is set (and `includeBody` is false), it automatically returns a **directory-grouped summary** instead of truncated entries. This eliminates the need for preliminary `search_fast dirsOnly=true` calls when exploring unfamiliar code modules.
+
+```json
+// Request: explore a large service directory
+{ "file": "Services/" }
+
+// Response: directory-grouped summary (instead of truncated entries)
+{
+  "autoSummary": {
+    "groups": [
+      {
+        "directory": "Orders",
+        "total": 180,
+        "counts": { "class": 12, "interface": 5, "method": 120, "field": 43 },
+        "topDefinitions": ["OrderService", "OrderProcessor", "OrderValidator"]
+      },
+      {
+        "directory": "Users",
+        "total": 250,
+        "counts": { "class": 15, "interface": 8, "method": 170, "field": 57 },
+        "topDefinitions": ["UserService", "UserRepository", "AuthenticationManager"]
+      }
+    ],
+    "totalDefinitions": 3222,
+    "groupCount": 12,
+    "hint": "Use file='Orders' to explore the largest group, or name='OrderService' for a specific class"
+  },
+  "summary": {
+    "totalResults": 3222,
+    "returned": 0,
+    "autoSummaryMode": true,
+    "searchTimeMs": 0.8
+  }
+}
+```
+
+**Activation conditions** (all must be true):
+- `totalResults > maxResults` — results exceed the limit
+- No `name` filter — broad exploration query
+- `includeBody` is false — not requesting source code
+
+**To get individual definitions instead**, add a `name` filter or narrow the `file` scope.
+
+| Response field | Description |
+|---|---|
+| `autoSummary.groups[]` | Array of directory groups, sorted by `total` descending |
+| `groups[].directory` | Subdirectory name (1 level below `file` filter) |
+| `groups[].total` | Total definitions in this directory |
+| `groups[].counts` | Definition counts by kind (`class`, `method`, etc.) |
+| `groups[].topDefinitions` | Top-3 largest classes/interfaces/structs/enums by line count |
+| `autoSummary.totalDefinitions` | Grand total of all matching definitions |
+| `autoSummary.hint` | Context-aware suggestion for next query |
+| `summary.autoSummaryMode` | `true` when auto-summary is active |
+
 ---
 
 ## `search_fast` — File Name Search
