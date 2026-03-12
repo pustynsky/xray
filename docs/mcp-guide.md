@@ -69,7 +69,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `search_git_history`         | Commit history for a file. Uses in-memory cache when available (sub-millisecond), falls back to CLI (~2–6 sec)                          |
 | `search_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |
 | `search_git_authors`         | Top authors for a file ranked by commit count. Uses in-memory cache when available (sub-millisecond), falls back to CLI                  |
-| `search_git_activity`        | Repo-wide activity (all changed files) for a date range. Uses in-memory cache when available (sub-millisecond), falls back to CLI        |
+| `search_git_activity`        | Activity (changed files) for a date range, optionally filtered by path. Uses in-memory cache when available (sub-millisecond), falls back to CLI |
 | `search_git_blame`           | Line-level attribution (`git blame`) for a file or line range. Returns commit hash, author, date, and content per line                   |
 | `search_branch_status`       | Shows current git branch status: branch name, main/master check, behind/ahead counts, dirty files, fetch age. Call before investigating production bugs |
 
@@ -964,7 +964,7 @@ Cache responses include a `"(from cache)"` hint in the `summary` field so the AI
 |---|---|---|---|
 | `repo`       | string | ✅ | Path to local git repository |
 | `file`       | string | ✅* | File path relative to repo root (*required for `search_git_history`, `search_git_diff`, `search_git_blame`) |
-| `path`       | string | — | File or directory path relative to repo root. `search_git_authors` accepts `path` (file, directory, or omit for entire repo). `file` is a backward-compatible alias for `path` |
+| `path`       | string | — | File or directory path relative to repo root. `search_git_authors` and `search_git_activity` accept `path` (file, directory, or omit for entire repo). `file` is a backward-compatible alias for `path` in `search_git_authors` |
 | `from`       | string | — | Start date (YYYY-MM-DD, inclusive) |
 | `to`         | string | — | End date (YYYY-MM-DD, inclusive) |
 | `date`       | string | — | Exact date (YYYY-MM-DD), overrides from/to |
@@ -1055,11 +1055,21 @@ The `path` parameter (or its backward-compatible alias `file`) accepts:
 
 ### search_git_activity
 
-Get activity across all files in a repository for a date range. Returns a list of changed files with their commit counts. Useful for answering "what changed this week?" Date filters are recommended to keep results manageable.
+Get activity across files in a repository for a date range. Returns a list of changed files with their commit counts. Useful for answering "what changed this week?" Date filters are recommended to keep results manageable.
+
+The optional `path` parameter filters activity to a specific file or directory:
+- **File path** — activity for a single file (e.g., `"path": "src/main.rs"`)
+- **Directory path** — activity across all files in a directory (e.g., `"path": "src/controllers"`)
+- **Omitted** — activity across the entire repository
+
+Path filtering uses native `git log -- <pathspec>` for efficiency — git itself filters commits at the source.
 
 ```json
-// Request
+// Request — whole repo
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","from":"2025-01-01","to":"2025-01-31"}}}
+
+// Request — specific directory
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","path":"src/controllers","from":"2025-01-01","to":"2025-01-31"}}}
 
 // Response (abbreviated — from cache)
 {

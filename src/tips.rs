@@ -537,6 +537,7 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "noCache": "true -> bypass cache"
         },
         "search_git_activity": {
+            "path": "'src/controllers' — filter by directory. Aggregates across all files within. Omit for whole repo",
             "from": "'2025-01-01' — RECOMMENDED to narrow results. Without date filter, returns ALL repo activity",
             "author": "'alice' — filter by author",
             "message": "'refactor' — filter by commit message"

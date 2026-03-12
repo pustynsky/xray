@@ -5765,6 +5765,45 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
+### T-GIT-04b: `serve` — search_git_activity with `path` filter
+
+**Command:**
+
+```powershell
+$msgs = @(
+    '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+    '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","path":"src/git","from":"2020-01-01","to":"2030-12-31"}}}'
+) -join "`n"
+echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
+```
+
+**Expected:**
+
+- stdout: JSON-RPC response with `activity` array
+- All entries in `activity` have `path` starting with `src/git`
+- `summary.filesChanged` > 0 (git directory has commit history)
+- Results are filtered to the specified directory only
+
+**Negative test — nonexistent path:**
+
+```powershell
+'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","path":"nonexistent_dir_xyz","from":"2020-01-01","to":"2030-12-31"}}}'
+```
+
+**Expected:**
+
+- `activity` array is empty
+- `warning` field: `"File not found in git: nonexistent_dir_xyz. Check the path."`
+
+**Validates:** `path` parameter filters `search_git_activity` results to a specific file or directory using native `git log -- <pathspec>` filtering. Works in both cache and CLI fallback paths.
+
+**Unit tests:** `test_repo_activity_with_path_filter`, `test_repo_activity_with_path_filter_no_results`, `test_git_activity_nonexistent_path_has_warning`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T-GIT-05: `serve` — search_git_history with date filter
 
 **Command:**

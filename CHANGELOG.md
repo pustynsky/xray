@@ -9,6 +9,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ## 2026-03-12
 
 ### Features
+- **`search_git_activity` path filter** — `search_git_activity` now supports an optional `path` parameter to filter activity by file or directory. Previously, `path` worked only via the in-memory cache but was undocumented in the MCP schema and ignored in the CLI fallback path. Three fixes: (1) `path` added to MCP schema so LLMs discover the parameter; (2) CLI fallback passes `path` to `git log -- <pathspec>` for native git-level filtering (efficient — git itself filters commits); (3) tips updated with `path` example. Backward compatible — `path` is optional, omitting it returns whole-repo activity as before. 2 new unit tests. All 1551 unit tests pass.
+
 - **`search_definitions` auto-summary for broad queries** — When `search_definitions` finds more results than `maxResults` and no `name` filter is set (and `includeBody` is false), it automatically returns a **directory-grouped summary** (`autoSummary`) instead of truncated entries. Each group shows: subdirectory name, total definition count, counts by kind (class, method, etc.), and top-3 largest classes/interfaces by line count. Includes a contextual `hint` with concrete subdirectory and class name suggestions. This eliminates the "map then read" pattern where LLMs needed `search_fast dirsOnly=true` + multiple narrowing `search_definitions` calls to explore large code modules. To get individual definitions, add a `name` filter or narrow the `file` scope. Updated Architecture Exploration strategy recipe and anti-patterns in LLM instructions. 11 new unit tests. All 1547 unit tests pass.
 
 ---

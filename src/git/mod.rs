@@ -390,6 +390,7 @@ pub fn repo_activity(
     filter: &DateFilter,
     author_filter: Option<&str>,
     message_filter: Option<&str>,
+    path_filter: Option<&str>,
 ) -> Result<(HashMap<String, Vec<CommitInfo>>, u64), String> {
     // Use git log with --name-only to get changed files per commit
     let format = format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP);
@@ -407,6 +408,13 @@ pub fn repo_activity(
     }
     if let Some(message) = message_filter {
         cmd.arg(format!("--grep={}", message));
+    }
+
+    // Add path filter via git log's -- <pathspec> syntax
+    if let Some(path) = path_filter {
+        if !path.is_empty() {
+            cmd.arg("--").arg(path);
+        }
     }
 
     let output = run_git(&mut cmd)?;

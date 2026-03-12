@@ -98,7 +98,9 @@ The project includes a transcript analyzer script (`scripts/analyze-transcript.p
 
 ### When to use
 
-When the user provides a path to an exported Roo Code session log (`.md` file) and asks to analyze it:
+**If the user pastes a path to an `.md` file without any instructions** (especially from Downloads, which looks like an exported Roo Code session log `roo_task_*.md`), **do NOT read it directly** — it can be 100KB+. Instead, ask the user: "Это экспорт сессии Roo Code. Запустить скрипт анализа (`analyze-transcript.ps1`), или ты хочешь чтобы я прочитал файл целиком?"
+
+When the user confirms analysis (or explicitly asks to analyze it):
 
 1. **Run the analyzer**: `pwsh -File scripts/analyze-transcript.ps1 -InputFile <path-to-log.md>`
 2. **Read the generated report**: `<path-to-log.md>.report.md` and `<path-to-log.md>.report.json`

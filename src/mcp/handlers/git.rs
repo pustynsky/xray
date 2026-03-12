@@ -103,6 +103,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string", "description": "Path to git repository" },
+                    "path": { "type": "string", "description": "Filter by file or directory path. For directories, returns activity for all files within. If omitted, returns whole-repo activity." },
                     "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive). Recommended." },
                     "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
                     "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
@@ -560,7 +561,9 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let start = Instant::now();
 
-    match git::repo_activity(repo, &filter, author_filter, message_filter) {
+    let activity_path = args.get("path").and_then(|v| v.as_str());
+
+    match git::repo_activity(repo, &filter, author_filter, message_filter, activity_path) {
         Ok((file_map, commits_processed)) => {
             let elapsed = start.elapsed();
 
@@ -591,8 +594,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             let total_files = files_array.len();
             let total_entries: usize = file_map.values().map(|v| v.len()).sum();
 
-            // Check if a path filter was provided
-            let activity_path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let activity_path_str = activity_path.unwrap_or("");
 
             let mut output = json!({
                 "activity": files_array,
@@ -611,8 +613,8 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             });
 
             // Empty results validation: warn if path doesn't exist in git
-            if total_files == 0 && !activity_path.is_empty() && !git::file_exists_in_git(repo, activity_path) {
-                output["warning"] = json!(format!("File not found in git: {}. Check the path.", activity_path));
+            if total_files == 0 && !activity_path_str.is_empty() && !git::file_exists_in_git(repo, activity_path_str) {
+                output["warning"] = json!(format!("File not found in git: {}. Check the path.", activity_path_str));
             }
 
             ToolCallResult::success(json_to_string(&output))

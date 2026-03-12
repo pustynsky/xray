@@ -212,7 +212,7 @@ fn test_top_authors_limits_results() {
 fn test_repo_activity_returns_files() {
     // Use a broad date range
     let filter = parse_date_filter(Some("2020-01-01"), Some("2030-12-31"), None).unwrap();
-    let result = repo_activity(".", &filter, None, None);
+    let result = repo_activity(".", &filter, None, None, None);
     assert!(result.is_ok(), "Should succeed: {:?}", result.err());
     let (files, commits_processed) = result.unwrap();
     assert!(!files.is_empty(), "Should have at least one file with changes");
@@ -222,16 +222,43 @@ fn test_repo_activity_returns_files() {
 #[test]
 fn test_repo_activity_empty_date_range() {
     let filter = parse_date_filter(Some("1970-01-01"), Some("1970-01-02"), None).unwrap();
-    let result = repo_activity(".", &filter, None, None);
+    let result = repo_activity(".", &filter, None, None, None);
     assert!(result.is_ok());
     let (files, _) = result.unwrap();
     assert!(files.is_empty(), "Very old date range should have no activity");
 }
 
 #[test]
+fn test_repo_activity_with_path_filter() {
+    let filter = parse_date_filter(Some("2020-01-01"), Some("2030-12-31"), None).unwrap();
+    let result = repo_activity(".", &filter, None, None, Some("src/git"));
+    assert!(result.is_ok(), "Should succeed: {:?}", result.err());
+    let (files, commits_processed) = result.unwrap();
+    assert!(!files.is_empty(), "Should have files in src/git");
+    assert!(commits_processed > 0, "Should have processed commits");
+    // All returned files should be under src/git
+    for path in files.keys() {
+        assert!(
+            path.starts_with("src/git"),
+            "File '{}' should be under src/git",
+            path
+        );
+    }
+}
+
+#[test]
+fn test_repo_activity_with_path_filter_no_results() {
+    let filter = parse_date_filter(Some("2020-01-01"), Some("2030-12-31"), None).unwrap();
+    let result = repo_activity(".", &filter, None, None, Some("nonexistent_directory_xyz"));
+    assert!(result.is_ok(), "Should succeed even with nonexistent path");
+    let (files, _) = result.unwrap();
+    assert!(files.is_empty(), "Nonexistent path should return no files");
+}
+
+#[test]
 fn test_repo_activity_bad_repo() {
     let filter = DateFilter { from_date: None, to_date: None };
-    let result = repo_activity("C:\\nonexistent\\repo\\xyz", &filter, None, None);
+    let result = repo_activity("C:\\nonexistent\\repo\\xyz", &filter, None, None, None);
     assert!(result.is_err(), "Should fail for nonexistent repo");
 }
 

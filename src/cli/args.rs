@@ -218,7 +218,7 @@ AVAILABLE TOOLS (exposed via MCP):
   search_git_history -- Commit history for a file (cached or git CLI)
   search_git_diff    -- Commit history with full diff/patch for a file
   search_git_authors -- Top authors for a file ranked by commit count
-  search_git_activity-- Repo-wide activity (all changed files) for a date range
+  search_git_activity-- Activity (changed files) for a date range, optionally filtered by path
   search_git_blame   -- Line-by-line git blame for a file or line range
   search_branch_status-- Show current git branch status, behind/ahead counts, dirty files
   search_help        -- Show tips and best practices for effective search tool usage
