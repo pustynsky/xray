@@ -237,6 +237,103 @@ function Get-ParamDiff {
     catch { return '' }
 }
 
+function Is-TargetRefinement {
+    <#
+    .SYNOPSIS
+        Determines whether two consecutive calls to the same tool represent a true
+        scope refinement (same target entity, changed scope parameters) vs sequential
+        exploration (different target entity).
+    .DESCRIPTION
+        Compares "target identity" parameters between two calls:
+        - search_definitions: name, parent, file
+        - search_callers: method, class
+        - search_grep: terms
+        - search_fast: pattern
+        - search_edit: path
+
+        Returns $true if there is meaningful overlap in target identity, indicating
+        the model is refining the same query. Returns $false if targets are completely
+        different, indicating sequential exploration of different entities.
+    #>
+    param([string]$prevArgs, [string]$currArgs, [string]$toolName)
+    try {
+        $prev = $prevArgs | ConvertFrom-Json -ErrorAction Stop
+        $curr = $currArgs | ConvertFrom-Json -ErrorAction Stop
+
+        # Define target keys per tool
+        $targetKeys = switch ($toolName) {
+            'search_definitions' { @('name', 'parent', 'file') }
+            'search_callers'     { @('method', 'class') }
+            'search_grep'        { @('terms') }
+            'search_fast'        { @('pattern') }
+            'search_edit'        { @('path') }
+            default              { @('name', 'file', 'method', 'path', 'terms', 'pattern') }
+        }
+
+        # Collect target values from each call
+        $prevTargets = @{}
+        $currTargets = @{}
+        foreach ($key in $targetKeys) {
+            $pVal = if ($prev.PSObject.Properties[$key]) { "$($prev.$key)".Trim() } else { '' }
+            $cVal = if ($curr.PSObject.Properties[$key]) { "$($curr.$key)".Trim() } else { '' }
+            if ($pVal) { $prevTargets[$key] = $pVal }
+            if ($cVal) { $currTargets[$key] = $cVal }
+        }
+
+        # If neither call has any target params, treat as refinement (scope-only change)
+        if ($prevTargets.Count -eq 0 -and $currTargets.Count -eq 0) { return $true }
+
+        # Rule 1: Direct key match — same key, same value (or one is substring of other)
+        foreach ($key in $targetKeys) {
+            $pVal = if ($prevTargets.ContainsKey($key)) { $prevTargets[$key] } else { '' }
+            $cVal = if ($currTargets.ContainsKey($key)) { $currTargets[$key] } else { '' }
+            if ($pVal -and $cVal) {
+                # Exact match
+                if ($pVal -eq $cVal) { return $true }
+                # File path: one is subdirectory of the other (drilling down)
+                if ($key -eq 'file') {
+                    if ($cVal.Contains($pVal) -or $pVal.Contains($cVal)) { return $true }
+                }
+                # Comma-separated names: check overlap (e.g., "A,B,C" vs "B")
+                $pNames = $pVal -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                $cNames = $cVal -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                $overlap = $pNames | Where-Object { $cNames -contains $_ }
+                if ($overlap) { return $true }
+            }
+        }
+
+        # Rule 2: Cross-key match — name↔parent (drilling from class to its methods)
+        if ($toolName -eq 'search_definitions') {
+            $pName   = if ($prevTargets.ContainsKey('name'))   { $prevTargets['name'] }   else { '' }
+            $pParent = if ($prevTargets.ContainsKey('parent')) { $prevTargets['parent'] } else { '' }
+            $cName   = if ($currTargets.ContainsKey('name'))   { $currTargets['name'] }   else { '' }
+            $cParent = if ($currTargets.ContainsKey('parent')) { $currTargets['parent'] } else { '' }
+
+            # prev.name == curr.parent (looked up class, now exploring its methods)
+            if ($pName -and $cParent) {
+                $pNames = $pName -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                $cParents = $cParent -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                $overlap = $pNames | Where-Object { $cParents -contains $_ }
+                if ($overlap) { return $true }
+            }
+            # prev.parent == curr.name (reverse)
+            if ($pParent -and $cName) {
+                $pParents = $pParent -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                $cNames = $cName -split ',' | ForEach-Object { $_.Trim() } | Where-Object { $_ }
+                $overlap = $pParents | Where-Object { $cNames -contains $_ }
+                if ($overlap) { return $true }
+            }
+        }
+
+        # No target overlap found — this is sequential exploration
+        return $false
+    }
+    catch {
+        # If parsing fails, assume refinement (conservative)
+        return $true
+    }
+}
+
 function Analyze-TruncationCause {
     param([hashtable]$episode)
     $causes = @()
@@ -489,16 +586,23 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
     # truncated_response
     if ($ep.response_status -eq 'partial') { $ep.tags.Add('truncated_response') }
 
-    # progressive_refinement vs retry
+    # progressive_refinement vs sequential_exploration vs retry
     if ($e -gt 0) {
         $prev = $episodes[$e - 1]
         if ($prev.tool -eq $ep.tool -and $prev.server -eq $ep.server) {
-            # Compare args: if different -> refinement, if same -> retry
+            # Compare args: if identical -> retry
             if ($prev._call_args -eq $ep._call_args) {
                 $ep.tags.Add('retry')
             }
             else {
-                $ep.tags.Add('progressive_refinement')
+                # Check if target entity is the same (refinement) or different (exploration)
+                $isRefinement = Is-TargetRefinement $prev._call_args $ep._call_args $ep.tool
+                if ($isRefinement) {
+                    $ep.tags.Add('progressive_refinement')
+                }
+                else {
+                    $ep.tags.Add('sequential_exploration')
+                }
             }
         }
     }
@@ -659,6 +763,7 @@ foreach ($group in $toolGroups) {
     $emptyCount = @($toolEps | Where-Object { $_.response_status -eq 'empty' }).Count
     $errorCount = @($toolEps | Where-Object { $_.response_status -eq 'error' }).Count
     $refinementCount = @($toolEps | Where-Object { $_.tags -contains 'progressive_refinement' }).Count
+    $seqExplCount = @($toolEps | Where-Object { $_.tags -contains 'sequential_exploration' }).Count
     $strategyCount = @($toolEps | Where-Object { $_.tags -contains 'strategy_change' }).Count
     $hintsFollowed = @($toolEps | Where-Object { $_.tags -contains 'hint_followed' }).Count
     $hintsIgnored = @($toolEps | Where-Object { $_.tags -contains 'hint_ignored' }).Count
@@ -671,18 +776,19 @@ foreach ($group in $toolGroups) {
     }
 
     $toolScorecard[$toolName] = @{
-        total_calls           = $toolEps.Count
-        result_used_count     = $usedCount
-        utilization_rate      = if ($toolEps.Count -gt 0) { [math]::Round($usedCount / $toolEps.Count, 2) } else { 0 }
-        truncated_count       = $truncCount
-        empty_count           = $emptyCount
-        error_count           = $errorCount
-        refinement_chains     = $refinementCount
-        avg_response_size_bytes = $avgSize
-        hints_followed        = $hintsFollowed
-        hints_ignored         = $hintsIgnored
-        first_useful_call     = $firstUseful
-        strategy_changes      = $strategyCount
+        total_calls                = $toolEps.Count
+        result_used_count          = $usedCount
+        utilization_rate           = if ($toolEps.Count -gt 0) { [math]::Round($usedCount / $toolEps.Count, 2) } else { 0 }
+        truncated_count            = $truncCount
+        empty_count                = $emptyCount
+        error_count                = $errorCount
+        refinement_chains          = $refinementCount
+        sequential_exploration_count = $seqExplCount
+        avg_response_size_bytes    = $avgSize
+        hints_followed             = $hintsFollowed
+        hints_ignored              = $hintsIgnored
+        first_useful_call          = $firstUseful
+        strategy_changes           = $strategyCount
     }
 }
 
@@ -699,6 +805,7 @@ foreach ($ep in $episodes) {
 
 $redundantCount = @($episodes | Where-Object { $_.tags -contains 'redundant' }).Count
 $refinementChainCount = @($episodes | Where-Object { $_.tags -contains 'progressive_refinement' }).Count
+$seqExplTotalCount = @($episodes | Where-Object { $_.tags -contains 'sequential_exploration' }).Count
 
 # Top useful tools (by utilization_rate)
 $topUseful = @($toolScorecard.GetEnumerator() | Sort-Object { $_.Value.utilization_rate } -Descending | Select-Object -First 3 | ForEach-Object { $_.Key })
@@ -725,7 +832,8 @@ foreach ($entry in $toolScorecard.GetEnumerator()) {
         $recommendations += "[$toolName] $($t.truncated_count)/$($t.total_calls) responses truncated (${truncPct}%). Consider reducing default response size or adding auto-pagination."
     }
     if ($t.refinement_chains -gt 2) {
-        $recommendations += "[$toolName] $($t.refinement_chains) refinement chains. Model often narrows scope after first call. Consider better default scope or interactive scope discovery."
+        $seqExp = $t.sequential_exploration_count
+        $recommendations += "[$toolName] $($t.refinement_chains) true refinement chains (+ $seqExp sequential explorations). Model often narrows scope after first call. Consider better default scope or interactive scope discovery."
     }
     if ($t.first_useful_call -gt 1) {
         $recommendations += "[$toolName] First useful call at position $($t.first_useful_call). Consider improving parameter defaults or adding usage hints."
@@ -869,12 +977,12 @@ if ($hasSelfAnalysis) { $synthDetails += ", self-analysis: yes" }
 # Tool Quality Scorecard
 [void]$md.AppendLine("## Tool Quality Scorecard")
 [void]$md.AppendLine("")
-[void]$md.AppendLine("| Tool | Calls | Used | Util% | Truncated | Empty | Errors | Refinements | 1st Useful |")
-[void]$md.AppendLine("|------|-------|------|-------|-----------|-------|--------|-------------|------------|")
+[void]$md.AppendLine("| Tool | Calls | Used | Util% | Truncated | Empty | Errors | Refine | SeqExpl | 1st Useful |")
+[void]$md.AppendLine("|------|-------|------|-------|-----------|-------|--------|--------|---------|------------|")
 foreach ($entry in ($toolScorecard.GetEnumerator() | Sort-Object { $_.Value.total_calls } -Descending)) {
     $t = $entry.Value
     $utilPct = [math]::Round($t.utilization_rate * 100, 0)
-    [void]$md.AppendLine("| $($entry.Key) | $($t.total_calls) | $($t.result_used_count) | ${utilPct}% | $($t.truncated_count) | $($t.empty_count) | $($t.error_count) | $($t.refinement_chains) | $($t.first_useful_call) |")
+    [void]$md.AppendLine("| $($entry.Key) | $($t.total_calls) | $($t.result_used_count) | ${utilPct}% | $($t.truncated_count) | $($t.empty_count) | $($t.error_count) | $($t.refinement_chains) | $($t.sequential_exploration_count) | $($t.first_useful_call) |")
 }
 [void]$md.AppendLine("")
 
@@ -892,6 +1000,9 @@ if ($redundantCount -gt 0) {
 }
 if ($refinementChainCount -gt 0) {
     [void]$md.AppendLine("**Progressive refinement chains**: $refinementChainCount")
+}
+if ($seqExplTotalCount -gt 0) {
+    [void]$md.AppendLine("**Sequential explorations**: $seqExplTotalCount")
 }
 [void]$md.AppendLine("")
 
