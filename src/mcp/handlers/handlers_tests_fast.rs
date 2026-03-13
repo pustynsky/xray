@@ -820,3 +820,247 @@ fn test_search_fast_max_depth_server_dir_mismatch() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+
+/// Regression test: fileCount must work when `dir` points to a subdirectory
+/// (different from server_dir). The LLM typically queries subdirectories like
+/// `dir=src/Clients`. The index stores absolute paths. The dir_prefix used for
+/// filtering file counts must resolve correctly against index.root.
+#[test]
+fn test_search_fast_filecount_with_subdir() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_reldir_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Structure:
+    //   src/
+    //     ModuleA/       (2 files)
+    //     ModuleB/       (1 file)
+    //   tests/
+    //     TestA/         (1 file)
+    let src = tmp_dir.join("src");
+    let mod_a = src.join("ModuleA");
+    let mod_b = src.join("ModuleB");
+    let tests_dir = tmp_dir.join("tests");
+    let test_a = tests_dir.join("TestA");
+    for d in &[&mod_a, &mod_b, &test_a] {
+        let _ = std::fs::create_dir_all(d);
+    }
+    for name in &["X.cs", "Y.cs"] {
+        let mut f = std::fs::File::create(mod_a.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(mod_b.join("Z.cs")).unwrap();
+        writeln!(f, "// Z").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(test_a.join("T.cs")).unwrap();
+        writeln!(f, "// T").unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: dir_str.clone(),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // Pass the absolute path of the subdirectory (simulating LLM's dir param
+    // after load_index resolves it). The key test: dir != server_dir triggers
+    // dir_prefix filtering, and fileCount must still be correct.
+    let src_str = src.to_string_lossy().to_string();
+    let result = handle_search_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": src_str,
+        "dirsOnly": true
+    }));
+    assert!(!result.is_error, "should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    // Should find at least: src, ModuleA, ModuleB
+    assert!(files.len() >= 3, "Should find at least 3 directories under src, got {}", files.len());
+
+    // ModuleA should have fileCount=2
+    let mod_a_entry = files.iter().find(|e| e["path"].as_str().unwrap().ends_with("ModuleA"));
+    assert!(mod_a_entry.is_some(), "ModuleA should be in results");
+    let mod_a_fc = mod_a_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(mod_a_fc, 2, "ModuleA fileCount should be 2, got {}", mod_a_fc);
+
+    // ModuleB should have fileCount=1
+    let mod_b_entry = files.iter().find(|e| e["path"].as_str().unwrap().ends_with("ModuleB"));
+    assert!(mod_b_entry.is_some(), "ModuleB should be in results");
+    let mod_b_fc = mod_b_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(mod_b_fc, 1, "ModuleB fileCount should be 1, got {}", mod_b_fc);
+
+    // src itself should have fileCount=3 (all files under src recursively)
+    let src_entry = files.iter().find(|e| {
+        let p = e["path"].as_str().unwrap();
+        p.ends_with("src") && !p.contains("Module")
+    });
+    assert!(src_entry.is_some(), "src directory should be in results");
+    let src_fc = src_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(src_fc, 3, "src fileCount should be 3 (2 in ModuleA + 1 in ModuleB), got {}", src_fc);
+
+    // TestA should NOT be in results (it's under tests/, not src/)
+    let test_entry = files.iter().find(|e| e["path"].as_str().unwrap().contains("TestA"));
+    assert!(test_entry.is_none(), "TestA should NOT be in results when dir=src");
+
+    // fileCount should NOT be 0 for directories with files (regression)
+    for entry in files {
+        let path = entry["path"].as_str().unwrap();
+        if path.ends_with("ModuleA") || path.ends_with("ModuleB") {
+            let fc = entry["fileCount"].as_u64().unwrap();
+            assert!(fc > 0, "fileCount should be > 0 for {}, got 0 (regression!)", path);
+        }
+    }
+
+    // Sorted by fileCount descending
+    let mod_a_pos = files.iter().position(|e| e["path"].as_str().unwrap().ends_with("ModuleA")).unwrap();
+    let mod_b_pos = files.iter().position(|e| e["path"].as_str().unwrap().ends_with("ModuleB")).unwrap();
+    assert!(mod_a_pos < mod_b_pos,
+        "ModuleA (fc=2, pos={}) should come before ModuleB (fc=1, pos={})", mod_a_pos, mod_b_pos);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Test that fileCount works correctly with absolute dir paths too (regression-proof).
+#[test]
+fn test_search_fast_filecount_with_absolute_dir() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_absdir_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    let sub = tmp_dir.join("sub");
+    let _ = std::fs::create_dir_all(&sub);
+    for name in &["A.cs", "B.cs"] {
+        let mut f = std::fs::File::create(sub.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: dir_str.clone(),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // Pass absolute path for sub directory
+    let sub_str = sub.to_string_lossy().to_string();
+    let result = handle_search_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": sub_str,
+        "dirsOnly": true
+    }));
+    assert!(!result.is_error, "should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    // Should find at least the sub directory itself
+    let sub_entry = files.iter().find(|e| e["path"].as_str().unwrap().ends_with("sub"));
+    assert!(sub_entry.is_some(), "sub directory should be in results");
+    let sub_fc = sub_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(sub_fc, 2, "sub fileCount should be 2, got {}", sub_fc);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+
+/// Regression test: when `dir` is the absolute path of a subdirectory that 
+/// equals index.root (load_index built the index FOR that subdir),
+/// dir_prefix should be empty — fileCount should count all files in the index.
+#[test]
+fn test_search_fast_filecount_when_dir_equals_root() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_rootdir_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Structure:
+    //   src/
+    //     FileA.cs
+    //     sub/
+    //       FileB.cs
+    let src = tmp_dir.join("src");
+    let sub = src.join("sub");
+    let _ = std::fs::create_dir_all(&sub);
+    {
+        let mut f = std::fs::File::create(src.join("FileA.cs")).unwrap();
+        writeln!(f, "// A").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(sub.join("FileB.cs")).unwrap();
+        writeln!(f, "// B").unwrap();
+    }
+
+    // Build index specifically for the src/ subdirectory (simulates load_index("src"))
+    let src_str = src.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: src_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: src_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+
+    // KEY: server_dir is the PARENT (tmp_dir), but index.root is src/ (the subdir).
+    // Simulates: load_index built index for /project/src → index.root = /project/src.
+    // The dir parameter must be the absolute path (load_index resolves relative paths
+    // against CWD, which wouldn't point to our test dir).
+    let parent_str = tmp_dir.to_string_lossy().to_string();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: parent_str,
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // Pass absolute src path — tests that dir == index.root → dir_prefix = "" → correct counts
+    let result = handle_search_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": src_str,
+        "dirsOnly": true
+    }));
+    assert!(!result.is_error, "should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    // Should find src and sub directories
+    let src_entry = files.iter().find(|e| {
+        let p = e["path"].as_str().unwrap();
+        p.ends_with("src") && !p.contains("sub")
+    });
+    let sub_entry = files.iter().find(|e| e["path"].as_str().unwrap().ends_with("sub"));
+
+    assert!(src_entry.is_some(), "src directory should be in results");
+    assert!(sub_entry.is_some(), "sub directory should be in results");
+
+    // src should have fileCount=2 (FileA + FileB recursively)
+    let src_fc = src_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(src_fc, 2, "src fileCount should be 2, got {} (regression: dir_prefix was root/src/ instead of empty)", src_fc);
+
+    // sub should have fileCount=1
+    let sub_fc = sub_entry.unwrap()["fileCount"].as_u64().unwrap();
+    assert_eq!(sub_fc, 1, "sub fileCount should be 1, got {}", sub_fc);
+
+    cleanup_tmp(&tmp_dir);
+}

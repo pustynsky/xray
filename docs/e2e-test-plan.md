@@ -3936,6 +3936,25 @@ returns only file entries.
 
 ---
 
+#### T79a-fix: `search_fast` — `fileCount` correct when `dir` is a subdirectory (regression)
+
+**Tool:** `search_fast`
+
+**Scenario:** When `dir` points to a subdirectory (absolute or relative path, different from `server_dir`), the `fileCount` field should still be correctly computed — not 0 for all directories. Previously, relative `dir` paths caused `fileCount` to always be 0 because the `dir_prefix` filter didn't resolve against `index.root`.
+
+**Expected:**
+
+- `fileCount > 0` for directories containing files (not always 0)
+- `fileCount` matches actual recursive file count under each directory
+- Directories sorted by `fileCount` descending
+- Only files under the specified `dir` are counted (not files from other directories)
+
+**Unit tests:** [`test_search_fast_filecount_with_subdir`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_filecount_with_absolute_dir`](../src/mcp/handlers/handlers_tests_fast.rs)
+
+**Status:** ✅ Implemented (regression fix 2026-03-13)
+
+---
+
 #### T79c: `search_fast` — `maxDepth` limits directory depth
 
 **Tool:** `search_fast`

@@ -100,11 +100,31 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
 
     // Build file-count-per-directory map (only when dirsOnly + wildcard, not count_only)
     let file_counts: HashMap<&str, usize> = if dirs_only && is_wildcard && !count_only {
+        let root_normalized = index.root.replace('\\', "/");
         let dir_normalized = dir.replace('\\', "/");
-        let dir_prefix = if dir_normalized != ctx.server_dir.replace('\\', "/") {
+        let server_dir_normalized = ctx.server_dir.replace('\\', "/");
+        // Resolve dir_prefix to match absolute paths in the index.
+        // Bug fix: raw `dir` can be relative (e.g. "src") while entry paths are
+        // absolute (e.g. "C:/Repos/project/src/..."). Also handles the case
+        // where load_index built an index FOR the subdir (root == resolved dir).
+        let dir_trimmed = dir_normalized.trim_matches('/');
+        let dir_prefix = if dir_normalized == root_normalized
+            || dir_normalized == server_dir_normalized
+            || dir_normalized == "."
+            || root_normalized.ends_with(&format!("/{}", dir_trimmed))
+        {
+            // dir IS the root of this index (or equivalent) — no filtering
+            String::new()
+        } else if dir_normalized.starts_with(&root_normalized) {
+            // Already absolute path within root
             format!("{}/", dir_normalized)
         } else {
-            String::new()
+            // Relative path — resolve against index root
+            format!(
+                "{}/{}/",
+                root_normalized.trim_end_matches('/'),
+                dir_trimmed
+            )
         };
         let mut counts: HashMap<&str, usize> = HashMap::new();
         for entry in &index.entries {

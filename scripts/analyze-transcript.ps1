@@ -763,6 +763,11 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
         }
     }
 
+    # data_quality_complaint: model explicitly flags a data quality issue in thinking
+    if ($ep.thinking_before -match '(?i)(showing 0|always 0|fileCount.*0|returns? 0|doesn.t track|doesn.t work|doesn.t count|not working|broken|useless|misleading|no data|empty result|all zero)') {
+        $ep.tags.Add('data_quality_complaint')
+    }
+
     # redundant
     if (-not $ep.result_used -and $ep.response_status -ne 'error') {
         $ep.tags.Add('redundant')
@@ -973,6 +978,50 @@ foreach ($entry in $toolScorecard.GetEnumerator()) {
     }
 }
 
+# Detect forced enumeration chains: N consecutive calls to same tool where only 'dir' changes
+# (model iterating directory-by-directory because tool lacks aggregation)
+$forcedEnumerationChains = @()
+$enumStart = -1
+for ($e = 1; $e -lt $episodes.Count; $e++) {
+    $ep = $episodes[$e]
+    $prev = $episodes[$e - 1]
+    if ($ep.tool -eq $prev.tool -and $ep.server -eq $prev.server -and
+        $ep.tags -contains 'progressive_refinement') {
+        try {
+            $prevP = $prev._call_args | ConvertFrom-Json -ErrorAction Stop
+            $currP = $ep._call_args | ConvertFrom-Json -ErrorAction Stop
+            # Check: same params except 'dir' changed
+            $prevDir = if ($prevP.PSObject.Properties['dir']) { "$($prevP.dir)" } else { '' }
+            $currDir = if ($currP.PSObject.Properties['dir']) { "$($currP.dir)" } else { '' }
+            $sameTool = $true
+            # Compare non-dir params
+            $allKeys = @($prevP.PSObject.Properties.Name) + @($currP.PSObject.Properties.Name) | Sort-Object -Unique
+            foreach ($key in $allKeys) {
+                if ($key -eq 'dir') { continue }
+                $pVal = if ($prevP.PSObject.Properties[$key]) { "$($prevP.$key)" } else { '<absent>' }
+                $cVal = if ($currP.PSObject.Properties[$key]) { "$($currP.$key)" } else { '<absent>' }
+                if ($pVal -ne $cVal) { $sameTool = $false; break }
+            }
+            if ($sameTool -and $prevDir -ne $currDir -and $prevDir -and $currDir) {
+                if ($enumStart -eq -1) { $enumStart = $e - 1 }
+            } else {
+                if ($enumStart -ne -1 -and ($e - 1 - $enumStart) -ge 2) {
+                    $forcedEnumerationChains += @{ start = $enumStart + 1; end = $e; length = $e - $enumStart; tool = $prev.tool }
+                }
+                $enumStart = -1
+            }
+        } catch { $enumStart = -1 }
+    } else {
+        if ($enumStart -ne -1 -and ($e - 1 - $enumStart) -ge 2) {
+            $forcedEnumerationChains += @{ start = $enumStart + 1; end = $e; length = $e - $enumStart; tool = $episodes[$e-1].tool }
+        }
+        $enumStart = -1
+    }
+}
+if ($enumStart -ne -1 -and ($episodes.Count - 1 - $enumStart) -ge 2) {
+    $forcedEnumerationChains += @{ start = $enumStart + 1; end = $episodes.Count; length = $episodes.Count - $enumStart; tool = $episodes[-1].tool }
+}
+
 # Wasted bytes on truncated-then-refined responses
 # Only count as waste if the next call is a RETRY or SCOPE NARROWING of the same query,
 # not a completely different query (which is normal exploration workflow)
@@ -1030,6 +1079,25 @@ if ($policyViolations.Count -gt 0) {
     if ($mcpUnavailableViolations.Count -gt 0) {
         $recommendations += "[policy] $($mcpUnavailableViolations.Count) violation(s) occurred while MCP was unavailable (justified fallback)."
     }
+}
+
+# Incomplete session warning
+if (-not $hasCompletion) {
+    $recommendations += '[session] Session ended without attempt_completion — result may not have been delivered to the user.'
+}
+
+# Data quality complaints
+$dqComplaints = @($episodes | Where-Object { $_.tags -contains 'data_quality_complaint' })
+if ($dqComplaints.Count -gt 0) {
+    $dqTools = @($dqComplaints | ForEach-Object { $_.tool } | Sort-Object -Unique) -join ', '
+    $recommendations += "[data_quality] Model flagged data quality issues $($dqComplaints.Count) time(s) in thinking (tools: $dqTools). Review thinking_before content for specific complaints."
+}
+
+# Forced enumeration chains
+if ($forcedEnumerationChains.Count -gt 0) {
+    $totalForcedCalls = ($forcedEnumerationChains | Measure-Object -Property length -Sum).Sum
+    $chainDetails = ($forcedEnumerationChains | ForEach-Object { "$($_.tool) episodes $($_.start)-$($_.end) ($($_.length) calls)" }) -join '; '
+    $recommendations += "[forced_enumeration] $totalForcedCalls calls in $($forcedEnumerationChains.Count) forced enumeration chain(s): $chainDetails. Model iterated directory-by-directory because tool lacks aggregation. Consider batch dir counting or per-directory file counts in dirsOnly response."
 }
 
 # Truncation root causes
