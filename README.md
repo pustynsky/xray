@@ -1,4 +1,4 @@
-# Search — High-Performance Code Search Engine
+# Xray — High-Performance Code Intelligence Engine
 
 Inverted index + AST-based code intelligence engine for large-scale codebases. Millisecond content search, structural code navigation (classes, methods, call trees), and native MCP server for AI agent integration — in a single statically-linked Rust binary.
 
@@ -59,7 +59,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Regex support** — full Rust regex syntax for pattern matching
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
-- **MCP Server** — native Model Context Protocol server for AI agents (Roo Code, Cline, or any MCP-compatible client) with async startup, named `SEARCH_INDEX_POLICY` initialization guidance, and per-response policy reminders to reduce tool-selection drift
+- **MCP Server** — native Model Context Protocol server for AI agents (Roo Code, Cline, or any MCP-compatible client) with async startup, named `XRAY_POLICY` initialization guidance, and per-response policy reminders to reduce tool-selection drift
 - **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*, regex-based parsing for *SQL* (.sql files: stored procedures, tables, views, functions, types, indexes, columns, and call sites from SP bodies). Angular components enriched with template metadata (selector, child components from HTML templates)
 - **Code complexity metrics** — 7 metrics computed during AST indexing: cyclomatic complexity, cognitive complexity (SonarSource), max nesting depth, parameter count, return/throw count, call count, lambda count. Query with `includeCodeStats`, sort by any metric, filter with `min*` thresholds
 - **Parallel tokenization** — content index tokenization parallelized across all CPU cores
@@ -76,8 +76,8 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 ### Installation
 
 ```bash
-git clone <repo-url>
-cd search
+git clone https://github.com/pustynsky/xray
+cd xray
 cargo build --release
 ```
 

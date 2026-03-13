@@ -1727,7 +1727,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- JSON-RPC response `result.instructions` starts with `=== SEARCH_INDEX_POLICY ===`
+- JSON-RPC response `result.instructions` starts with `=== XRAY_POLICY ===`
 - `result.instructions` ends with `================================`
 - Instructions body still contains the existing routing / strategy guidance
 
@@ -1751,7 +1751,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Expected:**
 
 - Successful JSON response contains `summary.policyReminder`
-- `summary.policyReminder` contains `SEARCH_INDEX_POLICY`
+- `summary.policyReminder` contains `XRAY_POLICY`
 - `summary.policyReminder` contains `Indexed extensions:` with the server's `--ext` values
 - Selected tools such as `xray_grep` include `summary.nextStepHint`
 - Error responses do not gain `policyReminder` / `nextStepHint`
