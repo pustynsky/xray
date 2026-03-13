@@ -955,6 +955,37 @@ fn build_search_summary(
             ));
         }
 
+    // Hint: name+kind mismatch — user asked for name=X with kind=method/property/field,
+    // but X is actually a class/interface/struct. Suggest using parent=X instead.
+    if let Some(ref kind_str) = args.kind_filter {
+        let is_member_kind = kind_str.eq_ignore_ascii_case("method")
+            || kind_str.eq_ignore_ascii_case("property")
+            || kind_str.eq_ignore_ascii_case("field")
+            || kind_str.eq_ignore_ascii_case("constructor");
+        if is_member_kind
+            && args.name_filter.is_some()
+            && total_results > 0
+            && summary.get("hint").is_none()
+        {
+            // Check if ALL returned results are type-level (class/interface/struct/enum/record)
+            let all_type_level = defs_json.iter().all(|d| {
+                d.get("kind").and_then(|k| k.as_str()).map(|k| {
+                    matches!(k, "class" | "interface" | "struct" | "enum" | "record")
+                }).unwrap_or(false)
+            });
+            if all_type_level {
+                let name_val = args.name_filter.as_ref().unwrap();
+                let first_kind = defs_json.first()
+                    .and_then(|d| d.get("kind").and_then(|k| k.as_str()))
+                    .unwrap_or("class");
+                summary["hint"] = json!(format!(
+                    "'{}' is a {}. To find its members, use parent='{}' with kind='{}' instead of name='{}'.",
+                    name_val, first_kind, name_val, kind_str, name_val
+                ));
+            }
+        }
+    }
+
     // ─── Zero-result hints (A/B/C/D) ────────────────────────────────
     // Generate contextual hints when search returns 0 results to help LLM self-correct.
     // Only one hint per query (first matching wins). Guards ensure no overwrite of existing hints.
@@ -1501,6 +1532,63 @@ fn generate_zero_result_hints(
             summary["hint"] = json!(format!(
                 "File '{}' has {} definitions ({}), but none match your other filters (name/kind/parent).{}",
                 ff, matching_file_defs, kinds_str.join(", "), extra
+            ));
+        }
+    }
+
+    // Hint F: File fuzzy-match — suggest nearest file path when file filter returns 0 results.
+    // Handles common case where user writes "A/B" but actual path is "AB" (or vice versa).
+    if args.file_filter.is_some()
+        && summary.get("hint").is_none()
+    {
+        let ff = args.file_filter.as_ref().unwrap();
+        // Normalize: remove slashes, dashes, underscores for comparison
+        let normalize = |s: &str| -> String {
+            s.replace('\\', "").replace('/', "").replace('-', "").replace('_', "").to_lowercase()
+        };
+        let ff_normalized = normalize(ff);
+
+        // Collect unique file paths from index and find near-misses
+        let mut best_match: Option<(String, usize)> = None; // (path_substring, def_count)
+        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        for (file_id, def_indices) in &index.file_index {
+            if let Some(file_path) = index.files.get(*file_id as usize) {
+                let path_lower = file_path.replace('\\', "/").to_lowercase();
+                // Extract meaningful segments for comparison
+                let path_normalized = normalize(&path_lower);
+                if path_normalized.contains(&ff_normalized) && !ff_normalized.is_empty() {
+                    // Found a near-miss: normalized path contains normalized query
+                    // Extract the matching segment from the original path
+                    if seen_paths.insert(path_lower.clone()) {
+                        // Find the shortest unique segment that matches
+                        let segments: Vec<&str> = path_lower.split('/').collect();
+                        for window_size in 1..=segments.len() {
+                            for start in 0..=(segments.len() - window_size) {
+                                let segment = segments[start..start + window_size].join("/");
+                                let seg_normalized = normalize(&segment);
+                                if seg_normalized.contains(&ff_normalized) || ff_normalized.contains(&seg_normalized) {
+                                    let count = def_indices.len();
+                                    match &best_match {
+                                        None => { best_match = Some((segment, count)); }
+                                        Some((_, prev_count)) => {
+                                            if count > *prev_count {
+                                                best_match = Some((segment, count));
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((nearest_path, def_count)) = best_match {
+            summary["hint"] = json!(format!(
+                "No definitions found for file='{}'. Nearest match: '{}' ({} definitions). Retry with file='{}'.",
+                ff, nearest_path, def_count, nearest_path
             ));
         }
     }

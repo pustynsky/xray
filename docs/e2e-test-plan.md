@@ -7843,6 +7843,91 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 ### T-HINT-E: `search_definitions` — Unsupported file extension hint
 
+### T-HINT-NAME-KIND: `search_definitions` — Name+kind mismatch hint (class found instead of methods)
+
+**Tool:** `search_definitions`
+
+**Background:** When a user searches for `name=UserService kind=method`, the search finds `UserService` (a class) because the name matches as a substring. But the kind filter is `method`, so no methods named `UserService` exist — the class result passes through because name search is substring-based and kind filtering already happened at the index level (methods exist with different names). The result is confusing: the user gets a class back when they asked for methods.
+
+The new hint detects this pattern: `name=X` + `kind=method/property/field/constructor` + all returned results are type-level (class/interface/struct/enum/record). It suggests using `parent=X` instead.
+
+**Scenario A — class returned when method requested:**
+
+```json
+{ "name": "UserService", "kind": "method" }
+```
+
+**Expected:**
+
+- `definitions` array contains 1 entry (the `UserService` class)
+- `summary.hint` contains `"'UserService' is a class"`
+- `summary.hint` contains `"parent='UserService'"`
+- `summary.hint` contains `"kind='method'"`
+
+**Scenario B — method found, no hint:**
+
+```json
+{ "name": "GetUser", "kind": "method" }
+```
+
+**Expected:**
+
+- `definitions` array contains the method
+- `summary.hint` is absent
+
+**Scenario C — no name filter, no hint:**
+
+```json
+{ "kind": "method" }
+```
+
+**Expected:**
+
+- `summary.hint` is absent (hint requires `name` filter)
+
+**Unit tests:** `test_hint_name_kind_mismatch_class_with_method_kind`, `test_hint_name_kind_mismatch_no_hint_when_method_found`, `test_hint_name_kind_mismatch_interface_with_field_kind`, `test_hint_name_kind_mismatch_no_hint_without_name_filter`
+
+**Status:** ✅ Implemented
+
+---
+
+### T-HINT-F-FILE-FUZZY: `search_definitions` — File path fuzzy-match hint
+
+**Tool:** `search_definitions`
+
+**Background:** When `search_definitions` is called with a `file` filter that returns 0 results, and no previous hints (E, A, C) could fire, a new Hint F checks for near-miss file paths. It normalizes the query and index paths by removing slashes, dashes, and underscores, then checks if the normalized query is a substring of any normalized file path in the index. This catches the common case where the user writes `Components/Utils` but the actual path is `ComponentsUtils`.
+
+**Scenario A — slash mismatch:**
+
+```json
+{ "file": "Components/Utils" }
+```
+
+**Expected (when `ComponentsUtils` directory exists in index):**
+
+- `definitions` array is empty
+- `summary.hint` contains `"Nearest match"`
+- `summary.hint` contains `"componentsutils"` (normalized path)
+- `summary.hint` contains `"Retry with file="`
+
+**Scenario B — no near-miss:**
+
+```json
+{ "file": "TotallyNonexistent" }
+```
+
+**Expected:**
+
+- `definitions` array is empty
+- `summary.hint` does NOT contain `"Nearest match"` (no near-miss found)
+- Other hints (B, D) may fire instead
+
+**Unit tests:** `test_hint_f_file_fuzzy_match_slash_mismatch`, `test_hint_f_file_fuzzy_no_hint_when_no_near_miss`
+
+**Status:** ✅ Implemented
+
+---
+
 **Tool:** `search_definitions`
 
 **Background:** When `search_definitions` is called with a `file` filter containing an extension not supported by the definition index (e.g., `.xml`, `.json`, `.config`), a new Hint E fires before all other hints. It checks whether the extension is indexed by the content index (`server_ext`) and gives a targeted recommendation: "Use search_grep" (if in content index) or "Use read_file" (if not indexed at all). Guard: skipped when `def_extensions` is empty.

@@ -1,8 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- **search_definitions: Name+kind mismatch hint** — When `name=X` + `kind=method/property/field/constructor` returns only type-level definitions (class/interface/struct), the response now includes a hint suggesting `parent=X` instead of `name=X`. This eliminates a common LLM confusion pattern where the model searches for class members using `name` instead of `parent`.
+- **search_definitions: File path fuzzy-match hint (Hint F)** — When `file` filter returns 0 results and no other hints fire, the server normalizes paths (removing slashes, dashes, underscores) and suggests the nearest matching file path. Catches cases like `file='Components/Utils'` when the actual path is `ComponentsUtils`.
+
 All notable changes to **search-index** are documented here.
 
 Changes are grouped by date and organized into categories: **Features**, **Bug Fixes**, **Performance**, and **Internal**.
+
+---
+
+## 2026-03-13
+
+### Bug Fixes
+- **`search_fast` `fileCount` always 0 when `dir` is a relative path** — When `search_fast` was called with `dirsOnly=true` and a relative `dir` parameter (e.g., `dir=src`), the `fileCount` field for all directories was always 0. Root cause: the `dir_prefix` used for filtering files was computed from the raw `dir` argument (e.g., `"src/"`), but index entry paths are absolute (e.g., `"C:/Repos/project/src/..."`), so `starts_with("src/")` always failed. This forced LLMs to make N individual `countOnly=true` calls to determine directory sizes — a session analysis showed 12 sequential calls wasted on this pattern. Fix: `dir_prefix` now resolves against `index.root` for relative paths. Also added guard for `dir="."` edge case. Found via MCP transcript analysis (`roo_task_mar-13-2026_12-10-37-pm.md`, 22 progressive refinement chains). 2 new unit tests.
+
+### Internal
+- **Transcript analyzer improvements (`analyze-transcript.ps1`)** — Three new detection features:
+  1. **Data quality complaints** — detects when the model explicitly flags data quality issues in thinking (e.g., "fileCount is showing 0"), tagged as `data_quality_complaint`
+  2. **Forced enumeration chains** — detects N consecutive calls to the same tool where only `dir` changes (model iterating directory-by-directory due to missing aggregation), with specific chain details in recommendations
+  3. **Incomplete session warning** — flags when session ends without `attempt_completion`
 
 ---
 

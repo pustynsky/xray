@@ -1426,6 +1426,31 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
+# T-HINT-F: File fuzzy-match hint — file filter with slashes finds near-miss path
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-HINT-F-FUZZY definitions-file-fuzzy-match-hint"
+    try {
+        # Query search_definitions with a file path containing extra slashes
+        # Real path: definitions/tree_sitter_utils.rs. Query: tree/sitter/utils (slashes instead of underscores)
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"tree/sitter/utils"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no response)" } }
+        $errors = @()
+        # Should have hint with "Nearest match"
+        if ($jsonLine -notmatch 'Nearest match') { $errors += "missing 'Nearest match' in hint" }
+        if ($jsonLine -notmatch 'tree_sitter_utils') { $errors += "missing 'tree_sitter_utils' suggestion" }
+        if ($jsonLine -notmatch 'Retry with file') { $errors += "missing 'Retry with file' advice" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (fuzzy-match hint suggests tree_sitter_utils.rs)" }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
+}
+
 $parallelJobs = @()
 foreach ($block in $testBlocks) {
     $parallelJobs += Start-Job -ScriptBlock $block -ArgumentList $searchBinAbs, $projectDirAbs, $TestExt

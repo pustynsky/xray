@@ -2655,6 +2655,185 @@ fn test_hint_e_comma_separated_file_filter() {
     assert!(hint.contains("search_grep"), "Hint should suggest search_grep. Got: {}", hint);
 }
 
+// ─── Tests for Hint: name+kind mismatch (Fix 1) ─────────────────────
+
+#[test]
+fn test_hint_name_kind_mismatch_class_with_method_kind() {
+    // name=UserService + kind=method → returns the class (kind=class), not methods
+    // Should produce hint suggesting parent=UserService
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({
+        "name": "UserService",
+        "kind": "method"
+    })).unwrap();
+    // Simulate: search returned 1 result — the class itself (name substring matched)
+    let defs_json = vec![json!({
+        "name": "UserService",
+        "kind": "class",
+        "file": "C:\\src\\UserService.cs",
+        "lines": "1-100"
+    })];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 1 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 1, &stats_info, &None, 0, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str()
+        .expect("Should have hint for name+kind mismatch");
+    assert!(hint.contains("parent='UserService'"),
+        "Hint should suggest parent=. Got: {}", hint);
+    assert!(hint.contains("is a class"),
+        "Hint should mention it's a class. Got: {}", hint);
+    assert!(hint.contains("kind='method'"),
+        "Hint should mention the requested kind. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_name_kind_mismatch_no_hint_when_method_found() {
+    // name=GetUser + kind=method → returns the method → no hint
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({
+        "name": "GetUser",
+        "kind": "method"
+    })).unwrap();
+    let defs_json = vec![json!({
+        "name": "GetUser",
+        "kind": "method",
+        "file": "C:\\src\\UserService.cs",
+        "lines": "10-30"
+    })];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 1 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 1, &stats_info, &None, 0, 0,
+        std::time::Duration::ZERO, &ctx);
+    assert!(summary.get("hint").is_none(),
+        "No hint when method was actually found");
+}
+
+#[test]
+fn test_hint_name_kind_mismatch_interface_with_field_kind() {
+    // name=UserService + kind=field → returns the interface → hint
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({
+        "name": "UserService",
+        "kind": "field"
+    })).unwrap();
+    let defs_json = vec![json!({
+        "name": "UserService",
+        "kind": "interface",
+        "file": "C:\\src\\IService.cs",
+        "lines": "1-50"
+    })];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 1 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 1, &stats_info, &None, 0, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str()
+        .expect("Should have hint for interface+field mismatch");
+    assert!(hint.contains("parent='UserService'"),
+        "Hint should suggest parent=. Got: {}", hint);
+    assert!(hint.contains("is a interface"),
+        "Hint should mention it's an interface. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_name_kind_mismatch_no_hint_without_name_filter() {
+    // kind=method without name → no hint (hint only applies when name is set)
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({
+        "kind": "method"
+    })).unwrap();
+    let defs_json = vec![json!({
+        "name": "GetUser",
+        "kind": "method",
+        "file": "C:\\src\\UserService.cs",
+        "lines": "10-30"
+    })];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 1 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 1, &stats_info, &None, 0, 0,
+        std::time::Duration::ZERO, &ctx);
+    assert!(summary.get("hint").is_none(),
+        "No hint without name filter");
+}
+
+// ─── Tests for Hint F: File fuzzy-match (Fix 2) ─────────────────────
+
+#[test]
+fn test_hint_f_file_fuzzy_match_slash_mismatch() {
+    // file='Components/Utils' → 0 results, but 'ComponentsUtils' exists in index
+    let index = make_test_def_index_with_file("C:/src/ComponentsUtils/Helper.cs");
+    let args = parse_definition_args(&json!({
+        "file": "Components/Utils"
+    })).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
+        std::time::Duration::ZERO, &ctx);
+    let hint = summary["hint"].as_str()
+        .expect("Should have fuzzy-match hint");
+    assert!(hint.contains("Nearest match"),
+        "Hint should mention nearest match. Got: {}", hint);
+    assert!(hint.to_lowercase().contains("componentsutils"),
+        "Hint should suggest the actual path. Got: {}", hint);
+}
+
+#[test]
+fn test_hint_f_file_fuzzy_no_hint_when_no_near_miss() {
+    // file='TotallyNonexistent' → 0 results and no near-miss → no Hint F
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({
+        "file": "TotallyNonexistent"
+    })).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let ctx = HandlerContext::default();
+    let summary = build_search_summary(
+        &index, &defs_json, &args, 0, &stats_info, &None, 0, 0,
+        std::time::Duration::ZERO, &ctx);
+    // Hint F should NOT fire (no near-miss). Hint B/C/D might fire instead.
+    if let Some(hint) = summary.get("hint").and_then(|h| h.as_str()) {
+        assert!(!hint.contains("Nearest match"),
+            "Should not have fuzzy-match hint for completely unrelated path. Got: {}", hint);
+    }
+}
+
+/// Helper: create a DefinitionIndex with a single class in a custom file path.
+fn make_test_def_index_with_file(file_path: &str) -> DefinitionIndex {
+    let definitions = vec![
+        DefinitionEntry {
+            name: "Helper".to_string(), kind: DefinitionKind::Class,
+            file_id: 0, line_start: 1, line_end: 50,
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    name_index.entry("helper".to_string()).or_default().push(0);
+    kind_index.entry(DefinitionKind::Class).or_default().push(0);
+    file_index.entry(0).or_default().push(0);
+
+    DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![file_path.to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
+    }
+}
+
 
 // ─── Auto-summary tests ──────────────────────────────────────────────
 
