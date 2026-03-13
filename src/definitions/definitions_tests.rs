@@ -1328,7 +1328,7 @@ fn test_reconcile_nonblocking_adds_new_files() {
     };
     let arc_index = Arc::new(RwLock::new(index));
 
-    let (added, modified, removed) = super::incremental::reconcile_definition_index_nonblocking(
+    let (added, _modified, removed) = super::incremental::reconcile_definition_index_nonblocking(
         &arc_index,
         &dir.to_string_lossy(),
         &["cs".to_string()],
@@ -1370,7 +1370,7 @@ fn test_reconcile_nonblocking_removes_deleted_files() {
 
     let arc_index = Arc::new(RwLock::new(index));
 
-    let (added, modified, removed) = super::incremental::reconcile_definition_index_nonblocking(
+    let (_added, _modified, removed) = super::incremental::reconcile_definition_index_nonblocking(
         &arc_index,
         &dir.to_string_lossy(),
         &["cs".to_string()],

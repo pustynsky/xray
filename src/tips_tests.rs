@@ -670,6 +670,7 @@ fn test_tips_no_hardcoded_language_lists() {
                 "Strategy '{}' anti-pattern should not hardcode '.cs/.ts'. Found in: {}", strat.name, ap);
         }
     }
+}
 
 /// Verify all 3 definition-dependent tools say "not available" consistently when empty.
 #[test]
@@ -701,7 +702,6 @@ fn test_render_instructions_multiple_extensions() {
     assert!(text.contains(".ts"), "should mention .ts");
     assert!(text.contains(".sql"), "should mention .sql");
     assert!(text.contains("NEVER READ"), "should have NEVER READ");
-}
 }
 
 #[test]

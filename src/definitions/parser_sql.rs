@@ -261,6 +261,28 @@ fn strip_brackets(name: &str) -> String {
     name.trim_start_matches('[').trim_end_matches(']').to_string()
 }
 
+/// Extract (schema, name) from a regex match with the common SQL pattern:
+/// `((\[?schema\]?)\s*\.\s*(\[?name\]?)|(\[?name\]?))`.
+///
+/// `schema_group` / `name_group` are the group indices for the schema-qualified form,
+/// `simple_group` is the group index for the standalone name form.
+/// Returns `None` if no valid name can be extracted (defensive against corrupted SQL).
+fn extract_schema_name(
+    caps: &regex::Captures,
+    schema_group: usize,
+    name_group: usize,
+    simple_group: usize,
+) -> Option<(String, String)> {
+    if caps.get(schema_group).is_some() {
+        let schema = caps.get(schema_group)?.as_str();
+        let name = caps.get(name_group)?.as_str();
+        Some((strip_brackets(schema), strip_brackets(name)))
+    } else {
+        let name = caps.get(simple_group)?.as_str();
+        Some((String::new(), strip_brackets(name)))
+    }
+}
+
 // ─── Line counting helpers ──────────────────────────────────────────
 
 fn compute_code_stats_for_lines(lines: &[&str]) -> CodeStats {
@@ -302,11 +324,9 @@ fn parse_procedure_or_function(
         None => return,
     };
 
-    let (schema, name) = if caps.get(2).is_some() {
-        (strip_brackets(caps.get(2).unwrap().as_str()),
-         strip_brackets(caps.get(3).unwrap().as_str()))
-    } else {
-        (String::new(), strip_brackets(caps.get(4).unwrap().as_str()))
+    let (schema, name) = match extract_schema_name(&caps, 2, 3, 4) {
+        Some(pair) => pair,
+        None => return,
     };
 
     if name.is_empty() { return; }
@@ -324,7 +344,7 @@ fn parse_procedure_or_function(
     // Extract parameters (lines starting with @)
     let params: Vec<String> = PARAM_RE.captures_iter(batch_text)
         .take(5)
-        .map(|c| c.get(1).unwrap().as_str().to_string())
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
         .collect();
 
     if !params.is_empty() {
@@ -377,11 +397,9 @@ fn parse_table(
         None => return,
     };
 
-    let (_schema, name) = if caps.get(2).is_some() {
-        (strip_brackets(caps.get(2).unwrap().as_str()),
-         strip_brackets(caps.get(3).unwrap().as_str()))
-    } else {
-        (String::new(), strip_brackets(caps.get(4).unwrap().as_str()))
+    let (_schema, name) = match extract_schema_name(&caps, 2, 3, 4) {
+        Some(pair) => pair,
+        None => return,
     };
 
     if name.is_empty() { return; }
@@ -397,10 +415,10 @@ fn parse_table(
     let mut base_types: Vec<String> = Vec::new();
     let mut seen_fk: HashSet<String> = HashSet::new();
     for caps in FK_RE.captures_iter(batch_text) {
-        let ref_table = if caps.get(2).is_some() {
-            strip_brackets(caps.get(3).unwrap().as_str())
+        let ref_table = if let Some((_, name)) = extract_schema_name(&caps, 2, 3, 4) {
+            name
         } else {
-            strip_brackets(caps.get(4).unwrap().as_str())
+            continue;
         };
         if !ref_table.is_empty() && seen_fk.insert(ref_table.to_lowercase()) {
             base_types.push(ref_table);
@@ -461,8 +479,14 @@ fn extract_columns(
         }
 
         if let Some(caps) = COL_RE.captures(trimmed) {
-            let col_name = strip_brackets(caps.get(1).unwrap().as_str());
-            let col_type = caps.get(2).unwrap().as_str().to_uppercase();
+            let col_name = match caps.get(1) {
+                Some(m) => strip_brackets(m.as_str()),
+                None => continue,
+            };
+            let col_type = match caps.get(2) {
+                Some(m) => m.as_str().to_uppercase(),
+                None => continue,
+            };
 
             // Skip if column name is a SQL keyword
             let keywords = ["CONSTRAINT", "PRIMARY", "UNIQUE", "INDEX", "CHECK", "FOREIGN", "KEY", "ON", "CREATE", "ALTER", "DROP"];
@@ -502,11 +526,9 @@ fn parse_view(
         None => return,
     };
 
-    let (schema, name) = if caps.get(2).is_some() {
-        (strip_brackets(caps.get(2).unwrap().as_str()),
-         strip_brackets(caps.get(3).unwrap().as_str()))
-    } else {
-        (String::new(), strip_brackets(caps.get(4).unwrap().as_str()))
+    let (schema, name) = match extract_schema_name(&caps, 2, 3, 4) {
+        Some(pair) => pair,
+        None => return,
     };
 
     if name.is_empty() { return; }
@@ -552,11 +574,9 @@ fn parse_type(
         None => return,
     };
 
-    let (schema, name) = if caps.get(2).is_some() {
-        (strip_brackets(caps.get(2).unwrap().as_str()),
-         strip_brackets(caps.get(3).unwrap().as_str()))
-    } else {
-        (String::new(), strip_brackets(caps.get(4).unwrap().as_str()))
+    let (schema, name) = match extract_schema_name(&caps, 2, 3, 4) {
+        Some(pair) => pair,
+        None => return,
     };
 
     if name.is_empty() { return; }
@@ -602,19 +622,16 @@ fn parse_index(
         None => return,
     };
 
-    let index_name = strip_brackets(caps.get(1).unwrap().as_str());
+    let index_name = match caps.get(1) {
+        Some(m) => strip_brackets(m.as_str()),
+        None => return,
+    };
     if index_name.is_empty() { return; }
 
     // Parse ON [schema].[table] to determine parent table
-    let parent = if let Some(on_caps) = ON_RE.captures(batch_text) {
-        if on_caps.get(2).is_some() {
-            Some(strip_brackets(on_caps.get(3).unwrap().as_str()))
-        } else {
-            Some(strip_brackets(on_caps.get(4).unwrap().as_str()))
-        }
-    } else {
-        None
-    };
+    let parent = ON_RE.captures(batch_text)
+        .and_then(|on_caps| extract_schema_name(&on_caps, 2, 3, 4))
+        .map(|(_, name)| name);
 
     // Build signature
     let first_line = batch.lines.first().map(|l| l.trim()).unwrap_or("");
@@ -668,13 +685,10 @@ fn extract_call_sites_from_body(
 
         for regex in &all_regexes {
             for caps in regex.captures_iter(line) {
-                let (receiver_type, method_name) = if caps.get(2).is_some() {
-                    let schema = strip_brackets(caps.get(2).unwrap().as_str());
-                    let name = strip_brackets(caps.get(3).unwrap().as_str());
-                    (Some(schema), name)
-                } else {
-                    let name = strip_brackets(caps.get(4).unwrap().as_str());
-                    (None, name)
+                let (receiver_type, method_name) = match extract_schema_name(&caps, 2, 3, 4) {
+                    Some((schema, name)) if !schema.is_empty() => (Some(schema), name),
+                    Some((_, name)) => (None, name),
+                    None => continue,
                 };
 
                 if method_name.is_empty() { continue; }

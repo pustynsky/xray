@@ -4,6 +4,12 @@
 
 ### Internal
 
+- **`EditMode` enum in `search_edit` handler** — Replaced `unreachable!()` panic in `apply_edits_to_content()` with compile-time type safety. Introduced `EditMode::Operations` / `EditMode::Edits` enum so the `match` is exhaustive — invalid state (both None) is now unrepresentable at the type level. Updated signatures of `apply_edits_to_content()`, `handle_single_file_edit()`, `handle_multi_file_edit()`. Zero behavioral change — all 1626 unit tests + 71 E2E tests pass.
+
+- **SQL parser defensive coding (`parser_sql.rs`)** — Replaced all `.unwrap()` calls on regex capture groups with safe alternatives. Introduced `extract_schema_name()` helper for the common `(schema.name|name)` regex pattern (6 call sites). Remaining single-group captures use `match caps.get(N)` with early `return`/`continue`. Changed `PARAM_RE` capture from `.map(|c| c.get(1).unwrap())` to `.filter_map(|c| c.get(1))`. SQL parser now gracefully handles corrupted/malformed SQL without panicking. 9 new regression tests for corrupted SQL (truncated CREATE, missing names, garbled bodies, binary content, unmatched brackets).
+
+- **Fixed 9 pre-existing compiler warnings** — 3 tests in `tips_tests.rs` were accidentally nested inside another test function (missing closing `}`) — now properly at module scope and actually run (test count: 1617 → 1626). 2 unused variable warnings in `definitions_tests.rs` fixed with `_` prefix.
+
 - **Refactored god-functions `truncate_large_response` and `generate_zero_result_hints`** — Two high-cognitive-complexity functions decomposed into independently testable units:
   - **`truncate_large_response`** (utils.rs, CC=50, cognitive=179) → 7 extracted functions: `measure_json_size()` (replaces 7 inline `serde_json::to_string` calls), `phase_cap_lines_per_file()`, `phase_cap_matched_tokens()`, `phase_remove_lines_arrays()`, `phase_reduce_file_count()`, `phase_strip_body_fields()`, `phase_truncate_largest_array()`. Orchestrator is now a linear sequence of phase calls with early returns.
   - **`generate_zero_result_hints`** (definitions.rs, CC=62, cognitive=192) → 6 extracted functions returning `Option<String>`: `hint_unsupported_extension()`, `hint_wrong_kind()`, `hint_file_has_defs_but_filters_narrow()`, `hint_file_fuzzy_match()`, `hint_nearest_name()`, `hint_name_in_content_not_defs()`. Orchestrator uses `.or_else()` chain for explicit priority ordering.

@@ -11,6 +11,15 @@ use crate::mcp::protocol::ToolCallResult;
 use super::utils::json_to_string;
 use super::HandlerContext;
 
+/// Edit mode: either line-range operations (Mode A) or text-match edits (Mode B).
+/// Using an enum makes invalid states (both None or both Some) unrepresentable at the type level.
+enum EditMode<'a> {
+    /// Mode A: line-range splice operations, applied bottom-up.
+    Operations(&'a [Value]),
+    /// Mode B: text find-replace or insert after/before, applied sequentially.
+    Edits(&'a [Value]),
+}
+
 /// Maximum number of files for multi-file edit (protection against abuse).
 const MAX_MULTI_FILE_PATHS: usize = 20;
 
@@ -53,8 +62,8 @@ pub(crate) fn handle_search_edit(ctx: &HandlerContext, args: &Value) -> ToolCall
     let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let expected_line_count = args.get("expectedLineCount").and_then(|v| v.as_u64()).map(|v| v as usize);
 
-    // ── Validate mode ──
-    match (operations, edits) {
+    // ── Validate mode and construct EditMode ──
+    let mode = match (operations, edits) {
         (None, None) => {
             return ToolCallResult::error(
                 "Specify 'operations' (line-range) or 'edits' (text-match), not neither.".to_string(),
@@ -65,15 +74,16 @@ pub(crate) fn handle_search_edit(ctx: &HandlerContext, args: &Value) -> ToolCall
                 "Specify 'operations' or 'edits', not both.".to_string(),
             );
         }
-        _ => {}
-    }
+        (Some(ops), None) => EditMode::Operations(ops),
+        (None, Some(eds)) => EditMode::Edits(eds),
+    };
 
     // ── Dispatch single vs multi-file ──
     if let Some(paths_array) = multi_paths {
-        handle_multi_file_edit(ctx, paths_array, operations, edits, is_regex, dry_run, expected_line_count)
+        handle_multi_file_edit(ctx, paths_array, &mode, is_regex, dry_run, expected_line_count)
     } else {
         let path_str = single_path.unwrap(); // validated above
-        handle_single_file_edit(ctx, path_str, operations, edits, is_regex, dry_run, expected_line_count)
+        handle_single_file_edit(ctx, path_str, &mode, is_regex, dry_run, expected_line_count)
     }
 }
 
@@ -145,38 +155,38 @@ fn read_and_validate_file(server_dir: &str, path_str: &str) -> Result<(PathBuf, 
 fn apply_edits_to_content(
     path_str: &str,
     normalized: &str,
-    operations: Option<&Vec<Value>>,
-    edits: Option<&Vec<Value>>,
+    mode: &EditMode<'_>,
     is_regex: bool,
     expected_line_count: Option<usize>,
 ) -> Result<EditResult, String> {
-    let (modified_content, applied, total_replacements, skipped_details, warnings) = if let Some(ops_array) = operations {
-        // Mode A: Line-range operations
-        let ops = parse_line_operations(ops_array)?;
+    let (modified_content, applied, total_replacements, skipped_details, warnings) = match mode {
+        EditMode::Operations(ops_array) => {
+            // Mode A: Line-range operations
+            let ops = parse_line_operations(ops_array)?;
 
-        let lines: Vec<&str> = normalized.split('\n').collect();
+            let lines: Vec<&str> = normalized.split('\n').collect();
 
-        // expectedLineCount check
-        if let Some(expected) = expected_line_count {
-            if lines.len() != expected {
-                return Err(format!(
-                    "Expected {} lines, file has {}. File may have changed.",
-                    expected, lines.len()
-                ));
+            // expectedLineCount check
+            if let Some(expected) = expected_line_count {
+                if lines.len() != expected {
+                    return Err(format!(
+                        "Expected {} lines, file has {}. File may have changed.",
+                        expected, lines.len()
+                    ));
+                }
             }
+
+            let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
+            (new_lines.join("\n"), applied_count, 0, Vec::new(), Vec::new())
         }
+        EditMode::Edits(edits_array) => {
+            // Mode B: Text-match edits
+            let text_edits = parse_text_edits(edits_array)?;
 
-        let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
-        (new_lines.join("\n"), applied_count, 0, Vec::new(), Vec::new())
-    } else if let Some(edits_array) = edits {
-        // Mode B: Text-match edits
-        let text_edits = parse_text_edits(edits_array)?;
-
-        let (new_content, replacements, skipped, edit_warnings) = apply_text_edits(normalized, &text_edits, is_regex)?;
-        let edit_count = text_edits.len();
-        (new_content, edit_count, replacements, skipped, edit_warnings)
-    } else {
-        unreachable!("Already validated that one of operations/edits is Some");
+            let (new_content, replacements, skipped, edit_warnings) = apply_text_edits(normalized, &text_edits, is_regex)?;
+            let edit_count = text_edits.len();
+            (new_content, edit_count, replacements, skipped, edit_warnings)
+        }
     };
 
     // Generate unified diff
@@ -218,8 +228,7 @@ fn write_file_with_endings(resolved: &Path, content: &str, line_ending: &str) ->
 fn handle_single_file_edit(
     ctx: &HandlerContext,
     path_str: &str,
-    operations: Option<&Vec<Value>>,
-    edits: Option<&Vec<Value>>,
+    mode: &EditMode<'_>,
     is_regex: bool,
     dry_run: bool,
     expected_line_count: Option<usize>,
@@ -232,7 +241,7 @@ fn handle_single_file_edit(
     let file_created = normalized.is_empty() && !resolved.exists();
 
     // Apply edits
-    let edit_result = match apply_edits_to_content(path_str, &normalized, operations, edits, is_regex, expected_line_count) {
+    let edit_result = match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count) {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
@@ -290,8 +299,7 @@ fn handle_single_file_edit(
 fn handle_multi_file_edit(
     ctx: &HandlerContext,
     paths_array: &[Value],
-    operations: Option<&Vec<Value>>,
-    edits: Option<&Vec<Value>>,
+    mode: &EditMode<'_>,
     is_regex: bool,
     dry_run: bool,
     expected_line_count: Option<usize>,
@@ -330,7 +338,7 @@ fn handle_multi_file_edit(
     // Phase 2: Apply edits to all (in memory)
     let mut edit_results: Vec<(&str, PathBuf, EditResult, &'static str)> = Vec::with_capacity(file_data.len());
     for (path_str, resolved, normalized, line_ending) in file_data {
-        match apply_edits_to_content(path_str, &normalized, operations, edits, is_regex, expected_line_count) {
+        match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count) {
             Ok(result) => {
                 edit_results.push((path_str, resolved, result, line_ending));
             }

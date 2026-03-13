@@ -824,3 +824,126 @@ END
     assert!(call_names.contains(&"UserMappings"),
         "Expected FROM call to UserMappings, got: {:?}", call_names);
 }
+
+// ─── Defensive coding tests: corrupted SQL must not panic ──────────
+
+/// Truncated CREATE TABLE — name parsed but body is incomplete.
+/// Parser should NOT panic on missing capture groups.
+#[test]
+fn test_sql_corrupted_truncated_create_table() {
+    // Truncated right after TABLE keyword — no name follows
+    let source = "CREATE TABLE";
+    let (defs, calls, stats) = parse_sql_definitions(source, 0);
+    // Should not panic — 0 definitions is acceptable
+    assert!(defs.is_empty() || !defs.is_empty(), "Should not panic on truncated CREATE TABLE");
+    let _ = (calls, stats); // suppress unused warnings
+}
+
+/// CREATE TABLE with schema dot but missing table name.
+#[test]
+fn test_sql_corrupted_schema_dot_no_name() {
+    let source = "CREATE TABLE [dbo].";
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+    // May produce 0 defs or a def with empty name — either is fine, just no panic
+    for d in &defs {
+        assert!(!d.name.is_empty() || defs.is_empty(),
+            "Should not produce a definition with empty name from corrupted SQL");
+    }
+}
+
+/// FK REFERENCES with schema dot but no table name.
+#[test]
+fn test_sql_corrupted_fk_reference_incomplete() {
+    let source = r#"
+CREATE TABLE [dbo].[Items]
+(
+    [Id] INT NOT NULL,
+    CONSTRAINT [FK_Bad] FOREIGN KEY ([Id]) REFERENCES [dbo].
+)
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+    // Should parse the table, FK extraction may fail gracefully
+    let table = defs.iter().find(|d| d.kind == DefinitionKind::Table);
+    assert!(table.is_some(), "Table should still be parsed despite corrupted FK");
+}
+
+/// CREATE INDEX with ON clause but missing table name.
+#[test]
+fn test_sql_corrupted_index_no_table() {
+    let source = "CREATE INDEX IX_Bad ON";
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+    // Should not panic
+    let _ = defs;
+}
+
+/// Procedure with no parameters and garbled body — call site extraction must not panic.
+#[test]
+fn test_sql_corrupted_procedure_garbled_body() {
+    let source = r#"
+CREATE PROCEDURE [dbo].[usp_Broken]
+AS
+BEGIN
+    SELECT FROM [dbo]. WHERE = AND
+    EXEC [].[]
+    INSERT INTO
+    UPDATE SET
+    DELETE FROM
+END
+"#;
+    let (defs, call_sites, code_stats) = parse_sql_definitions(source, 0);
+    assert_eq!(defs.len(), 1, "Should parse the procedure definition");
+    assert_eq!(defs[0].name, "usp_Broken");
+    // Call sites may be empty or partial — just no panic
+    let _ = (call_sites, code_stats);
+}
+
+/// Binary/garbled content that looks vaguely like SQL but isn't.
+#[test]
+fn test_sql_corrupted_binary_content() {
+    let source = "CREATE\x00TABLE\x00[bad]\x00\x01\x02\x03";
+    let (defs, calls, stats) = parse_sql_definitions(source, 0);
+    let _ = (defs, calls, stats); // just verify no panic
+}
+
+/// Multiple consecutive GO delimiters with empty batches.
+#[test]
+fn test_sql_corrupted_empty_go_batches() {
+    let source = "GO\nGO\nGO\nGO\n";
+    let (defs, calls, stats) = parse_sql_definitions(source, 0);
+    assert!(defs.is_empty());
+    let _ = (calls, stats);
+}
+
+/// CREATE PROCEDURE with unmatched brackets in name.
+#[test]
+fn test_sql_corrupted_unmatched_brackets() {
+    let source = r#"
+CREATE PROCEDURE [dbo.[usp_BadBrackets
+AS
+BEGIN
+    SELECT 1
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+    // May or may not parse — just no panic
+    let _ = defs;
+}
+
+/// Column regex edge case: line looks like a column but has weird types.
+#[test]
+fn test_sql_corrupted_column_weird_types() {
+    let source = r#"
+CREATE TABLE [dbo].[WeirdTable]
+(
+    [Normal] INT NOT NULL,
+    [Broken NOTACOLUMN,
+    [] INT,
+    [  ] NVARCHAR(10),
+    CONSTRAINT
+)
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+    // Should parse the table, columns may be partial
+    let table = defs.iter().find(|d| d.kind == DefinitionKind::Table);
+    assert!(table.is_some(), "Table should be parsed despite corrupted columns");
+}
