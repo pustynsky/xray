@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- **`search_grep` dir= silently returned 0 results when pointing to a file** — When `search_grep` was called with `dir` = path to a file (not a directory), it silently returned 0 results because `is_under_dir()` appends `/` to the dir prefix, making a file path like `parser_sql.rs/` match nothing. Now `parse_grep_args()` detects file paths via `Path::is_file()` (filesystem check) and `looks_like_file_path()` (heuristic for non-existent paths), returning an error with a helpful hint: try `dir='<parent_dir>'` or `search_definitions file='<filename>'`. Tool description and `search_help` parameter examples updated. 8 new unit tests + 1 E2E test.
+
 ### Features
 
 - **search_definitions: Name+kind mismatch hint** — When `name=X` + `kind=method/property/field/constructor` returns only type-level definitions (class/interface/struct), the response now includes a hint suggesting `parent=X` instead of `name=X`. This eliminates a common LLM confusion pattern where the model searches for class members using `name` instead of `parent`.

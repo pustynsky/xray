@@ -6823,6 +6823,30 @@ echo $msgs | search-index serve --dir . --ext rs
 
 **Unit test:** [`test_search_grep_context_lines_auto_enables_show_lines`](../src/mcp/handlers/handlers_tests.rs)
 
+---
+
+### T-GREP-DIR-FILE: `search_grep` — dir= pointing to a file returns error with hint
+
+**Tool:** `search_grep`
+
+**Scenario:** When `search_grep` is called with `dir` pointing to a file path (not a directory), it should return an error with a helpful hint instead of silently returning 0 results.
+
+**Expected:**
+
+- `isError: true`
+- Error message contains `"is a file path"`
+- Error message contains `"directories only"`
+- Error message contains the filename (e.g., `"Service.cs"`)
+- Error message suggests the parent directory or `search_definitions` as alternatives
+
+**Negative test — directory path still works:**
+
+- `dir` pointing to a valid subdirectory → normal results returned (not error)
+
+**Unit tests:** `test_parse_grep_args_dir_as_file_path_rejected_by_heuristic`, `test_parse_grep_args_dir_as_real_file_rejected`, `test_parse_grep_args_dir_as_directory_accepted`, `test_grep_dir_as_file_returns_error_with_hint`, `test_looks_like_file_path_rust_file`, `test_looks_like_file_path_various_extensions`, `test_looks_like_file_path_case_insensitive`, `test_looks_like_file_path_directories_return_false`, `test_looks_like_file_path_unknown_extension_returns_false`
+
+**Status:** ✅ Implemented
+
 ### T-WARMUP: Trigram pre-warming eliminates cold-start penalty
 
 **Tool:** `search_grep` (substring mode)

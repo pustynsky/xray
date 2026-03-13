@@ -165,6 +165,7 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
 
 /// Parsed arguments for the grep handler. Extracts all parameter parsing
 /// from the main handler to reduce its cognitive complexity.
+#[derive(Debug)]
 struct ParsedGrepArgs {
     terms_str: String,
     dir_filter: Option<String>,
@@ -191,7 +192,27 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
 
     let dir_filter: Option<String> = if let Some(dir) = args.get("dir").and_then(|v| v.as_str()) {
         match validate_search_dir(dir, server_dir) {
-            Ok(filter) => filter,
+            Ok(filter) => {
+                // Detect file paths passed as dir= and reject with helpful hint
+                if let Some(ref resolved) = filter {
+                    let path = std::path::Path::new(resolved);
+                    if path.is_file() || super::utils::looks_like_file_path(resolved) {
+                        let parent = path.parent()
+                            .map(|p| p.to_string_lossy().to_string())
+                            .unwrap_or_else(|| server_dir.to_string());
+                        let filename = path.file_name()
+                            .map(|f| f.to_string_lossy().to_string())
+                            .unwrap_or_default();
+                        return Err(ToolCallResult::error(format!(
+                            "dir='{}' is a file path, not a directory. search_grep dir= accepts directories only. \
+                             Try: dir='{}' to search the parent directory, \
+                             or use search_definitions file='{}' for AST-based search in a specific file.",
+                            dir, parent, filename
+                        )));
+                    }
+                }
+                filter
+            },
             Err(msg) => return Err(ToolCallResult::error(msg)),
         }
     } else {

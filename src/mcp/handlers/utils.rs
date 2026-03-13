@@ -99,6 +99,24 @@ pub(crate) fn is_under_dir(file_path: &str, dir_prefix: &str) -> bool {
     file_norm.starts_with(&dir_norm)
 }
 
+/// Heuristic: if path ends with a known source/config extension, it's likely a file path.
+/// Used as fallback when `Path::is_file()` returns false (e.g., non-existent paths).
+pub(crate) fn looks_like_file_path(path: &str) -> bool {
+    let known_exts = [
+        "rs", "cs", "ts", "tsx", "js", "jsx", "py", "java",
+        "go", "rb", "sql", "xml", "json", "yaml", "yml",
+        "md", "txt", "toml", "cfg", "ini", "html", "css",
+        "scss", "less", "vue", "svelte", "swift", "kt",
+        "c", "cpp", "h", "hpp", "csproj", "sln", "props",
+        "targets", "config", "csv", "log",
+    ];
+    if let Some(ext) = std::path::Path::new(path).extension().and_then(|e| e.to_str()) {
+        known_exts.iter().any(|k| k.eq_ignore_ascii_case(ext))
+    } else {
+        false
+    }
+}
+
 // ─── Extension filter helper ────────────────────────────────────────
 
 /// Check if a file path's extension matches a filter string.

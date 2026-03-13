@@ -777,6 +777,49 @@ fn test_find_doc_comment_start_decl_at_zero() {
     assert_eq!(result, 0, "Should return 0 when decl is at line 0");
 }
 
+// ─── looks_like_file_path tests ────────────────────────────────────────
+
+#[test]
+fn test_looks_like_file_path_rust_file() {
+    assert!(looks_like_file_path("src/main.rs"));
+    assert!(looks_like_file_path("C:/Repos/project/src/lib.rs"));
+}
+
+#[test]
+fn test_looks_like_file_path_various_extensions() {
+    assert!(looks_like_file_path("file.cs"));
+    assert!(looks_like_file_path("file.ts"));
+    assert!(looks_like_file_path("file.py"));
+    assert!(looks_like_file_path("file.json"));
+    assert!(looks_like_file_path("file.xml"));
+    assert!(looks_like_file_path("file.sql"));
+    assert!(looks_like_file_path("file.md"));
+    assert!(looks_like_file_path("file.toml"));
+    assert!(looks_like_file_path("file.yaml"));
+    assert!(looks_like_file_path("file.config"));
+    assert!(looks_like_file_path("file.csproj"));
+}
+
+#[test]
+fn test_looks_like_file_path_case_insensitive() {
+    assert!(looks_like_file_path("file.RS"));
+    assert!(looks_like_file_path("file.Json"));
+    assert!(looks_like_file_path("file.CS"));
+}
+
+#[test]
+fn test_looks_like_file_path_directories_return_false() {
+    assert!(!looks_like_file_path("src/definitions"));
+    assert!(!looks_like_file_path("C:/Repos/project"));
+    assert!(!looks_like_file_path("some/path/without/ext"));
+}
+
+#[test]
+fn test_looks_like_file_path_unknown_extension_returns_false() {
+    assert!(!looks_like_file_path("file.xyz"));
+    assert!(!looks_like_file_path("file.banana"));
+}
+
 #[test]
 fn test_is_doc_comment_line_variants() {
     assert!(is_doc_comment_line("    /// <summary>"));

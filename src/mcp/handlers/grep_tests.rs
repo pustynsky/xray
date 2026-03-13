@@ -304,6 +304,46 @@ fn test_parse_grep_args_exclude_lists() {
     assert_eq!(result.exclude, vec!["mock"]);
 }
 
+#[test]
+fn test_parse_grep_args_dir_as_file_path_rejected_by_heuristic() {
+    // Non-existent file path but inside server_dir — detected by looks_like_file_path heuristic
+    let args = json!({"terms": "hello", "dir": "C:/nonexistent/project/src/parser_sql.rs"});
+    let result = parse_grep_args(&args, "C:/nonexistent/project");
+    assert!(result.is_err(), "File path as dir= should be rejected");
+    let err_msg = result.unwrap_err().content[0].text.clone();
+    assert!(err_msg.contains("is a file path"), "Error should mention file path: {}", err_msg);
+    assert!(err_msg.contains("directories only"), "Error should say directories only: {}", err_msg);
+    assert!(err_msg.contains("parser_sql.rs"), "Error should mention the filename: {}", err_msg);
+}
+
+#[test]
+fn test_parse_grep_args_dir_as_real_file_rejected() {
+    // Create a real temp file to test is_file() detection
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("test_file.txt");
+    std::fs::write(&file, "content").unwrap();
+    let server_dir = tmp.path().to_string_lossy().to_string();
+    let file_str = file.to_string_lossy().to_string();
+    let args = json!({"terms": "hello", "dir": file_str});
+    let result = parse_grep_args(&args, &server_dir);
+    assert!(result.is_err(), "Real file as dir= should be rejected");
+    let err_msg = result.unwrap_err().content[0].text.clone();
+    assert!(err_msg.contains("is a file path"), "Error: {}", err_msg);
+}
+
+#[test]
+fn test_parse_grep_args_dir_as_directory_accepted() {
+    // Directory path should still work
+    let tmp = tempfile::tempdir().unwrap();
+    let sub = tmp.path().join("subdir");
+    std::fs::create_dir_all(&sub).unwrap();
+    let server_dir = tmp.path().to_string_lossy().to_string();
+    let sub_str = sub.to_string_lossy().to_string();
+    let args = json!({"terms": "hello", "dir": sub_str});
+    let result = parse_grep_args(&args, &server_dir);
+    assert!(result.is_ok(), "Directory as dir= should be accepted, got: {:?}", result);
+}
+
 // ─── expand_regex_terms tests ───────────────────────────────────
 
 #[test]

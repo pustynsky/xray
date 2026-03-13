@@ -1556,3 +1556,30 @@ fn test_grep_single_char_exact_no_oom() {
     assert!(output["summary"]["totalFiles"].as_u64().is_some(),
         "Should return a valid totalFiles count");
 }
+
+/// BUG-8: search_grep with dir= pointing to a file should return error with hint.
+#[test]
+fn test_grep_dir_as_file_returns_error_with_hint() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // Use a file that exists in the temp dir
+    let file_path = tmp.join("Service.cs");
+    assert!(file_path.exists(), "Test setup: Service.cs should exist");
+
+    let result = handle_search_grep(&ctx, &json!({
+        "terms": "httpclient",
+        "dir": file_path.to_string_lossy().to_string()
+    }));
+    assert!(result.is_error, "dir= pointing to a file should return error, got success");
+    let err_msg = &result.content[0].text;
+    assert!(err_msg.contains("is a file path"),
+        "Error should mention 'is a file path': {}", err_msg);
+    assert!(err_msg.contains("directories only"),
+        "Error should say 'directories only': {}", err_msg);
+    assert!(err_msg.contains("Service.cs"),
+        "Error should mention the filename 'Service.cs': {}", err_msg);
+    // Hint should suggest the parent directory
+    let parent_str = tmp.to_string_lossy().to_string();
+    assert!(err_msg.contains(&parent_str) || err_msg.contains("search_definitions"),
+        "Error should suggest parent dir or search_definitions: {}", err_msg);
+    cleanup_tmp(&tmp);
+}

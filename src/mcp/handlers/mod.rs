@@ -50,7 +50,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "dir": {
                         "type": "string",
-                        "description": "Directory to search (default: server's --dir)"
+                        "description": "Directory to search (default: server's --dir). Accepts directories only — if you pass a file path, an error with a helpful hint is returned."
                     },
                     "ext": {
                         "type": "string",
