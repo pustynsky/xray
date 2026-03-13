@@ -526,6 +526,9 @@ $builtinCallDetails = @{}
 $mcpAvailable = $true  # assume available until first error
 $mcpBecameAvailable = $false  # tracks if MCP recovered after errors
 [System.Collections.Generic.List[hashtable]]$policyViolations = @()
+[System.Collections.Generic.List[hashtable]]$autoCorrections = @()
+$totalEstimatedTokens = 0
+$sessionMode = ''
 $taskDescription = ''
 $completionText = ''
 
@@ -537,6 +540,14 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
         $taskTags = Extract-Tag $turn.content 'task'
         if ($taskTags.Count -gt 0) {
             $taskDescription = Summarize-Text $taskTags[0] 300
+        }
+    }
+
+    # Extract session mode from environment_details (improvement 6)
+    if ($turn.role -eq 'user' -and -not $sessionMode) {
+        $slugMatch = [regex]::Match($turn.content, '<slug>([^<]+)</slug>')
+        if ($slugMatch.Success) {
+            $sessionMode = $slugMatch.Groups[1].Value.Trim()
         }
     }
 
@@ -643,6 +654,45 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
         $responseSummary = Extract-ResponseSummary $resultContent
         $responseSize = [System.Text.Encoding]::UTF8.GetByteCount($resultContent)
 
+        # Extract estimatedTokens from response (improvement 2)
+        $estimatedTokens = 0
+        $tokensMatch = [regex]::Match($resultContent, '"estimatedTokens"\s*:\s*(\d+)')
+        if ($tokensMatch.Success) {
+            $estimatedTokens = [int]$tokensMatch.Groups[1].Value
+            $totalEstimatedTokens += $estimatedTokens
+        }
+
+        # Extract autoCorrection from response (improvement 1)
+        $autoCorrectionInfo = $null
+        $acTypeMatch = [regex]::Match($resultContent, '"autoCorrection"\s*:\s*\{.*?"type"\s*:\s*"([^"]+)"')
+        if ($acTypeMatch.Success) {
+            $acType = $acTypeMatch.Groups[1].Value
+            $acReasonMatch = [regex]::Match($resultContent, '"autoCorrection"\s*:\s*\{.*?"reason"\s*:\s*"([^"]+)"')
+            $acReason = if ($acReasonMatch.Success) { $acReasonMatch.Groups[1].Value } else { 'unknown' }
+            $autoCorrectionInfo = @{
+                type   = $acType
+                reason = $acReason
+            }
+            $autoCorrections.Add(@{
+                episode = $episodes.Count + 1
+                tool    = $call.tool
+                type    = $acType
+                reason  = $acReason
+            })
+        }
+
+        # Count bodyOmitted entries (improvement 4)
+        $bodyOmittedCount = ([regex]::Matches($resultContent, '"bodyOmitted"\s*:')).Count
+
+        # Extract termBreakdown (improvement 5)
+        $termBreakdown = $null
+        $tbMatch = [regex]::Match($resultContent, '"termBreakdown"\s*:\s*(\{[^}]+\})')
+        if ($tbMatch.Success) {
+            try {
+                $termBreakdown = $tbMatch.Groups[1].Value | ConvertFrom-Json -ErrorAction Stop
+            } catch { $termBreakdown = $null }
+        }
+
         # Track MCP availability (for policy violation context)
         if ($call.server -eq 'search-index') {
             if ($status.status -eq 'error') {
@@ -672,23 +722,27 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
         }
 
         $newEp = @{
-            index             = $episodes.Count + 1
-            server            = $call.server
-            tool              = $call.tool
-            params_summary    = Normalize-Params $call.args
-            response_status   = $status.status
+            index               = $episodes.Count + 1
+            server              = $call.server
+            tool                = $call.tool
+            params_summary      = Normalize-Params $call.args
+            response_status     = $status.status
             response_size_bytes = $responseSize
-            response_summary  = $responseSummary
-            partial_reason    = $status.reason
-            thinking_before   = $thinkingBefore
-            reaction_after    = $reactionAfter
-            result_used       = $false
-            tags              = [System.Collections.Generic.List[string]]::new()
-            param_diff        = $paramDiff
-            truncation_cause  = ''
-            _result_raw       = $resultContent
-            _call_args        = $call.args
-            _hints            = @(Extract-Hints $resultContent)
+            response_summary    = $responseSummary
+            partial_reason      = $status.reason
+            thinking_before     = $thinkingBefore
+            reaction_after      = $reactionAfter
+            result_used         = $false
+            tags                = [System.Collections.Generic.List[string]]::new()
+            param_diff          = $paramDiff
+            truncation_cause    = ''
+            estimated_tokens    = $estimatedTokens
+            auto_correction     = $autoCorrectionInfo
+            body_omitted_count  = $bodyOmittedCount
+            term_breakdown      = $termBreakdown
+            _result_raw         = $resultContent
+            _call_args          = $call.args
+            _hints              = @(Extract-Hints $resultContent)
         }
 
         if ($status.status -eq 'partial') {
@@ -715,6 +769,16 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
 
     # truncated_response
     if ($ep.response_status -eq 'partial') { $ep.tags.Add('truncated_response') }
+
+    # heavy_response: large non-truncated response (improvement 3)
+    if ($ep.response_status -eq 'success' -and $ep.response_size_bytes -gt 20000) {
+        $ep.tags.Add('heavy_response')
+    }
+
+    # auto_corrected: server auto-corrected the query (improvement 1)
+    if ($ep.auto_correction) {
+        $ep.tags.Add('auto_corrected')
+    }
 
     # progressive_refinement vs sequential_exploration vs retry
     if ($e -gt 0) {
@@ -910,20 +974,29 @@ foreach ($group in $toolGroups) {
         if ($toolEps[$j].result_used) { $firstUseful = $j + 1; break }
     }
 
+    $autoCorrectedCount = @($toolEps | Where-Object { $_.tags -contains 'auto_corrected' }).Count
+    $heavyCount = @($toolEps | Where-Object { $_.tags -contains 'heavy_response' }).Count
+    $totalTokens = ($toolEps | Measure-Object -Property estimated_tokens -Sum).Sum
+    $totalBodyOmitted = ($toolEps | Measure-Object -Property body_omitted_count -Sum).Sum
+
     $toolScorecard[$toolName] = @{
-        total_calls                = $toolEps.Count
-        result_used_count          = $usedCount
-        utilization_rate           = if ($toolEps.Count -gt 0) { [math]::Round($usedCount / $toolEps.Count, 2) } else { 0 }
-        truncated_count            = $truncCount
-        empty_count                = $emptyCount
-        error_count                = $errorCount
-        refinement_chains          = $refinementCount
+        total_calls                 = $toolEps.Count
+        result_used_count           = $usedCount
+        utilization_rate            = if ($toolEps.Count -gt 0) { [math]::Round($usedCount / $toolEps.Count, 2) } else { 0 }
+        truncated_count             = $truncCount
+        empty_count                 = $emptyCount
+        error_count                 = $errorCount
+        refinement_chains           = $refinementCount
         sequential_exploration_count = $seqExplCount
-        avg_response_size_bytes    = $avgSize
-        hints_followed             = $hintsFollowed
-        hints_ignored              = $hintsIgnored
-        first_useful_call          = $firstUseful
-        strategy_changes           = $strategyCount
+        avg_response_size_bytes     = $avgSize
+        hints_followed              = $hintsFollowed
+        hints_ignored               = $hintsIgnored
+        first_useful_call           = $firstUseful
+        strategy_changes            = $strategyCount
+        auto_corrected_count        = $autoCorrectedCount
+        heavy_response_count        = $heavyCount
+        total_estimated_tokens      = $totalTokens
+        total_body_omitted          = [int]$totalBodyOmitted
     }
 }
 
@@ -1139,6 +1212,10 @@ foreach ($ep in $episodes) {
     }
     if ($ep.param_diff) { $clean['param_diff'] = $ep.param_diff }
     if ($ep.truncation_cause) { $clean['truncation_cause'] = $ep.truncation_cause }
+    if ($ep.estimated_tokens -gt 0) { $clean['estimated_tokens'] = $ep.estimated_tokens }
+    if ($ep.auto_correction) { $clean['auto_correction'] = $ep.auto_correction }
+    if ($ep.body_omitted_count -gt 0) { $clean['body_omitted_count'] = $ep.body_omitted_count }
+    if ($ep.term_breakdown) { $clean['term_breakdown'] = $ep.term_breakdown }
     $cleanEpisodes += $clean
 }
 
@@ -1158,16 +1235,20 @@ foreach ($pv in $policyViolations) {
 
 $report = @{
     session        = @{
-        source_file        = $fileName
-        total_turns        = $totalTurns
-        total_mcp_calls    = $episodes.Count
-        total_builtin_calls = $builtinCallCount
-        builtin_tools      = $builtinCallDetails
-        indexed_extensions = @($indexedExtensions)
-        phases             = $phases
+        source_file            = $fileName
+        total_turns            = $totalTurns
+        total_mcp_calls        = $episodes.Count
+        total_builtin_calls    = $builtinCallCount
+        builtin_tools          = $builtinCallDetails
+        indexed_extensions     = @($indexedExtensions)
+        session_mode           = $sessionMode
+        total_estimated_tokens = $totalEstimatedTokens
+        auto_corrections_count = $autoCorrections.Count
+        phases                 = $phases
     }
     tool_scorecard     = $toolScorecard
     episodes           = $cleanEpisodes
+    auto_corrections   = @($autoCorrections)
     policy_violations  = $cleanViolations
     summary            = $summary
 }
@@ -1191,6 +1272,15 @@ $md = [System.Text.StringBuilder]::new()
 [void]$md.AppendLine("**Total turns**: $totalTurns")
 [void]$md.AppendLine("**MCP tool calls**: $($episodes.Count)")
 [void]$md.AppendLine("**Built-in tool calls**: $builtinCallCount")
+if ($sessionMode) {
+    [void]$md.AppendLine("**Session mode**: $sessionMode")
+}
+if ($totalEstimatedTokens -gt 0) {
+    [void]$md.AppendLine("**Total MCP response tokens**: ~$totalEstimatedTokens (~$([math]::Round($totalEstimatedTokens / 1000, 1))K)")
+}
+if ($autoCorrections.Count -gt 0) {
+    [void]$md.AppendLine("**Auto-corrections**: $($autoCorrections.Count)")
+}
 [void]$md.AppendLine("")
 
 # Phases
@@ -1208,12 +1298,13 @@ if ($hasSelfAnalysis) { $synthDetails += ", self-analysis: yes" }
 # Tool Quality Scorecard
 [void]$md.AppendLine("## Tool Quality Scorecard")
 [void]$md.AppendLine("")
-[void]$md.AppendLine("| Tool | Calls | Used | Util% | Truncated | Empty | Errors | Refine | SeqExpl | 1st Useful |")
-[void]$md.AppendLine("|------|-------|------|-------|-----------|-------|--------|--------|---------|------------|")
+[void]$md.AppendLine("| Tool | Calls | Used | Util% | Truncated | Empty | Errors | Refine | SeqExpl | Heavy | AutoCorr | Tokens |")
+[void]$md.AppendLine("|------|-------|------|-------|-----------|-------|--------|--------|---------|-------|----------|--------|")
 foreach ($entry in ($toolScorecard.GetEnumerator() | Sort-Object { $_.Value.total_calls } -Descending)) {
     $t = $entry.Value
     $utilPct = [math]::Round($t.utilization_rate * 100, 0)
-    [void]$md.AppendLine("| $($entry.Key) | $($t.total_calls) | $($t.result_used_count) | ${utilPct}% | $($t.truncated_count) | $($t.empty_count) | $($t.error_count) | $($t.refinement_chains) | $($t.sequential_exploration_count) | $($t.first_useful_call) |")
+    $tokenK = if ($t.total_estimated_tokens -gt 0) { "~$([math]::Round($t.total_estimated_tokens / 1000, 1))K" } else { '-' }
+    [void]$md.AppendLine("| $($entry.Key) | $($t.total_calls) | $($t.result_used_count) | ${utilPct}% | $($t.truncated_count) | $($t.empty_count) | $($t.error_count) | $($t.refinement_chains) | $($t.sequential_exploration_count) | $($t.heavy_response_count) | $($t.auto_corrected_count) | $tokenK |")
 }
 [void]$md.AppendLine("")
 
@@ -1260,8 +1351,25 @@ foreach ($ep in $cleanEpisodes) {
     if ($ep.ContainsKey('truncation_cause') -and $ep.truncation_cause) {
         [void]$md.AppendLine("- **Truncation cause**: $($ep.truncation_cause)")
     }
-    [void]$md.AppendLine("- **Response size**: $($ep.response_size_bytes) bytes")
+    $sizeStr = "$($ep.response_size_bytes) bytes"
+    if ($ep.ContainsKey('estimated_tokens') -and $ep.estimated_tokens -gt 0) {
+        $sizeStr += " (~$($ep.estimated_tokens) tokens)"
+    }
+    [void]$md.AppendLine("- **Response size**: $sizeStr")
     [void]$md.AppendLine("- **Summary**: $($ep.response_summary)")
+    if ($ep.ContainsKey('auto_correction') -and $ep.auto_correction) {
+        [void]$md.AppendLine("- **Auto-correction**: $($ep.auto_correction.type) — $($ep.auto_correction.reason)")
+    }
+    if ($ep.ContainsKey('body_omitted_count') -and $ep.body_omitted_count -gt 0) {
+        [void]$md.AppendLine("- **Body omitted**: $($ep.body_omitted_count) definitions had body omitted (budget exceeded)")
+    }
+    if ($ep.ContainsKey('term_breakdown') -and $ep.term_breakdown) {
+        $tbParts = @()
+        foreach ($prop in $ep.term_breakdown.PSObject.Properties) {
+            $tbParts += "$($prop.Name):$($prop.Value)"
+        }
+        [void]$md.AppendLine("- **Term breakdown**: $($tbParts -join ', ')")
+    }
     if ($ep.ContainsKey('param_diff') -and $ep.param_diff) {
         [void]$md.AppendLine("- **Param diff from prev**: $($ep.param_diff)")
     }
@@ -1272,6 +1380,40 @@ foreach ($ep in $cleanEpisodes) {
     }
     if ($ep.reaction_after.type -ne 'none') {
         [void]$md.AppendLine("- **Reaction**: [$($ep.reaction_after.type)] $($ep.reaction_after.content)")
+    }
+    [void]$md.AppendLine("")
+}
+
+# Auto-corrections section
+if ($autoCorrections.Count -gt 0) {
+    [void]$md.AppendLine("## Auto-corrections")
+    [void]$md.AppendLine("")
+    [void]$md.AppendLine("Server auto-corrected $($autoCorrections.Count) queries:")
+    [void]$md.AppendLine("")
+    [void]$md.AppendLine("| Episode | Tool | Type | Reason |")
+    [void]$md.AppendLine("|---------|------|------|--------|")
+    foreach ($ac in $autoCorrections) {
+        [void]$md.AppendLine("| $($ac.episode) | $($ac.tool) | $($ac.type) | $($ac.reason) |")
+    }
+    [void]$md.AppendLine("")
+}
+
+# Token budget section
+if ($totalEstimatedTokens -gt 0) {
+    [void]$md.AppendLine("## Token Budget")
+    [void]$md.AppendLine("")
+    [void]$md.AppendLine("**Total tokens consumed by MCP responses**: ~$totalEstimatedTokens (~$([math]::Round($totalEstimatedTokens / 1000, 1))K)")
+    $heavyEps = @($cleanEpisodes | Where-Object { $_.ContainsKey('estimated_tokens') -and $_.estimated_tokens -gt 0 } | Sort-Object { $_.estimated_tokens } -Descending | Select-Object -First 5)
+    if ($heavyEps.Count -gt 0) {
+        [void]$md.AppendLine("")
+        [void]$md.AppendLine("**Top 5 heaviest responses:**")
+        [void]$md.AppendLine("")
+        [void]$md.AppendLine("| Episode | Tool | Tokens | Size (KB) | Status |")
+        [void]$md.AppendLine("|---------|------|--------|-----------|--------|")
+        foreach ($hep in $heavyEps) {
+            $sizeKB = [math]::Round($hep.response_size_bytes / 1024, 1)
+            [void]$md.AppendLine("| $($hep.index) | $($hep.tool) | ~$($hep.estimated_tokens) | ${sizeKB}KB | $($hep.response_status) |")
+        }
     }
     [void]$md.AppendLine("")
 }
@@ -1364,3 +1506,6 @@ Write-Host "Episodes: $($episodes.Count) MCP calls, $builtinCallCount built-in c
 Write-Host "Statuses: success=$($statusCounts.success), partial=$($statusCounts.partial), empty=$($statusCounts.empty), error=$($statusCounts.error)"
 Write-Host "Policy violations: $($policyViolations.Count)$(if ($indexedExtensions.Count -gt 0) { " (indexed: $($indexedExtensions -join ','))" } else { ' (no indexed extensions detected)' })"
 Write-Host "Self-analysis: $(if ($hasSelfAnalysis) { 'yes' } else { 'no' })"
+if ($sessionMode) { Write-Host "Session mode: $sessionMode" }
+if ($totalEstimatedTokens -gt 0) { Write-Host "Total MCP response tokens: ~$totalEstimatedTokens (~$([math]::Round($totalEstimatedTokens / 1000, 1))K)" }
+if ($autoCorrections.Count -gt 0) { Write-Host "Auto-corrections: $($autoCorrections.Count)" }
