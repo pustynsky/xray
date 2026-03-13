@@ -2,34 +2,34 @@
 
 Complete reference for all `search` CLI commands.
 
-## `search-index find` — Live Filesystem Search
+## `xray find` — Live Filesystem Search
 
 Walks the filesystem in real-time. No index needed.
 
 ```bash
 # Search for files by name
-search-index find "config" -d C:\Projects
+xray find "config" -d C:\Projects
 
 # Search with extension filter
-search-index find "main" -e rs
+xray find "main" -e rs
 
 # Search file contents
-search-index find "TODO" -d C:\Projects --contents -e cs
+xray find "TODO" -d C:\Projects --contents -e cs
 
 # Regex search in file contents
-search-index find "fn\s+\w+" --contents --regex -e rs
+xray find "fn\s+\w+" --contents --regex -e rs
 
 # Case-insensitive search
-search-index find "readme" -i -d C:\
+xray find "readme" -i -d C:\
 
 # Count matches only
-search-index find ".exe" -d C:\Windows -c
+xray find ".exe" -d C:\Windows -c
 
 # Limit search depth
-search-index find "node_modules" -d C:\Projects --max-depth 3
+xray find "node_modules" -d C:\Projects --max-depth 3
 
 # Include hidden and gitignored files
-search-index find "secret" --hidden --no-ignore
+xray find "secret" --hidden --no-ignore
 ```
 
 **Options:**
@@ -49,19 +49,19 @@ search-index find "secret" --hidden --no-ignore
 
 ---
 
-## `search-index index` — Build File Name Index
+## `xray index` — Build File Name Index
 
 Pre-builds an index of all file paths for instant lookups.
 
 ```bash
 # Index a directory
-search-index index -d C:\Projects
+xray index -d C:\Projects
 
 # Index with custom max age (hours)
-search-index index -d C:\ --max-age-hours 48
+xray index -d C:\ --max-age-hours 48
 
 # Include hidden and gitignored files
-search-index index -d C:\Projects --hidden --no-ignore
+xray index -d C:\Projects --hidden --no-ignore
 ```
 
 **Options:**
@@ -76,31 +76,31 @@ search-index index -d C:\Projects --hidden --no-ignore
 
 ---
 
-## `search-index fast` — Search File Name Index
+## `xray fast` — Search File Name Index
 
 Searches a pre-built file name index. Instant results. Supports comma-separated patterns for multi-file lookup (OR logic).
 
 ```bash
 # Search by file name (substring match)
-search-index fast "notepad" -d C:\Windows
+xray fast "notepad" -d C:\Windows
 
 # With extension filter
-search-index fast "notepad" -d C:\Windows -e exe --files-only
+xray fast "notepad" -d C:\Windows -e exe --files-only
 
 # Comma-separated multi-term search (OR logic) — find multiple files at once
-search-index fast "UserService,OrderProcessor,PaymentHandler" -d C:\Projects -e cs
+xray fast "UserService,OrderProcessor,PaymentHandler" -d C:\Projects -e cs
 
 # Regex search
-search-index fast "config\.\w+" -d C:\Projects --regex
+xray fast "config\.\w+" -d C:\Projects --regex
 
 # Find large files (> 100MB)
-search-index fast "" -d C:\ --min-size 104857600
+xray fast "" -d C:\ --min-size 104857600
 
 # Find directories only
-search-index fast "node_modules" -d C:\Projects --dirs-only
+xray fast "node_modules" -d C:\Projects --dirs-only
 
 # Count only
-search-index fast ".dll" -d C:\Windows -c
+xray fast ".dll" -d C:\Windows -c
 ```
 
 If no index exists for the directory, it will be built automatically on first use.
@@ -122,22 +122,22 @@ If no index exists for the directory, it will be built automatically on first us
 
 ---
 
-## `search-index content-index` — Build Inverted Content Index
+## `xray content-index` — Build Inverted Content Index
 
 Reads file contents, tokenizes them, and builds an inverted index mapping tokens to file locations. **The tokenizer is language-agnostic** — it works with any text file (C#, Rust, Python, JavaScript, TypeScript, XML, JSON, Markdown, config files, etc.). Specify the extensions you want to index with `-e`.
 
 ```bash
 # Index C# files
-search-index content-index -d C:\Projects -e cs
+xray content-index -d C:\Projects -e cs
 
 # Index multiple file types (any text files work)
-search-index content-index -d C:\Projects -e cs,rs,py,js,ts
+xray content-index -d C:\Projects -e cs,rs,py,js,ts
 
 # Custom token minimum length
-search-index content-index -d C:\Projects -e cs --min-token-len 3
+xray content-index -d C:\Projects -e cs --min-token-len 3
 
 # Include everything
-search-index content-index -d C:\Projects -e cs --hidden --no-ignore
+xray content-index -d C:\Projects -e cs --hidden --no-ignore
 ```
 
 **Tokenization rules:**
@@ -161,40 +161,40 @@ search-index content-index -d C:\Projects -e cs --hidden --no-ignore
 
 ---
 
-## `search-index grep` — Search Inverted Content Index
+## `xray grep` — Search Inverted Content Index
 
 Searches the inverted index for tokens. Results are ranked by TF-IDF score. Supports multi-term search (AND/OR) and regex pattern matching against indexed tokens.
 
 ```bash
 # Search for a single term (results ranked by relevance)
-search-index grep "HttpClient" -d C:\Projects
+xray grep "HttpClient" -d C:\Projects
 
 # Multi-term OR search (files containing ANY of the terms)
-search-index grep "HttpClient,ILogger,Task" -d C:\Projects -e cs
+xray grep "HttpClient,ILogger,Task" -d C:\Projects -e cs
 
 # Multi-term AND search (files containing ALL terms)
-search-index grep "HttpClient,ILogger" -d C:\Projects -e cs --all
+xray grep "HttpClient,ILogger" -d C:\Projects -e cs --all
 
 # Regex: find all cache interfaces
-search-index grep "i.*cache" -d C:\Projects -e cs --regex
+xray grep "i.*cache" -d C:\Projects -e cs --regex
 
 # Regex: find all factory classes
-search-index grep ".*factory" -d C:\Projects -e cs --regex --max-results 20
+xray grep ".*factory" -d C:\Projects -e cs --regex --max-results 20
 
 # Regex: find all async methods
-search-index grep ".*async" -d C:\Projects -e cs --regex -c
+xray grep ".*async" -d C:\Projects -e cs --regex -c
 
 # Show actual matching lines from files
-search-index grep "HttpClient" -d C:\Projects --show-lines
+xray grep "HttpClient" -d C:\Projects --show-lines
 
 # Top 10 results only
-search-index grep "HttpClient" -d C:\Projects --max-results 10
+xray grep "HttpClient" -d C:\Projects --max-results 10
 
 # Count matches
-search-index grep "HttpClient" -d C:\Projects -c
+xray grep "HttpClient" -d C:\Projects -c
 
 # Filter by extension
-search-index grep "HttpClient" -d C:\Projects -e cs
+xray grep "HttpClient" -d C:\Projects -e cs
 ```
 
 ### Multi-term search
@@ -213,8 +213,8 @@ search-index grep "HttpClient" -d C:\Projects -e cs
 - Results sorted by TF-IDF: exact matches rank highest, compound matches lower
 - For queries shorter than 4 characters, a warning is included in the response (trigram matching is less selective for very short queries)
 - Use `--exact` to disable substring matching and search for exact tokens only
-- CLI example: `search-index grep "DatabaseConn" -d C:\Projects -e cs` (substring by default)
-- CLI exact: `search-index grep "DatabaseConn" -d C:\Projects -e cs --exact` (exact tokens only)
+- CLI example: `xray grep "DatabaseConn" -d C:\Projects -e cs` (substring by default)
+- CLI exact: `xray grep "DatabaseConn" -d C:\Projects -e cs --exact` (exact tokens only)
 - MCP example: `{ "terms": "DatabaseConn" }` (substring by default; use `"substring": false` for exact-token-only)
 
 ### Regex search (`-r, --regex`)
@@ -248,29 +248,29 @@ search-index grep "HttpClient" -d C:\Projects -e cs
 
 ---
 
-## `search-index info` — Index Information
+## `xray info` — Index Information
 
 Shows all existing indexes with their status.
 
 ```bash
-search-index info
+xray info
 ```
 
 Example output:
 
 ```
-Index directory: C:\Users\you\AppData\Local\search-index
+Index directory: C:\Users\you\AppData\Local\xray
 
   [FILE] C:\Windows — 333875 entries, 47.8 MB, 0.1h ago
   [CONTENT] C:\Projects — 48986 files, 33229888 tokens, exts: [cs, rs], 242.7 MB, 0.5h ago
   [GIT]  branch=main  commits=12345  files=2500  authors=42  HEAD=abc123de  1.2 MB  0.5 hours
 ```
 
-> **Note:** `[GIT]` entries appear when the MCP server (`search-index serve`) builds a git history cache for the indexed directory. The git index is created automatically during `serve` and is not built by any standalone CLI command.
+> **Note:** `[GIT]` entries appear when the MCP server (`xray serve`) builds a git history cache for the indexed directory. The git index is created automatically during `serve` and is not built by any standalone CLI command.
 
 ---
 
-## `search-index cleanup` — Remove Orphaned or Directory-Specific Indexes
+## `xray cleanup` — Remove Orphaned or Directory-Specific Indexes
 
 Without `--dir`: scans the index directory and removes `.file-list`, `.word-search`, `.code-structure` files whose root directories no longer exist on disk.
 
@@ -278,13 +278,13 @@ With `--dir`: removes all index files whose root matches the specified directory
 
 ```bash
 # Remove orphaned indexes (root dirs that no longer exist)
-search-index cleanup
+xray cleanup
 
 # Remove all indexes for a specific directory
-search-index cleanup --dir C:\Projects\MyApp
+xray cleanup --dir C:\Projects\MyApp
 
 # Remove indexes for current directory (useful after E2E tests)
-search-index cleanup --dir .
+xray cleanup --dir .
 ```
 
 | Flag       | Description                                              |
@@ -294,7 +294,7 @@ search-index cleanup --dir .
 Example output (orphaned):
 
 ```
-Scanning for orphaned indexes in C:\Users\you\AppData\Local\search-index...
+Scanning for orphaned indexes in C:\Users\you\AppData\Local\xray...
   Removed orphaned index: Deleted_OldProject_abc12345.file-list (root: C:\Deleted\OldProject)
   Removed orphaned index: Temp_test_dir_12345_def45678.word-search (root: C:\Temp\test_dir_12345)
 Removed 2 orphaned index file(s).
@@ -303,7 +303,7 @@ Removed 2 orphaned index file(s).
 Example output (`--dir`):
 
 ```
-Removing indexes for directory '.' from C:\Users\you\AppData\Local\search-index...
+Removing indexes for directory '.' from C:\Users\you\AppData\Local\xray...
   Removed index for dir '.': Repos_MyApp_abc12345.file-list (file-list)
   Removed index for dir '.': Repos_MyApp_def45678.word-search (word-search)
   Removed index for dir '.': Repos_MyApp_ghi78901.code-structure (code-structure)
@@ -312,31 +312,31 @@ Removed 3 index file(s) for '.'.
 
 ---
 
-## `search-index def-index` — Build Code Definition Index
+## `xray def-index` — Build Code Definition Index
 
 Parses source files using tree-sitter (C#, TypeScript/TSX, Rust) or regex (SQL) to extract structural code definitions (classes, methods, interfaces, enums, stored procedures, tables, views, etc.). **Unlike the content index, this is language-specific** — supports C#, TypeScript/TSX, Rust, and SQL. See [Supported Languages](architecture.md#supported-languages) for details.
 
 ```bash
 # Index C# files
-search-index def-index --dir C:\Projects --ext cs
+xray def-index --dir C:\Projects --ext cs
 
 # Index TypeScript files
-search-index def-index --dir C:\Projects --ext ts
+xray def-index --dir C:\Projects --ext ts
 
 # Index TypeScript + TSX files
-search-index def-index --dir C:\Projects --ext ts,tsx
+xray def-index --dir C:\Projects --ext ts,tsx
 
 # Index Rust files
-search-index def-index --dir C:\Projects --ext rs
+xray def-index --dir C:\Projects --ext rs
 
 # Index C# + TypeScript together (mixed-language project)
-search-index def-index --dir C:\Projects --ext cs,ts,tsx
+xray def-index --dir C:\Projects --ext cs,ts,tsx
 
 # Index all supported languages
-search-index def-index --dir C:\Projects --ext cs,ts,tsx,rs,sql
+xray def-index --dir C:\Projects --ext cs,ts,tsx,rs,sql
 
 # Custom thread count
-search-index def-index --dir C:\Projects --ext cs --threads 8
+xray def-index --dir C:\Projects --ext cs --threads 8
 ```
 
 **What it extracts:**
@@ -375,19 +375,19 @@ Each definition includes: name, kind, file path, line range, full signature, mod
 
 ---
 
-## `search-index def-audit` — Audit Definition Index Coverage
+## `xray def-audit` — Audit Definition Index Coverage
 
 Loads a previously built `.code-structure` file from disk (instant, no rebuild) and reports which files have 0 definitions. Files >500 bytes with 0 definitions are flagged as "suspicious" — possible parse failures.
 
 ```bash
 # Show all suspicious files (>500B, 0 definitions)
-search-index def-audit --dir C:\Projects --ext cs
+xray def-audit --dir C:\Projects --ext cs
 
 # Only flag files >2KB as suspicious
-search-index def-audit --dir C:\Projects --ext cs --min-bytes 2000
+xray def-audit --dir C:\Projects --ext cs --min-bytes 2000
 
 # Also show files with lossy UTF-8 conversion
-search-index def-audit --dir C:\Projects --ext cs --show-lossy
+xray def-audit --dir C:\Projects --ext cs --show-lossy
 ```
 
 **Options:**
@@ -414,25 +414,25 @@ search-index def-audit --dir C:\Projects --ext cs --show-lossy
 
 ---
 
-## `search-index serve` — Start MCP Server
+## `xray serve` — Start MCP Server
 
 Starts a Model Context Protocol (MCP) server over stdio. See [MCP Server Guide](mcp-guide.md) for full documentation on setup, tools API, and examples.
 
 ```bash
 # Start MCP server for C# files
-search-index serve --dir C:\Projects --ext cs
+xray serve --dir C:\Projects --ext cs
 
 # With file watching and code definitions
-search-index serve --dir C:\Projects --ext cs --watch --definitions
+xray serve --dir C:\Projects --ext cs --watch --definitions
 
 # Mixed C# + TypeScript project
-search-index serve --dir C:\Projects --ext cs,ts,tsx --watch --definitions
+xray serve --dir C:\Projects --ext cs,ts,tsx --watch --definitions
 
 # Mixed C# + SQL project
-search-index serve --dir C:\Projects --ext cs,sql --watch --definitions
+xray serve --dir C:\Projects --ext cs,sql --watch --definitions
 
 # Rust project
-search-index serve --dir C:\Projects --ext rs --watch --definitions
+xray serve --dir C:\Projects --ext rs --watch --definitions
 ```
 
 **Options:**
@@ -451,6 +451,6 @@ search-index serve --dir C:\Projects --ext rs --watch --definitions
 
 ---
 
-## `search-index tips` — Best Practices Guide
+## `xray tips` — Best Practices Guide
 
-Prints the same best practices and strategy recipes available via the `search_help` MCP tool. Includes step-by-step patterns for common tasks (architecture exploration, call chain investigation, stack trace analysis) with a target of ≤3 search calls per task.
+Prints the same best practices and strategy recipes available via the `xray_help` MCP tool. Includes step-by-step patterns for common tasks (architecture exploration, call chain investigation, stack trace analysis) with a target of ≤3 search calls per task.

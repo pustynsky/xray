@@ -1,7 +1,7 @@
 //! Tests for grep/substring/phrase/truncation -- extracted from handlers_tests.rs.
 
 use super::*;
-use super::grep::handle_search_grep;
+use super::grep::handle_xray_grep;
 use super::handlers_test_utils::{cleanup_tmp, make_empty_ctx};
 use crate::index::build_trigram_index;
 use crate::Posting;
@@ -35,9 +35,9 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
     }
 }
 
-#[test] fn test_substring_search_finds_partial_match() {
+#[test] fn test_substring_xray_finds_partial_match() {
     let ctx = make_substring_ctx(vec![("databaseconnectionfactory", 0, vec![10])], vec!["C:\\test\\Activity.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "databaseconn", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "databaseconn", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -45,7 +45,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
 
 #[test] fn test_substring_search_no_match() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5])], vec!["C:\\test\\Program.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "xyznonexistent", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "xyznonexistent", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 0);
@@ -53,7 +53,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
 
 #[test] fn test_substring_search_full_token_match() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5, 12])], vec!["C:\\test\\Program.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpclient", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "httpclient", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -61,7 +61,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
 
 #[test] fn test_substring_search_case_insensitive() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5])], vec!["C:\\test\\Program.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpCli", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpCli", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -69,7 +69,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
 
 #[test] fn test_substring_search_short_query_warning() {
     let ctx = make_substring_ctx(vec![("ab_something", 0, vec![1])], vec!["C:\\test\\File.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "ab", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "ab", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["warnings"].is_array(),
@@ -78,21 +78,21 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
 
 #[test] fn test_substring_search_mutually_exclusive_with_regex() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5])], vec!["C:\\test\\Program.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "http", "substring": true, "regex": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "http", "substring": true, "regex": true}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("mutually exclusive"));
 }
 
 #[test] fn test_substring_search_mutually_exclusive_with_phrase() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5])], vec!["C:\\test\\Program.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "http", "substring": true, "phrase": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "http", "substring": true, "phrase": true}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("mutually exclusive"));
 }
 
 #[test] fn test_substring_search_multi_term_or() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5]), ("grpchandler", 1, vec![10])], vec!["C:\\test\\Http.cs", "C:\\test\\Grpc.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpcli,grpchan", "substring": true, "mode": "or"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "httpcli,grpchan", "substring": true, "mode": "or"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 2);
@@ -100,7 +100,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
 
 #[test] fn test_substring_search_multi_term_and() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5]), ("grpchandler", 0, vec![10]), ("grpchandler", 1, vec![20])], vec!["C:\\test\\Both.cs", "C:\\test\\GrpcOnly.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpcli,grpchan", "substring": true, "mode": "and"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "httpcli,grpchan", "substring": true, "mode": "and"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -115,7 +115,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
         ],
         vec!["C:\\test\\ServiceFile.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "service,handler",
         "substring": true,
         "mode": "and"
@@ -135,7 +135,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
         ],
         vec!["C:\\test\\ServiceFile.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "service,handler",
         "substring": true,
         "mode": "and"
@@ -148,7 +148,7 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
 
 #[test] fn test_substring_search_count_only() {
     let ctx = make_substring_ctx(vec![("httpclient", 0, vec![5, 12]), ("httphandler", 1, vec![3])], vec!["C:\\test\\Client.cs", "C:\\test\\Handler.cs"]);
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "http", "substring": true, "countOnly": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "http", "substring": true, "countOnly": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 2);
@@ -170,7 +170,7 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
         index: Arc::new(RwLock::new(content_index)),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpcli", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "httpcli", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -224,7 +224,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn e2e_substring_search_full_pipeline() {
     let (ctx, tmp_dir) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "databaseconn", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "databaseconn", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1);
@@ -235,7 +235,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn e2e_substring_search_with_show_lines() {
     let (ctx, tmp_dir) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "grpcservice", "substring": true, "showLines": true, "contextLines": 1}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "grpcservice", "substring": true, "showLines": true, "contextLines": 1}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1);
@@ -248,16 +248,16 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 #[test] fn e2e_reindex_rebuilds_trigram() {
     use std::io::Write;
     let (ctx, tmp_dir) = make_e2e_substring_ctx();
-    let r1 = dispatch_tool(&ctx, "search_grep", &json!({"terms": "cachemanager", "substring": true}));
+    let r1 = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "cachemanager", "substring": true}));
     let o1: Value = serde_json::from_str(&r1.content[0].text).unwrap();
     assert!(o1["summary"]["totalFiles"].as_u64().unwrap() >= 1);
     std::fs::remove_file(tmp_dir.join("Util.cs")).unwrap();
     { let mut f = std::fs::File::create(tmp_dir.join("NewFile.cs")).unwrap(); writeln!(f, "public class DatabaseConnectionPoolManager {{}}").unwrap(); }
-    let _ = dispatch_tool(&ctx, "search_reindex", &json!({}));
-    let r2 = dispatch_tool(&ctx, "search_grep", &json!({"terms": "cachemanager", "substring": true}));
+    let _ = dispatch_tool(&ctx, "xray_reindex", &json!({}));
+    let r2 = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "cachemanager", "substring": true}));
     let o2: Value = serde_json::from_str(&r2.content[0].text).unwrap();
     assert_eq!(o2["summary"]["totalFiles"], 0);
-    let r3 = dispatch_tool(&ctx, "search_grep", &json!({"terms": "connectionpool", "substring": true}));
+    let r3 = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "connectionpool", "substring": true}));
     let o3: Value = serde_json::from_str(&r3.content[0].text).unwrap();
     assert!(o3["summary"]["totalFiles"].as_u64().unwrap() >= 1);
     cleanup_tmp(&tmp_dir);
@@ -276,7 +276,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
       idx.total_tokens += 1;
       idx.trigram_dirty = true;
     }
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "blobstorage", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "blobstorage", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1);
@@ -299,7 +299,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     assert_eq!(loaded.index.len(), orig_tokens);
     assert_eq!(loaded.trigram.trigram_map.len(), orig_trigrams);
     let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), server_dir: root, ..Default::default() };
-    let result = dispatch_tool(&loaded_ctx, "search_grep", &json!({"terms": "databaseconn", "substring": true}));
+    let result = dispatch_tool(&loaded_ctx, "xray_grep", &json!({"terms": "databaseconn", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1);
@@ -308,7 +308,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn e2e_substring_search_multi_term_and() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpclient,grpcservice", "substring": true, "mode": "and"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "httpclient,grpcservice", "substring": true, "mode": "and"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalFiles"].as_u64().unwrap() >= 1);
@@ -317,7 +317,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn e2e_substring_search_count_only() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpclient", "substring": true, "countOnly": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "httpclient", "substring": true, "countOnly": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output.get("files").is_none());
@@ -327,7 +327,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn e2e_substring_search_with_excludes() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpclient", "substring": true, "exclude": ["Controller"]}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "httpclient", "substring": true, "exclude": ["Controller"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -337,7 +337,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn e2e_substring_search_max_results() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "public", "substring": true, "maxResults": 1}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "public", "substring": true, "maxResults": 1}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["files"].as_array().unwrap().len() <= 1);
@@ -346,7 +346,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn e2e_substring_search_short_query_warning() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "ok", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "ok", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["warnings"].is_array(),
@@ -356,21 +356,21 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn e2e_substring_mutually_exclusive_with_regex() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "test", "substring": true, "regex": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "test", "substring": true, "regex": true}));
     assert!(result.is_error);
     cleanup_tmp(&tmp);
 }
 
 #[test] fn e2e_substring_mutually_exclusive_with_phrase() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "test", "substring": true, "phrase": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "test", "substring": true, "phrase": true}));
     assert!(result.is_error);
     cleanup_tmp(&tmp);
 }
 
 #[test] fn e2e_substring_search_has_scores() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "httpclient", "substring": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "httpclient", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -388,7 +388,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         ],
         vec!["C:\\test\\StorageIndexManager.cs", "C:\\test\\IStorageIndexManager.cs", "C:\\test\\Controller.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "StorageIndexManager"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "StorageIndexManager"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 3,
@@ -406,7 +406,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         ],
         vec!["C:\\test\\StorageIndexManager.cs", "C:\\test\\IStorageIndexManager.cs", "C:\\test\\Controller.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "storageindexmanager", "substring": false}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "storageindexmanager", "substring": false}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1,
@@ -418,7 +418,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         vec![("httpclient", 0, vec![5])],
         vec!["C:\\test\\Program.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "http.*", "regex": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "http.*", "regex": true}));
     assert!(!result.is_error, "regex=true should auto-disable substring, not error");
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -429,7 +429,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         vec![("new", 0, vec![5]), ("httpclient", 0, vec![5])],
         vec!["C:\\test\\Program.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "new httpclient", "phrase": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "new httpclient", "phrase": true}));
     assert!(!result.is_error, "phrase=true should auto-disable substring, not error");
 }
 
@@ -490,7 +490,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_phrase_postfilter_xml_literal_match() {
     let (ctx, tmp) = make_phrase_postfilter_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "</Property> </Property>",
         "phrase": true
     }));
@@ -506,7 +506,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_phrase_postfilter_no_punctuation_uses_regex() {
     let (ctx, tmp) = make_phrase_postfilter_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "pub fn",
         "phrase": true
     }));
@@ -522,7 +522,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_phrase_postfilter_angle_brackets() {
     let (ctx, tmp) = make_phrase_postfilter_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "ILogger<string>",
         "phrase": true
     }));
@@ -541,7 +541,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
         vec![("httpclient", 0, vec![5])],
         vec!["C:\\test\\Program.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "http", "substring": true, "regex": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "http", "substring": true, "regex": true}));
     assert!(result.is_error, "Explicit substring=true + regex=true should error");
 }
 #[test] fn test_grep_with_subdir_filter() {
@@ -553,10 +553,10 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
     let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 }).unwrap();
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
-    let r_all = handle_search_grep(&ctx, &json!({"terms": "productcatalog"}));
+    let r_all = handle_xray_grep(&ctx, &json!({"terms": "productcatalog"}));
     let o_all: Value = serde_json::from_str(&r_all.content[0].text).unwrap();
     assert_eq!(o_all["summary"]["totalFiles"], 2);
-    let r_sub = handle_search_grep(&ctx, &json!({"terms": "productcatalog", "dir": sub_a.to_string_lossy().to_string()}));
+    let r_sub = handle_xray_grep(&ctx, &json!({"terms": "productcatalog", "dir": sub_a.to_string_lossy().to_string()}));
     assert!(!r_sub.is_error);
     let o_sub: Value = serde_json::from_str(&r_sub.content[0].text).unwrap();
     assert_eq!(o_sub["summary"]["totalFiles"], 1);
@@ -567,7 +567,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let tmp = tmp_holder.path();
     let index = ContentIndex { root: tmp.to_string_lossy().to_string(), ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), server_dir: tmp.to_string_lossy().to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
-    let result = handle_search_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
+    let result = handle_xray_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
     assert!(result.is_error);
 }
 
@@ -609,7 +609,7 @@ fn test_response_truncation_triggers_on_large_result() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "common",
         "maxResults": 0,
         "substring": false
@@ -657,7 +657,7 @@ fn test_response_truncation_does_not_trigger_on_small_result() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "mytoken", "substring": false}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "mytoken", "substring": false}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
@@ -669,7 +669,7 @@ fn test_response_truncation_does_not_trigger_on_small_result() {
 // ─── Response truncation via small budget ──────────────────────────
 
 #[test]
-fn test_search_grep_response_truncation_via_small_budget() {
+fn test_xray_grep_response_truncation_via_small_budget() {
     let mut idx = HashMap::new();
     let mut files = Vec::new();
     let mut file_token_counts = Vec::new();
@@ -704,7 +704,7 @@ fn test_search_grep_response_truncation_via_small_budget() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "targettoken",
         "maxResults": 0,
         "substring": false
@@ -728,9 +728,9 @@ fn test_search_grep_response_truncation_via_small_budget() {
 // Batch 3 tests — Nice-to-have edge cases
 // ═══════════════════════════════════════════════════════════════════════
 
-/// T39 — search_grep SQL extension filter.
+/// T39 — xray_grep SQL extension filter.
 #[test]
-fn test_search_grep_sql_extension_filter() {
+fn test_xray_grep_sql_extension_filter() {
     let mut idx = HashMap::new();
     idx.insert("createtable".to_string(), vec![
         Posting { file_id: 0, lines: vec![5] },
@@ -758,7 +758,7 @@ fn test_search_grep_sql_extension_filter() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "createtable",
         "ext": "sql",
         "substring": false
@@ -774,7 +774,7 @@ fn test_search_grep_sql_extension_filter() {
             "All results should be .sql files, but found: {}", path);
     }
 
-    let result_all = dispatch_tool(&ctx, "search_grep", &json!({
+    let result_all = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "createtable",
         "substring": false
     }));
@@ -784,9 +784,9 @@ fn test_search_grep_sql_extension_filter() {
         "Without ext filter should find all 3 files");
 }
 
-/// T71 — search_grep SQL phrase search with showLines.
+/// T71 — xray_grep SQL phrase search with showLines.
 #[test]
-fn test_search_grep_phrase_search_with_show_lines() {
+fn test_xray_grep_phrase_search_with_show_lines() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -825,7 +825,7 @@ fn test_search_grep_phrase_search_with_show_lines() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "CREATE TABLE",
         "phrase": true,
         "showLines": true
@@ -846,9 +846,9 @@ fn test_search_grep_phrase_search_with_show_lines() {
 
     cleanup_tmp(&tmp_dir);
 }
-/// T82 — search_grep maxResults=0 semantics.
+/// T82 — xray_grep maxResults=0 semantics.
 #[test]
-fn test_search_grep_max_results_zero_means_unlimited() {
+fn test_xray_grep_max_results_zero_means_unlimited() {
     let mut idx = HashMap::new();
     let mut files = Vec::new();
     let mut file_token_counts = Vec::new();
@@ -879,7 +879,7 @@ fn test_search_grep_max_results_zero_means_unlimited() {
         ..Default::default()
     };
 
-    let result_unlimited = dispatch_tool(&ctx, "search_grep", &json!({
+    let result_unlimited = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "commontoken",
         "maxResults": 0,
         "substring": false
@@ -891,7 +891,7 @@ fn test_search_grep_max_results_zero_means_unlimited() {
     assert_eq!(files_unlimited.len(), 25,
         "maxResults=0 should return all 25 files (unlimited), got {}", files_unlimited.len());
 
-    let result_capped = dispatch_tool(&ctx, "search_grep", &json!({
+    let result_capped = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "commontoken",
         "maxResults": 5,
         "substring": false
@@ -904,7 +904,7 @@ fn test_search_grep_max_results_zero_means_unlimited() {
     assert_eq!(files_capped.len(), 5,
         "maxResults=5 should return exactly 5 files, got {}", files_capped.len());
 
-    let result_default = dispatch_tool(&ctx, "search_grep", &json!({
+    let result_default = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "commontoken",
         "substring": false
     }));
@@ -914,13 +914,13 @@ fn test_search_grep_max_results_zero_means_unlimited() {
     assert_eq!(files_default.len(), 25,
         "Default maxResults=50 should return all 25 files when total < 50, got {}", files_default.len());
 }
-/// search_grep phrase mode: results sorted by number of occurrences descending.
+/// xray_grep phrase mode: results sorted by number of occurrences descending.
 #[test]
-fn test_search_grep_phrase_sort_by_occurrences() {
+fn test_xray_grep_phrase_sort_by_occurrences() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_grep_phrase_rank_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_grep_phrase_rank_{}_{}", std::process::id(), id));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
 
@@ -958,7 +958,7 @@ fn test_search_grep_phrase_sort_by_occurrences() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "user service",
         "phrase": true
     }));
@@ -979,12 +979,12 @@ fn test_search_grep_phrase_sort_by_occurrences() {
 
     cleanup_tmp(&tmp_dir);
 }
-/// BUG-6: search_grep with contextLines>0 should auto-enable showLines.
+/// BUG-6: xray_grep with contextLines>0 should auto-enable showLines.
 #[test]
-fn test_search_grep_context_lines_auto_enables_show_lines() {
+fn test_xray_grep_context_lines_auto_enables_show_lines() {
     let (ctx, tmp) = make_e2e_substring_ctx();
     // contextLines=3 without explicit showLines=true
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "httpclient",
         "contextLines": 3
     }));
@@ -1018,7 +1018,7 @@ fn test_read_errors_in_substring_summary() {
         ..Default::default()
     };
     // Substring mode
-    let result = handle_search_grep(&ctx, &json!({"terms": "httpcli", "substring": true}));
+    let result = handle_xray_grep(&ctx, &json!({"terms": "httpcli", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["readErrors"], 3,
@@ -1027,14 +1027,14 @@ fn test_read_errors_in_substring_summary() {
         "lossyUtf8Files should appear in substring summary");
 
     // CountOnly mode
-    let result2 = handle_search_grep(&ctx, &json!({"terms": "httpcli", "substring": true, "countOnly": true}));
+    let result2 = handle_xray_grep(&ctx, &json!({"terms": "httpcli", "substring": true, "countOnly": true}));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     assert_eq!(output2["summary"]["readErrors"], 3,
         "readErrors should appear in countOnly substring summary");
 }
 
-/// BUG-7: search_grep substring matchedTokens should be filtered by dir/ext/exclude.
+/// BUG-7: xray_grep substring matchedTokens should be filtered by dir/ext/exclude.
 #[test]
 fn test_substring_matched_tokens_filtered_by_dir() {
     // Two files in different directories, each with a unique token containing "service"
@@ -1056,7 +1056,7 @@ fn test_substring_matched_tokens_filtered_by_dir() {
     };
 
     // Search with dir filter restricting to dir_a only
-    let result = handle_search_grep(&ctx, &json!({
+    let result = handle_xray_grep(&ctx, &json!({
         "terms": "service",
         "substring": true,
         "dir": "C:\\project\\dir_a"
@@ -1097,7 +1097,7 @@ fn test_substring_matched_tokens_filtered_by_ext() {
     );
 
     // Search with ext filter restricting to .cs only
-    let result = handle_search_grep(&ctx, &json!({
+    let result = handle_xray_grep(&ctx, &json!({
         "terms": "service",
         "substring": true,
         "ext": "cs"
@@ -1133,7 +1133,7 @@ fn test_substring_matched_tokens_filtered_by_exclude() {
     );
 
     // Search with exclude filter removing mock files
-    let result = handle_search_grep(&ctx, &json!({
+    let result = handle_xray_grep(&ctx, &json!({
         "terms": "service",
         "substring": true,
         "exclude": ["Mock"]
@@ -1171,7 +1171,7 @@ fn test_substring_matched_tokens_empty_when_no_files_match() {
     };
 
     // Search in dir_a (no files there)
-    let result = handle_search_grep(&ctx, &json!({
+    let result = handle_xray_grep(&ctx, &json!({
         "terms": "service",
         "substring": true,
         "dir": "C:\\project\\dir_a",
@@ -1189,12 +1189,12 @@ fn test_substring_matched_tokens_empty_when_no_files_match() {
 
 // ─── US-16: Substring auto-switch to phrase for spaced terms ────────
 
-/// US-16: search_grep with default substring mode and spaced terms auto-switches to phrase.
+/// US-16: xray_grep with default substring mode and spaced terms auto-switches to phrase.
 #[test]
 fn test_substring_space_in_terms_auto_switches_to_phrase() {
     let (ctx, tmp) = make_e2e_substring_ctx();
     // "public class" contains a space — should auto-switch to phrase mode
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "public class"
     }));
     assert!(!result.is_error, "Spaced terms should not error: {}", result.content[0].text);
@@ -1220,7 +1220,7 @@ fn test_substring_space_in_terms_auto_switches_to_phrase() {
 #[test]
 fn test_substring_space_in_terms_count_only() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "public class",
         "countOnly": true
     }));
@@ -1236,7 +1236,7 @@ fn test_substring_space_in_terms_count_only() {
 #[test]
 fn test_substring_no_space_stays_substring() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "httpclient"
     }));
     assert!(!result.is_error);
@@ -1281,7 +1281,7 @@ fn test_substring_space_sql_create_table() {
     };
 
     // "CREATE TABLE" with default substring mode — should auto-switch to phrase
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "CREATE TABLE"
     }));
     assert!(!result.is_error, "CREATE TABLE search should not error: {}", result.content[0].text);
@@ -1292,7 +1292,7 @@ fn test_substring_space_sql_create_table() {
     assert!(output["summary"]["searchModeNote"].as_str().is_some());
 
     // "CREATE PROCEDURE" — should also find via auto-switch
-    let result2 = dispatch_tool(&ctx, "search_grep", &json!({
+    let result2 = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "CREATE PROCEDURE"
     }));
     assert!(!result2.is_error);
@@ -1312,7 +1312,7 @@ fn test_substring_space_sql_create_table() {
 fn test_multi_phrase_or_auto_switch() {
     let (ctx, tmp) = make_e2e_substring_ctx();
     // "public class" and "private readonly" both exist in test files
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "public class,private readonly"
     }));
     assert!(!result.is_error, "Multi-phrase OR should not error: {}", result.content[0].text);
@@ -1337,7 +1337,7 @@ fn test_multi_phrase_or_auto_switch() {
 #[test]
 fn test_multi_phrase_or_explicit_phrase() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "public class,private readonly",
         "phrase": true
     }));
@@ -1361,7 +1361,7 @@ fn test_multi_phrase_or_explicit_phrase() {
 fn test_multi_phrase_and_explicit_phrase() {
     let (ctx, tmp) = make_e2e_substring_ctx();
     // "public class" exists in all 3 test files, "private readonly" only in Controller.cs
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "public class,private readonly",
         "phrase": true,
         "mode": "and"
@@ -1385,7 +1385,7 @@ fn test_multi_phrase_and_explicit_phrase() {
 #[test]
 fn test_single_phrase_regression_no_comma() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "public class"
     }));
     assert!(!result.is_error);
@@ -1408,7 +1408,7 @@ fn test_single_phrase_regression_no_comma() {
 #[test]
 fn test_tokens_no_spaces_stays_substring() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "httpclient,grpcservice"
     }));
     assert!(!result.is_error);
@@ -1424,7 +1424,7 @@ fn test_tokens_no_spaces_stays_substring() {
 #[test]
 fn test_multi_phrase_count_only() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "public class,private readonly",
         "countOnly": true
     }));
@@ -1442,7 +1442,7 @@ fn test_multi_phrase_count_only() {
 #[test]
 fn test_multi_phrase_explicit_count_only() {
     let (ctx, tmp) = make_e2e_substring_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "public class,private readonly",
         "phrase": true,
         "countOnly": true
@@ -1460,7 +1460,7 @@ fn test_multi_phrase_explicit_count_only() {
     cleanup_tmp(&tmp);
 }
 
-/// Bug scenario from user story: "fn handle_search_definitions,fn build_caller_tree"
+/// Bug scenario from user story: "fn handle_xray_definitions,fn build_caller_tree"
 /// should find files with either function.
 #[test]
 fn test_multi_phrase_fn_signatures() {
@@ -1473,7 +1473,7 @@ fn test_multi_phrase_fn_signatures() {
 
     {
         let mut f = std::fs::File::create(tmp_dir.join("definitions.rs")).unwrap();
-        writeln!(f, "pub fn handle_search_definitions(ctx: &Context) -> Result {{").unwrap();
+        writeln!(f, "pub fn handle_xray_definitions(ctx: &Context) -> Result {{").unwrap();
         writeln!(f, "    // implementation").unwrap();
         writeln!(f, "}}").unwrap();
     }
@@ -1501,8 +1501,8 @@ fn test_multi_phrase_fn_signatures() {
     };
 
     // This was the bug scenario: comma-separated function signatures
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
-        "terms": "fn handle_search_definitions,fn build_caller_tree"
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": "fn handle_xray_definitions,fn build_caller_tree"
     }));
     assert!(!result.is_error, "Multi-phrase fn search should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1530,7 +1530,7 @@ fn test_multi_phrase_fn_signatures() {
 #[test]
 fn test_grep_unicode_search_terms_no_crash() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "数据库连接", "countOnly": true}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "数据库连接", "countOnly": true}));
     assert!(!result.is_error, "Unicode search terms should not crash: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 0,
@@ -1544,7 +1544,7 @@ fn test_grep_single_char_exact_no_oom() {
         vec![("httpclient", 0, vec![5]), ("abc", 1, vec![10])],
         vec!["C:\\test\\Program.cs", "C:\\test\\Other.cs"],
     );
-    let result = dispatch_tool(&ctx, "search_grep", &json!({
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": "a",
         "substring": false,
         "countOnly": true
@@ -1557,7 +1557,7 @@ fn test_grep_single_char_exact_no_oom() {
         "Should return a valid totalFiles count");
 }
 
-/// BUG-8: search_grep with dir= pointing to a file should return error with hint.
+/// BUG-8: xray_grep with dir= pointing to a file should return error with hint.
 #[test]
 fn test_grep_dir_as_file_returns_error_with_hint() {
     let (ctx, tmp) = make_e2e_substring_ctx();
@@ -1565,7 +1565,7 @@ fn test_grep_dir_as_file_returns_error_with_hint() {
     let file_path = tmp.join("Service.cs");
     assert!(file_path.exists(), "Test setup: Service.cs should exist");
 
-    let result = handle_search_grep(&ctx, &json!({
+    let result = handle_xray_grep(&ctx, &json!({
         "terms": "httpclient",
         "dir": file_path.to_string_lossy().to_string()
     }));
@@ -1579,7 +1579,7 @@ fn test_grep_dir_as_file_returns_error_with_hint() {
         "Error should mention the filename 'Service.cs': {}", err_msg);
     // Hint should suggest the parent directory
     let parent_str = tmp.to_string_lossy().to_string();
-    assert!(err_msg.contains(&parent_str) || err_msg.contains("search_definitions"),
-        "Error should suggest parent dir or search_definitions: {}", err_msg);
+    assert!(err_msg.contains(&parent_str) || err_msg.contains("xray_definitions"),
+        "Error should suggest parent dir or xray_definitions: {}", err_msg);
     cleanup_tmp(&tmp);
 }

@@ -8,7 +8,7 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // Re-export core types from library crate
-pub use search_index::{clean_path, read_file_lossy, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, DEFAULT_MIN_TOKEN_LEN};
+pub use code_xray::{clean_path, read_file_lossy, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, DEFAULT_MIN_TOKEN_LEN};
 
 mod cli;
 mod definitions;

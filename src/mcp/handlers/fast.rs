@@ -1,4 +1,4 @@
-//! search_fast handler: pre-built file name index search.
+//! xray_fast handler: pre-built file name index search.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -12,7 +12,7 @@ use crate::mcp::protocol::ToolCallResult;
 use super::HandlerContext;
 use super::utils::{best_match_tier, inject_branch_warning, json_to_string};
 
-pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let raw_pattern = args.get("pattern").and_then(|v| v.as_str());
     let dir_provided = args.get("dir").and_then(|v| v.as_str()).is_some();
 
@@ -262,7 +262,7 @@ pub(crate) fn handle_search_fast(ctx: &HandlerContext, args: &Value) -> ToolCall
     if dirs_only && match_count > 150 && max_depth.is_none() {
         summary["hint"] = json!(
             "Too many directories. Use maxDepth=1 for immediate children only, \
-             or use search_definitions file='<dir>' for code-level module overview with autoSummary."
+             or use xray_definitions file='<dir>' for code-level module overview with autoSummary."
         );
     }
     inject_branch_warning(&mut summary, ctx);

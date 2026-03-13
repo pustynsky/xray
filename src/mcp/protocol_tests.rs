@@ -27,11 +27,11 @@ fn test_parse_tools_list_request() {
 
 #[test]
 fn test_parse_tools_call_request() {
-    let json = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"HttpClient","mode":"or"}}}"#;
+    let json = r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"HttpClient","mode":"or"}}}"#;
     let req: JsonRpcRequest = serde_json::from_str(json).unwrap();
     assert_eq!(req.method, "tools/call");
     let params = req.params.unwrap();
-    assert_eq!(params["name"], "search_grep");
+    assert_eq!(params["name"], "xray_grep");
     assert_eq!(params["arguments"]["terms"], "HttpClient");
     assert_eq!(params["arguments"]["mode"], "or");
 }
@@ -42,7 +42,7 @@ fn test_initialize_response_format() {
     let json = serde_json::to_value(&result).unwrap();
     assert_eq!(json["protocolVersion"], "2025-03-26");
     assert_eq!(json["capabilities"]["tools"]["listChanged"], false);
-    assert_eq!(json["serverInfo"]["name"], "search-index");
+    assert_eq!(json["serverInfo"]["name"], "xray");
     assert_eq!(json["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
 }
 
@@ -51,12 +51,12 @@ fn test_initialize_includes_instructions() {
     let result = InitializeResult::new(crate::definitions::definition_extensions());
     let json = serde_json::to_value(&result).unwrap();
     let instructions = json["instructions"].as_str().unwrap();
-    assert!(instructions.contains("=== SEARCH_INDEX_POLICY ==="), "instructions should have named policy wrapper");
+    assert!(instructions.contains("=== XRAY_POLICY ==="), "instructions should have named policy wrapper");
     assert!(instructions.contains("TASK ROUTING"), "instructions should have TASK ROUTING table");
-    assert!(instructions.contains("search_fast"), "instructions should mention search_fast");
-    assert!(instructions.contains("search_callers"), "instructions should mention search_callers");
-    assert!(instructions.contains("search_grep"), "instructions should mention search_grep");
-    assert!(instructions.contains("search_edit"), "instructions should mention search_edit");
+    assert!(instructions.contains("xray_fast"), "instructions should mention xray_fast");
+    assert!(instructions.contains("xray_callers"), "instructions should mention xray_callers");
+    assert!(instructions.contains("xray_grep"), "instructions should mention xray_grep");
+    assert!(instructions.contains("xray_edit"), "instructions should mention xray_edit");
     assert!(instructions.contains("class"), "instructions should mention class parameter");
     assert!(instructions.contains("includeBody"), "instructions should mention includeBody");
     assert!(instructions.contains("countOnly"), "instructions should mention countOnly");

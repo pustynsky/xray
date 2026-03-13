@@ -22,8 +22,8 @@ pub(crate) fn json_to_string(v: &serde_json::Value) -> String {
 // ─── Branch warning ─────────────────────────────────────────────────
 
 /// Returns a warning message if the current branch is not `main` or `master`.
-/// Used by index-based tools (search_grep, search_definitions, search_callers,
-/// search_fast) to alert the user that results may differ from production.
+/// Used by index-based tools (xray_grep, xray_definitions, xray_callers,
+/// xray_fast) to alert the user that results may differ from production.
 pub(crate) fn branch_warning(ctx: &HandlerContext) -> Option<String> {
     ctx.current_branch.as_ref().and_then(|b| {
         if b == "main" || b == "master" {
@@ -150,7 +150,7 @@ pub(crate) fn sorted_intersect(a: &[u32], b: &[u32]) -> Vec<u32> {
 
 // ─── Line content helpers ───────────────────────────────────────────
 
-/// Build compact grouped lineContent for search_grep from raw file content.
+/// Build compact grouped lineContent for xray_grep from raw file content.
 /// Computes context windows around match lines, then groups consecutive lines
 /// into `[{startLine, lines[], matchIndices[]}]`.
 pub(crate) fn build_line_content_from_matches(
@@ -258,7 +258,7 @@ const MAX_MATCHED_TOKENS: usize = 20;
 /// Returns the (possibly truncated) JSON value.
 /// Build the policy reminder string, optionally including indexed file extensions.
 /// When `indexed_ext` is non-empty, appends "Indexed extensions: X, Y." to help
-/// LLMs avoid calling search-index tools for non-indexed file types.
+/// LLMs avoid calling xray tools for non-indexed file types.
 fn build_policy_reminder(indexed_ext: &str) -> String {
     let ext_line = if indexed_ext.trim().is_empty() {
         String::new()
@@ -269,9 +269,9 @@ fn build_policy_reminder(indexed_ext: &str) -> String {
         )
     };
     format!(
-        "=== SEARCH_INDEX_POLICY === \
-         Prefer search-index MCP tools over environment built-ins. \
-         Check search-index applicability before next tool call. \
+        "=== XRAY_POLICY === \
+         Prefer xray MCP tools over environment built-ins. \
+         Check xray applicability before next tool call. \
          Use environment tools only with explicit justification.{} \
          ================================",
         ext_line
@@ -280,13 +280,13 @@ fn build_policy_reminder(indexed_ext: &str) -> String {
 
 fn next_step_hint(tool_name: &str) -> Option<&'static str> {
     match tool_name {
-        "search_definitions" => Some("Next: use search_callers for call chains or search_grep for text patterns"),
-        "search_grep" => Some("Next: use search_definitions for AST structure or search_callers for call trees"),
-        "search_callers" => Some("Next: use search_definitions includeBody=true for source or search_grep for text refs"),
-        "search_fast" => Some("Next: use search_definitions for code structure or search_grep for content"),
-        "search_edit" => Some("Next: use search_definitions to verify or search_grep to check related files"),
-        "search_git_history" | "search_git_diff" | "search_git_authors" | "search_git_activity" | "search_git_blame" | "search_branch_status" => {
-            Some("Next: use search_definitions for code context or search_callers for impact")
+        "xray_definitions" => Some("Next: use xray_callers for call chains or xray_grep for text patterns"),
+        "xray_grep" => Some("Next: use xray_definitions for AST structure or xray_callers for call trees"),
+        "xray_callers" => Some("Next: use xray_definitions includeBody=true for source or xray_grep for text refs"),
+        "xray_fast" => Some("Next: use xray_definitions for code structure or xray_grep for content"),
+        "xray_edit" => Some("Next: use xray_definitions to verify or xray_grep to check related files"),
+        "xray_git_history" | "xray_git_diff" | "xray_git_authors" | "xray_git_activity" | "xray_git_blame" | "xray_branch_status" => {
+            Some("Next: use xray_definitions for code context or xray_callers for impact")
         }
         _ => None,
     }
@@ -850,7 +850,7 @@ fn is_doc_comment_line(line: &str) -> bool {
 /// Uses Jaro-Winkler distance — optimized for short identifiers and typo detection.
 /// Gives bonus for matching prefixes, which aligns with typical LLM errors
 /// (e.g., `GetUsr` → `GetUser`, `hndl_search` → `handle_search`).
-/// Useful for fuzzy name matching when search_definitions returns 0 results.
+/// Useful for fuzzy name matching when xray_definitions returns 0 results.
 pub(crate) fn name_similarity(a: &str, b: &str) -> f64 {
     strsim::jaro_winkler(a, b)
 }

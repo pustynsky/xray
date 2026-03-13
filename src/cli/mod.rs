@@ -31,7 +31,7 @@ use crate::definitions;
 /// High-performance code search engine with inverted indexing and AST-based code intelligence
 #[derive(Parser, Debug)]
 #[command(
-    name = "search-index",
+    name = "xray",
     version,
     author = "Sergey Pustynsky",
     long_version = concat!(
@@ -41,7 +41,7 @@ use crate::definitions;
     ),
     about,
     after_help = "\
-Run 'search-index <COMMAND> --help' for detailed options and examples.\n\
+Run 'xray <COMMAND> --help' for detailed options and examples.\n\
 Common options: -d <DIR> (directory), -e <EXT> (extension filter), -c (count only)"
 )]
 pub(crate) struct Cli {
@@ -209,7 +209,7 @@ fn cmd_def_audit(args: definitions::DefAuditArgs) -> Result<(), SearchError> {
     let index = match definitions::load_definition_index(&args.dir, &exts, &idx_base) {
         Ok(idx) => idx,
         Err(_) => {
-            eprintln!("[def-audit] No definition index found for dir='{}' ext='{}'. Run 'search-index def-index' first.", args.dir, args.ext);
+            eprintln!("[def-audit] No definition index found for dir='{}' ext='{}'. Run 'xray def-index' first.", args.dir, args.ext);
             return Ok(());
         }
     };
@@ -243,7 +243,7 @@ fn cmd_def_audit(args: definitions::DefAuditArgs) -> Result<(), SearchError> {
         // We don't store the list of lossy paths in the index (only count),
         // so we can't enumerate them here. Re-run def-index to see warnings.
         eprintln!("  (lossy file paths are logged during def-index build, not stored in index)");
-        eprintln!("  Re-run: search-index def-index --dir {} --ext {} 2>&1 | findstr /i \"lossy\"", args.dir, args.ext);
+        eprintln!("  Re-run: xray def-index --dir {} --ext {} 2>&1 | findstr /i \"lossy\"", args.dir, args.ext);
     }
 
     Ok(())
@@ -434,7 +434,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
                 new_index
             } else {
                 if idx.is_stale() {
-                    eprintln!("Warning: index is stale (use 'search-index index -d {}' to rebuild)", args.dir);
+                    eprintln!("Warning: index is stale (use 'xray index -d {}' to rebuild)", args.dir);
                 }
                 idx
             }
@@ -724,7 +724,7 @@ fn expand_substring_terms(
                 .cloned()
                 .collect()
         } else {
-            let trigrams = search_index::generate_trigrams(term);
+            let trigrams = code_xray::generate_trigrams(term);
             if trigrams.is_empty() {
                 Vec::new()
             } else {

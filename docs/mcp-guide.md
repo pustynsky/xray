@@ -1,6 +1,6 @@
 # MCP Server Guide
 
-Complete guide for the `search-index serve` MCP server — setup, tools API, and examples.
+Complete guide for the `xray serve` MCP server — setup, tools API, and examples.
 
 ## Overview
 
@@ -12,13 +12,13 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
    ```bash
    cargo install --path .
-   # Or copy search-index.exe to a folder in your PATH
+   # Or copy xray.exe to a folder in your PATH
    ```
 
 2. **Build a content index** for your project:
 
    ```bash
-   search-index content-index -d C:\Projects\MyApp -e cs,sql,csproj
+   xray content-index -d C:\Projects\MyApp -e cs,sql,csproj
    ```
 
 3. **Create `.vscode/mcp.json`** in your workspace root:
@@ -26,8 +26,8 @@ The MCP server starts its event loop **immediately** and responds to `initialize
    ```json
    {
      "servers": {
-       "search-index": {
-         "command": "C:\\Users\\you\\.cargo\\bin\\search-index.exe",
+       "xray": {
+         "command": "C:\\Users\\you\\.cargo\\bin\\xray.exe",
          "args": [
            "serve",
            "--dir",
@@ -45,33 +45,33 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
 4. **Restart VS Code** — the MCP server starts automatically. Your MCP-compatible AI agent (Roo Code, Cline, etc.) now has access to all MCP tools. The server also sends an `instructions` field during MCP initialization with best practices for tool selection. The instructions include:
    - **TASK ROUTING table** — maps user tasks to recommended tools (auto-generated, context-aware based on indexed file extensions)
-   - **DECISION TRIGGERs** — hard prohibitions for file reading and editing that redirect LLM to search-index tools
+   - **DECISION TRIGGERs** — hard prohibitions for file reading and editing that redirect LLM to xray tools
    - **Fallback rule** — guidance for uncertain file types
    - **Strategy Recipes** — multi-step workflow patterns for common tasks
-   - **Named policy anchor** — the instructions are wrapped in `=== SEARCH_INDEX_POLICY ===` / `================================` so the agent sees a stable, reusable policy name during MCP initialization
+   - **Named policy anchor** — the instructions are wrapped in `=== XRAY_POLICY ===` / `================================` so the agent sees a stable, reusable policy name during MCP initialization
 
-5. **Verify** — ask the AI: _"Use search_grep to find all files containing HttpClient"_
+5. **Verify** — ask the AI: _"Use xray_grep to find all files containing HttpClient"_
 
 ## Exposed Tools
 
 | Tool                         | Description                                                                                                                             |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| `search_grep`                | Search content index with TF-IDF ranking, regex, phrase, AND/OR                                                                         |
-| `search_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports C#, TypeScript/TSX, Rust (tree-sitter) and SQL (regex). `containsLine`, `includeBody`, `audit`. Relevance-ranked when name filter is active. Requires `--definitions` |
-| `search_callers`             | Find callers / callees and build recursive call tree. Supports C#, TypeScript/TSX, and SQL (EXEC call chains). Requires `--definitions`  |
-| `search_find`                | Live filesystem walk (⚠️ slow for large dirs)                                                                                           |
-| `search_fast`                | Search pre-built file name index (instant). Supports comma-separated OR patterns. Results ranked: exact stem → prefix → contains        |
-| `search_info`                | Show all indexes with status, sizes, age                                                                                                |
-| `search_reindex`             | Force rebuild + reload content index                                                                                                    |
-| `search_reindex_definitions` | Force rebuild + reload definition index. Requires `--definitions`                                                                       |
-| `search_edit`                | Edit files by line-range operations or text-match replacements. Auto-creates new files. Supports multi-file (`paths`), insert after/before, expectedContext. Atomic, returns unified diff |
-| `search_help`                | Best practices guide, strategy recipes, performance tiers                                                                               |
-| `search_git_history`         | Commit history for a file. Uses in-memory cache when available (sub-millisecond), falls back to CLI (~2–6 sec)                          |
-| `search_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |
-| `search_git_authors`         | Top authors for a file ranked by commit count. Uses in-memory cache when available (sub-millisecond), falls back to CLI                  |
-| `search_git_activity`        | Activity (changed files) for a date range, optionally filtered by path. Uses in-memory cache when available (sub-millisecond), falls back to CLI |
-| `search_git_blame`           | Line-level attribution (`git blame`) for a file or line range. Returns commit hash, author, date, and content per line                   |
-| `search_branch_status`       | Shows current git branch status: branch name, main/master check, behind/ahead counts, dirty files, fetch age. Call before investigating production bugs |
+| `xray_grep`                | Search content index with TF-IDF ranking, regex, phrase, AND/OR                                                                         |
+| `xray_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports C#, TypeScript/TSX, Rust (tree-sitter) and SQL (regex). `containsLine`, `includeBody`, `audit`. Relevance-ranked when name filter is active. Requires `--definitions` |
+| `xray_callers`             | Find callers / callees and build recursive call tree. Supports C#, TypeScript/TSX, and SQL (EXEC call chains). Requires `--definitions`  |
+| `xray_find`                | Live filesystem walk (⚠️ slow for large dirs)                                                                                           |
+| `xray_fast`                | Search pre-built file name index (instant). Supports comma-separated OR patterns. Results ranked: exact stem → prefix → contains        |
+| `xray_info`                | Show all indexes with status, sizes, age                                                                                                |
+| `xray_reindex`             | Force rebuild + reload content index                                                                                                    |
+| `xray_reindex_definitions` | Force rebuild + reload definition index. Requires `--definitions`                                                                       |
+| `xray_edit`                | Edit files by line-range operations or text-match replacements. Auto-creates new files. Supports multi-file (`paths`), insert after/before, expectedContext. Atomic, returns unified diff |
+| `xray_help`                | Best practices guide, strategy recipes, performance tiers                                                                               |
+| `xray_git_history`         | Commit history for a file. Uses in-memory cache when available (sub-millisecond), falls back to CLI (~2–6 sec)                          |
+| `xray_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |
+| `xray_git_authors`         | Top authors for a file ranked by commit count. Uses in-memory cache when available (sub-millisecond), falls back to CLI                  |
+| `xray_git_activity`        | Activity (changed files) for a date range, optionally filtered by path. Uses in-memory cache when available (sub-millisecond), falls back to CLI |
+| `xray_git_blame`           | Line-level attribution (`git blame`) for a file or line range. Returns commit hash, author, date, and content per line                   |
+| `xray_branch_status`       | Shows current git branch status: branch name, main/master check, behind/ahead counts, dirty files, fetch age. Call before investigating production bugs |
 
 ## What the AI Agent Sees
 
@@ -81,7 +81,7 @@ Example interaction:
 
 ```
 AI:  "Let me search for HttpClient in your codebase..."
-     → calls search_grep { terms: "HttpClient", maxResults: 10 }
+     → calls xray_grep { terms: "HttpClient", maxResults: 10 }
      ← receives JSON with file paths, scores, line numbers
 AI:  "Found 1,082 files. The most relevant is CustomHttpClient.cs (score: 0.49)..."
 ```
@@ -94,8 +94,8 @@ Successful **JSON** MCP tool responses may include guidance fields inside `summa
 
 | Field | When present | Description |
 |---|---|---|
-| `policyReminder` | Successful JSON responses | Compact re-materialization of `SEARCH_INDEX_POLICY`, reminding the agent to prefer search-index MCP tools over environment built-ins on the next step. Dynamically includes the indexed file extensions (from `--ext`) so the LLM knows which file types are searchable |
-| `nextStepHint` | Selected successful JSON responses | Fixed-dictionary hint suggesting the most likely next search-index tool |
+| `policyReminder` | Successful JSON responses | Compact re-materialization of `XRAY_POLICY`, reminding the agent to prefer xray MCP tools over environment built-ins on the next step. Dynamically includes the indexed file extensions (from `--ext`) so the LLM knows which file types are searchable |
+| `nextStepHint` | Selected successful JSON responses | Fixed-dictionary hint suggesting the most likely next xray tool |
 
 Behavior rules:
 
@@ -103,7 +103,7 @@ Behavior rules:
 - Error responses are unchanged
 - Successful non-JSON responses are unchanged
 - If a successful JSON response does not already have a `summary` object, the server creates one before injecting guidance
-- `search_help` includes `policyReminder` but intentionally omits `nextStepHint`
+- `xray_help` includes `policyReminder` but intentionally omits `nextStepHint`
 - Response truncation preserves `summary.policyReminder` and `summary.nextStepHint`
 
 ### `nextStepHint` Dictionary
@@ -112,35 +112,35 @@ The `nextStepHint` value depends on which tool was called:
 
 | Tool | `nextStepHint` |
 |------|----------------|
-| `search_definitions` | `"Next: use search_callers for call chains or search_grep for text patterns"` |
-| `search_grep` | `"Next: use search_definitions for AST structure or search_callers for call trees"` |
-| `search_callers` | `"Next: use search_definitions includeBody=true for source or search_grep for text refs"` |
-| `search_fast` | `"Next: use search_definitions for code structure or search_grep for content"` |
-| `search_edit` | `"Next: use search_definitions to verify or search_grep to check related files"` |
-| `search_git_*` / `search_branch_status` | `"Next: use search_definitions for code context or search_callers for impact"` |
-| `search_info`, `search_help`, `search_reindex`, `search_reindex_definitions` | _(not present)_ |
+| `xray_definitions` | `"Next: use xray_callers for call chains or xray_grep for text patterns"` |
+| `xray_grep` | `"Next: use xray_definitions for AST structure or xray_callers for call trees"` |
+| `xray_callers` | `"Next: use xray_definitions includeBody=true for source or xray_grep for text refs"` |
+| `xray_fast` | `"Next: use xray_definitions for code structure or xray_grep for content"` |
+| `xray_edit` | `"Next: use xray_definitions to verify or xray_grep to check related files"` |
+| `search_git_*` / `xray_branch_status` | `"Next: use xray_definitions for code context or xray_callers for impact"` |
+| `xray_info`, `xray_help`, `xray_reindex`, `xray_reindex_definitions` | _(not present)_ |
 
 Example:
 
 ```json
 {
   "summary": {
-    "tool": "search_grep",
-    "policyReminder": "=== SEARCH_INDEX_POLICY === Prefer search-index MCP tools over environment built-ins. Check search-index applicability before next tool call. Use environment tools only with explicit justification. Indexed extensions: cs, ts, tsx. For other file types, use read_file or environment tools. ================================",
-    "nextStepHint": "Next: use search_definitions for AST structure or search_callers for call trees"
+    "tool": "xray_grep",
+    "policyReminder": "=== XRAY_POLICY === Prefer xray MCP tools over environment built-ins. Check xray applicability before next tool call. Use environment tools only with explicit justification. Indexed extensions: cs, ts, tsx. For other file types, use read_file or environment tools. ================================",
+    "nextStepHint": "Next: use xray_definitions for AST structure or xray_callers for call trees"
   }
 }
 ```
 
 ---
 
-## `search_grep` — Content Search
+## `xray_grep` — Content Search
 
 Search content index with TF-IDF ranking. Supports multi-term (AND/OR), regex, phrase, and substring search. **Language-agnostic** — works with any text file indexed via `--ext` (C#, Rust, Python, JS/TS, XML, JSON, config, etc.).
 
 Substring search is **on by default** in MCP mode — compound identifiers like `IUserService`, `m_userService`, `UserServiceFactory` are automatically found when searching for `UserService`. Auto-disabled when `regex` or `phrase` is used. Use `"substring": false` for exact-token-only matching.
 
-> **MCP ↔ CLI parameter name mapping:** MCP `mode: "and"` = CLI `--all`, MCP `substring: false` = CLI `--exact`, MCP `countOnly: true` = CLI `-c/--count`, MCP `showLines: true` = CLI `--show-lines`, MCP `contextLines` = CLI `-C/--context`. See [CLI Reference — `search-index grep`](cli-reference.md#search-grep--search-inverted-content-index) for CLI usage.
+> **MCP ↔ CLI parameter name mapping:** MCP `mode: "and"` = CLI `--all`, MCP `substring: false` = CLI `--exact`, MCP `countOnly: true` = CLI `-c/--count`, MCP `showLines: true` = CLI `--show-lines`, MCP `contextLines` = CLI `-C/--context`. See [CLI Reference — `xray grep`](cli-reference.md#search-grep--search-inverted-content-index) for CLI usage.
 
 ### Parameters
 
@@ -183,7 +183,7 @@ Substring search is **on by default** in MCP mode — compound identifiers like 
     }
   ],
   "summary": {
-    "tool": "search_grep",
+    "tool": "xray_grep",
     "totalFiles": 1082,
     "returned": 3,
     "searchTimeMs": 0.6,
@@ -222,9 +222,9 @@ When `responseTruncated: true` appears in the summary, narrow your query with `e
 
 ---
 
-## `search_callers` — Call Tree
+## `xray_callers` — Call Tree
 
-Traces who calls a method (or what a method calls) and builds a hierarchical call tree. Combines the content index (grep) with the definition index (AST) to determine which method/class contains each call site. Replaces 7+ sequential `search_grep` + `read_file` calls with a single request. Supports C#, TypeScript/TSX, and SQL (call sites from stored procedure bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE). For SQL, the `class` parameter maps to schema name (e.g., `class="dbo"`).
+Traces who calls a method (or what a method calls) and builds a hierarchical call tree. Combines the content index (grep) with the definition index (AST) to determine which method/class contains each call site. Replaces 7+ sequential `xray_grep` + `read_file` calls with a single request. Supports C#, TypeScript/TSX, and SQL (call sites from stored procedure bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE). For SQL, the `class` parameter maps to schema name (e.g., `class="dbo"`).
 
 ```json
 // Find all callers of ExecuteQueryAsync, 5 levels deep, excluding tests
@@ -434,7 +434,7 @@ Query multiple methods in a single call to reduce MCP round trips. Each method g
 
 ---
 
-## `search_definitions` — Code Definitions
+## `xray_definitions` — Code Definitions
 
 Search code definitions: classes, methods, interfaces, enums, functions, type aliases, stored procedures. Supports C#, TypeScript/TSX, and Rust via tree-sitter grammars; SQL via regex parser. Requires `--definitions`.
 
@@ -535,7 +535,7 @@ When body is truncated, the summary includes `totalBodyLinesAvailable` — the t
   "id": 3,
   "method": "tools/call",
   "params": {
-    "name": "search_definitions",
+    "name": "xray_definitions",
     "arguments": {
       "name": "GetProductEntriesAsync",
       "includeBody": true,
@@ -618,7 +618,7 @@ Get complexity metrics for methods, functions, and constructors. Metrics are alw
 { "minComplexity": 20, "minParams": 5, "minCalls": 15, "sortBy": "cyclomaticComplexity" }
 ```
 
-**Note:** Classes, fields, and enum members do not have `codeStats`. Old indexes (before this feature) return results normally with `summary.codeStatsAvailable: false` — run `search_reindex_definitions` to compute metrics.
+**Note:** Classes, fields, and enum members do not have `codeStats`. Old indexes (before this feature) return results normally with `summary.codeStatsAvailable: false` — run `xray_reindex_definitions` to compute metrics.
 
 ### `audit` — Index Coverage Report
 
@@ -650,28 +650,28 @@ Check if all files in the repository are properly indexed. Files >500 bytes with
 
 ### Zero-Result Hints
 
-When `search_definitions` returns 0 results, the response `summary` may include a `hint` field with a contextual suggestion to help correct the query. This is particularly useful for LLM agents that may use wrong `kind` values across languages or confuse `search_definitions` with `search_grep`.
+When `xray_definitions` returns 0 results, the response `summary` may include a `hint` field with a contextual suggestion to help correct the query. This is particularly useful for LLM agents that may use wrong `kind` values across languages or confuse `xray_definitions` with `xray_grep`.
 
 Five types of hints are generated (first matching wins):
 
 | Hint | When | Example |
 |------|------|---------|
-| **Unsupported extension** | `file` filter has extension not in `def_extensions` (checked first — highest priority) | If in content index: `"Extension '.xml' is not in the definition index. However, .xml files ARE indexed in the content index. Use search_grep."` If not in any index: `"Extension '.xyz' is not supported by any index. Use read_file."` |
+| **Unsupported extension** | `file` filter has extension not in `def_extensions` (checked first — highest priority) | If in content index: `"Extension '.xml' is not in the definition index. However, .xml files ARE indexed in the content index. Use xray_grep."` If not in any index: `"Extension '.xyz' is not supported by any index. Use read_file."` |
 | **Wrong kind** | `kind` filter set + `name` or `file` filter set, but definitions exist with different kinds | `"0 results with kind='method'. Without kind filter: 8 defs found (5 function, 2 struct). Did you mean kind='function'?"` |
 | **File has definitions** | `file` filter matches files with definitions, but other filters (name/kind/parent) are too narrow | `"File 'tips.rs' has 8 definitions (5 function, 2 struct), but none match your other filters."` |
 | **Nearest name** | `name` filter set (non-regex), closest name in index has ≥80% Jaro-Winkler similarity | `"0 results for name='getusr'. Nearest match: 'getuser' (1 definition, similarity 96%)"` |
-| **Name in content** | `name` not found as AST definition but exists in content index as text | `"'inputSchema' not found as an AST definition name, but appears in 3 files. Use search_grep."` |
+| **Name in content** | `name` not found as AST definition but exists in content index as text | `"'inputSchema' not found as an AST definition name, but appears in 3 files. Use xray_grep."` |
 
 Hints are **not generated** when results are found (zero overhead for successful queries). The existing `kind='property'` → `kind='field'` TypeScript hint is preserved and takes priority.
 
 ### Auto-Correction
 
-Before generating hints, `search_definitions` attempts to **automatically correct** the query and return results in a single round-trip (no second LLM call needed). Two correction types:
+Before generating hints, `xray_definitions` attempts to **automatically correct** the query and return results in a single round-trip (no second LLM call needed). Two correction types:
 
 | Correction | When | What happens |
 |---|---|---|
 | **Kind mismatch** | `kind` filter set + `name` or `file` set, 0 results | Removes kind, finds correct kind, re-runs. E.g., `kind='method'` on Rust code → auto-corrects to `kind='function'` |
-| **Nearest name** | `name` set (non-regex), nearest match ≥85% Jaro-Winkler | Re-runs with corrected name. E.g., `name='hndl_search'` → `name='handle_search_find'` |
+| **Nearest name** | `name` set (non-regex), nearest match ≥85% Jaro-Winkler | Re-runs with corrected name. E.g., `name='hndl_search'` → `name='handle_xray_find'` |
 
 When auto-correction produces results, the response includes an `autoCorrection` object in `summary`:
 
@@ -726,7 +726,7 @@ Possible `reason` values:
 
 ### Auto-Summary for Broad Queries
 
-When `search_definitions` finds more results than `maxResults` and **no `name` filter** is set (and `includeBody` is false, and `sortBy` is not set), it automatically returns a **directory-grouped summary** instead of truncated entries. This eliminates the need for preliminary `search_fast dirsOnly=true` calls when exploring unfamiliar code modules.
+When `xray_definitions` finds more results than `maxResults` and **no `name` filter** is set (and `includeBody` is false, and `sortBy` is not set), it automatically returns a **directory-grouped summary** instead of truncated entries. This eliminates the need for preliminary `xray_fast dirsOnly=true` calls when exploring unfamiliar code modules.
 
 ```json
 // Request: explore a large service directory
@@ -783,7 +783,7 @@ When `search_definitions` finds more results than `maxResults` and **no `name` f
 
 ---
 
-## `search_fast` — File Name Search
+## `xray_fast` — File Name Search
 
 Search pre-built file name index for instant file lookup (~35ms vs ~3s for live filesystem walk). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Supports `pattern='*'` or empty pattern with `dir` for wildcard listing (all files/directories). Results are relevance-ranked: exact stem match → prefix match → contains match (ranking skipped for wildcard).
 
@@ -813,13 +813,13 @@ Search pre-built file name index for instant file lookup (~35ms vs ~3s for live 
     "src/Services/IUserService.cs",
     "test/UserServiceTests.cs"
   ],
-  "summary": { "tool": "search_fast", "totalMatches": 3, "searchTimeMs": 35 }
+  "summary": { "tool": "xray_fast", "totalMatches": 3, "searchTimeMs": 35 }
 }
 ```
 
 ---
 
-## `search_info` — Index Information
+## `xray_info` — Index Information
 
 Shows all existing indexes with their status, sizes, age, and memory usage. No parameters.
 
@@ -827,7 +827,7 @@ Shows all existing indexes with their status, sizes, age, and memory usage. No p
 
 ```json
 {
-  "directory": "C:\\Users\\you\\AppData\\Local\\search-index",
+  "directory": "C:\\Users\\you\\AppData\\Local\\xray",
   "indexes": [
     {
       "type": "content",
@@ -878,7 +878,7 @@ Shows all existing indexes with their status, sizes, age, and memory usage. No p
 
 ---
 
-## `search_reindex` — Rebuild Content Index
+## `xray_reindex` — Rebuild Content Index
 
 Force rebuild the content index and reload it into the server's in-memory cache. Useful after many file changes or when `--watch` is not enabled.
 
@@ -902,7 +902,7 @@ Force rebuild the content index and reload it into the server's in-memory cache.
 
 ---
 
-## `search_reindex_definitions` — Rebuild Definition Index
+## `xray_reindex_definitions` — Rebuild Definition Index
 
 Force rebuild the AST definition index (tree-sitter) and reload it into the server's in-memory cache. Requires server started with `--definitions` flag.
 
@@ -929,7 +929,7 @@ Force rebuild the AST definition index (tree-sitter) and reload it into the serv
 
 ---
 
-## `search_edit` — File Editing
+## `xray_edit` — File Editing
 
 Edit files by line-range operations or text-match replacements. Works on any text file (not limited to `--dir`). Supports multi-file editing, insert after/before, safety checks, and returns unified diff.
 
@@ -981,13 +981,13 @@ When `skipIfNotFound=true` is used and edits are skipped, the response includes 
 
 Possible `reason` values: `"text not found"`, `"regex pattern not found"`, `"anchor text not found"`.
 
-For full parameter documentation, see `search_help` → `parameterExamples` → `search_edit`.
+For full parameter documentation, see `xray_help` → `parameterExamples` → `xray_edit`.
 
 ---
 
 ## Git History Tools
 
-Six MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `search_git_history`, `search_git_authors`, and `search_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `search_git_diff` and `search_git_blame` always use CLI.
+Six MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `xray_git_history`, `xray_git_authors`, and `xray_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `xray_git_diff` and `xray_git_blame` always use CLI.
 
 Cache responses include a `"(from cache)"` hint in the `summary` field so the AI agent knows the data source.
 
@@ -996,16 +996,16 @@ Cache responses include a `"(from cache)"` hint in the `summary` field so the AI
 | Parameter    | Type   | Required | Description |
 |---|---|---|---|
 | `repo`       | string | ✅ | Path to local git repository |
-| `file`       | string | ✅* | File path relative to repo root (*required for `search_git_history`, `search_git_diff`, `search_git_blame`) |
-| `path`       | string | — | File or directory path relative to repo root. `search_git_authors` and `search_git_activity` accept `path` (file, directory, or omit for entire repo). `file` is a backward-compatible alias for `path` in `search_git_authors` |
+| `file`       | string | ✅* | File path relative to repo root (*required for `xray_git_history`, `xray_git_diff`, `xray_git_blame`) |
+| `path`       | string | — | File or directory path relative to repo root. `xray_git_authors` and `xray_git_activity` accept `path` (file, directory, or omit for entire repo). `file` is a backward-compatible alias for `path` in `xray_git_authors` |
 | `from`       | string | — | Start date (YYYY-MM-DD, inclusive) |
 | `to`         | string | — | End date (YYYY-MM-DD, inclusive) |
 | `date`       | string | — | Exact date (YYYY-MM-DD), overrides from/to |
 | `maxResults` | number | — | Maximum results to return (default: 50) |
-| `top`        | number | — | Maximum authors to return (default: 10, `search_git_authors` only) |
-| `author`     | string | — | Filter by author name or email (case-insensitive substring match). Available on `search_git_history`, `search_git_diff`, `search_git_activity` |
-| `message`    | string | — | Filter by commit message (case-insensitive substring match). Available on `search_git_history`, `search_git_diff`, `search_git_activity`, `search_git_authors` |
-| `noCache`    | boolean | — | If true, bypass the in-memory git history cache and query git CLI directly. Useful when cache may be stale. Available on `search_git_history`, `search_git_authors`, `search_git_activity` |
+| `top`        | number | — | Maximum authors to return (default: 10, `xray_git_authors` only) |
+| `author`     | string | — | Filter by author name or email (case-insensitive substring match). Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity` |
+| `message`    | string | — | Filter by commit message (case-insensitive substring match). Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity`, `xray_git_authors` |
+| `noCache`    | boolean | — | If true, bypass the in-memory git history cache and query git CLI directly. Useful when cache may be stale. Available on `xray_git_history`, `xray_git_authors`, `xray_git_activity` |
 
 ### Cache behavior
 
@@ -1014,35 +1014,35 @@ Cache responses include a `"(from cache)"` hint in the `summary` field so the AI
 | Server just started, no `.git-history` on disk | Cache builds in background (~59 sec). Tools use CLI fallback during build. |
 | Server restart, `.git-history` exists on disk | Cache loads from disk (~100 ms). Tools use cache almost immediately. |
 | HEAD changed since cache was built | Cache rebuilds in background. Old cache (if loaded from disk) serves queries during rebuild. |
-| `search_git_diff` | Always uses CLI — diff data is too large and variable to cache. |
+| `xray_git_diff` | Always uses CLI — diff data is too large and variable to cache. |
 | No `.git` directory in `--dir` | Git tools return errors. No cache is built. |
 
-### search_git_history
+### xray_git_history
 
 Get commit history for a specific file. Returns commit hash, date, author, email, and message. Uses in-memory cache when available (sub-millisecond), falls back to `git log` CLI (~2–6 sec).
 
 ```json
 // Request
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"src/main.rs","maxResults":3}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"src/main.rs","maxResults":3}}}
 
 // Response (abbreviated)
 {
   "commits": [
     {"hash":"abc123...","date":"2025-01-15 10:30:00 +0000","author":"Alice","email":"alice@example.com","message":"Fix null check in main"}
   ],
-  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":0.15,"hint":"(from cache)","tool":"search_git_history"}
+  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":0.15,"hint":"(from cache)","tool":"xray_git_history"}
 }
 ```
 
-### search_git_diff
+### xray_git_diff
 
-Get commit history with full diff/patch for a specific file. Same as `search_git_history` but includes added/removed lines for each commit. Patches are truncated to ~200 lines per commit to manage output size.
+Get commit history with full diff/patch for a specific file. Same as `xray_git_history` but includes added/removed lines for each commit. Patches are truncated to ~200 lines per commit to manage output size.
 
 > **Note:** Always uses CLI (`git log -p`) — never uses the in-memory cache, because diff data is too large and variable to cache.
 
 ```json
 // Request
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_diff","arguments":{"repo":".","file":"src/main.rs","maxResults":2}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_diff","arguments":{"repo":".","file":"src/main.rs","maxResults":2}}}
 
 // Response (abbreviated)
 {
@@ -1052,11 +1052,11 @@ Get commit history with full diff/patch for a specific file. Same as `search_git
       "patch":"--- a/src/main.rs\n+++ b/src/main.rs\n@@ -10,3 +10,4 @@\n+    if value.is_none() { return; }\n"
     }
   ],
-  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":1250.5,"tool":"search_git_diff"}
+  "summary": {"totalCommits":1,"returned":1,"file":"src/main.rs","elapsedMs":1250.5,"tool":"xray_git_diff"}
 }
 ```
 
-### search_git_authors
+### xray_git_authors
 
 Get top authors for a file, directory, or entire repository ranked by number of commits. Shows who changed the code the most, with commit count and date range of their changes.
 
@@ -1067,13 +1067,13 @@ The `path` parameter (or its backward-compatible alias `file`) accepts:
 
 ```json
 // Request — single file
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","path":"src/main.rs","top":3}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_authors","arguments":{"repo":".","path":"src/main.rs","top":3}}}
 
 // Request — directory
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","path":"src/controllers","top":5}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_authors","arguments":{"repo":".","path":"src/controllers","top":5}}}
 
 // Request — entire repo
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","top":10}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_authors","arguments":{"repo":".","top":10}}}
 
 // Response (abbreviated)
 {
@@ -1082,11 +1082,11 @@ The `path` parameter (or its backward-compatible alias `file`) accepts:
     {"rank":2,"name":"Bob","email":"bob@example.com","commits":17,"firstChange":"2024-06-10","lastChange":"2024-12-20"},
     {"rank":3,"name":"Carol","email":"carol@example.com","commits":5,"firstChange":"2024-09-05","lastChange":"2024-11-30"}
   ],
-  "summary": {"totalCommits":64,"totalAuthors":3,"returned":3,"path":"src/main.rs","elapsedMs":0.08,"hint":"(from cache)","tool":"search_git_authors"}
+  "summary": {"totalCommits":64,"totalAuthors":3,"returned":3,"path":"src/main.rs","elapsedMs":0.08,"hint":"(from cache)","tool":"xray_git_authors"}
 }
 ```
 
-### search_git_activity
+### xray_git_activity
 
 Get activity across files in a repository for a date range. Returns a list of changed files with their commit counts. Useful for answering "what changed this week?" Date filters are recommended to keep results manageable.
 
@@ -1099,10 +1099,10 @@ Path filtering uses native `git log -- <pathspec>` for efficiency — git itself
 
 ```json
 // Request — whole repo
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","from":"2025-01-01","to":"2025-01-31"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","from":"2025-01-01","to":"2025-01-31"}}}
 
 // Request — specific directory
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","path":"src/controllers","from":"2025-01-01","to":"2025-01-31"}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","path":"src/controllers","from":"2025-01-01","to":"2025-01-31"}}}
 
 // Response (abbreviated — from cache)
 {
@@ -1111,11 +1111,11 @@ Path filtering uses native `git log -- <pathspec>` for efficiency — git itself
     {"path":"src/lib.rs","commitCount":8,"lastModified":"2025-01-28 10:20:00 +0000","authors":["Alice"]},
     {"path":"Cargo.toml","commitCount":3,"lastModified":"2025-01-15 09:00:00 +0000","authors":["Carol"]}
   ],
-  "summary": {"filesChanged":3,"totalEntries":23,"commitsProcessed":150,"elapsedMs":0.12,"hint":"(from cache)","tool":"search_git_activity"}
+  "summary": {"filesChanged":3,"totalEntries":23,"commitsProcessed":150,"elapsedMs":0.12,"hint":"(from cache)","tool":"xray_git_activity"}
 }
 ```
 
-### search_git_blame
+### xray_git_blame
 
 Get line-level attribution for a file or line range via `git blame`. Returns the commit hash, author, date, and source content for each line. Always uses CLI (`git blame --porcelain`).
 
@@ -1130,7 +1130,7 @@ Get line-level attribution for a file or line range via `git blame`. Returns the
 
 ```json
 // Request — blame lines 10-15 of UserService.cs
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_git_blame","arguments":{"repo":".","file":"src/UserService.cs","startLine":10,"endLine":15}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_blame","arguments":{"repo":".","file":"src/UserService.cs","startLine":10,"endLine":15}}}
 
 // Response (abbreviated)
 {
@@ -1142,19 +1142,19 @@ Get line-level attribution for a file or line range via `git blame`. Returns the
     {"line":14,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"        return user;"},
     {"line":15,"hash":"a1b2c3d4","author":"Alice","email":"alice@example.com","date":"2025-01-10 14:30:00 +0000","content":"    }"}
   ],
-  "summary": {"tool":"search_git_blame","file":"src/UserService.cs","lineRange":"10-15","uniqueAuthors":2,"uniqueCommits":2,"oldestLine":"2025-01-10","newestLine":"2025-01-12","elapsedMs":45.3}
+  "summary": {"tool":"xray_git_blame","file":"src/UserService.cs","lineRange":"10-15","uniqueAuthors":2,"uniqueCommits":2,"oldestLine":"2025-01-10","newestLine":"2025-01-12","elapsedMs":45.3}
 }
 ```
 
 ---
 
-## `search_branch_status` — Branch Status
+## `xray_branch_status` — Branch Status
 
 Shows whether you're on the right branch before investigating production bugs. Reports branch name, behind/ahead of remote main, uncommitted changes, and how fresh the last fetch is.
 
 ```json
 // Request
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_branch_status","arguments":{"repo":"."}}}
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_branch_status","arguments":{"repo":"."}}}
 
 // Response
 {
@@ -1169,7 +1169,7 @@ Shows whether you're on the right branch before investigating production bugs. R
   "fetchAge": "3 hours ago",
   "fetchWarning": null,
   "warning": "Index is built on 'users/dev/my-feature', not on master. Local branch is 47 commits behind remote master.",
-  "summary": { "tool": "search_branch_status", "elapsedMs": 45.2 }
+  "summary": { "tool": "xray_branch_status", "elapsedMs": 45.2 }
 }
 ```
 
@@ -1186,12 +1186,12 @@ Shows whether you're on the right branch before investigating production bugs. R
 
 ## File Not Found Warning
 
-When `search_git_history`, `search_git_authors`, or `search_git_activity` return 0 results and the specified file doesn't exist in git, the response includes a `"warning"` field:
+When `xray_git_history`, `xray_git_authors`, or `xray_git_activity` return 0 results and the specified file doesn't exist in git, the response includes a `"warning"` field:
 
 ```json
 {
   "commits": [],
-  "summary": { "totalCommits": 0, "tool": "search_git_history" },
+  "summary": { "totalCommits": 0, "tool": "xray_git_history" },
   "warning": "File not found in git: path/to/file.cs. Check the path."
 }
 ```
@@ -1202,7 +1202,7 @@ This helps distinguish between "no commits in the date range" and "wrong file pa
 
 ## Branch Warning
 
-When the MCP server is started on a branch other than `main` or `master`, all index-based tool responses (`search_grep`, `search_definitions`, `search_callers`, `search_fast`) include a `branchWarning` field in the `summary` object:
+When the MCP server is started on a branch other than `main` or `master`, all index-based tool responses (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`) include a `branchWarning` field in the `summary` object:
 
 ```json
 {
@@ -1218,21 +1218,21 @@ This warning is **absent** when:
 - The indexed directory is not a git repository
 - The `git rev-parse` command fails (e.g., git not installed)
 
-The branch is detected **once at server startup** via `git rev-parse --abbrev-ref HEAD`. Git tools (`search_git_history`, `search_git_diff`, etc.) do **not** include this warning because they query the git repository directly and are not affected by which branch the index was built on.
+The branch is detected **once at server startup** via `git rev-parse --abbrev-ref HEAD`. Git tools (`xray_git_history`, `xray_git_diff`, etc.) do **not** include this warning because they query the git repository directly and are not affected by which branch the index was built on.
 
 ---
 
 ## Manual Testing (without AI)
 
 ```bash
-search-index serve --dir . --ext rs --definitions
+xray serve --dir . --ext rs --definitions
 # Then paste JSON-RPC messages to stdin:
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"ExecuteQueryAsync","depth":3}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"QueryService.cs","containsLine":812}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"GetProductEntriesAsync","includeBody":true,"maxBodyLines":10}}}
-{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":5}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokenize"}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"ExecuteQueryAsync","depth":3}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"file":"QueryService.cs","containsLine":812}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"GetProductEntriesAsync","includeBody":true,"maxBodyLines":10}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":5}}}
 ```

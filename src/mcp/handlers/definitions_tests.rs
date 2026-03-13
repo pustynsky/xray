@@ -211,7 +211,7 @@ fn test_parent_ranking_only_active_with_parent_filter() {
 #[test]
 fn test_file_filter_comma_separated_matches_multiple_files() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "file": "ResilientClient.cs,ProxyClient.cs",
         "kind": "method"
     }));
@@ -231,7 +231,7 @@ fn test_file_filter_comma_separated_matches_multiple_files() {
 #[test]
 fn test_file_filter_single_value_still_works() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "file": "QueryService.cs",
         "kind": "method"
     }));
@@ -248,7 +248,7 @@ fn test_file_filter_single_value_still_works() {
 #[test]
 fn test_file_filter_comma_separated_no_match_returns_empty() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "file": "NonExistent.cs,AlsoMissing.cs"
     }));
     assert!(!result.is_error);
@@ -262,7 +262,7 @@ fn test_file_filter_comma_separated_no_match_returns_empty() {
 #[test]
 fn test_parent_filter_comma_separated_matches_multiple_classes() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "parent": "ResilientClient,ProxyClient",
         "kind": "method"
     }));
@@ -282,7 +282,7 @@ fn test_parent_filter_comma_separated_matches_multiple_classes() {
 #[test]
 fn test_parent_filter_single_value_still_works() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "parent": "QueryService",
         "kind": "method"
     }));
@@ -299,7 +299,7 @@ fn test_parent_filter_single_value_still_works() {
 #[test]
 fn test_parent_filter_comma_separated_no_match_returns_empty() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "parent": "NonExistentClass,AlsoMissing"
     }));
     assert!(!result.is_error);
@@ -313,7 +313,7 @@ fn test_parent_filter_comma_separated_no_match_returns_empty() {
 #[test]
 fn test_audit_cross_validate_no_file_index_returns_skipped() {
     let ctx = make_transitive_inheritance_ctx();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "audit": true,
         "crossValidate": true
     }));
@@ -327,7 +327,7 @@ fn test_audit_cross_validate_no_file_index_returns_skipped() {
 #[test]
 fn test_audit_without_cross_validate_has_no_cross_validation() {
     let ctx = make_transitive_inheritance_ctx();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "audit": true
     }));
     assert!(!result.is_error);
@@ -380,7 +380,7 @@ fn test_audit_cross_validate_with_file_index() {
         ..Default::default()
     };
 
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "audit": true,
         "crossValidate": true
     }));
@@ -481,7 +481,7 @@ fn make_transitive_inheritance_ctx() -> HandlerContext {
 #[test]
 fn test_base_type_transitive_finds_indirect_descendants() {
     let ctx = make_transitive_inheritance_ctx();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "BaseService",
         "baseTypeTransitive": true
     }));
@@ -498,7 +498,7 @@ fn test_base_type_transitive_finds_indirect_descendants() {
 #[test]
 fn test_base_type_non_transitive_finds_only_direct() {
     let ctx = make_transitive_inheritance_ctx();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "BaseService"
     }));
     assert!(!result.is_error);
@@ -512,7 +512,7 @@ fn test_base_type_non_transitive_finds_only_direct() {
 #[test]
 fn test_base_type_transitive_no_match_returns_empty() {
     let ctx = make_transitive_inheritance_ctx();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "NonExistentType",
         "baseTypeTransitive": true
     }));
@@ -525,14 +525,14 @@ fn test_base_type_transitive_no_match_returns_empty() {
 #[test]
 fn test_base_type_empty_string_treated_as_no_filter() {
     let ctx = make_transitive_inheritance_ctx();
-    let result_empty = handle_search_definitions(&ctx, &serde_json::json!({
+    let result_empty = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": ""
     }));
     assert!(!result_empty.is_error);
     let v_empty: serde_json::Value = serde_json::from_str(&result_empty.content[0].text).unwrap();
     let defs_empty = v_empty["definitions"].as_array().unwrap();
 
-    let result_no_filter = handle_search_definitions(&ctx, &serde_json::json!({}));
+    let result_no_filter = handle_xray_definitions(&ctx, &serde_json::json!({}));
     let v_no_filter: serde_json::Value = serde_json::from_str(&result_no_filter.content[0].text).unwrap();
     let defs_no_filter = v_no_filter["definitions"].as_array().unwrap();
 
@@ -601,7 +601,7 @@ fn test_base_type_substring_matches_generic_interface() {
         ..Default::default()
     };
 
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "IRepository"
     }));
     assert!(!result.is_error);
@@ -610,7 +610,7 @@ fn test_base_type_substring_matches_generic_interface() {
     assert_eq!(defs.len(), 2, "baseType='IRepository' should find both IRepository<Model> and IRepository<Report> via substring. Got: {:?}",
         defs.iter().map(|d| d["name"].as_str().unwrap()).collect::<Vec<_>>());
 
-    let result2 = handle_search_definitions(&ctx, &serde_json::json!({
+    let result2 = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "IRepository<Model>"
     }));
     assert!(!result2.is_error);
@@ -623,7 +623,7 @@ fn test_base_type_substring_matches_generic_interface() {
 #[test]
 fn test_base_type_transitive_case_insensitive() {
     let ctx = make_transitive_inheritance_ctx();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "BASESERVICE",
         "baseTypeTransitive": true
     }));
@@ -709,7 +709,7 @@ fn test_base_type_transitive_no_cascade_with_dangerous_names() {
         ..Default::default()
     };
 
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "BaseBlock",
         "baseTypeTransitive": true
     }));
@@ -791,7 +791,7 @@ fn test_base_type_transitive_generics_still_work_at_seed_level() {
         ..Default::default()
     };
 
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "IRepository",
         "baseTypeTransitive": true
     }));
@@ -813,7 +813,7 @@ fn test_base_type_transitive_generics_still_work_at_seed_level() {
 #[test]
 fn test_base_type_transitive_hint_for_large_hierarchy() {
     let ctx = make_transitive_inheritance_ctx();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": "BaseService",
         "baseTypeTransitive": true
     }));
@@ -826,7 +826,7 @@ fn test_base_type_transitive_hint_for_large_hierarchy() {
 #[test]
 fn test_parent_filter_comma_with_spaces_trimmed() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "parent": " ResilientClient , ProxyClient ",
         "kind": "method"
     }));
@@ -841,7 +841,7 @@ fn test_parent_filter_comma_with_spaces_trimmed() {
 #[test]
 fn test_term_breakdown_multi_term_shows_per_term_counts() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "name": "QueryService,ResilientClient"
     }));
     assert!(!result.is_error, "should not error: {:?}", result.content[0].text);
@@ -863,7 +863,7 @@ fn test_term_breakdown_multi_term_shows_per_term_counts() {
 #[test]
 fn test_term_breakdown_single_term_not_present() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "name": "QueryService"
     }));
     assert!(!result.is_error);
@@ -875,7 +875,7 @@ fn test_term_breakdown_single_term_not_present() {
 #[test]
 fn test_term_breakdown_regex_not_present() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "name": "Query.*",
         "regex": true
     }));
@@ -888,7 +888,7 @@ fn test_term_breakdown_regex_not_present() {
 #[test]
 fn test_term_breakdown_no_name_filter_not_present() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "kind": "class"
     }));
     assert!(!result.is_error);
@@ -900,7 +900,7 @@ fn test_term_breakdown_no_name_filter_not_present() {
 #[test]
 fn test_term_breakdown_with_zero_match_term() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "name": "QueryService,NonExistentXyzZzz"
     }));
     assert!(!result.is_error);
@@ -915,7 +915,7 @@ fn test_term_breakdown_with_zero_match_term() {
 #[test]
 fn test_term_breakdown_counts_are_pre_truncation() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "name": "QueryService,ResilientClient",
         "maxResults": 1
     }));
@@ -2002,7 +2002,7 @@ fn test_kind_property_hint_when_fields_exist() {
     };
 
     // Search with kind="property" and parent="UserService" — should return 0 results + hint
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "kind": "property",
         "parent": "UserService"
     }));
@@ -2022,7 +2022,7 @@ fn test_kind_property_hint_when_fields_exist() {
 fn test_kind_property_no_hint_when_results_exist() {
     // If kind="property" returns results, no hint needed
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = handle_search_definitions(&ctx, &serde_json::json!({
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "kind": "class"
     }));
     assert!(!result.is_error);
@@ -2083,7 +2083,7 @@ fn test_hint_file_has_defs_but_name_not_found() {
     let hint = summary["hint"].as_str().unwrap();
     assert!(hint.contains("UserService.cs"), "Should mention the file. Got: {}", hint);
     assert!(hint.contains("definitions"), "Should mention definitions count. Got: {}", hint);
-    assert!(hint.contains("search_grep"), "Should suggest search_grep. Got: {}", hint);
+    assert!(hint.contains("xray_grep"), "Should suggest xray_grep. Got: {}", hint);
 }
 
 #[test]
@@ -2143,7 +2143,7 @@ fn test_hint_name_in_content_not_in_defs() {
     assert!(hint.is_some(), "Should have hint when name is in content but not in definitions");
     let h = hint.unwrap();
     assert!(h.contains("not found as an AST definition name"), "Hint should explain the issue. Got: {}", h);
-    assert!(h.contains("search_grep"), "Hint should suggest search_grep. Got: {}", h);
+    assert!(h.contains("xray_grep"), "Hint should suggest xray_grep. Got: {}", h);
     assert!(h.contains("2 files"), "Hint should show file count. Got: {}", h);
 }
 
@@ -2264,7 +2264,7 @@ fn test_auto_correct_kind_method_to_function() {
     // make_test_def_index has GetUser (method) and GetOrder (method)
     // Searching kind='function' + name='GetUser' should auto-correct to kind='method'
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "kind": "function",
         "name": "GetUser"
     }));
@@ -2291,7 +2291,7 @@ fn test_auto_correct_kind_method_to_function() {
 fn test_auto_correct_kind_with_file_filter() {
     // kind='function' + file='UserService.cs' — should auto-correct kind
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "kind": "function",
         "file": "UserService.cs"
     }));
@@ -2309,7 +2309,7 @@ fn test_auto_correct_kind_with_file_filter() {
 fn test_auto_correct_kind_no_trigger_without_name_or_file() {
     // kind='function' WITHOUT name/file — auto-correction should NOT trigger
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "kind": "function"
     }));
     assert!(!result.is_error);
@@ -2324,7 +2324,7 @@ fn test_auto_correct_kind_no_trigger_without_name_or_file() {
 fn test_auto_correct_name_typo() {
     // name='GetUsr' — close to 'getuser' (Jaro-Winkler ~95%)
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "name": "GetUsr"
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
@@ -2348,7 +2348,7 @@ fn test_auto_correct_name_typo() {
 fn test_auto_correct_name_below_threshold_no_correction() {
     // name='xyz_totally_different' — very low similarity to any name
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "name": "xyz_totally_different"
     }));
     assert!(!result.is_error);
@@ -2362,7 +2362,7 @@ fn test_auto_correct_name_below_threshold_no_correction() {
 #[test]
 fn test_auto_correct_name_not_triggered_for_regex() {
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "name": "GetUsr",
         "regex": true
     }));
@@ -2376,7 +2376,7 @@ fn test_auto_correct_name_not_triggered_for_regex() {
 fn test_auto_correct_kind_takes_priority_over_name() {
     // kind='function' + name='GetUser' — kind correction should fire first
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "kind": "function",
         "name": "GetUser"
     }));
@@ -2394,7 +2394,7 @@ fn test_auto_correct_kind_takes_priority_over_name() {
 #[test]
 fn test_auto_correct_no_correction_when_results_found() {
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "name": "GetUser"
     }));
     assert!(!result.is_error);
@@ -2409,7 +2409,7 @@ fn test_auto_correct_preserves_other_filters() {
     // kind='function' + name='GetUser' + file='OrderService.cs'
     // After kind correction, file filter should still be applied
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "kind": "function",
         "name": "GetUser",
         "file": "OrderService.cs"
@@ -2440,7 +2440,7 @@ fn test_auto_correct_name_blocked_by_length_ratio() {
     // Length ratio = 11/21 = 0.52 < 0.6 threshold → auto-correction should NOT fire.
     // Even if Jaro-Winkler similarity is high due to shared prefix.
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "name": "UserServiceController"
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
@@ -2457,7 +2457,7 @@ fn test_auto_correct_name_typo_passes_length_ratio() {
     // name='GetUsr' (6 chars) — closest match is 'getuser' (7 chars).
     // Length ratio = 6/7 = 0.86 ≥ 0.6 → auto-correction should fire.
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "name": "GetUsr"
     }));
     assert!(!result.is_error);
@@ -2473,7 +2473,7 @@ fn test_auto_correct_name_typo_passes_length_ratio_similar_length() {
     // Length ratio = 11/11 = 1.0 ≥ 0.6 → auto-correction should fire.
     // This is NOT a substring match, so normal search returns 0 results → auto-correction kicks in.
     let ctx = make_auto_correction_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "name": "UserServise"
     }));
     assert!(!result.is_error);
@@ -2494,7 +2494,7 @@ fn test_auto_correct_name_typo_passes_length_ratio_similar_length() {
 fn test_include_usage_count_present() {
     // Definition name exists in content index → usageCount > 0
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = super::super::dispatch_tool(&ctx, "search_definitions", &serde_json::json!({
+    let result = super::super::dispatch_tool(&ctx, "xray_definitions", &serde_json::json!({
         "name": "ExecuteQueryAsync",
         "includeUsageCount": true
     }));
@@ -2519,7 +2519,7 @@ fn test_include_usage_count_present() {
 fn test_include_usage_count_zero() {
     // Definition name NOT in content index → usageCount = 0
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = super::super::dispatch_tool(&ctx, "search_definitions", &serde_json::json!({
+    let result = super::super::dispatch_tool(&ctx, "xray_definitions", &serde_json::json!({
         "name": "ResilientClient",
         "kind": "class",
         "includeUsageCount": true
@@ -2541,7 +2541,7 @@ fn test_include_usage_count_zero() {
 fn test_include_usage_count_default_off() {
     // Without includeUsageCount parameter → no usageCount in output
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
-    let result = super::super::dispatch_tool(&ctx, "search_definitions", &serde_json::json!({
+    let result = super::super::dispatch_tool(&ctx, "xray_definitions", &serde_json::json!({
         "name": "ExecuteQueryAsync"
     }));
     assert!(!result.is_error);
@@ -2578,11 +2578,11 @@ fn make_hint_e_ctx() -> HandlerContext {
 }
 
 #[test]
-fn test_hint_e_xml_extension_suggests_search_grep() {
+fn test_hint_e_xml_extension_suggests_xray_grep() {
     // file='something.xml' → Hint E should fire because .xml is not in def_extensions
     // but IS in server_ext (content index)
     let ctx = make_hint_e_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "file": "config.xml"
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
@@ -2590,7 +2590,7 @@ fn test_hint_e_xml_extension_suggests_search_grep() {
     let hint = v["summary"]["hint"].as_str()
         .expect("Should have hint for unsupported extension");
     assert!(hint.contains(".xml"), "Hint should mention .xml extension. Got: {}", hint);
-    assert!(hint.contains("search_grep"), "Hint should suggest search_grep. Got: {}", hint);
+    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep. Got: {}", hint);
     assert!(hint.contains("content index"), "Hint should mention content index. Got: {}", hint);
 }
 
@@ -2599,7 +2599,7 @@ fn test_hint_e_md_extension_not_in_content_index_suggests_read_file() {
     // file='notes.xyz' → .xyz is not in def_extensions AND not in server_ext
     // Should suggest read_file
     let ctx = make_hint_e_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "file": "notes.xyz"
     }));
     assert!(!result.is_error);
@@ -2614,7 +2614,7 @@ fn test_hint_e_md_extension_not_in_content_index_suggests_read_file() {
 fn test_hint_e_cs_extension_no_hint() {
     // file='UserService.cs' → .cs IS in def_extensions → Hint E should NOT fire
     let ctx = make_hint_e_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "file": "UserService.cs"
     }));
     assert!(!result.is_error);
@@ -2631,28 +2631,28 @@ fn test_hint_e_cs_extension_no_hint() {
 fn test_hint_e_case_insensitive_extension() {
     // file='Config.XML' (uppercase) → should still match .xml as unsupported
     let ctx = make_hint_e_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "file": "Config.XML"
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = v["summary"]["hint"].as_str()
         .expect("Should have hint for .XML (case-insensitive)");
-    assert!(hint.contains("search_grep"), "Hint should suggest search_grep for .XML. Got: {}", hint);
+    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep for .XML. Got: {}", hint);
 }
 
 #[test]
 fn test_hint_e_comma_separated_file_filter() {
     // file='foo.xml,bar.xml' → first term has unsupported extension → Hint E fires
     let ctx = make_hint_e_ctx();
-    let result = handle_search_definitions(&ctx, &json!({
+    let result = handle_xray_definitions(&ctx, &json!({
         "file": "foo.xml,bar.xml"
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = v["summary"]["hint"].as_str()
         .expect("Should have hint for comma-separated unsupported extensions");
-    assert!(hint.contains("search_grep"), "Hint should suggest search_grep. Got: {}", hint);
+    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep. Got: {}", hint);
 }
 
 // ─── Tests for Hint: name+kind mismatch (Fix 1) ─────────────────────
@@ -3107,7 +3107,7 @@ fn test_hint_fn_unsupported_extension_xml_returns_some() {
     assert!(result.is_some(), "Should return Some for unsupported .xml extension");
     let hint = result.unwrap();
     assert!(hint.contains(".xml"), "Hint should mention .xml");
-    assert!(hint.contains("search_grep"), "Hint should suggest search_grep");
+    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep");
 }
 
 #[test]
@@ -3366,7 +3366,7 @@ fn test_hint_fn_content_not_defs_returns_some() {
     let result = hint_name_in_content_not_defs(&args, &ctx);
     assert!(result.is_some(), "Should return Some when name is in content but not defs");
     let hint = result.unwrap();
-    assert!(hint.contains("search_grep"), "Hint should suggest search_grep");
+    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep");
 }
 
 #[test]

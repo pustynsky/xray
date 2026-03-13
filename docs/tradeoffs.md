@@ -41,7 +41,7 @@ Every architectural decision has alternatives. This document captures what was c
 
 **Why:**
 
-- **90× faster than the alternative** — `search_fast` scans the in-memory vec in ~35ms for 100K files. The alternative (`search_find`) does a live filesystem walk taking ~3s for the same files. The vec scan replaces disk I/O, not a faster algorithm.
+- **90× faster than the alternative** — `xray_fast` scans the in-memory vec in ~35ms for 100K files. The alternative (`xray_find`) does a live filesystem walk taking ~3s for the same files. The vec scan replaces disk I/O, not a faster algorithm.
 - Simple — no secondary data structures to build, maintain, or invalidate
 - Cache-friendly — sequential scan over a contiguous `Vec` has excellent CPU cache locality
 - Flexible matching — supports substring, regex, case-insensitive, comma-separated multi-term OR — all patterns that are hard to pre-index efficiently
@@ -156,7 +156,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 - Full syntactic understanding — correctly handles nested classes, partial classes, multi-line signatures
 - Modifiers, attributes, base types extracted as structured data
 - Line range tracking enables `containsLine` queries (which method is on line N?)
-- Call-graph extraction — AST walk of method bodies extracts `CallSite` data (method name, receiver type, line) for `search_callers` "down" direction. Resolves field types (e.g., `_userService` → `IUserService`) for DI-aware call trees. This would be impossible with regex.
+- Call-graph extraction — AST walk of method bodies extracts `CallSite` data (method name, receiver type, line) for `xray_callers` "down" direction. Resolves field types (e.g., `_userService` → `IUserService`) for DI-aware call trees. This would be impossible with regex.
 - Code complexity metrics — cyclomatic/cognitive complexity, nesting depth, params, returns, calls, lambdas computed during AST walk via shared `walk_code_stats()` with per-language `CodeStatsConfig`
 - Language grammars maintained by the community, handle edge cases we'd never cover with regex
 - SQL uses a regex-based parser (no tree-sitter grammar needed) — sufficient for DDL/DML extraction where the syntax is regular enough
@@ -245,7 +245,7 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 - No remote access — must run on same machine as the AI agent
 - Debugging requires stderr logging — cannot use stdout for diagnostics
 
-## 9. Positioning: search-index vs Existing Code Search Tools
+## 9. Positioning: xray vs Existing Code Search Tools
 
 ### Chosen: Custom single-binary engine (inverted index + trigram + tree-sitter AST + call graph + git cache + code stats)
 
@@ -263,11 +263,11 @@ The question is not just "which data structure?" but "why not use an existing to
 | **ripgrep (rg)** | Fastest regex-based file search. Gold standard for live filesystem grep. | No index — every query is a full filesystem scan (32s for 49K files). No AST awareness. No call graph. No ranking. No trigram substring search. Linear cost per query. |
 | **ctags / universal-ctags** | Fast tag-based navigation. Works with 50+ languages. | Tags only — no call graph, no base types, no attributes, no modifiers. External tool dependency. Limited structured data. No search API — produces a file that editors consume. |
 
-### What search-index uniquely provides
+### What xray uniquely provides
 
 The combination of these capabilities in a single tool is what makes it distinct:
 
-| Capability | Zoekt | Sourcegraph | LSP | ripgrep | search-index |
+| Capability | Zoekt | Sourcegraph | LSP | ripgrep | xray |
 |---|---|---|---|---|---|
 | Text search <1ms | ✅ | ✅ | ❌ | ❌ (32s) | ✅ |
 | Substring search | ✅ (trigram) | ✅ | ❌ | ✅ (regex) | ✅ (trigram) |
@@ -294,7 +294,7 @@ The combination of these capabilities in a single tool is what makes it distinct
 - Zoekt = fast indexed search but no AST
 - Sourcegraph = most complete but requires infrastructure
 
-search-index occupies the **"fast enough for interactive AI agents, structured enough for code navigation"** niche that none of the above serve.
+xray occupies the **"fast enough for interactive AI agents, structured enough for code navigation"** niche that none of the above serve.
 
 **When to reconsider:** If precise type inference becomes critical (not just call-site heuristics), integrating SCIP/LSIF indexes alongside the current AST index would be the path — keeping the fast text search layer while adding semantic precision where needed.
 
@@ -347,7 +347,7 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Known limitations:**
 
-- No patch/diff data in cache — `search_git_diff` always uses CLI (patches are too large to cache efficiently)
+- No patch/diff data in cache — `xray_git_diff` always uses CLI (patches are too large to cache efficiently)
 - Author pool capped at 65,535 unique authors (u16 index) — sufficient for any single repository
 - Cache is per-repository — multi-repo setups have separate caches
 
@@ -416,7 +416,7 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 **Why:**
 
 - **LLM context window efficiency** — large responses waste tokens. A 1MB response consumes ~250K tokens, leaving little room for reasoning.
-- Tool-specific budgets: 16KB default, 64KB for `includeBody=true`, 32KB for `search_help`
+- Tool-specific budgets: 16KB default, 64KB for `includeBody=true`, 32KB for `xray_help`
 - Progressive — truncates results one-by-one from the end, preserving the most relevant (highest-scored) results
 - `maxResults`, `maxBodyLines`, `maxTotalBodyLines` give users fine-grained control before truncation kicks in
 
@@ -424,7 +424,7 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 | Alternative | Why Not |
 |---|---|
-| **No truncation** | Responses can exceed 1MB for broad queries (e.g., `search_definitions` with no filters on 846K definitions). Wastes LLM context window and can cause timeouts. |
+| **No truncation** | Responses can exceed 1MB for broad queries (e.g., `xray_definitions` with no filters on 846K definitions). Wastes LLM context window and can cause timeouts. |
 | **Fixed line limits only** | Line count doesn't correlate well with token count. A line with a long base64 string uses far more tokens than a line with `}`. Byte budget is more predictable. |
 | **Client-side truncation** | MCP clients (VS Code, Roo) may truncate arbitrarily, potentially cutting mid-JSON. Server-side truncation ensures valid JSON response structure. |
 | **Pagination (offset/limit)** | Adds protocol complexity (stateful cursors). LLM agents rarely paginate — they refine queries instead. `maxResults` provides equivalent functionality without state. |

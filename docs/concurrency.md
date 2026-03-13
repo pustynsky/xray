@@ -217,10 +217,10 @@ cmd_serve()
 
 - `AtomicBool` with `Release`/`Acquire` ordering gates tool readiness — cheap (no lock contention)
 - Background thread acquires a single write lock to swap the fully-built index into the `Arc<RwLock>`, then sets the `AtomicBool` flag
-- Tools that bypass content readiness: `search_help`, `search_info`, `search_find`, `search_definitions`, `search_callers`, git tools
-- Tools that require content readiness: `search_grep`, `search_fast`, `search_reindex`
-- Tools that require definition readiness: `search_definitions`, `search_callers`, `search_reindex_definitions`
-- `search_reindex` during background build returns "already building" error to prevent double-builds
+- Tools that bypass content readiness: `xray_help`, `xray_info`, `xray_find`, `xray_definitions`, `xray_callers`, git tools
+- Tools that require content readiness: `xray_grep`, `xray_fast`, `xray_reindex`
+- Tools that require definition readiness: `xray_definitions`, `xray_callers`, `xray_reindex_definitions`
+- `xray_reindex` during background build returns "already building" error to prevent double-builds
 
 **Drop-and-reload pattern (memory optimization):**
 
@@ -351,7 +351,7 @@ fn update_definition_index(def_index, removed_clean, dirty_clean) -> bool {
 **Important:** The two indexes are updated sequentially, not atomically. There's a brief window where the content index is updated but the definition index is stale. This is acceptable because:
 
 1. The window is <5ms per file
-2. Queries that use both indexes (search_callers) will see slightly stale definition data, which at worst means a caller might be missing from the tree until the next update cycle
+2. Queries that use both indexes (xray_callers) will see slightly stale definition data, which at worst means a caller might be missing from the tree until the next update cycle
 3. True atomicity would require either a single lock for both indexes (reducing read concurrency) or a transaction log (complexity not justified)
 
 ## Thread Safety Guarantees
@@ -384,7 +384,7 @@ On EOF (stdin closed) or Ctrl+C/SIGTERM, the server saves both content and defin
 
 ### Backpressure
 
-If the server is processing a long query (e.g., `search_callers` with depth=10), incoming file events queue up in the `mpsc::channel`. The channel is unbounded, so events are never lost. They'll be processed in the next debounce window after the query completes.
+If the server is processing a long query (e.g., `xray_callers` with depth=10), incoming file events queue up in the `mpsc::channel`. The channel is unbounded, so events are never lost. They'll be processed in the next debounce window after the query completes.
 
 ### Request Size Limits
 

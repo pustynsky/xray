@@ -33,7 +33,7 @@ fn test_mode_a_replace_single_line() {
     let (tmp, filename, path) = create_temp_file("line1\nline2\nline3\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 2, "content": "replaced" }
@@ -53,7 +53,7 @@ fn test_mode_a_replace_range() {
     let (tmp, filename, path) = create_temp_file("line1\nline2\nline3\nline4\nline5\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 4, "content": "new_content" }
@@ -76,7 +76,7 @@ fn test_mode_a_insert_before_line() {
     let ctx = make_ctx(tmp.path());
 
     // endLine < startLine = insert mode
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 1, "content": "inserted" }
@@ -97,7 +97,7 @@ fn test_mode_a_delete_lines() {
     let (tmp, filename, path) = create_temp_file("line1\nline2\nline3\nline4\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 3, "content": "" }
@@ -118,7 +118,7 @@ fn test_mode_a_multiple_operations_bottom_up() {
     let ctx = make_ctx(tmp.path());
 
     // Replace line 4 and line 2 — should work regardless of order
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 2, "content": "B" },
@@ -141,7 +141,7 @@ fn test_mode_a_overlap_error() {
     let (tmp, filename, _) = create_temp_file("a\nb\nc\nd\ne\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 4, "content": "X" },
@@ -157,7 +157,7 @@ fn test_mode_a_out_of_range_error() {
     let (tmp, filename, _) = create_temp_file("a\nb\nc\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 10, "endLine": 10, "content": "X" }
@@ -172,7 +172,7 @@ fn test_mode_a_expected_line_count_mismatch() {
     let (tmp, filename, _) = create_temp_file("a\nb\nc\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 1, "endLine": 1, "content": "X" }
@@ -192,7 +192,7 @@ fn test_mode_b_literal_replace_all() {
     let (tmp, filename, path) = create_temp_file("foo bar foo baz foo\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "foo", "replace": "qux" }
@@ -209,7 +209,7 @@ fn test_mode_b_literal_replace_specific_occurrence() {
     let (tmp, filename, path) = create_temp_file("foo bar foo baz foo\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "foo", "replace": "qux", "occurrence": 2 }
@@ -226,7 +226,7 @@ fn test_mode_b_regex_replace() {
     let (tmp, filename, path) = create_temp_file("count: 10\nmax: 20\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": r"\d+", "replace": "0" }
@@ -244,7 +244,7 @@ fn test_mode_b_text_not_found_error() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "nonexistent", "replace": "x" }
@@ -263,7 +263,7 @@ fn test_file_not_found_error() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": "nonexistent.txt",
         "edits": [
             { "search": "x", "replace": "y" }
@@ -280,7 +280,7 @@ fn test_both_operations_and_edits_error() {
     let (tmp, filename, _) = create_temp_file("hello\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [{ "startLine": 1, "endLine": 1, "content": "X" }],
         "edits": [{ "search": "hello", "replace": "bye" }]
@@ -296,7 +296,7 @@ fn test_neither_operations_nor_edits_error() {
     let (tmp, filename, _) = create_temp_file("hello\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename
     }));
 
@@ -308,7 +308,7 @@ fn test_dry_run_does_not_write() {
     let (tmp, filename, path) = create_temp_file("original content\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "original", "replace": "modified" }
@@ -332,7 +332,7 @@ fn test_unified_diff_format() {
     let (tmp, filename, _) = create_temp_file("line1\nline2\nline3\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 2, "content": "REPLACED" }
@@ -352,7 +352,7 @@ fn test_crlf_preservation() {
     let (tmp, filename, path) = create_temp_file("line1\r\nline2\r\nline3\r\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 2, "content": "REPLACED" }
@@ -372,7 +372,7 @@ fn test_empty_file() {
     let ctx = make_ctx(tmp.path());
 
     // Insert into empty file
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 1, "endLine": 0, "content": "new content" }
@@ -389,7 +389,7 @@ fn test_single_line_file() {
     let (tmp, filename, path) = create_temp_file("only line");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 1, "endLine": 1, "content": "replaced line" }
@@ -406,7 +406,7 @@ fn test_missing_path_error() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "edits": [{ "search": "x", "replace": "y" }]
     }));
 
@@ -420,7 +420,7 @@ fn test_mode_b_occurrence_out_of_range() {
     let (tmp, filename, _) = create_temp_file("foo bar foo\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "foo", "replace": "qux", "occurrence": 5 }
@@ -435,7 +435,7 @@ fn test_response_contains_stats() {
     let (tmp, filename, _) = create_temp_file("line1\nline2\nline3\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 2, "content": "X\nY" }
@@ -459,7 +459,7 @@ fn test_absolute_path_works() {
     // Use a different server_dir to confirm absolute path bypasses it
     let ctx = make_ctx(std::path::Path::new("."));
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": path.to_string_lossy(),
         "edits": [
             { "search": "hello", "replace": "world" }
@@ -476,7 +476,7 @@ fn test_directory_path_error() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": tmp.path().to_string_lossy(),
         "edits": [
             { "search": "x", "replace": "y" }
@@ -494,7 +494,7 @@ fn test_mode_a_multiline_content_replace() {
     let ctx = make_ctx(tmp.path());
 
     // Replace single line with multiple lines
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 2, "content": "x\ny\nz" }
@@ -516,7 +516,7 @@ fn test_mode_b_multiple_edits_sequential() {
     let (tmp, filename, path) = create_temp_file("int x = 10;\nint y = 20;\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "10", "replace": "100" },
@@ -535,7 +535,7 @@ fn test_mode_b_regex_capture_groups() {
     let (tmp, filename, path) = create_temp_file("func getData() {}\nfunc setData() {}\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": r"func (\w+)\(\)", "replace": "fn $1()" }
@@ -558,7 +558,7 @@ fn test_mode_a_insert_at_end_of_file() {
     // Insert after the last line (startLine = 4 because split('\n') on "line1\nline2\n" gives ["line1", "line2", ""])
     // Actually, for a file "line1\nline2\n", split('\n') gives ["line1", "line2", ""] — 3 elements
     // Insert at position 4 (after element 3) = append
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 4, "endLine": 3, "content": "appended" }
@@ -575,7 +575,7 @@ fn test_mode_a_replace_last_line() {
     let (tmp, filename, path) = create_temp_file("first\nsecond\nthird");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 3, "endLine": 3, "content": "LAST" }
@@ -592,7 +592,7 @@ fn test_mode_b_no_changes_when_same_text() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "hello", "replace": "hello" }
@@ -610,7 +610,7 @@ fn test_mode_b_multiline_search_replace() {
     let (tmp, filename, path) = create_temp_file("start\nold_line1\nold_line2\nend\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "old_line1\nold_line2", "replace": "new_block" }
@@ -635,7 +635,7 @@ fn test_large_file_smoke() {
     let ctx = make_ctx(tmp.path());
 
     // Replace line 100 and line 150 (bottom-up)
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 100, "endLine": 100, "content": "REPLACED_100" },
@@ -657,7 +657,7 @@ fn test_mode_a_expected_line_count_match() {
     let ctx = make_ctx(tmp.path());
 
     // "a\nb\nc\n" split by '\n' gives ["a", "b", "c", ""] = 4 elements
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 2, "content": "B" }
@@ -675,7 +675,7 @@ fn test_mode_b_empty_search_error() {
     let (tmp, filename, _) = create_temp_file("hello\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "", "replace": "x" }
@@ -699,7 +699,7 @@ fn test_multi_file_all_succeed() {
     let path3 = create_named_temp_file(tmp.path(), "file3.txt", "old text everywhere\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["file1.txt", "file2.txt", "file3.txt"],
         "edits": [
             { "search": "old", "replace": "new" }
@@ -729,7 +729,7 @@ fn test_multi_file_one_fails_aborts_all() {
     let ctx = make_ctx(tmp.path());
 
     // file2 doesn't contain "old" → edit fails → ALL files should be unchanged
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["good1.txt", "good2.txt"],
         "edits": [
             { "search": "old", "replace": "new" }
@@ -750,7 +750,7 @@ fn test_multi_file_dry_run() {
     let path2 = create_named_temp_file(tmp.path(), "dry2.txt", "hello there\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["dry1.txt", "dry2.txt"],
         "edits": [
             { "search": "hello", "replace": "goodbye" }
@@ -778,7 +778,7 @@ fn test_multi_file_max_limit() {
     // Create 21 paths (over the 20 limit)
     let paths: Vec<String> = (0..21).map(|i| format!("file{}.txt", i)).collect();
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": paths,
         "edits": [
             { "search": "x", "replace": "y" }
@@ -795,7 +795,7 @@ fn test_multi_file_mutual_exclusive_with_path() {
     let (tmp, filename, _) = create_temp_file("hello\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "paths": [filename],
         "edits": [
@@ -813,7 +813,7 @@ fn test_multi_file_empty_paths() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": [],
         "edits": [
             { "search": "x", "replace": "y" }
@@ -831,7 +831,7 @@ fn test_multi_file_file_not_found() {
     create_named_temp_file(tmp.path(), "exists.txt", "hello\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["exists.txt", "missing.txt"],
         "edits": [
             { "search": "hello", "replace": "bye" }
@@ -852,7 +852,7 @@ fn test_insert_after_found() {
     let (tmp, filename, path) = create_temp_file("using System;\nusing System.IO;\n\nclass Foo {}\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -877,7 +877,7 @@ fn test_insert_before_found() {
     let (tmp, filename, path) = create_temp_file("line1\nline2\nline3\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -901,7 +901,7 @@ fn test_insert_after_not_found() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -921,7 +921,7 @@ fn test_insert_after_specific_occurrence() {
     let (tmp, filename, path) = create_temp_file("marker\nother\nmarker\nend\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -949,7 +949,7 @@ fn test_insert_after_with_search_replace_error() {
     let (tmp, filename, _) = create_temp_file("hello\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -971,7 +971,7 @@ fn test_insert_after_missing_content_error() {
     let (tmp, filename, _) = create_temp_file("hello\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -990,7 +990,7 @@ fn test_insert_before_and_after_error() {
     let (tmp, filename, _) = create_temp_file("hello\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1011,7 +1011,7 @@ fn test_insert_after_at_last_line() {
     let (tmp, filename, path) = create_temp_file("first\nlast");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1031,7 +1031,7 @@ fn test_insert_before_at_first_line() {
     let (tmp, filename, path) = create_temp_file("first line\nsecond line\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1058,7 +1058,7 @@ fn test_expected_context_match() {
     let (tmp, filename, path) = create_temp_file("var semaphore = new SemaphoreSlim(10);\nDoWork();\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1079,7 +1079,7 @@ fn test_expected_context_mismatch() {
     let (tmp, filename, _) = create_temp_file("var semaphore = new SemaphoreSlim(10);\nDoWork();\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1101,7 +1101,7 @@ fn test_expected_context_optional() {
     let ctx = make_ctx(tmp.path());
 
     // No expectedContext → should work as before
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1121,7 +1121,7 @@ fn test_expected_context_with_insert_after() {
     let (tmp, filename, path) = create_temp_file("using System;\nusing System.IO;\n\nclass Foo {}\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1142,7 +1142,7 @@ fn test_expected_context_with_insert_after_mismatch() {
     let (tmp, filename, _) = create_temp_file("using System;\nusing System.IO;\n\nclass Foo {}\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1167,7 +1167,7 @@ fn test_skip_if_not_found_single_file() {
     let ctx = make_ctx(tmp.path());
 
     // Text not found, but skipIfNotFound=true → should succeed without changing file
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "nonexistent", "replace": "x", "skipIfNotFound": true }
@@ -1185,7 +1185,7 @@ fn test_skip_if_not_found_false_still_errors() {
     let ctx = make_ctx(tmp.path());
 
     // skipIfNotFound=false (default) → should error
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "nonexistent", "replace": "x", "skipIfNotFound": false }
@@ -1201,7 +1201,7 @@ fn test_skip_if_not_found_default_is_false() {
     let ctx = make_ctx(tmp.path());
 
     // No skipIfNotFound → default is false → should error
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "nonexistent", "replace": "x" }
@@ -1219,7 +1219,7 @@ fn test_skip_if_not_found_multi_file_partial_match() {
     let ctx = make_ctx(tmp.path());
 
     // file1 has "old", file2 doesn't → with skipIfNotFound=true, both should succeed
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["has_it.txt", "no_it.txt"],
         "edits": [
             { "search": "old", "replace": "new", "skipIfNotFound": true }
@@ -1242,7 +1242,7 @@ fn test_skip_if_not_found_multi_file_without_flag_fails() {
     let ctx = make_ctx(tmp.path());
 
     // file2 doesn't have "old" → without skipIfNotFound, should fail (transactional abort)
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["has_it.txt", "no_it.txt"],
         "edits": [
             { "search": "old", "replace": "new" }
@@ -1259,7 +1259,7 @@ fn test_skip_if_not_found_insert_after_anchor_missing() {
     let (tmp, filename, path) = create_temp_file("line1\nline2\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "insertAfter": "nonexistent anchor", "content": "new line", "skipIfNotFound": true }
@@ -1276,7 +1276,7 @@ fn test_skip_if_not_found_regex_pattern_missing() {
     let (tmp, filename, path) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "nonexistent\\d+", "replace": "x", "skipIfNotFound": true }
@@ -1295,7 +1295,7 @@ fn test_skip_if_not_found_response_contains_skipped_edits_field() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "nonexistent", "replace": "x", "skipIfNotFound": true }
@@ -1316,7 +1316,7 @@ fn test_skip_if_not_found_multi_file_response_shows_skipped_per_file() {
     let _path2 = create_named_temp_file(tmp.path(), "no_it.txt", "different content\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["has_it.txt", "no_it.txt"],
         "edits": [
             { "search": "old", "replace": "new", "skipIfNotFound": true }
@@ -1350,7 +1350,7 @@ fn test_nearest_match_hint_different_quotes() {
     let (tmp, filename, _) = create_temp_file("line one\nДевять «израильтян» погибли\nline three\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "Девять \"израильтян\" погибли", "replace": "replaced" }
@@ -1369,7 +1369,7 @@ fn test_nearest_match_hint_partial_overlap() {
     let (tmp, filename, _) = create_temp_file("function processData() {\n    return data;\n}\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "function processdata() {", "replace": "fn processData() {" }
@@ -1387,7 +1387,7 @@ fn test_nearest_match_hint_no_good_match() {
     let (tmp, filename, _) = create_temp_file("abc\ndef\nghi\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "zzzzzzzzzzzzzzzzz completely different", "replace": "x" }
@@ -1405,7 +1405,7 @@ fn test_nearest_match_hint_multiline_search() {
     let (tmp, filename, _) = create_temp_file("line1\nfunction oldName() {\n    return 42;\n}\nline5\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "function oldname() {\n    return 42;\n}", "replace": "replaced" }
@@ -1424,7 +1424,7 @@ fn test_nearest_match_hint_anchor_not_found() {
     let (tmp, filename, _) = create_temp_file("using System;\nusing System.IO;\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "insertAfter": "using System.Io;", "content": "using System.Linq;" }
@@ -1442,7 +1442,7 @@ fn test_nearest_match_hint_regex_not_found() {
     let (tmp, filename, _) = create_temp_file("int count = 10;\nmax = 20;\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "xyzzy\\d+", "replace": "0" }
@@ -1466,7 +1466,7 @@ fn test_skipped_details_contains_edit_info() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "nonexistent_text", "replace": "x", "skipIfNotFound": true }
@@ -1496,7 +1496,7 @@ fn test_skipped_details_multiple_skips() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "missing_one", "replace": "x", "skipIfNotFound": true },
@@ -1538,7 +1538,7 @@ fn test_skipped_details_multi_file_per_file() {
     let _path2 = create_named_temp_file(tmp.path(), "no_it.txt", "different content\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["has_it.txt", "no_it.txt"],
         "edits": [
             { "search": "old", "replace": "new", "skipIfNotFound": true }
@@ -1571,7 +1571,7 @@ fn test_skipped_details_regex_skip() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "nonexistent\\d+", "replace": "x", "skipIfNotFound": true }
@@ -1599,7 +1599,7 @@ fn test_sequential_edit_hint_when_previous_edit_reduces_occurrences() {
 
     // First edit replaces first "foo" with "qux", leaving 2 "foo"s.
     // Second edit requests occurrence=3 of "foo" — only 2 remain.
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "foo", "replace": "qux", "occurrence": 1 },
@@ -1619,7 +1619,7 @@ fn test_no_sequential_hint_for_first_edit() {
     let ctx = make_ctx(tmp.path());
 
     // First edit (index 0) requests occurrence=5 but only 1 exists.
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "foo", "replace": "qux", "occurrence": 5 }
@@ -1642,7 +1642,7 @@ fn test_crlf_in_search_text_is_normalized() {
     let ctx = make_ctx(tmp.path());
 
     // Search text uses CRLF — should still match after normalization
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "line one\r\nline two", "replace": "LINE ONE\nLINE TWO" }
@@ -1661,7 +1661,7 @@ fn test_crlf_in_anchor_text_is_normalized() {
     let ctx = make_ctx(tmp.path());
 
     // Anchor uses CRLF — should still match
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "insertAfter": "using System;\r\n", "content": "using System.Linq;" }
@@ -1679,7 +1679,7 @@ fn test_crlf_in_replace_text_is_normalized() {
     let (tmp, filename, _) = create_temp_file("old text\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "old text", "replace": "new\r\ntext" }
@@ -1701,7 +1701,7 @@ fn test_trailing_whitespace_in_search_auto_retry() {
     let ctx = make_ctx(tmp.path());
 
     // Search text has trailing spaces (LLM artifact)
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "function hello() {  \n    return 42;  \n}", "replace": "function hello() {\n    return 43;\n}" }
@@ -1722,7 +1722,7 @@ fn test_trailing_whitespace_in_anchor_auto_retry() {
     let ctx = make_ctx(tmp.path());
 
     // Anchor has trailing spaces
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "insertAfter": "line one  ", "content": "inserted line" }
@@ -1743,7 +1743,7 @@ fn test_no_trailing_whitespace_no_warning() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "hello world", "replace": "goodbye world" }
@@ -1761,7 +1761,7 @@ fn test_trailing_whitespace_both_sides_no_retry_needed() {
     let (tmp, filename, _) = create_temp_file("hello world  \n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "hello world  ", "replace": "goodbye world" }
@@ -1779,7 +1779,7 @@ fn test_trailing_whitespace_retry_fails_gracefully() {
     let (tmp, filename, _) = create_temp_file("alpha beta gamma\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "totally different text  ", "replace": "x" }
@@ -1795,7 +1795,7 @@ fn test_trailing_whitespace_skip_if_not_found_with_retry() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "hello world  ", "replace": "goodbye", "skipIfNotFound": false }
@@ -1817,7 +1817,7 @@ fn test_byte_diff_hint_trailing_space() {
     let (tmp, filename, _) = create_temp_file("hello\tworld\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "hello world", "replace": "x" }
@@ -1839,7 +1839,7 @@ fn test_byte_diff_hint_length_difference() {
     let (tmp, filename, _) = create_temp_file("abc\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "abcd", "replace": "x" }
@@ -1918,7 +1918,7 @@ fn test_all_whitespace_search_does_not_panic() {
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             { "search": "  ", "replace": "x" }
@@ -1936,7 +1936,7 @@ fn test_expected_context_crlf_normalized() {
     let (tmp, filename, _) = create_temp_file("line one\nline two\nline three\n");
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
             {
@@ -1961,7 +1961,7 @@ fn test_auto_create_file_via_mode_a_insert() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": "brand_new_file.txt",
         "operations": [
             { "startLine": 1, "endLine": 0, "content": "hello world\nsecond line" }
@@ -1987,7 +1987,7 @@ fn test_auto_create_file_in_nested_dirs() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": "deep/nested/dir/new_file.rs",
         "operations": [
             { "startLine": 1, "endLine": 0, "content": "fn main() {}" }
@@ -2006,7 +2006,7 @@ fn test_auto_create_mode_b_search_fails_gracefully() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": "nonexistent.txt",
         "edits": [
             { "search": "some text", "replace": "other text" }
@@ -2024,7 +2024,7 @@ fn test_auto_create_mode_a_replace_on_nonexistent_fails() {
     let ctx = make_ctx(tmp.path());
 
     // Replace lines 5-10 in a nonexistent file (treated as 1-line empty file)
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": "nonexistent.txt",
         "operations": [
             { "startLine": 5, "endLine": 10, "content": "new content" }
@@ -2039,7 +2039,7 @@ fn test_auto_create_file_dry_run_does_not_create() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "path": "dry_run_file.txt",
         "dryRun": true,
         "operations": [
@@ -2059,7 +2059,7 @@ fn test_auto_create_multi_file_mixed_existing_and_new() {
     let ctx = make_ctx(tmp.path());
 
     // Insert into both existing and new file
-    let result = handle_search_edit(&ctx, &json!({
+    let result = handle_xray_edit(&ctx, &json!({
         "paths": ["existing.txt", "new_file.txt"],
         "operations": [
             { "startLine": 1, "endLine": 0, "content": "inserted" }

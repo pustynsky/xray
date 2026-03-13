@@ -295,14 +295,14 @@ use clap::Parser;
   modifiers, attributes (e.g. [ServiceProvider]), and base types.
 
   The index is saved to disk as a .code-structure file and can be loaded instantly
-  by 'search-index serve --definitions'.
+  by 'xray serve --definitions'.
 
 EXAMPLES:
-  Index C# files:     search-index def-index --dir C:\Projects --ext cs
-  Index TypeScript:   search-index def-index --dir C:\Projects --ext ts,tsx
-  Index C# + SQL:     search-index def-index --dir C:\Projects --ext cs,sql
-  Index all:          search-index def-index --dir C:\Projects --ext cs,sql,ts,tsx
-  Custom threads:     search-index def-index --dir C:\Projects --ext cs --threads 8
+  Index C# files:     xray def-index --dir C:\Projects --ext cs
+  Index TypeScript:   xray def-index --dir C:\Projects --ext ts,tsx
+  Index C# + SQL:     xray def-index --dir C:\Projects --ext cs,sql
+  Index all:          xray def-index --dir C:\Projects --ext cs,sql,ts,tsx
+  Custom threads:     xray def-index --dir C:\Projects --ext cs --threads 8
 
 PERFORMANCE:
   48,643 files -> 846,167 definitions in ~14s (24 threads)

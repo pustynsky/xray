@@ -30,7 +30,7 @@ use parser_typescript::extract_component_metadata;
 
 /// File extensions that have definition parser support (tree-sitter or regex).
 /// Used to dynamically generate MCP instructions about which files can be read
-/// via search_definitions instead of direct file reads.
+/// via xray_definitions instead of direct file reads.
 ///
 /// Returns extensions based on which language features are compiled in.
 pub fn definition_extensions() -> &'static [&'static str] {

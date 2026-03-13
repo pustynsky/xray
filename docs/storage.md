@@ -6,12 +6,12 @@ All indexes are stored under a platform-specific data directory:
 
 | OS      | Path                                          |
 | ------- | --------------------------------------------- |
-| Windows | `%LOCALAPPDATA%\search-index\`                |
-| macOS   | `~/Library/Application Support/search-index/` |
-| Linux   | `~/.local/share/search-index/`                |
+| Windows | `%LOCALAPPDATA%\xray\`                |
+| macOS   | `~/Library/Application Support/xray/` |
+| Linux   | `~/.local/share/xray/`                |
 
 ```
-search-index/
+xray/
 ├── Repos_MyProject_a1b2c3d4.file-list           ← FileIndex
 ├── Repos_MyProject_f0e1d2c3.word-search          ← ContentIndex (cs,xml)
 ├── Repos_MyProject_12345678.code-structure        ← DefinitionIndex (cs,xml)
@@ -36,10 +36,10 @@ Where:
 
 | Extension           | Index Type      | Purpose                                    |
 |---------------------|-----------------|--------------------------------------------|
-| `.file-list`        | FileIndex       | File name lookup (`search_fast`)           |
-| `.word-search`      | ContentIndex    | Full-text token search (`search_grep`)     |
-| `.code-structure`   | DefinitionIndex | AST definitions & callers (`search_definitions`, `search_callers`) |
-| `.git-history`      | GitHistoryCache | Git commit history cache (`search_git_history`, `search_git_authors`, `search_git_activity`) |
+| `.file-list`        | FileIndex       | File name lookup (`xray_fast`)           |
+| `.word-search`      | ContentIndex    | Full-text token search (`xray_grep`)     |
+| `.code-structure`   | DefinitionIndex | AST definitions & callers (`xray_definitions`, `xray_callers`) |
+| `.git-history`      | GitHistoryCache | Git commit history cache (`xray_git_history`, `xray_git_authors`, `xray_git_activity`) |
 
 ### Semantic Prefix Rules
 
@@ -77,7 +77,7 @@ let hash = stable_hash(&[canonical_dir.as_bytes(), b"git-history"]);
 let filename = format!("{}_{:08x}.git-history", prefix, hash as u32);
 ```
 
-**Implication:** Indexing the same directory with different extension sets produces different files. `search-index content-index -d C:\Projects -e cs` and `search-index content-index -d C:\Projects -e cs,sql` create two separate `.word-search` files.
+**Implication:** Indexing the same directory with different extension sets produces different files. `xray content-index -d C:\Projects -e cs` and `xray content-index -d C:\Projects -e cs,sql` create two separate `.word-search` files.
 
 ### Collision Handling
 
@@ -112,7 +112,7 @@ let result = load_compressed::<ContentIndex>(&path, "content-index");
 
 ### Sizes on Disk
 
-Measured on a real codebase (from `search-index info` and build logs):
+Measured on a real codebase (from `xray info` and build logs):
 
 | Index Type      | Files Indexed   | Content                 | Disk Size |
 | --------------- | --------------- | ----------------------- | --------- |
@@ -181,7 +181,7 @@ struct DefinitionIndex {
     base_type_index: HashMap<String, Vec<u32>>,        // base type → def indices
     file_index: HashMap<u32, Vec<u32>>,                // file_id → def indices
     path_to_id: HashMap<PathBuf, u32>,                 // path → file_id
-    method_calls: HashMap<u32, Vec<CallSite>>,         // def_idx → call sites (for search_callers "down")
+    method_calls: HashMap<u32, Vec<CallSite>>,         // def_idx → call sites (for xray_callers "down")
 }
 
 struct DefinitionEntry {
@@ -215,11 +215,11 @@ fn is_stale(&self) -> bool {
 }
 ```
 
-| Behavior                            | `search-index fast` / `search-index grep`                                | `search-index serve`                   |
+| Behavior                            | `xray fast` / `xray grep`                                | `xray serve`                   |
 | ----------------------------------- | ------------------------------------------------------------ | -------------------------------- |
 | Index stale, `--auto-reindex true`  | Rebuild automatically                                        | N/A (index stays in RAM)         |
 | Index stale, `--auto-reindex false` | Print warning, use stale                                     | N/A                              |
-| Index missing                       | Build automatically (`search-index fast`) or error (`search-index grep`) | Build in background (async startup) |
+| Index missing                       | Build automatically (`xray fast`) or error (`xray grep`) | Build in background (async startup) |
 | With `--watch`                      | N/A                                                          | Incremental updates, never stale |
 
 Default max age: 24 hours (`--max-age-hours 24`).

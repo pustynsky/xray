@@ -178,51 +178,51 @@ pub struct TestCreateStaleIndexArgs {
   The server reads JSON requests from stdin and writes responses to stdout.
 
 EXAMPLES:
-  Basic:          search-index serve --dir C:\Projects\MyApp --ext cs
-  Multi-ext:      search-index serve --dir C:\Projects --ext cs,csproj,sql
-  C# + TypeScript: search-index serve --dir C:\Projects --ext cs,ts,tsx
-  With watcher:   search-index serve --dir C:\Projects --ext cs --watch
-  With defs:      search-index serve --dir C:\Projects --ext cs --watch --definitions
-  TS defs:        search-index serve --dir C:\Projects --ext ts,tsx --watch --definitions
-  Custom debounce: search-index serve --dir . --ext rs --watch --debounce-ms 1000
+  Basic:          xray serve --dir C:\Projects\MyApp --ext cs
+  Multi-ext:      xray serve --dir C:\Projects --ext cs,csproj,sql
+  C# + TypeScript: xray serve --dir C:\Projects --ext cs,ts,tsx
+  With watcher:   xray serve --dir C:\Projects --ext cs --watch
+  With defs:      xray serve --dir C:\Projects --ext cs --watch --definitions
+  TS defs:        xray serve --dir C:\Projects --ext ts,tsx --watch --definitions
+  Custom debounce: xray serve --dir . --ext rs --watch --debounce-ms 1000
 
 VS CODE CONFIGURATION (.vscode/mcp.json):
   {
     "servers": {
-      "search-index": {
-        "command": "search-index",
+      "xray": {
+        "command": "xray",
         "args": ["serve", "--dir", "C:\\Projects\\MyApp", "--ext", "cs", "--watch", "--definitions"]
       }
     }
   }
 
 AVAILABLE TOOLS (exposed via MCP):
-  search_grep        -- Search content index (TF-IDF ranked, regex, phrase, multi-term)
-  search_definitions -- Search code definitions: classes, methods, interfaces, enums, SPs,
+  xray_grep        -- Search content index (TF-IDF ranked, regex, phrase, multi-term)
+  xray_definitions -- Search code definitions: classes, methods, interfaces, enums, SPs,
                         functions, type aliases, variables. Supports C#, TypeScript/TSX,
                         and SQL (.sql files: stored procedures, tables, views, functions,
                         types, indexes, columns via regex parser; call sites from SP bodies).
                         Supports containsLine to find which method/class/function contains
                         a line. (requires --definitions flag)
-  search_callers     -- Find all callers of a method and build a call tree (up/down).
+  xray_callers     -- Find all callers of a method and build a call tree (up/down).
                        Combines grep index + AST index. Replaces 7+ manual queries with 1.
                        Supports C#, TypeScript/TSX (DI-aware, inject() support), and SQL
                        (call sites from EXEC/FROM/JOIN/INSERT/UPDATE/DELETE in SP bodies).
                        Note: calls through local variables (var x = ...; x.Method())
                        may not be detected (AST parsing without type inference).
                        (requires --definitions flag)
-  search_find        -- Live filesystem search (no index, slow for large dirs)
-  search_fast        -- Search file name index (instant)
-  search_info        -- Show all indexes
-  search_reindex     -- Force rebuild + reload index
-  search_git_history -- Commit history for a file (cached or git CLI)
-  search_git_diff    -- Commit history with full diff/patch for a file
-  search_git_authors -- Top authors for a file ranked by commit count
-  search_git_activity-- Activity (changed files) for a date range, optionally filtered by path
-  search_git_blame   -- Line-by-line git blame for a file or line range
-  search_branch_status-- Show current git branch status, behind/ahead counts, dirty files
-  search_help        -- Show tips and best practices for effective search tool usage
-  search_reindex_definitions -- Re-index code definitions (AST parser). Requires --definitions
+  xray_find        -- Live filesystem search (no index, slow for large dirs)
+  xray_fast        -- Search file name index (instant)
+  xray_info        -- Show all indexes
+  xray_reindex     -- Force rebuild + reload index
+  xray_git_history -- Commit history for a file (cached or git CLI)
+  xray_git_diff    -- Commit history with full diff/patch for a file
+  xray_git_authors -- Top authors for a file ranked by commit count
+  xray_git_activity-- Activity (changed files) for a date range, optionally filtered by path
+  xray_git_blame   -- Line-by-line git blame for a file or line range
+  xray_branch_status-- Show current git branch status, behind/ahead counts, dirty files
+  xray_help        -- Show tips and best practices for effective search tool usage
+  xray_reindex_definitions -- Re-index code definitions (AST parser). Requires --definitions
 
 HOW IT WORKS:
   1. On startup: loads (or builds) content index into RAM (~0.7-1.6s one-time)
@@ -279,21 +279,21 @@ pub struct ServeArgs {
 
 #[derive(Parser, Debug)]
 #[command(after_long_help = r#"EXAMPLES:
-  Single term:     search-index grep "HttpClient" -d C:\Projects -e cs
-  Multi-term OR:   search-index grep "HttpClient,ILogger,Task" -d C:\Projects -e cs
-  Multi-term AND:  search-index grep "HttpClient,ILogger" -d C:\Projects -e cs --all
-  Regex:           search-index grep "i.*cache" -d C:\Projects -e cs --regex
-  Regex + lines:   search-index grep ".*factory" -d C:\Projects -e cs --regex --show-lines
-  Top 10 results:  search-index grep "HttpClient" -d C:\Projects --max-results 10
-  Exclude dirs:    search-index grep "HttpClient" -d . -e cs --exclude-dir test --exclude-dir E2E
-  Exclude files:   search-index grep "HttpClient" -d . -e cs --exclude Mock
-  Context lines:   search-index grep "HttpClient" -d . -e cs --show-lines -C 3
-  Before/after:    search-index grep "HttpClient" -d . -e cs --show-lines -B 2 -A 5
-  Exact tokens:    search-index grep "UserService" -d C:\Projects -e cs --exact
+  Single term:     xray grep "HttpClient" -d C:\Projects -e cs
+  Multi-term OR:   xray grep "HttpClient,ILogger,Task" -d C:\Projects -e cs
+  Multi-term AND:  xray grep "HttpClient,ILogger" -d C:\Projects -e cs --all
+  Regex:           xray grep "i.*cache" -d C:\Projects -e cs --regex
+  Regex + lines:   xray grep ".*factory" -d C:\Projects -e cs --regex --show-lines
+  Top 10 results:  xray grep "HttpClient" -d C:\Projects --max-results 10
+  Exclude dirs:    xray grep "HttpClient" -d . -e cs --exclude-dir test --exclude-dir E2E
+  Exclude files:   xray grep "HttpClient" -d . -e cs --exclude Mock
+  Context lines:   xray grep "HttpClient" -d . -e cs --show-lines -C 3
+  Before/after:    xray grep "HttpClient" -d . -e cs --show-lines -B 2 -A 5
+  Exact tokens:    xray grep "UserService" -d C:\Projects -e cs --exact
 
 NOTES:
   - Requires a content index. Build one first:
-      search-index content-index -d C:\Projects -e cs,rs,py
+      xray content-index -d C:\Projects -e cs,rs,py
   - Results sorted by TF-IDF relevance (most relevant files first)
   - Multi-term: comma-separated, OR by default, AND with --all
   - Regex: pattern matched against all indexed tokens (e.g. 754K unique tokens)

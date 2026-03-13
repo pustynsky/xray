@@ -18,16 +18,16 @@ fn test_tool_definitions_count() {
 fn test_tool_definitions_names() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
-    assert!(names.contains(&"search_grep"));
-    assert!(names.contains(&"search_find"));
-    assert!(names.contains(&"search_fast"));
-    assert!(names.contains(&"search_info"));
-    assert!(names.contains(&"search_reindex"));
-    assert!(names.contains(&"search_reindex_definitions"));
-    assert!(names.contains(&"search_definitions"));
-    assert!(names.contains(&"search_callers"));
-    assert!(names.contains(&"search_edit"));
-    assert!(names.contains(&"search_help"));
+    assert!(names.contains(&"xray_grep"));
+    assert!(names.contains(&"xray_find"));
+    assert!(names.contains(&"xray_fast"));
+    assert!(names.contains(&"xray_info"));
+    assert!(names.contains(&"xray_reindex"));
+    assert!(names.contains(&"xray_reindex_definitions"));
+    assert!(names.contains(&"xray_definitions"));
+    assert!(names.contains(&"xray_callers"));
+    assert!(names.contains(&"xray_edit"));
+    assert!(names.contains(&"xray_help"));
 }
 
 #[test]
@@ -61,19 +61,19 @@ fn test_all_tools_have_required_field() {
 }
 
 #[test]
-fn test_search_grep_required_fields() {
+fn test_xray_grep_required_fields() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
-    let grep = tools.iter().find(|t| t.name == "search_grep").unwrap();
+    let grep = tools.iter().find(|t| t.name == "xray_grep").unwrap();
     let required = grep.input_schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 1);
     assert_eq!(required[0], "terms");
 }
 
 #[test]
-fn test_search_find_has_slow_warning() {
+fn test_xray_find_has_slow_warning() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
-    let find = tools.iter().find(|t| t.name == "search_find").unwrap();
-    assert!(find.description.contains("SLOW") || find.description.contains("search_fast"), "search_find should discourage use and point to search_fast");
+    let find = tools.iter().find(|t| t.name == "xray_find").unwrap();
+    assert!(find.description.contains("SLOW") || find.description.contains("xray_fast"), "xray_find should discourage use and point to xray_fast");
 }
 
 /// Compile-time guard: lists ALL HandlerContext fields explicitly.
@@ -131,7 +131,7 @@ fn test_dispatch_unknown_tool() {
 #[test]
 fn test_dispatch_grep_missing_terms() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("Missing required parameter: terms"));
 }
@@ -139,7 +139,7 @@ fn test_dispatch_grep_missing_terms() {
 #[test]
 fn test_dispatch_grep_empty_index() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 0);
@@ -165,7 +165,7 @@ fn test_dispatch_grep_with_results() {
         index: Arc::new(RwLock::new(index)),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient", "substring": false}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient", "substring": false}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -173,22 +173,22 @@ fn test_dispatch_grep_with_results() {
     assert_eq!(output["files"][0]["occurrences"], 2);
 }
 
-// --- search_callers error tests (general) ---
+// --- xray_callers error tests (general) ---
 
 #[test]
-fn test_search_callers_no_def_index() {
+fn test_xray_callers_no_def_index() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({"method": "Foo"}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "Foo"}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("Definition index not available"));
 }
 
-// --- search_reindex_definitions tests ---
+// --- xray_reindex_definitions tests ---
 
 #[test]
 fn test_reindex_definitions_no_def_index() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("Definition index not available"));
 }
@@ -196,7 +196,7 @@ fn test_reindex_definitions_no_def_index() {
 #[test]
 fn test_reindex_definitions_has_schema() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
-    let tool = tools.iter().find(|t| t.name == "search_reindex_definitions").unwrap();
+    let tool = tools.iter().find(|t| t.name == "xray_reindex_definitions").unwrap();
     let props = tool.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("dir"), "Should have dir parameter");
     assert!(props.contains_key("ext"), "Should have ext parameter");
@@ -207,37 +207,37 @@ fn test_reindex_definitions_has_schema() {
 #[test]
 fn test_contains_line_requires_file() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "containsLine": 391
     }));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("containsLine requires 'file' parameter"));
 }
 
-// --- search_callers schema tests ---
+// --- xray_callers schema tests ---
 
 #[test]
-fn test_search_callers_has_required_params() {
+fn test_xray_callers_has_required_params() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
-    let callers = tools.iter().find(|t| t.name == "search_callers").unwrap();
+    let callers = tools.iter().find(|t| t.name == "xray_callers").unwrap();
     let required = callers.input_schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 1);
     assert_eq!(required[0], "method");
 }
 
 #[test]
-fn test_search_callers_has_limit_params() {
+fn test_xray_callers_has_limit_params() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
-    let callers = tools.iter().find(|t| t.name == "search_callers").unwrap();
+    let callers = tools.iter().find(|t| t.name == "xray_callers").unwrap();
     let props = callers.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("maxCallersPerLevel"), "Should have maxCallersPerLevel");
     assert!(props.contains_key("maxTotalNodes"), "Should have maxTotalNodes");
 }
 
 #[test]
-fn test_search_definitions_has_contains_line() {
+fn test_xray_definitions_has_contains_line() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
-    let defs = tools.iter().find(|t| t.name == "search_definitions").unwrap();
+    let defs = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     let props = defs.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("containsLine"), "Should have containsLine parameter");
 }
@@ -245,10 +245,10 @@ fn test_search_definitions_has_contains_line() {
 // --- maxResults=0 means unlimited tests ---
 
 #[test]
-fn test_search_definitions_max_results_zero_means_unlimited() {
+fn test_xray_definitions_max_results_zero_means_unlimited() {
     let ctx = make_ctx_with_defs();
     // maxResults=0 should return ALL definitions, not cap at 100
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "maxResults": 0
     }));
     assert!(!result.is_error);
@@ -260,10 +260,10 @@ fn test_search_definitions_max_results_zero_means_unlimited() {
 }
 
 #[test]
-fn test_search_definitions_max_results_one_caps_output() {
+fn test_xray_definitions_max_results_one_caps_output() {
     let ctx = make_ctx_with_defs();
     // Use name filter to bypass autoSummary (which triggers when results > maxResults without name filter)
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "maxResults": 1,
         "name": "Service"
     }));
@@ -274,10 +274,10 @@ fn test_search_definitions_max_results_one_caps_output() {
 }
 
 #[test]
-fn test_search_definitions_max_results_default_is_100() {
+fn test_xray_definitions_max_results_default_is_100() {
     let ctx = make_ctx_with_defs();
     // When maxResults is omitted, default should be 100
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let total = output["summary"]["totalResults"].as_u64().unwrap();
@@ -293,7 +293,7 @@ fn test_dispatch_grep_while_content_index_building() {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "foo"}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("being built"),
         "Expected 'being built' message, got: {}", result.content[0].text);
@@ -320,7 +320,7 @@ fn test_dispatch_definitions_while_def_index_building() {
         }))),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "Foo"}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "Foo"}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("being built"),
         "Expected 'being built' message, got: {}", result.content[0].text);
@@ -347,7 +347,7 @@ fn test_dispatch_callers_while_def_index_building() {
         }))),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "search_callers", &json!({"method": "Foo"}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "Foo"}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("being built"),
         "Expected 'being built' message, got: {}", result.content[0].text);
@@ -359,7 +359,7 @@ fn test_dispatch_reindex_while_content_index_building() {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "search_reindex", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("already being built"),
         "Expected 'already being built' message, got: {}", result.content[0].text);
@@ -371,7 +371,7 @@ fn test_dispatch_fast_while_content_index_building() {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "search_fast", &json!({"pattern": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": "foo"}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("being built"),
         "Expected 'being built' message, got: {}", result.content[0].text);
@@ -384,11 +384,11 @@ fn test_dispatch_help_works_while_index_building() {
         def_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "search_help", &json!({}));
-    assert!(!result.is_error, "search_help should work during index build");
+    let result = dispatch_tool(&ctx, "xray_help", &json!({}));
+    assert!(!result.is_error, "xray_help should work during index build");
 
-    let result = dispatch_tool(&ctx, "search_info", &json!({}));
-    assert!(!result.is_error, "search_info should work during index build");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error, "xray_info should work during index build");
 }
 
 #[test]
@@ -397,6 +397,6 @@ fn test_dispatch_find_works_while_index_building() {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "search_find", &json!({"pattern": "nonexistent_xyz"}));
-    assert!(!result.is_error, "search_find should work during index build");
+    let result = dispatch_tool(&ctx, "xray_find", &json!({"pattern": "nonexistent_xyz"}));
+    assert!(!result.is_error, "xray_find should work during index build");
 }

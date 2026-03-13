@@ -1,4 +1,4 @@
-//! search_callers handler: call tree building (up/down).
+//! xray_callers handler: call tree building (up/down).
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 use crate::mcp::protocol::ToolCallResult;
 use crate::ContentIndex;
 use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionKind};
-use search_index::generate_trigrams;
+use code_xray::generate_trigrams;
 
 use super::HandlerContext;
 use super::utils::{inject_body_into_obj, inject_branch_warning, json_to_string, name_similarity, sorted_intersect};
@@ -165,7 +165,7 @@ const BUILTIN_RECEIVER_TYPES: &[&str] = &[
     "Tuple", "ValueTuple", "Span", "Memory",
 ];
 
-pub(crate) fn handle_search_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
         Some(idx) => idx,
         None => return ToolCallResult::error(

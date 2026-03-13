@@ -14,12 +14,12 @@ Real-world use cases, future ideas, and a case study demonstrating deep architec
 
 ```
 Need to find something?
-├── Know the FILE NAME?        → search_fast       (~25ms)
-├── Know the CLASS or METHOD?  → search_definitions (~1ms)
-├── Need a CALL CHAIN?         → search_callers     (~3-11ms)
-├── Need TEXT CONTENT?         → search_grep        (~1ms)
-├── Need FILE COUNT only?      → search_grep countOnly=true
-└── Not sure?                  → search_help
+├── Know the FILE NAME?        → xray_fast       (~25ms)
+├── Know the CLASS or METHOD?  → xray_definitions (~1ms)
+├── Need a CALL CHAIN?         → xray_callers     (~3-11ms)
+├── Need TEXT CONTENT?         → xray_grep        (~1ms)
+├── Need FILE COUNT only?      → xray_grep countOnly=true
+└── Not sure?                  → xray_help
 ```
 
 ---
@@ -35,7 +35,7 @@ NullReferenceException at OrderManager.ProcessOrderAsync(OrderManager.cs:145)
 ```
 
 <table>
-<tr><th>❌ Without search-index</th><th>✅ With search-index</th></tr>
+<tr><th>❌ Without xray</th><th>✅ With xray</th></tr>
 <tr><td>
 
 ```
@@ -112,7 +112,7 @@ Total: 3 milliseconds
 **Situation:** Reviewing a PR — need to understand blast radius.
 
 <table>
-<tr><th>❌ Without search-index</th><th>✅ With search-index</th></tr>
+<tr><th>❌ Without xray</th><th>✅ With xray</th></tr>
 <tr><td>
 
 ```
@@ -263,8 +263,8 @@ Total: <3 milliseconds
 → full diff showing the exact lines added
 ```
 
-**Tools used:** `search_branch_status` → `search_grep` → `search_git_blame` → `search_git_authors` → `search_git_diff`
-**Total time:** ~3 seconds. Without search-index: ~10 minutes of `git log`, `git blame`, manual searching.
+**Tools used:** `xray_branch_status` → `xray_grep` → `xray_git_blame` → `xray_git_authors` → `xray_git_diff`
+**Total time:** ~3 seconds. Without xray: ~10 minutes of `git log`, `git blame`, manual searching.
 
 ---
 
@@ -286,7 +286,7 @@ Total: <3 milliseconds
 
 ### Context
 
-We used search-index to reverse-engineer a **large async API system** spanning **3,800+ lines** across multiple layers, which we had never seen before.
+We used xray to reverse-engineer a **large async API system** spanning **3,800+ lines** across multiple layers, which we had never seen before.
 
 ```mermaid
 flowchart TD
@@ -315,7 +315,7 @@ flowchart TD
 
 ### What we discovered in ~5 minutes
 
-Using only `search_definitions`, `search_callers`, and `search_grep`:
+Using only `xray_definitions`, `xray_callers`, and `xray_grep`:
 
 1. **Found all API endpoints** — identified async 3-step polling: POST trigger → GET status → GET result
 2. **Traced the full async job flow**: Controller → Manager → Job Scheduler → Worker Service → blob write
@@ -357,7 +357,7 @@ Manager.GetSchema → SchemaStorage.GetFromBlob → DB.GetBlobReference
 
 ### Key insight
 
-All of this was done **without reading any documentation** — purely by navigating code structure through search-index tools. The AST index + call graph + content search, combined with an AI agent's reasoning, turned a multi-day exploration into a 5-minute conversation.
+All of this was done **without reading any documentation** — purely by navigating code structure through xray tools. The AST index + call graph + content search, combined with an AI agent's reasoning, turned a multi-day exploration into a 5-minute conversation.
 
 ---
 
@@ -367,7 +367,7 @@ All of this was done **without reading any documentation** — purely by navigat
 
 **Automatic Developer Onboarding** — A bot that answers "I got a bug in CacheManager, where do I start?" by finding the class, its callers, its dependencies, and related tests in 30 seconds.
 
-**PR Impact Analysis** — On every PR, run `search_callers` depth=5 on every changed method. Generate: "This change affects 3 API endpoints and 47 callers."
+**PR Impact Analysis** — On every PR, run `xray_callers` depth=5 on every changed method. Generate: "This change affects 3 API endpoints and 47 callers."
 
 **Auto-Generated Architecture Docs** — Given a namespace, auto-map all classes, call trees, and generate Mermaid diagrams.
 
@@ -375,7 +375,7 @@ All of this was done **without reading any documentation** — purely by navigat
 
 **Live Architecture Map** — Interactive dependency visualization from the full AST index. Heatmap of co-change frequency (correlating with git history).
 
-**Code Archaeology** — "Tell me the story of this feature" by combining search-index with git blame/log.
+**Code Archaeology** — "Tell me the story of this feature" by combining xray with git blame/log.
 
 **Smart Code Review** — Auto-detect pattern violations: "47 other places wrap this in a logging scope — this PR doesn't."
 
@@ -393,10 +393,10 @@ All of this was done **without reading any documentation** — purely by navigat
 
 ---
 
-## Why search-index Makes All of This Possible
+## Why xray Makes All of This Possible
 
 **AST index + call graph + inverted text index in one tool** at **sub-millisecond to low single-digit milliseconds per query** across **65K+ files**.
 
 Without it, each scenario requires minutes of ripgrep per query, manual file navigation, or heavyweight tools like Roslyn/CodeQL with long cold starts.
 
-search-index provides capabilities that previously required an IDE with a fully-loaded solution — but accessible via MCP in the working flow of an AI agent.
+xray provides capabilities that previously required an IDE with a fully-loaded solution — but accessible via MCP in the working flow of an AI agent.

@@ -12,7 +12,7 @@
 Git CLI (`git log -- <file>`) on a large monorepo (Monorepo: ~50K commits, ~65K files) takes 2-6 sec per file. For an LLM agent making several sequential queries (history → authors → diff), the total wait is ~10-15 sec.
 
 ### Goal
-Sub-millisecond responses for `search_git_history`, `search_git_authors`, `search_git_activity`. Only `search_git_diff` remains via git CLI (diffs cannot be cached — too large and rarely repeated).
+Sub-millisecond responses for `xray_git_history`, `xray_git_authors`, `xray_git_activity`. Only `xray_git_diff` remains via git CLI (diffs cannot be cached — too large and rarely repeated).
 
 ### Measurements (large monorepo)
 
@@ -33,7 +33,7 @@ The cache stores the **full history** of the default branch (status quo confirme
 - 7.5 MB RAM = **1.8%** of total server memory (~410 MB). RAM savings are not a motivation.
 - 59 sec is a **one-time** cost for the first build. Disk cache ensures subsequent restarts in ~100 ms.
 - All limited approaches (by time, depth, directory, tiered, lazy) trade **query coverage** for build time savings that the disk cache already provides.
-- A limited cache creates a **risk of misleading answers**: the cache doesn't know what it doesn't know. Example: `search_git_authors` on a file created outside the time window will show an incomplete author list. The LLM agent will treat this as fact.
+- A limited cache creates a **risk of misleading answers**: the cache doesn't know what it doesn't know. Example: `xray_git_authors` on a file created outside the time window will show an incomplete author list. The LLM agent will treat this as fact.
 
 **Escape hatch for the future:** CLI flag `--git-cache-since` for repositories with >200K commits (~4 min build time). Documented but **NOT implemented in MVP** — until a specific user request.
 
@@ -138,8 +138,8 @@ struct AuthorEntry {
 | **Total RAM** | | **~7.6 MB** |
 
 For comparison:
-- Content index (search_grep): ~200 MB RAM
-- Definition index (search_definitions): ~200 MB RAM
+- Content index (xray_grep): ~200 MB RAM
+- Definition index (xray_definitions): ~200 MB RAM
 - **Git history cache: ~7.6 MB** — negligible
 
 ### 2.3 On-Disk Format
@@ -214,10 +214,10 @@ MCP SERVER STARTUP
 > - **Order of operations:** filter by date → sort by timestamp → truncate to `maxResults` (correctness first).
 > - Hot file (5K commits): O(5K) scan = ~50 μs — adequate.
 > - Directory scan (50K keys): 1-3 ms — adequate for sub-10ms target.
-> - Worst case: `search_git_activity(path="")` without date filter — existing behavior; hint "use date filter for large results".
+> - Worst case: `xray_git_activity(path="")` without date filter — existing behavior; hint "use date filter for large results".
 
 ```
-QUERY: search_git_history(repo=".", file="src/main.rs", maxResults=10)
+QUERY: xray_git_history(repo=".", file="src/main.rs", maxResults=10)
     │
     ├── Cache ready?
     │   ├── YES → cache.file_commits.get("src/main.rs")
@@ -249,7 +249,7 @@ QUERY: search_git_history(repo=".", file="src/main.rs", maxResults=10)
 | `git merge-base --is-ancestor` = true | `git log --name-only OLD..NEW`, append to cache |
 | `git merge-base --is-ancestor` = false | Force push / rebase → **full rebuild** |
 | `git cat-file -t cache.head_hash` = error | Repo was re-cloned → **full rebuild** |
-| ~~`search_reindex` called~~ | ~~Rebuild cache~~ — **cancelled**: git cache NOT tied to reindex (see §3.5) |
+| ~~`xray_reindex` called~~ | ~~Rebuild cache~~ — **cancelled**: git cache NOT tied to reindex (see §3.5) |
 | Watcher: `.git/refs/heads/<branch>` changed | Check HEAD, incrementally update |
 | New day (>24h) | Check HEAD |
 
@@ -307,12 +307,12 @@ for line in reader.lines() {
 
 RAM usage during parsing: ~7.6 MB (final cache) + ~4 KB BufReader buffer. No 163 MB in memory.
 
-### 3.5 Integration with search_reindex
+### 3.5 Integration with xray_reindex
 
 > **Reference:** [`debate-12-parallel-git-log.md`](debate-12-parallel-git-log.md)
 
-- `search_reindex` rebuilds **ONLY** the content index (no changes)
-- `search_reindex_definitions` rebuilds **ONLY** the definition index (no changes)
+- `xray_reindex` rebuilds **ONLY** the content index (no changes)
+- `xray_reindex_definitions` rebuilds **ONLY** the definition index (no changes)
 - Git cache is **NOT tied** to reindex — three reasons:
   1. **Orthogonal data** — content/def indexes work with files in the working tree, git cache works with `.git/` (commit history)
   2. **Different build times** — content/def index: 5-30 sec, git cache: ~59 sec. Tying them would mean 59 sec wait on every reindex
@@ -323,11 +323,11 @@ RAM usage during parsing: ~7.6 MB (final cache) + ~4 KB BufReader buffer. No 163
 - Watcher → `.git/refs/heads/<branch>` changed → incremental update
 - Lazy HEAD check → >24h since last check
 
-**`search_reindex_git` — NOT needed in MVP** (YAGNI). Emergency reset: delete `.git-history` file + restart server.
+**`xray_reindex_git` — NOT needed in MVP** (YAGNI). Emergency reset: delete `.git-history` file + restart server.
 
 **No conflicts during parallel operation:** each index lives in its own `Arc<RwLock>`, builds happen in separate threads. Content reindex, definition reindex, and git cache rebuild can run simultaneously without mutual blocking.
 
-**Git cache status:** shown in `search_info` (general server information), **NOT** in `search_reindex` response (which relates only to the content index).
+**Git cache status:** shown in `xray_info` (general server information), **NOT** in `xray_reindex` response (which relates only to the content index).
 
 ### 3.6 Git Pull / Checkout Scenarios
 
@@ -343,8 +343,8 @@ RAM usage during parsing: ~7.6 MB (final cache) + ~4 KB BufReader buffer. No 163
 
 **Typical LLM agent scenario:** "What changed in file X from date A to date B?"
 
-1. **`search_git_history`** (cache, <1 ms) → list of commits (hash, date, author, subject) — change metadata
-2. **`search_git_diff`** (git CLI, 2-3 sec) → actual diff for a specific commit — added/removed lines
+1. **`xray_git_history`** (cache, <1 ms) → list of commits (hash, date, author, subject) — change metadata
+2. **`xray_git_diff`** (git CLI, 2-3 sec) → actual diff for a specific commit — added/removed lines
 
 The cache stores **"which commits touched a file"** (reverse index [`file_commits`](user-stories/git-history-cache-design.md:95)). The actual changes (diff) are always via git CLI, since diffs are unpredictable in size and rarely repeated.
 
@@ -354,14 +354,14 @@ The cache stores **"which commits touched a file"** (reverse index [`file_commit
 
 | Tool | Cache | CLI fallback | Notes |
 |------|-------|-------------|-------|
-| `search_git_history` | ✅ file_commits lookup | git log -- file | Subject only from cache. For fullMessage → git show |
-| `search_git_authors` | ✅ aggregate by author_idx | git log -- file | Aggregation O(N) over commit IDs: ~50 μs for 5K commits |
-| `search_git_activity` | ✅ filter file_commits by path prefix + date | git log --name-only | Prefix matching: `== path \|\| starts_with(path + "/")` |
-| `search_git_diff` | ❌ Always CLI | git diff hash^..hash -- file | Diffs cannot be cached (~KB-MB per commit) |
+| `xray_git_history` | ✅ file_commits lookup | git log -- file | Subject only from cache. For fullMessage → git show |
+| `xray_git_authors` | ✅ aggregate by author_idx | git log -- file | Aggregation O(N) over commit IDs: ~50 μs for 5K commits |
+| `xray_git_activity` | ✅ filter file_commits by path prefix + date | git log --name-only | Prefix matching: `== path \|\| starts_with(path + "/")` |
+| `xray_git_diff` | ❌ Always CLI | git diff hash^..hash -- file | Diffs cannot be cached (~KB-MB per commit) |
 
 > **[debate-10](debate-10-remaining-design-areas.md):** Path matching and normalization.
 >
-> **Prefix matching for `search_git_activity`:**
+> **Prefix matching for `xray_git_activity`:**
 > ```rust
 > fn matches_path_prefix(file_path: &str, query_path: &str) -> bool {
 >     if query_path.is_empty() { return true; } // entire repo
@@ -376,7 +376,7 @@ The cache stores **"which commits touched a file"** (reverse index [`file_commit
 > - `\` → `/` (Windows backslashes)
 > - Collapse `..` segments, strip `./`
 >
-> **Rename tracking:** the cache does not support `--follow`. Cache responses for `search_git_history` and `search_git_authors`
+> **Rename tracking:** the cache does not support `--follow`. Cache responses for `xray_git_history` and `xray_git_authors`
 > include a hint: `"Rename tracking not available from cache."` `follow: true` is NOT applicable to the cache (CLI-only in Phase 1).
 >
 > **Deleted files:** history of deleted files is available from the cache — they exist in `file_commits` (git log records their paths).
@@ -424,9 +424,9 @@ enum CacheStatus {
 
 ```
 ┌─────────────────────────────────────────┐
-│          search_git_history/            │
-│          search_git_authors/            │
-│          search_git_activity            │
+│          xray_git_history/            │
+│          xray_git_authors/            │
+│          xray_git_activity            │
 │                                         │
 │  ┌──── Cache ready? ────┐              │
 │  │                       │              │
@@ -439,7 +439,7 @@ enum CacheStatus {
 │                      building           │
 │                                         │
 ├─────────────────────────────────────────┤
-│          search_git_diff               │
+│          xray_git_diff               │
 │                                         │
 │  ALWAYS: git diff (Phase 1)            │
 │  ~2-3 sec                              │
@@ -448,7 +448,7 @@ enum CacheStatus {
 
 **Phase 1 NEVER becomes irrelevant:**
 1. CLI fallback while cache is building (~59 sec on first start)
-2. CLI for `search_git_diff` (always)
+2. CLI for `xray_git_diff` (always)
 3. CLI for `follow: true` (cache does not support rename tracking)
 4. CLI for `fullMessage: true` (cache stores only subject)
 
@@ -549,11 +549,11 @@ Example: `repos_mainproject_a1b2c3d4.git-history`
 | 27 | serve.rs refactor | **Do NOT refactor** when adding git cache | Copy-paste block is simpler and lower-risk. YAGNI ([debate-10](debate-10-remaining-design-areas.md)) |
 | 28 | Nice priority | **Do not add** | IO-bound single thread, no precedent in codebase ([debate-10](debate-10-remaining-design-areas.md)) |
 | 29 | Race conditions | **Eliminated** via build-then-swap + RwLock + bounds checks | Poison handling: `unwrap_or_else` ([debate-10](debate-10-remaining-design-areas.md)) |
-| 30 | Git cache NOT tied to search_reindex | Orthogonal data (files vs `.git/`), auto-invalidation via watcher + HEAD check | Different build times, different triggers. Tying them = 59 sec wait on every reindex ([debate-12](debate-12-parallel-git-log.md)) |
-| 31 | search_reindex_git not needed in MVP | **YAGNI**. Emergency case = delete `.git-history` file + restart | No real use case for manual rebuild with auto-invalidation available ([debate-12](debate-12-parallel-git-log.md)) |
+| 30 | Git cache NOT tied to xray_reindex | Orthogonal data (files vs `.git/`), auto-invalidation via watcher + HEAD check | Different build times, different triggers. Tying them = 59 sec wait on every reindex ([debate-12](debate-12-parallel-git-log.md)) |
+| 31 | xray_reindex_git not needed in MVP | **YAGNI**. Emergency case = delete `.git-history` file + restart | No real use case for manual rebuild with auto-invalidation available ([debate-12](debate-12-parallel-git-log.md)) |
 | 32 | Multi-branch cache not needed | Feature-branch queries = CLI fallback, confirmed by customer | Cache only default branch; checkout another branch doesn't invalidate cache ([debate-12](debate-12-parallel-git-log.md)) |
 | 33 | commit-graph hint at startup | Log hint when `.git/objects/info/commit-graph` is missing, **NOT auto-created** | search tool is read-only with respect to `.git/`. 2-5× speedup ([debate-12](debate-12-parallel-git-log.md)) |
-| 34 | Git cache status in search_info | Show in `search_info`, **NOT** in `search_reindex` response | `search_reindex` relates only to content index; git cache is an orthogonal system ([debate-12](debate-12-parallel-git-log.md)) |
+| 34 | Git cache status in xray_info | Show in `xray_info`, **NOT** in `xray_reindex` response | `xray_reindex` relates only to content index; git cache is an orthogonal system ([debate-12](debate-12-parallel-git-log.md)) |
 | 35 | Maximum isolation from existing modules | Git cache = standalone module [`src/git/cache.rs`](../src/git/cache.rs), zero imports from `index.rs`/`definitions/`/`mcp/`. Touch points: 4 files, ~95 lines of changes. **0 changes** to content index, definition index, other handlers, existing tests | Customer requirement. Details in §10 |
 
 ---

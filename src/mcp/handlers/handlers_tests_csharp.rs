@@ -41,11 +41,11 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     (ctx, tmp_dir)
 }
 
-// ─── search_callers tests ────────────────────────────────────────────
+// ─── xray_callers tests ────────────────────────────────────────────
 #[test]
 fn test_contains_line_finds_method() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "QueryService",
         "containsLine": 391
     }));
@@ -60,7 +60,7 @@ fn test_contains_line_finds_method() {
 #[test]
 fn test_contains_line_returns_parent() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "QueryService",
         "containsLine": 800
     }));
@@ -75,7 +75,7 @@ fn test_contains_line_returns_parent() {
 #[test]
 fn test_contains_line_no_match() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "QueryService",
         "containsLine": 999
     }));
@@ -106,13 +106,13 @@ fn test_find_containing_method_none() {
     assert!(result.is_none());
 }
 #[test]
-fn test_search_definitions_regex_name_filter() {
+fn test_xray_definitions_regex_name_filter() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "Execute.*",
         "regex": true
     }));
-    assert!(!result.is_error, "search_definitions regex should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_definitions regex should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
 
@@ -135,9 +135,9 @@ fn test_search_definitions_regex_name_filter() {
 }
 
 #[test]
-fn test_search_definitions_audit_mode() {
+fn test_xray_definitions_audit_mode() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "audit": true
     }));
     assert!(!result.is_error, "audit mode should not error: {}", result.content[0].text);
@@ -163,7 +163,7 @@ fn test_search_definitions_audit_mode() {
 }
 
 #[test]
-fn test_search_definitions_exclude_dir() {
+fn test_xray_definitions_exclude_dir() {
     // Create a context with definitions in two different directories
     let content_index = ContentIndex {
         root: ".".to_string(),
@@ -235,7 +235,7 @@ fn test_search_definitions_exclude_dir() {
     };
 
     // Exclude "tests" directory
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "excludeDir": ["tests"]
     }));
     assert!(!result.is_error);
@@ -259,11 +259,11 @@ fn test_search_definitions_exclude_dir() {
 }
 
 #[test]
-fn test_search_definitions_combined_name_parent_kind_filter() {
+fn test_xray_definitions_combined_name_parent_kind_filter() {
     let ctx = make_ctx_with_defs();
 
     // Filter: name=ExecuteQueryAsync, parent=ResilientClient, kind=method
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "ExecuteQueryAsync",
         "parent": "ResilientClient",
         "kind": "method"
@@ -281,7 +281,7 @@ fn test_search_definitions_combined_name_parent_kind_filter() {
     assert_eq!(defs[0]["kind"], "method");
 
     // Verify: same name+kind but different parent should NOT match
-    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result2 = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "ExecuteQueryAsync",
         "parent": "NonExistentClass",
         "kind": "method"
@@ -294,7 +294,7 @@ fn test_search_definitions_combined_name_parent_kind_filter() {
 }
 
 #[test]
-fn test_search_definitions_struct_kind() {
+fn test_xray_definitions_struct_kind() {
     let content_index = ContentIndex {
         root: ".".to_string(),
         files: vec!["C:\\src\\Models.cs".to_string()],
@@ -356,7 +356,7 @@ fn test_search_definitions_struct_kind() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "struct"
     }));
     assert!(!result.is_error, "kind=struct should not error: {}", result.content[0].text);
@@ -375,7 +375,7 @@ fn test_search_definitions_struct_kind() {
 }
 
 #[test]
-fn test_search_definitions_base_type_filter() {
+fn test_xray_definitions_base_type_filter() {
     let content_index = ContentIndex {
         root: ".".to_string(),
         files: vec!["C:\\src\\Controllers.cs".to_string()],
@@ -445,7 +445,7 @@ fn test_search_definitions_base_type_filter() {
     };
 
     // Filter by baseType=ControllerBase — should return UserController and AdminController
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "baseType": "ControllerBase"
     }));
     assert!(!result.is_error, "baseType filter should not error: {}", result.content[0].text);
@@ -457,7 +457,7 @@ fn test_search_definitions_base_type_filter() {
     assert!(names.contains(&"AdminController"), "Should contain AdminController");
 
     // Filter by baseType=IOrderService — should return only OrderService
-    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result2 = dispatch_tool(&ctx, "xray_definitions", &json!({
         "baseType": "IOrderService"
     }));
     assert!(!result2.is_error);
@@ -467,7 +467,7 @@ fn test_search_definitions_base_type_filter() {
     assert_eq!(defs2[0]["name"], "OrderService");
 
     // Filter by non-existent baseType — should return empty
-    let result3 = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result3 = dispatch_tool(&ctx, "xray_definitions", &json!({
         "baseType": "NonExistentBase"
     }));
     assert!(!result3.is_error);
@@ -477,7 +477,7 @@ fn test_search_definitions_base_type_filter() {
 }
 
 #[test]
-fn test_search_definitions_enum_member_kind() {
+fn test_xray_definitions_enum_member_kind() {
     let content_index = ContentIndex {
         root: ".".to_string(),
         files: vec!["C:\\src\\Enums.cs".to_string()],
@@ -553,7 +553,7 @@ fn test_search_definitions_enum_member_kind() {
     };
 
     // Filter by kind=enumMember
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "enumMember"
     }));
     assert!(!result.is_error, "kind=enumMember should not error: {}", result.content[0].text);
@@ -580,9 +580,9 @@ fn test_search_definitions_enum_member_kind() {
 
 // ─── includeBody tests (require real files) ──────────────────────────
 
-#[test] fn test_search_definitions_include_body() {
+#[test] fn test_xray_definitions_include_body() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "DoWork", "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "DoWork", "includeBody": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
@@ -593,19 +593,19 @@ fn test_search_definitions_enum_member_kind() {
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_definitions_include_body_default_false() {
+#[test] fn test_xray_definitions_include_body_default_false() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "DoWork"}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "DoWork"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["definitions"].as_array().unwrap()[0].get("body").is_none());
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_definitions_body_line_range_filter() {
+#[test] fn test_xray_definitions_body_line_range_filter() {
     let (ctx, tmp) = make_ctx_with_real_files();
     // DoWork has 6 body lines starting at line 3
     // Request only lines 5-6 (middle of the method)
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "DoWork",
         "includeBody": true,
         "bodyLineStart": 5,
@@ -621,11 +621,11 @@ fn test_search_definitions_enum_member_kind() {
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_definitions_contains_line_with_body_line_range() {
+#[test] fn test_xray_definitions_contains_line_with_body_line_range() {
     let (ctx, tmp) = make_ctx_with_real_files();
     // DoWork method is in MyService.cs at lines 3-8
     // Use containsLine to find the method, then bodyLineStart/End to narrow the body
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "MyService.cs",
         "containsLine": 5,
         "includeBody": true,
@@ -647,9 +647,9 @@ fn test_search_definitions_enum_member_kind() {
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_definitions_max_body_lines_truncation() {
+#[test] fn test_xray_definitions_max_body_lines_truncation() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "Process", "includeBody": true, "maxBodyLines": 5}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "Process", "includeBody": true, "maxBodyLines": 5}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
     assert_eq!(defs[0]["body"].as_array().unwrap().len(), 5);
@@ -657,18 +657,18 @@ fn test_search_definitions_enum_member_kind() {
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_definitions_max_total_body_lines_budget() {
+#[test] fn test_xray_definitions_max_total_body_lines_budget() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "DoWork,Process", "includeBody": true, "maxTotalBodyLines": 10}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "DoWork,Process", "includeBody": true, "maxTotalBodyLines": 10}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let total = output["summary"]["totalBodyLinesReturned"].as_u64().unwrap();
     assert!(total <= 10);
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_definitions_contains_line_with_body() {
+#[test] fn test_xray_definitions_contains_line_with_body() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"file": "MyService", "containsLine": 5, "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"file": "MyService", "containsLine": 5, "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["containingDefinitions"].as_array().unwrap();
     assert_eq!(defs[0]["name"], "DoWork");
@@ -682,7 +682,7 @@ fn test_search_definitions_enum_member_kind() {
     let (ctx, tmp) = make_ctx_with_real_files();
     // MyService.cs: MyService class (1-15), DoWork method (3-8)
     // Line 5 is inside DoWork → both match, DoWork is innermost
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "MyService.cs",
         "containsLine": 5,
         "includeBody": true
@@ -710,7 +710,7 @@ fn test_search_definitions_enum_member_kind() {
 #[test] fn test_contains_line_body_line_range_only_on_innermost() {
     // bodyLineStart/bodyLineEnd should apply only to the innermost definition
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "MyService.cs",
         "containsLine": 5,
         "includeBody": true,
@@ -740,7 +740,7 @@ fn test_search_definitions_enum_member_kind() {
     let (ctx, tmp) = make_ctx_with_real_files();
     // BigFile.cs: BigClass (1-25), Process (5-24)
     // Line 2 is inside BigClass but NOT inside Process → only BigClass matches (single match)
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "BigFile.cs",
         "containsLine": 2,
         "includeBody": true
@@ -762,7 +762,7 @@ fn test_search_definitions_enum_member_kind() {
     let (ctx, tmp) = make_ctx_with_real_files();
     // BigFile.cs: BigClass has 25 lines, Process has 20 lines. Total bodies = 25 + 20 = 45 lines
     // But maxTotalBodyLines=5 → truncation occurs
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "parent": "BigClass",
         "includeBody": true,
         "maxTotalBodyLines": 5
@@ -784,7 +784,7 @@ fn test_search_definitions_enum_member_kind() {
     // When all bodies fit within budget, totalBodyLinesAvailable should NOT appear
     let (ctx, tmp) = make_ctx_with_real_files();
     // DoWork method is 6 lines (3-8). maxTotalBodyLines=500 → no truncation
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "DoWork",
         "includeBody": true,
         "maxTotalBodyLines": 500
@@ -803,7 +803,7 @@ fn test_search_definitions_enum_member_kind() {
     // Verify totalBodyLinesAvailable reflects actual definition line counts
     let (ctx, tmp) = make_ctx_with_real_files();
     // BigFile.cs: Process method (lines 5-24) = 20 lines. maxTotalBodyLines=10 → truncated
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "Process",
         "includeBody": true,
         "maxTotalBodyLines": 10
@@ -818,16 +818,16 @@ fn test_search_definitions_enum_member_kind() {
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_definitions_file_cache() {
+#[test] fn test_xray_definitions_file_cache() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"parent": "MyService", "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"parent": "MyService", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
     for def in defs { assert!(def.get("body").is_some()); }
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_definitions_stale_file_warning() {
+#[test] fn test_xray_definitions_stale_file_warning() {
     use std::io::Write;
     let tmp = std::env::temp_dir().join(format!("search_test_stale_cs_{}", std::process::id()));
     let _ = std::fs::create_dir_all(&tmp);
@@ -840,13 +840,13 @@ fn test_search_definitions_enum_member_kind() {
     let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, file_index: fi, ..Default::default() };
     let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), files: vec![fs], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), ..Default::default() };
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "StaleClass", "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "StaleClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["definitions"].as_array().unwrap()[0].get("bodyWarning").is_some());
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
-#[test] fn test_search_definitions_body_error() {
+#[test] fn test_xray_definitions_body_error() {
     let definitions = vec![DefinitionEntry { file_id: 0, name: "GhostClass".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 10, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] }];
     let mut ni: HashMap<String, Vec<u32>> = HashMap::new(); let mut ki: HashMap<DefinitionKind, Vec<u32>> = HashMap::new(); let mut fi: HashMap<u32, Vec<u32>> = HashMap::new();
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
@@ -854,19 +854,19 @@ fn test_search_definitions_enum_member_kind() {
     let di = DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, file_index: fi, ..Default::default() };
     let ci = ContentIndex { root: ".".to_string(), files: vec![ne], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), ..Default::default() };
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "GhostClass", "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "GhostClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["definitions"].as_array().unwrap()[0]["bodyError"], "failed to read file");
 }
 
-// ─── search_reindex_definitions success test ─────────────────────────
+// ─── xray_reindex_definitions success test ─────────────────────────
 
 #[test]
 fn test_reindex_definitions_success() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_reindex_def_cs_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_reindex_def_cs_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create a minimal .cs file so the reindex has something to parse
@@ -902,7 +902,7 @@ fn test_reindex_definitions_success() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({}));
     assert!(!result.is_error, "Reindex definitions should succeed: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["status"], "ok", "Status should be 'ok'");
@@ -987,10 +987,10 @@ fn make_ctx_with_backslash_paths() -> HandlerContext {
 }
 
 #[test]
-fn test_search_definitions_file_filter_forward_slash() {
+fn test_xray_definitions_file_filter_forward_slash() {
     // T77: file filter with forward slashes should match backslash-stored paths
     let ctx = make_ctx_with_backslash_paths();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "src/Services/UserService"
     }));
     assert!(!result.is_error);
@@ -1000,10 +1000,10 @@ fn test_search_definitions_file_filter_forward_slash() {
 }
 
 #[test]
-fn test_search_definitions_file_filter_backslash() {
+fn test_xray_definitions_file_filter_backslash() {
     // T77: file filter with backslashes should also still work
     let ctx = make_ctx_with_backslash_paths();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": r"src\Services\UserService"
     }));
     assert!(!result.is_error);
@@ -1013,10 +1013,10 @@ fn test_search_definitions_file_filter_backslash() {
 }
 
 #[test]
-fn test_search_definitions_file_filter_mixed_separators() {
+fn test_xray_definitions_file_filter_mixed_separators() {
     // T77: mixed separators should work
     let ctx = make_ctx_with_backslash_paths();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": r"src/Services\UserService"
     }));
     assert!(!result.is_error);
@@ -1026,10 +1026,10 @@ fn test_search_definitions_file_filter_mixed_separators() {
 }
 
 #[test]
-fn test_search_definitions_file_filter_no_match() {
+fn test_xray_definitions_file_filter_no_match() {
     // Sanity check: non-matching file filter returns 0
     let ctx = make_ctx_with_backslash_paths();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "src/NonExistent/Path"
     }));
     assert!(!result.is_error);
@@ -1039,10 +1039,10 @@ fn test_search_definitions_file_filter_no_match() {
 }
 
 #[test]
-fn test_search_definitions_contains_line_forward_slash() {
+fn test_xray_definitions_contains_line_forward_slash() {
     // T77: containsLine with forward-slash file filter should work
     let ctx = make_ctx_with_backslash_paths();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "src/Services/UserService",
         "containsLine": 15
     }));
@@ -1056,10 +1056,10 @@ fn test_search_definitions_contains_line_forward_slash() {
 }
 
 #[test]
-fn test_search_definitions_contains_line_backslash() {
+fn test_xray_definitions_contains_line_backslash() {
     // T77: containsLine with backslash file filter should also work
     let ctx = make_ctx_with_backslash_paths();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": r"src\Services\UserService",
         "containsLine": 15
     }));
@@ -1070,10 +1070,10 @@ fn test_search_definitions_contains_line_backslash() {
 }
 
 #[test]
-fn test_search_definitions_contains_line_mixed_separators() {
+fn test_xray_definitions_contains_line_mixed_separators() {
     // T77: containsLine with mixed separators should work
     let ctx = make_ctx_with_backslash_paths();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": r"src/Services\UserService",
         "containsLine": 15
     }));
@@ -1083,13 +1083,13 @@ fn test_search_definitions_contains_line_mixed_separators() {
     assert!(!defs.is_empty(), "containsLine with mixed separators should find definitions");
 }
 #[test]
-fn test_search_definitions_comma_separated_name_filter() {
+fn test_xray_definitions_comma_separated_name_filter() {
     // Analytics Test 1.5: Comma-separated name OR lookup.
     // name="ClassA,ClassB,ClassC" should return results from all matching names.
     let ctx = make_ctx_with_defs();
 
     // Search for multiple names at once: ResilientClient,QueryService,ProxyClient
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "ResilientClient,QueryService,ProxyClient",
         "kind": "class"
     }));
@@ -1114,11 +1114,11 @@ fn test_search_definitions_comma_separated_name_filter() {
 }
 
 #[test]
-fn test_search_definitions_comma_separated_name_partial_match() {
+fn test_xray_definitions_comma_separated_name_partial_match() {
     // Analytics Test 1.5 variant: some terms match, some don't.
     let ctx = make_ctx_with_defs();
 
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "ResilientClient,NonExistentClass123,QueryService",
         "kind": "class"
     }));
@@ -1135,12 +1135,12 @@ fn test_search_definitions_comma_separated_name_partial_match() {
 }
 
 #[test]
-fn test_search_definitions_case_insensitive_name() {
+fn test_xray_definitions_case_insensitive_name() {
     // Analytics Test 42.4: Wrong casing (lowercase input).
     // name="resilientclient" should find "ResilientClient" (case-insensitive).
     let ctx = make_ctx_with_defs();
 
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "resilientclient",
         "kind": "class"
     }));
@@ -1154,11 +1154,11 @@ fn test_search_definitions_case_insensitive_name() {
 }
 
 #[test]
-fn test_search_definitions_case_insensitive_name_mixed() {
+fn test_xray_definitions_case_insensitive_name_mixed() {
     // Variant: mixed case input like "QUERYSERVICE" should find "QueryService"
     let ctx = make_ctx_with_defs();
 
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "QUERYSERVICE",
         "kind": "class"
     }));
@@ -1178,7 +1178,7 @@ fn test_contains_line_outside_any_definition() {
     // Line 301 is past the end of the class — outside any definition.
     let ctx = make_ctx_with_defs();
 
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "ResilientClient",
         "containsLine": 301
     }));
@@ -1195,7 +1195,7 @@ fn test_contains_line_inside_class_but_outside_method() {
     // Should return only the class, not a method.
     let ctx = make_ctx_with_defs();
 
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "ResilientClient",
         "containsLine": 270
     }));
@@ -1215,12 +1215,12 @@ fn test_contains_line_inside_class_but_outside_method() {
 }
 
 #[test]
-fn test_search_definitions_empty_intersection_all_valid_params() {
+fn test_xray_definitions_empty_intersection_all_valid_params() {
     // Analytics Test 10.1: All valid parameters but targeting non-existent
     // combinations should return 0 results without crash.
     let ctx = make_ctx_with_defs();
 
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "ExecuteQueryAsync",
         "kind": "method",
         "file": "NonExistentPath",
@@ -1234,7 +1234,7 @@ fn test_search_definitions_empty_intersection_all_valid_params() {
 }
 
 #[test]
-fn test_search_definitions_sort_by_cognitive_complexity() {
+fn test_xray_definitions_sort_by_cognitive_complexity() {
     // Analytics Test 8.1: sortBy="cognitiveComplexity" returns results
     // sorted by complexity descending.
     // We need to set up code_stats in the definition index.
@@ -1308,7 +1308,7 @@ fn test_search_definitions_sort_by_cognitive_complexity() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "sortBy": "cognitiveComplexity",
         "kind": "method",
         "maxResults": 3

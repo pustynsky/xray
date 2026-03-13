@@ -7,17 +7,17 @@
 ```mermaid
 graph TB
     subgraph CLI["CLI Layer (clap)"]
-        FIND[search-index find]
-        INDEX[search-index index]
-        FAST[search-index fast]
-        CIDX[search-index content-index]
-        GREP[search-index grep]
-        DIDX[search-index def-index]
-        SERVE[search-index serve]
-        INFO[search-index info]
-        DAUD[search-index def-audit]
-        CLEAN[search-index cleanup]
-        TIPS[search-index tips]
+        FIND[xray find]
+        INDEX[xray index]
+        FAST[xray fast]
+        CIDX[xray content-index]
+        GREP[xray grep]
+        DIDX[xray def-index]
+        SERVE[xray serve]
+        INFO[xray info]
+        DAUD[xray def-audit]
+        CLEAN[xray cleanup]
+        TIPS[xray tips]
     end
 
     subgraph Core["Core Engine"]
@@ -43,7 +43,7 @@ graph TB
     end
 
     subgraph Storage["Persistent Storage"]
-        DISK["%LOCALAPPDATA%/search-index/"]
+        DISK["%LOCALAPPDATA%/xray/"]
     end
 
     FIND --> WALK
@@ -211,7 +211,7 @@ pub struct CodeStats {
 
 **Language-agnostic walker** — `CodeStatsConfig` struct defines which AST node names correspond to branching, case, return, etc. for each language. Currently configured for C#, TypeScript/TSX, and Rust.
 
-**Query API** (via `search_definitions`):
+**Query API** (via `xray_definitions`):
 
 - `sortBy` — sort results by any metric descending (e.g., `sortBy='cognitiveComplexity'` for worst methods first)
 - `minComplexity`, `minCognitive`, `minNesting`, `minParams`, `minReturns`, `minCalls` — filter thresholds (combine with AND)
@@ -335,12 +335,12 @@ Arc<RwLock<Option<GitHistoryCache>>>
 
 | Tool | Cache | CLI fallback | Notes |
 |---|---|---|---|
-| `search_git_history` | ✅ | git log -- file | Cache response includes `"(from cache)"` hint |
-| `search_git_authors` | ✅ | git log -- file | Aggregation by author |
-| `search_git_activity` | ✅ | git log --name-only | Path prefix matching |
-| `search_git_diff` | ❌ Always CLI | git diff | Diff data too large to cache |
-| `search_git_blame` | ❌ Always CLI | git blame | Blame data not cached |
-| `search_branch_status` | ❌ Always CLI | git status / rev-list | Branch metadata, not file-specific |
+| `xray_git_history` | ✅ | git log -- file | Cache response includes `"(from cache)"` hint |
+| `xray_git_authors` | ✅ | git log -- file | Aggregation by author |
+| `xray_git_activity` | ✅ | git log --name-only | Path prefix matching |
+| `xray_git_diff` | ❌ Always CLI | git diff | Diff data too large to cache |
+| `xray_git_blame` | ❌ Always CLI | git blame | Blame data not cached |
+| `xray_branch_status` | ❌ Always CLI | git status / rev-list | Branch metadata, not file-specific |
 
 **Module:** [`src/git/cache.rs`](../src/git/cache.rs) — self-contained, zero imports from `index.rs`, `definitions/`, or `mcp/`. Depends only on `std`, `serde`, `bincode`, `lz4_flex`.
 
@@ -361,7 +361,7 @@ sequenceDiagram
     Agent->>Server: tools/list
     Server->>Agent: 15 tool definitions
 
-    Agent->>Server: tools/call search_grep
+    Agent->>Server: tools/call xray_grep
     Server->>Index: HashMap lookup + TF-IDF (~0.6ms measured)
     Index->>Server: Postings + TF-IDF scores
     Server->>Agent: JSON results
@@ -374,26 +374,26 @@ sequenceDiagram
 
 | # | Tool | Index/Source | Purpose |
 |---|------|-------------|---------|
-| 1 | `search_grep` | ContentIndex | Full-text search with TF-IDF, substring, phrase, regex |
-| 2 | `search_find` | Filesystem walk | Live file search (slow, fallback) |
-| 3 | `search_fast` | FileIndex | Pre-built file name search (~35ms) |
-| 4 | `search_definitions` | DefinitionIndex | Structural code search (classes, methods, etc.) |
-| 5 | `search_callers` | DefinitionIndex + ContentIndex | Call tree analysis (up/down), DI-aware |
-| 6 | `search_info` | All | Index status, sizes, age |
-| 7 | `search_help` | — | Best practices guide for LLM agents |
-| 8 | `search_reindex` | ContentIndex | Force rebuild content index |
-| 9 | `search_reindex_definitions` | DefinitionIndex | Force rebuild definition index |
-| 10 | `search_git_history` | GitHistoryCache / CLI | Commit history for a file |
-| 11 | `search_git_diff` | CLI only | Commit history with full diff/patch |
-| 12 | `search_git_authors` | GitHistoryCache / CLI | Top contributors for file/directory |
-| 13 | `search_git_activity` | GitHistoryCache / CLI | All changed files in a date range |
-| 14 | `search_git_blame` | CLI only | Per-line author/date/commit |
-| 15 | `search_branch_status` | CLI only | Current branch, ahead/behind, dirty files, fetch age |
+| 1 | `xray_grep` | ContentIndex | Full-text search with TF-IDF, substring, phrase, regex |
+| 2 | `xray_find` | Filesystem walk | Live file search (slow, fallback) |
+| 3 | `xray_fast` | FileIndex | Pre-built file name search (~35ms) |
+| 4 | `xray_definitions` | DefinitionIndex | Structural code search (classes, methods, etc.) |
+| 5 | `xray_callers` | DefinitionIndex + ContentIndex | Call tree analysis (up/down), DI-aware |
+| 6 | `xray_info` | All | Index status, sizes, age |
+| 7 | `xray_help` | — | Best practices guide for LLM agents |
+| 8 | `xray_reindex` | ContentIndex | Force rebuild content index |
+| 9 | `xray_reindex_definitions` | DefinitionIndex | Force rebuild definition index |
+| 10 | `xray_git_history` | GitHistoryCache / CLI | Commit history for a file |
+| 11 | `xray_git_diff` | CLI only | Commit history with full diff/patch |
+| 12 | `xray_git_authors` | GitHistoryCache / CLI | Top contributors for file/directory |
+| 13 | `xray_git_activity` | GitHistoryCache / CLI | All changed files in a date range |
+| 14 | `xray_git_blame` | CLI only | Per-line author/date/commit |
+| 15 | `xray_branch_status` | CLI only | Current branch, ahead/behind, dirty files, fetch age |
 
 **Design decisions:**
 
 - **Stdio transport** — no HTTP overhead, direct pipe from VS Code process manager
-- **Async startup** — event loop starts immediately with empty indexes; pre-built indexes load synchronously from disk (< 3s), otherwise build in background threads. `AtomicBool` flags (`content_ready`, `def_ready`) gate search tools — they return "index is building" until ready. `initialize`, `tools/list`, `search_help`, `search_info`, and `search_find` work immediately.
+- **Async startup** — event loop starts immediately with empty indexes; pre-built indexes load synchronously from disk (< 3s), otherwise build in background threads. `AtomicBool` flags (`content_ready`, `def_ready`) gate search tools — they return "index is building" until ready. `initialize`, `tools/list`, `xray_help`, `xray_info`, and `xray_find` work immediately.
 - **Single-threaded event loop** — JSON-RPC is sequential; index reads use `RwLock` for watcher concurrency
 - **Indexes held in `Arc<RwLock<T>>`** — watcher thread writes, server thread reads; background build thread writes once at completion
 - **All logging to stderr** — stdout is exclusively for JSON-RPC protocol messages
@@ -474,7 +474,7 @@ Multi-term: scores are summed across matching terms. Files matching more terms r
 
 ### Relevance Ranking
 
-Results from `search_definitions`, `search_fast`, and `search_grep` (phrase mode) are sorted by relevance using a multi-key tiered sort algorithm. This ensures that exact matches appear first, followed by prefix matches, then substring/contains matches — critical for AI agents that rely on the first 5–10 results.
+Results from `xray_definitions`, `xray_fast`, and `xray_grep` (phrase mode) are sorted by relevance using a multi-key tiered sort algorithm. This ensures that exact matches appear first, followed by prefix matches, then substring/contains matches — critical for AI agents that rely on the first 5–10 results.
 
 #### Algorithm: `best_match_tier()`
 
@@ -490,7 +490,7 @@ For comma-separated multi-term queries, the **best** (lowest) tier across all te
 
 #### Sort Keys by Tool
 
-**`search_definitions`** (when `name` filter is active, non-regex):
+**`xray_definitions`** (when `name` filter is active, non-regex):
 
 ```
 1. Match tier:   exact(0) > prefix(1) > contains(2)
@@ -499,7 +499,7 @@ For comma-separated multi-term queries, the **best** (lowest) tier across all te
 4. Alphabetical: deterministic tiebreaker
 ```
 
-**`search_fast`** (file name search):
+**`xray_fast`** (file name search):
 
 ```
 1. Match tier:   exact(0) > prefix(1) > contains(2)  — by filename stem (no extension)
@@ -507,9 +507,9 @@ For comma-separated multi-term queries, the **best** (lowest) tier across all te
 3. Full path:    alphabetical tiebreaker
 ```
 
-**`search_grep` phrase mode**: sorted by occurrence count (descending).
+**`xray_grep` phrase mode**: sorted by occurrence count (descending).
 
-**Not ranked**: `search_grep` token/substring mode (uses TF-IDF), `search_find` (filesystem walk order), regex mode in `search_definitions` (no "exact match" semantics).
+**Not ranked**: `xray_grep` token/substring mode (uses TF-IDF), `xray_find` (filesystem walk order), regex mode in `xray_definitions` (no "exact match" semantics).
 
 #### Design Decisions
 
@@ -519,7 +519,7 @@ For comma-separated multi-term queries, the **best** (lowest) tier across all te
 
 See [TODO-relevance-ranking.md](TODO-relevance-ranking.md) for the full design rationale and comparison of alternatives.
 
-### Call Tree Pipeline (search_callers)
+### Call Tree Pipeline (xray_callers)
 
 **Direction "up" (find callers):**
 ```mermaid
@@ -547,13 +547,13 @@ Direction "down" uses the pre-computed call graph — zero runtime file I/O. Cal
 
 **Advanced features:**
 
-- **`includeBody`** — returns source code of each method in the call tree inline, plus a `rootMethod` object with the searched method's own body. Eliminates separate `search_definitions` calls.
+- **`includeBody`** — returns source code of each method in the call tree inline, plus a `rootMethod` object with the searched method's own body. Eliminates separate `xray_definitions` calls.
 - **`includeDocComments`** — expands body upward to include doc-comments (`///` in C#/Rust, `/** */` JSDoc in TypeScript). Implies `includeBody=true`.
 - **`impactAnalysis`** — when `direction='up'`, identifies test methods in the caller chain. Test methods (detected via `[Test]`/`[Fact]`/`[Theory]`/`[TestMethod]`/`#[test]` attributes or `*.spec.ts`/`*.test.ts` file patterns) are marked with `isTest=true` and collected in a `testsCovering` array with full file path, depth, and call chain. Recursion stops at test methods.
 
 #### Caller Tree Verification
 
-The `search_callers` tool builds call trees by tracing method invocations through AST-parsed call-site data. Key design points:
+The `xray_callers` tool builds call trees by tracing method invocations through AST-parsed call-site data. Key design points:
 
 - **Call-site verification is mandatory** — methods without parsed call-site data are filtered out (no false-positive fallback)
 - **Expression body properties supported** — C# expression body properties (`public string Name => _service.GetName();`) have their call sites extracted and verified
@@ -571,11 +571,11 @@ The `search_callers` tool builds call trees by tracing method invocations throug
 Angular `@Component` class definitions are automatically enriched with template metadata during definition indexing:
 
 - **What it does** — extracts `selector` and `templateUrl` from the `@Component()` decorator, reads the paired `.html` file, and scans for custom elements (tags with hyphens) used in the template
-- **`search_definitions`** — Angular components include `selector` (e.g., `"app-user-profile"`) and `templateChildren` (list of child component selectors found in the HTML)
-- **Component tree navigation via `search_callers`**:
+- **`xray_definitions`** — Angular components include `selector` (e.g., `"app-user-profile"`) and `templateChildren` (list of child component selectors found in the HTML)
+- **Component tree navigation via `xray_callers`**:
   - `direction='down'` with a component class name → shows child components from the HTML template (recursive with `depth`)
   - `direction='up'` with a selector (e.g., `"app-footer"`) → finds parent components that use it in their templates
-- **HTML content search** — add `html` to `--ext` / `ext` parameter for `search_grep` to search HTML template content
+- **HTML content search** — add `html` to `--ext` / `ext` parameter for `xray_grep` to search HTML template content
 
 **Limitations:** Only external templates (`templateUrl`), not inline `template:`. Only tags with hyphens (custom elements per HTML spec). `ng-*` tags are excluded (Angular built-ins). Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
 
@@ -587,12 +587,12 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
-| `search-index content-index -d DIR -e EXT` | Full parallel walk + tokenization | ContentIndex (`.word-search`) | ~7–16s |
-| `search-index def-index -d DIR -e EXT` | Full parallel walk + tree-sitter parse | DefinitionIndex (`.code-structure`) | ~16–32s |
-| `search-index index -d DIR` | Full parallel walk | FileIndex (`.file-list`) | ~2–4s |
+| `xray content-index -d DIR -e EXT` | Full parallel walk + tokenization | ContentIndex (`.word-search`) | ~7–16s |
+| `xray def-index -d DIR -e EXT` | Full parallel walk + tree-sitter parse | DefinitionIndex (`.code-structure`) | ~16–32s |
+| `xray index -d DIR` | Full parallel walk | FileIndex (`.file-list`) | ~2–4s |
 | MCP server first start (no index on disk) | Background thread builds indexes; tools return "index is building" until ready | ContentIndex + DefinitionIndex (if `--definitions`) | Same as above |
-| `search_reindex` (MCP tool) | Full rebuild + reload in-memory | ContentIndex | ~7–16s |
-| `search_reindex_definitions` (MCP tool) | Full rebuild + reload in-memory | DefinitionIndex | ~16–32s |
+| `xray_reindex` (MCP tool) | Full rebuild + reload in-memory | ContentIndex | ~7–16s |
+| `xray_reindex_definitions` (MCP tool) | Full rebuild + reload in-memory | DefinitionIndex | ~16–32s |
 
 ### Incremental Update (Watcher)
 
@@ -606,24 +606,24 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
-| Substring search after file watcher update | `trigram_dirty` flag → trigram index rebuilt from inverted index on next `search_grep` with `substring=true` | TrigramIndex (in-memory, part of ContentIndex) | ~200ms |
-| `search-index fast` with stale FileIndex | Auto-rebuild if `--auto-reindex true` (default) | FileIndex | ~2–4s |
-| `search-index grep` with stale ContentIndex | Auto-rebuild if `--auto-reindex true` (default) | ContentIndex | ~7–16s |
+| Substring search after file watcher update | `trigram_dirty` flag → trigram index rebuilt from inverted index on next `xray_grep` with `substring=true` | TrigramIndex (in-memory, part of ContentIndex) | ~200ms |
+| `xray fast` with stale FileIndex | Auto-rebuild if `--auto-reindex true` (default) | FileIndex | ~2–4s |
+| `xray grep` with stale ContentIndex | Auto-rebuild if `--auto-reindex true` (default) | ContentIndex | ~7–16s |
 
 ### Load From Disk (No Rebuild)
 
 | Trigger | What Happens | Time |
 |---------|-------------|------|
 | MCP server start (index exists on disk) | Synchronous load of LZ4-compressed bincode files | < 3s |
-| `search-index grep` / `search-index fast` (index exists, not stale) | Load from disk | < 3s |
+| `xray grep` / `xray fast` (index exists, not stale) | Load from disk | < 3s |
 
 ### What Does NOT Trigger Re-indexing
 
 | Scenario | Why |
 |----------|-----|
-| Upgrading `search-index.exe` binary (runtime logic changes only) | Index format unchanged → existing `.word-search` / `.code-structure` files are fully compatible |
-| Upgrading `search-index.exe` binary (parser changes — new definition types, new call site patterns) | Old index loads fine but may have stale/incomplete data → **manual `search_reindex_definitions`** recommended |
-| Upgrading `search-index.exe` binary (index format changes — e.g., new field added to struct) | Bincode deserialization fails → index is rebuilt automatically on next server start |
+| Upgrading `xray.exe` binary (runtime logic changes only) | Index format unchanged → existing `.word-search` / `.code-structure` files are fully compatible |
+| Upgrading `xray.exe` binary (parser changes — new definition types, new call site patterns) | Old index loads fine but may have stale/incomplete data → **manual `xray_reindex_definitions`** recommended |
+| Upgrading `xray.exe` binary (index format changes — e.g., new field added to struct) | Bincode deserialization fails → index is rebuilt automatically on next server start |
 | Restarting VS Code / MCP server | Index loads from disk (if saved); no rebuild |
 | Opening a different VS Code workspace | Each workspace has its own MCP server instance with its own index |
 
@@ -646,7 +646,7 @@ src/
 ├── index_tests.rs            # Unit tests for index build/load/save
 ├── error.rs                  # SearchError enum (thiserror) — unified error type
 ├── error_tests.rs            # Error handling tests
-├── tips.rs                   # Best-practices guide text for search_help / CLI tips
+├── tips.rs                   # Best-practices guide text for xray_help / CLI tips
 ├── tips_tests.rs             # Tests for tips content and tool definition token budget
 │
 ├── git/                      # Git history: CLI tools + in-memory cache
@@ -694,11 +694,11 @@ src/
     ├── watcher_tests.rs      # Watcher integration tests
     └── handlers/             # Tool implementations (one file per tool group)
         ├── mod.rs            # tool_definitions() + dispatch_tool() + reindex handlers
-        ├── grep.rs           # handle_search_grep + phrase/substring helpers
-        ├── find.rs           # handle_search_find
-        ├── fast.rs           # handle_search_fast
-        ├── definitions.rs    # handle_search_definitions + body/doccomment injection + audit
-        ├── callers.rs        # handle_search_callers + caller/callee tree builders + impactAnalysis
+        ├── grep.rs           # handle_xray_grep + phrase/substring helpers
+        ├── find.rs           # handle_xray_find
+        ├── fast.rs           # handle_xray_fast
+        ├── definitions.rs    # handle_xray_definitions + body/doccomment injection + audit
+        ├── callers.rs        # handle_xray_callers + caller/callee tree builders + impactAnalysis
         ├── git.rs            # Git history MCP handlers (history/diff/authors/activity/blame/branch_status)
         ├── utils.rs          # validate_search_dir, sorted_intersect, metrics helpers,
         │                       response size truncation, body injection utilities
@@ -730,8 +730,8 @@ The engine has two layers with **different language coverage**:
 
 | Layer | Tools | Language Support | How it works |
 | ----- | ----- | ---------------- | ------------ |
-| **Content search** | `search-index grep`, `content-index`, `search_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
-| **AST / structural search** | `search-index def-index`, `search_definitions`, `search_callers` (MCP) | **C#, TypeScript/TSX, and Rust** (tree-sitter), **SQL** (regex) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. SQL uses a regex-based parser. Each language parser is optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-sql`, `lang-rust`). |
+| **Content search** | `xray grep`, `content-index`, `xray_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
+| **AST / structural search** | `xray def-index`, `xray_definitions`, `xray_callers` (MCP) | **C#, TypeScript/TSX, and Rust** (tree-sitter), **SQL** (regex) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. SQL uses a regex-based parser. Each language parser is optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-sql`, `lang-rust`). |
 
 ### AST Parser Status
 
@@ -743,4 +743,4 @@ The engine has two layers with **different language coverage**:
 | SQL (.sql)        | regex-based (no tree-sitter) | stored procedure, table, view, function, user-defined type, column, index                                  | ✅ Active |
 | Rust (.rs)        | tree-sitter-rust             | struct, enum, trait (→Interface), method (impl block), constructor (new/default), function, field, enum variant, const/static (→Variable), type alias | ✅ Active (optional: `--features lang-rust`) |
 
-> **Key takeaway:** You can use `content-index` / `search_grep` on **any** codebase regardless of language. Only `def-index` / `search_definitions` / `search_callers` require a supported parser (currently C#, TypeScript/TSX, Rust via tree-sitter; SQL via regex). Each parser is an optional Cargo feature — build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-rust` for Rust, etc.
+> **Key takeaway:** You can use `content-index` / `xray_grep` on **any** codebase regardless of language. Only `def-index` / `xray_definitions` / `xray_callers` require a supported parser (currently C#, TypeScript/TSX, Rust via tree-sitter; SQL via regex). Each parser is an optional Cargo feature — build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-rust` for Rust, etc.

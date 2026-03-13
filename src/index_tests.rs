@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::io::Write;
-use search_index::Posting;
+use code_xray::Posting;
 use crate::index::build_trigram_index;
 
 #[test]
@@ -281,7 +281,7 @@ fn test_force_mimalloc_collect_does_not_panic() {
 
 #[test]
 fn test_content_index_meta_no_errors() {
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: ".".to_string(),
         files: vec!["file.cs".to_string()],
         extensions: vec!["cs".to_string()],
@@ -299,7 +299,7 @@ fn test_content_index_meta_no_errors() {
 
 #[test]
 fn test_content_index_meta_with_errors() {
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: ".".to_string(),
         files: vec!["file.cs".to_string()],
         extensions: vec!["cs".to_string()],
@@ -319,7 +319,7 @@ fn test_content_index_meta_with_errors() {
 
 #[test]
 fn test_estimate_content_index_memory_empty() {
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: ".".to_string(),
         ..Default::default()
     };
@@ -343,7 +343,7 @@ fn test_estimate_content_index_memory_nonempty() {
         Posting { file_id: 0, lines: vec![2] },
     ]);
 
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: ".".to_string(),
         files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
         index,
@@ -404,9 +404,9 @@ fn test_find_content_index_skips_stale_extensions() {
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
     // Save a content index with only "cs" extension
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: root_str.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["cs".to_string()],
         ..Default::default()
@@ -430,9 +430,9 @@ fn test_find_content_index_accepts_superset() {
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
     // Save a content index with "cs,sql,md" extensions
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: root_str.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["cs".to_string(), "sql".to_string(), "md".to_string()],
         ..Default::default()
@@ -455,9 +455,9 @@ fn test_find_content_index_empty_expected_accepts_any() {
     std::fs::create_dir_all(&root_dir).unwrap();
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: root_str.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["cs".to_string()],
         ..Default::default()
@@ -603,8 +603,8 @@ fn test_compressed_file_smaller_than_uncompressed() {
 #[test]
 fn test_content_index_format_version_correct_loads_ok() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut idx = search_index::ContentIndex::default();
-    idx.format_version = search_index::CONTENT_INDEX_VERSION;
+    let mut idx = code_xray::ContentIndex::default();
+    idx.format_version = code_xray::CONTENT_INDEX_VERSION;
     idx.root = tmp.path().to_string_lossy().to_string();
     idx.extensions = vec!["rs".to_string()];
 
@@ -616,13 +616,13 @@ fn test_content_index_format_version_correct_loads_ok() {
 
     let result = crate::index::load_content_index(&idx.root, "rs", tmp.path());
     assert!(result.is_ok(), "Loading content index with correct version should succeed");
-    assert_eq!(result.unwrap().format_version, search_index::CONTENT_INDEX_VERSION);
+    assert_eq!(result.unwrap().format_version, code_xray::CONTENT_INDEX_VERSION);
 }
 
 #[test]
 fn test_content_index_format_version_mismatch_returns_err() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut idx = search_index::ContentIndex::default();
+    let mut idx = code_xray::ContentIndex::default();
     idx.format_version = 999; // wrong version
     idx.root = tmp.path().to_string_lossy().to_string();
     idx.extensions = vec!["rs".to_string()];
@@ -641,7 +641,7 @@ fn test_content_index_format_version_mismatch_returns_err() {
 #[test]
 fn test_content_index_format_version_legacy_zero_returns_err() {
     let tmp = tempfile::tempdir().unwrap();
-    let mut idx = search_index::ContentIndex::default();
+    let mut idx = code_xray::ContentIndex::default();
     idx.format_version = 0; // legacy index without version
     idx.root = tmp.path().to_string_lossy().to_string();
     idx.extensions = vec!["rs".to_string()];
@@ -669,7 +669,7 @@ fn test_build_content_index_sets_format_version() {
         min_token_len: 2,
     });
     assert!(result.is_ok());
-    assert_eq!(result.unwrap().format_version, search_index::CONTENT_INDEX_VERSION,
+    assert_eq!(result.unwrap().format_version, code_xray::CONTENT_INDEX_VERSION,
         "build_content_index should set format_version to CONTENT_INDEX_VERSION");
 }
 
@@ -686,7 +686,7 @@ fn test_content_index_old_format_without_version_field_does_not_crash() {
         created_at: u64,
         max_age_secs: u64,
         files: Vec<String>,
-        index: std::collections::HashMap<String, Vec<search_index::Posting>>,
+        index: std::collections::HashMap<String, Vec<code_xray::Posting>>,
         total_tokens: u64,
         extensions: Vec<String>,
         file_token_counts: Vec<u32>,
@@ -709,14 +709,14 @@ fn test_content_index_old_format_without_version_field_does_not_crash() {
     crate::index::save_compressed(&path, &old_idx, "test").unwrap();
 
     // Try loading as new ContentIndex — should return Err, NOT crash/abort
-    let result = crate::index::load_compressed::<search_index::ContentIndex>(&path, "test");
+    let result = crate::index::load_compressed::<code_xray::ContentIndex>(&path, "test");
     // We don't care whether it returns Ok (with garbled data) or Err —
     // the key assertion is that we REACH this line without crashing.
     // If the deserialization attempted a multi-TB allocation, the process would abort
     // before reaching this assert.
     if let Ok(idx) = &result {
         // If it somehow deserialized, the version should be garbage (not 1)
-        assert_ne!(idx.format_version, search_index::CONTENT_INDEX_VERSION,
+        assert_ne!(idx.format_version, code_xray::CONTENT_INDEX_VERSION,
             "Old format should not accidentally produce correct version");
     }
     // If Err — that's the expected, correct outcome
@@ -1025,9 +1025,9 @@ fn test_find_content_index_uses_meta_to_skip_non_matching_root() {
     let root_b = crate::clean_path(&dir_b.to_string_lossy());
 
     // Save content index for project_a
-    let idx_a = search_index::ContentIndex {
+    let idx_a = code_xray::ContentIndex {
         root: root_a.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -1058,9 +1058,9 @@ fn test_find_content_index_works_without_meta_sidecar() {
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
     // Save content index (creates both .word-search and .word-search.meta)
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: root_str.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string(), "md".to_string()],
         ..Default::default()
@@ -1092,9 +1092,9 @@ fn test_find_content_index_meta_rejects_extension_mismatch() {
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
     // Save content index with only "rs" extension
-    let idx = search_index::ContentIndex {
+    let idx = code_xray::ContentIndex {
         root: root_str.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -1121,9 +1121,9 @@ fn test_cleanup_stale_same_root_removes_old_index() {
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
     // Save content index with "rs" extension
-    let idx1 = search_index::ContentIndex {
+    let idx1 = code_xray::ContentIndex {
         root: root_str.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -1140,9 +1140,9 @@ fn test_cleanup_stale_same_root_removes_old_index() {
     assert_eq!(count_ws(), 1, "Should have 1 content index after first save");
 
     // Save content index with "rs,md" extensions (different hash)
-    let idx2 = search_index::ContentIndex {
+    let idx2 = code_xray::ContentIndex {
         root: root_str.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string(), "md".to_string()],
         ..Default::default()
@@ -1177,9 +1177,9 @@ fn test_cleanup_stale_same_root_does_not_clean_other_roots() {
     let root_b = crate::clean_path(&dir_b.to_string_lossy());
 
     // Save content index for project_a with "rs"
-    let idx_a = search_index::ContentIndex {
+    let idx_a = code_xray::ContentIndex {
         root: root_a.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -1187,9 +1187,9 @@ fn test_cleanup_stale_same_root_does_not_clean_other_roots() {
     crate::save_content_index(&idx_a, index_base).unwrap();
 
     // Save content index for project_b with "rs"
-    let idx_b = search_index::ContentIndex {
+    let idx_b = code_xray::ContentIndex {
         root: root_b.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string()],
         ..Default::default()
@@ -1205,9 +1205,9 @@ fn test_cleanup_stale_same_root_does_not_clean_other_roots() {
     assert_eq!(count_ws(), 2, "Should have 2 content indexes (one per project)");
 
     // Save new content index for project_a with "rs,md"
-    let idx_a2 = search_index::ContentIndex {
+    let idx_a2 = code_xray::ContentIndex {
         root: root_a.clone(),
-        format_version: search_index::CONTENT_INDEX_VERSION,
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         max_age_secs: 86400,
         extensions: vec!["rs".to_string(), "md".to_string()],
         ..Default::default()

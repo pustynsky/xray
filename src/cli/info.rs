@@ -31,7 +31,7 @@ fn age_hours(created_at: u64) -> f64 {
 pub fn cmd_info() {
     let dir = index_dir();
     if !dir.exists() {
-        eprintln!("No indexes found. Use 'search-index index -d <dir>' to create one.");
+        eprintln!("No indexes found. Use 'xray index -d <dir>' to create one.");
         return;
     }
 

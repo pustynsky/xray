@@ -10,19 +10,19 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-// ─── search_callers tests ────────────────────────────────────────────
+// ─── xray_callers tests ────────────────────────────────────────────
 #[test]
-fn test_search_callers_missing_method() {
+fn test_xray_callers_missing_method() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("Missing required parameter: method"));
 }
 
 #[test]
-fn test_search_callers_finds_callers() {
+fn test_xray_callers_finds_callers() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ExecuteQueryAsync",
         "depth": 2
     }));
@@ -35,9 +35,9 @@ fn test_search_callers_finds_callers() {
 }
 
 #[test]
-fn test_search_callers_nonexistent_method() {
+fn test_xray_callers_nonexistent_method() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "NonExistentMethodXYZ"
     }));
     assert!(!result.is_error);
@@ -47,9 +47,9 @@ fn test_search_callers_nonexistent_method() {
 }
 
 #[test]
-fn test_search_callers_max_total_nodes() {
+fn test_xray_callers_max_total_nodes() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ExecuteQueryAsync",
         "depth": 5,
         "maxTotalNodes": 2
@@ -61,9 +61,9 @@ fn test_search_callers_max_total_nodes() {
 }
 
 #[test]
-fn test_search_callers_max_per_level() {
+fn test_xray_callers_max_per_level() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ExecuteQueryAsync",
         "depth": 1,
         "maxCallersPerLevel": 1
@@ -75,9 +75,9 @@ fn test_search_callers_max_per_level() {
 }
 
 #[test]
-fn test_search_callers_has_class_and_file() {
+fn test_xray_callers_has_class_and_file() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ExecuteQueryAsync",
         "depth": 1
     }));
@@ -92,7 +92,7 @@ fn test_search_callers_has_class_and_file() {
 }
 
 #[test]
-fn test_search_callers_field_prefix_m_underscore() {
+fn test_xray_callers_field_prefix_m_underscore() {
     let mut content_idx = HashMap::new();
     content_idx.insert("submitasync".to_string(), vec![
         Posting { file_id: 0, lines: vec![45] },
@@ -186,12 +186,12 @@ fn test_search_callers_field_prefix_m_underscore() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "SubmitAsync",
         "class": "OrderProcessor",
         "depth": 1
     }));
-    assert!(!result.is_error, "search_callers should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_callers should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let tree = output["callTree"].as_array().unwrap();
     assert!(!tree.is_empty(),
@@ -202,7 +202,7 @@ fn test_search_callers_field_prefix_m_underscore() {
 }
 
 #[test]
-fn test_search_callers_field_prefix_underscore() {
+fn test_xray_callers_field_prefix_underscore() {
     let mut content_idx = HashMap::new();
     content_idx.insert("getuserasync".to_string(), vec![
         Posting { file_id: 0, lines: vec![15] },
@@ -287,7 +287,7 @@ fn test_search_callers_field_prefix_underscore() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "GetUserAsync",
         "class": "UserService",
         "depth": 1
@@ -301,9 +301,9 @@ fn test_search_callers_field_prefix_underscore() {
 }
 
 #[test]
-fn test_search_callers_no_trigram_no_regression() {
+fn test_xray_callers_no_trigram_no_regression() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ExecuteQueryAsync",
         "class": "ResilientClient",
         "depth": 1
@@ -314,7 +314,7 @@ fn test_search_callers_no_trigram_no_regression() {
 }
 
 #[test]
-fn test_search_callers_multi_ext_filter() {
+fn test_xray_callers_multi_ext_filter() {
     let ctx = make_ctx_with_defs();
     let multi_ext_ctx = HandlerContext {
         index: ctx.index.clone(),
@@ -324,7 +324,7 @@ fn test_search_callers_multi_ext_filter() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&multi_ext_ctx, "search_callers", &json!({
+    let result = dispatch_tool(&multi_ext_ctx, "xray_callers", &json!({
         "method": "ExecuteQueryAsync",
         "depth": 1
     }));
@@ -435,10 +435,10 @@ fn test_resolve_call_site_with_class_scope() {
     }));
 }
 
-// ─── search_callers "down" direction + class filter tests ────────────
+// ─── xray_callers "down" direction + class filter tests ────────────
 
 #[test]
-fn test_search_callers_down_class_filter() {
+fn test_xray_callers_down_class_filter() {
     let definitions = vec![
         DefinitionEntry { file_id: 0, name: "IndexSearchService".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 900, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
         DefinitionEntry { file_id: 0, name: "SearchInternalAsync".to_string(), kind: DefinitionKind::Method, line_start: 766, line_end: 833, parent: Some("IndexSearchService".to_string()), signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
@@ -487,7 +487,7 @@ fn test_search_callers_down_class_filter() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "SearchInternalAsync", "class": "IndexSearchService", "direction": "down", "depth": 1 }));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({ "method": "SearchInternalAsync", "class": "IndexSearchService", "direction": "down", "depth": 1 }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let tree = output["callTree"].as_array().unwrap();
@@ -495,7 +495,7 @@ fn test_search_callers_down_class_filter() {
     assert!(callee_names.contains(&"ShouldIssueVectorSearch"));
     assert!(!callee_names.contains(&"TraceInformation"));
 
-    let result2 = dispatch_tool(&ctx, "search_callers", &json!({ "method": "SearchInternalAsync", "class": "IndexedSearchQueryExecuter", "direction": "down", "depth": 1 }));
+    let result2 = dispatch_tool(&ctx, "xray_callers", &json!({ "method": "SearchInternalAsync", "class": "IndexedSearchQueryExecuter", "direction": "down", "depth": 1 }));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     let tree2 = output2["callTree"].as_array().unwrap();
@@ -503,7 +503,7 @@ fn test_search_callers_down_class_filter() {
     assert!(callee_names2.contains(&"TraceInformation"));
     assert!(!callee_names2.contains(&"ShouldIssueVectorSearch"));
 
-    let result3 = dispatch_tool(&ctx, "search_callers", &json!({ "method": "SearchInternalAsync", "direction": "down", "depth": 1 }));
+    let result3 = dispatch_tool(&ctx, "xray_callers", &json!({ "method": "SearchInternalAsync", "direction": "down", "depth": 1 }));
     assert!(!result3.is_error);
     let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
     let tree3 = output3["callTree"].as_array().unwrap();
@@ -514,7 +514,7 @@ fn test_search_callers_down_class_filter() {
 }
 
 #[test]
-fn test_search_callers_ambiguity_warning_truncated() {
+fn test_xray_callers_ambiguity_warning_truncated() {
     // Create 15 classes each with a method named "OnInit" — exceeds MAX_LISTED (10)
     let num_classes = 15;
     let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
@@ -588,7 +588,7 @@ fn test_search_callers_ambiguity_warning_truncated() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "OnInit" }));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({ "method": "OnInit" }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let warning = output["warning"].as_str().expect("should have warning");
@@ -601,7 +601,7 @@ fn test_search_callers_ambiguity_warning_truncated() {
     assert!(warning.len() < 500, "Warning should be truncated, but was {} bytes", warning.len());
 }
 #[test]
-fn test_search_callers_ambiguity_warning_few_classes() {
+fn test_xray_callers_ambiguity_warning_few_classes() {
     // Create 3 classes each with a method named "Initialize" — within MAX_LISTED (10)
     // When called without `class` param, should get a warning listing ALL 3 classes.
     let num_classes = 3;
@@ -673,7 +673,7 @@ fn test_search_callers_ambiguity_warning_few_classes() {
     };
 
     // No `class` param → should produce a warning listing all 3 classes
-    let result = dispatch_tool(&ctx, "search_callers", &json!({ "method": "Initialize" }));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({ "method": "Initialize" }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let warning = output["warning"].as_str().expect("should have warning when method is in multiple classes");
@@ -691,7 +691,7 @@ fn test_search_callers_ambiguity_warning_few_classes() {
 }
 
 #[test]
-fn test_search_callers_no_ambiguity_warning_with_class_param() {
+fn test_xray_callers_no_ambiguity_warning_with_class_param() {
     // Same setup as above (3 classes with "Initialize") but WITH `class` param → no warning.
     let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
     let mut files: Vec<String> = Vec::new();
@@ -764,7 +764,7 @@ fn test_search_callers_no_ambiguity_warning_with_class_param() {
     };
 
     // WITH `class` param → should NOT produce a warning
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "Initialize",
         "class": "AlphaService"
     }));
@@ -776,10 +776,10 @@ fn test_search_callers_no_ambiguity_warning_with_class_param() {
 }
 
 #[test]
-fn test_search_callers_no_ambiguity_warning_single_class() {
+fn test_xray_callers_no_ambiguity_warning_single_class() {
     // Method exists in only 1 class → no warning even without `class` param.
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "QueryInternalAsync"
     }));
     assert!(!result.is_error);
@@ -791,7 +791,7 @@ fn test_search_callers_no_ambiguity_warning_single_class() {
 
 
 #[test]
-fn test_search_callers_exclude_dir_and_file() {
+fn test_xray_callers_exclude_dir_and_file() {
     // Set up: MethodA is defined in ServiceA (dir: src\services)
     // MethodA is called from ControllerB (dir: src\controllers) and from TestC (dir: src\tests)
     let mut content_idx = HashMap::new();
@@ -890,7 +890,7 @@ fn test_search_callers_exclude_dir_and_file() {
     };
 
     // Test excludeDir: exclude "tests" directory
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "MethodA",
         "class": "ServiceA",
         "depth": 1,
@@ -908,7 +908,7 @@ fn test_search_callers_exclude_dir_and_file() {
     }
 
     // Test excludeFile: exclude "TestC" file pattern
-    let result2 = dispatch_tool(&ctx, "search_callers", &json!({
+    let result2 = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "MethodA",
         "class": "ServiceA",
         "depth": 1,
@@ -926,7 +926,7 @@ fn test_search_callers_exclude_dir_and_file() {
 }
 
 #[test]
-fn test_search_callers_cycle_detection_down() {
+fn test_xray_callers_cycle_detection_down() {
     // Set up: MethodA (in ClassA) calls MethodB (in ClassB),
     // and MethodB calls MethodA back — creating a cycle.
     let definitions = vec![
@@ -1008,7 +1008,7 @@ fn test_search_callers_cycle_detection_down() {
     };
 
     // direction=down with depth=5 — cycle should be stopped by visited set
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "MethodA",
         "class": "ClassA",
         "direction": "down",
@@ -1033,9 +1033,9 @@ fn test_search_callers_cycle_detection_down() {
     }
 }
 #[test]
-fn test_search_callers_cycle_detection() {
+fn test_xray_callers_cycle_detection() {
     // Regression test: A recursive call graph (A calls B, B calls A) must NOT
-    // cause infinite recursion in `search_callers` direction="up".
+    // cause infinite recursion in `xray_callers` direction="up".
     //
     // Setup:
     //   ServiceA.MethodA() calls ServiceB.MethodB()
@@ -1149,7 +1149,7 @@ fn test_search_callers_cycle_detection() {
     };
 
     // direction=up (default) with depth=5 — cycle should be stopped by visited set
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "MethodA",
         "class": "ServiceA",
         "depth": 5,
@@ -1182,7 +1182,7 @@ fn test_search_callers_cycle_detection() {
 }
 
 #[test]
-fn test_search_callers_ext_filter_comma_split() {
+fn test_xray_callers_ext_filter_comma_split() {
     // Setup: DataService.cs defines ProcessData; callers exist in both .cs and .txt files.
     // The ext parameter should filter caller files by extension.
     let mut content_idx = HashMap::new();
@@ -1305,13 +1305,13 @@ fn test_search_callers_ext_filter_comma_split() {
     };
 
     // ── Case 1: ext="cs" → only .cs callers ──────────────────────────
-    let result_cs = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_cs = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ProcessData",
         "class": "DataService",
         "depth": 1,
         "ext": "cs"
     }));
-    assert!(!result_cs.is_error, "search_callers ext=cs should not error: {}", result_cs.content[0].text);
+    assert!(!result_cs.is_error, "xray_callers ext=cs should not error: {}", result_cs.content[0].text);
     let output_cs: Value = serde_json::from_str(&result_cs.content[0].text).unwrap();
     let tree_cs = output_cs["callTree"].as_array().unwrap();
     assert!(!tree_cs.is_empty(), "ext=cs should find at least one caller from .cs files");
@@ -1325,13 +1325,13 @@ fn test_search_callers_ext_filter_comma_split() {
     assert!(!has_txt, "ext=cs should NOT include .txt callers");
 
     // ── Case 2: ext="cs,txt" → callers from both extensions ─────────
-    let result_both = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_both = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ProcessData",
         "class": "DataService",
         "depth": 1,
         "ext": "cs,txt"
     }));
-    assert!(!result_both.is_error, "search_callers ext=cs,txt should not error: {}", result_both.content[0].text);
+    assert!(!result_both.is_error, "xray_callers ext=cs,txt should not error: {}", result_both.content[0].text);
     let output_both: Value = serde_json::from_str(&result_both.content[0].text).unwrap();
     let tree_both = output_both["callTree"].as_array().unwrap();
 
@@ -1347,7 +1347,7 @@ fn test_search_callers_ext_filter_comma_split() {
 // ─── Overload dedup tests ────────────────────────────────────────────
 
 #[test]
-fn test_search_callers_overloads_not_collapsed_up() {
+fn test_xray_callers_overloads_not_collapsed_up() {
     // Two overloads of Process (same class, different lines) both call Validate.
     // Both should appear as callers (direction=up) — they must NOT be collapsed.
     let mut content_idx = HashMap::new();
@@ -1452,12 +1452,12 @@ fn test_search_callers_overloads_not_collapsed_up() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "Validate",
         "class": "Validator",
         "depth": 1
     }));
-    assert!(!result.is_error, "search_callers should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_callers should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let tree = output["callTree"].as_array().unwrap();
 
@@ -1479,7 +1479,7 @@ fn test_search_callers_overloads_not_collapsed_up() {
 }
 
 #[test]
-fn test_search_callers_overloads_not_collapsed_down() {
+fn test_xray_callers_overloads_not_collapsed_down() {
     // A method (RunAll) calls two overloads of Execute in the same class.
     // Direction=down: both Execute overloads should appear as callees.
     let definitions = vec![
@@ -1570,13 +1570,13 @@ fn test_search_callers_overloads_not_collapsed_down() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "RunAll",
         "class": "Orchestrator",
         "direction": "down",
         "depth": 1
     }));
-    assert!(!result.is_error, "search_callers down should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_callers down should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let tree = output["callTree"].as_array().unwrap();
 
@@ -1600,7 +1600,7 @@ fn test_search_callers_overloads_not_collapsed_down() {
 // ─── SAME_NAME_DIFFERENT_RECEIVER: interface resolution scoping ──────
 
 #[test]
-fn test_search_callers_same_name_different_receiver_interface_resolution() {
+fn test_xray_callers_same_name_different_receiver_interface_resolution() {
     // Regression test: When two UNRELATED interfaces both define the same method
     // name (e.g. Execute()), searching for callers of ServiceA.Execute() should
     // NOT find callers that use IServiceB.Execute() — even though the interface
@@ -1784,12 +1784,12 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
     };
 
     // ── Test 1: callers of ServiceA.Execute() should NOT find Consumer.DoWork()
-    let result_a = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_a = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "Execute",
         "class": "ServiceA",
         "depth": 2
     }));
-    assert!(!result_a.is_error, "search_callers for ServiceA.Execute should not error: {}", result_a.content[0].text);
+    assert!(!result_a.is_error, "xray_callers for ServiceA.Execute should not error: {}", result_a.content[0].text);
     let output_a: Value = serde_json::from_str(&result_a.content[0].text).unwrap();
     let tree_a = output_a["callTree"].as_array().unwrap();
 
@@ -1802,12 +1802,12 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
         serde_json::to_string_pretty(&tree_a).unwrap());
 
     // ── Test 2: callers of ServiceB.Execute() SHOULD find Consumer.DoWork()
-    let result_b = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_b = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "Execute",
         "class": "ServiceB",
         "depth": 2
     }));
-    assert!(!result_b.is_error, "search_callers for ServiceB.Execute should not error: {}", result_b.content[0].text);
+    assert!(!result_b.is_error, "xray_callers for ServiceB.Execute should not error: {}", result_b.content[0].text);
     let output_b: Value = serde_json::from_str(&result_b.content[0].text).unwrap();
     let tree_b = output_b["callTree"].as_array().unwrap();
 
@@ -1824,10 +1824,10 @@ fn test_search_callers_same_name_different_receiver_interface_resolution() {
 // ─── includeBody tests (require real files on disk) ──────────────────
 
 #[test]
-fn test_search_callers_include_body_default_false() {
+fn test_xray_callers_include_body_default_false() {
     // Default (no includeBody) should NOT have body fields in nodes
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ExecuteQueryAsync",
         "depth": 1
     }));
@@ -1844,10 +1844,10 @@ fn test_search_callers_include_body_default_false() {
 }
 
 #[test]
-fn test_search_callers_include_body_false_explicit() {
+fn test_xray_callers_include_body_false_explicit() {
     // Explicit includeBody=false should NOT have body fields
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ExecuteQueryAsync",
         "depth": 1,
         "includeBody": false
@@ -1864,7 +1864,7 @@ fn test_search_callers_include_body_false_explicit() {
 /// Helper: create a temp directory with real .cs files and set up indexes for includeBody tests.
 /// Returns (HandlerContext, TempDir path).
 fn make_callers_body_ctx() -> (HandlerContext, std::path::PathBuf) {
-    let tmp = std::env::temp_dir().join(format!("search_callers_body_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let tmp = std::env::temp_dir().join(format!("xray_callers_body_{}_{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("Failed to create temp dir for callers body test");
 
@@ -2002,10 +2002,10 @@ fn cleanup_callers_body_ctx(tmp: &std::path::Path) {
 }
 
 #[test]
-fn test_search_callers_include_body_up() {
+fn test_xray_callers_include_body_up() {
     let (ctx, tmp) = make_callers_body_ctx();
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "SubmitOrder",
         "class": "OrderService",
         "depth": 1,
@@ -2036,10 +2036,10 @@ fn test_search_callers_include_body_up() {
 }
 
 #[test]
-fn test_search_callers_include_body_down() {
+fn test_xray_callers_include_body_down() {
     let (ctx, tmp) = make_callers_body_ctx();
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ProcessOrder",
         "class": "OrderController",
         "direction": "down",
@@ -2063,10 +2063,10 @@ fn test_search_callers_include_body_down() {
 }
 
 #[test]
-fn test_search_callers_include_body_max_body_lines() {
+fn test_xray_callers_include_body_max_body_lines() {
     let (ctx, tmp) = make_callers_body_ctx();
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "SubmitOrder",
         "class": "OrderService",
         "depth": 1,
@@ -2092,11 +2092,11 @@ fn test_search_callers_include_body_max_body_lines() {
 }
 
 #[test]
-fn test_search_callers_include_body_max_total_body_lines() {
+fn test_xray_callers_include_body_max_total_body_lines() {
     let (ctx, tmp) = make_callers_body_ctx();
 
     // Set maxTotalBodyLines=1 — after the first node's body, the budget should be exhausted
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "SubmitOrder",
         "class": "OrderService",
         "depth": 1,
@@ -2122,7 +2122,7 @@ fn test_search_callers_include_body_max_total_body_lines() {
 }
 
 #[test]
-fn test_search_callers_include_body_nonexistent_file() {
+fn test_xray_callers_include_body_nonexistent_file() {
     // When file doesn't exist on disk, body should have bodyError
     let mut content_idx = HashMap::new();
     content_idx.insert("dowork".to_string(), vec![
@@ -2209,7 +2209,7 @@ fn test_search_callers_include_body_nonexistent_file() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "DoWork",
         "class": "Worker",
         "depth": 1,
@@ -2243,7 +2243,7 @@ fn test_include_body_response_budget_64kb() {
     };
 
     // Without includeBody: effective_max should be 16KB (default)
-    let result_no_body = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_no_body = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "NonExistent"
     }));
     // The error result won't be truncated, but the dispatch logic was exercised
@@ -2251,7 +2251,7 @@ fn test_include_body_response_budget_64kb() {
     // With includeBody=true: effective_max should be 64KB
     // We can't directly observe the effective_max, but we verify the feature
     // compiles and runs without error
-    let result_with_body = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_with_body = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "NonExistent",
         "includeBody": true
     }));
@@ -2262,11 +2262,11 @@ fn test_include_body_response_budget_64kb() {
 
 
 #[test]
-fn test_search_callers_include_body_has_root_method() {
+fn test_xray_callers_include_body_has_root_method() {
     // When includeBody=true, the response should include rootMethod with body of the searched method
     let (ctx, tmp) = make_callers_body_ctx();
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "SubmitOrder",
         "class": "OrderService",
         "depth": 1,
@@ -2288,7 +2288,7 @@ fn test_search_callers_include_body_has_root_method() {
     assert!(root["bodyStartLine"].as_u64().is_some(), "rootMethod should have bodyStartLine");
 
     // rootMethod should NOT appear when includeBody=false
-    let result2 = dispatch_tool(&ctx, "search_callers", &json!({
+    let result2 = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "SubmitOrder",
         "class": "OrderService",
         "depth": 1
@@ -2301,11 +2301,11 @@ fn test_search_callers_include_body_has_root_method() {
 }
 
 #[test]
-fn test_search_callers_include_body_root_method_down() {
+fn test_xray_callers_include_body_root_method_down() {
     // rootMethod should also work for direction=down
     let (ctx, tmp) = make_callers_body_ctx();
 
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "ProcessOrder",
         "class": "OrderController",
         "direction": "down",
@@ -2324,12 +2324,12 @@ fn test_search_callers_include_body_root_method_down() {
 }
 
 #[test]
-fn test_search_callers_root_method_body_line_range() {
+fn test_xray_callers_root_method_body_line_range() {
     // bodyLineStart/bodyLineEnd should filter rootMethod body to the specified line range
     let (ctx, tmp) = make_callers_body_ctx();
 
     // First, get the full rootMethod body to know the line numbers
-    let result_full = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_full = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "SubmitOrder",
         "class": "OrderService",
         "depth": 1,
@@ -2346,7 +2346,7 @@ fn test_search_callers_root_method_body_line_range() {
     // Now request only 2 lines from the middle of the body
     let target_start = full_start + 2; // skip first 2 lines
     let target_end = full_start + 3;   // take 2 lines
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "SubmitOrder",
         "class": "OrderService",
         "depth": 1,

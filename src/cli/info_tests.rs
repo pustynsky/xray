@@ -29,7 +29,7 @@ src/lib.rs
 
 #[test]
 fn test_info_json_includes_git_history() {
-    let tmp = std::env::temp_dir().join(format!("search_info_test_{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("xray_info_test_{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
 
     let _cache_path = create_test_git_history_cache(&tmp);
@@ -60,7 +60,7 @@ fn test_info_json_includes_git_history() {
 
 #[test]
 fn test_info_json_empty_dir_no_git_history() {
-    let tmp = std::env::temp_dir().join(format!("search_info_empty_test_{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("xray_info_empty_test_{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
 
     let result = cmd_info_json_for_dir(&tmp);
@@ -76,7 +76,7 @@ fn test_info_json_empty_dir_no_git_history() {
 
 #[test]
 fn test_info_json_nonexistent_dir() {
-    let nonexistent = std::path::Path::new("/nonexistent_search_info_test_dir_12345");
+    let nonexistent = std::path::Path::new("/nonexistent_xray_info_test_dir_12345");
     let result = cmd_info_json_for_dir(nonexistent);
     let indexes = result["indexes"].as_array().expect("indexes should be an array");
     assert!(indexes.is_empty());
@@ -84,7 +84,7 @@ fn test_info_json_nonexistent_dir() {
 
 #[test]
 fn test_info_json_git_history_corrupt_file_skipped() {
-    let tmp = std::env::temp_dir().join(format!("search_info_corrupt_test_{}", std::process::id()));
+    let tmp = std::env::temp_dir().join(format!("xray_info_corrupt_test_{}", std::process::id()));
     std::fs::create_dir_all(&tmp).unwrap();
 
     // Write a corrupt .git-history file

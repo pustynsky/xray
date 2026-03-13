@@ -1,4 +1,4 @@
-//! search_grep handler: token search, substring search, phrase search.
+//! xray_grep handler: token search, substring search, phrase search.
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -9,7 +9,7 @@ use tracing::debug;
 use crate::mcp::protocol::ToolCallResult;
 use crate::{read_file_lossy, tokenize, ContentIndex};
 use crate::index::build_trigram_index;
-use search_index::generate_trigrams;
+use code_xray::generate_trigrams;
 
 use super::utils::{
     build_line_content_from_matches, inject_branch_warning, is_under_dir, json_to_string,
@@ -204,9 +204,9 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
                             .map(|f| f.to_string_lossy().to_string())
                             .unwrap_or_default();
                         return Err(ToolCallResult::error(format!(
-                            "dir='{}' is a file path, not a directory. search_grep dir= accepts directories only. \
+                            "dir='{}' is a file path, not a directory. xray_grep dir= accepts directories only. \
                              Try: dir='{}' to search the parent directory, \
-                             or use search_definitions file='{}' for AST-based search in a specific file.",
+                             or use xray_definitions file='{}' for AST-based search in a specific file.",
                             dir, parent, filename
                         )));
                     }
@@ -449,7 +449,7 @@ fn inject_grep_ext_hint(
 }
 
 
-pub(crate) fn handle_search_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let parsed = match parse_grep_args(args, &ctx.server_dir) {
         Ok(p) => p,
         Err(e) => return e,

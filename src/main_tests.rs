@@ -683,7 +683,7 @@
     // ─────────────────────────────────────────────────────────────────
 
     #[test]
-    fn test_phrase_search_finds_exact_phrase() {
+    fn test_phrase_xray_finds_exact_phrase() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
 

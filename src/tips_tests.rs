@@ -56,19 +56,19 @@ fn test_render_json_has_strategy_recipes() {
 fn test_render_instructions_contains_key_terms() {
     let text = render_instructions(crate::definitions::definition_extensions());
     // Core tools mentioned (via TASK ROUTING table)
-    assert!(text.contains("search_fast"), "instructions should mention search_fast");
-    assert!(text.contains("search_callers"), "instructions should mention search_callers");
-    assert!(text.contains("search_definitions"), "instructions should mention search_definitions");
-    assert!(text.contains("search_grep"), "instructions should mention search_grep");
-    assert!(text.contains("search_edit"), "instructions should mention search_edit");
+    assert!(text.contains("xray_fast"), "instructions should mention xray_fast");
+    assert!(text.contains("xray_callers"), "instructions should mention xray_callers");
+    assert!(text.contains("xray_definitions"), "instructions should mention xray_definitions");
+    assert!(text.contains("xray_grep"), "instructions should mention xray_grep");
+    assert!(text.contains("xray_edit"), "instructions should mention xray_edit");
     // TASK ROUTING table present
     assert!(text.contains("TASK ROUTING"), "instructions should have TASK ROUTING table");
     assert!(text.contains("check BEFORE using any built-in tool"), "TASK ROUTING should have routing directive");
     // Key features mentioned in strategy recipes / DECISION TRIGGERs
     assert!(text.contains("includeBody"), "instructions should mention includeBody");
-    // search_help reference (soft, not urgent)
-    assert!(text.contains("search_help"), "instructions should mention search_help");
-    assert!(!text.contains("IMPORTANT: Call search_help first"), "instructions should NOT have urgent search_help prompt");
+    // xray_help reference (soft, not urgent)
+    assert!(text.contains("xray_help"), "instructions should mention xray_help");
+    assert!(!text.contains("IMPORTANT: Call xray_help first"), "instructions should NOT have urgent xray_help prompt");
     // Strategy recipes and query budget
     assert!(text.contains("STRATEGY RECIPES"), "instructions should include strategy recipes");
     assert!(text.contains("Architecture Exploration"), "instructions should include arch exploration recipe");
@@ -104,7 +104,7 @@ fn test_render_instructions_contains_key_terms() {
     // Removed sections should NOT be present
     assert!(!text.contains("Quick Reference"), "instructions should NOT have Quick Reference (replaced by TASK ROUTING)");
     assert!(!text.contains("TOOL PRIORITY"), "instructions should NOT have TOOL PRIORITY (replaced by TASK ROUTING)");
-    assert!(!text.contains("CRITICAL: ALWAYS use search-index tools"), "instructions should NOT have old CRITICAL block");
+    assert!(!text.contains("CRITICAL: ALWAYS use xray tools"), "instructions should NOT have old CRITICAL block");
     assert!(!text.contains("BATCH SPLIT"), "instructions should NOT have BATCH SPLIT (removed)");
     assert!(!text.contains("TRAP"), "instructions should NOT have TRAP (removed)");
     // Fallback rule
@@ -138,15 +138,15 @@ fn test_render_json_has_parameter_examples() {
     let examples = &json["parameterExamples"];
     assert!(examples.is_object(), "parameterExamples should be an object");
     // Key tools should have examples
-    assert!(examples["search_definitions"].is_object(), "search_definitions should have examples");
-    assert!(examples["search_grep"].is_object(), "search_grep should have examples");
-    assert!(examples["search_callers"].is_object(), "search_callers should have examples");
-    assert!(examples["search_fast"].is_object(), "search_fast should have examples");
+    assert!(examples["xray_definitions"].is_object(), "xray_definitions should have examples");
+    assert!(examples["xray_grep"].is_object(), "xray_grep should have examples");
+    assert!(examples["xray_callers"].is_object(), "xray_callers should have examples");
+    assert!(examples["xray_fast"].is_object(), "xray_fast should have examples");
     // Spot-check a few specific examples
-    assert!(examples["search_definitions"]["name"].is_string(), "name should have example");
-    assert!(examples["search_definitions"]["containsLine"].is_string(), "containsLine should have example");
-    assert!(examples["search_grep"]["terms"].is_string(), "terms should have example");
-    assert!(examples["search_callers"]["class"].is_string(), "class should have example");
+    assert!(examples["xray_definitions"]["name"].is_string(), "name should have example");
+    assert!(examples["xray_definitions"]["containsLine"].is_string(), "containsLine should have example");
+    assert!(examples["xray_grep"]["terms"].is_string(), "terms should have example");
+    assert!(examples["xray_callers"]["class"].is_string(), "class should have example");
 }
 
 /// Verify tool definitions stay within a reasonable token budget.
@@ -164,13 +164,13 @@ fn test_tool_definitions_token_budget() {
     assert!(
         approx_tokens < 5500,
         "Tool definitions exceed token budget: ~{} tokens ({} words). \
-         Target: <5500. Shorten parameter descriptions or move examples to search_help.",
+         Target: <5500. Shorten parameter descriptions or move examples to xray_help.",
         approx_tokens, word_count
     );
 }
 
 /// Empty def_extensions: NEVER READ block should be skipped,
-/// fallback note about search_definitions unavailability should appear.
+/// fallback note about xray_definitions unavailability should appear.
 /// TASK ROUTING should contain only universal tools.
 #[test]
 fn test_render_instructions_empty_extensions() {
@@ -185,13 +185,13 @@ fn test_render_instructions_empty_extensions() {
     assert_eq!(dt_count, 4,
         "Empty def_extensions should have 4 DECISION TRIGGERs (critical override + editing + search_files + zero-result hints), not {} (reading trigger should be absent)", dt_count);
     // Should contain fallback note
-    assert!(text.contains("search_definitions is not available"),
-        "Empty def_extensions should have fallback note about search_definitions");
+    assert!(text.contains("xray_definitions is not available"),
+        "Empty def_extensions should have fallback note about xray_definitions");
     // TASK ROUTING should be present but WITHOUT definition-dependent tools
     assert!(text.contains("TASK ROUTING"), "should have TASK ROUTING even with empty extensions");
-    assert!(text.contains("search_grep"), "should still mention search_grep");
-    assert!(text.contains("search_fast"), "should still mention search_fast");
-    assert!(text.contains("search_edit"), "should still mention search_edit");
+    assert!(text.contains("xray_grep"), "should still mention xray_grep");
+    assert!(text.contains("xray_fast"), "should still mention xray_fast");
+    assert!(text.contains("xray_edit"), "should still mention xray_edit");
     assert!(!text.contains("Read/explore source code"),
         "should NOT have definition-dependent task routing when def_extensions is empty");
     assert!(!text.contains("Find callers"),
@@ -262,10 +262,10 @@ fn test_task_routing_without_definitions() {
     assert!(!text.contains("Find callers or callees"), "should NOT have callers routing");
     assert!(!text.contains("Code complexity"), "should NOT have code health routing");
     // Universal routes always present
-    assert!(text.contains("search_grep"), "should mention search_grep");
-    assert!(text.contains("search_fast"), "should mention search_fast");
-    assert!(text.contains("search_edit"), "should mention search_edit");
-    assert!(text.contains("search_git_blame"), "should mention git tools");
+    assert!(text.contains("xray_grep"), "should mention xray_grep");
+    assert!(text.contains("xray_fast"), "should mention xray_fast");
+    assert!(text.contains("xray_edit"), "should mention xray_edit");
+    assert!(text.contains("xray_git_blame"), "should mention git tools");
     assert!(text.contains("List files or subdirectories"), "should have directory listing route even without defs");
 }
 
@@ -273,9 +273,9 @@ fn test_task_routing_without_definitions() {
 fn test_task_routing_always_has_universal_tools() {
     for exts in [&[][..], &["cs"], &["cs", "ts", "rs"]] {
         let text = render_instructions(exts);
-        assert!(text.contains("search_grep"), "search_grep should always be in routing (exts: {:?})", exts);
-        assert!(text.contains("search_fast"), "search_fast should always be in routing (exts: {:?})", exts);
-        assert!(text.contains("search_edit"), "search_edit should always be in routing (exts: {:?})", exts);
+        assert!(text.contains("xray_grep"), "xray_grep should always be in routing (exts: {:?})", exts);
+        assert!(text.contains("xray_fast"), "xray_fast should always be in routing (exts: {:?})", exts);
+        assert!(text.contains("xray_edit"), "xray_edit should always be in routing (exts: {:?})", exts);
     }
 }
 
@@ -299,17 +299,17 @@ fn test_routing_tool_names_exist_in_definitions() {
     }
 }
 
-/// search_edit description must START with "ALWAYS USE THIS" override.
+/// xray_edit description must START with "ALWAYS USE THIS" override.
 /// This is the strongest lever for preventing LLM fallback to apply_diff.
 #[test]
-fn test_search_edit_description_starts_with_override() {
+fn test_xray_edit_description_starts_with_override() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&vec!["rs".to_string()]);
-    let edit_tool = tools.iter().find(|t| t.name == "search_edit")
-        .expect("search_edit tool not found");
+    let edit_tool = tools.iter().find(|t| t.name == "xray_edit")
+        .expect("xray_edit tool not found");
     assert!(
         edit_tool.description.starts_with("ALWAYS USE THIS instead of apply_diff"),
-        "search_edit description must start with 'ALWAYS USE THIS instead of apply_diff' override. \
+        "xray_edit description must start with 'ALWAYS USE THIS instead of apply_diff' override. \
          Current start: '{}'",
         &edit_tool.description[..80.min(edit_tool.description.len())]
     );
@@ -320,7 +320,7 @@ fn test_search_edit_description_starts_with_override() {
 fn test_routing_critical_tools_have_hints() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&vec!["cs".to_string(), "ts".to_string(), "tsx".to_string()]);
-    let routing_critical = ["search_definitions", "search_grep", "search_fast", "search_edit"];
+    let routing_critical = ["xray_definitions", "xray_grep", "xray_fast", "xray_edit"];
     for tool_name in routing_critical {
         let tool = tools.iter().find(|t| t.name == tool_name)
             .unwrap_or_else(|| panic!("tool '{}' not found", tool_name));
@@ -338,7 +338,7 @@ fn test_routing_critical_tools_have_hints() {
 fn test_instructions_fallback_rule() {
     let text = render_instructions(&["cs"]);
     assert!(text.contains("uncertain"), "instructions should contain uncertainty fallback");
-    assert!(text.contains("search_info"), "fallback should mention search_info");
+    assert!(text.contains("xray_info"), "fallback should mention xray_info");
     assert!(text.contains("Do not default to raw file reading"), "fallback should discourage raw reads");
 }
 
@@ -364,11 +364,11 @@ fn test_instructions_token_budget() {
 #[test]
 fn test_instructions_no_redundant_sections() {
     let text = render_instructions(&["cs", "ts"]);
-    assert!(text.contains("=== SEARCH_INDEX_POLICY ==="), "Instructions should include named policy wrapper");
+    assert!(text.contains("=== XRAY_POLICY ==="), "Instructions should include named policy wrapper");
     assert!(text.contains("================================"), "Instructions should include policy closing marker");
     assert!(!text.contains("Quick Reference"), "Quick Reference should be removed (replaced by TASK ROUTING)");
     assert!(!text.contains("TOOL PRIORITY"), "TOOL PRIORITY should be removed (replaced by TASK ROUTING)");
-    assert!(!text.contains("CRITICAL: ALWAYS use search-index tools"), "Old CRITICAL block should be removed");
+    assert!(!text.contains("CRITICAL: ALWAYS use xray tools"), "Old CRITICAL block should be removed");
 }
 
 
@@ -507,37 +507,37 @@ fn test_format_supported_languages_duplicate_ext() {
 fn test_tool_definitions_rust_only() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&vec!["rs".to_string()]);
-    let def_tool = tools.iter().find(|t| t.name == "search_definitions").unwrap();
+    let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("Rust"),
-        "search_definitions description should contain 'Rust' when ext=rs. Got: {}", def_tool.description);
+        "xray_definitions description should contain 'Rust' when ext=rs. Got: {}", def_tool.description);
     assert!(!def_tool.description.contains("C#"),
-        "search_definitions should NOT contain 'C#' when only rs is configured");
+        "xray_definitions should NOT contain 'C#' when only rs is configured");
 
-    let callers_tool = tools.iter().find(|t| t.name == "search_callers").unwrap();
+    let callers_tool = tools.iter().find(|t| t.name == "xray_callers").unwrap();
     assert!(callers_tool.description.contains("Rust"),
-        "search_callers description should contain 'Rust'");
+        "xray_callers description should contain 'Rust'");
 }
 
 #[test]
 fn test_tool_definitions_empty_extensions() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&vec![]);
-    let def_tool = tools.iter().find(|t| t.name == "search_definitions").unwrap();
+    let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("not available"),
-        "search_definitions should say 'not available' when no extensions");
+        "xray_definitions should say 'not available' when no extensions");
 
-    let callers_tool = tools.iter().find(|t| t.name == "search_callers").unwrap();
+    let callers_tool = tools.iter().find(|t| t.name == "xray_callers").unwrap();
     assert!(callers_tool.description.contains("not available"),
-        "search_callers should say 'not available' when no extensions");
+        "xray_callers should say 'not available' when no extensions");
 }
 
 #[test]
 fn test_tool_definitions_cs_ts_tsx() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&vec!["cs".to_string(), "ts".to_string(), "tsx".to_string()]);
-    let def_tool = tools.iter().find(|t| t.name == "search_definitions").unwrap();
+    let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("C# and TypeScript/TSX"),
-        "search_definitions should contain 'C# and TypeScript/TSX'. Got: {}", def_tool.description);
+        "xray_definitions should contain 'C# and TypeScript/TSX'. Got: {}", def_tool.description);
 }
 
 #[test]
@@ -545,8 +545,8 @@ fn test_render_instructions_example_line() {
     let text = render_instructions(&["rs"]);
     assert!(text.contains("EXAMPLE: instead of reading handler.rs directly"),
         "Instructions should contain EXAMPLE line for the configured extension");
-    assert!(text.contains("search_definitions file='handler.rs'"),
-        "EXAMPLE should show search_definitions with the correct extension");
+    assert!(text.contains("xray_definitions file='handler.rs'"),
+        "EXAMPLE should show xray_definitions with the correct extension");
 }
 
 #[test]
@@ -564,9 +564,9 @@ fn test_render_instructions_example_line_uses_first_ext() {
 fn test_tool_definitions_with_sql_only() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&vec!["sql".to_string()]);
-    let def_tool = tools.iter().find(|t| t.name == "search_definitions").unwrap();
+    let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("SQL (regex-based parser)"),
-        "search_definitions should contain 'SQL (regex-based parser)' for sql-only. Got: {}", def_tool.description);
+        "xray_definitions should contain 'SQL (regex-based parser)' for sql-only. Got: {}", def_tool.description);
     // Should NOT mention tree-sitter for SQL-only
     assert!(!def_tool.description.contains("C#"),
         "Should NOT mention C# for sql-only");
@@ -579,26 +579,26 @@ fn test_tool_definitions_cs_rs_sql() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&vec!["cs".to_string(), "rs".to_string(), "sql".to_string()]);
 
-    // search_definitions
-    let def_tool = tools.iter().find(|t| t.name == "search_definitions").unwrap();
+    // xray_definitions
+    let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("C# and Rust"),
-        "search_definitions should contain both tree-sitter languages");
+        "xray_definitions should contain both tree-sitter languages");
     assert!(def_tool.description.contains("SQL supported via regex parser"),
-        "search_definitions should mention SQL via regex parser");
+        "xray_definitions should mention SQL via regex parser");
 
-    // search_callers must mention the same languages
-    let callers_tool = tools.iter().find(|t| t.name == "search_callers").unwrap();
+    // xray_callers must mention the same languages
+    let callers_tool = tools.iter().find(|t| t.name == "xray_callers").unwrap();
     assert!(callers_tool.description.contains("C# and Rust"),
-        "search_callers should contain same tree-sitter languages as search_definitions");
+        "xray_callers should contain same tree-sitter languages as xray_definitions");
     assert!(callers_tool.description.contains("SQL supported via regex parser"),
-        "search_callers should mention SQL via regex parser");
+        "xray_callers should mention SQL via regex parser");
 
-    // search_reindex_definitions must also mention languages
-    let reindex_tool = tools.iter().find(|t| t.name == "search_reindex_definitions").unwrap();
+    // xray_reindex_definitions must also mention languages
+    let reindex_tool = tools.iter().find(|t| t.name == "xray_reindex_definitions").unwrap();
     assert!(reindex_tool.description.contains("C# and Rust"),
-        "search_reindex_definitions should contain tree-sitter languages");
+        "xray_reindex_definitions should contain tree-sitter languages");
     assert!(reindex_tool.description.contains("SQL supported via regex parser"),
-        "search_reindex_definitions should mention SQL via regex parser");
+        "xray_reindex_definitions should mention SQL via regex parser");
 }
 
 // ─── Tests for Hint E prompt changes (B + C) ────────────────────────
@@ -609,7 +609,7 @@ fn test_task_routing_has_non_code_files_entry() {
     let non_code = routings.iter().find(|r| r.task.contains("non-code"));
     assert!(non_code.is_some(), "task_routings should have entry for non-code files");
     let entry = non_code.unwrap();
-    assert_eq!(entry.tool, "search_grep", "non-code files should route to search_grep");
+    assert_eq!(entry.tool, "xray_grep", "non-code files should route to xray_grep");
     assert!(!entry.requires_definitions, "non-code files routing should not require definitions");
 }
 
@@ -625,19 +625,19 @@ fn test_instructions_non_code_routing_in_output() {
 #[test]
 fn test_instructions_anti_pattern_unsupported_defs() {
     let text = render_instructions(&["cs", "rs"]);
-    assert!(text.contains("NEVER use search_definitions for non-"),
+    assert!(text.contains("NEVER use xray_definitions for non-"),
         "Instructions should have anti-pattern for unsupported definition extensions. Got:\n{}", text);
     assert!(text.contains("XML"),
-        "Anti-pattern should mention XML as unsupported for search_definitions");
-    assert!(text.contains("search_grep instead"),
-        "Anti-pattern should suggest search_grep as alternative");
+        "Anti-pattern should mention XML as unsupported for xray_definitions");
+    assert!(text.contains("xray_grep instead"),
+        "Anti-pattern should suggest xray_grep as alternative");
 }
 
 #[test]
 fn test_instructions_anti_pattern_absent_without_defs() {
-    // When no def extensions, the anti-pattern about "NEVER use search_definitions for non-X" should not appear
+    // When no def extensions, the anti-pattern about "NEVER use xray_definitions for non-X" should not appear
     let text = render_instructions(&[]);
-    assert!(!text.contains("NEVER use search_definitions for non-"),
+    assert!(!text.contains("NEVER use xray_definitions for non-"),
         "Anti-pattern should NOT appear when def_extensions is empty");
 }
 
@@ -677,7 +677,7 @@ fn test_tips_no_hardcoded_language_lists() {
 fn test_tool_definitions_all_three_say_not_available_when_empty() {
     use crate::mcp::handlers::tool_definitions;
     let tools = tool_definitions(&vec![]);
-    for tool_name in ["search_definitions", "search_callers", "search_reindex_definitions"] {
+    for tool_name in ["xray_definitions", "xray_callers", "xray_reindex_definitions"] {
         let tool = tools.iter().find(|t| t.name == tool_name).unwrap();
         assert!(tool.description.contains("not available") || tool.description.contains("Not available"),
             "{} should say 'not available' when def_extensions is empty. Got: {}",
@@ -709,15 +709,15 @@ fn test_tool_definitions_reindex_defs_dynamic() {
     use crate::mcp::handlers::tool_definitions;
     // С расширениями — описание содержит языки
     let tools = tool_definitions(&vec!["rs".to_string()]);
-    let reindex = tools.iter().find(|t| t.name == "search_reindex_definitions").unwrap();
+    let reindex = tools.iter().find(|t| t.name == "xray_reindex_definitions").unwrap();
     assert!(reindex.description.contains("Rust"),
-        "search_reindex_definitions should mention 'Rust'. Got: {}", reindex.description);
+        "xray_reindex_definitions should mention 'Rust'. Got: {}", reindex.description);
     assert!(!reindex.description.contains("tree-sitter"),
-        "search_reindex_definitions should NOT hardcode 'tree-sitter'");
+        "xray_reindex_definitions should NOT hardcode 'tree-sitter'");
 
     // Без расширений — "not available"
     let tools_empty = tool_definitions(&vec![]);
-    let reindex_empty = tools_empty.iter().find(|t| t.name == "search_reindex_definitions").unwrap();
+    let reindex_empty = tools_empty.iter().find(|t| t.name == "xray_reindex_definitions").unwrap();
     assert!(reindex_empty.description.contains("not available"),
-        "search_reindex_definitions should say 'not available' when empty");
+        "xray_reindex_definitions should say 'not available' when empty");
 }

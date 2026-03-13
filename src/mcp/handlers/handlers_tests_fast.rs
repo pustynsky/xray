@@ -1,17 +1,17 @@
-//! Tests for search_fast -- extracted from handlers_tests.rs.
+//! Tests for xray_fast -- extracted from handlers_tests.rs.
 
 use super::*;
-use super::fast::handle_search_fast;
+use super::fast::handle_xray_fast;
 use super::handlers_test_utils::cleanup_tmp;
 use crate::ContentIndex;
 use std::sync::{Arc, RwLock};
-// --- search_fast comma-separated tests ---
+// --- xray_fast comma-separated tests ---
 
-fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
+fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_test_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_test_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
     for name in &["ModelSchemaStorage.cs", "ModelSchemaManager.cs", "ScannerJobState.cs", "WorkspaceInfoUtils.cs", "UserService.cs", "OtherFile.txt"] {
         let p = tmp_dir.join(name);
@@ -27,69 +27,69 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     (ctx, tmp_dir)
 }
 
-#[test] fn test_search_fast_single_pattern() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": "ModelSchemaStorage"}));
+#[test] fn test_xray_fast_single_pattern() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1);
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_fast_comma_separated_multi_term() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,ModelSchemaManager,ScannerJobState,WorkspaceInfoUtils"}));
+#[test] fn test_xray_fast_comma_separated_multi_term() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,ModelSchemaManager,ScannerJobState,WorkspaceInfoUtils"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 4);
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_fast_comma_separated_with_ext_filter() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,OtherFile", "ext": "cs"}));
+#[test] fn test_xray_fast_comma_separated_with_ext_filter() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,OtherFile", "ext": "cs"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1);
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_fast_comma_separated_no_matches() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": "NonExistentClass,AnotherMissing"}));
+#[test] fn test_xray_fast_comma_separated_no_matches() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "NonExistentClass,AnotherMissing"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 0);
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_fast_comma_separated_partial_matches() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,NonExistent,ScannerJobState"}));
+#[test] fn test_xray_fast_comma_separated_partial_matches() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,NonExistent,ScannerJobState"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_fast_comma_separated_with_spaces() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": " ModelSchemaStorage , ScannerJobState "}));
+#[test] fn test_xray_fast_comma_separated_with_spaces() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": " ModelSchemaStorage , ScannerJobState "}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_fast_comma_separated_count_only() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,ScannerJobState", "countOnly": true}));
+#[test] fn test_xray_fast_comma_separated_count_only() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,ScannerJobState", "countOnly": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     assert!(output["files"].as_array().unwrap().is_empty());
     cleanup_tmp(&tmp);
 }
 
-#[test] fn test_search_fast_comma_separated_ignore_case() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": "modelschemastorage,scannerjobstate", "ignoreCase": true}));
+#[test] fn test_xray_fast_comma_separated_ignore_case() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "modelschemastorage,scannerjobstate", "ignoreCase": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     cleanup_tmp(&tmp);
@@ -98,13 +98,13 @@ fn make_search_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 // Batch 2 tests — Strengthen Partial Coverage
 // ═══════════════════════════════════════════════════════════════════════
 
-/// T15 — search_fast dirsOnly and filesOnly filters.
+/// T15 — xray_fast dirsOnly and filesOnly filters.
 #[test]
-fn test_search_fast_dirs_only_and_files_only() {
+fn test_xray_fast_dirs_only_and_files_only() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_dironly_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_dironly_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let sub = tmp_dir.join("Models");
@@ -121,7 +121,7 @@ fn test_search_fast_dirs_only_and_files_only() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
-    let result_dirs = handle_search_fast(&ctx, &json!({"pattern": "Models", "dirsOnly": true}));
+    let result_dirs = handle_xray_fast(&ctx, &json!({"pattern": "Models", "dirsOnly": true}));
     assert!(!result_dirs.is_error, "dirsOnly should not error: {}", result_dirs.content[0].text);
     let output_dirs: Value = serde_json::from_str(&result_dirs.content[0].text).unwrap();
     let dir_files = output_dirs["files"].as_array().unwrap();
@@ -131,7 +131,7 @@ fn test_search_fast_dirs_only_and_files_only() {
     assert!(output_dirs["summary"]["totalMatches"].as_u64().unwrap() >= 1,
         "Should find at least one directory matching 'Models'");
 
-    let result_files = handle_search_fast(&ctx, &json!({"pattern": "Models", "filesOnly": true}));
+    let result_files = handle_xray_fast(&ctx, &json!({"pattern": "Models", "filesOnly": true}));
     assert!(!result_files.is_error);
     let output_files: Value = serde_json::from_str(&result_files.content[0].text).unwrap();
     let file_entries = output_files["files"].as_array().unwrap();
@@ -144,12 +144,12 @@ fn test_search_fast_dirs_only_and_files_only() {
     cleanup_tmp(&tmp_dir);
 }
 
-/// T16 — search_fast regex mode.
+/// T16 — xray_fast regex mode.
 #[test]
-fn test_search_fast_regex_mode() {
-    let (ctx, tmp) = make_search_fast_ctx();
+fn test_xray_fast_regex_mode() {
+    let (ctx, tmp) = make_xray_fast_ctx();
 
-    let result = handle_search_fast(&ctx, &json!({"pattern": ".*State\\.cs$", "regex": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ".*State\\.cs$", "regex": true}));
     assert!(!result.is_error, "regex search should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1,
@@ -158,7 +158,7 @@ fn test_search_fast_regex_mode() {
     assert!(files[0]["path"].as_str().unwrap().contains("ScannerJobState"),
         "Matched file should be ScannerJobState.cs");
 
-    let result2 = handle_search_fast(&ctx, &json!({"pattern": "Model.*\\.cs$", "regex": true}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "Model.*\\.cs$", "regex": true}));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     assert_eq!(output2["summary"]["totalMatches"], 2,
@@ -166,13 +166,13 @@ fn test_search_fast_regex_mode() {
 
     cleanup_tmp(&tmp);
 }
-/// T76 — search_fast empty pattern without dir → error.
+/// T76 — xray_fast empty pattern without dir → error.
 #[test]
-fn test_search_fast_empty_pattern() {
-    let (ctx, tmp) = make_search_fast_ctx();
+fn test_xray_fast_empty_pattern() {
+    let (ctx, tmp) = make_xray_fast_ctx();
 
     // Empty pattern WITHOUT dir → error
-    let result = handle_search_fast(&ctx, &json!({"pattern": ""}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ""}));
     assert!(result.is_error, "Empty pattern without dir should return an error");
     assert!(result.content[0].text.to_lowercase().contains("empty"),
         "Error should mention 'empty', got: {}", result.content[0].text);
@@ -181,13 +181,13 @@ fn test_search_fast_empty_pattern() {
 
     cleanup_tmp(&tmp);
 }
-/// search_fast ranking: exact stem match sorts first, then prefix, then contains.
+/// xray_fast ranking: exact stem match sorts first, then prefix, then contains.
 #[test]
-fn test_search_fast_ranking_exact_stem_first() {
+fn test_xray_fast_ranking_exact_stem_first() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_rank_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_rank_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create files with names that test different match tiers
@@ -204,8 +204,8 @@ fn test_search_fast_ranking_exact_stem_first() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
-    let result = handle_search_fast(&ctx, &json!({"pattern": "UserService"}));
-    assert!(!result.is_error, "search_fast should not error: {}", result.content[0].text);
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "UserService"}));
+    assert!(!result.is_error, "xray_fast should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
 
@@ -230,13 +230,13 @@ fn test_search_fast_ranking_exact_stem_first() {
     cleanup_tmp(&tmp_dir);
 }
 
-/// search_fast ranking: among prefix matches, shorter stems sort first.
+/// xray_fast ranking: among prefix matches, shorter stems sort first.
 #[test]
-fn test_search_fast_ranking_shorter_stem_first() {
+fn test_xray_fast_ranking_shorter_stem_first() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_rank_len_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_rank_len_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     for name in &["OrderA.cs", "OrderABC.cs", "OrderABCDEF.cs"] {
@@ -252,7 +252,7 @@ fn test_search_fast_ranking_shorter_stem_first() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
-    let result = handle_search_fast(&ctx, &json!({"pattern": "Order"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -273,11 +273,11 @@ fn test_search_fast_ranking_shorter_stem_first() {
 
     cleanup_tmp(&tmp_dir);
 }
-/// BUG-5: search_fast with pattern="" without dir should return error.
+/// BUG-5: xray_fast with pattern="" without dir should return error.
 #[test]
-fn test_search_fast_empty_pattern_returns_error() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": ""}));
+fn test_xray_fast_empty_pattern_returns_error() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ""}));
     assert!(result.is_error, "Empty pattern without dir should return an error");
     assert!(result.content[0].text.to_lowercase().contains("empty"),
         "Error should mention 'empty', got: {}", result.content[0].text);
@@ -292,11 +292,11 @@ fn test_search_fast_empty_pattern_returns_error() {
 
 /// Wildcard pattern="*" returns all files and directories.
 #[test]
-fn test_search_fast_wildcard_star() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    // make_search_fast_ctx creates 6 files: ModelSchemaStorage.cs, ModelSchemaManager.cs,
+fn test_xray_fast_wildcard_star() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    // make_xray_fast_ctx creates 6 files: ModelSchemaStorage.cs, ModelSchemaManager.cs,
     // ScannerJobState.cs, WorkspaceInfoUtils.cs, UserService.cs, OtherFile.txt
-    let result = handle_search_fast(&ctx, &json!({"pattern": "*"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
     assert!(!result.is_error, "Wildcard '*' should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let matches = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -306,11 +306,11 @@ fn test_search_fast_wildcard_star() {
 
 /// Wildcard pattern="*" with dirsOnly returns only directories.
 #[test]
-fn test_search_fast_wildcard_star_dirs_only() {
+fn test_xray_fast_wildcard_star_dirs_only() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_wc_dirs_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_wc_dirs_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create subdirectories and files
@@ -328,7 +328,7 @@ fn test_search_fast_wildcard_star_dirs_only() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
-    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
     assert!(!result.is_error, "Wildcard + dirsOnly should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let matches = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -344,11 +344,11 @@ fn test_search_fast_wildcard_star_dirs_only() {
 
 /// Empty pattern with dir specified → wildcard listing (not an error).
 #[test]
-fn test_search_fast_empty_pattern_with_dir() {
+fn test_xray_fast_empty_pattern_with_dir() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_wc_empty_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_wc_empty_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create some files
@@ -368,7 +368,7 @@ fn test_search_fast_empty_pattern_with_dir() {
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str.clone(), index_base: idx_base, ..Default::default() };
 
     // Empty pattern + dir → wildcard (not an error)
-    let result = handle_search_fast(&ctx, &json!({"pattern": "", "dir": dir_str}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "", "dir": dir_str}));
     assert!(!result.is_error, "Empty pattern WITH dir should be wildcard, not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let matches = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -379,9 +379,9 @@ fn test_search_fast_empty_pattern_with_dir() {
 
 /// Empty pattern without dir → still an error (unchanged behavior).
 #[test]
-fn test_search_fast_empty_pattern_without_dir_still_errors() {
-    let (ctx, tmp) = make_search_fast_ctx();
-    let result = handle_search_fast(&ctx, &json!({"pattern": ""}));
+fn test_xray_fast_empty_pattern_without_dir_still_errors() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ""}));
     assert!(result.is_error, "Empty pattern without dir should still be an error");
     assert!(result.content[0].text.contains("Do NOT fall back"),
         "Error should contain anti-fallback warning, got: {}", result.content[0].text);
@@ -393,11 +393,11 @@ fn test_search_fast_empty_pattern_without_dir_still_errors() {
 /// Previously, ext="cs" combined with dirsOnly=true returned 0 results because
 /// directories have no file extension. The fix skips the ext filter for dirsOnly.
 #[test]
-fn test_search_fast_dirs_only_ignores_ext_filter() {
+fn test_xray_fast_dirs_only_ignores_ext_filter() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_dirsext_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_dirsext_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create a subdirectory "Services" with a .cs file inside
@@ -414,7 +414,7 @@ fn test_search_fast_dirs_only_ignores_ext_filter() {
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
     // dirsOnly=true + ext="cs" should find the "Services" directory (ext is ignored for dirs)
-    let result = handle_search_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true, "ext": "cs"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true, "ext": "cs"}));
     assert!(!result.is_error, "dirsOnly + ext should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
@@ -433,11 +433,11 @@ fn test_search_fast_dirs_only_ignores_ext_filter() {
 
 /// Regression guard: dirsOnly without ext should continue to work.
 #[test]
-fn test_search_fast_dirs_only_without_ext() {
+fn test_xray_fast_dirs_only_without_ext() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_dirsnoext_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_dirsnoext_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let sub = tmp_dir.join("Controllers");
@@ -453,7 +453,7 @@ fn test_search_fast_dirs_only_without_ext() {
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
     // dirsOnly=true without ext should work fine
-    let result = handle_search_fast(&ctx, &json!({"pattern": "Controllers", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Controllers", "dirsOnly": true}));
     assert!(!result.is_error, "dirsOnly without ext should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
@@ -467,11 +467,11 @@ fn test_search_fast_dirs_only_without_ext() {
 
 /// Verify ext filter still works correctly for filesOnly (regression).
 #[test]
-fn test_search_fast_files_only_with_ext_still_filters() {
+fn test_xray_fast_files_only_with_ext_still_filters() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_filesext_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_filesext_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     { let mut f = std::fs::File::create(&tmp_dir.join("Report.cs")).unwrap(); writeln!(f, "// cs").unwrap(); }
@@ -485,7 +485,7 @@ fn test_search_fast_files_only_with_ext_still_filters() {
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
 
     // filesOnly + ext="cs" should only return Report.cs, not Report.txt
-    let result = handle_search_fast(&ctx, &json!({"pattern": "Report", "filesOnly": true, "ext": "cs"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Report", "filesOnly": true, "ext": "cs"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1,
@@ -504,11 +504,11 @@ fn test_search_fast_files_only_with_ext_still_filters() {
 
 /// dirsOnly + wildcard returns fileCount for each directory, sorted by fileCount descending.
 #[test]
-fn test_search_fast_dirsonly_wildcard_filecount() {
+fn test_xray_fast_dirsonly_wildcard_filecount() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_fc_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create directory structure:
@@ -553,7 +553,7 @@ fn test_search_fast_dirsonly_wildcard_filecount() {
         ..Default::default()
     };
 
-    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
     assert!(!result.is_error, "dirsOnly wildcard should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -606,11 +606,11 @@ fn test_search_fast_dirsonly_wildcard_filecount() {
 
 /// Non-wildcard dirsOnly does NOT add fileCount.
 #[test]
-fn test_search_fast_dirsonly_non_wildcard_no_filecount() {
+fn test_xray_fast_dirsonly_non_wildcard_no_filecount() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_nw_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_fc_nw_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let sub = tmp_dir.join("Services");
@@ -631,7 +631,7 @@ fn test_search_fast_dirsonly_non_wildcard_no_filecount() {
         ..Default::default()
     };
 
-    let result = handle_search_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -648,11 +648,11 @@ fn test_search_fast_dirsonly_non_wildcard_no_filecount() {
 
 /// maxDepth=1 returns only immediate subdirectories.
 #[test]
-fn test_search_fast_max_depth() {
+fn test_xray_fast_max_depth() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_md_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_md_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create: src/ → src/controllers/ → src/controllers/deep/
@@ -682,7 +682,7 @@ fn test_search_fast_max_depth() {
     };
 
     // maxDepth=1: only immediate children (src/)
-    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
     assert!(!result.is_error, "maxDepth should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -695,7 +695,7 @@ fn test_search_fast_max_depth() {
         "maxDepth=1 should NOT find 'src/controllers', got: {:?}", paths);
 
     // maxDepth=2: should find src and src/controllers, but not deep
-    let result2 = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 2}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 2}));
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     let files2 = output2["files"].as_array().unwrap();
     let paths2: Vec<&str> = files2.iter().map(|e| e["path"].as_str().unwrap()).collect();
@@ -705,7 +705,7 @@ fn test_search_fast_max_depth() {
         "maxDepth=2 should NOT find 'src/controllers/deep', got: {:?}", paths2);
 
     // No maxDepth: all directories
-    let result3 = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let result3 = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
     let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
     let files3 = output3["files"].as_array().unwrap();
     let paths3: Vec<&str> = files3.iter().map(|e| e["path"].as_str().unwrap()).collect();
@@ -717,11 +717,11 @@ fn test_search_fast_max_depth() {
 
 /// Truncation hint is emitted when dirsOnly matches > 150 directories without maxDepth.
 #[test]
-fn test_search_fast_dirsonly_truncation_hint() {
+fn test_xray_fast_dirsonly_truncation_hint() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_hint_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_hint_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create 160 directories to trigger the hint (> 150)
@@ -747,7 +747,7 @@ fn test_search_fast_dirsonly_truncation_hint() {
     };
 
     // Without maxDepth: should get truncation hint
-    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = output["summary"]["hint"].as_str().unwrap_or("");
@@ -755,7 +755,7 @@ fn test_search_fast_dirsonly_truncation_hint() {
         "Should suggest maxDepth when >150 dirs. Hint: '{}'", hint);
 
     // With maxDepth: should NOT get truncation hint
-    let result2 = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     let hint2 = output2["summary"]["hint"].as_str().unwrap_or("");
@@ -772,11 +772,11 @@ fn test_search_fast_dirsonly_truncation_hint() {
 /// not from `index.root`. When server_dir=".", base_depth=0 but entry paths
 /// have full paths with 3+ slashes, so all entries were filtered out.
 #[test]
-fn test_search_fast_max_depth_server_dir_mismatch() {
+fn test_xray_fast_max_depth_server_dir_mismatch() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_md_mismatch_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_md_mismatch_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create: src/ → src/sub/
@@ -805,7 +805,7 @@ fn test_search_fast_max_depth_server_dir_mismatch() {
     };
 
     // maxDepth=1 should return root + src (not 0 results)
-    let result = handle_search_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
     assert!(!result.is_error, "maxDepth with server_dir mismatch should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -827,11 +827,11 @@ fn test_search_fast_max_depth_server_dir_mismatch() {
 /// `dir=src/Clients`. The index stores absolute paths. The dir_prefix used for
 /// filtering file counts must resolve correctly against index.root.
 #[test]
-fn test_search_fast_filecount_with_subdir() {
+fn test_xray_fast_filecount_with_subdir() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_reldir_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_fc_reldir_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Structure:
@@ -879,7 +879,7 @@ fn test_search_fast_filecount_with_subdir() {
     // after load_index resolves it). The key test: dir != server_dir triggers
     // dir_prefix filtering, and fileCount must still be correct.
     let src_str = src.to_string_lossy().to_string();
-    let result = handle_search_fast(&ctx, &json!({
+    let result = handle_xray_fast(&ctx, &json!({
         "pattern": "*",
         "dir": src_str,
         "dirsOnly": true
@@ -936,11 +936,11 @@ fn test_search_fast_filecount_with_subdir() {
 
 /// Test that fileCount works correctly with absolute dir paths too (regression-proof).
 #[test]
-fn test_search_fast_filecount_with_absolute_dir() {
+fn test_xray_fast_filecount_with_absolute_dir() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_absdir_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_fc_absdir_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let sub = tmp_dir.join("sub");
@@ -966,7 +966,7 @@ fn test_search_fast_filecount_with_absolute_dir() {
 
     // Pass absolute path for sub directory
     let sub_str = sub.to_string_lossy().to_string();
-    let result = handle_search_fast(&ctx, &json!({
+    let result = handle_xray_fast(&ctx, &json!({
         "pattern": "*",
         "dir": sub_str,
         "dirsOnly": true
@@ -989,11 +989,11 @@ fn test_search_fast_filecount_with_absolute_dir() {
 /// equals index.root (load_index built the index FOR that subdir),
 /// dir_prefix should be empty — fileCount should count all files in the index.
 #[test]
-fn test_search_fast_filecount_when_dir_equals_root() {
+fn test_xray_fast_filecount_when_dir_equals_root() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_fast_fc_rootdir_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_fc_rootdir_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Structure:
@@ -1035,7 +1035,7 @@ fn test_search_fast_filecount_when_dir_equals_root() {
     };
 
     // Pass absolute src path — tests that dir == index.root → dir_prefix = "" → correct counts
-    let result = handle_search_fast(&ctx, &json!({
+    let result = handle_xray_fast(&ctx, &json!({
         "pattern": "*",
         "dir": src_str,
         "dirsOnly": true

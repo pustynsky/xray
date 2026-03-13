@@ -6,7 +6,7 @@
 
 A tool-assisted framework for reviewing Rust code changes, combining:
 
-- **search-index MCP tools** for workspace-wide caller/callee analysis
+- **xray MCP tools** for workspace-wide caller/callee analysis
 - **Strict senior-level review criteria** for Rust applications, libraries, and CLI tools
 - **Evidence-based assessment** focused on real risks, not style nitpicks
 
@@ -107,9 +107,9 @@ Execute review steps **in this order**. Do not produce conclusions before gather
 | 1 | **Fast-path check** — if diff qualifies for fast path, skip to verdict | Judgment |
 | 2 | **Parse diff** — identify all modified public/private surface (functions, types, traits, impls) | Diff analysis |
 | 3 | **Assign preliminary risk level** — based on what was modified (Part 0 categories) | Judgment |
-| 4 | **Search callers** — for every modified public/shared item, search entire workspace | `search_callers` / `search_grep` |
-| 5 | **Read full bodies** — of all modified functions (not just changed lines) | `search_definitions includeBody=true` |
-| 6 | **Trace downstream** — identify every function/method called from modified code, assess data flow changes | `search_callers direction=down` |
+| 4 | **Search callers** — for every modified public/shared item, search entire workspace | `xray_callers` / `xray_grep` |
+| 5 | **Read full bodies** — of all modified functions (not just changed lines) | `xray_definitions includeBody=true` |
+| 6 | **Trace downstream** — identify every function/method called from modified code, assess data flow changes | `xray_callers direction=down` |
 | 7 | **Check Rust-specific concerns** — async, unsafe, ownership, errors, API, performance, invariants (Part 4) | Code analysis |
 | 8 | **Review tests** — adequacy, quality, missing coverage | Code analysis |
 | 9 | **Assess evidence coverage** — what was verified vs inferred vs unverified (Part 3) | Self-assessment |
@@ -123,8 +123,8 @@ When reviewing a branch with tool assistance:
 2. Fetch the branch: `git fetch origin <base-branch> <target-branch>`
 3. List changed files: `git diff --name-status origin/<base>...origin/<branch>`
 4. Read modified files:
-   - `.rs` files: `search_definitions file='<filename>' includeBody=true maxBodyLines=0`
-   - Other files: `search_grep terms='<search>' ext='<ext>' showLines=true`
+   - `.rs` files: `xray_definitions file='<filename>' includeBody=true maxBodyLines=0`
+   - Other files: `xray_grep terms='<search>' ext='<ext>' showLines=true`
 5. Get the actual diff: `git diff origin/<base>...origin/<branch> -- <file>`
 
 ### Fast Path
@@ -162,19 +162,19 @@ Every claim in the review must be classified:
 
 ```
 # Find all callers of a function
-search_callers method='fn_name' class='StructName' depth=2 includeBody=true
+xray_callers method='fn_name' class='StructName' depth=2 includeBody=true
 
 # Find all references (text-based, catches dynamic usage)
-search_grep terms='fn_name' ext='rs' showLines=true
+xray_grep terms='fn_name' ext='rs' showLines=true
 
 # Read full function body
-search_definitions name='fn_name' includeBody=true maxBodyLines=0
+xray_definitions name='fn_name' includeBody=true maxBodyLines=0
 
 # Trace downstream calls
-search_callers method='fn_name' direction='down' depth=2
+xray_callers method='fn_name' direction='down' depth=2
 
 # Find struct/enum consumers
-search_grep terms='StructName' ext='rs' mode='and' showLines=true
+xray_grep terms='StructName' ext='rs' mode='and' showLines=true
 ```
 
 ### Verdict Format
@@ -512,7 +512,7 @@ Include only when modified `pub` surface exists.
 
 **Detect when:** Implementation of a function changes what it calls downstream (different functions, different arguments, different order).
 **Risk (MAJOR):** Callers assume specific side effects that no longer occur.
-**Action:** For each changed downstream call: does any caller depend on the old behavior? Use `search_callers direction='down'` to map the call tree before and after.
+**Action:** For each changed downstream call: does any caller depend on the old behavior? Use `xray_callers direction='down'` to map the call tree before and after.
 
 ---
 
@@ -754,7 +754,7 @@ Based on systematic review of V1.2 identifying structural redundancy (Part 4 vs 
 22. **`#[inline]`/`#[cold]`/`#[track_caller]` attribute changes** (Part 4 `[CONDITIONAL]`)
 
 **Other improvements:**
-23. **Tool usage examples** added to Part 3 — concrete `search_callers`, `search_grep`, `search_definitions` call patterns
+23. **Tool usage examples** added to Part 3 — concrete `xray_callers`, `xray_grep`, `xray_definitions` call patterns
 24. **New deep-dive pattern 6.8** — Downstream Function Contract Change
 25. **Expanded 6.7 triggers** — now includes derive removal, visibility changes, generic bound changes
 26. **Coverage gaps note** expanded — added `build.rs`-generated code

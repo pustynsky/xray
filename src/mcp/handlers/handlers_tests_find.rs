@@ -1,16 +1,16 @@
-//! Tests for search_find -- extracted from handlers_tests.rs.
+//! Tests for xray_find -- extracted from handlers_tests.rs.
 
 use super::*;
 use super::handlers_test_utils::cleanup_tmp;
 use crate::ContentIndex;
 use std::sync::{Arc, RwLock};
-/// T43-T45 — search_find combined parameters: countOnly, maxDepth, ignoreCase, regex.
+/// T43-T45 — xray_find combined parameters: countOnly, maxDepth, ignoreCase, regex.
 #[test]
-fn test_search_find_combined_parameters() {
+fn test_xray_find_combined_parameters() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_find_combined_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_find_combined_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let level1 = tmp_dir.join("level1");
@@ -34,7 +34,7 @@ fn test_search_find_combined_parameters() {
         ..Default::default()
     };
 
-    let result_count = dispatch_tool(&ctx, "search_find", &json!({
+    let result_count = dispatch_tool(&ctx, "xray_find", &json!({
         "pattern": ".cs",
         "countOnly": true,
         "ignoreCase": true
@@ -46,7 +46,7 @@ fn test_search_find_combined_parameters() {
     assert!(output_count["files"].as_array().unwrap().is_empty(),
         "countOnly=true should return empty files array");
 
-    let result_depth = dispatch_tool(&ctx, "search_find", &json!({
+    let result_depth = dispatch_tool(&ctx, "xray_find", &json!({
         "pattern": ".cs",
         "maxDepth": 1,
         "ignoreCase": true
@@ -57,7 +57,7 @@ fn test_search_find_combined_parameters() {
     assert!(depth_matches < 3,
         "maxDepth=1 should find fewer than 3 files, got {}", depth_matches);
 
-    let result_regex = dispatch_tool(&ctx, "search_find", &json!({
+    let result_regex = dispatch_tool(&ctx, "xray_find", &json!({
         "pattern": "top.*\\.cs",
         "regex": true,
         "ignoreCase": true
@@ -69,14 +69,14 @@ fn test_search_find_combined_parameters() {
 
     cleanup_tmp(&tmp_dir);
 }
-// ─── search_find contents=true tests ─────────────────────────────────
+// ─── xray_find contents=true tests ─────────────────────────────────
 
 #[test]
-fn test_search_find_contents_mode() {
+fn test_xray_find_contents_mode() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_find_contents_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_find_contents_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     // Create files with distinct content
@@ -115,13 +115,13 @@ fn test_search_find_contents_mode() {
     };
 
     // Search file contents for "magic_searchable_token" in .txt files
-    let result = dispatch_tool(&ctx, "search_find", &json!({
+    let result = dispatch_tool(&ctx, "xray_find", &json!({
         "pattern": "magic_searchable_token",
         "contents": true,
         "ext": "txt",
         "dir": dir_str
     }));
-    assert!(!result.is_error, "search_find contents=true should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_find contents=true should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
     // Should find exactly 2 files (alpha.txt and gamma.txt)
@@ -154,7 +154,7 @@ fn test_search_find_contents_mode() {
     }
 
     // Test countOnly=true with contents search
-    let result_count = dispatch_tool(&ctx, "search_find", &json!({
+    let result_count = dispatch_tool(&ctx, "xray_find", &json!({
         "pattern": "magic_searchable_token",
         "contents": true,
         "ext": "txt",

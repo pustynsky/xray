@@ -8,7 +8,7 @@ output format, and all feature flags (including substring search via trigram ind
 
 **Run these tests after every major refactoring, before merging PRs, and after dependency upgrades.**
 
-> **Note:** MCP `search_grep` defaults to `substring: true` since v0.2. Tests that expect exact-token behavior must pass `substring: false` explicitly.
+> **Note:** MCP `xray_grep` defaults to `substring: true` since v0.2. Tests that expect exact-token behavior must pass `substring: false` explicitly.
 
 ## Configuration
 
@@ -217,7 +217,7 @@ cargo run -- fast "main,lib,handler" -d $TEST_DIR -e $TEST_EXT
 
 ---
 
-### T09b: `fast` — Comma-separated multi-term search via MCP `search_fast`
+### T09b: `fast` — Comma-separated multi-term search via MCP `xray_fast`
 
 **Command:**
 
@@ -225,7 +225,7 @@ cargo run -- fast "main,lib,handler" -d $TEST_DIR -e $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_fast","arguments":{"pattern":"main,lib,handler","ext":"rs"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":"main,lib,handler","ext":"rs"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -236,7 +236,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - `summary.totalMatches` > 1 (matches files containing ANY of the terms)
 - `files` array contains paths matching "main", "lib", or "handler"
 
-**Validates:** MCP `search_fast` tool supports comma-separated multi-term OR search.
+**Validates:** MCP `xray_fast` tool supports comma-separated multi-term OR search.
 
 ---
 
@@ -491,7 +491,7 @@ cargo run -- info
 - Size is in MB
 - Age is in hours
 
-**MCP equivalent (search_info JSON response):**
+**MCP equivalent (xray_info JSON response):**
 
 ```json
 {
@@ -507,7 +507,7 @@ cargo run -- info
 }
 ```
 
-**Validates:** Git history cache file is discovered and deserialized by both CLI `info` and MCP `search_info`. All key cache metadata (commits, files, authors, branch, HEAD hash) is displayed.
+**Validates:** Git history cache file is discovered and deserialized by both CLI `info` and MCP `xray_info`. All key cache metadata (commits, files, authors, branch, HEAD hash) is displayed.
 
 **Unit tests:** `test_info_json_includes_git_history`, `test_info_json_empty_dir_no_git_history`, `test_info_json_nonexistent_dir`, `test_info_json_git_history_corrupt_file_skipped`
 
@@ -536,7 +536,7 @@ cargo run -- cleanup
 - stderr: `Scanning for orphaned indexes in ...`
 - stderr: `Removed orphaned index: ... (root: ...search_cleanup_test...)`
 - stderr: `Removed N orphaned index file(s).`
-- After cleanup, `search-index info` should NOT list the deleted temp directory
+- After cleanup, `xray info` should NOT list the deleted temp directory
 
 **Validates:** Orphaned index detection, safe removal, root field extraction from binary index files.
 
@@ -566,7 +566,7 @@ cargo run -- cleanup --dir $tmp
 - stderr: `Removing indexes for directory '...' from ...`
 - stderr: `Removed index for dir '...' ...` (one line per removed file)
 - stderr: `Removed N index file(s) for '...'.`
-- After cleanup, `search-index info` should NOT list the temp directory
+- After cleanup, `xray info` should NOT list the temp directory
 - Indexes for other directories remain untouched
 
 **Validates:** Targeted index cleanup by directory, case-insensitive path comparison, preservation of unrelated indexes.
@@ -581,7 +581,7 @@ cargo run -- cleanup --dir $tmp
 
 ```powershell
 # Find the content index file and delete it
-$idxDir = "$env:LOCALAPPDATA\search-index"
+$idxDir = "$env:LOCALAPPDATA\xray"
 $cidxFile = Get-ChildItem $idxDir -Filter *.word-search | Select-Object -First 1
 $backupPath = "$cidxFile.bak"
 Move-Item $cidxFile.FullName $backupPath
@@ -615,7 +615,7 @@ Move-Item $backupPath $cidxFile.FullName
 
 ```powershell
 # Find the content index file and overwrite with garbage
-$idxDir = "$env:LOCALAPPDATA\search-index"
+$idxDir = "$env:LOCALAPPDATA\xray"
 $cidxFile = Get-ChildItem $idxDir -Filter *.word-search | Select-Object -First 1
 $backupPath = "$cidxFile.bak"
 Copy-Item $cidxFile.FullName $backupPath
@@ -791,16 +791,16 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Expected:**
 
-- stdout: JSON-RPC response with 16 tools: `search_grep`, `search_find`, `search_fast`, `search_info`, `search_reindex`, `search_reindex_definitions`, `search_definitions`, `search_callers`, `search_edit`, `search_help`, `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`
+- stdout: JSON-RPC response with 16 tools: `xray_grep`, `xray_find`, `xray_fast`, `xray_info`, `xray_reindex`, `xray_reindex_definitions`, `xray_definitions`, `xray_callers`, `xray_edit`, `xray_help`, `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_activity`, `xray_git_blame`, `xray_branch_status`
 - Each tool has `name`, `description`, `inputSchema`
-- `search_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
+- `xray_definitions` inputSchema includes `includeBody` (boolean), `maxBodyLines` (integer), and `maxTotalBodyLines` (integer) parameters
 - Git tools have `repo` (required) and date filter parameters
 
-**Validates:** Tool discovery, tool schema generation, `search_definitions` schema includes body-related parameters.
+**Validates:** Tool discovery, tool schema generation, `xray_definitions` schema includes body-related parameters.
 
 ---
 
-### T27: `serve` — MCP search_grep via tools/call
+### T27: `serve` — MCP xray_grep via tools/call
 
 **Command:**
 
@@ -808,7 +808,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokenize"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -819,11 +819,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - Result content includes `files` array and `summary` object
 - `summary.totalFiles` > 0
 
-**Validates:** MCP tool dispatch, search_grep handler, JSON-RPC tools/call.
+**Validates:** MCP tool dispatch, xray_grep handler, JSON-RPC tools/call.
 
 ---
 
-### T27a: `serve` — search_grep with `showLines: true` (compact grouped format)
+### T27a: `serve` — xray_grep with `showLines: true` (compact grouped format)
 
 **Command:**
 
@@ -831,7 +831,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"<some_known_token>","showLines":true,"contextLines":2,"maxResults":1}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"<some_known_token>","showLines":true,"contextLines":2,"maxResults":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -853,7 +853,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T27b: `serve` — search_grep phrase search with `showLines: true` (compact grouped format)
+### T27b: `serve` — xray_grep phrase search with `showLines: true` (compact grouped format)
 
 **Command:**
 
@@ -861,7 +861,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"<some_known_phrase>","phrase":true,"showLines":true,"contextLines":1,"maxResults":1}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"<some_known_phrase>","phrase":true,"showLines":true,"contextLines":1,"maxResults":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -878,7 +878,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T28: `serve` — MCP search_definitions (requires --definitions)
+### T28: `serve` — MCP xray_definitions (requires --definitions)
 
 **Command:**
 
@@ -886,7 +886,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"tokenize"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"tokenize"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -898,13 +898,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - For C# or TypeScript codebase: results with `name`, `kind`, `file`, `lines`
 - For SQL codebase: results with `name`, `kind` (storedProcedure, table, view, etc.), `file`, `lines`
 
-**Validates:** search_definitions handler, definition index loading, AST-based search.
+**Validates:** xray_definitions handler, definition index loading, AST-based search.
 
 **Note:** Requires `--definitions` flag. For `.rs` files, 0 results is expected. For TypeScript files, definition kinds include `function`, `typeAlias`, `variable`, etc. For SQL files, definition kinds include `storedProcedure`, `table`, `view`, `sqlFunction`, `userDefinedType`, `sqlIndex`, `column`.
 
 ---
 
-### T28a: `serve` — search_definitions with `includeBody: true`
+### T28a: `serve` — xray_definitions with `includeBody: true`
 
 **Command:**
 
@@ -912,7 +912,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<some_known_def>","includeBody":true}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"<some_known_def>","includeBody":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -929,7 +929,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T28b: `serve` — search_definitions with `includeBody: true, maxBodyLines: 5`
+### T28b: `serve` — xray_definitions with `includeBody: true, maxBodyLines: 5`
 
 **Command:**
 
@@ -937,7 +937,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<some_known_long_def>","includeBody":true,"maxBodyLines":5}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"<some_known_long_def>","includeBody":true,"maxBodyLines":5}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -954,7 +954,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T28c: `serve` — search_definitions backward compatibility (default `includeBody: false`)
+### T28c: `serve` — xray_definitions backward compatibility (default `includeBody: false`)
 
 **Command:**
 
@@ -962,7 +962,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<some_known_def>"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"<some_known_def>"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -976,7 +976,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T28d: `serve` — search_definitions with `containsLine` + `includeBody: true`
+### T28d: `serve` — xray_definitions with `containsLine` + `includeBody: true`
 
 **Command:**
 
@@ -984,7 +984,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"<known_file>","containsLine":<known_line>,"includeBody":true}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"file":"<known_file>","containsLine":<known_line>,"includeBody":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1010,7 +1010,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T28e: `serve` — search_definitions with `maxTotalBodyLines` budget exhaustion
+### T28e: `serve` — xray_definitions with `maxTotalBodyLines` budget exhaustion
 
 **Command:**
 
@@ -1018,7 +1018,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"parent":"<class_with_many_methods>","includeBody":true,"maxTotalBodyLines":20}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"parent":"<class_with_many_methods>","includeBody":true,"maxTotalBodyLines":20}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1036,7 +1036,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T28f-doc: `serve` — search_definitions with `includeDocComments: true`
+### T28f-doc: `serve` — xray_definitions with `includeDocComments: true`
 
 **Command:**
 
@@ -1044,7 +1044,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<method_with_doc_comment>","includeDocComments":true}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"<method_with_doc_comment>","includeDocComments":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1061,7 +1061,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 **Negative test — without includeDocComments:**
 
 ```powershell
-'{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<method_with_doc_comment>","includeBody":true}}}'
+'{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"<method_with_doc_comment>","includeBody":true}}}'
 ```
 
 **Expected:**
@@ -1077,7 +1077,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 **Status:** ✅ Implemented
 ---
 
-### T28g-body-range: `serve` — search_definitions with `bodyLineStart`/`bodyLineEnd` (precise body extraction)
+### T28g-body-range: `serve` — xray_definitions with `bodyLineStart`/`bodyLineEnd` (precise body extraction)
 
 **Command:**
 
@@ -1085,7 +1085,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"<long_method>","includeBody":true,"bodyLineStart":1330,"bodyLineEnd":1345}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"<long_method>","includeBody":true,"bodyLineStart":1330,"bodyLineEnd":1345}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1099,25 +1099,25 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - `maxBodyLines` still applies on top of the filtered range (caps from the start of the filtered body)
 - When `bodyLineStart`/`bodyLineEnd` are both absent → full body returned (backward compatible)
 
-**Use case:** When `search_definitions` with `includeBody=true maxBodyLines=0` on a 363-line method exceeds the 64KB response budget, causing Phase 5a to strip all body fields. With `bodyLineStart`/`bodyLineEnd`, the caller can request only the 15 lines they need, staying well under budget.
+**Use case:** When `xray_definitions` with `includeBody=true maxBodyLines=0` on a 363-line method exceeds the 64KB response budget, causing Phase 5a to strip all body fields. With `bodyLineStart`/`bodyLineEnd`, the caller can request only the 15 lines they need, staying well under budget.
 
-**Also supported in `search_callers`:** `bodyLineStart`/`bodyLineEnd` filter the `rootMethod` body only (caller node bodies are unaffected).
+**Also supported in `xray_callers`:** `bodyLineStart`/`bodyLineEnd` filter the `rootMethod` body only (caller node bodies are unaffected).
 
-**Unit tests:** `test_inject_body_body_line_range_filter`, `test_inject_body_body_line_start_only`, `test_inject_body_body_line_end_only`, `test_inject_body_body_line_range_outside_method`, `test_inject_body_body_line_range_with_none_is_full_body`, `test_search_definitions_body_line_range_filter`, `test_search_definitions_contains_line_with_body_line_range`, `test_search_callers_root_method_body_line_range`
+**Unit tests:** `test_inject_body_body_line_range_filter`, `test_inject_body_body_line_start_only`, `test_inject_body_body_line_end_only`, `test_inject_body_body_line_range_outside_method`, `test_inject_body_body_line_range_with_none_is_full_body`, `test_xray_definitions_body_line_range_filter`, `test_xray_definitions_contains_line_with_body_line_range`, `test_xray_callers_root_method_body_line_range`
 
 **Status:** ✅ Implemented
 
 
 ---
 
-### T28f: `serve` — search_definitions by attribute returns no duplicates
+### T28f: `serve` — xray_definitions by attribute returns no duplicates
 
 **Command:**
 
 ```powershell
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"attribute":"<attribute_name>","kind":"class"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"attribute":"<attribute_name>","kind":"class"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1134,7 +1134,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T28g: `serve` — search_definitions with `maxResults: 0` (unlimited)
+### T28g: `serve` — xray_definitions with `maxResults: 0` (unlimited)
 
 **Scenario:** `maxResults=0` should return ALL matching definitions without capping at 100.
 The tool description states `"0 = unlimited"`, and the truncation safety net (`--max-response-kb`)
@@ -1146,7 +1146,7 @@ handles context size protection independently.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"0.1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"method","maxResults":0}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"method","maxResults":0}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1161,7 +1161,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T29: `serve` — MCP search_callers (requires --definitions)
+### T29: `serve` — MCP xray_callers (requires --definitions)
 
 **Command:**
 
@@ -1169,7 +1169,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"tokenize","depth":2}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"tokenize","depth":2}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1180,13 +1180,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - Result includes `callTree` array, `query` object (method, direction, depth), `summary` object (totalNodes, searchTimeMs)
 - For Rust codebase: empty callTree (tree-sitter supports C#/TypeScript/SQL only)
 
-**Validates:** search_callers handler end-to-end, call tree building, JSON output format.
+**Validates:** xray_callers handler end-to-end, call tree building, JSON output format.
 
 **Note:** For C# codebases, use a method name that exists (e.g., `ExecuteQueryAsync`).
 
 ---
 
-### T30: `serve` — MCP search_callers with class filter and direction=down
+### T30: `serve` — MCP xray_callers with class filter and direction=down
 
 **Command:**
 
@@ -1194,7 +1194,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"tokenize","class":"SomeClass","direction":"down","depth":2}}}'
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"tokenize","class":"SomeClass","direction":"down","depth":2}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1210,7 +1210,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T29a: `serve` — search_callers with `includeBody: true` (direction=up)
+### T29a: `serve` — xray_callers with `includeBody: true` (direction=up)
 
 **Command:**
 
@@ -1218,7 +1218,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":2,"includeBody":true}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":2,"includeBody":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1232,13 +1232,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - `body` content corresponds to the actual source code of each method in the call chain
 - Response budget automatically increased to 64KB (vs default 16KB) because `includeBody=true`
 
-**Validates:** `includeBody` parameter in `search_callers` returns method source code inline, eliminating the need for a separate `search_definitions` call. Uses the same `inject_body_into_obj()` function as `search_definitions`.
+**Validates:** `includeBody` parameter in `xray_callers` returns method source code inline, eliminating the need for a separate `xray_definitions` call. Uses the same `inject_body_into_obj()` function as `xray_definitions`.
 
 **Note:** Replace `<MethodName>` and `<ClassName>` with a method/class that exists and has callers.
 
 ---
 
-### T29b: `serve` — search_callers with `includeBody: true` and `maxBodyLines` limit
+### T29b: `serve` — xray_callers with `includeBody: true` and `maxBodyLines` limit
 
 **Command:**
 
@@ -1246,7 +1246,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":1,"includeBody":true,"maxBodyLines":5}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":1,"includeBody":true,"maxBodyLines":5}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1261,7 +1261,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T29c: `serve` — search_callers with `includeBody: true` and `maxTotalBodyLines` budget
+### T29c: `serve` — xray_callers with `includeBody: true` and `maxTotalBodyLines` budget
 
 **Command:**
 
@@ -1269,7 +1269,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":2,"includeBody":true,"maxTotalBodyLines":20}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","depth":2,"includeBody":true,"maxTotalBodyLines":20}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1284,7 +1284,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T29d: `serve` — search_callers with `includeBody: true` direction=down
+### T29d: `serve` — xray_callers with `includeBody: true` direction=down
 
 **Command:**
 
@@ -1292,7 +1292,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","direction":"down","depth":2,"includeBody":true}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","direction":"down","depth":2,"includeBody":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1307,7 +1307,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T29e: `serve` — search_callers backward compatibility (default `includeBody: false`)
+### T29e: `serve` — xray_callers backward compatibility (default `includeBody: false`)
 
 **Command:**
 
@@ -1315,7 +1315,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -1327,7 +1327,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 **Validates:** Backward compatibility — omitting `includeBody` produces the original response format.
 
-**Unit tests:** `test_search_callers_include_body_default_false`, `test_search_callers_include_body_false_explicit`, `test_search_callers_include_body_up`, `test_search_callers_include_body_down`, `test_search_callers_include_body_max_body_lines`, `test_search_callers_include_body_max_total_body_lines`, `test_search_callers_include_body_nonexistent_file`, `test_include_body_response_budget_64kb`
+**Unit tests:** `test_xray_callers_include_body_default_false`, `test_xray_callers_include_body_false_explicit`, `test_xray_callers_include_body_up`, `test_xray_callers_include_body_down`, `test_xray_callers_include_body_max_body_lines`, `test_xray_callers_include_body_max_total_body_lines`, `test_xray_callers_include_body_nonexistent_file`, `test_include_body_response_budget_64kb`
 
 **Status:** ✅ Implemented
 
@@ -1337,14 +1337,14 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 **Scenario:** When any tool is called with `includeBody=true`, the response byte budget is automatically increased from 16KB to 64KB, preventing premature truncation of body-rich responses.
 
-**Applies to:** `search_callers` with `includeBody=true`, `search_definitions` with `includeBody=true`
+**Applies to:** `xray_callers` with `includeBody=true`, `xray_definitions` with `includeBody=true`
 
 **Expected:**
 
 - `includeBody=true` responses can be up to 64KB without truncation
 - `includeBody=false` (or absent) responses use the default 16KB budget
-- `search_help` uses its own 32KB budget (unchanged)
-- `search_grep` and other tools without `includeBody` parameter use 16KB (unchanged)
+- `xray_help` uses its own 32KB budget (unchanged)
+- `xray_grep` and other tools without `includeBody` parameter use 16KB (unchanged)
 
 **Unit test:** `test_include_body_response_budget_64kb`
 
@@ -1352,7 +1352,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ---
 
-### T31: `serve` — search_callers finds callers through prefixed fields (C# only)
+### T31: `serve` — xray_callers finds callers through prefixed fields (C# only)
 
 **Command (C# codebase with field naming like `m_orderProcessor` or `_userService`):**
 
@@ -1360,7 +1360,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":1}}}'
+    '{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 ```
@@ -1375,7 +1375,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 
 ---
 
-### T32: `serve` — search_callers works with multi-extension `--ext` flag
+### T32: `serve` — xray_callers works with multi-extension `--ext` flag
 
 **Command (server started with `--ext cs,csproj,xml,config`):**
 
@@ -1383,7 +1383,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":1}}}'
+    '{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,csproj,xml,config --definitions
 ```
@@ -1398,7 +1398,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,csproj,xml,config --def
 
 ---
 
-### T33: `serve` — search_grep with `substring: true` (basic)
+### T33: `serve` — xray_grep with `substring: true` (basic)
 
 **Command:**
 
@@ -1406,7 +1406,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,csproj,xml,config --def
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokeniz","substring":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1424,7 +1424,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T34: `serve` — search_grep with `substring: true` + short query warning
+### T34: `serve` — xray_grep with `substring: true` + short query warning
 
 **Command:**
 
@@ -1432,7 +1432,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"fn","substring":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"fn","substring":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1448,7 +1448,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T35: `serve` — search_grep with `substring: true` + `showLines: true`
+### T35: `serve` — xray_grep with `substring: true` + `showLines: true`
 
 **Command:**
 
@@ -1456,7 +1456,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true,"showLines":true,"maxResults":2}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokeniz","substring":true,"showLines":true,"maxResults":2}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1473,7 +1473,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T36: `serve` — search_grep `substring: true` mutually exclusive with `regex`
+### T36: `serve` — xray_grep `substring: true` mutually exclusive with `regex`
 
 **Command:**
 
@@ -1481,7 +1481,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"test","substring":true,"regex":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"test","substring":true,"regex":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1496,7 +1496,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T37: `serve` — search_grep `substring: true` mutually exclusive with `phrase`
+### T37: `serve` — xray_grep `substring: true` mutually exclusive with `phrase`
 
 **Command:**
 
@@ -1504,7 +1504,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"pub fn","substring":true,"phrase":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"pub fn","substring":true,"phrase":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1519,7 +1519,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T37a: `serve` — search_grep defaults to substring mode (no explicit param)
+### T37a: `serve` — xray_grep defaults to substring mode (no explicit param)
 
 **Command:**
 
@@ -1527,7 +1527,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokenize"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1551,7 +1551,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":".*stale.*","regex":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":".*stale.*","regex":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1567,7 +1567,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T37c: `serve` — search_grep substring AND-mode correctness (no false positives from multi-token match)
+### T37c: `serve` — xray_grep substring AND-mode correctness (no false positives from multi-token match)
 
 **Command:**
 
@@ -1575,7 +1575,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"service,controller","substring":true,"mode":"and"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"service,controller","substring":true,"mode":"and"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1592,7 +1592,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T37d: `serve` — search_grep phrase post-filter for raw content matching
+### T37d: `serve` — xray_grep phrase post-filter for raw content matching
 
 **Command:**
 
@@ -1600,7 +1600,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"</Property> </Property>","phrase":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"</Property> </Property>","phrase":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
 ```
@@ -1617,7 +1617,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
 
 ---
 
-### T38: `serve` — search_reindex rebuilds trigram index
+### T38: `serve` — xray_reindex rebuilds trigram index
 
 **Command:**
 
@@ -1625,8 +1625,8 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_reindex","arguments":{}}}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_reindex","arguments":{}}}',
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokeniz","substring":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1658,7 +1658,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Expected:**
 
 - JSON-RPC response `result` contains `instructions` field (string)
-- `instructions` mentions `search_fast`, `search_find`, `substring`, `search_callers`, `class`, `includeBody`, `countOnly`
+- `instructions` mentions `xray_fast`, `xray_find`, `substring`, `xray_callers`, `class`, `includeBody`, `countOnly`
 - Provides LLM-readable best practices for tool selection
 
 **Validates:** MCP server-level instructions for LLM tool selection guidance.
@@ -1693,7 +1693,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
 **Expected:**
 
 - `instructions` does NOT contain `"NEVER READ"`
-- `instructions` contains `"search_definitions is not available"` fallback note
+- `instructions` contains `"xray_definitions is not available"` fallback note
 
 **Command (server with --ext cs,ts,sql):**
 
@@ -1743,7 +1743,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokenize"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1753,16 +1753,16 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - Successful JSON response contains `summary.policyReminder`
 - `summary.policyReminder` contains `SEARCH_INDEX_POLICY`
 - `summary.policyReminder` contains `Indexed extensions:` with the server's `--ext` values
-- Selected tools such as `search_grep` include `summary.nextStepHint`
+- Selected tools such as `xray_grep` include `summary.nextStepHint`
 - Error responses do not gain `policyReminder` / `nextStepHint`
 - Successful non-JSON responses remain unchanged
-- `search_grep` with `ext` filter targeting non-indexed extension and 0 results → `summary.hint` explains the extension is not indexed
+- `xray_grep` with `ext` filter targeting non-indexed extension and 0 results → `summary.hint` explains the extension is not indexed
 
 **Validates:** Response guidance is injected only into successful JSON tool results and survives normal tool dispatch.
 
 ---
 
-### T40a: `serve` — `search_help` includes policy reminder but omits next-step hint
+### T40a: `serve` — `xray_help` includes policy reminder but omits next-step hint
 
 **Command:**
 
@@ -1770,7 +1770,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_help","arguments":{}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_help","arguments":{}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1779,14 +1779,14 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 - Successful JSON response contains `summary.policyReminder`
 - `summary.nextStepHint` is absent
-- Response is still subject to the dedicated `search_help` response budget
+- Response is still subject to the dedicated `xray_help` response budget
 
-**Validates:** `search_help` participates in policy re-materialization without emitting a misleading next-step tool hint.
+**Validates:** `xray_help` participates in policy re-materialization without emitting a misleading next-step tool hint.
 
 ---
 
 
-### T40: `serve` — MCP search_help returns best practices
+### T40: `serve` — MCP xray_help returns best practices
 
 **Command:**
 
@@ -1794,7 +1794,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_help","arguments":{}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_help","arguments":{}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -1846,11 +1846,11 @@ cargo run -- grep "Newtonsoft.Json" -d $tmp -e csproj
 Remove-Item -Recurse -Force $tmp
 ```
 
-**Validates:** `search_grep` works with non-code file extensions like `.csproj`. Users can search NuGet dependencies, XML configurations, and other non-code files by including the appropriate extension in `--ext`.
+**Validates:** `xray_grep` works with non-code file extensions like `.csproj`. Users can search NuGet dependencies, XML configurations, and other non-code files by including the appropriate extension in `--ext`.
 
 ---
 
-### T41a: `serve` — MCP search_grep with ext='csproj' override
+### T41a: `serve` — MCP xray_grep with ext='csproj' override
 
 **Command:**
 
@@ -1858,7 +1858,7 @@ Remove-Item -Recurse -Force $tmp
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"Newtonsoft.Json","ext":"csproj"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"Newtonsoft.Json","ext":"csproj"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $tmp --ext csproj
 ```
@@ -1868,11 +1868,11 @@ echo $msgs | cargo run -- serve --dir $tmp --ext csproj
 - JSON-RPC response with matching file(s) containing `Newtonsoft.Json`
 - `ext` parameter override filters to `.csproj` files only
 
-**Validates:** MCP `search_grep` `ext` parameter works with non-code extensions.
+**Validates:** MCP `xray_grep` `ext` parameter works with non-code extensions.
 
 ---
 
-### T41b: `tips` / `search_help` — Non-code file tip present
+### T41b: `tips` / `xray_help` — Non-code file tip present
 
 **Command (CLI):**
 
@@ -1885,11 +1885,11 @@ cargo run -- tips
 - Output contains tip about searching non-code file types (XML, csproj, config)
 - Mentions `ext='csproj'` or similar example
 
-**Validates:** The new tip for non-code file search is visible in CLI output and MCP `search_help`.
+**Validates:** The new tip for non-code file search is visible in CLI output and MCP `xray_help`.
 
 ---
 
-### T42: `tips` / `search_help` — Strategy recipes present
+### T42: `tips` / `xray_help` — Strategy recipes present
 
 **Command (CLI):**
 
@@ -1910,7 +1910,7 @@ cargo run -- tips
 $input = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_help","arguments":{}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_help","arguments":{}}}'
 ) -join "`n"
 echo $input | cargo run -- serve -d $TEST_DIR -e $TEST_EXT
 ```
@@ -1924,30 +1924,30 @@ echo $input | cargo run -- serve -d $TEST_DIR -e $TEST_EXT
 
 ---
 
-### T42b: `tips` / `search_help` — Query budget and multi-term tips present
+### T42b: `tips` / `xray_help` — Query budget and multi-term tips present
 
-### T42c: `tips` / `search_help` — Code Review strategy recipe present
+### T42c: `tips` / `xray_help` — Code Review strategy recipe present
 
-**Goal:** Verify the "Code Review / Story Evaluation" strategy recipe is included in `search_help` and CLI `tips` output.
+**Goal:** Verify the "Code Review / Story Evaluation" strategy recipe is included in `xray_help` and CLI `tips` output.
 
 **Steps:**
-1. Run `search-index tips` and verify output contains "Code Review / Story Evaluation"
-2. Via MCP `search_help`, verify `strategyRecipes` array contains a recipe with `name: "Code Review / Story Evaluation"`
+1. Run `xray tips` and verify output contains "Code Review / Story Evaluation"
+2. Via MCP `xray_help`, verify `strategyRecipes` array contains a recipe with `name: "Code Review / Story Evaluation"`
 3. Verify the recipe has 3 steps and 3 antiPatterns
 
 **Expected:** Recipe present in both CLI and MCP output with correct structure.
 
 **Covered by:** `test_render_json_has_strategy_recipes`, `test_all_renderers_consistent_tip_count`, `T42` E2E test (checks for strategy recipes in tips output).
 
-### T-DYNAMIC-HELP: `search_help` dynamic language scope
+### T-DYNAMIC-HELP: `xray_help` dynamic language scope
 
-**Goal:** Verify `search_help` shows actual language list instead of static "languages with definition parser support".
+**Goal:** Verify `xray_help` shows actual language list instead of static "languages with definition parser support".
 
 **Steps:**
 1. Start MCP server with `--ext rs --definitions`
-2. Call `search_help`
+2. Call `xray_help`
 3. Verify `bestPractices` array contains a tip with "Language scope" containing "Rust"
-4. Verify `toolPriority` entries for search_callers and search_definitions contain "Rust"
+4. Verify `toolPriority` entries for xray_callers and xray_definitions contain "Rust"
 5. Verify they do NOT contain "languages with definition parser support"
 
 **Covered by:** `test_tips_no_hardcoded_language_lists`, `test_all_renderers_consistent_tip_count`.
@@ -1961,10 +1961,10 @@ cargo run -- tips
 **Expected:**
 
 - Output contains tip about "Query budget: aim for 3 or fewer search calls"
-- Output contains tip about "Multi-term name in search_definitions"
+- Output contains tip about "Multi-term name in xray_definitions"
 - Multi-term tip mentions comma-separated example: `UserService,IUserService,UserController`
 
-**Validates:** New efficiency guidance tips are visible in CLI output and MCP `search_help`.
+**Validates:** New efficiency guidance tips are visible in CLI output and MCP `xray_help`.
 
 ---
 
@@ -1990,7 +1990,7 @@ cargo run -- def-index -d $TEST_DIR -e sql
 
 ---
 
-### T-SQL-02: `serve` — search_definitions finds SQL stored procedures
+### T-SQL-02: `serve` — xray_definitions finds SQL stored procedures
 
 **Command:**
 
@@ -1998,7 +1998,7 @@ cargo run -- def-index -d $TEST_DIR -e sql
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"storedProcedure"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"storedProcedure"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext sql --definitions
 ```
@@ -2009,11 +2009,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext sql --definitions
 - Results contain SQL stored procedures with `kind: "storedProcedure"`
 - Each definition includes `name`, `file`, `lines`, `signature`
 
-**Validates:** `search_definitions` with `kind` filter works for SQL-specific definition kinds.
+**Validates:** `xray_definitions` with `kind` filter works for SQL-specific definition kinds.
 
 ---
 
-### T-SQL-03: `serve` — search_definitions finds SQL tables
+### T-SQL-03: `serve` — xray_definitions finds SQL tables
 
 **Command:**
 
@@ -2021,7 +2021,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext sql --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"table"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"table"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext sql --definitions
 ```
@@ -2032,7 +2032,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext sql --definitions
 - Results contain SQL table definitions with `kind: "table"`
 - Each definition includes `name`, `file`, `lines`
 
-**Validates:** `search_definitions` with `kind=table` returns SQL table definitions.
+**Validates:** `xray_definitions` with `kind=table` returns SQL table definitions.
 
 ---
 
@@ -2086,7 +2086,7 @@ Remove-Item -Recurse -Force $tmp
 
 ---
 
-### T-SQL-05: `serve` — search_callers direction=up finds callers of SQL stored procedure
+### T-SQL-05: `serve` — xray_callers direction=up finds callers of SQL stored procedure
 
 **Setup:**
 
@@ -2098,7 +2098,7 @@ Create temp `.sql` files with two stored procedures where one calls the other vi
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"usp_ValidateOrder","class":"Sales","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"usp_ValidateOrder","class":"Sales","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $tmp --ext sql --definitions
 ```
@@ -2109,11 +2109,11 @@ echo $msgs | cargo run -- serve --dir $tmp --ext sql --definitions
 - `class` parameter = SQL schema name (e.g., `"Sales"`, `"dbo"`)
 - Call sites matched via EXEC statements in SP bodies
 
-**Validates:** `search_callers` direction=up finds SQL stored procedures that call the target SP via EXEC.
+**Validates:** `xray_callers` direction=up finds SQL stored procedures that call the target SP via EXEC.
 
 ---
 
-### T-SQL-05b: `serve` — search_callers direction=down shows SP EXEC dependencies
+### T-SQL-05b: `serve` — xray_callers direction=down shows SP EXEC dependencies
 
 **Setup:**
 
@@ -2125,7 +2125,7 @@ Create temp `.sql` files with a stored procedure that calls other SPs and refere
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"usp_ProcessBatch","class":"dbo","direction":"down","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"usp_ProcessBatch","class":"dbo","direction":"down","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $tmp --ext sql --definitions
 ```
@@ -2137,7 +2137,7 @@ echo $msgs | cargo run -- serve --dir $tmp --ext sql --definitions
 - `class` = schema name for disambiguation
 - SQL functions (`kind: "sqlFunction"`) are included in the callee tree
 
-**Validates:** `search_callers` direction=down shows SP-to-SP EXEC call chains. Tables/views are deliberately excluded (they are data artifacts, not callable code).
+**Validates:** `xray_callers` direction=down shows SP-to-SP EXEC call chains. Tables/views are deliberately excluded (they are data artifacts, not callable code).
 
 **Known limitation:** Cross-language callers (C# calling SQL SP via ADO.NET string literals) are NOT visible — this requires semantic analysis beyond AST parsing.
 
@@ -2203,7 +2203,7 @@ cargo run -- def-index -d $TEST_DIR -e ts,tsx
 
 ---
 
-### T46: `serve` — MCP search_definitions finds TypeScript functions
+### T46: `serve` — MCP xray_definitions finds TypeScript functions
 
 **Command:**
 
@@ -2211,7 +2211,7 @@ cargo run -- def-index -d $TEST_DIR -e ts,tsx
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"function"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"function"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2222,13 +2222,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 - Results contain TypeScript function declarations with `kind: "function"`
 - Each definition includes `name`, `file`, `lines`, `signature`
 
-**Validates:** `search_definitions` with `kind` filter works for TypeScript-specific definition kinds.
+**Validates:** `xray_definitions` with `kind` filter works for TypeScript-specific definition kinds.
 
 **Note:** Requires a TypeScript project with function declarations.
 
 ---
 
-### T47: `serve` — MCP search_definitions finds TypeScript class by name
+### T47: `serve` — MCP xray_definitions finds TypeScript class by name
 
 **Command:**
 
@@ -2236,7 +2236,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"UserService"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"UserService"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2252,7 +2252,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 ---
 
-### T48: `serve` — MCP search_definitions finds decorated TypeScript classes
+### T48: `serve` — MCP xray_definitions finds decorated TypeScript classes
 
 **Command:**
 
@@ -2260,7 +2260,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"attribute":"injectable"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"attribute":"injectable"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2319,7 +2319,7 @@ Start-Sleep -Seconds 2
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"newTestFunction"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"newTestFunction"}}}'
 ) -join "`n"
 echo $msgs | & $server.Path
 ```
@@ -2327,7 +2327,7 @@ echo $msgs | & $server.Path
 **Expected:**
 
 - After file modification, stderr shows watcher detecting the change
-- `search_definitions` finds `newTestFunction` with correct file and line info
+- `xray_definitions` finds `newTestFunction` with correct file and line info
 
 **Validates:** Incremental definition update for TypeScript files via the file watcher.
 
@@ -2337,7 +2337,7 @@ echo $msgs | & $server.Path
 
 ### T50b: `serve` — Incremental content index update without forward index
 
-**Scenario:** Start the MCP server with `--watch`. Create a new file, wait for watcher debounce, then query for the new token via `search_grep`. Then modify the file (replacing a token), wait again, and verify the old token is gone and the new one is found. This validates the brute-force inverted index purge that replaced the forward index (memory optimization saving ~1.5 GB RAM).
+**Scenario:** Start the MCP server with `--watch`. Create a new file, wait for watcher debounce, then query for the new token via `xray_grep`. Then modify the file (replacing a token), wait again, and verify the old token is gone and the new one is found. This validates the brute-force inverted index purge that replaced the forward index (memory optimization saving ~1.5 GB RAM).
 
 **Command:**
 
@@ -2355,7 +2355,7 @@ Start-Sleep -Seconds 3
 # Query for OriginalToken — should find it
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"OriginalToken"}}}' | & search-index serve --dir $tmpDir --ext cs --watch
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"OriginalToken"}}}' | & xray serve --dir $tmpDir --ext cs --watch
 
 # Modify the file — replace OriginalToken with UpdatedToken
 Set-Content "$tmpDir\initial.cs" "class OriginalClass { UpdatedToken field; }"
@@ -2369,9 +2369,9 @@ Start-Sleep -Seconds 2
 
 **Expected:**
 
-- First query: `search_grep` for `OriginalToken` returns 1 file match
-- After modification and debounce: `search_grep` for `UpdatedToken` returns 1 match
-- After modification: `search_grep` for `OriginalToken` returns 0 matches (old postings purged)
+- First query: `xray_grep` for `OriginalToken` returns 1 file match
+- After modification and debounce: `xray_grep` for `UpdatedToken` returns 1 match
+- After modification: `xray_grep` for `OriginalToken` returns 0 matches (old postings purged)
 
 **Validates:** Incremental content index update via brute-force inverted index purge (no forward index). Ensures the memory optimization (~1.5 GB savings) doesn't break incremental watcher updates.
 
@@ -2387,7 +2387,7 @@ Start-Sleep -Seconds 2
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"typeAlias"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"typeAlias"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2403,7 +2403,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"variable"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"variable"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2419,12 +2419,12 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 ---
 
-### T52: `serve` — Response truncation for `search_definitions` broad queries
+### T52: `serve` — Response truncation for `xray_definitions` broad queries
 
-**Scenario:** When `search_definitions` returns a large result set (e.g., broad `kind: "property"`
+**Scenario:** When `xray_definitions` returns a large result set (e.g., broad `kind: "property"`
 query on a large codebase), the response must be truncated to stay within the `--max-response-kb`
-budget. Unlike `search_grep` (which uses Phase 1-4 with its `files` array structure),
-`search_definitions` uses a `definitions` array — truncation Phase 5 (generic array fallback)
+budget. Unlike `xray_grep` (which uses Phase 1-4 with its `files` array structure),
+`xray_definitions` uses a `definitions` array — truncation Phase 5 (generic array fallback)
 handles this. The `summary` must include truncation metadata with a definitions-specific hint.
 
 **Command (broad query expected to exceed 16KB):**
@@ -2433,7 +2433,7 @@ handles this. The `summary` must include truncation metadata with a definitions-
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_definitions","arguments":{"kind":"property","maxResults":500}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"property","maxResults":500}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts,tsx --definitions --metrics 2>$null
 ```
@@ -2453,7 +2453,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts,tsx --definitions --
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"truncate_large_response","kind":"method"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"truncate_large_response","kind":"method"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir . --ext rs --definitions --metrics 2>$null
 ```
@@ -2471,7 +2471,7 @@ echo $msgs | cargo run -- serve --dir . --ext rs --definitions --metrics 2>$null
 
 ## TypeScript Callers Tests
 
-### T53: `serve` — search_callers finds TypeScript class method callers
+### T53: `serve` — xray_callers finds TypeScript class method callers
 
 **Command (TypeScript codebase):**
 
@@ -2479,7 +2479,7 @@ echo $msgs | cargo run -- serve --dir . --ext rs --definitions --metrics 2>$null
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":2}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","class":"<ClassName>","depth":2}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2497,7 +2497,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 ---
 
-### T54: `serve` — search_callers finds TypeScript standalone function calls
+### T54: `serve` — xray_callers finds TypeScript standalone function calls
 
 **Command (TypeScript codebase with standalone functions):**
 
@@ -2505,7 +2505,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<functionName>","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<functionName>","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2523,7 +2523,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 ---
 
-### T55: `serve` — search_callers with `ext` parameter filters by language
+### T55: `serve` — xray_callers with `ext` parameter filters by language
 
 **Command (mixed C#/TypeScript codebase):**
 
@@ -2531,7 +2531,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","ext":"ts","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","ext":"ts","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts --definitions
 ```
@@ -2542,13 +2542,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts --definitions
 - All results are from `.ts` files only (no `.cs` files)
 - `ext` parameter filters both the grep search and the definition lookups
 
-**Validates:** `ext` parameter on `search_callers` can filter results to a specific language in a mixed-language project.
+**Validates:** `ext` parameter on `xray_callers` can filter results to a specific language in a mixed-language project.
 
 **Note:** Server must be started with `--ext cs,ts` to index both languages. The `ext` parameter in the tool call narrows results to TypeScript only.
 
 ---
 
-### T56: `serve` — search_callers finds callers in TypeScript arrow function class properties
+### T56: `serve` — xray_callers finds callers in TypeScript arrow function class properties
 
 **Command (TypeScript codebase with arrow function class properties):**
 
@@ -2556,7 +2556,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2573,7 +2573,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 ---
 
-### T57: `serve` — search_callers tracks TypeScript `new` expression constructor calls
+### T57: `serve` — xray_callers tracks TypeScript `new` expression constructor calls
 
 **Command (TypeScript codebase with constructor calls):**
 
@@ -2581,7 +2581,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<ClassName>","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<ClassName>","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -2596,7 +2596,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 **Note:** Replace `<ClassName>` with a class that is instantiated via `new` in the TypeScript project.
 
-### T58: `serve` — search_callers resolves Angular `inject()` field types
+### T58: `serve` — xray_callers resolves Angular `inject()` field types
 
 **Command (Angular/TypeScript codebase with `inject()` usage):**
 
@@ -2604,7 +2604,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"<MethodName>","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"<MethodName>","depth":1}}}'
 ) -join "`n"
 ```
 
@@ -2625,7 +2625,7 @@ Replace `<MethodName>` with a method called on an `inject()`-resolved field (e.g
 
 ---
 
-### T59: `serve` — search_callers ambiguity warning truncated for common methods
+### T59: `serve` — xray_callers ambiguity warning truncated for common methods
 
 **Command (codebase with many classes implementing the same method, e.g., Angular `ngOnInit`):**
 
@@ -2633,7 +2633,7 @@ Replace `<MethodName>` with a method called on an `inject()`-resolved field (e.g
 @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"ngOnInit"}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"ngOnInit"}}}'
 ) -join "`n"
 ```
 
@@ -2647,7 +2647,7 @@ Replace `<MethodName>` with a method called on an `inject()`-resolved field (e.g
 
 **Validates:** Ambiguity warning is truncated when a method name (without `class` filter) matches many classes. Previously, the warning listed all class names, producing ~56KB responses (~14K tokens) for common methods like `ngOnInit`.
 
-**Status:** ✅ Implemented (covered by `test_search_callers_ambiguity_warning_truncated` unit test)
+**Status:** ✅ Implemented (covered by `test_xray_callers_ambiguity_warning_truncated` unit test)
 
 ---
 
@@ -2774,7 +2774,7 @@ The E2E test script (`e2e-test.ps1`) uses **`Start-Job`** to run independent MCP
 
 | Group | Tests | Parallelizable | Reason |
 |-------|-------|---------------|--------|
-| **Sequential CLI** | T01-T22, T24, T42/T42b, T49, T54, T61-T64, T65(fast), T76, T80, T82 | ❌ No | Share index files in `%LOCALAPPDATA%/search-index/` for current directory |
+| **Sequential CLI** | T01-T22, T24, T42/T42b, T49, T54, T61-T64, T65(fast), T76, T80, T82 | ❌ No | Share index files in `%LOCALAPPDATA%/xray/` for current directory |
 | **Sequential state** | T-EXT-CHECK, T-DEF-AUDIT, T-SHUTDOWN | ❌ No | T-EXT-CHECK depends on T20; T-SHUTDOWN modifies global state |
 | **MCP callers** | T65-66, T67, T68, T69, T-FIX3-EXPR-BODY, T-FIX3-VERIFY, T-FIX3-LAMBDA, T-OVERLOAD-DEDUP-UP, T-SAME-NAME-IFACE, T-ANGULAR | ✅ Yes | Each creates isolated temp directory with own indexes |
 | **Git MCP** | T-BRANCH-STATUS, T-GIT-FILE-NOT-FOUND, T-GIT-NOCACHE, T-GIT-TOTALCOMMITS, T-GIT-CACHE | ✅ Yes | Read-only queries against current repo |
@@ -2809,9 +2809,9 @@ The E2E test script (`e2e-test.ps1`) uses **`Start-Job`** to run independent MCP
 - ✅ After merging a large PR
 - ✅ When switching Rust toolchain versions
 
-### T30: `serve` — MCP search_grep with subdirectory `dir` parameter
+### T30: `serve` — MCP xray_grep with subdirectory `dir` parameter
 
-**Scenario:** When the MCP server is started with `--dir C:\Repos\MainProject`, a `search_grep` call
+**Scenario:** When the MCP server is started with `--dir C:\Repos\MainProject`, a `xray_grep` call
 with `dir` set to a subdirectory (e.g., `C:\Repos\MainProject\Backend\Services`) should succeed and
 return only files within that subdirectory. Previously this returned an error.
 
@@ -2821,7 +2821,7 @@ return only files within that subdirectory. Previously this returned an error.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"main","dir":"src/mcp"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"main","dir":"src/mcp"}}}'
 ) -join "`n"
 $msgs | cargo run -- serve -d . -e rs 2>$null
 ```
@@ -2838,7 +2838,7 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"main","dir":"Z:\\other\\path"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"main","dir":"Z:\\other\\path"}}}'
 ) -join "`n"
 $msgs | cargo run -- serve -d . -e rs 2>$null
 ```
@@ -2868,7 +2868,7 @@ thousands of files), the MCP server automatically truncates the JSON response to
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"fn","substring":true}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"fn","substring":true}}}'
 ) -join "`n"
 $msgs | cargo run -- serve -d . -e rs --metrics 2>$null
 ```
@@ -2889,7 +2889,7 @@ $msgs | cargo run -- serve -d . -e rs --metrics 2>$null
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"truncate_large_response"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"truncate_large_response"}}}'
 ) -join "`n"
 $msgs | cargo run -- serve -d . -e rs --metrics 2>$null
 ```
@@ -2903,10 +2903,10 @@ $msgs | cargo run -- serve -d . -e rs --metrics 2>$null
 
 ---
 
-### T43: `serve` — search_find directory validation (security)
+### T43: `serve` — xray_find directory validation (security)
 
-**Scenario:** The `search_find` tool now validates the `dir` parameter against `server_dir`,
-matching the same security behavior as `search_grep`. Previously, `search_find` accepted any
+**Scenario:** The `xray_find` tool now validates the `dir` parameter against `server_dir`,
+matching the same security behavior as `xray_grep`. Previously, `xray_find` accepted any
 directory path, allowing filesystem enumeration outside the server's configured scope.
 
 **Test — directory outside `server_dir` is rejected:**
@@ -2915,7 +2915,7 @@ directory path, allowing filesystem enumeration outside the server's configured 
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_find","arguments":{"pattern":"*","dir":"C:\\Windows"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_find","arguments":{"pattern":"*","dir":"C:\\Windows"}}}'
 ) -join "`n"
 $msgs | cargo run -- serve -d . -e rs 2>$null
 ```
@@ -2932,7 +2932,7 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_find","arguments":{"pattern":"*.rs","dir":"src/mcp"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_find","arguments":{"pattern":"*.rs","dir":"src/mcp"}}}'
 ) -join "`n"
 $msgs | cargo run -- serve -d . -e rs 2>$null
 ```
@@ -2941,7 +2941,7 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 
 - No error
 - Results contain file paths within `src/mcp`
-- Normal `search_find` output with match count
+- Normal `xray_find` output with match count
 
 **Test — no `dir` parameter uses `server_dir` as default:**
 
@@ -2949,7 +2949,7 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_find","arguments":{"pattern":"*.rs"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_find","arguments":{"pattern":"*.rs"}}}'
 ) -join "`n"
 $msgs | cargo run -- serve -d . -e rs 2>$null
 ```
@@ -2958,9 +2958,9 @@ $msgs | cargo run -- serve -d . -e rs 2>$null
 
 - No error
 - Results returned from the server's root directory
-- Normal `search_find` output
+- Normal `xray_find` output
 
-**Validates:** `search_find` directory validation parity with `search_grep`, preventing filesystem enumeration outside allowed scope.
+**Validates:** `xray_find` directory validation parity with `xray_grep`, preventing filesystem enumeration outside allowed scope.
 
 **Status:** ✅ Implemented (covered by `test_validate_search_dir_subdirectory` and `test_validate_search_dir_outside_rejects` unit tests)
 
@@ -3009,7 +3009,7 @@ cargo run -- def-index --dir $testDir --ext cs
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | cargo run -- serve --dir $testDir --ext cs --definitions 2>$null
 ```
 
-Then send `search_definitions` with `name: "HtmlLexer"` — should return the class definition.
+Then send `xray_definitions` with `name: "HtmlLexer"` — should return the class definition.
 
 **Cleanup:**
 
@@ -3068,7 +3068,7 @@ cargo run -- def-index --dir $testDir --ext cs
 echo '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}' | cargo run -- serve --dir $testDir --ext cs --definitions 2>$null
 ```
 
-Then send `search_definitions` with `file: "Program.cs"` — should return `DataProcessor` class and `Process` method.
+Then send `xray_definitions` with `file: "Program.cs"` — should return `DataProcessor` class and `Process` method.
 
 **Cleanup:**
 
@@ -3080,7 +3080,7 @@ Remove-Item -Recurse -Force $testDir
 
 ### T-AUDIT: Definition index audit mode
 
-**Background:** The `search_definitions` tool supports an `audit` parameter that returns index coverage statistics — how many files have definitions, how many are empty, and which suspicious files (large but 0 definitions) may have parsing issues.
+**Background:** The `xray_definitions` tool supports an `audit` parameter that returns index coverage statistics — how many files have definitions, how many are empty, and which suspicious files (large but 0 definitions) may have parsing issues.
 
 **Prerequisites:** Server running with `--definitions` flag
 
@@ -3089,7 +3089,7 @@ Remove-Item -Recurse -Force $testDir
 ```json
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_definitions","arguments":{"audit":true}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"audit":true}}}
 ```
 
 **Expected response structure:**
@@ -3126,7 +3126,7 @@ Remove-Item -Recurse -Force $testDir
   "id": 3,
   "method": "tools/call",
   "params": {
-    "name": "search_definitions",
+    "name": "xray_definitions",
     "arguments": { "audit": true, "auditMinBytes": 10000 }
   }
 }
@@ -3140,13 +3140,13 @@ Should return fewer suspicious files (only those >10KB with 0 definitions).
 
 **Background:** The `search def-audit` CLI subcommand loads a previously built `.code-structure` file from disk and reports index coverage: how many files have definitions, how many are empty, and which suspicious files (large but 0 definitions) may have parsing issues. This does NOT rebuild the index.
 
-**Prerequisites:** A definition index must already be built via `search-index def-index`.
+**Prerequisites:** A definition index must already be built via `xray def-index`.
 
 **Command:**
 
 ```powershell
 # Build first (if not already built)
-search-index def-index --dir $TEST_DIR --ext rs
+xray def-index --dir $TEST_DIR --ext rs
 
 # Audit (instant — loads from disk)
 search def-audit --dir $TEST_DIR --ext rs
@@ -3296,7 +3296,7 @@ cargo run -- grep ".*stale.*" -d $TEST_DIR -e $TEST_EXT --regex
 cargo run -- content-index -d $TEST_DIR -e $TEST_EXT
 
 # Verify the index file starts with LZ4 magic bytes
-$idxDir = "$env:LOCALAPPDATA\search-index"
+$idxDir = "$env:LOCALAPPDATA\xray"
 $cidxFile = Get-ChildItem $idxDir -Filter *.word-search | Select-Object -First 1
 $bytes = [System.IO.File]::ReadAllBytes($cidxFile.FullName)
 $magic = [System.Text.Encoding]::ASCII.GetString($bytes[0..3])
@@ -3336,7 +3336,7 @@ cargo run -- grep "fn" -d $TEST_DIR -e $TEST_EXT
 Tests for the async startup feature that allows the MCP server event loop to start immediately
 while indexes are built in the background.
 
-#### T-ASYNC-01: `search_grep` returns "building" message when content index not ready
+#### T-ASYNC-01: `xray_grep` returns "building" message when content index not ready
 
 **Scenario:** MCP server starts without a pre-built content index on disk (first run on a new codebase).
 
@@ -3364,19 +3364,19 @@ while indexes are built in the background.
   "jsonrpc": "2.0",
   "id": 2,
   "method": "tools/call",
-  "params": { "name": "search_grep", "arguments": { "terms": "HttpClient" } }
+  "params": { "name": "xray_grep", "arguments": { "terms": "HttpClient" } }
 }
 ```
 
 **Expected:** `isError: true`, message contains "being built in the background".
 
-**Validates:** Server responds to `initialize` immediately, `search_grep` returns friendly error during build.
+**Validates:** Server responds to `initialize` immediately, `xray_grep` returns friendly error during build.
 
 **Status:** ✅ Covered by unit tests: `test_dispatch_grep_while_content_index_building`
 
 ---
 
-#### T-ASYNC-02: `search_definitions` returns "building" message when def index not ready
+#### T-ASYNC-02: `xray_definitions` returns "building" message when def index not ready
 
 **MCP Request:**
 
@@ -3386,7 +3386,7 @@ while indexes are built in the background.
   "id": 3,
   "method": "tools/call",
   "params": {
-    "name": "search_definitions",
+    "name": "xray_definitions",
     "arguments": { "name": "UserService" }
   }
 }
@@ -3398,7 +3398,7 @@ while indexes are built in the background.
 
 ---
 
-#### T-ASYNC-03: `search_callers` returns "building" message when def index not ready
+#### T-ASYNC-03: `xray_callers` returns "building" message when def index not ready
 
 **MCP Request:**
 
@@ -3408,7 +3408,7 @@ while indexes are built in the background.
   "id": 4,
   "method": "tools/call",
   "params": {
-    "name": "search_callers",
+    "name": "xray_callers",
     "arguments": { "method": "GetUserAsync" }
   }
 }
@@ -3420,7 +3420,7 @@ while indexes are built in the background.
 
 ---
 
-#### T-ASYNC-04: `search_fast` returns "building" message when content index not ready
+#### T-ASYNC-04: `xray_fast` returns "building" message when content index not ready
 
 **MCP Request:**
 
@@ -3429,7 +3429,7 @@ while indexes are built in the background.
   "jsonrpc": "2.0",
   "id": 5,
   "method": "tools/call",
-  "params": { "name": "search_fast", "arguments": { "pattern": "UserService" } }
+  "params": { "name": "xray_fast", "arguments": { "pattern": "UserService" } }
 }
 ```
 
@@ -3439,7 +3439,7 @@ while indexes are built in the background.
 
 ---
 
-#### T-ASYNC-05: `search_reindex` returns "already building" message during background build
+#### T-ASYNC-05: `xray_reindex` returns "already building" message during background build
 
 **MCP Request:**
 
@@ -3448,7 +3448,7 @@ while indexes are built in the background.
   "jsonrpc": "2.0",
   "id": 6,
   "method": "tools/call",
-  "params": { "name": "search_reindex", "arguments": {} }
+  "params": { "name": "xray_reindex", "arguments": {} }
 }
 ```
 
@@ -3458,13 +3458,13 @@ while indexes are built in the background.
 
 ---
 
-#### T-ASYNC-06: `search_help` and `search_info` work during index build
+#### T-ASYNC-06: `xray_help` and `xray_info` work during index build
 
 **MCP Requests:**
 
 ```json
-{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"search_help","arguments":{}}}
-{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"search_info","arguments":{}}}
+{"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"xray_help","arguments":{}}}
+{"jsonrpc":"2.0","id":8,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}
 ```
 
 **Expected:** Both return `isError: false` with valid results, even while index is building.
@@ -3473,7 +3473,7 @@ while indexes are built in the background.
 
 ---
 
-#### T-ASYNC-07: `search_find` works during index build (uses filesystem walk, not content index)
+#### T-ASYNC-07: `xray_find` works during index build (uses filesystem walk, not content index)
 
 **MCP Request:**
 
@@ -3482,7 +3482,7 @@ while indexes are built in the background.
   "jsonrpc": "2.0",
   "id": 9,
   "method": "tools/call",
-  "params": { "name": "search_find", "arguments": { "pattern": "main" } }
+  "params": { "name": "xray_find", "arguments": { "pattern": "main" } }
 }
 ```
 
@@ -3503,7 +3503,7 @@ while indexes are built in the background.
   "jsonrpc": "2.0",
   "id": 10,
   "method": "tools/call",
-  "params": { "name": "search_grep", "arguments": { "terms": "HttpClient" } }
+  "params": { "name": "xray_grep", "arguments": { "terms": "HttpClient" } }
 }
 ```
 
@@ -3566,7 +3566,7 @@ $stderr = Get-Content "$dir\stderr.txt" -Raw
 
 - Server stderr contains `saving indexes before shutdown`
 - Server stderr contains `Content index saved on shutdown`
-- The `.word-search` file in `%LOCALAPPDATA%\search-index` has a recent modification timestamp
+- The `.word-search` file in `%LOCALAPPDATA%\xray` has a recent modification timestamp
 
 **Validates:** Save-on-shutdown in [`server.rs`](../src/mcp/server.rs:107) persists incremental watcher changes.
 
@@ -3584,7 +3584,7 @@ $stderr = Get-Content "$dir\stderr.txt" -Raw
 
 ```powershell
 # 1. Start the MCP server
-search-index serve --dir C:\Projects --ext cs --watch --definitions
+xray serve --dir C:\Projects --ext cs --watch --definitions
 
 # 2. Wait for the server to finish loading indexes (watch stderr for "ready" messages)
 
@@ -3615,11 +3615,11 @@ The following test scenarios are covered by unit tests in
 with real indexes built from test fixture files (C#, TypeScript, SQL). Each entry documents what
 the unit test verifies at the E2E-equivalent level.
 
-### search_grep
+### xray_grep
 
-#### T65: `search_grep` — Response truncation via small budget
+#### T65: `xray_grep` — Response truncation via small budget
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** When the JSON response exceeds the `max_response_bytes` budget, the server
 progressively truncates the response (capping lines, removing lineContent, reducing file count).
@@ -3630,13 +3630,13 @@ progressively truncates the response (capping lines, removing lineContent, reduc
 - `summary.truncationReason` is present and non-empty
 - Response byte size is within the configured budget
 
-**Unit test:** [`test_search_grep_response_truncation_via_small_budget`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_grep_response_truncation_via_small_budget`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T66: `search_grep` — SQL extension filter
+#### T66: `xray_grep` — SQL extension filter
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** Passing `ext: "sql"` returns only `.sql` files from the index, excluding `.cs` and
 `.ts` files even if they contain the same tokens.
@@ -3646,13 +3646,13 @@ progressively truncates the response (capping lines, removing lineContent, reduc
 - All files in results have `.sql` extension
 - `summary.totalFiles` ≥ 1
 
-**Unit test:** [`test_search_grep_sql_extension_filter`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_grep_sql_extension_filter`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T67: `search_grep` — Phrase search with showLines from SQL files
+#### T67: `xray_grep` — Phrase search with showLines from SQL files
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** Phrase search with `phrase: true` and `showLines: true` against `.sql` files returns
 matching line content in the compact grouped format.
@@ -3663,13 +3663,13 @@ matching line content in the compact grouped format.
 - Each file has `lineContent` array with `startLine`, `lines[]`, `matchIndices[]`
 - Matched lines contain the searched phrase
 
-**Unit test:** [`test_search_grep_phrase_search_with_show_lines`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_grep_phrase_search_with_show_lines`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T68: `search_grep` — `maxResults=0` means unlimited
+#### T68: `xray_grep` — `maxResults=0` means unlimited
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** Setting `maxResults: 0` returns all matching files without any cap (0 = unlimited).
 
@@ -3678,17 +3678,17 @@ matching line content in the compact grouped format.
 - `summary.totalFiles` equals the actual number of files in the `files` array
 - No artificial capping at the default limit
 
-**Unit test:** [`test_search_grep_max_results_zero_means_unlimited`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_grep_max_results_zero_means_unlimited`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### search_definitions — Auto-Summary
+### xray_definitions — Auto-Summary
 
-#### T-AS1: `search_definitions` — Auto-summary triggered on broad query
+#### T-AS1: `xray_definitions` — Auto-summary triggered on broad query
 
 **Input:**
 ```json
-{ "name": "search_definitions", "arguments": { "file": "src/", "maxResults": 3 } }
+{ "name": "xray_definitions", "arguments": { "file": "src/", "maxResults": 3 } }
 ```
 
 **Expected:**
@@ -3699,22 +3699,22 @@ matching line content in the compact grouped format.
 - `summary.returned` is `0`
 - `autoSummary.hint` contains `file=` and `name=`
 
-#### T-AS2: `search_definitions` — Auto-summary NOT triggered with name filter
+#### T-AS2: `xray_definitions` — Auto-summary NOT triggered with name filter
 
 **Input:**
 ```json
-{ "name": "search_definitions", "arguments": { "file": "src/", "name": "handle", "maxResults": 3 } }
+{ "name": "xray_definitions", "arguments": { "file": "src/", "name": "handle", "maxResults": 3 } }
 ```
 
 **Expected:**
 - Response contains `definitions` array (normal format)
 - No `autoSummary` field
 
-#### T-AS3: `search_definitions` — Auto-summary NOT triggered when results fit
+#### T-AS3: `xray_definitions` — Auto-summary NOT triggered when results fit
 
 **Input:**
 ```json
-{ "name": "search_definitions", "arguments": { "file": "src/", "maxResults": 10000 } }
+{ "name": "xray_definitions", "arguments": { "file": "src/", "maxResults": 10000 } }
 ```
 
 **Expected:**
@@ -3724,11 +3724,11 @@ matching line content in the compact grouped format.
 ---
 
 
-### search_definitions
+### xray_definitions
 
-#### T69: `search_definitions` — Regex name filter
+#### T69: `xray_definitions` — Regex name filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Setting `regex: true` with a name pattern (e.g., `^User.*`) returns only definitions
 whose name matches the regex pattern.
@@ -3739,13 +3739,13 @@ whose name matches the regex pattern.
 - Non-matching definitions are excluded
 - `summary.totalResults` reflects only matching definitions
 
-**Unit test:** [`test_search_definitions_regex_name_filter`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_regex_name_filter`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T70: `search_definitions` — Audit mode
+#### T70: `xray_definitions` — Audit mode
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Setting `audit: true` returns an index coverage report instead of search results.
 
@@ -3755,13 +3755,13 @@ whose name matches the regex pattern.
 - `audit.totalFiles` > 0
 - `suspiciousFiles` is an array (may be empty)
 
-**Unit test:** [`test_search_definitions_audit_mode`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_audit_mode`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T71: `search_definitions` — `excludeDir` filter
+#### T71: `xray_definitions` — `excludeDir` filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Setting `excludeDir: ["some_dir"]` excludes definitions from files in the specified
 directory.
@@ -3771,13 +3771,13 @@ directory.
 - No definitions from excluded directories appear in results
 - Definitions from other directories are returned normally
 
-**Unit test:** [`test_search_definitions_exclude_dir`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_exclude_dir`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T72: `search_definitions` — Combined name + parent + kind filter
+#### T72: `xray_definitions` — Combined name + parent + kind filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `name`, `parent`, and `kind` filters simultaneously returns only definitions
 matching ALL three criteria.
@@ -3789,13 +3789,13 @@ matching ALL three criteria.
 - All returned definitions have the specified kind
 - `summary.totalResults` reflects only definitions matching all filters
 
-**Unit test:** [`test_search_definitions_combined_name_parent_kind_filter`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_combined_name_parent_kind_filter`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T73: `search_definitions` — Nonexistent name returns empty
+#### T73: `xray_definitions` — Nonexistent name returns empty
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a name that doesn't exist in the index returns an empty result set.
 
@@ -3805,13 +3805,13 @@ matching ALL three criteria.
 - `summary.totalResults` = 0
 - No error (graceful empty response)
 
-**Unit test:** [`test_search_definitions_nonexistent_name_returns_empty`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_nonexistent_name_returns_empty`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T74: `search_definitions` — Invalid regex error
+#### T74: `xray_definitions` — Invalid regex error
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `regex: true` with an invalid pattern (e.g., `[invalid`) returns an error.
 
@@ -3820,13 +3820,13 @@ matching ALL three criteria.
 - Response is an error (`isError: true`)
 - Error message mentions invalid regex
 
-**Unit test:** [`test_search_definitions_invalid_regex_error`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_invalid_regex_error`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T75: `search_definitions` — `kind="struct"` filter
+#### T75: `xray_definitions` — `kind="struct"` filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Filtering by `kind: "struct"` returns only struct-kind definitions.
 
@@ -3835,13 +3835,13 @@ matching ALL three criteria.
 - All returned definitions have `kind: "struct"`
 - No classes, interfaces, methods, or other kinds appear
 
-**Unit test:** [`test_search_definitions_struct_kind`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_struct_kind`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T76: `search_definitions` — `baseType` filter
+#### T76: `xray_definitions` — `baseType` filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Filtering by `baseType` (e.g., `"ControllerBase"`) returns only classes that inherit
 from or implement the specified type.
@@ -3851,13 +3851,13 @@ from or implement the specified type.
 - All returned definitions list the specified base type in their inheritance
 - Definitions without that base type are excluded
 
-**Unit test:** [`test_search_definitions_base_type_filter`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_base_type_filter`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T77: `search_definitions` — `kind="enumMember"` filter
+#### T77: `xray_definitions` — `kind="enumMember"` filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Filtering by `kind: "enumMember"` returns only enum member definitions.
 
@@ -3866,13 +3866,13 @@ from or implement the specified type.
 - All returned definitions have `kind: "enumMember"`
 - No enums, classes, or other kinds appear
 
-**Unit test:** [`test_search_definitions_enum_member_kind`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_enum_member_kind`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T78: `search_definitions` — File filter slash normalization
+#### T78: `xray_definitions` — File filter slash normalization
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** The `file` parameter normalizes path separators so both forward slashes (`/`) and
 backslashes (`\`) work identically for path filtering. This applies to both the general file filter
@@ -3889,21 +3889,21 @@ and the file filter comparison normalizes user input for defense-in-depth.
 
 **Unit tests:**
 
-- [`test_search_definitions_file_filter_forward_slash`](../src/mcp/handlers/handlers_tests_csharp.rs)
-- [`test_search_definitions_file_filter_backslash`](../src/mcp/handlers/handlers_tests_csharp.rs)
-- [`test_search_definitions_file_filter_mixed_separators`](../src/mcp/handlers/handlers_tests_csharp.rs)
-- [`test_search_definitions_file_filter_no_match`](../src/mcp/handlers/handlers_tests_csharp.rs)
-- [`test_search_definitions_contains_line_forward_slash`](../src/mcp/handlers/handlers_tests_csharp.rs)
-- [`test_search_definitions_contains_line_backslash`](../src/mcp/handlers/handlers_tests_csharp.rs)
-- [`test_search_definitions_contains_line_mixed_separators`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_definitions_file_filter_forward_slash`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_definitions_file_filter_backslash`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_definitions_file_filter_mixed_separators`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_definitions_file_filter_no_match`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_definitions_contains_line_forward_slash`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_definitions_contains_line_backslash`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_definitions_contains_line_mixed_separators`](../src/mcp/handlers/handlers_tests_csharp.rs)
 
 ---
 
-### search_fast
+### xray_fast
 
-#### T79: `search_fast` — `dirsOnly` and `filesOnly` filters
+#### T79: `xray_fast` — `dirsOnly` and `filesOnly` filters
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** Setting `dirsOnly: true` returns only directory entries; setting `filesOnly: true`
 returns only file entries.
@@ -3914,11 +3914,11 @@ returns only file entries.
 - `filesOnly: true` — all results are files (no directory entries)
 - Both modes return valid results from the file name index
 
-**Unit test:** [`test_search_fast_dirs_only_and_files_only`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_fast_dirs_only_and_files_only`](../src/mcp/handlers/handlers_tests.rs)
 
-#### T79a: `search_fast` — `dirsOnly` + wildcard returns `fileCount` sorted by size
+#### T79a: `xray_fast` — `dirsOnly` + wildcard returns `fileCount` sorted by size
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** When `dirsOnly=true` with wildcard pattern (`*` or empty pattern with `dir`), results include a `fileCount` field for each directory (recursive file count) and are sorted by `fileCount` descending (largest modules first). This helps LLMs quickly identify the most important modules in large repos.
 
@@ -3930,15 +3930,15 @@ returns only file entries.
 - Non-wildcard `dirsOnly` queries do NOT include `fileCount` (backward compatible)
 - `isDir: true` for all entries
 
-**Unit tests:** [`test_search_fast_dirsonly_wildcard_filecount`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_dirsonly_non_wildcard_no_filecount`](../src/mcp/handlers/handlers_tests_fast.rs)
+**Unit tests:** [`test_xray_fast_dirsonly_wildcard_filecount`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_dirsonly_non_wildcard_no_filecount`](../src/mcp/handlers/handlers_tests_fast.rs)
 
 **Status:** ✅ Implemented
 
 ---
 
-#### T79a-fix: `search_fast` — `fileCount` correct when `dir` is a subdirectory (regression)
+#### T79a-fix: `xray_fast` — `fileCount` correct when `dir` is a subdirectory (regression)
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** When `dir` points to a subdirectory (absolute or relative path, different from `server_dir`), the `fileCount` field should still be correctly computed — not 0 for all directories. Previously, relative `dir` paths caused `fileCount` to always be 0 because the `dir_prefix` filter didn't resolve against `index.root`.
 
@@ -3949,15 +3949,15 @@ returns only file entries.
 - Directories sorted by `fileCount` descending
 - Only files under the specified `dir` are counted (not files from other directories)
 
-**Unit tests:** [`test_search_fast_filecount_with_subdir`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_filecount_with_absolute_dir`](../src/mcp/handlers/handlers_tests_fast.rs)
+**Unit tests:** [`test_xray_fast_filecount_with_subdir`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_filecount_with_absolute_dir`](../src/mcp/handlers/handlers_tests_fast.rs)
 
 **Status:** ✅ Implemented (regression fix 2026-03-13)
 
 ---
 
-#### T79c: `search_fast` — `maxDepth` limits directory depth
+#### T79c: `xray_fast` — `maxDepth` limits directory depth
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** The `maxDepth` parameter limits directory traversal depth relative to the base directory. `maxDepth=1` returns only immediate subdirectories, `maxDepth=2` goes two levels deep, etc.
 
@@ -3968,17 +3968,17 @@ returns only file entries.
 - No `maxDepth` → full recursion (existing behavior)
 - Applies to both files and directories
 
-**Unit test:** [`test_search_fast_max_depth`](../src/mcp/handlers/handlers_tests_fast.rs)
+**Unit test:** [`test_xray_fast_max_depth`](../src/mcp/handlers/handlers_tests_fast.rs)
 
 **Status:** ✅ Implemented
 
 ---
 
-#### T79d: `search_fast` — `dirsOnly` truncation hint for large results
+#### T79d: `xray_fast` — `dirsOnly` truncation hint for large results
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
-**Scenario:** When `dirsOnly=true` wildcard returns more than 150 directories without `maxDepth`, the summary includes a hint recommending `maxDepth=1` or `search_definitions` for code exploration.
+**Scenario:** When `dirsOnly=true` wildcard returns more than 150 directories without `maxDepth`, the summary includes a hint recommending `maxDepth=1` or `xray_definitions` for code exploration.
 
 **Expected:**
 
@@ -3986,15 +3986,15 @@ returns only file entries.
 - With `maxDepth` set → no truncation hint
 - `ext_ignored_for_dirs` hint may be overwritten by truncation hint (truncation is more important)
 
-**Unit test:** [`test_search_fast_dirsonly_truncation_hint`](../src/mcp/handlers/handlers_tests_fast.rs)
+**Unit test:** [`test_xray_fast_dirsonly_truncation_hint`](../src/mcp/handlers/handlers_tests_fast.rs)
 
 **Status:** ✅ Implemented
 
 ---
 
-#### T79b: `search_fast` — `dirsOnly` with `ext` filter (ext ignored)
+#### T79b: `xray_fast` — `dirsOnly` with `ext` filter (ext ignored)
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** Setting `dirsOnly: true` with `ext: "cs"` should find directories (ext is ignored
 for directory searches because directories have no file extension). Response includes a hint.
@@ -4006,7 +4006,7 @@ for directory searches because directories have no file extension). Response inc
 - All results are directories (`isDir: true`)
 - `filesOnly: true` + `ext: "cs"` — ext still filters correctly (only `.cs` files)
 
-**Unit tests:** [`test_search_fast_dirs_only_ignores_ext_filter`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_dirs_only_without_ext`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_files_only_with_ext_still_filters`](../src/mcp/handlers/handlers_tests_fast.rs)
+**Unit tests:** [`test_xray_fast_dirs_only_ignores_ext_filter`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_dirs_only_without_ext`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_files_only_with_ext_still_filters`](../src/mcp/handlers/handlers_tests_fast.rs)
 
 **Status:** ✅ Implemented
 
@@ -4014,9 +4014,9 @@ for directory searches because directories have no file extension). Response inc
 
 ---
 
-#### T80: `search_fast` — Regex mode
+#### T80: `xray_fast` — Regex mode
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** Setting `regex: true` matches file names using regex patterns instead of substring
 matching.
@@ -4027,13 +4027,13 @@ matching.
 - Non-matching files are excluded
 - `summary.totalMatches` reflects regex-matched entries
 
-**Unit test:** [`test_search_fast_regex_mode`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_fast_regex_mode`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T81: `search_fast` — Empty pattern handled gracefully
+#### T81: `xray_fast` — Empty pattern handled gracefully
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** Passing an empty string as the pattern without `dir` returns an error. Passing an empty string with `dir` returns all entries (wildcard).
 
@@ -4046,15 +4046,15 @@ matching.
 - No panic or crash in any case
 - Clean response with valid JSON structure
 
-**Unit tests:** [`test_search_fast_empty_pattern`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_empty_pattern_returns_error`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_empty_pattern_with_dir`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_empty_pattern_without_dir_still_errors`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_wildcard_star`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_search_fast_wildcard_star_dirs_only`](../src/mcp/handlers/handlers_tests_fast.rs)
+**Unit tests:** [`test_xray_fast_empty_pattern`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_empty_pattern_returns_error`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_empty_pattern_with_dir`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_empty_pattern_without_dir_still_errors`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_wildcard_star`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_wildcard_star_dirs_only`](../src/mcp/handlers/handlers_tests_fast.rs)
 
 ---
 
-### search_find
+### xray_find
 
-#### T82: `search_find` — Combined parameters (countOnly, maxDepth, ignoreCase+regex)
+#### T82: `xray_find` — Combined parameters (countOnly, maxDepth, ignoreCase+regex)
 
-**Tool:** `search_find`
+**Tool:** `xray_find`
 
 **Scenario:** Tests combined parameter usage:
 
@@ -4068,17 +4068,17 @@ matching.
 - `maxDepth` mode: results limited to specified directory depth
 - `ignoreCase + regex` mode: case-insensitive regex patterns match correctly
 
-**Unit test:** [`test_search_find_combined_parameters`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_find_combined_parameters`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### search_callers
+### xray_callers
 
-#### T83: `search_callers` — `excludeDir` and `excludeFile` filters
+#### T83: `xray_callers` — `excludeDir` and `excludeFile` filters
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
-**Scenario:** Setting `excludeDir` and `excludeFile` filters on `search_callers` excludes
+**Scenario:** Setting `excludeDir` and `excludeFile` filters on `xray_callers` excludes
 matching entries from the call tree.
 
 **Expected:**
@@ -4087,13 +4087,13 @@ matching entries from the call tree.
 - Call tree nodes from excluded file patterns are filtered out
 - Remaining nodes are returned normally
 
-**Unit test:** [`test_search_callers_exclude_dir_and_file`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_callers_exclude_dir_and_file`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T84: `search_callers` — Cycle detection (direction=down)
+#### T84: `xray_callers` — Cycle detection (direction=down)
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Scenario:** When tracing callees (`direction: "down"`) through a circular call graph
 (A calls B, B calls A), the search completes without infinite loop.
@@ -4104,55 +4104,55 @@ matching entries from the call tree.
 - No infinite recursion or stack overflow
 - Call tree represents the cycle without duplicating nodes indefinitely
 
-**Unit test:** [`test_search_callers_cycle_detection_down`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_callers_cycle_detection_down`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### search_reindex_definitions
+### xray_reindex_definitions
 
-#### T85: `search_reindex_definitions` — Successful reindex
+#### T85: `xray_reindex_definitions` — Successful reindex
 
-**Tool:** `search_reindex_definitions`
+**Tool:** `xray_reindex_definitions`
 
-**Scenario:** Calling `search_reindex_definitions` successfully rebuilds the AST definition index
+**Scenario:** Calling `xray_reindex_definitions` successfully rebuilds the AST definition index
 and returns build metrics.
 
 **Expected:**
 
 - Response contains `status: "ok"`
 - Response includes metrics: files parsed, definitions extracted, build time
-- Definition index is usable for subsequent `search_definitions` queries
+- Definition index is usable for subsequent `xray_definitions` queries
 
 **Unit test:** [`test_reindex_definitions_success`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### search_reindex
+### xray_reindex
 
-#### T86: `search_reindex` — Invalid directory error
+#### T86: `xray_reindex` — Invalid directory error
 
-**Tool:** `search_reindex`
+**Tool:** `xray_reindex`
 
-**Scenario:** Calling `search_reindex` with a non-existent directory parameter returns an error.
+**Scenario:** Calling `xray_reindex` with a non-existent directory parameter returns an error.
 
 **Expected:**
 
 - Response is an error (`isError: true`)
 - Error message indicates the directory does not exist or is invalid
 
-**Unit test:** [`test_search_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
 ## Additional Test Scenarios (from upstream merge)
 
-#### T-SPEC-AUDIT: `search_definitions` — Audit mode with `.spec.ts` files (0 definitions expected)
+#### T-SPEC-AUDIT: `xray_definitions` — Audit mode with `.spec.ts` files (0 definitions expected)
 
-**Tool:** `search_definitions` (audit mode)
+**Tool:** `xray_definitions` (audit mode)
 
 **Scenario:** In TypeScript projects, `.spec.ts` files typically contain `describe()` and `it()`
 blocks which are function _calls_, not syntactic definitions (function declarations, class
-declarations, etc.). When running `search_definitions` with `audit: true`, these files are
+declarations, etc.). When running `xray_definitions` with `audit: true`, these files are
 expected to appear in the audit report with 0 definitions. This is **by-design behavior**, not
 a bug or a parsing failure.
 
@@ -4170,11 +4170,11 @@ a bug or a parsing failure.
 
 ---
 
-#### T-REINDEX-SECURITY: `search_reindex` / `search_reindex_definitions` — Invalid or outside directory
+#### T-REINDEX-SECURITY: `xray_reindex` / `xray_reindex_definitions` — Invalid or outside directory
 
-**Tool:** `search_reindex`, `search_reindex_definitions`
+**Tool:** `xray_reindex`, `xray_reindex_definitions`
 
-**Scenario:** Calling `search_reindex` or `search_reindex_definitions` with a `dir` parameter
+**Scenario:** Calling `xray_reindex` or `xray_reindex_definitions` with a `dir` parameter
 that either doesn't exist or is outside the allowed `--dir` server scope should return a
 descriptive error, not crash or silently succeed.
 
@@ -4183,11 +4183,11 @@ descriptive error, not crash or silently succeed.
 - Error response with `isError: true`
 - Error message mentions the invalid directory path
 
-**Unit test:** [`test_search_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_reindex_invalid_directory`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T-CALLERS-CYCLE-UP: `search_callers` — Cycle detection (direction=up)
+#### T-CALLERS-CYCLE-UP: `xray_callers` — Cycle detection (direction=up)
 
 **Scenario:** When tracing callers upward and encountering a call cycle (A→B→A),
 the search completes without infinite loop.
@@ -4198,13 +4198,13 @@ the search completes without infinite loop.
 - Call tree represents the cycle without duplicating nodes indefinitely
 - `summary.truncatedByBudget` may be true if cycle is deep
 
-**Unit test:** [`test_search_callers_cycle_detection`](../src/mcp/handlers/handlers_tests_csharp.rs)
+**Unit test:** [`test_xray_callers_cycle_detection`](../src/mcp/handlers/handlers_tests_csharp.rs)
 
 ---
 
-#### T-CALLERS-EXT-COMMA: `search_callers` — Comma-split `ext` filter
+#### T-CALLERS-EXT-COMMA: `xray_callers` — Comma-split `ext` filter
 
-**Scenario:** The `ext` parameter in `search_callers` accepts comma-separated extensions
+**Scenario:** The `ext` parameter in `xray_callers` accepts comma-separated extensions
 (e.g., `"cs,ts"`) for multi-language call tree analysis.
 
 **Expected:**
@@ -4212,7 +4212,7 @@ the search completes without infinite loop.
 - Both C# and TypeScript files are included in the call tree
 - Single extension filter (e.g., `"cs"`) excludes other languages
 
-**Unit test:** [`test_search_callers_ext_filter_comma_split`](../src/mcp/handlers/handlers_tests_csharp.rs)
+**Unit test:** [`test_xray_callers_ext_filter_comma_split`](../src/mcp/handlers/handlers_tests_csharp.rs)
 
 ---
 
@@ -4231,13 +4231,13 @@ sibling directory rejection, path traversal rejection, and absolute path rejecti
 
 ---
 
-#### T-CALLERS-AMBIGUITY: `search_callers` — Ambiguity warning variants (3 tests)
+#### T-CALLERS-AMBIGUITY: `xray_callers` — Ambiguity warning variants (3 tests)
 
 ---
 
-### T-CALLERS-DEPRIORITIZE: `search_callers` — Test caller deprioritization (5 tests)
+### T-CALLERS-DEPRIORITIZE: `xray_callers` — Test caller deprioritization (5 tests)
 
-**Scenario:** When `search_callers` truncates results by `maxCallersPerLevel`, production callers
+**Scenario:** When `xray_callers` truncates results by `maxCallersPerLevel`, production callers
 appear before test callers. Within each group, callers are sorted by popularity (posting count DESC).
 With `impactAnalysis=true`, test callers are NOT truncated.
 
@@ -4263,9 +4263,9 @@ The warning is truncated for common methods with many implementations.
 
 **Unit tests:**
 
-- [`test_search_callers_no_ambiguity_warning_single_class`](../src/mcp/handlers/handlers_tests_csharp.rs)
-- [`test_search_callers_ambiguity_warning_few_classes`](../src/mcp/handlers/handlers_tests_csharp.rs)
-- [`test_search_callers_ambiguity_warning_truncated`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_callers_no_ambiguity_warning_single_class`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_callers_ambiguity_warning_few_classes`](../src/mcp/handlers/handlers_tests_csharp.rs)
+- [`test_xray_callers_ambiguity_warning_truncated`](../src/mcp/handlers/handlers_tests_csharp.rs)
 
 ---
 
@@ -4276,11 +4276,11 @@ The following test scenarios are covered by unit tests in
 MCP handler behavior for TypeScript definitions and call graphs using real indexes built from
 TypeScript test fixture files.
 
-### search_definitions — TypeScript Kinds
+### xray_definitions — TypeScript Kinds
 
-#### T87: `search_definitions` — Finds TypeScript class
+#### T87: `xray_definitions` — Finds TypeScript class
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript class by name returns the class definition with correct
 metadata (file, lines, kind).
@@ -4290,13 +4290,13 @@ metadata (file, lines, kind).
 - `definitions` array contains the class with `kind: "class"`
 - Definition includes `name`, `file`, `lines`, `signature`
 
-**Unit test:** [`test_ts_search_definitions_finds_class`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_class`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T88: `search_definitions` — Finds TypeScript interface
+#### T88: `xray_definitions` — Finds TypeScript interface
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript interface by name returns the interface definition.
 
@@ -4305,13 +4305,13 @@ metadata (file, lines, kind).
 - `definitions` array contains the interface with `kind: "interface"`
 - Definition includes correct file path and line range
 
-**Unit test:** [`test_ts_search_definitions_finds_interface`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_interface`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T89: `search_definitions` — Finds TypeScript method
+#### T89: `xray_definitions` — Finds TypeScript method
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript class method returns the method definition with its
 parent class.
@@ -4321,13 +4321,13 @@ parent class.
 - `definitions` array contains the method with `kind: "method"`
 - Definition has correct `parent` class name
 
-**Unit test:** [`test_ts_search_definitions_finds_method`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_method`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T90: `search_definitions` — Finds TypeScript function
+#### T90: `xray_definitions` — Finds TypeScript function
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript standalone function returns the function definition
 with `kind: "function"`.
@@ -4337,13 +4337,13 @@ with `kind: "function"`.
 - `definitions` array contains the function with `kind: "function"`
 - Standalone functions (not class methods) are correctly categorized
 
-**Unit test:** [`test_ts_search_definitions_finds_function`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_function`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T91: `search_definitions` — Finds TypeScript enum
+#### T91: `xray_definitions` — Finds TypeScript enum
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript enum returns the enum definition.
 
@@ -4352,13 +4352,13 @@ with `kind: "function"`.
 - `definitions` array contains the enum with `kind: "enum"`
 - Enum signature includes member names
 
-**Unit test:** [`test_ts_search_definitions_finds_enum`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_enum`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T92: `search_definitions` — Finds TypeScript enum member
+#### T92: `xray_definitions` — Finds TypeScript enum member
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for TypeScript enum members returns individual enum values.
 
@@ -4367,13 +4367,13 @@ with `kind: "function"`.
 - `definitions` array contains entries with `kind: "enumMember"`
 - Each enum member has its parent enum as the `parent` field
 
-**Unit test:** [`test_ts_search_definitions_finds_enum_member`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_enum_member`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T93: `search_definitions` — Finds TypeScript type alias
+#### T93: `xray_definitions` — Finds TypeScript type alias
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript type alias returns the type declaration.
 
@@ -4382,13 +4382,13 @@ with `kind: "function"`.
 - `definitions` array contains the type alias with `kind: "typeAlias"`
 - Type aliases (e.g., `type Props = { ... }`) are correctly categorized
 
-**Unit test:** [`test_ts_search_definitions_finds_type_alias`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_type_alias`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T94: `search_definitions` — Finds TypeScript variable
+#### T94: `xray_definitions` — Finds TypeScript variable
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript exported variable/constant returns the variable definition.
 
@@ -4397,13 +4397,13 @@ with `kind: "function"`.
 - `definitions` array contains the variable with `kind: "variable"`
 - Exported `const`/`let` declarations and `InjectionToken` variables are included
 
-**Unit test:** [`test_ts_search_definitions_finds_variable`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_variable`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T95: `search_definitions` — Finds TypeScript field
+#### T95: `xray_definitions` — Finds TypeScript field
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript class field returns the field definition.
 
@@ -4412,13 +4412,13 @@ with `kind: "function"`.
 - `definitions` array contains the field with `kind: "field"`
 - Field has correct parent class
 
-**Unit test:** [`test_ts_search_definitions_finds_field`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_field`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T96: `search_definitions` — Finds TypeScript constructor
+#### T96: `xray_definitions` — Finds TypeScript constructor
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Searching for a TypeScript class constructor returns the constructor definition.
 
@@ -4427,15 +4427,15 @@ with `kind: "function"`.
 - `definitions` array contains the constructor with `kind: "constructor"`
 - Constructor has correct parent class
 
-**Unit test:** [`test_ts_search_definitions_finds_constructor`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_finds_constructor`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-### search_definitions — TypeScript Filters
+### xray_definitions — TypeScript Filters
 
-#### T97: `search_definitions` — TypeScript `baseType` filter (implements)
+#### T97: `xray_definitions` — TypeScript `baseType` filter (implements)
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Filtering by `baseType` returns TypeScript classes that implement the specified
 interface.
@@ -4445,13 +4445,13 @@ interface.
 - All returned definitions list the specified base type in their `baseTypes`
 - Classes using `implements` keyword are matched
 
-**Unit test:** [`test_ts_search_definitions_base_type_implements`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_base_type_implements`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T98: `search_definitions` — TypeScript `baseType` filter (abstract/extends)
+#### T98: `xray_definitions` — TypeScript `baseType` filter (abstract/extends)
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Filtering by `baseType` returns TypeScript classes extending an abstract class.
 
@@ -4460,13 +4460,13 @@ interface.
 - All returned definitions list the abstract base class in their `baseTypes`
 - Classes using `extends` keyword are matched
 
-**Unit test:** [`test_ts_search_definitions_base_type_abstract`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_base_type_abstract`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T99: `search_definitions` — TypeScript `containsLine` finds method
+#### T99: `xray_definitions` — TypeScript `containsLine` finds method
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Using `containsLine` with a TypeScript file returns the innermost method
 containing the specified line number.
@@ -4480,9 +4480,9 @@ containing the specified line number.
 
 ---
 
-#### T100: `search_definitions` — TypeScript `includeBody`
+#### T100: `xray_definitions` — TypeScript `includeBody`
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Setting `includeBody: true` for TypeScript definitions returns source code
 inline.
@@ -4493,13 +4493,13 @@ inline.
 - `bodyStartLine` matches the definition's start line
 - Body content is actual TypeScript source code
 
-**Unit test:** [`test_ts_search_definitions_include_body`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_include_body`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T101: `search_definitions` — TypeScript combined name + parent + kind filter
+#### T101: `xray_definitions` — TypeScript combined name + parent + kind filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `name`, `parent`, and `kind` filters simultaneously for TypeScript
 definitions returns only those matching all three criteria.
@@ -4509,13 +4509,13 @@ definitions returns only those matching all three criteria.
 - All returned definitions match the name substring, parent class, and kind
 - `summary.totalResults` reflects only matching definitions
 
-**Unit test:** [`test_ts_search_definitions_combined_name_parent_kind`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_combined_name_parent_kind`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T102: `search_definitions` — TypeScript regex name filter
+#### T102: `xray_definitions` — TypeScript regex name filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Setting `regex: true` with a name pattern matches TypeScript definitions
 using regex.
@@ -4525,15 +4525,15 @@ using regex.
 - All returned definitions have names matching the regex pattern
 - Non-matching definitions are excluded
 
-**Unit test:** [`test_ts_search_definitions_name_regex`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_definitions_name_regex`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-### search_callers — TypeScript
+### xray_callers — TypeScript
 
-#### T103: `search_callers` — TypeScript callers (direction=up)
+#### T103: `xray_callers` — TypeScript callers (direction=up)
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Scenario:** Finding callers of a TypeScript method returns the call tree with callers
 from TypeScript files.
@@ -4543,13 +4543,13 @@ from TypeScript files.
 - `callTree` includes callers from `.ts` files
 - Caller entries have correct method name, parent class, file path, and line number
 
-**Unit test:** [`test_ts_search_callers_up_finds_caller`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_callers_up_finds_caller`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T104: `search_callers` — TypeScript callees (direction=down)
+#### T104: `xray_callers` — TypeScript callees (direction=down)
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Scenario:** Finding callees of a TypeScript method returns the callee tree showing
 what the method calls.
@@ -4559,13 +4559,13 @@ what the method calls.
 - `callTree` includes callees (methods called by the target method)
 - Callee entries have correct method names and file paths
 
-**Unit test:** [`test_ts_search_callers_down_finds_callees`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_callers_down_finds_callees`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-#### T105: `search_callers` — TypeScript nonexistent method
+#### T105: `xray_callers` — TypeScript nonexistent method
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Scenario:** Searching for callers of a method that doesn't exist returns an empty call tree
 without errors.
@@ -4576,15 +4576,15 @@ without errors.
 - `summary.totalNodes` = 0
 - No error (graceful empty response)
 
-**Unit test:** [`test_ts_search_callers_nonexistent_method`](../src/mcp/handlers/handlers_tests_typescript.rs)
+**Unit test:** [`test_ts_xray_callers_nonexistent_method`](../src/mcp/handlers/handlers_tests_typescript.rs)
 
 ---
 
-### search_find — Additional Scenarios
+### xray_find — Additional Scenarios
 
-#### T106: `search_find` — Contents mode
+#### T106: `xray_find` — Contents mode
 
-**Tool:** `search_find`
+**Tool:** `xray_find`
 
 **Scenario:** Setting `contents: true` searches file contents instead of file names,
 returning matching lines with file path and line number.
@@ -4595,17 +4595,17 @@ returning matching lines with file path and line number.
 - Search term is found in the file content, not the file name
 - Response includes match count
 
-**Unit test:** [`test_search_find_contents_mode`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_find_contents_mode`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### search_help / search_info — Response Validation
+### xray_help / xray_info — Response Validation
 
-#### T107: `search_help` — Response structure validation
+#### T107: `xray_help` — Response structure validation
 
-**Tool:** `search_help`
+**Tool:** `xray_help`
 
-**Scenario:** Calling `search_help` returns a well-structured JSON response containing
+**Scenario:** Calling `xray_help` returns a well-structured JSON response containing
 best practices, performance tiers, tool priority, and strategy recipes.
 
 **Expected:**
@@ -4616,15 +4616,15 @@ best practices, performance tiers, tool priority, and strategy recipes.
 - Response contains `strategyRecipes` array
 - All expected fields are present and well-formed
 
-**Unit test:** [`test_search_help_response_structure`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_help_response_structure`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-#### T108: `search_info` — Response structure validation
+#### T108: `xray_info` — Response structure validation
 
-**Tool:** `search_info`
+**Tool:** `xray_info`
 
-**Scenario:** Calling `search_info` returns a well-structured JSON response containing
+**Scenario:** Calling `xray_info` returns a well-structured JSON response containing
 index information (directory, indexes, counts).
 
 **Expected:**
@@ -4633,7 +4633,7 @@ index information (directory, indexes, counts).
 - Response contains `indexes` array
 - Response structure is valid JSON with expected fields
 
-**Unit test:** [`test_search_info_response_structure`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_info_response_structure`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
@@ -4672,7 +4672,7 @@ correctly parsed as variable definitions.
 
 ---
 
-### T-GENERIC-CALLERS: `search_callers` — Generic method calls correctly matched with class filter
+### T-GENERIC-CALLERS: `xray_callers` — Generic method calls correctly matched with class filter
 
 **Background:** C# generic method calls like `_service.SearchAsync<T>(args)` were stored with
 `method_name = "SearchAsync<T>"` (including type arguments) instead of `"SearchAsync"`. This
@@ -4690,7 +4690,7 @@ The fix strips type arguments from `generic_name` AST nodes in the C# parser.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"SearchAsync","class":"SearchService","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"SearchAsync","class":"SearchService","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -4734,7 +4734,7 @@ public class TestBlock {
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"SearchForAllTenantsAsync","class":"SearchClient","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"SearchForAllTenantsAsync","class":"SearchClient","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -4768,7 +4768,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 
 ### T-OWNER-FIELD: Owner.m_field nested class DI resolution (ControllerBlock pattern)
 
-**Background:** In the ControllerBlock pattern, a nested inner class accesses DI-injected fields of its outer (parent) class via `Owner.m_field`. Previously, the receiver type for `Owner.m_queryManager.GetEntriesAsync(...)` was resolved to `"OrderControllerBlock"` (the type of the `Owner` field) instead of `"IQueryManager"` (the type of `m_queryManager` in the outer class). This caused `search_callers` with `class: "QueryManager"` or `class: "IQueryManager"` to return 0 results, even though the call site was correctly indexed when no class filter was used.
+**Background:** In the ControllerBlock pattern, a nested inner class accesses DI-injected fields of its outer (parent) class via `Owner.m_field`. Previously, the receiver type for `Owner.m_queryManager.GetEntriesAsync(...)` was resolved to `"OrderControllerBlock"` (the type of the `Owner` field) instead of `"IQueryManager"` (the type of `m_queryManager` in the outer class). This caused `xray_callers` with `class: "QueryManager"` or `class: "IQueryManager"` to return 0 results, even though the call site was correctly indexed when no class filter was used.
 
 **Root cause:** The `field_types` map passed to call site extraction only contained fields from the inner class — outer class fields were invisible. The fix merges outer class field types into the inner class's field_types map (inner class fields take precedence).
 
@@ -4785,9 +4785,9 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 
 ---
 
-### T-TYPE-INFER: Type inference improvements for search_callers
+### T-TYPE-INFER: Type inference improvements for xray_callers
 
-**Background:** 7 user stories improving local variable type inference in the C# parser. These improvements increase recall for `search_callers` by resolving types from cast expressions, `as` expressions, method return types, `await` + Task<T> unwrap, pattern matching, and extension methods.
+**Background:** 7 user stories improving local variable type inference in the C# parser. These improvements increase recall for `xray_callers` by resolving types from cast expressions, `as` expressions, method return types, `await` + Task<T> unwrap, pattern matching, and extension methods.
 
 **Unit tests (23 tests):**
 
@@ -4897,7 +4897,7 @@ The following internal optimizations are covered by unit tests in `src/mcp/watch
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"run","class":"Orchestrator","direction":"down","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"run","class":"Orchestrator","direction":"down","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 ```
@@ -4916,7 +4916,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 
 ### T67: Direction=up — False Positive Filtering with Receiver Type Mismatch
 
-**Background:** When `search_callers` runs with `direction=up`, the `verify_call_site_target()` function filters out false positive callers where the `receiver_type` on a call site doesn't match the target class. For example, if searching for callers of `TaskRunner.resolve()`, a file containing `path.resolve()` should NOT appear as a caller because the `receiver_type` is `"Path"`, not `"TaskRunner"`.
+**Background:** When `xray_callers` runs with `direction=up`, the `verify_call_site_target()` function filters out false positive callers where the `receiver_type` on a call site doesn't match the target class. For example, if searching for callers of `TaskRunner.resolve()`, a file containing `path.resolve()` should NOT appear as a caller because the `receiver_type` is `"Path"`, not `"TaskRunner"`.
 
 **Setup:** Create TypeScript files:
 
@@ -4930,7 +4930,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 ```
@@ -4943,7 +4943,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 
 **Validates:** `verify_call_site_target()` in up-direction correctly filters out false positives based on `receiver_type` mismatch.
 
-**Status:** ✅ Covered by unit tests: `test_ts_search_callers_up_filters_false_positives` (planned), parser-level tests for local var type extraction
+**Status:** ✅ Covered by unit tests: `test_ts_xray_callers_up_filters_false_positives` (planned), parser-level tests for local var type extraction
 
 ---
 
@@ -4962,7 +4962,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"fetch","class":"DataService","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"fetch","class":"DataService","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 ```
@@ -5008,7 +5008,7 @@ export class Consumer {
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 ```
@@ -5052,7 +5052,7 @@ with actual call-site evidence are included in the call tree.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Process","class":"DataService","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Process","class":"DataService","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -5093,7 +5093,7 @@ properties are extracted and included in the caller tree.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"GetName","class":"NameProvider","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"GetName","class":"NameProvider","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -5136,7 +5136,7 @@ sites from lambda bodies, resolving the call to the containing method definition
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -5227,7 +5227,7 @@ adds `line_start` to the dedup key: `(file_id, method_name, line_start)`.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -5241,7 +5241,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 **Validates:** Overloaded methods are not collapsed in the caller tree. The dedup key includes
 `line_start` so overloads at different line positions are treated as distinct callers.
 
-**Status:** ✅ Covered by unit test `test_search_callers_overloads_not_collapsed_up` in `handlers_tests_csharp.rs`
+**Status:** ✅ Covered by unit test `test_xray_callers_overloads_not_collapsed_up` in `handlers_tests_csharp.rs`
 
 ---
 
@@ -5277,7 +5277,7 @@ entries. The same dedup fix applies to direction=down.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"RunAll","class":"Orchestrator","direction":"down","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"RunAll","class":"Orchestrator","direction":"down","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -5291,7 +5291,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 **Validates:** Overloaded callees are not collapsed in the callee tree (direction=down).
 Same dedup key fix as T-OVERLOAD-DEDUP-UP.
 
-**Status:** ✅ Covered by unit test `test_search_callers_overloads_not_collapsed_down` in `handlers_tests_csharp.rs`
+**Status:** ✅ Covered by unit test `test_xray_callers_overloads_not_collapsed_down` in `handlers_tests_csharp.rs`
 
 ---
 
@@ -5326,7 +5326,7 @@ to the target class (i.e., interfaces listed in the class's `base_types`).
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Execute","class":"ServiceA","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Execute","class":"ServiceA","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -5345,7 +5345,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Execute","class":"ServiceB","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Execute","class":"ServiceB","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -5358,7 +5358,7 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 **Validates:** Interface resolution is scoped to related interfaces only. Unrelated interfaces
 with the same method name do not cause false positive callers.
 
-**Status:** ✅ Covered by unit test `test_search_callers_same_name_different_receiver_interface_resolution` in `handlers_tests_csharp.rs`
+**Status:** ✅ Covered by unit test `test_xray_callers_same_name_different_receiver_interface_resolution` in `handlers_tests_csharp.rs`
 
 ---
 
@@ -5381,7 +5381,7 @@ the receiver type is a known built-in JavaScript/TypeScript or C# type.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"doWork","class":"Worker","direction":"down","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"doWork","class":"Worker","direction":"down","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 ```
@@ -5399,7 +5399,7 @@ callee resolution for built-in type method calls.
 
 ---
 
-### T-FUZZY-DI: Fuzzy DI interface matching — search_callers direction=up finds callers through non-standard interface naming
+### T-FUZZY-DI: Fuzzy DI interface matching — xray_callers direction=up finds callers through non-standard interface naming
 
 **Background:** DI resolution only works with the exact convention `IFooService` → `FooService`
 (strip `I` prefix). If the interface is `IDataModelService` but the implementation is
@@ -5420,7 +5420,7 @@ the implementation class name `DataModelWebService`.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"loadModel","class":"DataModelWebService","direction":"up","depth":1}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"loadModel","class":"DataModelWebService","direction":"up","depth":1}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext ts --definitions
 ```
@@ -5445,8 +5445,8 @@ Stem must be ≥ 4 characters to avoid overly broad matches.
 
 ## Relevance Ranking Tests
 
-The following test scenarios validate the relevance ranking behavior added to `search_definitions`,
-`search_fast`, and `search_grep` (phrase mode). Results are sorted by match quality so that the
+The following test scenarios validate the relevance ranking behavior added to `xray_definitions`,
+`xray_fast`, and `xray_grep` (phrase mode). Results are sorted by match quality so that the
 most relevant result appears first.
 
 ### T-RANK-01: `best_match_tier()` — Unit tests for match tier classification
@@ -5496,9 +5496,9 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 
 ---
 
-### T-RANK-03: `search_definitions` — Relevance ranking (exact → prefix → contains)
+### T-RANK-03: `xray_definitions` — Relevance ranking (exact → prefix → contains)
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** When searching for `"UserService"`, results are sorted by:
 
@@ -5516,18 +5516,18 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 
 **Unit tests (4 tests in `handlers_tests.rs`):**
 
-- [`test_search_definitions_ranking_exact_first`](../src/mcp/handlers/handlers_tests.rs) — exact match appears first
-- [`test_search_definitions_ranking_prefix_before_contains`](../src/mcp/handlers/handlers_tests.rs) — prefix matches before contains
-- [`test_search_definitions_ranking_kind_and_length_tiebreak`](../src/mcp/handlers/handlers_tests.rs) — class before method among prefix matches
-- [`test_search_definitions_ranking_not_applied_with_regex`](../src/mcp/handlers/handlers_tests.rs) — ranking not applied in regex mode
+- [`test_xray_definitions_ranking_exact_first`](../src/mcp/handlers/handlers_tests.rs) — exact match appears first
+- [`test_xray_definitions_ranking_prefix_before_contains`](../src/mcp/handlers/handlers_tests.rs) — prefix matches before contains
+- [`test_xray_definitions_ranking_kind_and_length_tiebreak`](../src/mcp/handlers/handlers_tests.rs) — class before method among prefix matches
+- [`test_xray_definitions_ranking_not_applied_with_regex`](../src/mcp/handlers/handlers_tests.rs) — ranking not applied in regex mode
 
 **Status:** ✅ Covered by unit tests
 
 ---
 
-### T-RANK-04: `search_fast` — Relevance ranking (exact stem → prefix → contains)
+### T-RANK-04: `xray_fast` — Relevance ranking (exact stem → prefix → contains)
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** When searching for `"UserService"` with `ignoreCase: true`, file results are sorted by:
 
@@ -5544,16 +5544,16 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 
 **Unit tests (2 tests in `handlers_tests.rs`):**
 
-- [`test_search_fast_ranking_exact_stem_first`](../src/mcp/handlers/handlers_tests.rs) — exact stem match first, prefix before contains
-- [`test_search_fast_ranking_shorter_stem_first`](../src/mcp/handlers/handlers_tests.rs) — shorter stems before longer among same tier
+- [`test_xray_fast_ranking_exact_stem_first`](../src/mcp/handlers/handlers_tests.rs) — exact stem match first, prefix before contains
+- [`test_xray_fast_ranking_shorter_stem_first`](../src/mcp/handlers/handlers_tests.rs) — shorter stems before longer among same tier
 
 **Status:** ✅ Covered by unit tests
 
 ---
 
-### T-RANK-06: `search_definitions` — Parent relevance ranking (exact parent before substring parent)
+### T-RANK-06: `xray_definitions` — Parent relevance ranking (exact parent before substring parent)
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** When searching with `parent` filter, results are sorted by parent match quality:
 
@@ -5588,9 +5588,9 @@ delegate, event, enumMember, typeAlias, variable). Used as a tiebreaker when mat
 
 ---
 
-### T-RANK-05: `search_grep` phrase mode — Sort by occurrence count descending
+### T-RANK-05: `xray_grep` phrase mode — Sort by occurrence count descending
 
-**Tool:** `search_grep` (phrase mode)
+**Tool:** `xray_grep` (phrase mode)
 
 **Scenario:** When using `phrase: true`, results are sorted by number of occurrences (matching
 lines) in descending order — files with more matches appear first.
@@ -5600,7 +5600,7 @@ lines) in descending order — files with more matches appear first.
 - File with 3 occurrences appears before file with 2, which appears before file with 1
 - `files[i].occurrences >= files[i+1].occurrences` for all i
 
-**Unit test:** [`test_search_grep_phrase_sort_by_occurrences`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_grep_phrase_sort_by_occurrences`](../src/mcp/handlers/handlers_tests.rs)
 
 **Status:** ✅ Covered by unit test
 
@@ -5636,9 +5636,9 @@ lines) in descending order — files with more matches appear first.
 
 ---
 
-### T-CODESTATS-01: `search_definitions` — `includeCodeStats=true` returns metrics
+### T-CODESTATS-01: `xray_definitions` — `includeCodeStats=true` returns metrics
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `includeCodeStats: true` returns code complexity metrics for methods/functions.
 
@@ -5652,9 +5652,9 @@ lines) in descending order — files with more matches appear first.
 
 ---
 
-### T-CODESTATS-02: `search_definitions` — `sortBy` sorts by metric descending
+### T-CODESTATS-02: `xray_definitions` — `sortBy` sorts by metric descending
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `sortBy: "cognitiveComplexity"` returns methods sorted by cognitive complexity (worst first).
 
@@ -5666,9 +5666,9 @@ lines) in descending order — files with more matches appear first.
 
 ---
 
-### T-CODESTATS-03: `search_definitions` — `min*` filters restrict results
+### T-CODESTATS-03: `xray_definitions` — `min*` filters restrict results
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `minComplexity: 5` returns only methods with cyclomatic complexity ≥ 5.
 
@@ -5681,9 +5681,9 @@ lines) in descending order — files with more matches appear first.
 
 ---
 
-### T-CODESTATS-04: `search_definitions` — Invalid `sortBy` value returns error
+### T-CODESTATS-04: `xray_definitions` — Invalid `sortBy` value returns error
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `sortBy: "invalidMetric"` returns an actionable error.
 
@@ -5694,9 +5694,9 @@ lines) in descending order — files with more matches appear first.
 
 ---
 
-### T-CODESTATS-05: `search_reindex_definitions` — Response includes `codeStatsEntries`
+### T-CODESTATS-05: `xray_reindex_definitions` — Response includes `codeStatsEntries`
 
-**Tool:** `search_reindex_definitions`
+**Tool:** `xray_reindex_definitions`
 
 **Scenario:** After reindexing, the response includes the count of code stats entries.
 
@@ -5707,9 +5707,9 @@ lines) in descending order — files with more matches appear first.
 
 ---
 
-### T-CODESTATS-06: `search_definitions` — Backward compatibility with old index (no stats)
+### T-CODESTATS-06: `xray_definitions` — Backward compatibility with old index (no stats)
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** When loaded from an old cache without code_stats, `includeCodeStats: true` returns results without `codeStats` objects and `summary.codeStatsAvailable: false`.
 
@@ -5721,22 +5721,22 @@ lines) in descending order — files with more matches appear first.
 
 ---
 
-### T-CODESTATS-07: `search_definitions` — `sortBy` with old index returns error
+### T-CODESTATS-07: `xray_definitions` — `sortBy` with old index returns error
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** When loaded from an old cache without code_stats, `sortBy: "cognitiveComplexity"` returns an error.
 
 **Expected:**
 
 - Response is an error (`isError: true`)
-- Error message recommends `search_reindex_definitions`
+- Error message recommends `xray_reindex_definitions`
 
 ---
 
 ## Git History Tools Tests
 
-### T-GIT-01: `serve` — search_git_history returns file commit history
+### T-GIT-01: `serve` — xray_git_history returns file commit history
 
 **Command:**
 
@@ -5744,7 +5744,7 @@ lines) in descending order — files with more matches appear first.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":5}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":5}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -5757,13 +5757,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - `summary.returned` ≤ 5
 - No `patch` field (history mode, not diff)
 
-**Validates:** `search_git_history` tool with maxResults limit.
+**Validates:** `xray_git_history` tool with maxResults limit.
 
 **Status:** ✅ Covered by unit tests: `test_file_history_returns_commits`, `test_file_history_max_results_limits_output`, `test_commit_info_has_all_fields`
 
 ---
 
-### T-GIT-02: `serve` — search_git_diff returns patches
+### T-GIT-02: `serve` — xray_git_diff returns patches
 
 **Command:**
 
@@ -5771,7 +5771,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_diff","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_diff","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -5781,15 +5781,15 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - stdout: JSON-RPC response with `commits` array (non-empty)
 - Each commit has `patch` field (non-empty string with +/- lines)
 - Patches truncated to ~200 lines per commit
-- `summary.tool` = `"search_git_diff"`
+- `summary.tool` = `"xray_git_diff"`
 
-**Validates:** `search_git_diff` tool returns actual diff content.
+**Validates:** `xray_git_diff` tool returns actual diff content.
 
 **Status:** ✅ Covered by unit tests: `test_file_history_with_diff`
 
 ---
 
-### T-GIT-03: `serve` — search_git_authors returns ranked authors
+### T-GIT-03: `serve` — xray_git_authors returns ranked authors
 
 **Command:**
 
@@ -5797,7 +5797,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_authors","arguments":{"repo":".","file":"Cargo.toml","top":5}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_authors","arguments":{"repo":".","file":"Cargo.toml","top":5}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -5810,13 +5810,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - `summary.totalCommits` > 0
 - `summary.totalAuthors` > 0
 
-**Validates:** `search_git_authors` tool with top limit.
+**Validates:** `xray_git_authors` tool with top limit.
 
 **Status:** ✅ Covered by unit tests: `test_top_authors_returns_ranked`, `test_top_authors_limits_results`
 
 ---
 
-### T-GIT-04: `serve` — search_git_activity returns repo-wide changes
+### T-GIT-04: `serve` — xray_git_activity returns repo-wide changes
 
 **Command:**
 
@@ -5824,7 +5824,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","from":"2020-01-01","to":"2030-12-31"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","from":"2020-01-01","to":"2030-12-31"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -5837,13 +5837,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - `summary.commitsProcessed` > 0
 - Results sorted by commit count descending
 
-**Validates:** `search_git_activity` tool with date range.
+**Validates:** `xray_git_activity` tool with date range.
 
 **Status:** ✅ Covered by unit tests: `test_repo_activity_returns_files`
 
 ---
 
-### T-GIT-04b: `serve` — search_git_activity with `path` filter
+### T-GIT-04b: `serve` — xray_git_activity with `path` filter
 
 **Command:**
 
@@ -5851,7 +5851,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","path":"src/git","from":"2020-01-01","to":"2030-12-31"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","path":"src/git","from":"2020-01-01","to":"2030-12-31"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -5866,7 +5866,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Negative test — nonexistent path:**
 
 ```powershell
-'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_activity","arguments":{"repo":".","path":"nonexistent_dir_xyz","from":"2020-01-01","to":"2030-12-31"}}}'
+'{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","path":"nonexistent_dir_xyz","from":"2020-01-01","to":"2030-12-31"}}}'
 ```
 
 **Expected:**
@@ -5874,7 +5874,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - `activity` array is empty
 - `warning` field: `"File not found in git: nonexistent_dir_xyz. Check the path."`
 
-**Validates:** `path` parameter filters `search_git_activity` results to a specific file or directory using native `git log -- <pathspec>` filtering. Works in both cache and CLI fallback paths.
+**Validates:** `path` parameter filters `xray_git_activity` results to a specific file or directory using native `git log -- <pathspec>` filtering. Works in both cache and CLI fallback paths.
 
 **Unit tests:** `test_repo_activity_with_path_filter`, `test_repo_activity_with_path_filter_no_results`, `test_git_activity_nonexistent_path_has_warning`
 
@@ -5882,7 +5882,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T-GIT-05: `serve` — search_git_history with date filter
+### T-GIT-05: `serve` — xray_git_history with date filter
 
 **Command:**
 
@@ -5890,7 +5890,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","date":"1970-01-01"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","date":"1970-01-01"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -5906,7 +5906,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T-GIT-06: `serve` — search_git_history missing required parameter
+### T-GIT-06: `serve` — xray_git_history missing required parameter
 
 **Command:**
 
@@ -5914,7 +5914,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":"."}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":"."}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -5928,7 +5928,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T-GIT-07: `serve` — search_git_history bad repo path
+### T-GIT-07: `serve` — xray_git_history bad repo path
 
 **Command:**
 
@@ -5936,7 +5936,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":"/nonexistent/repo","file":"main.rs"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":"/nonexistent/repo","file":"main.rs"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -5970,7 +5970,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Expected:**
 
 - `tools` array contains 16 entries (10 original + 6 git)
-- Git tools present: `search_git_history`, `search_git_diff`, `search_git_authors`, `search_git_activity`, `search_git_blame`, `search_branch_status`
+- Git tools present: `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_activity`, `xray_git_blame`, `xray_branch_status`
 - No `--git` flag needed
 
 **Validates:** Git tools are always available, no opt-in needed.
@@ -6159,8 +6159,8 @@ that touch multiple files in the same directory.
 ### T-CACHE-FALLBACK: Git handlers fall back to CLI when cache is None (PR 2b)
 
 **Scenario:** When the MCP server starts without a git cache (default state until PR 2c spawns the
-background builder), all git history tools (`search_git_history`, `search_git_authors`,
-`search_git_activity`) transparently fall back to the CLI path. No regression from PR 2b changes.
+background builder), all git history tools (`xray_git_history`, `xray_git_authors`,
+`xray_git_activity`) transparently fall back to the CLI path. No regression from PR 2b changes.
 
 **Command:**
 
@@ -6168,7 +6168,7 @@ background builder), all git history tools (`search_git_history`, `search_git_au
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -6188,7 +6188,7 @@ with zero behavioral regression.
 
 ### T-NOCACHE: `noCache` parameter bypasses git history cache
 
-**Scenario:** When `noCache: true` is passed to `search_git_history`, `search_git_authors`, or `search_git_activity`, the handler bypasses the in-memory cache and queries git CLI directly, even when the cache is populated and ready.
+**Scenario:** When `noCache: true` is passed to `xray_git_history`, `xray_git_authors`, or `xray_git_activity`, the handler bypasses the in-memory cache and queries git CLI directly, even when the cache is populated and ready.
 
 **Command (MCP):**
 
@@ -6196,7 +6196,7 @@ with zero behavioral regression.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2,"noCache":true}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2,"noCache":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -6213,7 +6213,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -6222,7 +6222,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 - `summary.hint` contains `"(from cache)"` (when cache is populated)
 
-**Applies to:** `search_git_history`, `search_git_authors`, `search_git_activity`
+**Applies to:** `xray_git_history`, `xray_git_authors`, `xray_git_activity`
 
 **Unit tests:** `test_git_history_no_cache_bypasses_cache`, `test_git_history_default_uses_cache`, `test_git_authors_no_cache_bypasses_cache`, `test_git_activity_no_cache_bypasses_cache`, `test_git_history_no_cache_false_uses_cache`
 
@@ -6231,15 +6231,15 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ### T-CACHE-ROUTING: Git handlers use cache when populated (PR 2b)
 
 **Scenario:** When the git cache is populated (simulated by setting `git_cache_ready` to true and
-inserting a cache), `search_git_history` and `search_git_authors` use the cache for sub-millisecond
-responses. `search_git_diff` always uses CLI (no cache for patches).
+inserting a cache), `xray_git_history` and `xray_git_authors` use the cache for sub-millisecond
+responses. `xray_git_diff` always uses CLI (no cache for patches).
 
 **Expected (when cache is available):**
 
-- `search_git_history`: response `summary.hint` contains `"(from cache)"`
-- `search_git_authors`: response `summary.hint` contains `"(from cache)"`
-- `search_git_activity`: response `summary.hint` contains `"(from cache)"`
-- `search_git_diff`: response does NOT contain `"(from cache)"` (always CLI)
+- `xray_git_history`: response `summary.hint` contains `"(from cache)"`
+- `xray_git_authors`: response `summary.hint` contains `"(from cache)"`
+- `xray_git_activity`: response `summary.hint` contains `"(from cache)"`
+- `xray_git_diff`: response does NOT contain `"(from cache)"` (always CLI)
 - `summary.elapsedMs` < 10 for cache responses (vs 2000+ for CLI)
 
 **Note:** Full integration test requires PR 2c (background cache builder). Until then, this
@@ -6261,7 +6261,7 @@ the current branch HEAD.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":3}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir . --ext rs
 ```
@@ -6310,7 +6310,7 @@ echo $msgs | cargo run -- serve --dir . --ext rs
 
 ### T-CACHE-AUTHORS-TIMESTAMPS: Authors query returns first and last commit timestamps
 
-**Scenario:** `query_authors()` returns both `first_commit_timestamp` and `last_commit_timestamp` for each author, enabling the cached `search_git_authors` handler to populate both `firstChange` and `lastChange` fields.
+**Scenario:** `query_authors()` returns both `first_commit_timestamp` and `last_commit_timestamp` for each author, enabling the cached `xray_git_authors` handler to populate both `firstChange` and `lastChange` fields.
 
 **Expected:**
 
@@ -6337,9 +6337,9 @@ echo $msgs | cargo run -- serve --dir . --ext rs
 
 ---
 
-### T-CACHE-GIT-ROUTING: Git cache routing — search_git_history returns commits (E2E)
+### T-CACHE-GIT-ROUTING: Git cache routing — xray_git_history returns commits (E2E)
 
-**Scenario:** Verify that `search_git_history` works end-to-end through the MCP server, regardless of whether the cache is ready or the CLI fallback is used. This confirms the cache routing code doesn't break existing git history functionality.
+**Scenario:** Verify that `xray_git_history` works end-to-end through the MCP server, regardless of whether the cache is ready or the CLI fallback is used. This confirms the cache routing code doesn't break existing git history functionality.
 
 **Command:**
 
@@ -6347,9 +6347,9 @@ echo $msgs | cargo run -- serve --dir . --ext rs
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":2}}}'
 ) -join "`n"
-echo $msgs | search-index serve --dir . --ext rs
+echo $msgs | xray serve --dir . --ext rs
 ```
 
 **Expected:**
@@ -6358,7 +6358,7 @@ echo $msgs | search-index serve --dir . --ext rs
 - Response may come from cache or CLI fallback — both are valid
 - No errors or crashes
 
-**Validates:** Cache routing code in git handlers does not break existing search_git_history functionality.
+**Validates:** Cache routing code in git handlers does not break existing xray_git_history functionality.
 
 **Automated:** Test T-GIT-CACHE in [`e2e-test.ps1`](../e2e-test.ps1)
 
@@ -6613,9 +6613,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ## Input Validation Bug Fix Tests
 
-### T-VAL-01: `search_definitions` — Empty name treated as no filter (BUG-1)
+### T-VAL-01: `xray_definitions` — Empty name treated as no filter (BUG-1)
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `name: ""` (empty string) should behave identically to not passing `name` at all — returning all definitions filtered only by other parameters.
 
@@ -6625,13 +6625,13 @@ echo $msgs | search-index serve --dir . --ext rs
 - No error returned
 - `definitions` array is non-empty
 
-**Unit test:** [`test_search_definitions_empty_name_treated_as_no_filter`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_definitions_empty_name_treated_as_no_filter`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### T-VAL-02: `search_definitions` — Negative `containsLine` returns error (BUG-2)
+### T-VAL-02: `xray_definitions` — Negative `containsLine` returns error (BUG-2)
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** Passing `containsLine: -1` should return a validation error instead of silently returning all definitions from the file. This was the most critical bug: negative values caused `as_u64()` to return `None`, skipping the `containsLine` filter entirely.
 
@@ -6641,13 +6641,13 @@ echo $msgs | search-index serve --dir . --ext rs
 - Error message: `"containsLine must be >= 1"`
 - `containsLine: 0` also returns error
 
-**Unit tests:** [`test_search_definitions_contains_line_negative_returns_error`](../src/mcp/handlers/handlers_tests.rs), [`test_search_definitions_contains_line_zero_returns_error`](../src/mcp/handlers/handlers_tests.rs)
+**Unit tests:** [`test_xray_definitions_contains_line_negative_returns_error`](../src/mcp/handlers/handlers_tests.rs), [`test_xray_definitions_contains_line_zero_returns_error`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### T-VAL-03: `search_callers` — `depth: 0` returns error (BUG-3)
+### T-VAL-03: `xray_callers` — `depth: 0` returns error (BUG-3)
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Scenario:** Passing `depth: 0` should return a validation error instead of silently returning an empty call tree.
 
@@ -6656,13 +6656,13 @@ echo $msgs | search-index serve --dir . --ext rs
 - `isError: true`
 - Error message: `"depth must be >= 1"`
 
-**Unit test:** [`test_search_callers_depth_zero_returns_error`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_callers_depth_zero_returns_error`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### T-VAL-04: `search_git_history` — Reversed date range returns error (BUG-4)
+### T-VAL-04: `xray_git_history` — Reversed date range returns error (BUG-4)
 
-**Tool:** `search_git_history`, `search_git_diff`, `search_git_activity`
+**Tool:** `xray_git_history`, `xray_git_diff`, `xray_git_activity`
 
 **Scenario:** Passing `from: "2026-12-31", to: "2026-01-01"` (from > to) should return a descriptive error instead of silently returning 0 results.
 
@@ -6676,9 +6676,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ---
 
-### T-VAL-05: `search_fast` — Empty pattern returns error (BUG-5)
+### T-VAL-05: `xray_fast` — Empty pattern returns error (BUG-5)
 
-**Tool:** `search_fast`
+**Tool:** `xray_fast`
 
 **Scenario:** Passing `pattern: ""` should return an error instead of scanning the entire file index for 0 results.
 
@@ -6687,13 +6687,13 @@ echo $msgs | search-index serve --dir . --ext rs
 - `isError: true`
 - Error message mentions "empty"
 
-**Unit test:** [`test_search_fast_empty_pattern_returns_error`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_fast_empty_pattern_returns_error`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### T-VAL-07: `search_grep` — `matchedTokens` filtered by dir/ext/exclude (BUG-7)
+### T-VAL-07: `xray_grep` — `matchedTokens` filtered by dir/ext/exclude (BUG-7)
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** In substring search mode, `matchedTokens` should only contain tokens from files that passed all filters (dir, ext, exclude). Previously, `matchedTokens` was populated from the global trigram index before filtering, leaking token names from outside the requested scope.
 
@@ -6708,9 +6708,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ---
 
-### T-CR-01: `search_callers` — Fuzzy DI matching works via `is_implementation_of` (BUG-CR-2)
+### T-CR-01: `xray_callers` — Fuzzy DI matching works via `is_implementation_of` (BUG-CR-2)
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Scenario:** When a class `DataModelWebService` does NOT declare `IDataModelService` in its `base_types` but follows the naming convention (contains stem "DataModelService"), callers through `IDataModelService` should still be found via fuzzy DI matching in `is_implementation_of()`. Previously this was dead code because the function received lowercased inputs.
 
@@ -6724,9 +6724,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ---
 
-### T-CR-02: `search_grep` — Multi-extension ext filter (BUG-CR-1)
+### T-CR-02: `xray_grep` — Multi-extension ext filter (BUG-CR-1)
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** Passing `ext: "cs,sql"` should match both `.cs` and `.sql` files. Previously, the ext filter compared the entire string (e.g., `"cs" == "cs,sql"` → false), silently returning zero results.
 
@@ -6741,9 +6741,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ---
 
-### T-CR-03: `search_callers` — `maxTotalNodes: 0` means unlimited (BUG-CR-3)
+### T-CR-03: `xray_callers` — `maxTotalNodes: 0` means unlimited (BUG-CR-3)
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Scenario:** Passing `maxTotalNodes: 0` should treat 0 as unlimited (not return empty tree). Previously, `0 >= 0` was always true, causing immediate return.
 
@@ -6754,9 +6754,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ---
 
-### T-CR-04: `search_callers` — Invalid direction returns error (BUG-CR-4)
+### T-CR-04: `xray_callers` — Invalid direction returns error (BUG-CR-4)
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Scenario:** Passing `direction: "sideways"` or `direction: "UP"` should be handled. Invalid values return an error. Case-insensitive comparison: `"UP"` is accepted as `"up"`.
 
@@ -6768,9 +6768,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ---
 
-### T-CR-05: `search_grep` — Warnings array (BUG-CR-5)
+### T-CR-05: `xray_grep` — Warnings array (BUG-CR-5)
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** Short substring queries now return `summary.warnings` (array) instead of `summary.warning` (string). **Breaking change** for consumers reading the `warning` key.
 
@@ -6785,7 +6785,7 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ### T-CR-06: `inject_body_into_obj` — Non-UTF-8 files handled via `read_file_lossy` (BUG-CR-6)
 
-**Tool:** `search_definitions` (with `includeBody: true`)
+**Tool:** `xray_definitions` (with `includeBody: true`)
 
 **Scenario:** Files with non-UTF-8 content (e.g., Windows-1252 encoded) should have their body content returned via `read_file_lossy` instead of failing with `bodyError`. Previously, `std::fs::read_to_string` was used which fails on non-UTF-8 files.
 
@@ -6796,9 +6796,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ---
 
-### T-CR-07: `search_grep` — Empty terms in normal mode returns error (BUG-CR-7)
+### T-CR-07: `xray_grep` — Empty terms in normal mode returns error (BUG-CR-7)
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** Passing `terms: ",,,"` in normal token mode should return an explicit error, consistent with substring mode behavior. Previously, normal mode silently returned empty results.
 
@@ -6809,9 +6809,9 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ---
 
-### T-VAL-06: `search_grep` — `contextLines` auto-enables `showLines` (BUG-6)
+### T-VAL-06: `xray_grep` — `contextLines` auto-enables `showLines` (BUG-6)
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
 **Scenario:** Passing `contextLines: 3` without `showLines: true` should automatically enable `showLines` and return line content with context.
 
@@ -6821,15 +6821,15 @@ echo $msgs | search-index serve --dir . --ext rs
 - Response includes `lineContent` arrays (auto-enabled)
 - No need to explicitly pass `showLines: true` when `contextLines > 0`
 
-**Unit test:** [`test_search_grep_context_lines_auto_enables_show_lines`](../src/mcp/handlers/handlers_tests.rs)
+**Unit test:** [`test_xray_grep_context_lines_auto_enables_show_lines`](../src/mcp/handlers/handlers_tests.rs)
 
 ---
 
-### T-GREP-DIR-FILE: `search_grep` — dir= pointing to a file returns error with hint
+### T-GREP-DIR-FILE: `xray_grep` — dir= pointing to a file returns error with hint
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
-**Scenario:** When `search_grep` is called with `dir` pointing to a file path (not a directory), it should return an error with a helpful hint instead of silently returning 0 results.
+**Scenario:** When `xray_grep` is called with `dir` pointing to a file path (not a directory), it should return an error with a helpful hint instead of silently returning 0 results.
 
 **Expected:**
 
@@ -6837,7 +6837,7 @@ echo $msgs | search-index serve --dir . --ext rs
 - Error message contains `"is a file path"`
 - Error message contains `"directories only"`
 - Error message contains the filename (e.g., `"Service.cs"`)
-- Error message suggests the parent directory or `search_definitions` as alternatives
+- Error message suggests the parent directory or `xray_definitions` as alternatives
 
 **Negative test — directory path still works:**
 
@@ -6849,7 +6849,7 @@ echo $msgs | search-index serve --dir . --ext rs
 
 ### T-WARMUP: Trigram pre-warming eliminates cold-start penalty
 
-**Tool:** `search_grep` (substring mode)
+**Tool:** `xray_grep` (substring mode)
 
 **Background:** After deserializing the content index from disk, the first 1-2 substring queries
 take ~3.4 seconds due to OS page faults on memory that hasn't been touched yet. The `warm_up()`
@@ -6864,7 +6864,7 @@ eliminating this cold-start penalty.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokeniz","substring":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT 2>stderr.txt
 Get-Content stderr.txt | Select-String "warmup"
@@ -6896,9 +6896,9 @@ HashMap bucket pages to force OS page faults before the first real query.
 
 ### T-SUBSTRING-TRACE: Substring search emits timing traces to stderr
 
-**Tool:** `search_grep` (substring mode)
+**Tool:** `xray_grep` (substring mode)
 
-**Background:** Substring search (`search_grep` with `substring: true`, which is the default) now
+**Background:** Substring search (`xray_grep` with `substring: true`, which is the default) now
 emits `[substring-trace]` timing instrumentation to stderr at each major processing stage. This
 helps diagnose slow cold-start queries (first 1-2 queries take ~3.4s instead of expected
 milliseconds). The tracing is always-on and outputs to stderr, which doesn't interfere with the
@@ -6912,7 +6912,7 @@ MCP protocol on stdout.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokeniz","substring":true}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokeniz","substring":true}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT 2>stderr.txt
 Get-Content stderr.txt | Select-String "substring-trace"
@@ -6951,11 +6951,11 @@ and total elapsed time.
 ---
 
 
-### T-US16-SPACE: `serve` — search_grep auto-switches to phrase for spaced terms (US-16)
+### T-US16-SPACE: `serve` — xray_grep auto-switches to phrase for spaced terms (US-16)
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
-**Background:** When `search_grep` receives terms containing spaces in substring mode (the default), it auto-switches to phrase search. Previously, spaced terms silently returned 0 results because the tokenizer splits on spaces, so no individual token contains multi-word substrings.
+**Background:** When `xray_grep` receives terms containing spaces in substring mode (the default), it auto-switches to phrase search. Previously, spaced terms silently returned 0 results because the tokenizer splits on spaces, so no individual token contains multi-word substrings.
 
 **Command (MCP):**
 
@@ -6963,7 +6963,7 @@ and total elapsed time.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"pub fn"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"pub fn"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -6981,7 +6981,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokenize"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -7011,11 +7011,11 @@ cargo run -- grep "pub fn" -d $TEST_DIR -e $TEST_EXT
 
 ---
 
-### T-US16-PUNCT: `serve` — search_grep auto-switches to phrase for punctuation terms
+### T-US16-PUNCT: `serve` — xray_grep auto-switches to phrase for punctuation terms
 
-**Tool:** `search_grep`
+**Tool:** `xray_grep`
 
-**Background:** When `search_grep` receives terms containing non-token characters (punctuation, brackets, etc.) in substring mode (the default), it auto-switches to phrase search. The tokenizer strips all characters that are not alphanumeric or underscore, so terms like `#[cfg(test)]`, `<summary>`, `@Attribute`, or `System.IO` would never match any indexed token. Phrase search with punctuation does raw substring matching on file content, which correctly handles these patterns.
+**Background:** When `xray_grep` receives terms containing non-token characters (punctuation, brackets, etc.) in substring mode (the default), it auto-switches to phrase search. The tokenizer strips all characters that are not alphanumeric or underscore, so terms like `#[cfg(test)]`, `<summary>`, `@Attribute`, or `System.IO` would never match any indexed token. Phrase search with punctuation does raw substring matching on file content, which correctly handles these patterns.
 
 **Command (MCP — punctuation term):**
 
@@ -7023,7 +7023,7 @@ cargo run -- grep "pub fn" -d $TEST_DIR -e $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"#[cfg(test)]"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"#[cfg(test)]"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -7041,7 +7041,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"my_variable"}}}'
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"my_variable"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -7061,7 +7061,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ### T-BRANCH-WARNING: `serve` — `branchWarning` in index-based tool responses
 
-**Background:** When the MCP server is started on a non-main/non-master branch, all index-based tool responses (`search_grep`, `search_definitions`, `search_callers`, `search_fast`) include a `branchWarning` field in the `summary` object. This alerts the AI agent that results may differ from production because the index is built on a feature branch.
+**Background:** When the MCP server is started on a non-main/non-master branch, all index-based tool responses (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`) include a `branchWarning` field in the `summary` object. This alerts the AI agent that results may differ from production because the index is built on a feature branch.
 
 **Setup:** Check out a feature branch before starting the server:
 
@@ -7075,7 +7075,7 @@ git checkout -b feature/test-branch-warning
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_grep","arguments":{"terms":"tokenize"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokenize"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -7083,8 +7083,8 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 **Expected:**
 
 - `summary.branchWarning` contains `"Index is built on branch 'feature/test-branch-warning', not on main/master. Results may differ from production."`
-- The warning appears in ALL index-based tools: `search_grep`, `search_definitions`, `search_callers`, `search_fast`
-- The warning does NOT appear in git tools (`search_git_history`, `search_git_diff`, etc.) since they work directly with the git repo
+- The warning appears in ALL index-based tools: `xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`
+- The warning does NOT appear in git tools (`xray_git_history`, `xray_git_diff`, etc.) since they work directly with the git repo
 
 **Negative test — on main branch:**
 
@@ -7108,9 +7108,9 @@ Same expectation — no warning when on `master`.
 
 ---
 
-### T-BRANCH-STATUS: `serve` — `search_branch_status` shows branch info
+### T-BRANCH-STATUS: `serve` — `xray_branch_status` shows branch info
 
-**Tool:** `search_branch_status`
+**Tool:** `xray_branch_status`
 
 **Command:**
 
@@ -7118,7 +7118,7 @@ Same expectation — no warning when on `master`.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_branch_status","arguments":{"repo":"."}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_branch_status","arguments":{"repo":"."}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -7137,7 +7137,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
   - `fetchAge` — human-readable age string (e.g., "3 hours ago") or null
   - `fetchWarning` — null if fetch is fresh (< 1 hour), escalating warnings for stale fetch
   - `warning` — null if on main/master and up-to-date; human-readable warning if on feature branch or behind remote
-  - `summary.tool` = `"search_branch_status"`
+  - `summary.tool` = `"xray_branch_status"`
   - `summary.elapsedMs` — positive number
 
 **Error cases:**
@@ -7145,13 +7145,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - Missing `repo` parameter → `isError: true`, `"Missing required parameter: repo"`
 - Non-existent repo path → `isError: true`, error from git
 
-**Validates:** `search_branch_status` tool returns comprehensive branch status for production bug investigation context.
+**Validates:** `xray_branch_status` tool returns comprehensive branch status for production bug investigation context.
 
 **Unit tests:** `test_branch_status_returns_current_branch`, `test_branch_status_detects_main_branch`, `test_branch_status_dirty_files`, `test_branch_status_missing_repo`, `test_branch_status_bad_repo`, `test_branch_status_has_summary`, `test_is_main_branch`, `test_format_age`, `test_compute_fetch_warning_thresholds`, `test_build_warning_on_main_up_to_date`, `test_build_warning_on_main_behind`, `test_build_warning_on_feature_branch`, `test_build_warning_on_feature_branch_no_behind`, `test_build_warning_on_feature_branch_no_remote`
 
 ---
 
-> **Note:** `search_git_pickaxe` was removed in 2026-02-22. Use `search_grep` → `search_git_blame` workflow instead. See CHANGELOG for details.
+> **Note:** `search_git_pickaxe` was removed in 2026-02-22. Use `xray_grep` → `xray_git_blame` workflow instead. See CHANGELOG for details.
 
 **Command:**
 
@@ -7228,7 +7228,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
-### T70: `serve` — `search_git_history` empty results validation (file not in git)
+### T70: `serve` — `xray_git_history` empty results validation (file not in git)
 
 **Command:**
 
@@ -7236,7 +7236,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"nonexistent_file_xyz_abc_123.rs"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"nonexistent_file_xyz_abc_123.rs"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -7246,11 +7246,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - stdout: JSON-RPC response with `"totalCommits": 0` and `"commits": []`
 - Response JSON contains a `"warning"` field: `"File not found in git: nonexistent_file_xyz_abc_123.rs. Check the path."`
 
-**Validates:** When `search_git_history` returns 0 commits and the file is not tracked by git, the response includes a warning to help the user identify typos in the file path.
+**Validates:** When `xray_git_history` returns 0 commits and the file is not tracked by git, the response includes a warning to help the user identify typos in the file path.
 
 ---
 
-### T70b: `serve` — `search_git_history` empty results validation (file exists, no commits in range)
+### T70b: `serve` — `xray_git_history` empty results validation (file exists, no commits in range)
 
 **Command:**
 
@@ -7258,7 +7258,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_git_history","arguments":{"repo":".","file":"Cargo.toml","from":"1970-01-01","to":"1970-01-02"}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","from":"1970-01-01","to":"1970-01-02"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 ```
@@ -7275,9 +7275,9 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ### T-DEBUG-LOG: `serve --debug-log` — Debug logging (MCP traces + memory diagnostics)
 
-**Tool:** `search-index serve --debug-log`
+**Tool:** `xray serve --debug-log`
 
-**Background:** When `--debug-log` is passed to `search-index serve`, the server writes a `.debug.log` file in the index directory (`%LOCALAPPDATA%/search-index/`) with MCP request/response traces (tool name, arguments, elapsed time, response size, Working Set) and Working Set / Peak WS / Commit memory diagnostics at every key pipeline stage.
+**Background:** When `--debug-log` is passed to `xray serve`, the server writes a `.debug.log` file in the index directory (`%LOCALAPPDATA%/xray/`) with MCP request/response traces (tool name, arguments, elapsed time, response size, Working Set) and Working Set / Peak WS / Commit memory diagnostics at every key pipeline stage.
 
 **Command:**
 
@@ -7285,7 +7285,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_info","arguments":{}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --debug-log
 ```
@@ -7295,7 +7295,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --debug-log
 - stderr contains `[debug-log] Enabled, writing to`
 - stderr contains `[memory]` lines with timing, WS_MB, Peak_MB, Commit_MB, and labels
 - stderr contains `[debug-log]` lines with REQ/RESP entries for each tool call
-- File `%LOCALAPPDATA%/search-index/<prefix>.debug.log` is created with header + data lines
+- File `%LOCALAPPDATA%/xray/<prefix>.debug.log` is created with header + data lines
 - Labels include: `serve: startup`, `content-build: starting`, `content-build: finished`, etc.
 - REQ lines include: tool name and arguments JSON
 - RESP lines include: tool name, elapsed ms, response KB, Working Set MB
@@ -7307,11 +7307,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --debug-log
 
 ---
 
-### T-MEMORY-ESTIMATE: `search_info` — Memory estimates in response
+### T-MEMORY-ESTIMATE: `xray_info` — Memory estimates in response
 
-**Tool:** `search_info`
+**Tool:** `xray_info`
 
-**Background:** `search_info` now includes a `memoryEstimate` section with per-component memory estimates and process memory info.
+**Background:** `xray_info` now includes a `memoryEstimate` section with per-component memory estimates and process memory info.
 
 **Command:**
 
@@ -7319,7 +7319,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --debug-log
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_info","arguments":{}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 ```
@@ -7360,7 +7360,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 - WS after `reload` < WS at `finished` (reload is more compact than build)
 - Peak WS stays at or near the build-time peak (expected — Peak is high-water mark)
 
-**Validates:** `force_mimalloc_collect()` reduces Working Set after dropping build-time allocations. The same pattern applies to definition index and both `search_reindex`/`search_reindex_definitions` MCP handlers.
+**Validates:** `force_mimalloc_collect()` reduces Working Set after dropping build-time allocations. The same pattern applies to definition index and both `xray_reindex`/`xray_reindex_definitions` MCP handlers.
 
 **Unit test:** `test_force_mimalloc_collect_does_not_panic`
 
@@ -7370,9 +7370,9 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 
 ### T-MI-COLLECT-REINDEX: `mi_collect(true)` — Memory decommit after MCP reindex
 
-**Background:** The `search_reindex` and `search_reindex_definitions` MCP handlers previously built a new index, saved it to disk, and replaced the old one in-memory — without calling `force_mimalloc_collect()` or reloading from disk. This left ~0.5–1 GB of fragmented memory in mimalloc's freelists, visible as elevated Working Set in Task Manager. The fix applies the same drop-reload-mi_collect pattern used during server startup: build → save → drop build result → mi_collect → reload from disk (compact layout) → replace in lock → mi_collect again.
+**Background:** The `xray_reindex` and `xray_reindex_definitions` MCP handlers previously built a new index, saved it to disk, and replaced the old one in-memory — without calling `force_mimalloc_collect()` or reloading from disk. This left ~0.5–1 GB of fragmented memory in mimalloc's freelists, visible as elevated Working Set in Task Manager. The fix applies the same drop-reload-mi_collect pattern used during server startup: build → save → drop build result → mi_collect → reload from disk (compact layout) → replace in lock → mi_collect again.
 
-**Scenario:** Invoke `search_reindex_definitions` via MCP, then check memory with `search_info`.
+**Scenario:** Invoke `xray_reindex_definitions` via MCP, then check memory with `xray_info`.
 
 **Command (MCP):**
 
@@ -7380,21 +7380,21 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"search_reindex_definitions","arguments":{}}}',
-    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"search_info","arguments":{}}}'
+    '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"xray_reindex_definitions","arguments":{}}}',
+    '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}'
 ) -join "`n"
-echo $msgs | search-index serve --dir $TEST_DIR --ext $TEST_EXT --definitions --debug-log
+echo $msgs | xray serve --dir $TEST_DIR --ext $TEST_EXT --definitions --debug-log
 ```
 
 **Expected:**
 
 - Reindex response: `status: "ok"` with metrics (files, definitions, callSites, sizeMb, rebuildTimeMs)
 - `rebuildTimeMs` includes drop+reload overhead (~1-3s on top of build time)
-- `search_info` Working Set returns to near-baseline after reindex (±100 MB)
+- `xray_info` Working Set returns to near-baseline after reindex (±100 MB)
 - Debug log (`--debug-log`) contains entries:
   - `reindex: after drop+mi_collect (def)` — WS decreased after drop
   - `reindex: after replace+mi_collect (def)` — WS decreased after old index drop
-- Same pattern applies to `search_reindex` (content index)
+- Same pattern applies to `xray_reindex` (content index)
 
 **Validates:** `force_mimalloc_collect()` in reindex handlers returns freed pages to OS. Drop-reload pattern eliminates allocator fragmentation from build-time temporary allocations.
 
@@ -7406,15 +7406,15 @@ echo $msgs | search-index serve --dir $TEST_DIR --ext $TEST_EXT --definitions --
 
 **Tool:** All 15 tools via `tools/list`
 
-**Background:** MCP tool definitions (names, descriptions, parameter schemas) are injected into the LLM system prompt on every turn. To prevent token budget bloat, parameter descriptions are kept concise (semantic purpose + defaults, no concrete examples). Examples are available on-demand via `search_help` → `parameterExamples`.
+**Background:** MCP tool definitions (names, descriptions, parameter schemas) are injected into the LLM system prompt on every turn. To prevent token budget bloat, parameter descriptions are kept concise (semantic purpose + defaults, no concrete examples). Examples are available on-demand via `xray_help` → `parameterExamples`.
 
 **Scenario:** Verify that the total token footprint of all tool definitions stays under the budget.
 
 **Expected:**
 
 - Total word count of serialized tool definitions < 4,125 words (~5,500 tokens at 0.75 words/token ratio)
-- `search_help` response contains `parameterExamples` object with examples for key tools: `search_definitions`, `search_grep`, `search_callers`, `search_fast`
-- `search_callers.class` parameter retains its full "STRONGLY RECOMMENDED" warning (critical hint)
+- `xray_help` response contains `parameterExamples` object with examples for key tools: `xray_definitions`, `xray_grep`, `xray_callers`, `xray_fast`
+- `xray_callers.class` parameter retains its full "STRONGLY RECOMMENDED" warning (critical hint)
 - All parameter descriptions retain semantic purpose (8+ words for non-obvious params)
 - No concrete examples in parameter descriptions (moved to `parameterExamples`)
 
@@ -7446,7 +7446,7 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 ---
 
-### T-ANGULAR-02: `serve` — `search_definitions` returns Angular template metadata
+### T-ANGULAR-02: `serve` — `xray_definitions` returns Angular template metadata
 
 **Command:**
 
@@ -7454,7 +7454,7 @@ cargo run -- def-index -d $TEST_DIR -e ts
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"AppComponent"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"AppComponent"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -7465,11 +7465,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 - Each Angular component definition includes `selector` field (e.g., `"app-root"`)
 - Each Angular component definition includes `templateChildren` array listing child component selectors found in its HTML template (e.g., `["child-widget", "loading-spinner"]`)
 
-**Validates:** `search_definitions` exposes Angular template metadata (selector, templateChildren) in the response for component definitions.
+**Validates:** `xray_definitions` exposes Angular template metadata (selector, templateChildren) in the response for component definitions.
 
 ---
 
-### T-ANGULAR-03: `serve` — `search_callers` direction=down shows template children
+### T-ANGULAR-03: `serve` — `xray_callers` direction=down shows template children
 
 **Command:**
 
@@ -7477,7 +7477,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"AppComponent","class":"AppComponent","direction":"down"}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"AppComponent","class":"AppComponent","direction":"down"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -7488,11 +7488,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 - `callTree` includes child components from the HTML template with `templateUsage: true`
 - Child entries correspond to selectors found in the component's `.html` file (e.g., `child-widget`, `loading-spinner`)
 
-**Validates:** `search_callers` direction=down includes Angular template children in the call tree, enabling component hierarchy traversal through HTML templates.
+**Validates:** `xray_callers` direction=down includes Angular template children in the call tree, enabling component hierarchy traversal through HTML templates.
 
 ---
 
-### T-ANGULAR-04: `serve` — `search_callers` direction=up shows parent components
+### T-ANGULAR-04: `serve` — `xray_callers` direction=up shows parent components
 
 **Command:**
 
@@ -7500,7 +7500,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"child-widget","direction":"up"}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"child-widget","direction":"up"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -7511,11 +7511,11 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 - `callTree` includes parent components that use `<child-widget>` in their HTML templates with `templateUsage: true`
 - Parent entries correspond to components whose `templateChildren` contain `child-widget`
 
-**Validates:** `search_callers` direction=up resolves selectors to parent components via the `selector_index`, enabling reverse template dependency lookup.
+**Validates:** `xray_callers` direction=up resolves selectors to parent components via the `selector_index`, enabling reverse template dependency lookup.
 
 ---
 
-### T-ANGULAR-04b: `serve` — `search_callers` direction=up recursive depth shows grandparents
+### T-ANGULAR-04b: `serve` — `xray_callers` direction=up recursive depth shows grandparents
 
 **Command:**
 
@@ -7523,7 +7523,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"grand-child","direction":"up","depth":3}}}'
+    '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"grand-child","direction":"up","depth":3}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 ```
@@ -7537,7 +7537,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 - ChildComp node has a `"parents"` field containing GrandParent (level 2)
 - `depth` parameter controls recursion depth (depth=1 returns only direct parent, no grandparents)
 
-**Validates:** `search_callers` direction=up recursively traces parent components beyond level 1, respecting the `depth` parameter. Grandparents are nested in the `"parents"` field of each parent node. Cycle detection prevents infinite loops for circular component references.
+**Validates:** `xray_callers` direction=up recursively traces parent components beyond level 1, respecting the `depth` parameter. Grandparents are nested in the `"parents"` field of each parent node. Cycle detection prevents infinite loops for circular component references.
 
 ---
 
@@ -7563,7 +7563,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 
 ### T-F10-CLASS-FILTER-RECURSION: Call tree search with common method names does not produce cross-class false positives at depth > 0
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
 **Background:** Audit finding F-10 identified that `build_caller_tree` passed `parent_class: None` at recursion depth > 0, causing false positive callers from unrelated classes with common method names like `Process`, `Execute`, `Handle` to appear in the call tree. The fix passes `caller_parent` (the class of the found caller) as the class filter for the next recursion level, matching the pattern already used in `build_callee_tree`.
 
@@ -7579,7 +7579,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext ts --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_callers","arguments":{"method":"Process","class":"ServiceA","direction":"up","depth":3}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Process","class":"ServiceA","direction":"up","depth":3}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 ```
@@ -7596,9 +7596,9 @@ echo $msgs | cargo run -- serve --dir $TempDir --ext cs --definitions
 
 ---
 
-### T-TERM-BREAKDOWN: `search_definitions` — `termBreakdown` in summary for multi-term name queries
+### T-TERM-BREAKDOWN: `xray_definitions` — `termBreakdown` in summary for multi-term name queries
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** When `name` contains 2+ comma-separated terms, the summary includes a `termBreakdown`
 object showing how many results each term contributed (from the full result set, before `maxResults`
@@ -7610,7 +7610,7 @@ truncation).
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"name":"QueryService,ResilientClient"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"QueryService,ResilientClient"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 ```
@@ -7633,18 +7633,18 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 
 ---
 
-### T-MULTI-KIND: `search_definitions` — multi-kind filter
+### T-MULTI-KIND: `xray_definitions` — multi-kind filter
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** When `kind` contains comma-separated values (e.g., `kind="class,method"`), the response
 includes definitions of ALL specified kinds.
 
 **Steps:**
-1. Call `search_definitions` with `kind="class,method"` on a codebase
+1. Call `xray_definitions` with `kind="class,method"` on a codebase
 2. Verify response contains both classes and methods
-3. Call `search_definitions` with `kind="class"` (single value) → only classes returned (backward compatibility)
-4. Call `search_definitions` with `kind="class,invalid_kind"` → error returned
+3. Call `xray_definitions` with `kind="class"` (single value) → only classes returned (backward compatibility)
+4. Call `xray_definitions` with `kind="class,invalid_kind"` → error returned
 
 **Expected:**
 
@@ -7656,16 +7656,16 @@ includes definitions of ALL specified kinds.
 
 ---
 
-### T-MISSING-TERMS: `search_definitions` — `missingTerms` in summary for multi-name + kind queries
+### T-MISSING-TERMS: `xray_definitions` — `missingTerms` in summary for multi-name + kind queries
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** When `name` contains 2+ comma-separated terms AND `kind` filter is active, some terms
 may be silently dropped because they exist with a different kind. The summary includes `missingTerms`
 array diagnosing the issue.
 
 **Steps:**
-1. Call `search_definitions` with `name="UserService,GetUser"` and `kind="class"`
+1. Call `xray_definitions` with `name="UserService,GetUser"` and `kind="class"`
    - UserService is a class → found
    - GetUser is a method → dropped by kind filter
 2. Check `summary.missingTerms`
@@ -7684,9 +7684,9 @@ array diagnosing the issue.
 
 ---
 
-### T-COMMA-FILE-PARENT: `search_definitions` — Comma-separated `file` and `parent` parameters
+### T-COMMA-FILE-PARENT: `xray_definitions` — Comma-separated `file` and `parent` parameters
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Scenario:** The `file` and `parent` parameters support comma-separated OR (matching `name` behavior).
 
@@ -7696,7 +7696,7 @@ array diagnosing the issue.
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"file":"UserService.cs,OrderService.cs","kind":"method"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"file":"UserService.cs,OrderService.cs","kind":"method"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 ```
@@ -7713,7 +7713,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"search_definitions","arguments":{"parent":"UserService,OrderService","kind":"method"}}}'
+    '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"parent":"UserService,OrderService","kind":"method"}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 ```
@@ -7742,7 +7742,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 
 - stderr contains `Skipping ... — extensions mismatch (cached: ["cs"], expected: ["cs", "sql"])`
 - The server rebuilds the index with both `cs` and `sql` extensions
-- `search_definitions` with `kind: "storedProcedure"` returns results (if SQL files exist)
+- `xray_definitions` with `kind: "storedProcedure"` returns results (if SQL files exist)
 - Same behavior for content index fallback (`find_content_index_for_dir`)
 
 **Unit tests:** `test_find_def_index_skips_stale_extensions`, `test_find_def_index_accepts_superset`, `test_find_def_index_accepts_exact_match`, `test_find_def_index_empty_expected_accepts_any`, `test_find_def_index_case_insensitive_ext_match`, `test_find_content_index_skips_stale_extensions`, `test_find_content_index_accepts_superset`, `test_find_content_index_empty_expected_accepts_any`
@@ -7770,9 +7770,9 @@ cargo run -- def-index -d $TEST_DIR -e ts
 **Validates:** `def-index` completes without error when a component's `templateUrl` points to a non-existent file. The component is still indexed for its selector but without template children.
 
 
-### T-BFS-CASCADE: `search_definitions` — `baseTypeTransitive` BFS no longer cascades
+### T-BFS-CASCADE: `xray_definitions` — `baseTypeTransitive` BFS no longer cascades
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Background:** The `collect_transitive_base_type_indices()` BFS previously used substring matching (`key.contains(&current_type)`) at ALL levels. When a descendant class had a short/common name (e.g., `"Service"`), BFS level 1+ would substring-match many unrelated base_type keys (`"iservice"`, `"webservice"`, `"serviceprovider"`), pulling thousands of definitions into the result set (~42K instead of ~828, ~29 sec instead of <1 sec). The fix uses exact HashMap lookup at levels 1+, keeping substring matching only at level 0 (seed) for generic type support.
 
@@ -7788,11 +7788,11 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 ---
 
-### T-MULTI-METHOD: `search_callers` — Multi-method batch returns results array
+### T-MULTI-METHOD: `xray_callers` — Multi-method batch returns results array
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
-**Background:** When `method` parameter contains commas (e.g., `"process,validate"`), `search_callers` returns independent call trees for each method in a single MCP call. This saves N-1 round trips. Each method gets its own `maxTotalNodes` budget. Body lines budget (`maxTotalBodyLines`) is shared across all methods. Response budget auto-scales with method count (32KB × N, capped at 128KB).
+**Background:** When `method` parameter contains commas (e.g., `"process,validate"`), `xray_callers` returns independent call trees for each method in a single MCP call. This saves N-1 round trips. Each method gets its own `maxTotalNodes` budget. Body lines budget (`maxTotalBodyLines`) is shared across all methods. Response budget auto-scales with method count (32KB × N, capped at 128KB).
 
 **Scenario:** Create two TS files: service with `process()` and `validate()` methods, consumer that calls both. Send multi-method callers request with `method: "process,validate"`.
 
@@ -7812,11 +7812,11 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 ---
 
-### T-CALLERS-HINT: `search_callers` — Hint when 0 results with class filter
+### T-CALLERS-HINT: `xray_callers` — Hint when 0 results with class filter
 
-**Tool:** `search_callers`
+**Tool:** `xray_callers`
 
-**Background:** When `search_callers` returns an empty call tree and `class` parameter is set, the response now includes a `hint` field suggesting possible reasons (extension methods, DI wrappers, narrow class filter) and advising to try without `class` or with the interface name.
+**Background:** When `xray_callers` returns an empty call tree and `class` parameter is set, the response now includes a `hint` field suggesting possible reasons (extension methods, DI wrappers, narrow class filter) and advising to try without `class` or with the interface name.
 
 **Expected:**
 
@@ -7824,15 +7824,15 @@ cargo run -- def-index -d $TEST_DIR -e ts
 - `method="X"` (no class filter) → response does NOT include `"hint"` even if tree is empty
 - `method="X" class="ValidClass"` with callers found → response does NOT include `"hint"`
 
-**Unit tests:** `test_search_callers_hint_when_empty_with_class_filter`, `test_search_callers_no_hint_without_class_filter`, `test_search_callers_no_hint_when_results_found`
+**Unit tests:** `test_xray_callers_hint_when_empty_with_class_filter`, `test_xray_callers_no_hint_without_class_filter`, `test_xray_callers_no_hint_when_results_found`
 
 **Status:** ✅ Covered by unit tests
 
 ---
 
-### T-TRANSITIVE-HINT: `search_definitions` — Hint for large transitive hierarchies
+### T-TRANSITIVE-HINT: `xray_definitions` — Hint for large transitive hierarchies
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Background:** When `baseTypeTransitive=true` and `totalResults > 5000`, the summary includes a `hint` suggesting `kind` or `file` filters to narrow results.
 
@@ -7845,11 +7845,11 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Status:** ✅ Covered by unit test (negative case; positive case requires 5000+ definitions)
 
-### T-ZERO-HINTS: `search_definitions` — Zero-result hints for LLM self-correction
+### T-ZERO-HINTS: `xray_definitions` — Zero-result hints for LLM self-correction
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
-**Background:** When `search_definitions` returns 0 results, the response `summary` now includes a contextual `hint` field with four types of suggestions (first matching wins): (A) wrong `kind` — definitions exist with same name/file but different kind; (B) nearest name — typo/wrong name, suggests closest match by Jaro-Winkler similarity (≥80%); (C) file has definitions — file matches but name/kind/parent filters are too narrow; (D) name in content index — name exists as text but not as AST definition. Zero overhead for successful queries.
+**Background:** When `xray_definitions` returns 0 results, the response `summary` now includes a contextual `hint` field with four types of suggestions (first matching wins): (A) wrong `kind` — definitions exist with same name/file but different kind; (B) nearest name — typo/wrong name, suggests closest match by Jaro-Winkler similarity (≥80%); (C) file has definitions — file matches but name/kind/parent filters are too narrow; (D) name in content index — name exists as text but not as AST definition. Zero overhead for successful queries.
 
 **Scenario A — wrong kind (most common):**
 
@@ -7879,7 +7879,7 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Expected:**
 - `definitions` array is empty
-- `summary.hint` contains `"File 'tips.rs' has N definitions"` and `"Use search_grep for content search"`
+- `summary.hint` contains `"File 'tips.rs' has N definitions"` and `"Use xray_grep for content search"`
 
 **Scenario D — name in content but not in defs:**
 
@@ -7889,7 +7889,7 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Expected:**
 - `definitions` array is empty
-- `summary.hint` contains `"not found as an AST definition name"` and `"Use search_grep"`
+- `summary.hint` contains `"not found as an AST definition name"` and `"Use xray_grep"`
 
 **Negative test — no hint when results found:**
 
@@ -7914,11 +7914,11 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Status:** ✅ Implemented
 
-### T-HINT-E: `search_definitions` — Unsupported file extension hint
+### T-HINT-E: `xray_definitions` — Unsupported file extension hint
 
-### T-HINT-NAME-KIND: `search_definitions` — Name+kind mismatch hint (class found instead of methods)
+### T-HINT-NAME-KIND: `xray_definitions` — Name+kind mismatch hint (class found instead of methods)
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
 **Background:** When a user searches for `name=UserService kind=method`, the search finds `UserService` (a class) because the name matches as a substring. But the kind filter is `method`, so no methods named `UserService` exist — the class result passes through because name search is substring-based and kind filtering already happened at the index level (methods exist with different names). The result is confusing: the user gets a class back when they asked for methods.
 
@@ -7964,11 +7964,11 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 
 ---
 
-### T-HINT-F-FILE-FUZZY: `search_definitions` — File path fuzzy-match hint
+### T-HINT-F-FILE-FUZZY: `xray_definitions` — File path fuzzy-match hint
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
-**Background:** When `search_definitions` is called with a `file` filter that returns 0 results, and no previous hints (E, A, C) could fire, a new Hint F checks for near-miss file paths. It normalizes the query and index paths by removing slashes, dashes, and underscores, then checks if the normalized query is a substring of any normalized file path in the index. This catches the common case where the user writes `Components/Utils` but the actual path is `ComponentsUtils`.
+**Background:** When `xray_definitions` is called with a `file` filter that returns 0 results, and no previous hints (E, A, C) could fire, a new Hint F checks for near-miss file paths. It normalizes the query and index paths by removing slashes, dashes, and underscores, then checks if the normalized query is a substring of any normalized file path in the index. This catches the common case where the user writes `Components/Utils` but the actual path is `ComponentsUtils`.
 
 **Scenario A — slash mismatch:**
 
@@ -8001,9 +8001,9 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 
 ---
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
-**Background:** When `search_definitions` is called with a `file` filter containing an extension not supported by the definition index (e.g., `.xml`, `.json`, `.config`), a new Hint E fires before all other hints. It checks whether the extension is indexed by the content index (`server_ext`) and gives a targeted recommendation: "Use search_grep" (if in content index) or "Use read_file" (if not indexed at all). Guard: skipped when `def_extensions` is empty.
+**Background:** When `xray_definitions` is called with a `file` filter containing an extension not supported by the definition index (e.g., `.xml`, `.json`, `.config`), a new Hint E fires before all other hints. It checks whether the extension is indexed by the content index (`server_ext`) and gives a targeted recommendation: "Use xray_grep" (if in content index) or "Use read_file" (if not indexed at all). Guard: skipped when `def_extensions` is empty.
 
 **Scenario A — extension in content index but not in definition index:**
 
@@ -8014,7 +8014,7 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 **Expected:**
 - `definitions` array is empty (0 results)
 - `summary.hint` contains `".xml"`
-- `summary.hint` contains `"search_grep"`
+- `summary.hint` contains `"xray_grep"`
 - `summary.hint` contains `"content index"`
 
 **Scenario B — extension not in any index:**
@@ -8045,7 +8045,7 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 ```
 
 **Expected:**
-- `summary.hint` contains `"search_grep"` (treats `.XML` same as `.xml`)
+- `summary.hint` contains `"xray_grep"` (treats `.XML` same as `.xml`)
 
 **Scenario E — comma-separated file filter:**
 
@@ -8056,7 +8056,7 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 **Expected:**
 - Hint E fires for first unsupported extension
 
-**Unit tests:** `test_hint_e_xml_extension_suggests_search_grep`, `test_hint_e_md_extension_not_in_content_index_suggests_read_file`, `test_hint_e_cs_extension_no_hint`, `test_hint_e_case_insensitive_extension`, `test_hint_e_comma_separated_file_filter`
+**Unit tests:** `test_hint_e_xml_extension_suggests_xray_grep`, `test_hint_e_md_extension_not_in_content_index_suggests_read_file`, `test_hint_e_cs_extension_no_hint`, `test_hint_e_case_insensitive_extension`, `test_hint_e_comma_separated_file_filter`
 
 **Status:** ✅ Implemented
 
@@ -8064,11 +8064,11 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 
 ---
 
-### T-AUTO-CORRECT: `search_definitions` — Auto-correction for kind mismatch and name typos
+### T-AUTO-CORRECT: `xray_definitions` — Auto-correction for kind mismatch and name typos
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
-**Background:** When `search_definitions` returns 0 results, the server now automatically attempts to correct the query and return results in a single round-trip. Two auto-correction types: (A) **Kind mismatch** — if `kind` filter is set with `name` or `file` filter, the server removes the kind filter, finds the correct kind, and re-runs; (B) **Nearest name match** — if name has ≥85% Jaro-Winkler similarity to an indexed name, the server re-runs with the corrected name. If auto-correction produces results, the response includes an `autoCorrection` object in the `summary` explaining what was changed. If auto-correction produces 0 results, falls through to the regular hint system.
+**Background:** When `xray_definitions` returns 0 results, the server now automatically attempts to correct the query and return results in a single round-trip. Two auto-correction types: (A) **Kind mismatch** — if `kind` filter is set with `name` or `file` filter, the server removes the kind filter, finds the correct kind, and re-runs; (B) **Nearest name match** — if name has ≥85% Jaro-Winkler similarity to an indexed name, the server re-runs with the corrected name. If auto-correction produces results, the response includes an `autoCorrection` object in the `summary` explaining what was changed. If auto-correction produces 0 results, falls through to the regular hint system.
 
 **Scenario A — kind auto-correction:**
 
@@ -8136,9 +8136,9 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 
 ### T-AUTO-CORRECT-LENGTH-RATIO: Auto-correction length ratio guard
 
-**Tool:** `search_definitions`
+**Tool:** `xray_definitions`
 
-**Background:** The auto-correction feature could falsely correct partial name matches where Jaro-Winkler similarity was high due to shared prefixes but the names had very different lengths (e.g., `"search_definitions"` → `"search"`, 87% similarity but 33% length ratio). The length ratio guard requires ≥60% length ratio (`min(len1,len2)/max(len1,len2)`) in addition to ≥80% similarity.
+**Background:** The auto-correction feature could falsely correct partial name matches where Jaro-Winkler similarity was high due to shared prefixes but the names had very different lengths (e.g., `"xray_definitions"` → `"search"`, 87% similarity but 33% length ratio). The length ratio guard requires ≥60% length ratio (`min(len1,len2)/max(len1,len2)`) in addition to ≥80% similarity.
 
 **Scenario A — partial match blocked:**
 
@@ -8179,22 +8179,22 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 **Status:** ✅ Implemented
 
 
-**Tool:** `search-index serve --watch --definitions`
+**Tool:** `xray serve --watch --definitions`
 
 **Background:** When the file watcher incrementally updates definitions, old entries remain in the `definitions` Vec as tombstones. This causes `definitions.len()` to grow monotonically, inflating `totalDefinitions` and wasting memory. The fix adds auto-compaction when tombstone ratio exceeds 3× and reports active count instead of Vec length.
 
 **Scenario (totalDefinitions shows active count):**
 
 1. Start MCP server with `--watch --definitions`
-2. Query `search_definitions` — note `totalDefinitions` in summary
+2. Query `xray_definitions` — note `totalDefinitions` in summary
 3. Modify a `.cs` file (change class name), wait for watcher debounce
-4. Query `search_definitions` again — `totalDefinitions` should be ~same (not growing)
+4. Query `xray_definitions` again — `totalDefinitions` should be ~same (not growing)
 
 **Expected:**
 
 - `totalDefinitions` reflects active definitions only (not Vec length with tombstones)
 - After many file updates, `totalDefinitions` stays stable (±1 per file update)
-- `search_info` definition count matches `totalDefinitions` from `search_definitions`
+- `xray_info` definition count matches `totalDefinitions` from `xray_definitions`
 
 **Scenario (auto-compaction):**
 
@@ -8210,7 +8210,7 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 
 ### T-RECONCILE: Watcher startup reconciliation — catches stale cache files
 
-**Tool:** `search-index serve --watch --definitions`
+**Tool:** `xray serve --watch --definitions`
 
 **Background:** When the MCP server starts with `--watch` and loads indexes from a stale disk cache, files added/modified/deleted while the server was offline are permanently invisible because the `notify` file watcher only fires events for changes AFTER it starts watching. The reconciliation scan at watcher startup walks the filesystem and compares with the loaded index using path diff (added/deleted) and mtime comparison (modified), fixing all three cases.
 
@@ -8219,27 +8219,27 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 1. Build definition index for a temp directory with 1 file
 2. Add a new `.cs` file to the directory
 3. Restart the server with `--watch --definitions`
-4. Query `search_definitions` for the new file — should find definitions
+4. Query `xray_definitions` for the new file — should find definitions
 
 **Scenario (modified files):**
 
 1. Build definition index for a temp directory with 1 file
 2. Modify the file content (change class name)
 3. Restart the server with `--watch --definitions`
-4. Query `search_definitions` — should find the new class name, not the old one
+4. Query `xray_definitions` — should find the new class name, not the old one
 
 **Scenario (deleted files):**
 
 1. Build definition index for a temp directory with 2 files
 2. Delete one file
 3. Restart the server with `--watch --definitions`
-4. Query `search_definitions` for the deleted file — should return 0 results
+4. Query `xray_definitions` for the deleted file — should return 0 results
 
 **Expected (all scenarios):**
 
 - stderr contains reconciliation log: `Definition index reconciliation complete` with `added`, `modified`, `removed` counts
 - stderr contains cache age in startup log (e.g., `cache_age=5m`)
-- Indexes are accurate after reconciliation without manual `search_reindex_definitions`
+- Indexes are accurate after reconciliation without manual `xray_reindex_definitions`
 
 **Validates:** Watcher startup reconciliation catches stale cache files. The reconciliation runs once in the watcher thread before the event loop, with filesystem events buffered in the mpsc channel during the scan.
 
@@ -8250,11 +8250,11 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 **Status:** ✅ Covered by unit tests. Manual MCP test requires start/stop server workflow.
 
 
-### T-EDIT: `serve` — search_edit MCP tool (line-range and text-match modes)
+### T-EDIT: `serve` — xray_edit MCP tool (line-range and text-match modes)
 
-**Tool:** `search_edit`
+**Tool:** `xray_edit`
 
-**Background:** `search_edit` provides reliable file editing with two modes: Mode A (line-range operations applied bottom-up to avoid offset cascade) and Mode B (text find-replace, literal or regex). Returns unified diff. Supports `dryRun` for preview without writing.
+**Background:** `xray_edit` provides reliable file editing with two modes: Mode A (line-range operations applied bottom-up to avoid offset cascade) and Mode B (text find-replace, literal or regex). Returns unified diff. Supports `dryRun` for preview without writing.
 
 #### T-EDIT-01: Mode A — Line-range replace
 
@@ -8264,7 +8264,7 @@ The new hint detects this pattern: `name=X` + `kind=method/property/field/constr
 $msgs = @(
     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
     '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"test.txt","operations":[{"startLine":2,"endLine":2,"content":"REPLACED"}]}}}'
+    '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"test.txt","operations":[{"startLine":2,"endLine":2,"content":"REPLACED"}]}}}'
 ) -join "`n"
 echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 ```
@@ -8307,7 +8307,7 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Command (MCP):**
 
 ```powershell
-'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"test.txt","edits":[{"search":"old","replace":"new"}]}}}'
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"test.txt","edits":[{"search":"old","replace":"new"}]}}}'
 ```
 
 **Expected:**
@@ -8393,7 +8393,7 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Command (MCP):**
 
 ```powershell
-'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"paths":["file1.txt","file2.txt","file3.txt"],"edits":[{"search":"old","replace":"new"}]}}}'
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"paths":["file1.txt","file2.txt","file3.txt"],"edits":[{"search":"old","replace":"new"}]}}}'
 ```
 
 **Expected:**
@@ -8415,7 +8415,7 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Command (MCP):**
 
 ```powershell
-'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"file.cs","edits":[{"insertAfter":"using System.IO;","content":"using System.Linq;"}]}}}'
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"file.cs","edits":[{"insertAfter":"using System.IO;","content":"using System.Linq;"}]}}}'
 ```
 
 **Expected:**
@@ -8437,7 +8437,7 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Command (MCP):**
 
 ```powershell
-'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"file.cs","edits":[{"search":"SemaphoreSlim(10)","replace":"SemaphoreSlim(30)","expectedContext":"var semaphore = new"}]}}}'
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"file.cs","edits":[{"search":"SemaphoreSlim(10)","replace":"SemaphoreSlim(30)","expectedContext":"var semaphore = new"}]}}}'
 ```
 
 **Expected:**
@@ -8456,7 +8456,7 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 **Command (MCP):**
 
 ```powershell
-'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"paths":["file1.cs","file2.cs"],"edits":[{"search":"SemaphoreSlim(10)","replace":"SemaphoreSlim(30)","skipIfNotFound":true}]}}}'
+'{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"paths":["file1.cs","file2.cs"],"edits":[{"search":"SemaphoreSlim(10)","replace":"SemaphoreSlim(30)","skipIfNotFound":true}]}}}'
 ```
 
 **Expected:**
@@ -8509,7 +8509,7 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 
 #### T-EDIT-17: Whitespace normalization — CRLF and trailing whitespace auto-retry
 
-**Background:** `search_edit` now normalizes CRLF in search text and auto-retries with trailing whitespace stripped when exact match fails. When auto-retry succeeds, a `warnings` array is included in the response.
+**Background:** `xray_edit` now normalizes CRLF in search text and auto-retries with trailing whitespace stripped when exact match fails. When auto-retry succeeds, a `warnings` array is included in the response.
 
 **Expected:**
 
@@ -8533,7 +8533,7 @@ echo $msgs | cargo run -- serve --dir $TmpDir --ext txt
 
 **Tool:** `tools/list` via MCP server
 
-**Background:** Tool descriptions for `search_definitions`, `search_callers`, and `search_reindex_definitions` now dynamically include the supported language list based on the server's configured `--ext` and compiled parser support. Previously hardcoded "C# and TypeScript/TSX".
+**Background:** Tool descriptions for `xray_definitions`, `xray_callers`, and `xray_reindex_definitions` now dynamically include the supported language list based on the server's configured `--ext` and compiled parser support. Previously hardcoded "C# and TypeScript/TSX".
 
 **Scenario A — Rust-only project:**
 
@@ -8548,10 +8548,10 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext rs --definitions
 
 **Expected:**
 
-- `search_definitions` description contains "Rust"
-- `search_definitions` description does NOT contain "C#" or "TypeScript"
-- `search_callers` description contains "Rust"
-- `search_reindex_definitions` description contains "Rust"
+- `xray_definitions` description contains "Rust"
+- `xray_definitions` description does NOT contain "C#" or "TypeScript"
+- `xray_callers` description contains "Rust"
+- `xray_reindex_definitions` description contains "Rust"
 
 **Scenario B — No definition parsers:**
 
@@ -8561,8 +8561,8 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext xml
 
 **Expected:**
 
-- `search_definitions` description contains "not available"
-- `search_callers` description contains "not available"
+- `xray_definitions` description contains "not available"
+- `xray_callers` description contains "not available"
 
 **Scenario C — Mixed with SQL:**
 
@@ -8572,7 +8572,7 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,rs,sql --definitions
 
 **Expected:**
 
-- `search_definitions` description contains "C# and Rust" AND "SQL supported via regex parser"
+- `xray_definitions` description contains "C# and Rust" AND "SQL supported via regex parser"
 
 **Unit tests:** `test_tool_definitions_rust_only`, `test_tool_definitions_empty_extensions`, `test_tool_definitions_cs_ts_tsx`, `test_tool_definitions_with_sql_only`, `test_tool_definitions_cs_rs_sql`, `test_tool_definitions_reindex_defs_dynamic`, `test_tools_list_dynamic_descriptions_rust`, `test_tools_list_dynamic_descriptions_empty`, `test_format_supported_languages_*` (12 tests), `test_initialize_consistent_with_tools_list_*` (3 tests)
 
@@ -8638,42 +8638,42 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs,rs,sql --definitions
 
 ## Task Routing — Tool Selection Golden Scenarios
 
-These scenarios validate that LLM instructions correctly route tool selection toward search-index MCP tools instead of built-in client tools. **Manual validation in a real MCP-connected client is required for acceptance.**
+These scenarios validate that LLM instructions correctly route tool selection toward xray MCP tools instead of built-in client tools. **Manual validation in a real MCP-connected client is required for acceptance.**
 
-#### T-ROUTING-01: Source code exploration → search_definitions
+#### T-ROUTING-01: Source code exploration → xray_definitions
 
 **User prompt:** "Show me the UserService class"
-**Expected tool:** `search_definitions` with `includeBody=true`
+**Expected tool:** `xray_definitions` with `includeBody=true`
 **Forbidden first choice:** Built-in file reading on .cs/.ts file
-**Pass criteria:** LLM calls search_definitions, not read_file/list_files
+**Pass criteria:** LLM calls xray_definitions, not read_file/list_files
 
-#### T-ROUTING-02: Call chain investigation → search_callers
+#### T-ROUTING-02: Call chain investigation → xray_callers
 
 **User prompt:** "Who calls ProcessOrder?"
-**Expected tool:** `search_callers` with `class` parameter
-**Forbidden first choice:** `search_grep` for method name
-**Pass criteria:** LLM calls search_callers, not search_grep or manual file reading
+**Expected tool:** `xray_callers` with `class` parameter
+**Forbidden first choice:** `xray_grep` for method name
+**Pass criteria:** LLM calls xray_callers, not xray_grep or manual file reading
 
-#### T-ROUTING-03: File editing → search_edit
+#### T-ROUTING-03: File editing → xray_edit
 
 **User prompt:** "Fix the typo on line 42 of OrderService.cs"
-**Expected tool:** `search_edit`
+**Expected tool:** `xray_edit`
 **Forbidden first choice:** `apply_diff`, `search_and_replace`, or `insert_content`
-**Pass criteria:** LLM calls search_edit, not apply_diff
+**Pass criteria:** LLM calls xray_edit, not apply_diff
 
-#### T-ROUTING-04: Content search → search_grep
+#### T-ROUTING-04: Content search → xray_grep
 
 **User prompt:** "Find all files containing 'retry'"
-**Expected tool:** `search_grep`
+**Expected tool:** `xray_grep`
 **Forbidden first choice:** Built-in regex/content search tool
-**Pass criteria:** LLM calls search_grep
+**Pass criteria:** LLM calls xray_grep
 
 #### T-ROUTING-05: Non-indexed file → built-in read is acceptable
 
 **User prompt:** "Read the settings.xml config"
-**Expected tool:** `search_grep` (XML is in content index, not definition index)
-**Forbidden first choice:** `search_definitions` (would fail — no XML parser, but now returns Hint E directing to search_grep)
-**Pass criteria:** LLM either uses search_grep directly (via task routing) or calls search_definitions, gets Hint E, then auto-follows to search_grep
+**Expected tool:** `xray_grep` (XML is in content index, not definition index)
+**Forbidden first choice:** `xray_definitions` (would fail — no XML parser, but now returns Hint E directing to xray_grep)
+**Pass criteria:** LLM either uses xray_grep directly (via task routing) or calls xray_definitions, gets Hint E, then auto-follows to xray_grep
 
 #### T-ROUTING-06: Instructions structure validation (automated)
 

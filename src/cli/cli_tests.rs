@@ -22,7 +22,7 @@ fn make_test_index(
     tokens.sort();
     let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
     for (idx, token) in tokens.iter().enumerate() {
-        for tri in search_index::generate_trigrams(token) {
+        for tri in code_xray::generate_trigrams(token) {
             trigram_map.entry(tri).or_default().push(idx as u32);
         }
     }
@@ -201,7 +201,7 @@ fn test_expand_substring_terms_matches_via_trigram() {
     ];
     let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
     for (idx, token) in tokens.iter().enumerate() {
-        for tri in search_index::generate_trigrams(token) {
+        for tri in code_xray::generate_trigrams(token) {
             trigram_map.entry(tri).or_default().push(idx as u32);
         }
     }
@@ -222,7 +222,7 @@ fn test_expand_substring_terms_matches_multiple() {
     ];
     let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
     for (idx, token) in tokens.iter().enumerate() {
-        for tri in search_index::generate_trigrams(token) {
+        for tri in code_xray::generate_trigrams(token) {
             trigram_map.entry(tri).or_default().push(idx as u32);
         }
     }
@@ -241,7 +241,7 @@ fn test_expand_substring_terms_no_match() {
     let tokens = vec!["httpclient".to_string()];
     let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
     for (idx, token) in tokens.iter().enumerate() {
-        for tri in search_index::generate_trigrams(token) {
+        for tri in code_xray::generate_trigrams(token) {
             trigram_map.entry(tri).or_default().push(idx as u32);
         }
     }

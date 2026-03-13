@@ -497,7 +497,7 @@ fn test_regex_with_spaces_produces_search_mode_note() {
     let _index = ContentIndex::default();
     let ctx = HandlerContext::default();
 
-    let result = handle_search_grep(&ctx, &json!({
+    let result = handle_xray_grep(&ctx, &json!({
         "terms": "private.*double Percentile",
         "regex": true
     }));
@@ -519,7 +519,7 @@ fn test_regex_without_spaces_no_search_mode_note() {
     let _index = ContentIndex::default();
     let ctx = HandlerContext::default();
 
-    let result = handle_search_grep(&ctx, &json!({
+    let result = handle_xray_grep(&ctx, &json!({
         "terms": "I[A-Z]\\w+Cache",
         "regex": true
     }));
