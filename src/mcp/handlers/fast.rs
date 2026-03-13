@@ -208,7 +208,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // would show entries 1 level below root instead of 1 level below dir.
     let base_depth = if max_depth.is_some() {
         if let Some(ref filter) = subdir_entry_filter {
-            // filter = "c:/repos/shared/src/" — count slashes in the dir path (without trailing /)
+            // filter = "c:/projects/myapp/src/" — count slashes in the dir path (without trailing /)
             filter.trim_end_matches('/').matches('/').count()
         } else {
             index.root.replace('\\', "/").matches('/').count()

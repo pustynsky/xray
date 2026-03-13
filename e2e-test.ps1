@@ -1350,7 +1350,7 @@ $testBlocks += , {
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
             ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":"*","dir":"' + $srcPath + '"}}}')
         ) -join "`n"
-        $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs 2>`$null) | Out-String
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
 
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null

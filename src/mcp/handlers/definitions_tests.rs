@@ -3298,6 +3298,138 @@ fn test_hint_fn_file_has_defs_no_file_filter_returns_none() {
 }
 
 #[test]
+fn test_hint_cross_file_match_single() {
+    // Search for "OrderService" in file "UserService.cs" — it exists in OrderService.cs
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"file": "UserService.cs", "name": "OrderService"})).unwrap();
+    let result = hint_file_has_defs_but_filters_narrow(&index, &args);
+    assert!(result.is_some(), "Should return Some when file has defs");
+    let hint = result.unwrap();
+    assert!(hint.contains("Found 'OrderService' in OrderService.cs"), "Hint should mention cross-file match, got: {}", hint);
+    assert!(hint.contains("consider removing file filter"), "Hint should suggest removing file filter, got: {}", hint);
+    // Should NOT contain the xray_grep fallback
+    assert!(!hint.contains("Use xray_grep"), "Should not suggest xray_grep when cross-file match found, got: {}", hint);
+}
+
+#[test]
+fn test_hint_cross_file_match_comma_separated() {
+    // Search for "GetOrder,GetUser" in file "OrderService.cs" — GetUser exists in UserService.cs
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"file": "OrderService.cs", "name": "GetUser,GetOrder"})).unwrap();
+    let _result = hint_file_has_defs_but_filters_narrow(&index, &args);
+    // GetOrder IS in OrderService.cs, so it matches the file filter → not a zero-result scenario
+    // at file level. But hint_file_has_defs_but_filters_narrow is only called when the FULL
+    // pipeline returns 0 results. In isolation, both names exist in the file or not.
+    // Actually: name_index uses substring. "getorder" is in OrderService.cs (file_id=1),
+    // and "getuser" is in UserService.cs (file_id=0).
+    // file filter = "OrderService.cs" → file_id 1 matches. File has 2 defs (OrderService, GetOrder).
+    // name filter = "GetUser,GetOrder" → checks name_index for substring "getuser" and "getorder".
+    // In apply_entry_filters, only file_id=1 defs pass → OrderService(idx=2), GetOrder(idx=3).
+    // But name candidates from collect_candidates would include GetUser(idx=1, file_id=0) 
+    // and GetOrder(idx=3, file_id=1). After file filter, only GetOrder survives.
+    // So total_results=1 (GetOrder). This hint function wouldn't be called (>0 results).
+    // 
+    // Better test: search for two names that are BOTH absent from the target file.
+    let args2 = parse_definition_args(&json!({"file": "UserService.cs", "name": "OrderService,GetOrder"})).unwrap();
+    let result2 = hint_file_has_defs_but_filters_narrow(&index, &args2);
+    assert!(result2.is_some());
+    let hint2 = result2.unwrap();
+    assert!(hint2.contains("OrderService.cs"), "Hint should mention the cross-file: {}", hint2);
+    assert!(hint2.contains("Found"), "Hint should contain Found: {}", hint2);
+}
+
+#[test]
+fn test_hint_cross_file_no_match_anywhere() {
+    // Search for a name that doesn't exist in ANY file → should fall back to xray_grep suggestion
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"file": "UserService.cs", "name": "CompletelyBogus"})).unwrap();
+    let result = hint_file_has_defs_but_filters_narrow(&index, &args);
+    assert!(result.is_some());
+    let hint = result.unwrap();
+    assert!(hint.contains("Use xray_grep"), "Should suggest xray_grep when no cross-file match: {}", hint);
+    assert!(!hint.contains("Found"), "Should NOT contain Found when no cross-file match: {}", hint);
+}
+
+#[test]
+fn test_hint_cross_file_max_three_files() {
+    // Create an index with 5 files, name exists in 4 of them but not in the filtered file
+    let definitions = vec![
+        DefinitionEntry {
+            name: "CommonHelper".to_string(), kind: DefinitionKind::Class,
+            file_id: 0, line_start: 1, line_end: 10,
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "CommonHelper".to_string(), kind: DefinitionKind::Class,
+            file_id: 1, line_start: 1, line_end: 10,
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "CommonHelper".to_string(), kind: DefinitionKind::Class,
+            file_id: 2, line_start: 1, line_end: 10,
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "CommonHelper".to_string(), kind: DefinitionKind::Class,
+            file_id: 3, line_start: 1, line_end: 10,
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "Unrelated".to_string(), kind: DefinitionKind::Class,
+            file_id: 4, line_start: 1, line_end: 10,
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+
+    let index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "src/Alpha.cs".to_string(),
+            "src/Beta.cs".to_string(),
+            "src/Gamma.cs".to_string(),
+            "src/Delta.cs".to_string(),
+            "src/Target.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
+    };
+
+    // Search for CommonHelper in Target.cs — it exists in Alpha, Beta, Gamma, Delta
+    let args = parse_definition_args(&json!({"file": "Target.cs", "name": "CommonHelper"})).unwrap();
+    let result = hint_file_has_defs_but_filters_narrow(&index, &args);
+    assert!(result.is_some());
+    let hint = result.unwrap();
+    assert!(hint.contains("Found"), "Should contain cross-file hint: {}", hint);
+    // Count how many file names appear in the hint (max 3)
+    let file_mentions: Vec<&str> = ["Alpha.cs", "Beta.cs", "Gamma.cs", "Delta.cs"]
+        .iter()
+        .filter(|f| hint.contains(**f))
+        .copied()
+        .collect();
+    assert!(file_mentions.len() <= 3, "Should mention at most 3 files, got {}: {}", file_mentions.len(), hint);
+    assert!(file_mentions.len() >= 1, "Should mention at least 1 file: {}", hint);
+}
+
+#[test]
 fn test_hint_fn_fuzzy_match_returns_some() {
     let index = make_test_def_index_with_file("C:/src/ComponentsUtils/Helper.cs");
     let args = parse_definition_args(&json!({"file": "Components/Utils"})).unwrap();

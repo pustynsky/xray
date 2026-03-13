@@ -7901,7 +7901,9 @@ cargo run -- def-index -d $TEST_DIR -e ts
 
 **Expected:**
 - `definitions` array is empty
-- `summary.hint` contains `"File 'tips.rs' has N definitions"` and `"Use xray_grep for content search"`
+- `summary.hint` contains `"File 'tips.rs' has N definitions"`
+- If the name exists in OTHER files (cross-file match): hint contains `"Found '<name>' in <file>"` and `"consider removing file filter"`
+- If the name doesn't exist anywhere: hint contains `"Use xray_grep for content search"`
 
 **Scenario D — name in content but not in defs:**
 

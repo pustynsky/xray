@@ -658,7 +658,7 @@ Five types of hints are generated (first matching wins):
 |------|------|---------|
 | **Unsupported extension** | `file` filter has extension not in `def_extensions` (checked first — highest priority) | If in content index: `"Extension '.xml' is not in the definition index. However, .xml files ARE indexed in the content index. Use xray_grep."` If not in any index: `"Extension '.xyz' is not supported by any index. Use read_file."` |
 | **Wrong kind** | `kind` filter set + `name` or `file` filter set, but definitions exist with different kinds | `"0 results with kind='method'. Without kind filter: 8 defs found (5 function, 2 struct). Did you mean kind='function'?"` |
-| **File has definitions** | `file` filter matches files with definitions, but other filters (name/kind/parent) are too narrow | `"File 'tips.rs' has 8 definitions (5 function, 2 struct), but none match your other filters."` |
+| **File has definitions** | `file` filter matches files with definitions, but other filters (name/kind/parent) are too narrow | If name exists in other files: `"File 'tips.rs' has 8 definitions (...). Found 'X' in other.rs — consider removing file filter."` If name doesn't exist anywhere: `"File 'tips.rs' has 8 definitions (...). Use xray_grep for content search."` |
 | **Nearest name** | `name` filter set (non-regex), closest name in index has ≥80% Jaro-Winkler similarity | `"0 results for name='getusr'. Nearest match: 'getuser' (1 definition, similarity 96%)"` |
 | **Name in content** | `name` not found as AST definition but exists in content index as text | `"'inputSchema' not found as an AST definition name, but appears in 3 files. Use xray_grep."` |
 

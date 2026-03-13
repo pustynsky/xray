@@ -1601,8 +1601,44 @@ fn hint_file_has_defs_but_filters_narrow(
         .collect();
 
     let mut extra = String::new();
-    if args.name_filter.is_some() {
-        extra.push_str(&format!(" xray_definitions searches AST definition names, not string content. Use xray_grep for content search."));
+
+    // Cross-file hint: check if name matches exist in OTHER files
+    if let Some(ref name) = args.name_filter {
+        let terms: Vec<String> = name.split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+
+        let mut cross_file_paths: Vec<String> = Vec::new();
+        for (index_name, def_indices) in &index.name_index {
+            if terms.iter().any(|t| index_name.contains(t.as_str())) {
+                for &def_idx in def_indices {
+                    if let Some(def) = index.definitions.get(def_idx as usize) {
+                        // Skip definitions that ARE in the file filter (already counted above)
+                        if !file_matches_filter(index, def.file_id, ff) {
+                            if let Some(path) = index.files.get(def.file_id as usize) {
+                                // Extract just the filename for readability
+                                let short = path.rsplit(['/', '\\']).next().unwrap_or(path);
+                                if !cross_file_paths.contains(&short.to_string()) {
+                                    cross_file_paths.push(short.to_string());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        cross_file_paths.sort();
+        cross_file_paths.truncate(3);
+
+        if !cross_file_paths.is_empty() {
+            extra.push_str(&format!(
+                " Found '{}' in {} — consider removing file filter or using file='{}'.",
+                name, cross_file_paths.join(", "), cross_file_paths[0]
+            ));
+        } else {
+            extra.push_str(" xray_definitions searches AST definition names, not string content. Use xray_grep for content search.");
+        }
     }
 
     Some(format!(
