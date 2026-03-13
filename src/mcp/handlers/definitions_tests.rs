@@ -3095,3 +3095,159 @@ fn test_extract_group_directory_no_base() {
     let result = extract_group_directory("src/Controllers/HomeController.cs", "");
     assert_eq!(result, "src");
 }
+
+
+// ─── Unit tests for extracted hint functions ──────────────────────────
+
+#[test]
+fn test_hint_fn_unsupported_extension_xml_returns_some() {
+    let ctx = make_hint_e_ctx();
+    let args = parse_definition_args(&json!({"file": "config.xml"})).unwrap();
+    let result = hint_unsupported_extension(&args, &ctx);
+    assert!(result.is_some(), "Should return Some for unsupported .xml extension");
+    let hint = result.unwrap();
+    assert!(hint.contains(".xml"), "Hint should mention .xml");
+    assert!(hint.contains("search_grep"), "Hint should suggest search_grep");
+}
+
+#[test]
+fn test_hint_fn_unsupported_extension_supported_returns_none() {
+    let ctx = make_hint_e_ctx();
+    let args = parse_definition_args(&json!({"file": "UserService.cs"})).unwrap();
+    let result = hint_unsupported_extension(&args, &ctx);
+    assert!(result.is_none(), "Should return None for supported .cs extension");
+}
+
+#[test]
+fn test_hint_fn_unsupported_extension_no_file_filter_returns_none() {
+    let ctx = make_hint_e_ctx();
+    let args = parse_definition_args(&json!({"name": "UserService"})).unwrap();
+    let result = hint_unsupported_extension(&args, &ctx);
+    assert!(result.is_none(), "Should return None when no file filter");
+}
+
+#[test]
+fn test_hint_fn_wrong_kind_returns_some() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"kind": "function", "name": "GetUser"})).unwrap();
+    let result = hint_wrong_kind(&index, &args);
+    assert!(result.is_some(), "Should return Some when kind mismatch");
+    let hint = result.unwrap();
+    assert!(hint.contains("method"), "Hint should suggest method kind");
+    assert!(hint.contains("Did you mean"), "Hint should ask 'did you mean'");
+}
+
+#[test]
+fn test_hint_fn_wrong_kind_no_kind_filter_returns_none() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"name": "GetUser"})).unwrap();
+    let result = hint_wrong_kind(&index, &args);
+    assert!(result.is_none(), "Should return None without kind filter");
+}
+
+#[test]
+fn test_hint_fn_wrong_kind_no_name_or_file_returns_none() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"kind": "function"})).unwrap();
+    let result = hint_wrong_kind(&index, &args);
+    assert!(result.is_none(), "Should return None without name/file filter alongside kind");
+}
+
+#[test]
+fn test_hint_fn_file_has_defs_returns_some() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"file": "UserService.cs", "name": "nonexistent"})).unwrap();
+    let result = hint_file_has_defs_but_filters_narrow(&index, &args);
+    assert!(result.is_some(), "Should return Some when file has defs but name not found");
+    let hint = result.unwrap();
+    assert!(hint.contains("UserService.cs"), "Hint should mention the file");
+    assert!(hint.contains("definitions"), "Hint should mention definitions");
+}
+
+#[test]
+fn test_hint_fn_file_has_defs_no_file_filter_returns_none() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"name": "nonexistent"})).unwrap();
+    let result = hint_file_has_defs_but_filters_narrow(&index, &args);
+    assert!(result.is_none(), "Should return None without file filter");
+}
+
+#[test]
+fn test_hint_fn_fuzzy_match_returns_some() {
+    let index = make_test_def_index_with_file("C:/src/ComponentsUtils/Helper.cs");
+    let args = parse_definition_args(&json!({"file": "Components/Utils"})).unwrap();
+    let result = hint_file_fuzzy_match(&index, &args);
+    assert!(result.is_some(), "Should return Some for fuzzy file match");
+    let hint = result.unwrap();
+    assert!(hint.contains("Nearest match"), "Hint should mention nearest match");
+}
+
+#[test]
+fn test_hint_fn_fuzzy_match_no_match_returns_none() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"file": "TotallyNonexistent"})).unwrap();
+    let result = hint_file_fuzzy_match(&index, &args);
+    assert!(result.is_none(), "Should return None when no near-miss");
+}
+
+#[test]
+fn test_hint_fn_nearest_name_returns_some() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"name": "GetUsr"})).unwrap();
+    let result = hint_nearest_name(&index, &args);
+    assert!(result.is_some(), "Should return Some for typo name match");
+    let hint = result.unwrap();
+    assert!(hint.contains("Nearest match"), "Hint should mention nearest match");
+    assert!(hint.contains("similarity"), "Hint should show similarity");
+}
+
+#[test]
+fn test_hint_fn_nearest_name_regex_returns_none() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"name": "GetUsr", "regex": true})).unwrap();
+    let result = hint_nearest_name(&index, &args);
+    assert!(result.is_none(), "Should return None for regex search");
+}
+
+#[test]
+fn test_hint_fn_nearest_name_no_name_filter_returns_none() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({})).unwrap();
+    let result = hint_nearest_name(&index, &args);
+    assert!(result.is_none(), "Should return None without name filter");
+}
+
+#[test]
+fn test_hint_fn_content_not_defs_returns_some() {
+    use std::sync::Arc;
+    use std::sync::RwLock;
+    use std::sync::atomic::AtomicBool;
+
+    let mut content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        ..Default::default()
+    };
+    content_index.index.insert("inputschema".to_string(), vec![
+        crate::Posting { file_id: 0, lines: vec![10] },
+    ]);
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        content_ready: Arc::new(AtomicBool::new(true)),
+        ..Default::default()
+    };
+
+    let args = parse_definition_args(&json!({"name": "inputSchema"})).unwrap();
+    let result = hint_name_in_content_not_defs(&args, &ctx);
+    assert!(result.is_some(), "Should return Some when name is in content but not defs");
+    let hint = result.unwrap();
+    assert!(hint.contains("search_grep"), "Hint should suggest search_grep");
+}
+
+#[test]
+fn test_hint_fn_content_not_defs_no_name_returns_none() {
+    let ctx = HandlerContext::default();
+    let args = parse_definition_args(&json!({})).unwrap();
+    let result = hint_name_in_content_not_defs(&args, &ctx);
+    assert!(result.is_none(), "Should return None without name filter");
+}

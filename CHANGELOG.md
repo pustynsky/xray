@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+### Internal
+
+- **Refactored god-functions `truncate_large_response` and `generate_zero_result_hints`** — Two high-cognitive-complexity functions decomposed into independently testable units:
+  - **`truncate_large_response`** (utils.rs, CC=50, cognitive=179) → 7 extracted functions: `measure_json_size()` (replaces 7 inline `serde_json::to_string` calls), `phase_cap_lines_per_file()`, `phase_cap_matched_tokens()`, `phase_remove_lines_arrays()`, `phase_reduce_file_count()`, `phase_strip_body_fields()`, `phase_truncate_largest_array()`. Orchestrator is now a linear sequence of phase calls with early returns.
+  - **`generate_zero_result_hints`** (definitions.rs, CC=62, cognitive=192) → 6 extracted functions returning `Option<String>`: `hint_unsupported_extension()`, `hint_wrong_kind()`, `hint_file_has_defs_but_filters_narrow()`, `hint_file_fuzzy_match()`, `hint_nearest_name()`, `hint_name_in_content_not_defs()`. Orchestrator uses `.or_else()` chain for explicit priority ordering.
+  - Behavior-preserving: all 37 existing tests (12 truncation + 25 hints) pass without changes. Public API signatures unchanged.
+  - 26 new unit tests: 11 for truncation phases + 15 for hint functions. All 1614 unit tests + 71 E2E tests pass.
+
 ### Bug Fixes
 
 - **`search_grep` dir= silently returned 0 results when pointing to a file** — When `search_grep` was called with `dir` = path to a file (not a directory), it silently returned 0 results because `is_under_dir()` appends `/` to the dir prefix, making a file path like `parser_sql.rs/` match nothing. Now `parse_grep_args()` detects file paths via `Path::is_file()` (filesystem check) and `looks_like_file_path()` (heuristic for non-existent paths), returning an error with a helpful hint: try `dir='<parent_dir>'` or `search_definitions file='<filename>'`. Tool description and `search_help` parameter examples updated. 8 new unit tests + 1 E2E test.

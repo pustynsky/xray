@@ -1384,197 +1384,194 @@ fn run_corrected_search(
 /// Generate contextual hints when search_definitions returns 0 results.
 /// Helps LLMs self-correct common mistakes (wrong kind, typos, wrong tool).
 ///
-/// Hint priority (first matching wins):
+/// Hint priority (first matching wins, via `.or_else()` chain):
+/// E. Unsupported extension — file filter has an extension not in the definition index
 /// A. Wrong `kind` — definitions exist with same name/file but different kind
-/// B. Nearest name — typo/wrong name, suggest closest match by edit distance
 /// C. File has definitions — file matches but other filters (name/kind/parent) are too narrow
+/// F. File fuzzy match — nearest file path when file filter returns 0 results
+/// B. Nearest name — typo/wrong name, suggest closest match by edit distance
 /// D. Name in content index — name exists as text but not as an AST definition name
-fn generate_zero_result_hints(
+/// Hint E: File filter extension not supported by definition index.
+/// Must be checked FIRST — most actionable hint for unsupported file types.
+fn hint_unsupported_extension(
+    args: &DefinitionSearchArgs,
+    ctx: &HandlerContext,
+) -> Option<String> {
+    if ctx.def_extensions.is_empty() {
+        return None;
+    }
+    let ff = args.file_filter.as_ref()?;
+    let terms: Vec<&str> = ff.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+    for term in &terms {
+        if let Some(dot_pos) = term.rfind('.') {
+            let ext_lower = term[dot_pos + 1..].to_lowercase();
+            if !ext_lower.is_empty()
+                && !ctx.def_extensions.iter().any(|e| e == &ext_lower)
+            {
+                let def_supported = ctx.def_extensions.iter()
+                    .map(|e| format!(".{}", e)).collect::<Vec<_>>().join(", ");
+
+                let content_exts: Vec<&str> = ctx.server_ext.split(',')
+                    .map(|s| s.trim()).collect();
+                let in_content_index = content_exts.iter()
+                    .any(|e| e.eq_ignore_ascii_case(&ext_lower));
+
+                if in_content_index {
+                    return Some(format!(
+                        "Extension '.{}' is not in the definition index (AST parsing supports: {}). \
+                         However, .{} files ARE indexed in the content index. \
+                         Use search_grep terms='<query>' ext='{}' showLines=true for content search.",
+                        ext_lower, def_supported, ext_lower, ext_lower
+                    ));
+                } else {
+                    return Some(format!(
+                        "Extension '.{}' is not supported by any index \
+                         (definition index supports: {}, content index supports: {}). \
+                         Use read_file to access this file directly.",
+                        ext_lower, def_supported, ctx.server_ext
+                    ));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Hint A: Wrong kind — find what kinds exist for matching name/file.
+fn hint_wrong_kind(
     index: &DefinitionIndex,
     args: &DefinitionSearchArgs,
-    summary: &mut Value,
-    ctx: &HandlerContext,
-) {
-    // Hint E: File filter extension not supported by definition index
-    // Must be checked FIRST — most actionable hint for unsupported file types.
-    // Skip when def_extensions is empty (no AST parsers configured — can't distinguish supported vs unsupported).
-    if !ctx.def_extensions.is_empty() {
-    if let Some(ref ff) = args.file_filter {
-        if summary.get("hint").is_none() {
-            // Check each comma-separated term for an unsupported extension
-            let terms: Vec<&str> = ff.split(',').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-            for term in &terms {
-                if let Some(dot_pos) = term.rfind('.') {
-                    let ext_lower = term[dot_pos + 1..].to_lowercase();
-                    if !ext_lower.is_empty()
-                        && !ctx.def_extensions.iter().any(|e| e == &ext_lower)
-                    {
-                        let def_supported = ctx.def_extensions.iter()
-                            .map(|e| format!(".{}", e)).collect::<Vec<_>>().join(", ");
-
-                        // Check if extension is in content index (server_ext)
-                        let content_exts: Vec<&str> = ctx.server_ext.split(',')
-                            .map(|s| s.trim()).collect();
-                        let in_content_index = content_exts.iter()
-                            .any(|e| e.eq_ignore_ascii_case(&ext_lower));
-
-                        if in_content_index {
-                            summary["hint"] = json!(format!(
-                                "Extension '.{}' is not in the definition index (AST parsing supports: {}). \
-                                 However, .{} files ARE indexed in the content index. \
-                                 Use search_grep terms='<query>' ext='{}' showLines=true for content search.",
-                                ext_lower, def_supported, ext_lower, ext_lower
-                            ));
-                        } else {
-                            summary["hint"] = json!(format!(
-                                "Extension '.{}' is not supported by any index \
-                                 (definition index supports: {}, content index supports: {}). \
-                                 Use read_file to access this file directly.",
-                                ext_lower, def_supported, ctx.server_ext
-                            ));
-                        }
-                        return;
-                    }
-                }
-            }
-        }
-    }
-    } // end Hint E def_extensions guard
-
-    // Hint A: Wrong kind — find what kinds exist for matching name/file
-    if args.kind_filter.is_some()
-        && (args.name_filter.is_some() || args.file_filter.is_some())
-        && summary.get("hint").is_none()
+) -> Option<String> {
+    if args.kind_filter.is_none()
+        || (args.name_filter.is_none() && args.file_filter.is_none())
     {
-        let kind_str = args.kind_filter.as_ref().unwrap();
-        let mut kind_counts: HashMap<&str, usize> = HashMap::new();
+        return None;
+    }
+    let kind_str = args.kind_filter.as_ref().unwrap();
+    let mut kind_counts: HashMap<&str, usize> = HashMap::new();
 
-        if let Some(ref name) = args.name_filter {
-            // Find definitions matching name filter (ignoring kind)
-            let terms: Vec<String> = name.split(',')
-                .map(|s| s.trim().to_lowercase())
-                .filter(|s| !s.is_empty())
-                .collect();
-            for (n, indices) in &index.name_index {
-                if terms.iter().any(|t| n.contains(t.as_str())) {
-                    for &idx in indices {
-                        if let Some(def) = index.definitions.get(idx as usize) {
-                            // Also apply file filter if set
-                            if let Some(ref ff) = args.file_filter {
-                                if !file_matches_filter(index, def.file_id, ff) {
-                                    continue;
-                                }
+    if let Some(ref name) = args.name_filter {
+        let terms: Vec<String> = name.split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        for (n, indices) in &index.name_index {
+            if terms.iter().any(|t| n.contains(t.as_str())) {
+                for &idx in indices {
+                    if let Some(def) = index.definitions.get(idx as usize) {
+                        if let Some(ref ff) = args.file_filter {
+                            if !file_matches_filter(index, def.file_id, ff) {
+                                continue;
                             }
-                            *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
                         }
-                    }
-                }
-            }
-        } else if let Some(ref ff) = args.file_filter {
-            // Only file filter, no name filter
-            for (&file_id, def_indices) in &index.file_index {
-                if file_matches_filter(index, file_id, ff) {
-                    for &idx in def_indices {
-                        if let Some(def) = index.definitions.get(idx as usize) {
-                            *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
-                        }
+                        *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
                     }
                 }
             }
         }
-
-        if !kind_counts.is_empty() {
-            let total: usize = kind_counts.values().sum();
-            let mut kinds_sorted: Vec<(&&str, &usize)> = kind_counts.iter().collect();
-            kinds_sorted.sort_by(|a, b| b.1.cmp(a.1));
-            let kinds_str: Vec<String> = kinds_sorted.iter()
-                .map(|(k, c)| format!("{} {}", c, k))
-                .collect();
-            let top_kind = kinds_sorted[0].0;
-            summary["hint"] = json!(format!(
-                "0 results with kind='{}'. Without kind filter: {} definitions found ({}). Did you mean kind='{}'?",
-                kind_str, total, kinds_str.join(", "), top_kind
-            ));
-        }
-    }
-
-    // Hint C: File has definitions but other filters are too narrow
-    if args.file_filter.is_some()
-        && summary.get("hint").is_none()
-    {
-        let ff = args.file_filter.as_ref().unwrap();
-        let mut matching_file_defs = 0usize;
-        let mut matching_kinds: HashMap<&str, usize> = HashMap::new();
-
+    } else if let Some(ref ff) = args.file_filter {
         for (&file_id, def_indices) in &index.file_index {
             if file_matches_filter(index, file_id, ff) {
                 for &idx in def_indices {
                     if let Some(def) = index.definitions.get(idx as usize) {
-                        matching_file_defs += 1;
-                        *matching_kinds.entry(def.kind.as_str()).or_insert(0) += 1;
+                        *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
                     }
                 }
             }
         }
+    }
 
-        if matching_file_defs > 0 {
-            let mut kinds_sorted: Vec<(&&str, &usize)> = matching_kinds.iter().collect();
-            kinds_sorted.sort_by(|a, b| b.1.cmp(a.1));
-            let kinds_str: Vec<String> = kinds_sorted.iter()
-                .map(|(k, c)| format!("{} {}", c, k))
-                .collect();
+    if kind_counts.is_empty() {
+        return None;
+    }
+    let total: usize = kind_counts.values().sum();
+    let mut kinds_sorted: Vec<(&&str, &usize)> = kind_counts.iter().collect();
+    kinds_sorted.sort_by(|a, b| b.1.cmp(a.1));
+    let kinds_str: Vec<String> = kinds_sorted.iter()
+        .map(|(k, c)| format!("{} {}", c, k))
+        .collect();
+    let top_kind = kinds_sorted[0].0;
+    Some(format!(
+        "0 results with kind='{}'. Without kind filter: {} definitions found ({}). Did you mean kind='{}'?",
+        kind_str, total, kinds_str.join(", "), top_kind
+    ))
+}
 
-            let mut extra = String::new();
-            if args.name_filter.is_some() {
-                extra.push_str(&format!(" search_definitions searches AST definition names, not string content. Use search_grep for content search."));
+/// Hint C: File has definitions but other filters (name/kind/parent) are too narrow.
+fn hint_file_has_defs_but_filters_narrow(
+    index: &DefinitionIndex,
+    args: &DefinitionSearchArgs,
+) -> Option<String> {
+    let ff = args.file_filter.as_ref()?;
+    let mut matching_file_defs = 0usize;
+    let mut matching_kinds: HashMap<&str, usize> = HashMap::new();
+
+    for (&file_id, def_indices) in &index.file_index {
+        if file_matches_filter(index, file_id, ff) {
+            for &idx in def_indices {
+                if let Some(def) = index.definitions.get(idx as usize) {
+                    matching_file_defs += 1;
+                    *matching_kinds.entry(def.kind.as_str()).or_insert(0) += 1;
+                }
             }
-
-            summary["hint"] = json!(format!(
-                "File '{}' has {} definitions ({}), but none match your other filters (name/kind/parent).{}",
-                ff, matching_file_defs, kinds_str.join(", "), extra
-            ));
         }
     }
 
-    // Hint F: File fuzzy-match — suggest nearest file path when file filter returns 0 results.
-    // Handles common case where user writes "A/B" but actual path is "AB" (or vice versa).
-    if args.file_filter.is_some()
-        && summary.get("hint").is_none()
-    {
-        let ff = args.file_filter.as_ref().unwrap();
-        // Normalize: remove slashes, dashes, underscores for comparison
-        let normalize = |s: &str| -> String {
-            s.replace('\\', "").replace('/', "").replace('-', "").replace('_', "").to_lowercase()
-        };
-        let ff_normalized = normalize(ff);
+    if matching_file_defs == 0 {
+        return None;
+    }
+    let mut kinds_sorted: Vec<(&&str, &usize)> = matching_kinds.iter().collect();
+    kinds_sorted.sort_by(|a, b| b.1.cmp(a.1));
+    let kinds_str: Vec<String> = kinds_sorted.iter()
+        .map(|(k, c)| format!("{} {}", c, k))
+        .collect();
 
-        // Collect unique file paths from index and find near-misses
-        let mut best_match: Option<(String, usize)> = None; // (path_substring, def_count)
-        let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut extra = String::new();
+    if args.name_filter.is_some() {
+        extra.push_str(&format!(" search_definitions searches AST definition names, not string content. Use search_grep for content search."));
+    }
 
-        for (file_id, def_indices) in &index.file_index {
-            if let Some(file_path) = index.files.get(*file_id as usize) {
-                let path_lower = file_path.replace('\\', "/").to_lowercase();
-                // Extract meaningful segments for comparison
-                let path_normalized = normalize(&path_lower);
-                if path_normalized.contains(&ff_normalized) && !ff_normalized.is_empty() {
-                    // Found a near-miss: normalized path contains normalized query
-                    // Extract the matching segment from the original path
-                    if seen_paths.insert(path_lower.clone()) {
-                        // Find the shortest unique segment that matches
-                        let segments: Vec<&str> = path_lower.split('/').collect();
-                        for window_size in 1..=segments.len() {
-                            for start in 0..=(segments.len() - window_size) {
-                                let segment = segments[start..start + window_size].join("/");
-                                let seg_normalized = normalize(&segment);
-                                if seg_normalized.contains(&ff_normalized) || ff_normalized.contains(&seg_normalized) {
-                                    let count = def_indices.len();
-                                    match &best_match {
-                                        None => { best_match = Some((segment, count)); }
-                                        Some((_, prev_count)) => {
-                                            if count > *prev_count {
-                                                best_match = Some((segment, count));
-                                            }
+    Some(format!(
+        "File '{}' has {} definitions ({}), but none match your other filters (name/kind/parent).{}",
+        ff, matching_file_defs, kinds_str.join(", "), extra
+    ))
+}
+
+/// Hint F: File fuzzy-match — suggest nearest file path when file filter returns 0 results.
+fn hint_file_fuzzy_match(
+    index: &DefinitionIndex,
+    args: &DefinitionSearchArgs,
+) -> Option<String> {
+    let ff = args.file_filter.as_ref()?;
+    let normalize = |s: &str| -> String {
+        s.replace('\\', "").replace('/', "").replace('-', "").replace('_', "").to_lowercase()
+    };
+    let ff_normalized = normalize(ff);
+    if ff_normalized.is_empty() {
+        return None;
+    }
+
+    let mut best_match: Option<(String, usize)> = None;
+    let mut seen_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for (file_id, def_indices) in &index.file_index {
+        if let Some(file_path) = index.files.get(*file_id as usize) {
+            let path_lower = file_path.replace('\\', "/").to_lowercase();
+            let path_normalized = normalize(&path_lower);
+            if path_normalized.contains(&ff_normalized) {
+                if seen_paths.insert(path_lower.clone()) {
+                    let segments: Vec<&str> = path_lower.split('/').collect();
+                    for window_size in 1..=segments.len() {
+                        for start in 0..=(segments.len() - window_size) {
+                            let segment = segments[start..start + window_size].join("/");
+                            let seg_normalized = normalize(&segment);
+                            if seg_normalized.contains(&ff_normalized) || ff_normalized.contains(&seg_normalized) {
+                                let count = def_indices.len();
+                                match &best_match {
+                                    None => { best_match = Some((segment, count)); }
+                                    Some((_, prev_count)) => {
+                                        if count > *prev_count {
+                                            best_match = Some((segment, count));
                                         }
                                     }
                                 }
@@ -1584,59 +1581,79 @@ fn generate_zero_result_hints(
                 }
             }
         }
+    }
 
-        if let Some((nearest_path, def_count)) = best_match {
-            summary["hint"] = json!(format!(
-                "No definitions found for file='{}'. Nearest match: '{}' ({} definitions). Retry with file='{}'.",
-                ff, nearest_path, def_count, nearest_path
-            ));
+    let (nearest_path, def_count) = best_match?;
+    Some(format!(
+        "No definitions found for file='{}'. Nearest match: '{}' ({} definitions). Retry with file='{}'.",
+        ff, nearest_path, def_count, nearest_path
+    ))
+}
+
+/// Hint B: Nearest name match — suggest closest name by edit distance.
+fn hint_nearest_name(
+    index: &DefinitionIndex,
+    args: &DefinitionSearchArgs,
+) -> Option<String> {
+    if args.use_regex {
+        return None;
+    }
+    let search_name = args.name_filter.as_ref()?.to_lowercase();
+    let mut best_match: Option<(String, usize)> = None;
+    let mut best_score: f64 = 0.0;
+
+    for (name, indices) in &index.name_index {
+        let score = name_similarity(&search_name, name);
+        if score > best_score && score > 0.8 {
+            best_score = score;
+            best_match = Some((name.clone(), indices.len()));
         }
     }
 
-    // Hint B: Nearest name match — suggest closest name by edit distance
-    if args.name_filter.is_some()
-        && !args.use_regex
-        && summary.get("hint").is_none()
-    {
-        let search_name = args.name_filter.as_ref().unwrap().to_lowercase();
-        let mut best_match: Option<(String, usize)> = None;
-        let mut best_score: f64 = 0.0;
+    let (name, count) = best_match?;
+    Some(format!(
+        "0 results for name='{}'. Nearest match: '{}' ({} definitions, similarity {:.0}%)",
+        search_name, name, count, best_score * 100.0
+    ))
+}
 
-        for (name, indices) in &index.name_index {
-            let score = name_similarity(&search_name, name);
-            if score > best_score && score > 0.8 {
-                best_score = score;
-                best_match = Some((name.clone(), indices.len()));
-            }
-        }
-
-        if let Some((name, count)) = best_match {
-            summary["hint"] = json!(format!(
-                "0 results for name='{}'. Nearest match: '{}' ({} definitions, similarity {:.0}%)",
-                search_name, name, count, best_score * 100.0
-            ));
-        }
+/// Hint D: Name found in content index but not in definitions.
+fn hint_name_in_content_not_defs(
+    args: &DefinitionSearchArgs,
+    ctx: &HandlerContext,
+) -> Option<String> {
+    let name = args.name_filter.as_ref()?;
+    if !ctx.content_ready.load(std::sync::atomic::Ordering::Acquire) {
+        return None;
     }
+    let content_idx = ctx.index.read().ok()?;
+    let lower = name.to_lowercase();
+    let postings = content_idx.index.get(&lower)?;
+    let file_count = postings.len();
+    Some(format!(
+        "'{}' not found as an AST definition name, but appears in {} files as text content. \
+         search_definitions searches structural names (classes, methods, etc.), not arbitrary text. \
+         Use search_grep terms='{}' for content search.",
+        name, file_count, name
+    ))
+}
 
-    // Hint D: Name found in content index but not in definitions
-    if args.name_filter.is_some()
-        && summary.get("hint").is_none()
-    {
-        let name = args.name_filter.as_ref().unwrap();
-        if ctx.content_ready.load(std::sync::atomic::Ordering::Acquire) {
-            if let Ok(content_idx) = ctx.index.read() {
-                let lower = name.to_lowercase();
-                if let Some(postings) = content_idx.index.get(&lower) {
-                    let file_count = postings.len();
-                    summary["hint"] = json!(format!(
-                        "'{}' not found as an AST definition name, but appears in {} files as text content. \
-                         search_definitions searches structural names (classes, methods, etc.), not arbitrary text. \
-                         Use search_grep terms='{}' for content search.",
-                        name, file_count, name
-                    ));
-                }
-            }
-        }
+/// Orchestrator: generate zero-result hints with priority chain.
+fn generate_zero_result_hints(
+    index: &DefinitionIndex,
+    args: &DefinitionSearchArgs,
+    summary: &mut Value,
+    ctx: &HandlerContext,
+) {
+    let hint = hint_unsupported_extension(args, ctx)
+        .or_else(|| hint_wrong_kind(index, args))
+        .or_else(|| hint_file_has_defs_but_filters_narrow(index, args))
+        .or_else(|| hint_file_fuzzy_match(index, args))
+        .or_else(|| hint_nearest_name(index, args))
+        .or_else(|| hint_name_in_content_not_defs(args, ctx));
+
+    if let Some(hint_text) = hint {
+        summary["hint"] = json!(hint_text);
     }
 }
 

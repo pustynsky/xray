@@ -322,18 +322,13 @@ pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, 
 }
 
 
-pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Value {
-    if max_bytes == 0 {
-        return output;
-    }
-    let initial_size = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if initial_size <= max_bytes {
-        return output;
-    }
+/// Measure the JSON-serialized size of a Value in bytes.
+fn measure_json_size(output: &Value) -> usize {
+    serde_json::to_string(output).map(|s| s.len()).unwrap_or(0)
+}
 
-    let mut reasons: Vec<String> = Vec::new();
-
-    // Phase 1: Cap `lines` arrays per file
+/// Phase 1: Cap `lines` arrays per file to MAX_LINES_PER_FILE and remove lineContent.
+fn phase_cap_lines_per_file(output: &mut Value, reasons: &mut Vec<String>) {
     if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
         for file_entry in files.iter_mut() {
             if let Some(lines) = file_entry.get_mut("lines").and_then(|l| l.as_array_mut())
@@ -350,15 +345,10 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         }
         reasons.push(format!("capped lines per file to {}, removed lineContent", MAX_LINES_PER_FILE));
     }
+}
 
-    // Check size after phase 1
-    let size_after_p1 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if size_after_p1 <= max_bytes {
-        inject_truncation_metadata(&mut output, &reasons, initial_size);
-        return output;
-    }
-
-    // Phase 2: Cap `matchedTokens` in summary
+/// Phase 2: Cap `matchedTokens` array in summary to MAX_MATCHED_TOKENS.
+fn phase_cap_matched_tokens(output: &mut Value, reasons: &mut Vec<String>) {
     if let Some(summary) = output.get_mut("summary")
         && let Some(tokens) = summary.get_mut("matchedTokens").and_then(|t| t.as_array_mut())
             && tokens.len() > MAX_MATCHED_TOKENS {
@@ -367,15 +357,10 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
                 summary["matchedTokensOmitted"] = json!(omitted);
                 reasons.push(format!("capped matchedTokens to {}", MAX_MATCHED_TOKENS));
             }
+}
 
-    // Check size after phase 2
-    let size_after_p2 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if size_after_p2 <= max_bytes {
-        inject_truncation_metadata(&mut output, &reasons, initial_size);
-        return output;
-    }
-
-    // Phase 3: Remove `lines` arrays entirely from file entries
+/// Phase 3: Remove `lines` arrays entirely from file entries.
+fn phase_remove_lines_arrays(output: &mut Value, reasons: &mut Vec<String>) {
     if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
         for file_entry in files.iter_mut() {
             if file_entry.get("lines").is_some() {
@@ -384,22 +369,16 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         }
         reasons.push("removed all lines arrays".to_string());
     }
+}
 
-    // Check size after phase 3
-    let size_after_p3 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if size_after_p3 <= max_bytes {
-        inject_truncation_metadata(&mut output, &reasons, initial_size);
-        return output;
-    }
-
-    // Phase 4: Progressively remove file entries from the tail.
-    // Estimate how many files to keep based on average file entry size.
-    let size_p3 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
+/// Phase 4: Progressively remove file entries from the tail based on average file entry size.
+fn phase_reduce_file_count(output: &mut Value, max_bytes: usize, reasons: &mut Vec<String>) {
+    let current_size = measure_json_size(output);
     if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
         let original_count = files.len();
         if original_count > 0 {
-            let avg_file_size = size_p3 / original_count;
-            let excess = size_p3.saturating_sub(max_bytes);
+            let avg_file_size = current_size / original_count;
+            let excess = current_size.saturating_sub(max_bytes);
             let files_to_remove = if avg_file_size > 0 {
                 (excess / avg_file_size) + 1 // +1 to be safe
             } else {
@@ -413,124 +392,153 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
             }
         }
     }
+}
 
-    // Check size after phase 4
-    let size_after_p4 = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if size_after_p4 <= max_bytes {
-        inject_truncation_metadata(&mut output, &reasons, initial_size);
-        return output;
-    }
-
-    // Phase 5a: Strip body fields from array entries to preserve signatures.
-    // Before truncating entire entries (Phase 5b), remove body content to see if
-    // that's enough to get under budget. This preserves method signatures/metadata.
-    let size_before_5a = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if size_before_5a > max_bytes {
-        let body_fields = &["body", "bodyStartLine", "bodyTruncated", "totalBodyLines", "docCommentLines"];
-        if let Some(obj) = output.as_object_mut() {
-            let mut stripped = false;
-            // Strip bodies from top-level arrays
-            for key in &["definitions", "callTree", "containingDefinitions"] {
-                if let Some(arr) = obj.get_mut(*key).and_then(|v| v.as_array_mut()) {
-                    for entry in arr.iter_mut() {
-                        if let Some(entry_obj) = entry.as_object_mut() {
+/// Phase 5a: Strip body fields from array entries to preserve signatures/metadata.
+fn phase_strip_body_fields(output: &mut Value, reasons: &mut Vec<String>) {
+    let body_fields = &["body", "bodyStartLine", "bodyTruncated", "totalBodyLines", "docCommentLines"];
+    if let Some(obj) = output.as_object_mut() {
+        let mut stripped = false;
+        // Strip bodies from top-level arrays
+        for key in &["definitions", "callTree", "containingDefinitions"] {
+            if let Some(arr) = obj.get_mut(*key).and_then(|v| v.as_array_mut()) {
+                for entry in arr.iter_mut() {
+                    if let Some(entry_obj) = entry.as_object_mut() {
+                        for field in body_fields {
+                            if entry_obj.remove(*field).is_some() {
+                                stripped = true;
+                            }
+                        }
+                        // Also strip body from nested callers/callees arrays
+                        strip_bodies_recursive(entry_obj, body_fields);
+                    }
+                }
+            }
+        }
+        // Strip bodies from multi-method batch results: results[].callTree[]
+        if let Some(results_arr) = obj.get_mut("results").and_then(|v| v.as_array_mut()) {
+            for result_entry in results_arr.iter_mut() {
+                if let Some(result_obj) = result_entry.as_object_mut() {
+                    // Strip rootMethod body
+                    if let Some(root_method) = result_obj.get_mut("rootMethod") {
+                        if let Some(rm_obj) = root_method.as_object_mut() {
                             for field in body_fields {
-                                if entry_obj.remove(*field).is_some() {
+                                if rm_obj.remove(*field).is_some() {
                                     stripped = true;
                                 }
                             }
-                            // Also strip body from nested callers/callees arrays
-                            strip_bodies_recursive(entry_obj, body_fields);
                         }
                     }
-                }
-            }
-            // Strip bodies from multi-method batch results: results[].callTree[]
-            if let Some(results_arr) = obj.get_mut("results").and_then(|v| v.as_array_mut()) {
-                for result_entry in results_arr.iter_mut() {
-                    if let Some(result_obj) = result_entry.as_object_mut() {
-                        // Strip rootMethod body
-                        if let Some(root_method) = result_obj.get_mut("rootMethod") {
-                            if let Some(rm_obj) = root_method.as_object_mut() {
+                    // Strip bodies from callTree entries
+                    if let Some(call_tree) = result_obj.get_mut("callTree").and_then(|v| v.as_array_mut()) {
+                        for entry in call_tree.iter_mut() {
+                            if let Some(entry_obj) = entry.as_object_mut() {
                                 for field in body_fields {
-                                    if rm_obj.remove(*field).is_some() {
+                                    if entry_obj.remove(*field).is_some() {
                                         stripped = true;
                                     }
                                 }
-                            }
-                        }
-                        // Strip bodies from callTree entries
-                        if let Some(call_tree) = result_obj.get_mut("callTree").and_then(|v| v.as_array_mut()) {
-                            for entry in call_tree.iter_mut() {
-                                if let Some(entry_obj) = entry.as_object_mut() {
-                                    for field in body_fields {
-                                        if entry_obj.remove(*field).is_some() {
-                                            stripped = true;
-                                        }
-                                    }
-                                    strip_bodies_recursive(entry_obj, body_fields);
-                                }
+                                strip_bodies_recursive(entry_obj, body_fields);
                             }
                         }
                     }
                 }
             }
-            if stripped {
-                reasons.push("stripped body fields to preserve signatures".to_string());
-                if let Some(summary) = obj.get_mut("summary") {
-                    summary["bodiesStrippedForSize"] = json!(true);
-                }
+        }
+        if stripped {
+            reasons.push("stripped body fields to preserve signatures".to_string());
+            if let Some(summary) = obj.get_mut("summary") {
+                summary["bodiesStrippedForSize"] = json!(true);
             }
         }
     }
+}
 
-    // Check size after phase 5a
-    let size_after_5a = serde_json::to_string(&output).map(|s| s.len()).unwrap_or(0);
-    if size_after_5a <= max_bytes {
+/// Phase 5b: Generic fallback — truncate the largest top-level array (not "files"/"summary").
+fn phase_truncate_largest_array(output: &mut Value, max_bytes: usize, reasons: &mut Vec<String>) {
+    let current_size = measure_json_size(output);
+    if current_size <= max_bytes {
+        return;
+    }
+    if let Some(obj) = output.as_object_mut() {
+        // Find the largest top-level array (skip "files" — already handled)
+        let largest_array_key = obj.iter()
+            .filter(|(k, v)| *k != "files" && *k != "summary" && v.is_array())
+            .max_by_key(|(_, v)| v.as_array().map(|a| a.len()).unwrap_or(0))
+            .map(|(k, _)| k.clone());
+
+        if let Some(key) = largest_array_key
+            && let Some(arr) = obj.get_mut(&key).and_then(|v| v.as_array_mut()) {
+                let original_count = arr.len();
+                if original_count > 0 {
+                    // Estimate how many entries to keep
+                    let avg_entry_size = current_size / original_count.max(1);
+                    let target_entries = if avg_entry_size > 0 {
+                        max_bytes / avg_entry_size
+                    } else {
+                        original_count / 2
+                    };
+                    let keep = target_entries.max(1).min(original_count);
+                    let actual_kept = keep; // capture before truncate
+                    arr.truncate(keep);
+                    let removed = original_count - arr.len();
+                    if removed > 0 {
+                        reasons.push(format!(
+                            "truncated '{}' array from {} to {} entries",
+                            key, original_count, arr.len()
+                        ));
+                        // Update 'returned' in summary to reflect actual array length
+                        if let Some(summary) = obj.get_mut("summary") {
+                            summary["returned"] = json!(actual_kept);
+                        }
+                    }
+                }
+            }
+    }
+}
+
+pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Value {
+    if max_bytes == 0 {
+        return output;
+    }
+    let initial_size = measure_json_size(&output);
+    if initial_size <= max_bytes {
+        return output;
+    }
+
+    let mut reasons: Vec<String> = Vec::new();
+
+    phase_cap_lines_per_file(&mut output, &mut reasons);
+    if measure_json_size(&output) <= max_bytes {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
     }
 
-    // Phase 5b: Generic fallback — truncate any top-level array that isn't "files"
-    // (already handled above). This covers "definitions", "containingDefinitions",
-    // "callTree", or any future tool response format.
-    let current_size = size_after_5a;
-    if current_size > max_bytes
-        && let Some(obj) = output.as_object_mut() {
-            // Find the largest top-level array (skip "files" — already handled)
-            let largest_array_key = obj.iter()
-                .filter(|(k, v)| *k != "files" && *k != "summary" && v.is_array())
-                .max_by_key(|(_, v)| v.as_array().map(|a| a.len()).unwrap_or(0))
-                .map(|(k, _)| k.clone());
+    phase_cap_matched_tokens(&mut output, &mut reasons);
+    if measure_json_size(&output) <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
 
-            if let Some(key) = largest_array_key
-                && let Some(arr) = obj.get_mut(&key).and_then(|v| v.as_array_mut()) {
-                    let original_count = arr.len();
-                    if original_count > 0 {
-                        // Estimate how many entries to keep
-                        let avg_entry_size = current_size / original_count.max(1);
-                        let target_entries = if avg_entry_size > 0 {
-                            max_bytes / avg_entry_size
-                        } else {
-                            original_count / 2
-                        };
-                        let keep = target_entries.max(1).min(original_count);
-                        let actual_kept = keep; // capture before truncate
-                        arr.truncate(keep);
-                        let removed = original_count - arr.len();
-                        if removed > 0 {
-                            reasons.push(format!(
-                                "truncated '{}' array from {} to {} entries",
-                                key, original_count, arr.len()
-                            ));
-                            // Update 'returned' in summary to reflect actual array length
-                            if let Some(summary) = obj.get_mut("summary") {
-                                summary["returned"] = json!(actual_kept);
-                            }
-                        }
-                    }
-                }
-        }
+    phase_remove_lines_arrays(&mut output, &mut reasons);
+    if measure_json_size(&output) <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    phase_reduce_file_count(&mut output, max_bytes, &mut reasons);
+    if measure_json_size(&output) <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    phase_strip_body_fields(&mut output, &mut reasons);
+    if measure_json_size(&output) <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    phase_truncate_largest_array(&mut output, max_bytes, &mut reasons);
 
     inject_truncation_metadata(&mut output, &reasons, initial_size);
     output

@@ -1047,6 +1047,219 @@ fn test_truncate_phase5a_strips_nested_caller_bodies() {
     }
 }
 
+// ─── Unit tests for extracted phase functions ──────────────────
+
+#[test]
+fn test_phase_measure_json_size() {
+    let v = json!({"key": "value"});
+    let size = measure_json_size(&v);
+    assert!(size > 0, "measure_json_size should return positive size");
+    assert_eq!(size, serde_json::to_string(&v).unwrap().len());
+}
+
+#[test]
+fn test_phase_cap_lines_per_file_truncates() {
+    let many_lines: Vec<u32> = (1..=200).collect();
+    let mut output = json!({
+        "files": [
+            {"path": "a.cs", "lines": many_lines, "lineContent": [{"startLine": 1, "lines": ["code"]}]}
+        ],
+        "summary": {"totalFiles": 1}
+    });
+    let mut reasons = Vec::new();
+
+    phase_cap_lines_per_file(&mut output, &mut reasons);
+
+    let files = output["files"].as_array().unwrap();
+    let lines = files[0]["lines"].as_array().unwrap();
+    assert!(lines.len() <= MAX_LINES_PER_FILE,
+        "Lines should be capped to {}, got {}", MAX_LINES_PER_FILE, lines.len());
+    assert!(files[0]["linesOmitted"].as_u64().unwrap() > 0,
+        "linesOmitted should be set");
+    assert!(files[0].get("lineContent").is_none(),
+        "lineContent should be removed");
+    assert_eq!(files[0]["lineContentOmitted"], true);
+    assert!(!reasons.is_empty(), "Should add a reason");
+}
+
+#[test]
+fn test_phase_cap_lines_per_file_noop_when_small() {
+    let mut output = json!({
+        "files": [{"path": "a.cs", "lines": [1, 2, 3]}],
+        "summary": {"totalFiles": 1}
+    });
+    let mut reasons = Vec::new();
+
+    phase_cap_lines_per_file(&mut output, &mut reasons);
+
+    let files = output["files"].as_array().unwrap();
+    assert_eq!(files[0]["lines"].as_array().unwrap().len(), 3,
+        "Small lines array should be unchanged");
+    assert!(files[0].get("linesOmitted").is_none(),
+        "linesOmitted should not be set for small arrays");
+}
+
+#[test]
+fn test_phase_cap_matched_tokens_truncates() {
+    let many_tokens: Vec<String> = (0..500).map(|i| format!("token_{}", i)).collect();
+    let mut output = json!({
+        "files": [],
+        "summary": {"totalFiles": 0, "matchedTokens": many_tokens}
+    });
+    let mut reasons = Vec::new();
+
+    phase_cap_matched_tokens(&mut output, &mut reasons);
+
+    let tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+    assert!(tokens.len() <= MAX_MATCHED_TOKENS,
+        "matchedTokens should be capped to {}, got {}", MAX_MATCHED_TOKENS, tokens.len());
+    assert!(output["summary"]["matchedTokensOmitted"].as_u64().unwrap() > 0);
+    assert!(!reasons.is_empty());
+}
+
+#[test]
+fn test_phase_cap_matched_tokens_noop_when_small() {
+    let mut output = json!({
+        "summary": {"matchedTokens": ["a", "b"]}
+    });
+    let mut reasons = Vec::new();
+
+    phase_cap_matched_tokens(&mut output, &mut reasons);
+
+    let tokens = output["summary"]["matchedTokens"].as_array().unwrap();
+    assert_eq!(tokens.len(), 2);
+    assert!(reasons.is_empty(), "Should not add a reason when no truncation");
+}
+
+#[test]
+fn test_phase_remove_lines_arrays() {
+    let mut output = json!({
+        "files": [
+            {"path": "a.cs", "lines": [1, 2, 3]},
+            {"path": "b.cs", "lines": [4, 5]}
+        ],
+        "summary": {"totalFiles": 2}
+    });
+    let mut reasons = Vec::new();
+
+    phase_remove_lines_arrays(&mut output, &mut reasons);
+
+    let files = output["files"].as_array().unwrap();
+    for file in files {
+        assert!(file.get("lines").is_none(), "lines array should be removed");
+    }
+    assert!(!reasons.is_empty());
+}
+
+#[test]
+fn test_phase_reduce_file_count() {
+    let mut files = Vec::new();
+    for i in 0..100 {
+        files.push(json!({"path": format!("file_{}.cs", i), "score": 0.1}));
+    }
+    let mut output = json!({
+        "files": files,
+        "summary": {"totalFiles": 100}
+    });
+    let mut reasons = Vec::new();
+
+    // Use a small budget so files must be reduced
+    phase_reduce_file_count(&mut output, 500, &mut reasons);
+
+    let result_files = output["files"].as_array().unwrap();
+    assert!(result_files.len() < 100,
+        "File count should be reduced from 100, got {}", result_files.len());
+    assert!(result_files.len() >= 1, "Should keep at least 1 file");
+    assert!(!reasons.is_empty());
+}
+
+#[test]
+fn test_phase_strip_body_fields_strips_definitions() {
+    let mut output = json!({
+        "definitions": [
+            {
+                "name": "Method1",
+                "kind": "method",
+                "body": ["line1", "line2"],
+                "bodyStartLine": 10,
+                "bodyTruncated": false,
+                "totalBodyLines": 2,
+                "docCommentLines": 0
+            }
+        ],
+        "summary": {"returned": 1}
+    });
+    let mut reasons = Vec::new();
+
+    phase_strip_body_fields(&mut output, &mut reasons);
+
+    let defs = output["definitions"].as_array().unwrap();
+    assert!(defs[0].get("body").is_none(), "body should be stripped");
+    assert!(defs[0].get("bodyStartLine").is_none(), "bodyStartLine should be stripped");
+    assert!(defs[0].get("bodyTruncated").is_none(), "bodyTruncated should be stripped");
+    assert!(defs[0].get("totalBodyLines").is_none(), "totalBodyLines should be stripped");
+    assert!(defs[0].get("docCommentLines").is_none(), "docCommentLines should be stripped");
+    assert!(defs[0].get("name").is_some(), "name should be preserved");
+    assert!(defs[0].get("kind").is_some(), "kind should be preserved");
+    assert!(!reasons.is_empty());
+    assert_eq!(output["summary"]["bodiesStrippedForSize"], true);
+}
+
+#[test]
+fn test_phase_strip_body_fields_noop_without_bodies() {
+    let mut output = json!({
+        "definitions": [
+            {"name": "Method1", "kind": "method"}
+        ],
+        "summary": {"returned": 1}
+    });
+    let mut reasons = Vec::new();
+
+    phase_strip_body_fields(&mut output, &mut reasons);
+
+    assert!(reasons.is_empty(), "Should not add a reason when no bodies stripped");
+    assert!(output["summary"].get("bodiesStrippedForSize").is_none());
+}
+
+#[test]
+fn test_phase_truncate_largest_array_definitions() {
+    let mut defs = Vec::new();
+    for i in 0..100 {
+        defs.push(json!({"name": format!("Def_{}", i), "kind": "method"}));
+    }
+    let mut output = json!({
+        "definitions": defs,
+        "summary": {"returned": 100}
+    });
+    let mut reasons = Vec::new();
+
+    // Budget smaller than total size
+    phase_truncate_largest_array(&mut output, 500, &mut reasons);
+
+    let result_defs = output["definitions"].as_array().unwrap();
+    assert!(result_defs.len() < 100,
+        "Definitions should be truncated, got {}", result_defs.len());
+    assert!(!reasons.is_empty());
+    assert!(output["summary"]["returned"].as_u64().is_some(),
+        "summary.returned should be updated");
+}
+
+#[test]
+fn test_phase_truncate_largest_array_noop_when_under_budget() {
+    let mut output = json!({
+        "definitions": [{"name": "A"}],
+        "summary": {"returned": 1}
+    });
+    let mut reasons = Vec::new();
+
+    // Very large budget — no truncation needed
+    phase_truncate_largest_array(&mut output, 100_000, &mut reasons);
+
+    assert_eq!(output["definitions"].as_array().unwrap().len(), 1);
+    assert!(reasons.is_empty(), "Should not add reason when under budget");
+}
+
+
 #[test]
 fn test_inject_body_with_doc_comments_jsdoc() {
     let content = "import { User } from './types';\n\
