@@ -132,6 +132,8 @@ function Extract-BuiltinToolCalls {
     if ($text -match '<search_and_replace>') { $tools.Add('search_and_replace') }
     if ($text -match '<attempt_completion>') { $tools.Add('attempt_completion') }
     if ($text -match '<ask_followup_question>') { $tools.Add('ask_followup_question') }
+    if ($text -match '<list_files>') { $tools.Add('list_files') }
+    if ($text -match '<list_code_definition_names>') { $tools.Add('list_code_definition_names') }
     return @(,$tools)
 }
 
@@ -174,6 +176,14 @@ function Extract-BuiltinToolCallDetails {
             paths = @($searchPath)
             extensions = @()
         })
+    }
+
+    # list_files and list_code_definition_names (policy violations when search-index available)
+    if ($text -match '<list_files>') {
+        $details.Add(@{ tool = 'list_files'; paths = @(); extensions = @() })
+    }
+    if ($text -match '<list_code_definition_names>') {
+        $details.Add(@{ tool = 'list_code_definition_names'; paths = @(); extensions = @() })
     }
 
     # Other built-in tools (simple detection, no path extraction needed)
@@ -442,10 +452,8 @@ function Analyze-TruncationCause {
         if ($args_.maxResults -and [int]$args_.maxResults -gt 50) {
             $causes += "high_maxResults ($($args_.maxResults))"
         }
-        # Missing kind filter
-        if (-not $args_.kind) { $causes += "no_kind_filter" }
-        # Missing name filter
-        if (-not $args_.name) { $causes += "no_name_filter" }
+        # NOTE: no_kind_filter and no_name_filter removed — they are noise for exploration sessions
+        # where broad queries without kind/name are normal and expected.
     }
     catch {}
 
@@ -468,18 +476,26 @@ function Analyze-TruncationCause {
         }
     }
     elseif ($toolName -eq 'search_definitions') {
-        # Definitions: totalDefinitions > returned count
-        $totalDefsMatch = [regex]::Match($resultText, '"totalDefinitions"\s*:\s*(\d+)')
-        $defsArrayMatch = [regex]::Match($resultText, '"definitions"\s*:\s*\[')
-        if ($totalDefsMatch.Success -and $defsArrayMatch.Success) {
-            if ($causes -notcontains 'response_size_limit') {
-                $causes += 'definitions_truncated'
+        # Definitions: totalResults > returned count (definitions were truncated)
+        if ($returnedMatch.Success -and $totalMatch.Success) {
+            $returned = [int]$returnedMatch.Groups[1].Value
+            $total = [int]$totalMatch.Groups[1].Value
+            if ($total -gt $returned) {
+                if ($causes -notcontains 'response_size_limit') {
+                    $causes += 'definitions_truncated'
+                }
             }
         }
     }
 
-    # Fallback: infer response_size_limit from response size when no specific markers found
-    if ($episode.response_size_bytes -gt 15000 -and $causes -notcontains 'response_size_limit') {
+    # Fallback: infer response_size_limit from response size when no specific cause found
+    # Skip if we already have a specific cause (definitions_truncated, body_truncation, etc.)
+    $specificCauses = @('response_size_limit', 'definitions_truncated', 'body_truncation', 'max_total_nodes')
+    $hasSpecificCause = $false
+    foreach ($sc in $specificCauses) {
+        if ($causes -contains $sc) { $hasSpecificCause = $true; break }
+    }
+    if ($episode.response_size_bytes -gt 15000 -and -not $hasSpecificCause) {
         $causes += 'response_size_limit (inferred from response size)'
     }
 
@@ -602,6 +618,32 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
                 reason = 'search_files used instead of search_grep (search-index MCP available)'
             })
         }
+
+        # Check for policy violations: list_files when search_fast is available
+        if ($bd.tool -eq 'list_files' -and $indexedExtensions.Count -gt 0) {
+            $policyViolations.Add(@{
+                turn = $i
+                tool = 'list_files'
+                paths = $bd.paths
+                extension = ''
+                mcp_available = $mcpAvailable
+                suggested_alternative = 'search_fast'
+                reason = 'list_files used instead of search_fast (search-index MCP available)'
+            })
+        }
+
+        # Check for policy violations: list_code_definition_names when search_definitions is available
+        if ($bd.tool -eq 'list_code_definition_names' -and $indexedExtensions.Count -gt 0) {
+            $policyViolations.Add(@{
+                turn = $i
+                tool = 'list_code_definition_names'
+                paths = $bd.paths
+                extension = ''
+                mcp_available = $mcpAvailable
+                suggested_alternative = 'search_definitions'
+                reason = 'list_code_definition_names used instead of search_definitions (search-index MCP available)'
+            })
+        }
     }
 
     # Extract MCP tool calls
@@ -654,13 +696,17 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
         $responseSummary = Extract-ResponseSummary $resultContent
         $responseSize = [System.Text.Encoding]::UTF8.GetByteCount($resultContent)
 
-        # Extract estimatedTokens from response (improvement 2)
+        # Extract estimatedTokens from response (improvement 2), with fallback to bytes/4
         $estimatedTokens = 0
         $tokensMatch = [regex]::Match($resultContent, '"estimatedTokens"\s*:\s*(\d+)')
         if ($tokensMatch.Success) {
             $estimatedTokens = [int]$tokensMatch.Groups[1].Value
-            $totalEstimatedTokens += $estimatedTokens
         }
+        elseif ($responseSize -gt 0) {
+            # Fallback: estimate tokens from response size (~4 bytes per token)
+            $estimatedTokens = [math]::Round($responseSize / 4, 0)
+        }
+        $totalEstimatedTokens += $estimatedTokens
 
         # Extract autoCorrection from response (improvement 1)
         $autoCorrectionInfo = $null
@@ -830,6 +876,50 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
     # data_quality_complaint: model explicitly flags a data quality issue in thinking
     if ($ep.thinking_before -match '(?i)(showing 0|always 0|fileCount.*0|returns? 0|doesn.t track|doesn.t work|doesn.t count|not working|broken|useless|misleading|no data|empty result|all zero)') {
         $ep.tags.Add('data_quality_complaint')
+    }
+
+    # kind_mismatch: detect when term_breakdown shows 0 for some names due to wrong kind filter,
+    # and the next episode changes/removes kind and finds those names
+    if ($ep.tool -eq 'search_definitions' -and $ep.term_breakdown -and $e + 1 -lt $episodes.Count) {
+        $nextEp = $episodes[$e + 1]
+        # Check refinement inline (nextEp tags may not be computed yet in this forward pass)
+        $isNextRefinement = ($nextEp.tool -eq 'search_definitions' -and $nextEp.server -eq $ep.server -and
+            $nextEp._call_args -ne $ep._call_args -and (Is-TargetRefinement $ep._call_args $nextEp._call_args 'search_definitions'))
+        if ($nextEp.tool -eq 'search_definitions' -and $isNextRefinement) {
+            try {
+                $currParams = $ep._call_args | ConvertFrom-Json -ErrorAction Stop
+                $nextParams = $nextEp._call_args | ConvertFrom-Json -ErrorAction Stop
+                $currKind = if ($currParams.PSObject.Properties['kind']) { "$($currParams.kind)" } else { '' }
+                $nextKind = if ($nextParams.PSObject.Properties['kind']) { "$($nextParams.kind)" } else { '' }
+                # Only if kind changed between episodes
+                if ($currKind -and $currKind -ne $nextKind) {
+                    # Check if any names had 0 results in term_breakdown
+                    $zeroNames = @()
+                    foreach ($prop in $ep.term_breakdown.PSObject.Properties) {
+                        if ([int]$prop.Value -eq 0) { $zeroNames += $prop.Name }
+                    }
+                    if ($zeroNames.Count -gt 0) {
+                        # Check if next episode's term_breakdown found some of those names
+                        $recoveredNames = @()
+                        if ($nextEp.term_breakdown) {
+                            foreach ($prop in $nextEp.term_breakdown.PSObject.Properties) {
+                                if ([int]$prop.Value -gt 0 -and $zeroNames -contains $prop.Name) {
+                                    $recoveredNames += $prop.Name
+                                }
+                            }
+                        }
+                        # Tag as kind_mismatch if names had 0 results (even without recovery proof)
+                        $ep.tags.Add('kind_mismatch')
+                        $ep['kind_mismatch_details'] = @{
+                            requested_kind = $currKind
+                            next_kind = if ($nextKind) { $nextKind } else { '<removed>' }
+                            zero_names = $zeroNames
+                            recovered_names = $recoveredNames
+                        }
+                    }
+                }
+            } catch {}
+        }
     }
 
     # redundant
@@ -1159,6 +1249,16 @@ if (-not $hasCompletion) {
     $recommendations += '[session] Session ended without attempt_completion — result may not have been delivered to the user.'
 }
 
+# Kind mismatch detection
+$kindMismatches = @($episodes | Where-Object { $_.tags -contains 'kind_mismatch' })
+if ($kindMismatches.Count -gt 0) {
+    $kmDetails = ($kindMismatches | ForEach-Object {
+        $km = if ($_.ContainsKey('kind_mismatch_details')) { $_.kind_mismatch_details } else { @{ requested_kind = '?'; zero_names = @() } }
+        "episode $($_.index): kind=$($km.requested_kind) missed $($km.zero_names -join ',')"
+    }) -join '; '
+    $recommendations += "[kind_mismatch] $($kindMismatches.Count) kind mismatch(es) caused extra round-trips: $kmDetails. Consider multi-kind filter support (kind='class,interface') or kind mismatch hints."
+}
+
 # Data quality complaints
 $dqComplaints = @($episodes | Where-Object { $_.tags -contains 'data_quality_complaint' })
 if ($dqComplaints.Count -gt 0) {
@@ -1212,6 +1312,7 @@ foreach ($ep in $episodes) {
     }
     if ($ep.param_diff) { $clean['param_diff'] = $ep.param_diff }
     if ($ep.truncation_cause) { $clean['truncation_cause'] = $ep.truncation_cause }
+    if ($ep.ContainsKey('kind_mismatch_details') -and $ep.kind_mismatch_details) { $clean['kind_mismatch_details'] = $ep.kind_mismatch_details }
     if ($ep.estimated_tokens -gt 0) { $clean['estimated_tokens'] = $ep.estimated_tokens }
     if ($ep.auto_correction) { $clean['auto_correction'] = $ep.auto_correction }
     if ($ep.body_omitted_count -gt 0) { $clean['body_omitted_count'] = $ep.body_omitted_count }
@@ -1369,6 +1470,10 @@ foreach ($ep in $cleanEpisodes) {
             $tbParts += "$($prop.Name):$($prop.Value)"
         }
         [void]$md.AppendLine("- **Term breakdown**: $($tbParts -join ', ')")
+    }
+    if ($ep.ContainsKey('kind_mismatch_details') -and $ep.kind_mismatch_details) {
+        $km = $ep.kind_mismatch_details
+        [void]$md.AppendLine("- **Kind mismatch**: searched as ``$($km.requested_kind)`` but names [$($km.zero_names -join ', ')] returned 0 results. Next call used ``$($km.next_kind)``$(if ($km.recovered_names.Count -gt 0) { " and recovered: $($km.recovered_names -join ', ')" })")
     }
     if ($ep.ContainsKey('param_diff') -and $ep.param_diff) {
         [void]$md.AppendLine("- **Param diff from prev**: $($ep.param_diff)")

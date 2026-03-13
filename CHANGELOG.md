@@ -4,6 +4,13 @@
 
 ### Internal
 
+- **Transcript analyzer improvements (`analyze-transcript.ps1`)** — Five fixes and enhancements:
+  1. **Kind mismatch detection** — detects when `term_breakdown` shows 0 results for names due to wrong `kind` filter and the model retries with different/removed `kind`. Tagged as `kind_mismatch` with details (requested_kind, zero_names, recovered_names). Recommendation auto-generated: "Consider multi-kind filter support (kind='class,interface') or kind mismatch hints."
+  2. **Cleaned truncation cause noise** — removed `no_kind_filter` and `no_name_filter` from truncation causes (normal for exploration sessions). Fallback `response_size_limit (inferred)` no longer added when a specific cause (`definitions_truncated`, `body_truncation`) already exists.
+  3. **Fixed dead regex** — `Analyze-TruncationCause` used `"totalDefinitions"` regex which never matched (actual field is `"totalResults"`). Replaced with `returned` vs `totalResults` comparison.
+  4. **Token estimation fallback** — when MCP response doesn't include `estimatedTokens`, falls back to `responseSize / 4` approximation instead of 0.
+  5. **Extended policy violation detection** — added `list_files` and `list_code_definition_names` as detectable policy violations (should use `search_fast` and `search_definitions` respectively when search-index MCP is available).
+
 - **`EditMode` enum in `search_edit` handler** — Replaced `unreachable!()` panic in `apply_edits_to_content()` with compile-time type safety. Introduced `EditMode::Operations` / `EditMode::Edits` enum so the `match` is exhaustive — invalid state (both None) is now unrepresentable at the type level. Updated signatures of `apply_edits_to_content()`, `handle_single_file_edit()`, `handle_multi_file_edit()`. Zero behavioral change — all 1626 unit tests + 71 E2E tests pass.
 
 - **SQL parser defensive coding (`parser_sql.rs`)** — Replaced all `.unwrap()` calls on regex capture groups with safe alternatives. Introduced `extract_schema_name()` helper for the common `(schema.name|name)` regex pattern (6 call sites). Remaining single-group captures use `match caps.get(N)` with early `return`/`continue`. Changed `PARAM_RE` capture from `.map(|c| c.get(1).unwrap())` to `.filter_map(|c| c.get(1))`. SQL parser now gracefully handles corrupted/malformed SQL without panicking. 9 new regression tests for corrupted SQL (truncated CREATE, missing names, garbled bodies, binary content, unmatched brackets).
