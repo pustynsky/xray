@@ -46,7 +46,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Concurrency](docs/concurrency.md) | Thread model, lock strategy, watcher design |
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
-| [E2E Test Plan](docs/e2e-test-plan.md) | End-to-end test cases (CLI + MCP) with automation script |
+| [E2E Test Plan](docs/e2e/README.md) | End-to-end test cases (CLI + MCP), modular by tool — 8 files |
 | [Changelog](CHANGELOG.md) | All notable changes organized by category (features, fixes, performance) |
 
 ## Features
