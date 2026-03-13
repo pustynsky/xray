@@ -1570,6 +1570,7 @@ fn should_auto_summary(args: &DefinitionSearchArgs, total_results: usize) -> boo
         && total_results > args.max_results
         && args.name_filter.is_none()
         && !args.include_body
+        && args.sort_by.is_none() // sortBy means user wants ranked individual results, not summary
 }
 
 /// Internal accumulator for grouping definitions by directory.

@@ -1950,3 +1950,127 @@ fn test_expected_context_crlf_normalized() {
     assert!(!result.is_error, "CRLF in expectedContext should be normalized. Error: {:?}",
         result.content.first().map(|c| &c.text));
 }
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// Auto-create file tests
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_auto_create_file_via_mode_a_insert() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": "brand_new_file.txt",
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "hello world\nsecond line" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Auto-create with insert should succeed: {}", result.content[0].text);
+    let text = &result.content[0].text;
+    let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
+    assert_eq!(parsed["fileCreated"], true, "Response should have fileCreated: true");
+    assert_eq!(parsed["applied"], 1);
+
+    // Verify file exists with correct content
+    let file_path = tmp.path().join("brand_new_file.txt");
+    assert!(file_path.exists(), "File should have been created");
+    let content = std::fs::read_to_string(&file_path).unwrap();
+    assert!(content.contains("hello world"), "File should contain inserted text");
+    assert!(content.contains("second line"), "File should contain second line");
+}
+
+#[test]
+fn test_auto_create_file_in_nested_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": "deep/nested/dir/new_file.rs",
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "fn main() {}" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Auto-create with nested dirs should succeed: {}", result.content[0].text);
+    let file_path = tmp.path().join("deep/nested/dir/new_file.rs");
+    assert!(file_path.exists(), "File should have been created in nested directory");
+    let content = std::fs::read_to_string(&file_path).unwrap();
+    assert!(content.contains("fn main() {}"), "File should contain inserted text");
+}
+
+#[test]
+fn test_auto_create_mode_b_search_fails_gracefully() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": "nonexistent.txt",
+        "edits": [
+            { "search": "some text", "replace": "other text" }
+        ]
+    }));
+
+    assert!(result.is_error, "Search/replace on auto-created empty file should fail");
+    let text = &result.content[0].text;
+    assert!(text.contains("not found"), "Error should mention text not found: {}", text);
+}
+
+#[test]
+fn test_auto_create_mode_a_replace_on_nonexistent_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    // Replace lines 5-10 in a nonexistent file (treated as 1-line empty file)
+    let result = handle_search_edit(&ctx, &json!({
+        "path": "nonexistent.txt",
+        "operations": [
+            { "startLine": 5, "endLine": 10, "content": "new content" }
+        ]
+    }));
+
+    assert!(result.is_error, "Replace on nonexistent file should fail (out of range)");
+}
+
+#[test]
+fn test_auto_create_file_dry_run_does_not_create() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_search_edit(&ctx, &json!({
+        "path": "dry_run_file.txt",
+        "dryRun": true,
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "hello" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Dry run should succeed");
+    let file_path = tmp.path().join("dry_run_file.txt");
+    assert!(!file_path.exists(), "File should NOT be created during dry run");
+}
+
+#[test]
+fn test_auto_create_multi_file_mixed_existing_and_new() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_named_temp_file(tmp.path(), "existing.txt", "line1\nline2\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Insert into both existing and new file
+    let result = handle_search_edit(&ctx, &json!({
+        "paths": ["existing.txt", "new_file.txt"],
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "inserted" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Multi-file with mix of existing and new should succeed: {}", result.content[0].text);
+    // Both files should exist
+    assert!(tmp.path().join("existing.txt").exists());
+    assert!(tmp.path().join("new_file.txt").exists());
+    // New file should have the inserted content
+    let new_content = std::fs::read_to_string(tmp.path().join("new_file.txt")).unwrap();
+    assert!(new_content.contains("inserted"), "New file should contain inserted text");
+}

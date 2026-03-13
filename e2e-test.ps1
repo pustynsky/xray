@@ -1364,6 +1364,68 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
+# T-EDIT-CREATE: search_edit auto-creates new files
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-EDIT-CREATE search-edit-auto-create-file"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_edit_create_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        # Do NOT create any files — test auto-creation
+        $newFilePath = ($tmpDir -replace '\\', '/') + '/brand_new_file.txt'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_edit","arguments":{"path":"' + $newFilePath + '","operations":[{"startLine":1,"endLine":0,"content":"hello world\nsecond line"}]}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no response" }
+        elseif ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
+        if ($jsonLine -and $jsonLine -notmatch 'fileCreated') { $errors += "missing fileCreated field" }
+        # Verify file was actually created
+        $createdFile = Join-Path $tmpDir "brand_new_file.txt"
+        if (-not (Test-Path $createdFile)) { $errors += "file not created on disk" }
+        else {
+            $content = Get-Content -Path $createdFile -Raw
+            if ($content -notmatch 'hello world') { $errors += "file content wrong" }
+        }
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (new file created with fileCreated=true)" }
+    } catch {
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-SORTBY-NO-AUTOSUMMARY: sortBy bypasses autoSummary, returns individual results
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SORTBY-NO-AUTOSUMMARY definitions-sortby-bypasses-autosummary"
+    try {
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"search_definitions","arguments":{"sortBy":"cognitiveComplexity","maxResults":3}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no response)" } }
+        $errors = @()
+        # Should NOT have autoSummary
+        if ($jsonLine -match 'autoSummary') { $errors += "autoSummary should NOT trigger with sortBy" }
+        # Should have individual definitions with codeStats
+        if ($jsonLine -notmatch 'definitions') { $errors += "missing definitions array" }
+        if ($jsonLine -notmatch 'codeStats') { $errors += "missing codeStats in results" }
+        if ($jsonLine -notmatch 'cognitiveComplexity') { $errors += "missing cognitiveComplexity metric" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (sortBy returned individual ranked results, no autoSummary)" }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
+}
+
 $parallelJobs = @()
 foreach ($block in $testBlocks) {
     $parallelJobs += Start-Job -ScriptBlock $block -ArgumentList $searchBinAbs, $projectDirAbs, $TestExt

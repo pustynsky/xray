@@ -64,7 +64,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `search_info`                | Show all indexes with status, sizes, age                                                                                                |
 | `search_reindex`             | Force rebuild + reload content index                                                                                                    |
 | `search_reindex_definitions` | Force rebuild + reload definition index. Requires `--definitions`                                                                       |
-| `search_edit`                | Edit files by line-range operations or text-match replacements. Supports multi-file (`paths`), insert after/before, expectedContext. Atomic, returns unified diff |
+| `search_edit`                | Edit files by line-range operations or text-match replacements. Auto-creates new files. Supports multi-file (`paths`), insert after/before, expectedContext. Atomic, returns unified diff |
 | `search_help`                | Best practices guide, strategy recipes, performance tiers                                                                               |
 | `search_git_history`         | Commit history for a file. Uses in-memory cache when available (sub-millisecond), falls back to CLI (~2–6 sec)                          |
 | `search_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |
@@ -695,7 +695,7 @@ If auto-correction produces 0 results, it falls through to the regular hint syst
 
 ### Auto-Summary for Broad Queries
 
-When `search_definitions` finds more results than `maxResults` and **no `name` filter** is set (and `includeBody` is false), it automatically returns a **directory-grouped summary** instead of truncated entries. This eliminates the need for preliminary `search_fast dirsOnly=true` calls when exploring unfamiliar code modules.
+When `search_definitions` finds more results than `maxResults` and **no `name` filter** is set (and `includeBody` is false, and `sortBy` is not set), it automatically returns a **directory-grouped summary** instead of truncated entries. This eliminates the need for preliminary `search_fast dirsOnly=true` calls when exploring unfamiliar code modules.
 
 ```json
 // Request: explore a large service directory
@@ -735,6 +735,7 @@ When `search_definitions` finds more results than `maxResults` and **no `name` f
 - `totalResults > maxResults` — results exceed the limit
 - No `name` filter — broad exploration query
 - `includeBody` is false — not requesting source code
+- `sortBy` is not set — when sorting is requested, individual ranked results are returned instead
 
 **To get individual definitions instead**, add a `name` filter or narrow the `file` scope.
 
@@ -906,6 +907,7 @@ Edit files by line-range operations or text-match replacements. Works on any tex
 | Response field     | When present                              | Description                                              |
 | ------------------ | ----------------------------------------- | -------------------------------------------------------- |
 | `applied`          | Always                                    | Number of edits processed                                |
+| `fileCreated`      | File didn't exist before edit             | `true` when file was auto-created (non-existent → treated as empty, insert operations succeed) |
 | `diff`             | Always                                    | Unified diff or `"(no changes)"`                         |
 | `linesAdded`       | Always                                    | Lines added (net)                                        |
 | `linesRemoved`     | Always                                    | Lines removed (net)                                      |
