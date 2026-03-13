@@ -1,4 +1,4 @@
-//! MCP tool handler for `search_edit` — reliable file editing with two modes:
+//! MCP tool handler for `xray_edit` — reliable file editing with two modes:
 //! - Mode A (operations): line-range splice, applied bottom-up to avoid offset cascade
 //! - Mode B (edits): text find-replace, literal or regex, with insert after/before support
 
@@ -34,8 +34,8 @@ const NEAREST_MATCH_MIN_SIMILARITY: f64 = 0.4;
 /// Maximum length of search/match text shown in hint messages.
 const NEAREST_MATCH_MAX_DISPLAY_LEN: usize = 150;
 
-/// Handle `search_edit` tool call.
-pub(crate) fn handle_search_edit(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+/// Handle `xray_edit` tool call.
+pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // ── Parse path/paths ──
     let single_path = args.get("path").and_then(|v| v.as_str());
     let multi_paths = args.get("paths").and_then(|v| v.as_array());

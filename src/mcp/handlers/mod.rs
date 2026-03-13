@@ -34,12 +34,12 @@ pub(crate) use self::callers::resolve_call_site;
 
 /// Return all tool definitions for tools/list.
 /// `def_extensions` — file extensions with definition parser support (e.g., ["cs", "rs"]).
-/// Used to dynamically generate language lists in search_definitions and search_callers descriptions.
+/// Used to dynamically generate language lists in xray_definitions and xray_callers descriptions.
 pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
     let lang_list = crate::tips::format_supported_languages(def_extensions);
     let mut tools = vec![
         ToolDefinition {
-            name: "search_grep".to_string(),
+            name: "xray_grep".to_string(),
             description: "Preferred for content/pattern search across indexed files. Use before built-in text/regex search for indexed file types. Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results. Comma-separated phrases with spaces are searched independently (OR/AND).".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -104,8 +104,8 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_find".to_string(),
-            description: "[SLOW — USE search_fast INSTEAD] Search for files by name using live filesystem walk. This is 90x+ slower than search_fast (~3s vs ~35ms). Only use when: (1) no file name index exists, or (2) you need to search outside the indexed directory. For all normal file lookups, use search_fast.".to_string(),
+            name: "xray_find".to_string(),
+            description: "[SLOW — USE xray_fast INSTEAD] Search for files by name using live filesystem walk. This is 90x+ slower than xray_fast (~3s vs ~35ms). Only use when: (1) no file name index exists, or (2) you need to search outside the indexed directory. For all normal file lookups, use xray_fast.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -131,8 +131,8 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_fast".to_string(),
-            description: "PREFERRED file lookup tool — searches pre-built file name index. 90x+ faster than search_find (~35ms vs ~3s for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Supports pattern='*' or empty pattern with dir to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files, list_directory, or search_find. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field.".to_string(),
+            name: "xray_fast".to_string(),
+            description: "PREFERRED file lookup tool — searches pre-built file name index. 90x+ faster than xray_find (~35ms vs ~3s for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Supports pattern='*' or empty pattern with dir to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files, list_directory, or xray_find. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -150,7 +150,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_info".to_string(),
+            name: "xray_info".to_string(),
             description: "Show all existing indexes with their status, sizes, and age.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -159,7 +159,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_reindex".to_string(),
+            name: "xray_reindex".to_string(),
             description: "Force rebuild the content index and reload it into the server's in-memory cache. Useful after many file changes or when --watch is not enabled. The rebuilt index replaces the current in-memory index immediately.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -174,7 +174,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_reindex_definitions".to_string(),
+            name: "xray_reindex_definitions".to_string(),
             description: if def_extensions.is_empty() {
                 "Definition index not available. Start server with --definitions flag.".to_string()
             } else {
@@ -200,9 +200,9 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_definitions".to_string(),
+            name: "xray_definitions".to_string(),
             description: if def_extensions.is_empty() {
-                "Definition index not available for current file extensions. Use search_grep for content search.".to_string()
+                "Definition index not available for current file extensions. Use xray_grep for content search.".to_string()
             } else {
                 format!(
                     "PREFERRED for code exploration AND module structure discovery. \
@@ -211,7 +211,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                      REPLACES read_file for indexed source files — use includeBody=true maxBodyLines=0 to get full file content. \
                      Search code definitions — classes, interfaces, methods, properties, enums. \
                      Uses pre-built AST index for instant results (~0.001s). \
-                     LANGUAGE-SPECIFIC: Supports {}. Only these extensions are indexed — for other file types (XML, JSON, config, MD) use search_grep. \
+                     LANGUAGE-SPECIFIC: Supports {}. Only these extensions are indexed — for other file types (XML, JSON, config, MD) use xray_grep. \
                      Requires server started with --definitions flag. \
                      Supports 'containsLine' to find which method/class contains a given line number. \
                      Supports 'includeBody' to return actual source code inline. \
@@ -348,7 +348,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_callers".to_string(),
+            name: "xray_callers".to_string(),
             description: if def_extensions.is_empty() {
                 "Call chain analysis not available — definition index not configured. Start server with --definitions flag.".to_string()
             } else {
@@ -411,7 +411,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "includeBody": {
                         "type": "boolean",
-                        "description": "Include source code body of each method in the call tree, plus a 'rootMethod' object with the searched method's own body. Eliminates the need for a separate search_definitions call. (default: false)"
+                        "description": "Include source code body of each method in the call tree, plus a 'rootMethod' object with the searched method's own body. Eliminates the need for a separate xray_definitions call. (default: false)"
                     },
                     "includeDocComments": {
                         "type": "boolean",
@@ -446,7 +446,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_edit".to_string(),
+            name: "xray_edit".to_string(),
             description: "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content for ANY file edit. Edit a file by line-range operations or text-match replacements. Auto-creates new files when they don't exist (treats as empty — use Mode A: operations [{startLine:1, endLine:0, content:'...'}] for new file content). Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing. Works on any text file (not limited to --dir). Accepts absolute or relative paths. Supports multi-file editing via 'paths' parameter (transactional: all-or-nothing). PREFERRED over apply_diff for all file edits — atomic, no whitespace issues, minimal token cost.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -540,8 +540,8 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             }),
         },
         ToolDefinition {
-            name: "search_help".to_string(),
-            description: "Show best practices and usage tips for search-index tools. Call this when unsure which tool to use or how to optimize queries. Returns a concise guide with tool selection priorities, performance tiers, and common pitfalls.".to_string(),
+            name: "xray_help".to_string(),
+            description: "Show best practices and usage tips for xray tools. Call this when unsure which tool to use or how to optimize queries. Returns a concise guide with tool selection priorities, performance tiers, and common pitfalls.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -564,7 +564,7 @@ pub struct HandlerContext {
     pub server_ext: String,
     pub metrics: bool,
     /// Base directory for index file storage.
-    /// Production: `index_dir()` (`%LOCALAPPDATA%/search-index`).
+    /// Production: `index_dir()` (`%LOCALAPPDATA%/xray`).
     /// Tests: test-local temp directory (prevents orphan files).
     pub index_base: PathBuf,
     /// Maximum response size in bytes before truncation kicks in. 0 = no limit.
@@ -617,22 +617,22 @@ const INDEX_BUILDING_MSG: &str =
 const DEF_INDEX_BUILDING_MSG: &str =
     "Definition index is currently being built in the background. Please retry in a few seconds.";
 
-/// Message returned when search_reindex is called while a background build is in progress.
+/// Message returned when xray_reindex is called while a background build is in progress.
 const ALREADY_BUILDING_MSG: &str =
     "Index is already being built in the background. Please wait for it to finish.";
 
-/// Minimum response budget for search_help (32KB).
-/// search_help returns reference content (best practices, strategies, parameter examples)
+/// Minimum response budget for xray_help (32KB).
+/// xray_help returns reference content (best practices, strategies, parameter examples)
 /// that exceeds the default 16KB search-result budget (~20KB as of 23 tips + parameter examples).
 /// 32KB gives comfortable headroom for adding more tips and parameter examples.
-const SEARCH_HELP_MIN_RESPONSE_BYTES: usize = 32_768;
+const XRAY_HELP_MIN_RESPONSE_BYTES: usize = 32_768;
 
 /// Minimum response budget for tools called with includeBody=true (64KB).
 /// When includeBody is true, responses contain source code of methods which
 /// can easily exceed the default 16KB budget. 300 body lines × ~80 chars ≈ 24KB
 /// plus metadata ≈ 30-35KB. 64KB gives comfortable headroom.
-/// Applies globally to any tool with includeBody (currently search_definitions
-/// and search_callers). Users can increase further via --max-response-kb CLI flag.
+/// Applies globally to any tool with includeBody (currently xray_definitions
+/// and xray_callers). Users can increase further via --max-response-kb CLI flag.
 const INCLUDE_BODY_MIN_RESPONSE_BYTES: usize = 65_536;
 
 /// Per-method response budget scaling for multi-method batch callers (32KB per method).
@@ -644,12 +644,12 @@ const MULTI_METHOD_RESPONSE_MAX: usize = 131_072;
 
 /// Returns true when a tool requires the content index to be ready.
 fn requires_content_index(tool_name: &str) -> bool {
-    matches!(tool_name, "search_grep" | "search_fast" | "search_reindex")
+    matches!(tool_name, "xray_grep" | "xray_fast" | "xray_reindex")
 }
 
 /// Returns true when a tool requires the definition index to be ready.
 fn requires_def_index(tool_name: &str) -> bool {
-    matches!(tool_name, "search_definitions" | "search_callers" | "search_reindex_definitions")
+    matches!(tool_name, "xray_definitions" | "xray_callers" | "xray_reindex_definitions")
 }
 
 /// Dispatch a tool call to the right handler.
@@ -663,31 +663,31 @@ pub fn dispatch_tool(
 
     // Check readiness: if the required index is still building, return early
     if requires_content_index(tool_name) && !ctx.content_ready.load(Ordering::Acquire) {
-        if tool_name == "search_reindex" {
+        if tool_name == "xray_reindex" {
             return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
         }
         return ToolCallResult::error(INDEX_BUILDING_MSG.to_string());
     }
     if requires_def_index(tool_name) && !ctx.def_ready.load(Ordering::Acquire) {
-        if tool_name == "search_reindex_definitions" {
+        if tool_name == "xray_reindex_definitions" {
             return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
         }
         return ToolCallResult::error(DEF_INDEX_BUILDING_MSG.to_string());
     }
 
     let result = match tool_name {
-        "search_grep" => grep::handle_search_grep(ctx, arguments),
-        "search_find" => find::handle_search_find(ctx, arguments),
-        "search_fast" => fast::handle_search_fast(ctx, arguments),
-        "search_info" => handle_search_info(ctx),
-        "search_reindex" => handle_search_reindex(ctx, arguments),
-        "search_reindex_definitions" => handle_search_reindex_definitions(ctx, arguments),
-        "search_definitions" => definitions::handle_search_definitions(ctx, arguments),
-        "search_callers" => callers::handle_search_callers(ctx, arguments),
-        "search_edit" => edit::handle_search_edit(ctx, arguments),
-        "search_help" => handle_search_help(ctx),
+        "xray_grep" => grep::handle_xray_grep(ctx, arguments),
+        "xray_find" => find::handle_xray_find(ctx, arguments),
+        "xray_fast" => fast::handle_xray_fast(ctx, arguments),
+        "xray_info" => handle_xray_info(ctx),
+        "xray_reindex" => handle_xray_reindex(ctx, arguments),
+        "xray_reindex_definitions" => handle_xray_reindex_definitions(ctx, arguments),
+        "xray_definitions" => definitions::handle_xray_definitions(ctx, arguments),
+        "xray_callers" => callers::handle_xray_callers(ctx, arguments),
+        "xray_edit" => edit::handle_xray_edit(ctx, arguments),
+        "xray_help" => handle_xray_help(ctx),
         // Git history tools
-        "search_git_history" | "search_git_diff" | "search_git_authors" | "search_git_activity" | "search_git_blame" | "search_branch_status" => {
+        "xray_git_history" | "xray_git_diff" | "xray_git_authors" | "xray_git_activity" | "xray_git_blame" | "xray_branch_status" => {
             git::dispatch_git_tool(ctx, tool_name, arguments)
         }
         _ => return ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
@@ -700,7 +700,7 @@ pub fn dispatch_tool(
     let result = utils::inject_response_guidance(result, tool_name, &ctx.server_ext);
 
     // Determine effective response budget:
-    // - search_help: 32KB (static reference content)
+    // - xray_help: 32KB (static reference content)
     // - Multi-method callers: 32KB × N, capped at 128KB
     // - Any tool with includeBody=true: 64KB (source code is large)
     // - Everything else: default (16KB)
@@ -714,7 +714,7 @@ pub fn dispatch_tool(
             .unwrap_or(false);
 
     // Count methods for multi-method budget scaling
-    let method_count = if tool_name == "search_callers" {
+    let method_count = if tool_name == "xray_callers" {
         arguments.get("method").and_then(|v| v.as_str())
             .map(|m| m.split(',').filter(|s| !s.trim().is_empty()).count())
             .unwrap_or(1)
@@ -722,9 +722,9 @@ pub fn dispatch_tool(
         1
     };
 
-    let effective_max = if tool_name == "search_help" {
-        ctx.max_response_bytes.max(SEARCH_HELP_MIN_RESPONSE_BYTES)
-    } else if tool_name == "search_callers" && method_count > 1 {
+    let effective_max = if tool_name == "xray_help" {
+        ctx.max_response_bytes.max(XRAY_HELP_MIN_RESPONSE_BYTES)
+    } else if tool_name == "xray_callers" && method_count > 1 {
         // Multi-method batch: scale budget proportionally, cap at 128KB
         let scaled = MULTI_METHOD_RESPONSE_BYTES_PER * method_count;
         ctx.max_response_bytes.max(scaled.min(MULTI_METHOD_RESPONSE_MAX))
@@ -735,8 +735,8 @@ pub fn dispatch_tool(
     };
 
     if ctx.metrics {
-        if tool_name == "search_help" {
-            // search_help is static content, no need for metrics injection
+        if tool_name == "xray_help" {
+            // xray_help is static content, no need for metrics injection
             utils::truncate_response_if_needed(result, effective_max)
         } else {
             utils::inject_metrics(result, ctx, dispatch_start, effective_max)
@@ -749,17 +749,17 @@ pub fn dispatch_tool(
 
 // ─── Small inline handlers ──────────────────────────────────────────
 
-fn handle_search_help(ctx: &HandlerContext) -> ToolCallResult {
+fn handle_xray_help(ctx: &HandlerContext) -> ToolCallResult {
     let help = crate::tips::render_json(&ctx.def_extensions);
     ToolCallResult::success(utils::json_to_string(&help))
 }
 
-/// Build search_info response from in-memory indexes only.
+/// Build xray_info response from in-memory indexes only.
 /// Previous implementation called `cmd_info_json()` which deserialized ALL index
 /// files from disk (~1.8 GB for multi-repo setups), causing a massive memory spike.
 /// This version reads stats directly from the already-loaded in-memory structures
 /// via read locks — zero additional allocations.
-fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
+fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
     let mut indexes = Vec::new();
     let mut memory_estimate = json!({});
 
@@ -906,7 +906,7 @@ fn handle_search_info(ctx: &HandlerContext) -> ToolCallResult {
     ToolCallResult::success(utils::json_to_string(&info))
 }
 
-fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir);
     let ext = args.get("ext").and_then(|v| v.as_str())
         .map(|s| s.to_string())
@@ -995,7 +995,7 @@ fn handle_search_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     ToolCallResult::success(utils::json_to_string(&output))
 }
 
-fn handle_search_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index_arc = match &ctx.def_index {
         Some(di) => Arc::clone(di),
         None => return ToolCallResult::error(

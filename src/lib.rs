@@ -1,4 +1,4 @@
-//! # search-index — High-Performance Code Search Engine
+//! # Xray — High-Performance Code Intelligence Engine
 //!
 //! Inverted index + AST-based code intelligence engine for large-scale codebases.
 //! Sub-microsecond content search, structural code navigation, and native MCP server.
@@ -429,7 +429,7 @@ impl Default for ContentIndex {
 /// # Examples
 ///
 /// ```
-/// use search_index::tokenize;
+/// use code_xray::tokenize;
 ///
 /// let tokens = tokenize("private readonly HttpClient _client;", 2);
 /// assert!(tokens.contains(&"private".to_string()));

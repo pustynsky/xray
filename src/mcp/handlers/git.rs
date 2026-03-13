@@ -9,7 +9,7 @@
 //! responses. When the cache is not ready (building or disabled), handlers
 //! fall back to the existing CLI-based `git log` calls.
 //!
-//! Exception: `search_git_diff` always uses CLI (cache has no patch data).
+//! Exception: `xray_git_diff` always uses CLI (cache has no patch data).
 
 use std::path::Path;
 use std::sync::atomic::Ordering;
@@ -28,7 +28,7 @@ use super::utils::json_to_string;
 pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition> {
     vec![
         crate::mcp::protocol::ToolDefinition {
-            name: "search_git_history".to_string(),
+            name: "xray_git_history".to_string(),
             description: "Get commit history for a specific file in a git repository. Returns a list of commits that modified the file, with hash, date, author, and message. Use date filters to narrow results. Uses in-memory cache for sub-millisecond responses when available, falls back to git CLI.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -47,8 +47,8 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             }),
         },
         crate::mcp::protocol::ToolDefinition {
-            name: "search_git_diff".to_string(),
-            description: "Get commit history with full diff/patch for a specific file. Same as search_git_history but includes added/removed lines for each commit. Patches are truncated to ~200 lines per commit to manage output size. Always uses git CLI (cache has no patch data).".to_string(),
+            name: "xray_git_diff".to_string(),
+            description: "Get commit history with full diff/patch for a specific file. Same as xray_git_history but includes added/removed lines for each commit. Patches are truncated to ~200 lines per commit to manage output size. Always uses git CLI (cache has no patch data).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -65,7 +65,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             }),
         },
         crate::mcp::protocol::ToolDefinition {
-            name: "search_git_authors".to_string(),
+            name: "xray_git_authors".to_string(),
             description: "Get top authors/contributors for a file or directory, ranked by number of commits. Shows who changed this path the most, with commit count and date range. For directories, aggregates across all files within. If no path specified, returns ownership for the entire repo.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -83,7 +83,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             }),
         },
         crate::mcp::protocol::ToolDefinition {
-            name: "search_git_blame".to_string(),
+            name: "xray_git_blame".to_string(),
             description: "Show author, date, and commit for each line in a given range of a file. Useful for finding who wrote specific code, when it was last changed, and which commit introduced it.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -97,7 +97,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             }),
         },
         crate::mcp::protocol::ToolDefinition {
-            name: "search_git_activity".to_string(),
+            name: "xray_git_activity".to_string(),
             description: "Get activity across ALL files in a repository for a date range. Returns a map of changed files with their commits. Useful for answering 'what changed this week?' Date filters are recommended to keep results manageable.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -115,7 +115,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
             }),
         },
         crate::mcp::protocol::ToolDefinition {
-            name: "search_branch_status".to_string(),
+            name: "xray_branch_status".to_string(),
             description: "Shows the current git branch status: branch name, whether it's main/master, how far behind/ahead of remote, uncommitted changes, and how fresh the last fetch is. Call this before investigating production bugs to ensure you're looking at the right code.".to_string(),
             input_schema: json!({
                 "type": "object",
@@ -135,12 +135,12 @@ pub(crate) fn dispatch_git_tool(
     arguments: &Value,
 ) -> ToolCallResult {
     match tool_name {
-        "search_git_history" => handle_git_history(ctx, arguments, false),
-        "search_git_diff" => handle_git_history(ctx, arguments, true),
-        "search_git_authors" => handle_git_authors(ctx, arguments),
-        "search_git_activity" => handle_git_activity(ctx, arguments),
-        "search_git_blame" => handle_git_blame(ctx, arguments),
-        "search_branch_status" => handle_branch_status(ctx, arguments),
+        "xray_git_history" => handle_git_history(ctx, arguments, false),
+        "xray_git_diff" => handle_git_history(ctx, arguments, true),
+        "xray_git_authors" => handle_git_authors(ctx, arguments),
+        "xray_git_activity" => handle_git_activity(ctx, arguments),
+        "xray_git_blame" => handle_git_blame(ctx, arguments),
+        "xray_branch_status" => handle_branch_status(ctx, arguments),
         _ => ToolCallResult::error(format!("Unknown git tool: {}", tool_name)),
     }
 }
@@ -236,7 +236,7 @@ fn format_timestamp(ts: i64) -> String {
 
 // ─── Individual handlers ────────────────────────────────────────────
 
-/// Handle search_git_history and search_git_diff (shared logic, diff controlled by `include_diff`).
+/// Handle xray_git_history and xray_git_diff (shared logic, diff controlled by `include_diff`).
 fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) -> ToolCallResult {
     let repo = match args.get("repo").and_then(|v| v.as_str()) {
         Some(r) => r,
@@ -284,7 +284,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                 let mut output = json!({
                     "commits": commits_json,
                     "summary": {
-                        "tool": "search_git_history",
+                        "tool": "xray_git_history",
                         "totalCommits": total_count,
                         "returned": commits_json.len(),
                         "file": file,
@@ -336,7 +336,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                 obj
             }).collect();
 
-            let tool_name = if include_diff { "search_git_diff" } else { "search_git_history" };
+            let tool_name = if include_diff { "xray_git_diff" } else { "xray_git_history" };
 
             let mut output = json!({
                 "commits": commits_json,
@@ -365,7 +365,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
     }
 }
 
-/// Handle search_git_authors.
+/// Handle xray_git_authors.
 fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let repo = match args.get("repo").and_then(|v| v.as_str()) {
         Some(r) => r,
@@ -419,7 +419,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 let mut output = json!({
                     "authors": authors_json,
                     "summary": {
-                        "tool": "search_git_authors",
+                        "tool": "xray_git_authors",
                         "totalCommits": total_commits,
                         "totalAuthors": total_authors,
                         "returned": authors_json.len(),
@@ -466,7 +466,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             let mut output = json!({
                 "authors": authors_json,
                 "summary": {
-                    "tool": "search_git_authors",
+                    "tool": "xray_git_authors",
                     "totalCommits": total_commits,
                     "totalAuthors": total_authors,
                     "returned": authors_json.len(),
@@ -486,7 +486,7 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     }
 }
 
-/// Handle search_git_activity.
+/// Handle xray_git_activity.
 fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let repo = match args.get("repo").and_then(|v| v.as_str()) {
         Some(r) => r,
@@ -533,7 +533,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 let mut output = json!({
                     "activity": files_array,
                     "summary": {
-                        "tool": "search_git_activity",
+                        "tool": "xray_git_activity",
                         "filesChanged": total_files,
                         "totalEntries": total_entries,
                         "commitsProcessed": cache.commits.len(),
@@ -599,7 +599,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             let mut output = json!({
                 "activity": files_array,
                 "summary": {
-                    "tool": "search_git_activity",
+                    "tool": "xray_git_activity",
                     "filesChanged": total_files,
                     "totalEntries": total_entries,
                     "commitsProcessed": commits_processed,
@@ -622,7 +622,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Err(e) => ToolCallResult::error(e),
     }
 }
-/// Handle search_git_blame — always uses CLI (no cache for blame data).
+/// Handle xray_git_blame — always uses CLI (no cache for blame data).
 fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let repo = match args.get("repo").and_then(|v| v.as_str()) {
         Some(r) => r,
@@ -681,7 +681,7 @@ fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             let output = json!({
                 "blame": blame_json,
                 "summary": {
-                    "tool": "search_git_blame",
+                    "tool": "xray_git_blame",
                     "file": file,
                     "lineRange": format!("{}-{}", start_line, effective_end),
                     "uniqueAuthors": unique_authors.len(),
@@ -700,7 +700,7 @@ fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
 // ─── Branch status handler ──────────────────────────────────────────
 
-/// Handle search_branch_status — shows current branch, ahead/behind, dirty files, fetch age.
+/// Handle xray_branch_status — shows current branch, ahead/behind, dirty files, fetch age.
 fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let repo = match args.get("repo").and_then(|v| v.as_str()) {
         Some(r) => r,
@@ -752,7 +752,7 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         "fetchWarning": fetch_warning,
         "warning": warning,
         "summary": {
-            "tool": "search_branch_status",
+            "tool": "xray_branch_status",
             "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
         }
     });

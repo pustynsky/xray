@@ -13,7 +13,7 @@ fn test_handle_initialize() {
     assert_eq!(result["jsonrpc"], "2.0");
     assert_eq!(result["id"], 1);
     assert_eq!(result["result"]["protocolVersion"], "2025-03-26");
-    assert_eq!(result["result"]["serverInfo"]["name"], "search-index");
+    assert_eq!(result["result"]["serverInfo"]["name"], "xray");
 }
 
 #[test]
@@ -25,20 +25,20 @@ fn test_handle_tools_list() {
     let tools = result["result"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 16);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
-    assert!(names.contains(&"search_grep"));
-    assert!(names.contains(&"search_find"));
-    assert!(names.contains(&"search_fast"));
-    assert!(names.contains(&"search_info"));
-    assert!(names.contains(&"search_reindex"));
-    assert!(names.contains(&"search_reindex_definitions"));
-    assert!(names.contains(&"search_definitions"));
+    assert!(names.contains(&"xray_grep"));
+    assert!(names.contains(&"xray_find"));
+    assert!(names.contains(&"xray_fast"));
+    assert!(names.contains(&"xray_info"));
+    assert!(names.contains(&"xray_reindex"));
+    assert!(names.contains(&"xray_reindex_definitions"));
+    assert!(names.contains(&"xray_definitions"));
 }
 
 #[test]
 fn test_handle_tools_call_grep() {
     let ctx = make_ctx();
     let params = json!({
-        "name": "search_grep",
+        "name": "xray_grep",
         "arguments": { "terms": "HttpClient" }
     });
     let result = handle_request(&ctx, "tools/call", &Some(params), json!(3));
@@ -87,7 +87,7 @@ fn test_handle_request_does_not_panic_on_serialization() {
     let methods = vec![
         ("initialize", None),
         ("tools/list", None),
-        ("tools/call", Some(json!({"name": "search_grep", "arguments": {"terms": "test"}}))),
+        ("tools/call", Some(json!({"name": "xray_grep", "arguments": {"terms": "test"}}))),
         ("tools/call", None), // missing params branch
         ("ping", None),
         ("unknown/method", None),
@@ -142,7 +142,7 @@ fn test_initialize_def_extension_filtering() {
     let instructions2 = result2["result"]["instructions"].as_str().unwrap();
     assert!(!instructions2.contains("NEVER READ"),
         "empty def_extensions should NOT have NEVER READ block");
-    assert!(instructions2.contains("search_definitions is not available"),
+    assert!(instructions2.contains("xray_definitions is not available"),
         "empty def_extensions should have fallback note");
 
     // def_extensions=["cs","ts","sql"] → all three mentioned
@@ -165,12 +165,12 @@ fn test_tools_list_dynamic_descriptions_rust() {
     ctx.def_extensions = vec!["rs".to_string()];
     let result = handle_request(&ctx, "tools/list", &None, json!(2));
     let tools = result["result"]["tools"].as_array().unwrap();
-    let def_tool = tools.iter().find(|t| t["name"] == "search_definitions").unwrap();
+    let def_tool = tools.iter().find(|t| t["name"] == "xray_definitions").unwrap();
     let desc = def_tool["description"].as_str().unwrap();
     assert!(desc.contains("Rust"),
-        "tools/list search_definitions should mention 'Rust' when def_extensions=[rs]. Got: {}", desc);
+        "tools/list xray_definitions should mention 'Rust' when def_extensions=[rs]. Got: {}", desc);
     assert!(!desc.contains("C#"),
-        "tools/list search_definitions should NOT mention C# for rs-only config");
+        "tools/list xray_definitions should NOT mention C# for rs-only config");
 }
 
 #[test]
@@ -178,10 +178,10 @@ fn test_tools_list_dynamic_descriptions_empty() {
     let ctx = make_ctx(); // default: def_extensions = []
     let result = handle_request(&ctx, "tools/list", &None, json!(2));
     let tools = result["result"]["tools"].as_array().unwrap();
-    let def_tool = tools.iter().find(|t| t["name"] == "search_definitions").unwrap();
+    let def_tool = tools.iter().find(|t| t["name"] == "xray_definitions").unwrap();
     let desc = def_tool["description"].as_str().unwrap();
     assert!(desc.contains("not available"),
-        "tools/list search_definitions should say 'not available' when def_extensions is empty");
+        "tools/list xray_definitions should say 'not available' when def_extensions is empty");
 }
 
 /// Regression test for Bug 1: initialize and tools/list must use the SAME def_extensions.
@@ -197,12 +197,12 @@ fn test_initialize_consistent_with_tools_list_empty_def_extensions() {
          This would contradict tools/list which says 'not available'. Got:\n{}",
         &instructions[..200.min(instructions.len())]);
     // Should contain fallback note instead
-    assert!(instructions.contains("search_definitions is not available"),
+    assert!(instructions.contains("xray_definitions is not available"),
         "initialize with empty def_extensions should have fallback note");
 }
 
 /// Regression test: initialize with def_extensions=["rs"] must say "NEVER READ .rs" and
-/// tools/list search_definitions must say "Rust" — both from ctx.def_extensions.
+/// tools/list xray_definitions must say "Rust" — both from ctx.def_extensions.
 #[test]
 fn test_initialize_consistent_with_tools_list_rust() {
     let mut ctx = make_ctx();
@@ -215,10 +215,10 @@ fn test_initialize_consistent_with_tools_list_rust() {
     // tools/list
     let tools_result = handle_request(&ctx, "tools/list", &None, json!(2));
     let tools = tools_result["result"]["tools"].as_array().unwrap();
-    let def_tool = tools.iter().find(|t| t["name"] == "search_definitions").unwrap();
+    let def_tool = tools.iter().find(|t| t["name"] == "xray_definitions").unwrap();
     let desc = def_tool["description"].as_str().unwrap();
     assert!(desc.contains("Rust"),
-        "tools/list search_definitions should mention 'Rust'");
+        "tools/list xray_definitions should mention 'Rust'");
 }
 
 

@@ -64,16 +64,16 @@ fn make_rs_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     (ctx, tmp_dir)
 }
 
-// ─── search_definitions tests ────────────────────────────────────────
+// ─── xray_definitions tests ────────────────────────────────────────
 
 #[test]
-fn test_rust_search_definitions_finds_struct() {
+fn test_rust_xray_definitions_finds_struct() {
     let (ctx, tmp) = make_rs_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "OrderService",
         "kind": "struct"
     }));
-    assert!(!result.is_error, "search_definitions should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_definitions should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
     assert_eq!(defs.len(), 1, "Expected 1 struct named OrderService, got {}", defs.len());
@@ -83,9 +83,9 @@ fn test_rust_search_definitions_finds_struct() {
 }
 
 #[test]
-fn test_rust_search_definitions_finds_method() {
+fn test_rust_xray_definitions_finds_method() {
     let (ctx, tmp) = make_rs_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "process",
         "kind": "method"
     }));
@@ -99,18 +99,18 @@ fn test_rust_search_definitions_finds_method() {
     cleanup_tmp(&tmp);
 }
 
-// ─── search_callers tests ────────────────────────────────────────────
+// ─── xray_callers tests ────────────────────────────────────────────
 
 #[test]
-fn test_rust_search_callers_down() {
+fn test_rust_xray_callers_down() {
     let (ctx, tmp) = make_rs_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "process",
         "class": "OrderService",
         "direction": "down",
         "depth": 1
     }));
-    assert!(!result.is_error, "search_callers down should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_callers down should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let tree = output["callTree"].as_array().unwrap();
     // process() calls self.validate() — should appear in callees
@@ -125,7 +125,7 @@ fn test_rust_search_callers_down() {
 #[test]
 fn test_rust_include_body() {
     let (ctx, tmp) = make_rs_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "process",
         "includeBody": true
     }));
@@ -184,7 +184,7 @@ fn test_rust_incremental_update_through_handler() {
     };
 
     // Verify OldService is found
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({"name": "OldService"}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "OldService"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(!output["definitions"].as_array().unwrap().is_empty(), "OldService should be found");
@@ -205,11 +205,11 @@ fn test_rust_incremental_update_through_handler() {
     }
 
     // NewService found, OldService gone
-    let result_new = dispatch_tool(&ctx, "search_definitions", &json!({"name": "NewService"}));
+    let result_new = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "NewService"}));
     let output_new: Value = serde_json::from_str(&result_new.content[0].text).unwrap();
     assert!(!output_new["definitions"].as_array().unwrap().is_empty(), "NewService should be found");
 
-    let result_old = dispatch_tool(&ctx, "search_definitions", &json!({"name": "OldService"}));
+    let result_old = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "OldService"}));
     let output_old: Value = serde_json::from_str(&result_old.content[0].text).unwrap();
     assert!(output_old["definitions"].as_array().unwrap().is_empty(), "OldService should be gone");
 
@@ -223,7 +223,7 @@ fn test_rust_reindex_definitions_success() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp_dir = std::env::temp_dir().join(format!("search_reindex_rs_{}_{}", std::process::id(), id));
+    let tmp_dir = std::env::temp_dir().join(format!("xray_reindex_rs_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
     let rs_file = tmp_dir.join("sample.rs");
@@ -256,7 +256,7 @@ fn test_rust_reindex_definitions_success() {
         ..Default::default()
     };
 
-    let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({}));
     assert!(!result.is_error, "Reindex should succeed: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["status"], "ok");

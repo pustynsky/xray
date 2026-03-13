@@ -282,7 +282,7 @@ fn test_branch_status_has_summary() {
     let result = handle_branch_status(&ctx, &args);
     assert!(!result.is_error, "Should succeed");
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    assert_eq!(output["summary"]["tool"].as_str(), Some("search_branch_status"));
+    assert_eq!(output["summary"]["tool"].as_str(), Some("xray_branch_status"));
     assert!(output["summary"]["elapsedMs"].as_f64().is_some());
 }
 

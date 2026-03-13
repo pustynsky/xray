@@ -337,11 +337,11 @@ fn test_truncate_response_if_needed_small() {
 #[test]
 fn test_inject_response_guidance_creates_summary() {
     let result = ToolCallResult::success(r#"{"files":[]}"#.to_string());
-    let result = inject_response_guidance(result, "search_grep", "rs, md");
+    let result = inject_response_guidance(result, "xray_grep", "rs, md");
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output.get("summary").is_some());
     let reminder = output["summary"]["policyReminder"].as_str().unwrap();
-    assert!(reminder.contains("SEARCH_INDEX_POLICY"), "should contain policy header");
+    assert!(reminder.contains("XRAY_POLICY"), "should contain policy header");
     assert!(reminder.contains("Indexed extensions: rs, md"), "should contain indexed extensions");
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
 }
@@ -349,17 +349,17 @@ fn test_inject_response_guidance_creates_summary() {
 #[test]
 fn test_inject_response_guidance_skips_non_json_success() {
     let result = ToolCallResult::success("plain text".to_string());
-    let result = inject_response_guidance(result, "search_grep", "rs, md");
+    let result = inject_response_guidance(result, "xray_grep", "rs, md");
     assert_eq!(result.content[0].text, "plain text");
 }
 
 #[test]
 fn test_inject_response_guidance_empty_ext() {
     let result = ToolCallResult::success(r#"{"files":[]}"#.to_string());
-    let result = inject_response_guidance(result, "search_grep", "");
+    let result = inject_response_guidance(result, "xray_grep", "");
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let reminder = output["summary"]["policyReminder"].as_str().unwrap();
-    assert!(reminder.contains("SEARCH_INDEX_POLICY"), "should contain policy header");
+    assert!(reminder.contains("XRAY_POLICY"), "should contain policy header");
     assert!(!reminder.contains("Indexed extensions"), "should NOT contain extensions when empty");
 }
 
@@ -374,7 +374,7 @@ fn test_build_policy_reminder_with_extensions() {
 fn test_build_policy_reminder_empty_ext() {
     let reminder = build_policy_reminder("");
     assert!(!reminder.contains("Indexed extensions"));
-    assert!(reminder.contains("SEARCH_INDEX_POLICY"));
+    assert!(reminder.contains("XRAY_POLICY"));
 }
 
 #[test]
@@ -385,7 +385,7 @@ fn test_build_policy_reminder_whitespace_only_ext() {
 
 #[test]
 fn test_truncate_definitions_array() {
-    // Build a search_definitions-style response with many definitions — way over budget
+    // Build a xray_definitions-style response with many definitions — way over budget
     let mut defs = Vec::new();
     for i in 0..5000 {
         defs.push(json!({
@@ -1439,7 +1439,7 @@ fn test_name_similarity_completely_different() {
 
 #[test]
 fn test_name_similarity_partial_match() {
-    let score = name_similarity("handle_search_callers", "handle_search_definitions");
+    let score = name_similarity("handle_xray_callers", "handle_xray_definitions");
     assert!(score > 0.5, "Partial match should score above 0.5, got {}", score);
     assert!(score < 1.0, "Partial match should not be 1.0, got {}", score);
 }

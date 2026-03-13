@@ -1,4 +1,4 @@
-//! search_find handler: live filesystem walk for file name/content search.
+//! xray_find handler: live filesystem walk for file name/content search.
 
 use std::path::Path;
 use std::time::Instant;
@@ -10,7 +10,7 @@ use crate::mcp::protocol::ToolCallResult;
 use super::utils::{json_to_string, validate_search_dir};
 use super::HandlerContext;
 
-pub(crate) fn handle_search_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+pub(crate) fn handle_xray_find(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let pattern = match args.get("pattern").and_then(|v| v.as_str()) {
         Some(p) => p.to_string(),
         None => return ToolCallResult::error("Missing required parameter: pattern".to_string()),

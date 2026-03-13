@@ -35,23 +35,23 @@ Real production C# codebase (enterprise backend monorepo):
 
 ## Content Search: search vs ripgrep
 
-Single-term search for `HttpClient` across the full codebase. search-index.exe token matching finds 1,072 files; rg substring matching finds 2,092 files (includes `IHttpClientFactory`, `HttpClientHandler`, etc.):
+Single-term search for `HttpClient` across the full codebase. xray.exe token matching finds 1,072 files; rg substring matching finds 2,092 files (includes `IHttpClientFactory`, `HttpClientHandler`, etc.):
 
 | Tool                                           | Operation                                               | Total Time | Speedup     |
 | ---------------------------------------------- | ------------------------------------------------------- | ---------- | ----------- |
 | `rg HttpClient -g '*.cs' -l`                   | Live file scan                                          | 32.0s      | baseline    |
-| `search-index find "HttpClient" --contents -e cs -c` | Live parallel walk (24 threads)                         | 14.5s      | **2×**      |
-| `search-index grep "HttpClient" -e cs -c`            | Inverted index (total incl. load)                       | 1.76s      | **18×**     |
+| `xray find "HttpClient" --contents -e cs -c` | Live parallel walk (24 threads)                         | 14.5s      | **2×**      |
+| `xray grep "HttpClient" -e cs -c`            | Inverted index (total incl. load)                       | 1.76s      | **18×**     |
 | ↳ index load from disk                         | LZ4 decompress + bincode deserialize (223.7 MB on disk) | 1.19s      | —           |
 | ↳ search + TF-IDF rank                         | HashMap lookup + scoring                                | 0.757ms    | **42,300×** |
 
 > **Note:** In MCP server mode, the index is loaded once at startup. All subsequent queries pay only the search+rank cost (0.6–4ms depending on hardware), not the load cost.
 >
-> **Note:** `search-index find` (live parallel walk) is slower than indexed search because it reads all 48,779 files from disk. Its advantage over rg is modest (2×) since both perform full filesystem scans. The real speedup comes from the inverted index (18× total, 42,300× in-memory).
+> **Note:** `xray find` (live parallel walk) is slower than indexed search because it reads all 48,779 files from disk. Its advantage over rg is modest (2×) since both perform full filesystem scans. The real speedup comes from the inverted index (18× total, 42,300× in-memory).
 
 ## CLI Search Latency (index pre-loaded from disk)
 
-Measured via `search-index grep` on 48,779-file C# index (754K unique tokens). Search+Rank is the pure in-memory search time; total CLI time also includes index load from disk (~1.2s, LZ4 decompress + bincode deserialize):
+Measured via `xray grep` on 48,779-file C# index (754K unique tokens). Search+Rank is the pure in-memory search time; total CLI time also includes index load from disk (~1.2s, LZ4 decompress + bincode deserialize):
 
 | Query Type                                            | Search+Rank Time | Files Matched | Notes                   |
 | ----------------------------------------------------- | ---------------- | ------------- | ----------------------- |
@@ -63,9 +63,9 @@ Measured via `search-index grep` on 48,779-file C# index (754K unique tokens). S
 | Regex (`I.*Cache`)                                    | 60.6ms           | 1,425         | rg: 2,650 files (33.6s) |
 | Exclude filters (`StorageIndexManager`)               | 0.025ms          | 2             | rg: 4 files (22.9s)     |
 
-**File count differences**: search-index.exe uses exact token matching by default in CLI mode (no `--substring` flag). rg does substring content matching. In MCP mode, `substring=true` is the default, so MCP file counts typically match rg.
+**File count differences**: xray.exe uses exact token matching by default in CLI mode (no `--substring` flag). rg does substring content matching. In MCP mode, `substring=true` is the default, so MCP file counts typically match rg.
 
-## MCP Server: search_grep vs ripgrep (11-Test Suite)
+## MCP Server: xray_grep vs ripgrep (11-Test Suite)
 
 Comprehensive comparison of MCP `tools/call` JSON-RPC queries vs `rg` (ripgrep v14.x) on the same codebase. All MCP times are in-memory (index pre-loaded at server startup); rg performs a full filesystem scan per query.
 
@@ -86,77 +86,77 @@ Comprehensive comparison of MCP `tools/call` JSON-RPC queries vs `rg` (ripgrep v
 | 11  | Call tree (3 levels deep)                             | 48 nodes  | N/A²       | **0.49**      | N/A          | **∞**          |
 
 > ¹ rg AND returned 0 files due to a PowerShell scripting issue with `ForEach-Object` pipeline, not a real result.
-> ² `search_callers` has no rg equivalent — it combines grep index + AST index + recursive traversal in a single 0.49ms operation. Building a 3-level call tree manually with rg would require 7+ sequential queries (estimated 5+ minutes of agent round-trips).
+> ² `xray_callers` has no rg equivalent — it combines grep index + AST index + recursive traversal in a single 0.49ms operation. Building a 3-level call tree manually with rg would require 7+ sequential queries (estimated 5+ minutes of agent round-trips).
 
 ### Test Descriptions
 
 #### Test 1: Token search (single term, common identifier)
 
 - **What it tests**: Basic inverted index lookup, TF-IDF ranking
-- **MCP**: `search_grep terms="OrderServiceProvider" countOnly=true`
+- **MCP**: `xray_grep terms="OrderServiceProvider" countOnly=true`
 - **rg**: `rg "OrderServiceProvider" --type cs -l`
 
 #### Test 2: Multi-term OR search (find all variants of a class)
 
 - **What it tests**: Multi-term OR mode, ranking across variants
-- **MCP**: `search_grep terms="UserMapperCache,IUserMapperCache,UserMapperCacheEntry" mode="or" countOnly=true`
+- **MCP**: `xray_grep terms="UserMapperCache,IUserMapperCache,UserMapperCacheEntry" mode="or" countOnly=true`
 - **rg**: `rg "UserMapperCache|IUserMapperCache|UserMapperCacheEntry" --type cs -l`
 
 #### Test 3: Multi-term AND search (find files using multiple types together)
 
 - **What it tests**: AND mode intersection
-- **MCP**: `search_grep terms="IFeatureResolver,MonitoredTask" mode="and" countOnly=true`
+- **MCP**: `xray_grep terms="IFeatureResolver,MonitoredTask" mode="and" countOnly=true`
 - **rg**: `rg -l "IFeatureResolver" | ForEach-Object { if (rg -q "MonitoredTask" $_) { $_ } }`
 
 #### Test 4: Substring search (compound camelCase identifier)
 
 - **What it tests**: Trigram-based substring matching (now the default behavior)
-- **MCP**: `search_grep terms="FindAsyncWithQuery" countOnly=true` (substring=true is the default)
+- **MCP**: `xray_grep terms="FindAsyncWithQuery" countOnly=true` (substring=true is the default)
   → matched tokens: `findasyncwithqueryactivity`, `findasyncwithqueryactivityname`
 - **rg**: `rg "FindAsyncWithQuery" --type cs -l`
 
 #### Test 5: Substring search (short substring inside long identifiers)
 
 - **What it tests**: Trigram matching for 4+ char substrings (now the default behavior)
-- **MCP**: `search_grep terms="ProductQuery" countOnly=true` (substring=true is the default)
+- **MCP**: `xray_grep terms="ProductQuery" countOnly=true` (substring=true is the default)
   → matched 46 distinct tokens (productquerybuilder, iproductquerymanager, parsedproductqueryrequest, etc.)
 - **rg**: `rg "ProductQuery" --type cs -l`
 
 #### Test 6: Phrase search (exact multi-word sequence)
 
 - **What it tests**: Phrase matching across adjacent tokens (requires line-by-line scan)
-- **MCP**: `search_grep terms="new ConcurrentDictionary" phrase=true countOnly=true`
+- **MCP**: `xray_grep terms="new ConcurrentDictionary" phrase=true countOnly=true`
 - **rg**: `rg "new ConcurrentDictionary" --type cs -l`
 
 #### Test 7: Regex search (pattern matching)
 
 - **What it tests**: Regex over tokenized index
-- **MCP**: `search_grep terms="I.*Cache" regex=true countOnly=true`
+- **MCP**: `xray_grep terms="I.*Cache" regex=true countOnly=true`
 - **rg**: `rg "I\w*Cache" --type cs -l`
 
 #### Test 8: Full results with context lines
 
 - **What it tests**: Line-level results, context window, ranking relevance
-- **MCP**: `search_grep terms="InitializeIndexAsync" showLines=true contextLines=3 maxResults=5`
+- **MCP**: `xray_grep terms="InitializeIndexAsync" showLines=true contextLines=3 maxResults=5`
 - **rg**: `rg "InitializeIndexAsync" --type cs -C 3`
 
 #### Test 9: Exclusion filters (production-only results)
 
 - **What it tests**: Exclude patterns for Test/Mock filtering
-- **MCP**: `search_grep terms="StorageIndexManager" exclude=["Test","Mock"] excludeDir=["test"] countOnly=true`
+- **MCP**: `xray_grep terms="StorageIndexManager" exclude=["Test","Mock"] excludeDir=["test"] countOnly=true`
 - **rg**: `rg "StorageIndexManager" --type cs -l --glob "!*Test*" --glob "!*Mock*" --glob "!*test*"`
 
 #### Test 10: AST definitions with inline source code
 
 - **What it tests**: Tree-sitter AST index, definition lookup with inline source code
-- **MCP**: `search_definitions name="InitializeIndexAsync" kind="method" includeBody=true maxBodyLines=20`
+- **MCP**: `xray_definitions name="InitializeIndexAsync" kind="method" includeBody=true maxBodyLines=20`
   → Returns 18 structured definitions with signatures, parent classes, line ranges, and source code
 - **rg**: `rg "InitializeIndexAsync" --type cs -A 20` (approximate, unstructured)
 
 #### Test 11: Call tree (callers analysis)
 
 - **What it tests**: Recursive caller tracing with depth
-- **MCP**: `search_callers method="InitializeIndexAsync" class="StorageIndexManager" depth=3 excludeDir=["test","Test","Mock"]`
+- **MCP**: `xray_callers method="InitializeIndexAsync" class="StorageIndexManager" depth=3 excludeDir=["test","Test","Mock"]`
   → Returns 48-node hierarchical call tree in ~0.5–11ms (varies by direction and graph density)
 - **rg**: No equivalent. Would require 7+ sequential `rg` + `read_file` calls (estimated 5+ minutes of agent round-trips)
 
@@ -202,18 +202,18 @@ Both modes complete in ~1ms. The default substring mode finds **28 matched token
 
 **Note**: Substring mode is auto-disabled when `regex=true` or `phrase=true` is used (these modes have their own matching semantics). If you explicitly pass `substring=true` with `regex=true`, the tool returns an error to flag the conflict.
 
-## MCP Server: search_definitions and search_callers
+## MCP Server: xray_definitions and xray_callers
 
 Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O on queries.
 
-| #   | Task                                     | ripgrep (`rg`) | search-index MCP | Speedup       | MCP Tool                            |
+| #   | Task                                     | ripgrep (`rg`) | xray MCP | Speedup       | MCP Tool                            |
 | --- | ---------------------------------------- | -------------- | ---------------- | ------------- | ----------------------------------- |
-| 1   | Find a method definition by name         | 48,993 ms      | 38.7 ms          | **1,266×**    | `search_definitions`                |
-| 2   | Build a call tree (3 levels deep)        | 52,121 ms ¹    | 0.51 ms          | **~100,000×** | `search_callers`                    |
-| 3   | Find which method contains line N        | 195 ms ²       | 7.7 ms           | **25×**       | `search_definitions` (containsLine) |
-| 4   | Find all implementations of an interface | 56,222 ms      | 0.63 ms          | **~89,000×**  | `search_definitions` (baseType)     |
-| 5   | Find interfaces matching a regex         | 45,370 ms      | 58.2 ms          | **780×**      | `search_definitions` (regex)        |
-| 6   | Find classes with a specific attribute   | 38,699 ms      | 29.2 ms          | **1,325×**    | `search_definitions` (attribute)    |
+| 1   | Find a method definition by name         | 48,993 ms      | 38.7 ms          | **1,266×**    | `xray_definitions`                |
+| 2   | Build a call tree (3 levels deep)        | 52,121 ms ¹    | 0.51 ms          | **~100,000×** | `xray_callers`                    |
+| 3   | Find which method contains line N        | 195 ms ²       | 7.7 ms           | **25×**       | `xray_definitions` (containsLine) |
+| 4   | Find all implementations of an interface | 56,222 ms      | 0.63 ms          | **~89,000×**  | `xray_definitions` (baseType)     |
+| 5   | Find interfaces matching a regex         | 45,370 ms      | 58.2 ms          | **780×**      | `xray_definitions` (regex)        |
+| 6   | Find classes with a specific attribute   | 38,699 ms      | 29.2 ms          | **1,325×**    | `xray_definitions` (attribute)    |
 
 > ¹ `rg` only provides flat text search — it cannot build a call tree. The 52s is for a single `rg` query; building a 3-level tree manually would require 3–7 sequential queries totaling 150–350 seconds.
 > ² For containsLine, `rg` only reads a single file (not the full repo), so the speedup is smaller.
@@ -240,16 +240,16 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 
 | Capability             | Tool                 | What it does                                                                                                         |
 | ---------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
-| **AST definitions**    | `search_definitions` | Find classes/methods/interfaces by name, kind, parent, base type, attributes — with inline source code               |
-| **Call trees**         | `search_callers`     | Build hierarchical caller/callee trees in ~0.5ms (callees) to ~3–11ms (callers with DI resolution)                   |
-| **Structured results** | `search_grep`        | TF-IDF ranked files with occurrence counts, line numbers, context groups                                             |
-| **Substring matching** | `search_grep`        | Default `substring=true` matches inside compound identifiers (e.g., `UserMapper` finds `DeleteUserMapperCacheEntry`) |
+| **AST definitions**    | `xray_definitions` | Find classes/methods/interfaces by name, kind, parent, base type, attributes — with inline source code               |
+| **Call trees**         | `xray_callers`     | Build hierarchical caller/callee trees in ~0.5ms (callees) to ~3–11ms (callers with DI resolution)                   |
+| **Structured results** | `xray_grep`        | TF-IDF ranked files with occurrence counts, line numbers, context groups                                             |
+| **Substring matching** | `xray_grep`        | Default `substring=true` matches inside compound identifiers (e.g., `UserMapper` finds `DeleteUserMapperCacheEntry`) |
 
 ### When to Use ripgrep Instead
 
 - Searching **non-indexed file types** (XML, SQL, JSON, YAML, `.csproj`) — unless they are included in `--ext`
 - Exact **raw substring** matching needed when `substring=true` behaves differently than expected (MCP tokenizes, so `m_` prefix is a separate token)
-- search-index MCP server is not running
+- xray MCP server is not running
 - One-off searches where index build time (7–16s) is not justified
 
 ## MCP Tool Latency Summary
@@ -258,21 +258,21 @@ Verified measurements from two machines:
 
 | Tool                 | Query Type                             | Machine 1 (24 threads) | Machine 2 (16 threads) |
 | -------------------- | -------------------------------------- | ---------------------- | ---------------------- |
-| `search_grep`        | Single token (substring=true, default) | ~1 ms                  | 1.7 ms                 |
-| `search_grep`        | Single token (substring=false)         | 0.6 ms                 | 0.8 ms                 |
-| `search_grep`        | Multi-term OR (3)                      | 5.6 ms                 | 0.06 ms                |
-| `search_grep`        | Regex (i.\*cache)                      | 44 ms                  | 340 ms                 |
-| `search_grep`        | Phrase                                 | ~345 ms                | 55 ms                  |
-| `search_grep`        | Exclusion filters                      | ~0.03 ms               | 0.04 ms                |
-| `search_grep`        | Context lines (top 5)                  | ~6 ms                  | —                      |
-| `search_definitions` | Find by name                           | 38.7 ms                | —                      |
-| `search_definitions` | Find implementations (baseType)        | 0.63 ms                | —                      |
-| `search_definitions` | containsLine                           | 7.7 ms                 | —                      |
-| `search_definitions` | Attribute filter                       | 29.2 ms                | —                      |
-| `search_definitions` | With includeBody                       | ~33 ms                 | —                      |
-| `search_callers`     | Call tree — callees (down)             | 0.5 ms                 | —                      |
-| `search_callers`     | Call tree — callers (up, depth 3)      | 3–11 ms                | —                      |
-| `search_find`        | Live filesystem walk                   | —                      | 983 ms                 |
+| `xray_grep`        | Single token (substring=true, default) | ~1 ms                  | 1.7 ms                 |
+| `xray_grep`        | Single token (substring=false)         | 0.6 ms                 | 0.8 ms                 |
+| `xray_grep`        | Multi-term OR (3)                      | 5.6 ms                 | 0.06 ms                |
+| `xray_grep`        | Regex (i.\*cache)                      | 44 ms                  | 340 ms                 |
+| `xray_grep`        | Phrase                                 | ~345 ms                | 55 ms                  |
+| `xray_grep`        | Exclusion filters                      | ~0.03 ms               | 0.04 ms                |
+| `xray_grep`        | Context lines (top 5)                  | ~6 ms                  | —                      |
+| `xray_definitions` | Find by name                           | 38.7 ms                | —                      |
+| `xray_definitions` | Find implementations (baseType)        | 0.63 ms                | —                      |
+| `xray_definitions` | containsLine                           | 7.7 ms                 | —                      |
+| `xray_definitions` | Attribute filter                       | 29.2 ms                | —                      |
+| `xray_definitions` | With includeBody                       | ~33 ms                 | —                      |
+| `xray_callers`     | Call tree — callees (down)             | 0.5 ms                 | —                      |
+| `xray_callers`     | Call tree — callers (up, depth 3)      | 3–11 ms                | —                      |
+| `xray_find`        | Live filesystem walk                   | —                      | 983 ms                 |
 
 ## File Name Search
 
@@ -280,7 +280,7 @@ Searching for `notepad` in 333,875 indexed entries (C:\Windows):
 
 | Tool                                     | Operation            | Total Time |
 | ---------------------------------------- | -------------------- | ---------- |
-| `search-index fast "notepad" -d C:\Windows -c` | Pre-built file index | 0.091s     |
+| `xray fast "notepad" -d C:\Windows -c` | Pre-built file index | 0.091s     |
 
 Index load: 0.055s, search: 0.036s.
 
@@ -290,9 +290,9 @@ Three distinct indexes, each built independently:
 
 | Index Type                            | What it stores                            | CLI command            | MCP tool                     |
 | ------------------------------------- | ----------------------------------------- | ---------------------- | ---------------------------- |
-| **FileIndex** (.file-list)            | File paths, sizes, timestamps             | `search-index index`         | —                            |
-| **ContentIndex** (.word-search)       | Inverted token→file map for TF-IDF search | `search-index content-index` | `search_reindex`             |
-| **DefinitionIndex** (.code-structure) | AST definitions + call graph              | `search-index def-index`     | `search_reindex_definitions` |
+| **FileIndex** (.file-list)            | File paths, sizes, timestamps             | `xray index`         | —                            |
+| **ContentIndex** (.word-search)       | Inverted token→file map for TF-IDF search | `xray content-index` | `xray_reindex`             |
+| **DefinitionIndex** (.code-structure) | AST definitions + call graph              | `xray def-index`     | `xray_reindex_definitions` |
 
 ### Build times across machines
 
@@ -458,22 +458,22 @@ cargo build --release
 cargo bench
 
 # Real-codebase benchmarks (requires indexed directory)
-search-index content-index -d <YOUR_DIR> -e cs
+xray content-index -d <YOUR_DIR> -e cs
 
 # Measure search (PowerShell)
-Measure-Command { search-index grep "HttpClient" -d <YOUR_DIR> -e cs -c }
+Measure-Command { xray grep "HttpClient" -d <YOUR_DIR> -e cs -c }
 
 # Measure ripgrep baseline
 Measure-Command { rg "HttpClient" <YOUR_DIR> -g '*.cs' -l }
 
 # Measure index build
-Measure-Command { search-index content-index -d <YOUR_DIR> -e cs }
+Measure-Command { xray content-index -d <YOUR_DIR> -e cs }
 
 # MCP benchmarks (start server, then send JSON-RPC)
-search-index serve --dir <YOUR_DIR> --ext cs --watch --definitions
+xray serve --dir <YOUR_DIR> --ext cs --watch --definitions
 # Paste JSON-RPC messages to stdin and measure response times
 
 # Automated benchmark suite (PowerShell)
-# Runs 9 tests comparing rg vs search-index.exe CLI with real class/method names
+# Runs 9 tests comparing rg vs xray.exe CLI with real class/method names
 .\docs\run-benchmarks.ps1 -SearchDir <YOUR_DIR>
 ```

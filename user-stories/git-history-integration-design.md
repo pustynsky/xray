@@ -31,8 +31,8 @@ MCP Client (LLM)
     ▼  JSON-RPC via stdio
 search-index MCP Server
     │
-    ├── Content Index Tools (search_grep, search_fast, ...)
-    ├── Definition Index Tools (search_definitions, search_callers)
+    ├── Content Index Tools (xray_grep, xray_fast, ...)
+    ├── Definition Index Tools (xray_definitions, xray_callers)
     └── Git History Tools (NEW — 4 tools)
             │
             ▼  std::process::Command
@@ -56,7 +56,7 @@ search-index MCP Server
 
 ## 3. MCP Tools
 
-### 3.1 `search_git_history` — File Commit History
+### 3.1 `xray_git_history` — File Commit History
 
 **Purpose:** List of commits that touched a file.
 
@@ -76,9 +76,9 @@ search-index MCP Server
 
 **Output:** JSON with `commits[]` and `summary`.
 
-### 3.2 `search_git_diff` — File Diff by Commits
+### 3.2 `xray_git_diff` — File Diff by Commits
 
-Same as `search_git_history`, but each commit additionally contains `patch` (added/removed lines).
+Same as `xray_git_history`, but each commit additionally contains `patch` (added/removed lines).
 
 **Implementation:**
 
@@ -86,7 +86,7 @@ Same as `search_git_history`, but each commit additionally contains `patch` (add
 2. `git diff <hash>^..<hash> -- <file>` for each commit (parallelizable in Phase 2)
 3. Patches truncated to ~200 lines to protect LLM context
 
-### 3.3 `search_git_authors` — Who Changed a File the Most
+### 3.3 `xray_git_authors` — Who Changed a File the Most
 
 Author ranking by commit count.
 
@@ -96,7 +96,7 @@ Author ranking by commit count.
 
 **Implementation:** `git log --format=...` → aggregation in HashMap by author.
 
-### 3.4 `search_git_activity` — Repository-Wide Activity
+### 3.4 `xray_git_activity` — Repository-Wide Activity
 
 Map of `file → commits` for all changed files in a period.
 
@@ -141,7 +141,7 @@ Bloom filters allow skipping 99%+ of commits without expensive tree diff.
 
 ### 5.2 Truncation Example
 
-`search_git_activity` returned 2.4 MB (736 files × commits) → auto-truncation compressed to 51 KB (5 files out of 736). `summary.responseTruncated = true`.
+`xray_git_activity` returned 2.4 MB (736 files × commits) → auto-truncation compressed to 51 KB (5 files out of 736). `summary.responseTruncated = true`.
 
 ---
 
@@ -225,8 +225,8 @@ src/
 | Improvement           | Priority | Description                                                                                        |
 | --------------------- | -------- | -------------------------------------------------------------------------------------------------- |
 | Parallel diff queries | High     | `git diff` for N commits in parallel (rayon/thread::scope). Git reads .git/ via mmap without locks |
-| Multiple files        | Medium   | `files: string[]` parameter for `search_git_history` — parallel `git log` for each file            |
-| git blame             | Medium   | New tool `search_git_blame` — who wrote each line                                                  |
+| Multiple files        | Medium   | `files: string[]` parameter for `xray_git_history` — parallel `git log` for each file            |
+| git blame             | Medium   | New tool `xray_git_blame` — who wrote each line                                                  |
 | Commit-graph cache    | Low      | Call `git commit-graph write` if commit-graph is missing (speeds up first run)                     |
 
 ---

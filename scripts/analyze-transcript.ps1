@@ -178,7 +178,7 @@ function Extract-BuiltinToolCallDetails {
         })
     }
 
-    # list_files and list_code_definition_names (policy violations when search-index available)
+    # list_files and list_code_definition_names (policy violations when xray available)
     if ($text -match '<list_files>') {
         $details.Add(@{ tool = 'list_files'; paths = @(); extensions = @() })
     }
@@ -323,11 +323,11 @@ function Is-TargetRefinement {
         exploration (different target entity).
     .DESCRIPTION
         Compares "target identity" parameters between two calls:
-        - search_definitions: name, parent, file
-        - search_callers: method, class
-        - search_grep: terms
-        - search_fast: pattern
-        - search_edit: path
+        - xray_definitions: name, parent, file
+        - xray_callers: method, class
+        - xray_grep: terms
+        - xray_fast: pattern
+        - xray_edit: path
 
         Returns $true if there is meaningful overlap in target identity, indicating
         the model is refining the same query. Returns $false if targets are completely
@@ -340,11 +340,11 @@ function Is-TargetRefinement {
 
         # Define target keys per tool
         $targetKeys = switch ($toolName) {
-            'search_definitions' { @('name', 'parent', 'file') }
-            'search_callers'     { @('method', 'class') }
-            'search_grep'        { @('terms') }
-            'search_fast'        { @('pattern') }
-            'search_edit'        { @('path') }
+            'xray_definitions' { @('name', 'parent', 'file') }
+            'xray_callers'     { @('method', 'class') }
+            'xray_grep'        { @('terms') }
+            'xray_fast'        { @('pattern') }
+            'xray_edit'        { @('path') }
             default              { @('name', 'file', 'method', 'path', 'terms', 'pattern') }
         }
 
@@ -381,7 +381,7 @@ function Is-TargetRefinement {
         }
 
         # Rule 2: Cross-key match — name↔parent (drilling from class to its methods)
-        if ($toolName -eq 'search_definitions') {
+        if ($toolName -eq 'xray_definitions') {
             $pName   = if ($prevTargets.ContainsKey('name'))   { $prevTargets['name'] }   else { '' }
             $pParent = if ($prevTargets.ContainsKey('parent')) { $prevTargets['parent'] } else { '' }
             $cName   = if ($currTargets.ContainsKey('name'))   { $currTargets['name'] }   else { '' }
@@ -459,7 +459,7 @@ function Analyze-TruncationCause {
 
     # Tool-specific truncation markers
     $toolName = $episode.tool
-    if ($toolName -eq 'search_callers') {
+    if ($toolName -eq 'xray_callers') {
         # Callers: body truncation, maxTotalNodes, maxCallersPerLevel
         if ($resultText -match '"bodyTruncated"\s*:\s*true' -or $resultText -match 'bodyOmitted') {
             $causes += 'body_truncation'
@@ -475,7 +475,7 @@ function Analyze-TruncationCause {
             if ($causes.Count -eq 0) { $causes += 'body_budget_limit (inferred)' }
         }
     }
-    elseif ($toolName -eq 'search_definitions') {
+    elseif ($toolName -eq 'xray_definitions') {
         # Definitions: totalResults > returned count (definitions were truncated)
         if ($returnedMatch.Success -and $totalMatch.Success) {
             $returned = [int]$returnedMatch.Groups[1].Value
@@ -598,15 +598,15 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
                         paths = $bd.paths
                         extension = $ext
                         mcp_available = $mcpAvailable
-                        suggested_alternative = 'search_definitions includeBody=true maxBodyLines=0'
-                        reason = "read_file used for .$ext file (indexed extension) — should use search_definitions"
+                        suggested_alternative = 'xray_definitions includeBody=true maxBodyLines=0'
+                        reason = "read_file used for .$ext file (indexed extension) — should use xray_definitions"
                     })
                     break  # one violation per call
                 }
             }
         }
 
-        # Check for policy violations: search_files when search_grep is available
+        # Check for policy violations: search_files when xray_grep is available
         if ($bd.tool -eq 'search_files' -and $indexedExtensions.Count -gt 0) {
             $policyViolations.Add(@{
                 turn = $i
@@ -614,12 +614,12 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
                 paths = $bd.paths
                 extension = ''
                 mcp_available = $mcpAvailable
-                suggested_alternative = 'search_grep'
-                reason = 'search_files used instead of search_grep (search-index MCP available)'
+                suggested_alternative = 'xray_grep'
+                reason = 'search_files used instead of xray_grep (xray MCP available)'
             })
         }
 
-        # Check for policy violations: list_files when search_fast is available
+        # Check for policy violations: list_files when xray_fast is available
         if ($bd.tool -eq 'list_files' -and $indexedExtensions.Count -gt 0) {
             $policyViolations.Add(@{
                 turn = $i
@@ -627,12 +627,12 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
                 paths = $bd.paths
                 extension = ''
                 mcp_available = $mcpAvailable
-                suggested_alternative = 'search_fast'
-                reason = 'list_files used instead of search_fast (search-index MCP available)'
+                suggested_alternative = 'xray_fast'
+                reason = 'list_files used instead of xray_fast (xray MCP available)'
             })
         }
 
-        # Check for policy violations: list_code_definition_names when search_definitions is available
+        # Check for policy violations: list_code_definition_names when xray_definitions is available
         if ($bd.tool -eq 'list_code_definition_names' -and $indexedExtensions.Count -gt 0) {
             $policyViolations.Add(@{
                 turn = $i
@@ -640,8 +640,8 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
                 paths = $bd.paths
                 extension = ''
                 mcp_available = $mcpAvailable
-                suggested_alternative = 'search_definitions'
-                reason = 'list_code_definition_names used instead of search_definitions (search-index MCP available)'
+                suggested_alternative = 'xray_definitions'
+                reason = 'list_code_definition_names used instead of xray_definitions (xray MCP available)'
             })
         }
     }
@@ -740,7 +740,7 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
         }
 
         # Track MCP availability (for policy violation context)
-        if ($call.server -eq 'search-index') {
+        if ($call.server -eq 'xray') {
             if ($status.status -eq 'error') {
                 $mcpAvailable = $false
             }
@@ -880,12 +880,12 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
 
     # kind_mismatch: detect when term_breakdown shows 0 for some names due to wrong kind filter,
     # and the next episode changes/removes kind and finds those names
-    if ($ep.tool -eq 'search_definitions' -and $ep.term_breakdown -and $e + 1 -lt $episodes.Count) {
+    if ($ep.tool -eq 'xray_definitions' -and $ep.term_breakdown -and $e + 1 -lt $episodes.Count) {
         $nextEp = $episodes[$e + 1]
         # Check refinement inline (nextEp tags may not be computed yet in this forward pass)
-        $isNextRefinement = ($nextEp.tool -eq 'search_definitions' -and $nextEp.server -eq $ep.server -and
-            $nextEp._call_args -ne $ep._call_args -and (Is-TargetRefinement $ep._call_args $nextEp._call_args 'search_definitions'))
-        if ($nextEp.tool -eq 'search_definitions' -and $isNextRefinement) {
+        $isNextRefinement = ($nextEp.tool -eq 'xray_definitions' -and $nextEp.server -eq $ep.server -and
+            $nextEp._call_args -ne $ep._call_args -and (Is-TargetRefinement $ep._call_args $nextEp._call_args 'xray_definitions'))
+        if ($nextEp.tool -eq 'xray_definitions' -and $isNextRefinement) {
             try {
                 $currParams = $ep._call_args | ConvertFrom-Json -ErrorAction Stop
                 $nextParams = $nextEp._call_args | ConvertFrom-Json -ErrorAction Stop
@@ -940,10 +940,10 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
             $nextEp = $episodes[$la]
             foreach ($hint in $correctionHints) {
                 $hintText = $hint.text
-                if ($hintText -match 'search_grep' -and $nextEp.tool -eq 'search_grep') { $hintFollowed = $true }
-                elseif ($hintText -match 'search_definitions' -and $nextEp.tool -eq 'search_definitions') { $hintFollowed = $true }
-                elseif ($hintText -match 'search_callers' -and $nextEp.tool -eq 'search_callers') { $hintFollowed = $true }
-                elseif ($hintText -match 'search_fast' -and $nextEp.tool -eq 'search_fast') { $hintFollowed = $true }
+                if ($hintText -match 'xray_grep' -and $nextEp.tool -eq 'xray_grep') { $hintFollowed = $true }
+                elseif ($hintText -match 'xray_definitions' -and $nextEp.tool -eq 'xray_definitions') { $hintFollowed = $true }
+                elseif ($hintText -match 'xray_callers' -and $nextEp.tool -eq 'xray_callers') { $hintFollowed = $true }
+                elseif ($hintText -match 'xray_fast' -and $nextEp.tool -eq 'xray_fast') { $hintFollowed = $true }
                 # Also count as followed if same tool with different params (progressive refinement)
                 elseif ($nextEp.tool -eq $ep.tool -and $nextEp.server -eq $ep.server -and $nextEp._call_args -ne $ep._call_args) { $hintFollowed = $true }
             }
@@ -958,10 +958,10 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
             $nextEp = $episodes[$e + 1]
             foreach ($hint in $infoHints) {
                 $hintText = $hint.text
-                if ($hintText -match 'search_grep' -and $nextEp.tool -eq 'search_grep') { $hintFollowed = $true }
-                elseif ($hintText -match 'search_definitions' -and $nextEp.tool -eq 'search_definitions') { $hintFollowed = $true }
-                elseif ($hintText -match 'search_callers' -and $nextEp.tool -eq 'search_callers') { $hintFollowed = $true }
-                elseif ($hintText -match 'search_fast' -and $nextEp.tool -eq 'search_fast') { $hintFollowed = $true }
+                if ($hintText -match 'xray_grep' -and $nextEp.tool -eq 'xray_grep') { $hintFollowed = $true }
+                elseif ($hintText -match 'xray_definitions' -and $nextEp.tool -eq 'xray_definitions') { $hintFollowed = $true }
+                elseif ($hintText -match 'xray_callers' -and $nextEp.tool -eq 'xray_callers') { $hintFollowed = $true }
+                elseif ($hintText -match 'xray_fast' -and $nextEp.tool -eq 'xray_fast') { $hintFollowed = $true }
             }
         }
         if ($hintFollowed) { $ep.tags.Add('hint_followed') }
@@ -1233,10 +1233,10 @@ if ($policyViolations.Count -gt 0) {
     $searchFilesViolations = @($policyViolations | Where-Object { $_.tool -eq 'search_files' })
     if ($readFileViolations.Count -gt 0) {
         $violatedExts = @($readFileViolations | ForEach-Object { $_.extension } | Sort-Object -Unique) -join ', .'
-        $recommendations += "[policy] $($readFileViolations.Count) read_file call(s) for indexed file types (.$violatedExts) should have used search_definitions includeBody=true."
+        $recommendations += "[policy] $($readFileViolations.Count) read_file call(s) for indexed file types (.$violatedExts) should have used xray_definitions includeBody=true."
     }
     if ($searchFilesViolations.Count -gt 0) {
-        $recommendations += "[policy] $($searchFilesViolations.Count) search_files call(s) should have used search_grep (search-index MCP was available)."
+        $recommendations += "[policy] $($searchFilesViolations.Count) search_files call(s) should have used xray_grep (xray MCP was available)."
     }
     $mcpUnavailableViolations = @($policyViolations | Where-Object { -not $_.mcp_available })
     if ($mcpUnavailableViolations.Count -gt 0) {
@@ -1547,7 +1547,7 @@ if ($hasSelfAnalysis) {
 
 # Automated Recommendations
 if ($recommendations.Count -gt 0) {
-    [void]$md.AppendLine("## Automated Recommendations for search-index improvement")
+    [void]$md.AppendLine("## Automated Recommendations for xray improvement")
     [void]$md.AppendLine("")
     foreach ($rec in $recommendations) {
         [void]$md.AppendLine("- $rec")

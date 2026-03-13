@@ -271,7 +271,7 @@ fn test_collect_substring_file_ids_empty_trigram_index() {
 fn test_collect_substring_file_ids_finds_substrings() {
     // Token "m_storagemanager" contains "storage" as a substring (and is longer)
     use crate::{ContentIndex, Posting, TrigramIndex};
-    use search_index::generate_trigrams;
+    use code_xray::generate_trigrams;
 
     // Build a trigram index with a token that contains our search term
     let mut trigram_map: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
@@ -312,7 +312,7 @@ fn test_collect_substring_file_ids_finds_substrings() {
 fn test_collect_substring_file_ids_excludes_exact_match() {
     // Exact match (same length) should NOT be included — only strictly LONGER tokens
     use crate::{ContentIndex, Posting, TrigramIndex};
-    use search_index::generate_trigrams;
+    use code_xray::generate_trigrams;
 
     let tokens = vec!["storage".to_string()];
     let mut trigram_map: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
@@ -341,7 +341,7 @@ fn test_collect_substring_file_ids_excludes_exact_match() {
 fn test_collect_substring_file_ids_no_trigram_match() {
     // Term's trigrams are not found in the trigram index → no results
     use crate::{ContentIndex, Posting, TrigramIndex};
-    use search_index::generate_trigrams;
+    use code_xray::generate_trigrams;
 
     let tokens = vec!["httpclient".to_string()];
     let mut trigram_map: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
@@ -576,7 +576,7 @@ fn test_caller_popularity_case_insensitive() {
 }
 
 // ─── Test deprioritization integration tests ────────────────────────
-// These test the full search_callers handler with production + test callers
+// These test the full xray_callers handler with production + test callers
 
 /// Build a HandlerContext with a mix of production and test callers.
 /// Layout: file0=Utils.rs (production, has target method + 2 production callers),
@@ -729,7 +729,7 @@ fn test_callers_deprioritize_tests_production_first() {
     // 2 production + 8 test callers, maxCallersPerLevel=10
     // Should return: 2 production first, then 8 test callers
     let ctx = make_ctx_test_deprioritization();
-    let result = super::super::dispatch_tool(&ctx, "search_callers", &json!({
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "truncate_data",
         "depth": 1,
         "maxCallersPerLevel": 10,
@@ -761,7 +761,7 @@ fn test_callers_deprioritize_tests_truncation() {
     // 2 production + 8 test callers, maxCallersPerLevel=5
     // Should return: 2 production + 3 test (5 total)
     let ctx = make_ctx_test_deprioritization();
-    let result = super::super::dispatch_tool(&ctx, "search_callers", &json!({
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "truncate_data",
         "depth": 1,
         "maxCallersPerLevel": 5,
@@ -792,7 +792,7 @@ fn test_callers_popularity_sort_within_production() {
     // process_data has 5 postings, inject_metrics has 2 postings
     // process_data should come before inject_metrics
     let ctx = make_ctx_test_deprioritization();
-    let result = super::super::dispatch_tool(&ctx, "search_callers", &json!({
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "truncate_data",
         "depth": 1,
         "maxCallersPerLevel": 10,
@@ -816,7 +816,7 @@ fn test_callers_impact_analysis_keeps_all_tests() {
     // Without impactAnalysis: 2 prod + 3 test = 5
     // With impactAnalysis: 2 prod + 8 test = 10 (all tests kept)
     let ctx = make_ctx_test_deprioritization();
-    let result = super::super::dispatch_tool(&ctx, "search_callers", &json!({
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "truncate_data",
         "depth": 1,
         "maxCallersPerLevel": 5,
@@ -926,7 +926,7 @@ fn test_callers_only_tests_no_production() {
         ..Default::default()
     };
 
-    let result = super::super::dispatch_tool(&ctx, "search_callers", &json!({
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "helper_fn",
         "depth": 1,
         "maxCallersPerLevel": 3,

@@ -349,16 +349,16 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     (ctx, tmp_dir)
 }
 
-// ─── Part 2: search_definitions tests (one test per kind) ────────────
+// ─── Part 2: xray_definitions tests (one test per kind) ────────────
 
 #[test]
-fn test_ts_search_definitions_finds_class() {
+fn test_ts_xray_definitions_finds_class() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "UserService",
         "kind": "class"
     }));
-    assert!(!result.is_error, "search_definitions should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_definitions should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
     assert_eq!(defs.len(), 1, "Expected exactly 1 class named UserService, got {}", defs.len());
@@ -368,9 +368,9 @@ fn test_ts_search_definitions_finds_class() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_interface() {
+fn test_ts_xray_definitions_finds_interface() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "IUserService",
         "kind": "interface"
     }));
@@ -383,9 +383,9 @@ fn test_ts_search_definitions_finds_interface() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_method() {
+fn test_ts_xray_definitions_finds_method() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "getUser",
         "kind": "method"
     }));
@@ -399,9 +399,9 @@ fn test_ts_search_definitions_finds_method() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_function() {
+fn test_ts_xray_definitions_finds_function() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "function"
     }));
     assert!(!result.is_error);
@@ -414,9 +414,9 @@ fn test_ts_search_definitions_finds_function() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_enum() {
+fn test_ts_xray_definitions_finds_enum() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "enum"
     }));
     assert!(!result.is_error);
@@ -428,9 +428,9 @@ fn test_ts_search_definitions_finds_enum() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_enum_member() {
+fn test_ts_xray_definitions_finds_enum_member() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "enumMember"
     }));
     assert!(!result.is_error);
@@ -447,9 +447,9 @@ fn test_ts_search_definitions_finds_enum_member() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_type_alias() {
+fn test_ts_xray_definitions_finds_type_alias() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "typeAlias"
     }));
     assert!(!result.is_error);
@@ -461,9 +461,9 @@ fn test_ts_search_definitions_finds_type_alias() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_variable() {
+fn test_ts_xray_definitions_finds_variable() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "variable"
     }));
     assert!(!result.is_error);
@@ -475,9 +475,9 @@ fn test_ts_search_definitions_finds_variable() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_field() {
+fn test_ts_xray_definitions_finds_field() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "field"
     }));
     assert!(!result.is_error);
@@ -490,9 +490,9 @@ fn test_ts_search_definitions_finds_field() {
 }
 
 #[test]
-fn test_ts_search_definitions_finds_constructor() {
+fn test_ts_xray_definitions_finds_constructor() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "constructor"
     }));
     assert!(!result.is_error);
@@ -507,9 +507,9 @@ fn test_ts_search_definitions_finds_constructor() {
 // ─── Part 3: baseType filter tests ───────────────────────────────────
 
 #[test]
-fn test_ts_search_definitions_base_type_implements() {
+fn test_ts_xray_definitions_base_type_implements() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "baseType": "IUserService"
     }));
     assert!(!result.is_error, "baseType filter should not error: {}", result.content[0].text);
@@ -521,10 +521,10 @@ fn test_ts_search_definitions_base_type_implements() {
 }
 
 #[test]
-fn test_ts_search_definitions_base_type_abstract() {
+fn test_ts_xray_definitions_base_type_abstract() {
     let ctx = make_ts_ctx_with_defs();
     // OrderProcessor has modifiers ["export", "abstract"] — search by name to verify modifiers
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "OrderProcessor",
         "kind": "class"
     }));
@@ -545,7 +545,7 @@ fn test_ts_search_definitions_base_type_abstract() {
 #[test]
 fn test_ts_contains_line_finds_method() {
     let (ctx, tmp) = make_ts_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "UserService",
         "containsLine": 8
     }));
@@ -560,9 +560,9 @@ fn test_ts_contains_line_finds_method() {
 }
 
 #[test]
-fn test_ts_search_definitions_include_body() {
+fn test_ts_xray_definitions_include_body() {
     let (ctx, tmp) = make_ts_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "getUser",
         "includeBody": true
     }));
@@ -576,17 +576,17 @@ fn test_ts_search_definitions_include_body() {
     cleanup_tmp(&tmp);
 }
 
-// ─── Part 5: search_callers tests ────────────────────────────────────
+// ─── Part 5: xray_callers tests ────────────────────────────────────
 
 #[test]
-fn test_ts_search_callers_up_finds_caller() {
+fn test_ts_xray_callers_up_finds_caller() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "getUser",
         "class": "UserService",
         "depth": 1
     }));
-    assert!(!result.is_error, "search_callers should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_callers should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let tree = output["callTree"].as_array().unwrap();
     assert!(!tree.is_empty(), "Call tree should not be empty — handleOrder calls getUser");
@@ -597,15 +597,15 @@ fn test_ts_search_callers_up_finds_caller() {
 }
 
 #[test]
-fn test_ts_search_callers_down_finds_callees() {
+fn test_ts_xray_callers_down_finds_callees() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "handleOrder",
         "class": "OrderProcessor",
         "direction": "down",
         "depth": 1
     }));
-    assert!(!result.is_error, "search_callers down should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_callers down should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let tree = output["callTree"].as_array().unwrap();
     assert!(!tree.is_empty(), "Call tree should not be empty — handleOrder calls getUser");
@@ -615,9 +615,9 @@ fn test_ts_search_callers_down_finds_callees() {
 }
 
 #[test]
-fn test_ts_search_callers_nonexistent_method() {
+fn test_ts_xray_callers_nonexistent_method() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "nonExistentMethodXYZ"
     }));
     assert!(!result.is_error);
@@ -629,9 +629,9 @@ fn test_ts_search_callers_nonexistent_method() {
 // ─── Part 6: Combined filters ────────────────────────────────────────
 
 #[test]
-fn test_ts_search_definitions_combined_name_parent_kind() {
+fn test_ts_xray_definitions_combined_name_parent_kind() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "getUser",
         "parent": "UserService",
         "kind": "method"
@@ -647,7 +647,7 @@ fn test_ts_search_definitions_combined_name_parent_kind() {
     assert_eq!(defs[0]["kind"], "method");
 
     // Verify: same name+kind but different parent should NOT match
-    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result2 = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "getUser",
         "parent": "NonExistentClass",
         "kind": "method"
@@ -660,9 +660,9 @@ fn test_ts_search_definitions_combined_name_parent_kind() {
 }
 
 #[test]
-fn test_ts_search_definitions_name_regex() {
+fn test_ts_xray_definitions_name_regex() {
     let ctx = make_ts_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "User.*",
         "regex": true
     }));
@@ -691,10 +691,10 @@ fn test_ts_search_definitions_name_regex() {
 // ─── Part 7: TS-07 — Attribute filter for TS decorators ──────────────
 
 #[test]
-fn test_ts_search_definitions_attribute_filter_decorator() {
+fn test_ts_xray_definitions_attribute_filter_decorator() {
     let ctx = make_ts_ctx_with_defs();
     // UserService has @Injectable decorator — search by attribute
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "attribute": "Injectable"
     }));
     assert!(!result.is_error, "attribute filter should not error: {}", result.content[0].text);
@@ -705,7 +705,7 @@ fn test_ts_search_definitions_attribute_filter_decorator() {
     assert_eq!(defs[0]["kind"], "class");
 
     // Non-existent decorator should return 0 results
-    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result2 = dispatch_tool(&ctx, "xray_definitions", &json!({
         "attribute": "NonExistentDecorator"
     }));
     assert!(!result2.is_error);
@@ -714,10 +714,10 @@ fn test_ts_search_definitions_attribute_filter_decorator() {
     assert_eq!(defs2.len(), 0, "Non-existent decorator should return 0 results");
 }
 
-// ─── Part 8: TS-12 — search_callers with inject() support ────────────
+// ─── Part 8: TS-12 — xray_callers with inject() support ────────────
 
 #[test]
-fn test_ts_search_callers_inject_support() {
+fn test_ts_xray_callers_inject_support() {
     // Create a context where a service is injected via Angular inject()
     // and the caller uses it through the injected field.
     let mut content_idx = HashMap::new();
@@ -815,8 +815,8 @@ fn test_ts_search_callers_inject_support() {
         ..Default::default()
     };
 
-    // search_callers up: who calls getUser in UserService?
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    // xray_callers up: who calls getUser in UserService?
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "getUser",
         "class": "UserService",
         "depth": 1
@@ -830,14 +830,14 @@ fn test_ts_search_callers_inject_support() {
         "Should find processOrder as caller via inject(), got: {:?}", caller_methods);
 }
 
-// ─── Part 9: TS-13 — search_callers with arrow function class properties ──
+// ─── Part 9: TS-13 — xray_callers with arrow function class properties ──
 
 #[test]
-fn test_ts_search_callers_arrow_fn_property() {
+fn test_ts_xray_callers_arrow_fn_property() {
     let ctx = make_ts_ctx_with_defs();
     // The existing ctx has handleOrder (idx 4) calling getUser (on UserService)
-    // search_callers direction=down from handleOrder should find getUser
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    // xray_callers direction=down from handleOrder should find getUser
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "handleOrder",
         "class": "OrderProcessor",
         "direction": "down",
@@ -933,7 +933,7 @@ fn test_mixed_cs_ts_definitions_query() {
     };
 
     // Query by name — should find both C# and TS versions
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "UserService",
         "kind": "class"
     }));
@@ -948,7 +948,7 @@ fn test_mixed_cs_ts_definitions_query() {
     assert!(files.iter().any(|f| f.ends_with(".ts")), "Should have .ts file: {:?}", files);
 
     // Filter by file to scope to one language
-    let result_cs = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_cs = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "UserService",
         "file": ".cs"
     }));
@@ -1068,7 +1068,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
     };
 
     // Without ext filter — should find callers from both languages
-    let result_all = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_all = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "getUser",
         "class": "CsService",
         "depth": 1
@@ -1079,7 +1079,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
     assert!(tree_all.len() >= 2, "Without ext filter, should find callers from both .cs and .ts, got {}", tree_all.len());
 
     // With ext=ts filter — should only find TS callers
-    let result_ts = dispatch_tool(&ctx, "search_callers", &json!({
+    let result_ts = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "getUser",
         "class": "CsService",
         "ext": "ts",
@@ -1167,7 +1167,7 @@ fn test_tsx_file_support_through_handler() {
     };
 
     // Find class in .tsx file
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "AppComponent",
         "kind": "class"
     }));
@@ -1180,7 +1180,7 @@ fn test_tsx_file_support_through_handler() {
         "File should be .tsx: {}", defs[0]["file"]);
 
     // Find method in .tsx file with parent filter
-    let result2 = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result2 = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "render",
         "parent": "AppComponent"
     }));
@@ -1190,7 +1190,7 @@ fn test_tsx_file_support_through_handler() {
     assert_eq!(defs2.len(), 1, "Should find render in AppComponent");
 
     // Base type search — React.Component
-    let result3 = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result3 = dispatch_tool(&ctx, "xray_definitions", &json!({
         "baseType": "React.Component"
     }));
     assert!(!result3.is_error);
@@ -1254,7 +1254,7 @@ fn test_ts_incremental_update_through_handler() {
     };
 
     // Verify OldService is found
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "OldService"
     }));
     assert!(!result.is_error);
@@ -1278,7 +1278,7 @@ fn test_ts_incremental_update_through_handler() {
     }
 
     // Step 4: Verify NewService is found, OldService is NOT found
-    let result_new = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_new = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "NewService"
     }));
     assert!(!result_new.is_error);
@@ -1287,7 +1287,7 @@ fn test_ts_incremental_update_through_handler() {
     assert!(!defs_new.is_empty(), "NewService should be found after incremental update");
     assert_eq!(defs_new[0]["name"], "NewService");
 
-    let result_old = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_old = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "OldService"
     }));
     assert!(!result_old.is_error);
@@ -1296,7 +1296,7 @@ fn test_ts_incremental_update_through_handler() {
     assert!(defs_old.is_empty(), "OldService should NOT be found after incremental update");
 
     // Verify new methods are found
-    let result_exec = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_exec = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "execute", "parent": "NewService"
     }));
     assert!(!result_exec.is_error);
@@ -1310,7 +1310,7 @@ fn test_ts_incremental_update_through_handler() {
 // ─── Part 14: TS excludeDir filter ───────────────────────────────────
 
 #[test]
-fn test_ts_search_definitions_exclude_dir() {
+fn test_ts_xray_definitions_exclude_dir() {
     let mut content_idx = HashMap::new();
     content_idx.insert("userservice".to_string(), vec![
         Posting { file_id: 0, lines: vec![1] },
@@ -1380,7 +1380,7 @@ fn test_ts_search_definitions_exclude_dir() {
     };
 
     // Exclude __tests__ directory
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "excludeDir": ["__tests__"]
     }));
     assert!(!result.is_error);
@@ -1392,7 +1392,7 @@ fn test_ts_search_definitions_exclude_dir() {
     assert!(!names.contains(&"UserServiceSpec"), "Should NOT contain UserServiceSpec from __tests__ dir");
 
     // Without excludeDir — both should appear
-    let result_all = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_all = dispatch_tool(&ctx, "xray_definitions", &json!({
         "kind": "class"
     }));
     assert!(!result_all.is_error);
@@ -1404,10 +1404,10 @@ fn test_ts_search_definitions_exclude_dir() {
 // ─── Part 15: TS DI interface resolution in callers ──────────────────
 
 #[test]
-fn test_ts_search_callers_di_interface_resolution() {
+fn test_ts_xray_callers_di_interface_resolution() {
     // In this test, UserService implements IUserService.
     // A caller uses IUserService (the interface) to call getUser.
-    // search_callers for getUser on UserService should find the caller
+    // xray_callers for getUser on UserService should find the caller
     // through DI interface resolution.
     let ctx = make_ts_ctx_with_defs();
 
@@ -1416,9 +1416,9 @@ fn test_ts_search_callers_di_interface_resolution() {
     // - IUserService (interface)
     // - handleOrder in OrderProcessor calls getUser on UserService
     //
-    // Test: search_callers for getUser on IUserService should also
+    // Test: xray_callers for getUser on IUserService should also
     // find handleOrder (because UserService implements IUserService)
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "getUser",
         "class": "IUserService",
         "depth": 1
@@ -1565,7 +1565,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
     };
 
     // direction=down from Orchestrator.run() should find DataProcessor.transform()
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "run",
         "class": "Orchestrator",
         "direction": "down",

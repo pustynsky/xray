@@ -42,15 +42,15 @@ fn make_ctx_with_git_cache() -> HandlerContext {
     ctx
 }
 
-/// search_git_authors with populated cache returns non-empty firstChange and lastChange.
+/// xray_git_authors with populated cache returns non-empty firstChange and lastChange.
 #[test]
 fn test_git_authors_cached_has_first_and_last_change() {
     let ctx = make_ctx_with_git_cache();
-    let result = dispatch_tool(&ctx, "search_git_authors", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_authors", &json!({
         "repo": ".",
         "file": "src/main.rs"
     }));
-    assert!(!result.is_error, "search_git_authors should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_git_authors should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
     // Should use cache path (hint contains "from cache")
@@ -76,16 +76,16 @@ fn test_git_authors_cached_has_first_and_last_change() {
         "Alice has commits at different times, firstChange should differ from lastChange");
 }
 
-/// search_git_history with populated cache returns commits from cache.
+/// xray_git_history with populated cache returns commits from cache.
 #[test]
 fn test_git_history_cached_returns_commits() {
     let ctx = make_ctx_with_git_cache();
-    let result = dispatch_tool(&ctx, "search_git_history", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
         "repo": ".",
         "file": "src/main.rs",
         "maxResults": 5
     }));
-    assert!(!result.is_error, "search_git_history should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_git_history should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
     let hint = output["summary"]["hint"].as_str().unwrap_or("");
@@ -100,14 +100,14 @@ fn test_git_history_cached_returns_commits() {
     assert!(ts0 > ts2, "Commits should be sorted newest first");
 }
 
-/// search_git_activity with populated cache returns activity from cache.
+/// xray_git_activity with populated cache returns activity from cache.
 #[test]
 fn test_git_activity_cached_returns_files() {
     let ctx = make_ctx_with_git_cache();
-    let result = dispatch_tool(&ctx, "search_git_activity", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_activity", &json!({
         "repo": "."
     }));
-    assert!(!result.is_error, "search_git_activity should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_git_activity should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
     let hint = output["summary"]["hint"].as_str().unwrap_or("");
@@ -117,13 +117,13 @@ fn test_git_activity_cached_returns_files() {
     assert_eq!(activity.len(), 3, "Should have 3 files in activity");
 }
 
-/// search_git_diff always uses CLI, never cache (cache has no patch data).
+/// xray_git_diff always uses CLI, never cache (cache has no patch data).
 #[test]
 fn test_git_diff_does_not_use_cache() {
     let ctx = make_ctx_with_git_cache();
-    // search_git_diff with a fake repo will fail (no real git repo at "."),
+    // xray_git_diff with a fake repo will fail (no real git repo at "."),
     // but the key test is that it does NOT use the cache path
-    let result = dispatch_tool(&ctx, "search_git_diff", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_diff", &json!({
         "repo": ".",
         "file": "src/main.rs",
         "maxResults": 1
@@ -134,17 +134,17 @@ fn test_git_diff_does_not_use_cache() {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let hint = output["summary"]["hint"].as_str().unwrap_or("");
         assert!(!hint.contains("cache"),
-            "search_git_diff should never use cache, hint: {}", hint);
+            "xray_git_diff should never use cache, hint: {}", hint);
     }
 }
-/// noCache: search_git_history with noCache=true bypasses cache and uses CLI.
+/// noCache: xray_git_history with noCache=true bypasses cache and uses CLI.
 #[test]
 fn test_git_history_no_cache_bypasses_cache() {
     let ctx = make_ctx_with_git_cache();
     // With noCache=true, the cache should be bypassed even though it's populated.
     // Since we're in a real git repo (the workspace), this should either succeed
     // via CLI or fail with a git error — but NOT use the cache (no "(from cache)" hint).
-    let result = dispatch_tool(&ctx, "search_git_history", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
         "repo": ".",
         "file": "Cargo.toml",
         "maxResults": 2,
@@ -161,11 +161,11 @@ fn test_git_history_no_cache_bypasses_cache() {
     // the key test is that it didn't use the cache path
 }
 
-/// noCache: search_git_history without noCache uses cache when available.
+/// noCache: xray_git_history without noCache uses cache when available.
 #[test]
 fn test_git_history_default_uses_cache() {
     let ctx = make_ctx_with_git_cache();
-    let result = dispatch_tool(&ctx, "search_git_history", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
         "repo": ".",
         "file": "src/main.rs",
         "maxResults": 2
@@ -177,11 +177,11 @@ fn test_git_history_default_uses_cache() {
         "Without noCache, should use cache. Hint: {}", hint);
 }
 
-/// noCache: search_git_authors with noCache=true bypasses cache.
+/// noCache: xray_git_authors with noCache=true bypasses cache.
 #[test]
 fn test_git_authors_no_cache_bypasses_cache() {
     let ctx = make_ctx_with_git_cache();
-    let result = dispatch_tool(&ctx, "search_git_authors", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_authors", &json!({
         "repo": ".",
         "file": "src/main.rs",
         "noCache": true
@@ -195,11 +195,11 @@ fn test_git_authors_no_cache_bypasses_cache() {
     }
 }
 
-/// noCache: search_git_activity with noCache=true bypasses cache.
+/// noCache: xray_git_activity with noCache=true bypasses cache.
 #[test]
 fn test_git_activity_no_cache_bypasses_cache() {
     let ctx = make_ctx_with_git_cache();
-    let result = dispatch_tool(&ctx, "search_git_activity", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_activity", &json!({
         "repo": ".",
         "noCache": true
     }));
@@ -216,7 +216,7 @@ fn test_git_activity_no_cache_bypasses_cache() {
 #[test]
 fn test_git_history_no_cache_false_uses_cache() {
     let ctx = make_ctx_with_git_cache();
-    let result = dispatch_tool(&ctx, "search_git_history", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
         "repo": ".",
         "file": "src/main.rs",
         "maxResults": 2,
@@ -229,11 +229,11 @@ fn test_git_history_no_cache_false_uses_cache() {
         "noCache=false should use cache. Hint: {}", hint);
 }
 
-/// BUG-4: search_git_history with reversed date range should return error (cache path).
+/// BUG-4: xray_git_history with reversed date range should return error (cache path).
 #[test]
 fn test_git_history_cached_reversed_dates_returns_error() {
     let ctx = make_ctx_with_git_cache();
-    let result = dispatch_tool(&ctx, "search_git_history", &json!({
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
         "repo": ".",
         "file": "src/main.rs",
         "from": "2026-12-31",

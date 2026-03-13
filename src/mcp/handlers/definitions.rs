@@ -1,6 +1,6 @@
-//! search_definitions handler: AST-based code definition search.
+//! xray_definitions handler: AST-based code definition search.
 //!
-//! The main entry point is [`handle_search_definitions`], which orchestrates:
+//! The main entry point is [`handle_xray_definitions`], which orchestrates:
 //! 1. Argument parsing ([`parse_definition_args`])
 //! 2. Mode dispatch (audit / containsLine / normal search)
 //! 3. Index-based candidate collection ([`collect_candidates`])
@@ -22,7 +22,7 @@ use super::HandlerContext;
 
 // ─── Parsed arguments struct ─────────────────────────────────────────
 
-/// Parsed and validated arguments for the search_definitions tool.
+/// Parsed and validated arguments for the xray_definitions tool.
 /// Extracted from raw JSON [`Value`] by [`parse_definition_args`].
 #[derive(Debug, Clone)]
 pub(crate) struct DefinitionSearchArgs {
@@ -207,7 +207,7 @@ fn kind_priority(kind: &DefinitionKind) -> u8 {
 
 // ─── Main entry point (orchestrator) ─────────────────────────────────
 
-pub(crate) fn handle_search_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
         Some(idx) => idx,
         None => return ToolCallResult::error(
@@ -662,7 +662,7 @@ fn apply_stats_filters(
 
     if needs_code_stats && index.code_stats.is_empty() {
         return Err(
-            "Code stats not available for this index. Run search_reindex_definitions to compute metrics.".to_string()
+            "Code stats not available for this index. Run xray_reindex_definitions to compute metrics.".to_string()
         );
     }
 
@@ -1141,7 +1141,7 @@ fn cross_validate_indexes(
         Err(_) => {
             return serde_json::json!({
                 "status": "skipped",
-                "reason": "File-list index not found on disk. Run search_reindex or search_fast first."
+                "reason": "File-list index not found on disk. Run xray_reindex or xray_fast first."
             });
         }
     };
@@ -1359,7 +1359,7 @@ fn try_kind_correction(
 /// Finds the closest name in the definition index and re-runs the search.
 const AUTO_CORRECT_NAME_THRESHOLD: f64 = 0.80;
 /// Minimum length ratio (shorter/longer) for auto-correction to fire.
-/// Prevents partial-match corrections like "search_definitions" → "search" (ratio 6/18 = 0.33).
+/// Prevents partial-match corrections like "xray_definitions" → "search" (ratio 6/18 = 0.33).
 const AUTO_CORRECT_MIN_LENGTH_RATIO: f64 = 0.6;
 
 fn try_name_correction(
@@ -1377,7 +1377,7 @@ fn try_name_correction(
         let score = name_similarity(&search_lower, index_name);
         if score >= AUTO_CORRECT_NAME_THRESHOLD && score > best_score {
             // Guard: reject corrections where query and match differ too much in length.
-            // Jaro-Winkler inflates similarity for shared prefixes (e.g., "search_definitions" vs "search" = 87%)
+            // Jaro-Winkler inflates similarity for shared prefixes (e.g., "xray_definitions" vs "search" = 87%)
             // but 6/18 = 33% length ratio reveals it's a partial match, not a typo.
             let length_ratio = search_lower.len().min(index_name.len()) as f64
                 / search_lower.len().max(index_name.len()) as f64;
@@ -1455,7 +1455,7 @@ fn run_corrected_search(
 
 // ─── Zero-result hint generation ─────────────────────────────────────
 
-/// Generate contextual hints when search_definitions returns 0 results.
+/// Generate contextual hints when xray_definitions returns 0 results.
 /// Helps LLMs self-correct common mistakes (wrong kind, typos, wrong tool).
 ///
 /// Hint priority (first matching wins, via `.or_else()` chain):
@@ -1494,7 +1494,7 @@ fn hint_unsupported_extension(
                     return Some(format!(
                         "Extension '.{}' is not in the definition index (AST parsing supports: {}). \
                          However, .{} files ARE indexed in the content index. \
-                         Use search_grep terms='<query>' ext='{}' showLines=true for content search.",
+                         Use xray_grep terms='<query>' ext='{}' showLines=true for content search.",
                         ext_lower, def_supported, ext_lower, ext_lower
                     ));
                 } else {
@@ -1602,7 +1602,7 @@ fn hint_file_has_defs_but_filters_narrow(
 
     let mut extra = String::new();
     if args.name_filter.is_some() {
-        extra.push_str(&format!(" search_definitions searches AST definition names, not string content. Use search_grep for content search."));
+        extra.push_str(&format!(" xray_definitions searches AST definition names, not string content. Use xray_grep for content search."));
     }
 
     Some(format!(
@@ -1706,8 +1706,8 @@ fn hint_name_in_content_not_defs(
     let file_count = postings.len();
     Some(format!(
         "'{}' not found as an AST definition name, but appears in {} files as text content. \
-         search_definitions searches structural names (classes, methods, etc.), not arbitrary text. \
-         Use search_grep terms='{}' for content search.",
+         xray_definitions searches structural names (classes, methods, etc.), not arbitrary text. \
+         Use xray_grep terms='{}' for content search.",
         name, file_count, name
     ))
 }

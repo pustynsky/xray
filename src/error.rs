@@ -27,7 +27,7 @@ pub enum SearchError {
     DirNotFound(String),
 
     /// No index found for the given directory
-    #[error("No content index found for '{dir}'. Build one first:\n  search-index content-index -d {dir} -e cs")]
+    #[error("No content index found for '{dir}'. Build one first:\n  xray content-index -d {dir} -e cs")]
     IndexNotFound { dir: String },
 
     /// Index is stale and auto-reindex is disabled

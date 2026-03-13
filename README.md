@@ -21,16 +21,16 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 ## What Can You Do With It?
 
-| Scenario | Without search-index | With search-index* |
+| Scenario | Without xray | With xray* |
 |---|---|---|
 | 🐛 **Debug a stack trace** — find the exact method, trace all callers to the API entry point | ~5 min per stack frame | **< 15 seconds** |
 | 🏗️ **Understand unfamiliar code** — map classes, call trees, and dependencies of a module you've never seen | ~40 min of manual exploration | **2 minutes** |
 | 📝 **Review a PR** — check who else calls changed methods, spot missing patterns | ~8 min of searching | **<1 second** |
-| 🔄 **Refactor safely** — find every caller, every implementation, every DI registration | multiple manual searches | **one `search_callers` call** |
+| 🔄 **Refactor safely** — find every caller, every implementation, every DI registration | multiple manual searches | **one `xray_callers` call** |
 | 📊 **Estimate task scope** — "how many files use this feature?" | ~5 min | **30 seconds** |
 | 🧪 **Write tests** — find existing test patterns, discover all dependencies to mock | ~10 min browsing | **<1 second** |
 | 🕵️ **Investigate file history** — who changed this file? What was modified last week? Show me the diff from a specific commit. | ~5 min of git log | **<1 second** |
-> \* Times in the "With search-index" column are **pure tool execution time** (index lookup + response). In practice, add ~1–2 seconds of LLM latency (model thinking + MCP round-trip) which is outside the tool's control.
+> \* Times in the "With xray" column are **pure tool execution time** (index lookup + response). In practice, add ~1–2 seconds of LLM latency (model thinking + MCP round-trip) which is outside the tool's control.
 
 > 📖 **More:** [Use Cases & Vision](docs/use-cases.md) — detailed scenarios including AI-powered architecture exploration, automated impact analysis, and a real-world case study where we reverse-engineered a 3,800-line system in 5 minutes.
 
@@ -55,7 +55,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **File name index** — pre-built index for instant file lookups (like [Everything](https://www.voidtools.com/))
 - **Inverted content index** — language-agnostic tokenizer maps tokens to files for instant full-text search across any text file (like Elasticsearch)
 - **TF-IDF ranking** — content search results sorted by relevance, most relevant files first
-- **Relevance ranking** — `search_definitions` and `search_fast` results sorted by match quality: exact match → prefix → contains, with kind and name-length tiebreakers
+- **Relevance ranking** — `xray_definitions` and `xray_fast` results sorted by match quality: exact match → prefix → contains, with kind and name-length tiebreakers
 - **Regex support** — full Rust regex syntax for pattern matching
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
@@ -69,7 +69,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **LZ4 index compression** — all index files compressed on disk with backward-compatible loading
 - **Branch awareness** — automatic `branchWarning` in search responses when working on non-main branches
 - **Graceful shutdown** — handles Ctrl+C (SIGTERM/SIGINT) by saving indexes to disk before exit, preserving incremental watcher updates
-- **Git history cache** — background-built compact in-memory cache for sub-millisecond git queries (`search_git_history`, `search_git_authors`, `search_git_activity`, `search_git_blame`). LZ4-compressed on disk for instant restart. See [Architecture](docs/architecture.md) for details
+- **Git history cache** — background-built compact in-memory cache for sub-millisecond git queries (`xray_git_history`, `xray_git_authors`, `xray_git_activity`, `xray_git_blame`). LZ4-compressed on disk for instant restart. See [Architecture](docs/architecture.md) for details
 
 ## Quick Start
 
@@ -81,7 +81,7 @@ cd search
 cargo build --release
 ```
 
-Requires [Rust](https://rustup.rs/) 1.85+. Binary: `target/release/search-index.exe` (Windows) or `target/release/search-index` (Linux/Mac).
+Requires [Rust](https://rustup.rs/) 1.85+. Binary: `target/release/xray.exe` (Windows) or `target/release/xray` (Linux/Mac).
 
 ### Build with Feature Flags
 
@@ -115,16 +115,16 @@ cargo build --release --no-default-features
 
 ```bash
 # Build content index for C# files
-search-index content-index -d C:\Projects -e cs
+xray content-index -d C:\Projects -e cs
 
 # Search by token (TF-IDF ranked)
-search-index grep "HttpClient" -d C:\Projects -e cs
+xray grep "HttpClient" -d C:\Projects -e cs
 
 # Search file names (instant)
-search-index fast "UserService" -d C:\Projects -e cs
+xray fast "UserService" -d C:\Projects -e cs
 
 # Live filesystem search (no index needed)
-search-index find "TODO" -d C:\Projects --contents -e cs
+xray find "TODO" -d C:\Projects --contents -e cs
 ```
 
 See [CLI Reference](docs/cli-reference.md) for all commands and options.
@@ -133,7 +133,7 @@ See [CLI Reference](docs/cli-reference.md) for all commands and options.
 
 ```bash
 # Start MCP server with file watching and code definitions
-search-index serve --dir C:\Projects --ext cs --watch --definitions
+xray serve --dir C:\Projects --ext cs --watch --definitions
 ```
 
 See [MCP Server Guide](docs/mcp-guide.md) for VS Code setup, tools API, and examples.
@@ -144,12 +144,12 @@ The engine uses three independent index types plus a git history cache:
 
 | Index | File | Created by | Searched by | Stores |
 |---|---|---|---|---|
-| File name | `.file-list` | `search-index index` | `search-index fast` | File paths, sizes, timestamps |
-| Content | `.word-search` | `search-index content-index` | `search-index grep` | Token → (file, line numbers) map |
-| Definitions | `.code-structure` | `search-index def-index` | `search_definitions` / `search_callers` | AST-extracted classes, methods, call sites |
-| Git history | `.git-history` | Background (auto) | `search_git_history` / `search_git_diff` / `search_git_authors` / `search_git_activity` / `search_git_blame` / `search_branch_status` | Commit metadata, file-to-commit mapping, branch status |
+| File name | `.file-list` | `xray index` | `xray fast` | File paths, sizes, timestamps |
+| Content | `.word-search` | `xray content-index` | `xray grep` | Token → (file, line numbers) map |
+| Definitions | `.code-structure` | `xray def-index` | `xray_definitions` / `xray_callers` | AST-extracted classes, methods, call sites |
+| Git history | `.git-history` | Background (auto) | `xray_git_history` / `xray_git_diff` / `xray_git_authors` / `xray_git_activity` / `xray_git_blame` / `xray_branch_status` | Commit metadata, file-to-commit mapping, branch status |
 
-Indexes are stored in `%LOCALAPPDATA%\search-index\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX via tree-sitter; SQL via regex parser) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
+Indexes are stored in `%LOCALAPPDATA%\xray\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX via tree-sitter; SQL via regex parser) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 
 For caller tree verification details (DI resolution, type inference, false-positive filtering) and Angular template metadata, see [Architecture](docs/architecture.md).
 
@@ -157,7 +157,7 @@ For caller tree verification details (DI resolution, type inference, false-posit
 
 | Crate | Purpose |
 |---|---|
-| [similar](https://crates.io/crates/similar) | Unified diff generation for `search_edit` tool |
+| [similar](https://crates.io/crates/similar) | Unified diff generation for `xray_edit` tool |
 | [ignore](https://crates.io/crates/ignore) | Parallel directory walking (from ripgrep) |
 | [clap](https://crates.io/crates/clap) | CLI argument parsing |
 | [regex](https://crates.io/crates/regex) | Regular expression support |

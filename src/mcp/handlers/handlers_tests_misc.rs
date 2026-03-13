@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), ..Default::default() };
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["policyReminder"].as_str().is_some());
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
@@ -29,7 +29,7 @@ use std::sync::{Arc, RwLock};
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["policyReminder"].as_str().is_some());
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
@@ -41,35 +41,35 @@ use std::sync::{Arc, RwLock};
 #[test] fn test_metrics_not_injected_on_error() {
     let ctx = make_empty_ctx();
     let ctx = HandlerContext { metrics: true, ..ctx };
-    let result = dispatch_tool(&ctx, "search_grep", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({}));
     assert!(result.is_error);
     assert!(!result.content[0].text.contains("searchTimeMs"));
     assert!(!result.content[0].text.contains("policyReminder"));
 }
 
 #[test]
-fn test_search_help_has_policy_but_no_next_step_hint() {
+fn test_xray_help_has_policy_but_no_next_step_hint() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_help", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_help", &json!({}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["policyReminder"].as_str().is_some());
     assert!(output["summary"].get("nextStepHint").is_none());
 }
 
 #[test]
-fn test_search_info_has_policy_but_no_next_step_hint() {
+fn test_xray_info_has_policy_but_no_next_step_hint() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_info", &json!({}));
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["policyReminder"].as_str().is_some());
     assert!(output["summary"].get("nextStepHint").is_none());
 }
 
 #[test]
-fn test_search_reindex_has_policy_but_no_next_step_hint() {
+fn test_xray_reindex_has_policy_but_no_next_step_hint() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_reindex", &json!({}));
-    // search_reindex with empty ctx may error (no dir), but if it returns success JSON, verify guidance
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({}));
+    // xray_reindex with empty ctx may error (no dir), but if it returns success JSON, verify guidance
     if !result.is_error {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         assert!(output["summary"]["policyReminder"].as_str().is_some());
@@ -78,10 +78,10 @@ fn test_search_reindex_has_policy_but_no_next_step_hint() {
 }
 
 #[test]
-fn test_search_reindex_definitions_has_policy_but_no_next_step_hint() {
+fn test_xray_reindex_definitions_has_policy_but_no_next_step_hint() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_reindex_definitions", &json!({}));
-    // search_reindex_definitions with empty ctx may error (no def_index), but if it returns success JSON, verify guidance
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({}));
+    // xray_reindex_definitions with empty ctx may error (no def_index), but if it returns success JSON, verify guidance
     if !result.is_error {
         let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
         assert!(output["summary"]["policyReminder"].as_str().is_some());
@@ -94,7 +94,7 @@ fn test_search_reindex_definitions_has_policy_but_no_next_step_hint() {
     idx.insert("foo".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["test.cs".to_string()], index: idx, total_tokens: 10, extensions: vec!["cs".to_string()], file_token_counts: vec![10], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
-    let result = dispatch_tool(&ctx, "search_grep", &json!({"terms": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "foo"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().unwrap() >= 0.0);
 }
@@ -109,13 +109,13 @@ fn test_search_reindex_definitions_has_policy_but_no_next_step_hint() {
     assert!(result.is_ok());
     assert!(result.unwrap().is_some());
 }
-// ─── General search_definitions tests ───────────────────────────────
+// ─── General xray_definitions tests ───────────────────────────────
 
-/// search_definitions non-existent name returns empty.
+/// xray_definitions non-existent name returns empty.
 #[test]
-fn test_search_definitions_nonexistent_name_returns_empty() {
+fn test_xray_definitions_nonexistent_name_returns_empty() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "CompletelyNonExistentDefinitionXYZ123"
     }));
     assert!(!result.is_error, "Non-existent name should not error: {}", result.content[0].text);
@@ -126,11 +126,11 @@ fn test_search_definitions_nonexistent_name_returns_empty() {
     assert_eq!(output["summary"]["totalResults"], 0);
 }
 
-/// search_definitions invalid regex error.
+/// xray_definitions invalid regex error.
 #[test]
-fn test_search_definitions_invalid_regex_error() {
+fn test_xray_definitions_invalid_regex_error() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "[invalid",
         "regex": true
     }));
@@ -138,9 +138,9 @@ fn test_search_definitions_invalid_regex_error() {
     assert!(result.content[0].text.contains("Invalid regex"),
         "Error should mention 'Invalid regex', got: {}", result.content[0].text);
 }
-/// T77 — search_definitions file filter: backslash vs forward slash normalization.
+/// T77 — xray_definitions file filter: backslash vs forward slash normalization.
 #[test]
-fn test_search_definitions_file_filter_slash_normalization() {
+fn test_xray_definitions_file_filter_slash_normalization() {
     use crate::definitions::*;
 
     let content_index = ContentIndex {
@@ -200,14 +200,14 @@ fn test_search_definitions_file_filter_slash_normalization() {
         ..Default::default()
     };
 
-    let result_backslash = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_backslash = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "Models\\User"
     }));
     assert!(!result_backslash.is_error);
     let output_bs: Value = serde_json::from_str(&result_backslash.content[0].text).unwrap();
     let defs_bs = output_bs["definitions"].as_array().unwrap();
 
-    let result_fwdslash = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_fwdslash = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "Models/User"
     }));
     assert!(!result_fwdslash.is_error);
@@ -226,7 +226,7 @@ fn test_search_definitions_file_filter_slash_normalization() {
             "If slash normalization exists, both filters should return same count");
     }
 
-    let result_fragment = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_fragment = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "User"
     }));
     assert!(!result_fragment.is_error);
@@ -236,12 +236,12 @@ fn test_search_definitions_file_filter_slash_normalization() {
         "File filter 'User' should match both User.cs and UserService.cs, got {}", defs_frag.len());
 }
 
-/// T80 — search_reindex with invalid/non-existent directory.
+/// T80 — xray_reindex with invalid/non-existent directory.
 #[test]
-fn test_search_reindex_invalid_directory() {
+fn test_xray_reindex_invalid_directory() {
     let ctx = make_empty_ctx();
 
-    let result = dispatch_tool(&ctx, "search_reindex", &json!({
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({
         "dir": "Z:\\nonexistent\\path\\that\\does\\not\\exist"
     }));
 
@@ -323,13 +323,13 @@ fn test_validate_search_dir_windows_absolute_outside_rejected() {
         "Absolute path outside server dir should be rejected");
 }
 
-// ─── search_help response structure tests ────────────────────────────
+// ─── xray_help response structure tests ────────────────────────────
 
 #[test]
-fn test_search_help_response_structure() {
+fn test_xray_help_response_structure() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_help", &json!({}));
-    assert!(!result.is_error, "search_help should not error");
+    let result = dispatch_tool(&ctx, "xray_help", &json!({}));
+    assert!(!result.is_error, "xray_help should not error");
 
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
@@ -375,13 +375,13 @@ fn test_search_help_response_structure() {
         "toolPriority count should match tips::tool_priority()");
 }
 
-// ─── search_info response structure tests ────────────────────────────
+// ─── xray_info response structure tests ────────────────────────────
 
 #[test]
-fn test_search_info_response_structure() {
+fn test_xray_info_response_structure() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "search_info", &json!({}));
-    assert!(!result.is_error, "search_info should not error");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error, "xray_info should not error");
 
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
@@ -513,15 +513,15 @@ fn make_ranking_defs_ctx() -> HandlerContext {
     }
 }
 
-/// search_definitions ranking: exact match class comes first, then prefix matches,
+/// xray_definitions ranking: exact match class comes first, then prefix matches,
 /// with shorter names before longer. Type-level defs sort before member-level.
 #[test]
-fn test_search_definitions_ranking_exact_first() {
+fn test_xray_definitions_ranking_exact_first() {
     let ctx = make_ranking_defs_ctx();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "UserService"
     }));
-    assert!(!result.is_error, "search_definitions should not error: {}", result.content[0].text);
+    assert!(!result.is_error, "xray_definitions should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
 
@@ -534,11 +534,11 @@ fn test_search_definitions_ranking_exact_first() {
         "Exact match should be the class definition");
 }
 
-/// search_definitions ranking: prefix matches come before contains matches.
+/// xray_definitions ranking: prefix matches come before contains matches.
 #[test]
-fn test_search_definitions_ranking_prefix_before_contains() {
+fn test_xray_definitions_ranking_prefix_before_contains() {
     let ctx = make_ranking_defs_ctx();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "UserService"
     }));
     assert!(!result.is_error);
@@ -566,12 +566,12 @@ fn test_search_definitions_ranking_prefix_before_contains() {
     }
 }
 
-/// search_definitions ranking: among prefix matches, type-level (class) sorts before
+/// xray_definitions ranking: among prefix matches, type-level (class) sorts before
 /// member-level (method), and shorter names before longer for same kind priority.
 #[test]
-fn test_search_definitions_ranking_kind_and_length_tiebreak() {
+fn test_xray_definitions_ranking_kind_and_length_tiebreak() {
     let ctx = make_ranking_defs_ctx();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "UserService"
     }));
     assert!(!result.is_error);
@@ -593,11 +593,11 @@ fn test_search_definitions_ranking_kind_and_length_tiebreak() {
     }
 }
 
-/// search_definitions ranking: regex mode should NOT apply relevance ranking.
+/// xray_definitions ranking: regex mode should NOT apply relevance ranking.
 #[test]
-fn test_search_definitions_ranking_not_applied_with_regex() {
+fn test_xray_definitions_ranking_not_applied_with_regex() {
     let ctx = make_ranking_defs_ctx();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "UserService.*",
         "regex": true
     }));
@@ -611,12 +611,12 @@ fn test_search_definitions_ranking_not_applied_with_regex() {
 // Input validation bug fix tests (BUG-1 through BUG-6)
 // ═══════════════════════════════════════════════════════════════════════
 
-/// BUG-1: search_definitions with name="" should behave like no name filter (return all).
+/// BUG-1: xray_definitions with name="" should behave like no name filter (return all).
 #[test]
-fn test_search_definitions_empty_name_treated_as_no_filter() {
+fn test_xray_definitions_empty_name_treated_as_no_filter() {
     let ctx = make_ctx_with_defs();
     // With name="" — should return all definitions (empty string ignored)
-    let result_empty = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_empty = dispatch_tool(&ctx, "xray_definitions", &json!({
         "name": "",
         "maxResults": 5
     }));
@@ -625,7 +625,7 @@ fn test_search_definitions_empty_name_treated_as_no_filter() {
     let count_empty = output_empty["summary"]["totalResults"].as_u64().unwrap();
 
     // Without name — should return all definitions
-    let result_no_name = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result_no_name = dispatch_tool(&ctx, "xray_definitions", &json!({
         "maxResults": 5
     }));
     let output_no_name: Value = serde_json::from_str(&result_no_name.content[0].text).unwrap();
@@ -637,11 +637,11 @@ fn test_search_definitions_empty_name_treated_as_no_filter() {
     assert!(count_empty > 0, "Should have some definitions in test context");
 }
 
-/// BUG-2: search_definitions with containsLine=-1 should return error.
+/// BUG-2: xray_definitions with containsLine=-1 should return error.
 #[test]
-fn test_search_definitions_contains_line_negative_returns_error() {
+fn test_xray_definitions_contains_line_negative_returns_error() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "QueryService",
         "containsLine": -1
     }));
@@ -650,11 +650,11 @@ fn test_search_definitions_contains_line_negative_returns_error() {
         "Error should mention 'containsLine must be >= 1', got: {}", result.content[0].text);
 }
 
-/// BUG-2: search_definitions with containsLine=0 should return error.
+/// BUG-2: xray_definitions with containsLine=0 should return error.
 #[test]
-fn test_search_definitions_contains_line_zero_returns_error() {
+fn test_xray_definitions_contains_line_zero_returns_error() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "QueryService",
         "containsLine": 0
     }));
@@ -663,11 +663,11 @@ fn test_search_definitions_contains_line_zero_returns_error() {
         "Error should mention 'containsLine must be >= 1', got: {}", result.content[0].text);
 }
 
-/// BUG-3: search_callers with depth=0 should return error.
+/// BUG-3: xray_callers with depth=0 should return error.
 #[test]
-fn test_search_callers_depth_zero_returns_error() {
+fn test_xray_callers_depth_zero_returns_error() {
     let ctx = make_ctx_with_defs();
-    let result = dispatch_tool(&ctx, "search_callers", &json!({
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
         "method": "Execute",
         "depth": 0
     }));
@@ -731,7 +731,7 @@ fn test_contains_line_sql_stored_procedure() {
     };
 
     // Line 5 is inside the SP body (between line_start=2 and line_end=7)
-    let result = dispatch_tool(&ctx, "search_definitions", &json!({
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "file": "schema.sql",
         "containsLine": 5
     }));

@@ -1,5 +1,5 @@
 [package]
-name = "search-index"
+name = "code-xray"
 version = "0.1.0"
 edition = "2024"
 authors = ["Sergey Pustynsky"]
@@ -7,11 +7,11 @@ description = "High-performance code search engine with inverted indexing and AS
 license = "MIT OR Apache-2.0"
 
 [lib]
-name = "search_index"
+name = "code_xray"
 path = "src/lib.rs"
 
 [[bin]]
-name = "search-index"
+name = "xray"
 path = "src/main.rs"
 
 [features]

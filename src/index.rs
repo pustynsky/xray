@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use search_index::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION};
+use code_xray::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -127,7 +127,7 @@ fn append_to_debug_log(line: &str) {
 }
 
 /// Log an MCP tool request to the debug log file.
-/// Format: "2026-02-24T09:28:20Z | REQ  | search_grep | {"terms":"HttpClient","ext":"cs"}"
+/// Format: "2026-02-24T09:28:20Z | REQ  | xray_grep | {"terms":"HttpClient","ext":"cs"}"
 /// No-op when `--debug-log` is not passed (single AtomicBool check).
 pub fn log_request(tool: &str, args: &str) {
     if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
@@ -139,7 +139,7 @@ pub fn log_request(tool: &str, args: &str) {
 }
 
 /// Log an MCP tool response to the debug log file.
-/// Format: "2026-02-24T09:28:20Z | RESP | search_grep | 12.3ms | 4.2KB | WS=350.1MB"
+/// Format: "2026-02-24T09:28:20Z | RESP | xray_grep | 12.3ms | 4.2KB | WS=350.1MB"
 /// followed by the full response body on the next line.
 /// No-op when `--debug-log` is not passed (single AtomicBool check).
 pub fn log_response(tool: &str, elapsed_ms: f64, response_bytes: usize, response_body: &str) {
@@ -415,7 +415,7 @@ pub fn estimate_git_cache_memory(cache: &crate::git::cache::GitHistoryCache) -> 
 // ─── Index metadata sidecar (.meta) ─────────────────────────────────
 
 /// Lightweight metadata saved alongside each index file.
-/// Allows `search-index info` CLI to display index stats without
+/// Allows `xray info` CLI to display index stats without
 /// deserializing the full index (which can be 500+ MB in RAM).
 ///
 /// Written as `<index_file>.meta` (e.g., `prefix_12345678.word-search.meta`).
@@ -720,11 +720,11 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
 
 // ─── Index storage ───────────────────────────────────────────────────
 
-/// Default production index directory: `%LOCALAPPDATA%/search-index`.
+/// Default production index directory: `%LOCALAPPDATA%/xray`.
 /// Tests should NOT use this — pass a test-local directory instead.
 pub fn index_dir() -> PathBuf {
     let base = dirs::data_local_dir().unwrap_or_else(|| PathBuf::from("."));
-    base.join("search-index")
+    base.join("xray")
 }
 
 pub fn index_path_for(dir: &str, index_base: &std::path::Path) -> PathBuf {
@@ -930,7 +930,7 @@ fn read_root_from_index_file(path: &std::path::Path) -> Option<String> {
     String::from_utf8(str_buf).ok()
 }
 
-/// Public wrapper for `read_root_from_index_file` — used by `handle_search_info`
+/// Public wrapper for `read_root_from_index_file` — used by `handle_xray_info`
 /// to get the root directory from a file-list index without full deserialization.
 pub fn read_root_from_index_file_pub(path: &std::path::Path) -> Option<String> {
     read_root_from_index_file(path)

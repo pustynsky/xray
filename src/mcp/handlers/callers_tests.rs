@@ -1526,7 +1526,7 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
 // ─── F-1: Hint when 0 callers with class filter ─────────────────
 
 #[test]
-fn test_search_callers_hint_when_empty_with_class_filter() {
+fn test_xray_callers_hint_when_empty_with_class_filter() {
     // When class filter is set and callTree is empty, response should include a hint
     let definitions = vec![
         class_def(0, "OrderService", vec![]),
@@ -1551,7 +1551,7 @@ fn test_search_callers_hint_when_empty_with_class_filter() {
     };
 
     // Search for callers of a method with a class filter that yields 0 results
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process",
         "class": "NonExistentClass",
         "depth": 1
@@ -1566,7 +1566,7 @@ fn test_search_callers_hint_when_empty_with_class_filter() {
 }
 
 #[test]
-fn test_search_callers_no_hint_without_class_filter() {
+fn test_xray_callers_no_hint_without_class_filter() {
     // When no class filter is set, no hint should appear even if tree is empty
     let definitions = vec![
         class_def(0, "OrderService", vec![]),
@@ -1591,7 +1591,7 @@ fn test_search_callers_no_hint_without_class_filter() {
     };
 
     // Search without class filter — no hint expected
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "nonexistentmethod",
         "depth": 1
     }));
@@ -1602,7 +1602,7 @@ fn test_search_callers_no_hint_without_class_filter() {
 }
 
 #[test]
-fn test_search_callers_no_hint_when_results_found() {
+fn test_xray_callers_no_hint_when_results_found() {
     // When callers ARE found with class filter, no hint should appear
     use crate::{ContentIndex, Posting};
     use std::path::PathBuf;
@@ -1657,7 +1657,7 @@ fn test_search_callers_no_hint_when_results_found() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process",
         "class": "OrderService",
         "depth": 1
@@ -1697,7 +1697,7 @@ fn test_resolve_call_site_via_base_types() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// SQL Caller Tests — SP/SqlFunction integration with search_callers
+// SQL Caller Tests — SP/SqlFunction integration with xray_callers
 // ═══════════════════════════════════════════════════════════════════
 
 /// Helper: create a DefinitionEntry for a stored procedure.
@@ -2461,7 +2461,7 @@ fn test_impact_analysis_rejects_direction_down() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process",
         "direction": "down",
         "impactAnalysis": true
@@ -2487,7 +2487,7 @@ fn test_impact_analysis_false_no_tests_covering() {
     };
 
     // Without impactAnalysis, response should NOT have testsCovering
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process",
         "depth": 1
     }));
@@ -2790,7 +2790,7 @@ fn test_multi_method_returns_results_array() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process,validate",
         "depth": 1
     }));
@@ -2831,7 +2831,7 @@ fn test_single_method_no_comma_returns_calltree_directly() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process",
         "depth": 1
     }));
@@ -2863,7 +2863,7 @@ fn test_multi_method_with_spaces_trimmed() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": " process , validate ",
         "depth": 1
     }));
@@ -2890,7 +2890,7 @@ fn test_multi_method_empty_after_split_returns_error() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": " , , ",
         "depth": 1
     }));
@@ -2915,7 +2915,7 @@ fn test_multi_method_each_gets_independent_nodes() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process,validate,save",
         "depth": 1
     }));
@@ -2947,7 +2947,7 @@ fn test_multi_method_with_class_filter() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process,validate",
         "class": "OrderService",
         "depth": 1
@@ -2974,7 +2974,7 @@ fn test_multi_method_direction_down() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process,validate",
         "direction": "down",
         "depth": 1
@@ -3049,7 +3049,7 @@ fn test_include_grep_references_finds_extra_files() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "ProcessOrder",
         "class": "OrderService",
         "depth": 1,
@@ -3082,7 +3082,7 @@ fn test_include_grep_references_default_off() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "ProcessOrder",
         "depth": 1
     }));
@@ -3093,7 +3093,7 @@ fn test_include_grep_references_default_off() {
 }
 
 // ═══════════════════════════════════════════════════════════════════
-// Nearest-match hint tests for search_callers
+// Nearest-match hint tests for xray_callers
 // ═══════════════════════════════════════════════════════════════════
 
 #[test]
@@ -3113,7 +3113,7 @@ fn test_callers_hint_nearest_method_name() {
     };
 
     // Typo: "ProcessOrdr" instead of "ProcessOrder"
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "ProcessOrdr",
         "depth": 1
     }));
@@ -3143,7 +3143,7 @@ fn test_callers_hint_nearest_class_name() {
     };
 
     // Typo: "OrderServise" instead of "OrderService"
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "ProcessOrder",
         "class": "OrderServise",
         "depth": 1
@@ -3210,7 +3210,7 @@ fn test_callers_hint_not_shown_when_results_exist() {
         ..Default::default()
     };
 
-    let result = handle_search_callers(&ctx, &serde_json::json!({
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
         "method": "process",
         "class": "OrderService",
         "depth": 1
