@@ -45,24 +45,79 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     let start = Instant::now();
 
-    // Load file index
+    // Load file index.
+    // Strategy: try exact dir first, then fall back to server_dir's index if dir is
+    // a subdirectory. This prevents creating orphan file-list indexes for every
+    // subdirectory the LLM explores (bug: each subdir call created a separate index file).
     let index = match crate::load_index(&dir, &ctx.index_base) {
         Ok(idx) => idx,
         Err(_) => {
-            // Auto-build
-            info!(dir = %dir, "No file index found, building automatically");
-            let new_index = match crate::build_index(&crate::IndexArgs {
-                dir: dir.clone(),
-                max_age_hours: 24,
-                hidden: false,
-                no_ignore: false,
-                threads: 0,
-            }) {
-                Ok(idx) => idx,
-                Err(e) => return ToolCallResult::error(format!("Failed to build file index: {}", e)),
+            // Fallback: if dir is a subdirectory of server_dir, reuse the server_dir's index.
+            // The server_dir index contains ALL files including subdirectories.
+            let fallback = if dir != ctx.server_dir {
+                crate::load_index(&ctx.server_dir, &ctx.index_base).ok().filter(|idx| {
+                    let dir_canon = std::fs::canonicalize(&dir)
+                        .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
+                        .unwrap_or_else(|_| dir.replace('\\', "/").to_lowercase());
+                    let root_canon = std::fs::canonicalize(&idx.root)
+                        .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
+                        .unwrap_or_else(|_| idx.root.replace('\\', "/").to_lowercase());
+                    let root_prefix = format!("{}/", root_canon.trim_end_matches('/'));
+                    dir_canon.starts_with(&root_prefix) || dir_canon == root_canon
+                })
+            } else {
+                None
             };
-            let _ = crate::save_index(&new_index, &ctx.index_base);
-            new_index
+
+            if let Some(parent_idx) = fallback {
+                info!(dir = %dir, root = %parent_idx.root, "Reusing server_dir file index for subdirectory");
+                parent_idx
+            } else {
+                // Auto-build (only when no parent index is available)
+                info!(dir = %dir, "No file index found, building automatically");
+                let new_index = match crate::build_index(&crate::IndexArgs {
+                    dir: dir.clone(),
+                    max_age_hours: 24,
+                    hidden: false,
+                    no_ignore: false,
+                    threads: 0,
+                }) {
+                    Ok(idx) => idx,
+                    Err(e) => return ToolCallResult::error(format!("Failed to build file index: {}", e)),
+                };
+                let _ = crate::save_index(&new_index, &ctx.index_base);
+                new_index
+            }
+        }
+    };
+
+    // When reusing a parent index for a subdirectory request, compute a path prefix
+    // to filter entries. Without this, wildcard searches would return ALL entries in
+    // the parent index, not just those under the requested dir.
+    let subdir_entry_filter: Option<String> = {
+        let root_norm = index.root.replace('\\', "/");
+        // Resolve dir to absolute path consistent with index entry paths.
+        // Must use clean_path to strip Windows \\?\ prefix from canonicalize.
+        let dir_abs = if std::path::Path::new(&dir).is_absolute() {
+            std::fs::canonicalize(&dir)
+                .map(|p| code_xray::clean_path(&p.to_string_lossy()))
+                .unwrap_or_else(|_| dir.replace('\\', "/"))
+        } else {
+            // Relative path — resolve against index root
+            let full = format!("{}/{}", root_norm.trim_end_matches('/'), dir.replace('\\', "/").trim_matches('/'));
+            std::fs::canonicalize(&full)
+                .map(|p| code_xray::clean_path(&p.to_string_lossy()))
+                .unwrap_or(full)
+        };
+        let root_abs = std::fs::canonicalize(&index.root)
+            .map(|p| code_xray::clean_path(&p.to_string_lossy()))
+            .unwrap_or(root_norm);
+        let dir_lower = dir_abs.to_lowercase();
+        let root_lower = root_abs.to_lowercase();
+        if dir_lower.trim_end_matches('/') == root_lower.trim_end_matches('/') {
+            None // dir == root, no filtering needed
+        } else {
+            Some(format!("{}/", dir_lower.trim_end_matches('/')))
         }
     };
 
@@ -148,10 +203,16 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     };
 
     // Compute base depth for maxDepth filtering.
-    // Use index.root (same path format as entry.path) to avoid Windows path mismatches
-    // where dir might be "." or use backslashes while entry.path uses forward slashes.
+    // When subdir_entry_filter is active (parent index reused for subdirectory),
+    // base_depth must be relative to dir, not index.root. Otherwise maxDepth=1
+    // would show entries 1 level below root instead of 1 level below dir.
     let base_depth = if max_depth.is_some() {
-        index.root.replace('\\', "/").matches('/').count()
+        if let Some(ref filter) = subdir_entry_filter {
+            // filter = "c:/repos/shared/src/" — count slashes in the dir path (without trailing /)
+            filter.trim_end_matches('/').matches('/').count()
+        } else {
+            index.root.replace('\\', "/").matches('/').count()
+        }
     } else {
         0
     };
@@ -160,6 +221,15 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let mut match_count = 0usize;
 
     for entry in &index.entries {
+        // Filter by subdirectory when parent index is reused for a subdir request
+        if let Some(ref prefix) = subdir_entry_filter {
+            let entry_lower = entry.path.to_lowercase();
+            // Entry must be under the subdirectory OR be the subdirectory itself
+            if !entry_lower.starts_with(prefix)
+                && entry_lower != prefix.trim_end_matches('/') {
+                continue;
+            }
+        }
         if dirs_only && !entry.is_dir { continue; }
         if files_only && entry.is_dir { continue; }
 

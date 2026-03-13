@@ -1319,6 +1319,66 @@ $testBlocks += , {
     }
 }
 
+# T-FAST-SUBDIR: xray_fast with subdirectory reuses parent index (no orphan index created)
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-FAST-SUBDIR fast-subdir-no-orphan-index"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_fast_subdir_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Create structure: root/src/App.cs, root/tests/Test.cs
+        $srcDir = Join-Path $tmpDir "src"
+        $testsDir = Join-Path $tmpDir "tests"
+        New-Item -ItemType Directory -Path $srcDir | Out-Null
+        New-Item -ItemType Directory -Path $testsDir | Out-Null
+        Set-Content -Path (Join-Path $srcDir "App.cs") -Value "class App { }"
+        Set-Content -Path (Join-Path $testsDir "Test.cs") -Value "class Test { }"
+
+        # Build index for ROOT only
+        & $Bin index -d $tmpDir 2>&1 | Out-Null
+
+        # Count file-list indexes BEFORE
+        $idxDir = Join-Path $env:LOCALAPPDATA "xray"
+        $countBefore = (Get-ChildItem -Path $idxDir -Filter "*.file-list" -ErrorAction SilentlyContinue).Count
+
+        # Call xray_fast via MCP with dir=src (subdirectory)
+        $srcPath = $srcDir -replace '\\', '/'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":"*","dir":"' + $srcPath + '"}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs 2>`$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no JSON-RPC response" }
+        elseif ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
+
+        # Verify results contain App.cs (in src/)
+        if ($jsonLine -and $jsonLine -notmatch 'App\.cs') { $errors += "App.cs not found in results" }
+        # Verify results do NOT contain Test.cs (in tests/, outside src/)
+        if ($jsonLine -and $jsonLine -match 'Test\.cs') { $errors += "Test.cs should NOT be in results (outside src/)" }
+
+        # Verify no orphan file-list index was created
+        $countAfter = (Get-ChildItem -Path $idxDir -Filter "*.file-list" -ErrorAction SilentlyContinue).Count
+        if ($countAfter -gt $countBefore) { $errors += "orphan file-list index created (before=$countBefore, after=$countAfter)" }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (subdir results scoped, no orphan index)" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+
 # T-TASK-ROUTING: Verify MCP initialize response contains TASK ROUTING in instructions
 $testBlocks += , {
     param($Bin, $Dir, $Ext)

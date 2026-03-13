@@ -13,7 +13,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_test_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
-    for name in &["ModelSchemaStorage.cs", "ModelSchemaManager.cs", "ScannerJobState.cs", "WorkspaceInfoUtils.cs", "UserService.cs", "OtherFile.txt"] {
+    for name in &["OrderProcessor.cs", "OrderValidator.cs", "InventoryTracker.cs", "ConfigurationHelper.cs", "UserService.cs", "OtherFile.txt"] {
         let p = tmp_dir.join(name);
         let mut f = std::fs::File::create(&p).unwrap();
         writeln!(f, "// {}", name).unwrap();
@@ -29,7 +29,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_single_pattern() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1);
@@ -38,7 +38,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_multi_term() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,ModelSchemaManager,ScannerJobState,WorkspaceInfoUtils"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor,OrderValidator,InventoryTracker,ConfigurationHelper"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 4);
@@ -47,7 +47,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_with_ext_filter() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,OtherFile", "ext": "cs"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor,OtherFile", "ext": "cs"}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1);
@@ -64,7 +64,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_partial_matches() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,NonExistent,ScannerJobState"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor,NonExistent,InventoryTracker"}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     cleanup_tmp(&tmp);
@@ -72,7 +72,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_with_spaces() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": " ModelSchemaStorage , ScannerJobState "}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": " OrderProcessor , InventoryTracker "}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     cleanup_tmp(&tmp);
@@ -80,7 +80,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_count_only() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "ModelSchemaStorage,ScannerJobState", "countOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor,InventoryTracker", "countOnly": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     assert!(output["files"].as_array().unwrap().is_empty());
@@ -89,7 +89,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_ignore_case() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "modelschemastorage,scannerjobstate", "ignoreCase": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "orderprocessor,inventorytracker", "ignoreCase": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     cleanup_tmp(&tmp);
@@ -144,25 +144,247 @@ fn test_xray_fast_dirs_only_and_files_only() {
     cleanup_tmp(&tmp_dir);
 }
 
+/// Regression test: xray_fast should reuse the server_dir's file-list index
+/// when dir is a subdirectory, instead of creating a new orphan index file.
+/// Bug: LLM calling xray_fast(dir="docs/design/rest-api") created
+/// a separate file-list index for the subdirectory.
+#[test]
+fn test_xray_fast_subdir_reuses_parent_index() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_subdir_reuse_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create a directory structure: root/docs/design/rest-api/
+    let subdir = tmp_dir.join("docs").join("design").join("rest-api");
+    std::fs::create_dir_all(&subdir).unwrap();
+    { let mut f = std::fs::File::create(subdir.join("api-spec.md")).unwrap(); writeln!(f, "# API Spec").unwrap(); }
+    { let mut f = std::fs::File::create(tmp_dir.join("README.md")).unwrap(); writeln!(f, "# Root README").unwrap(); }
+
+    // Build and save a file-list index for the ROOT directory (server_dir)
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+
+    let content_index = ContentIndex {
+        root: dir_str.clone(), extensions: vec!["md".to_string()], ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: dir_str.clone(),
+        index_base: idx_base.clone(),
+        ..Default::default()
+    };
+
+    // Count index files BEFORE the subdir call
+    let count_before: usize = std::fs::read_dir(&idx_base).unwrap()
+        .filter(|e| e.as_ref().unwrap().path().extension()
+            .is_some_and(|ext| ext == "file-list"))
+        .count();
+
+    // Call xray_fast with dir pointing to a SUBDIRECTORY
+    let subdir_str = subdir.to_string_lossy().to_string();
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": subdir_str
+    }));
+    assert!(!result.is_error, "xray_fast with subdir should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
+        "Should find at least 1 entry in the subdirectory");
+
+    // CRITICAL: count index files AFTER — should NOT have created a new file-list index
+    let count_after: usize = std::fs::read_dir(&idx_base).unwrap()
+        .filter(|e| e.as_ref().unwrap().path().extension()
+            .is_some_and(|ext| ext == "file-list"))
+        .count();
+    assert_eq!(count_before, count_after,
+        "No new file-list index should be created for subdirectory. Before: {}, After: {}",
+        count_before, count_after);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Verify that xray_fast still auto-builds an index when dir is genuinely
+/// outside the server_dir (not a subdirectory).
+#[test]
+fn test_xray_fast_outside_dir_still_builds_index() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let server_dir = std::env::temp_dir().join(format!("xray_fast_outside_srv_{}_{}", std::process::id(), id));
+    let other_dir = std::env::temp_dir().join(format!("xray_fast_outside_other_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&server_dir);
+    let _ = std::fs::create_dir_all(&other_dir);
+
+    { let mut f = std::fs::File::create(server_dir.join("server.txt")).unwrap(); writeln!(f, "server").unwrap(); }
+    { let mut f = std::fs::File::create(other_dir.join("other.txt")).unwrap(); writeln!(f, "other").unwrap(); }
+
+    let srv_str = server_dir.to_string_lossy().to_string();
+    let other_str = other_dir.to_string_lossy().to_string();
+
+    // Build index for server_dir only
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: srv_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = server_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+
+    let content_index = ContentIndex {
+        root: srv_str.clone(), extensions: vec!["txt".to_string()], ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: srv_str.clone(),
+        index_base: idx_base.clone(),
+        ..Default::default()
+    };
+
+    // Call xray_fast with dir pointing OUTSIDE server_dir
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": other_str
+    }));
+    assert!(!result.is_error, "xray_fast with outside dir should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
+        "Should find files in the outside directory");
+
+    // Should have created a NEW file-list index (2 total: server_dir + other_dir)
+    let file_list_count: usize = std::fs::read_dir(&idx_base).unwrap()
+        .filter(|e| e.as_ref().unwrap().path().extension()
+            .is_some_and(|ext| ext == "file-list"))
+        .count();
+    assert_eq!(file_list_count, 2,
+        "Should have 2 file-list indexes (server_dir + other_dir), got {}", file_list_count);
+
+    cleanup_tmp(&server_dir);
+    cleanup_tmp(&other_dir);
+}
+
+/// Regression test: maxDepth with subdirectory should compute depth relative to dir,
+/// not relative to index.root. Without this fix, maxDepth=1 with dir=src would
+/// show entries relative to root (wrong depth calculation).
+#[test]
+fn test_xray_fast_subdir_max_depth_relative_to_dir() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_subdir_maxdepth_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Structure:
+    //   root/
+    //     src/
+    //       App.cs            ← depth 0 from src (should appear with maxDepth=1)
+    //       models/
+    //         User.cs          ← depth 1 from src (should appear with maxDepth=1)
+    //         nested/
+    //           Deep.cs        ← depth 2 from src (should NOT appear with maxDepth=1)
+    //     tests/
+    //       Test.cs            ← should NOT appear (outside src)
+    let src = tmp_dir.join("src");
+    let models = src.join("models");
+    let nested = models.join("nested");
+    let tests_dir = tmp_dir.join("tests");
+    for d in [&src, &models, &nested, &tests_dir] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    { let mut f = std::fs::File::create(src.join("App.cs")).unwrap(); writeln!(f, "// App").unwrap(); }
+    { let mut f = std::fs::File::create(models.join("User.cs")).unwrap(); writeln!(f, "// User").unwrap(); }
+    { let mut f = std::fs::File::create(nested.join("Deep.cs")).unwrap(); writeln!(f, "// Deep").unwrap(); }
+    { let mut f = std::fs::File::create(tests_dir.join("Test.cs")).unwrap(); writeln!(f, "// Test").unwrap(); }
+
+    // Build index for ROOT
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+
+    let content_index = ContentIndex {
+        root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        server_dir: dir_str.clone(),
+        index_base: idx_base.clone(),
+        ..Default::default()
+    };
+
+    // Call xray_fast with dir=src, maxDepth=1
+    let src_str = src.to_string_lossy().to_string();
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": src_str,
+        "maxDepth": 1
+    }));
+    assert!(!result.is_error, "should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+
+    // App.cs (depth 1 from src = immediate child) — MUST be included
+    assert!(paths.iter().any(|p| p.contains("App.cs")),
+        "App.cs (immediate child of src) should be included with maxDepth=1. Got paths: {:?}", paths);
+
+    // User.cs (depth 2 from src = grandchild) — MUST be excluded with maxDepth=1
+    assert!(!paths.iter().any(|p| p.contains("User.cs")),
+        "User.cs (depth 2 from src) should be excluded with maxDepth=1. Got paths: {:?}", paths);
+
+    // Deep.cs (depth 3 from src) — MUST be excluded
+    assert!(!paths.iter().any(|p| p.contains("Deep.cs")),
+        "Deep.cs (depth 3 from src) should be excluded with maxDepth=1. Got paths: {:?}", paths);
+
+    // Test.cs (outside src) — MUST be excluded by subdir_entry_filter
+    assert!(!paths.iter().any(|p| p.contains("Test.cs")),
+        "Test.cs (outside src) should not appear. Got paths: {:?}", paths);
+
+    // Now test maxDepth=2: should include User.cs but still exclude Deep.cs
+    let result2 = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": src_str,
+        "maxDepth": 2
+    }));
+    assert!(!result2.is_error, "maxDepth=2 should not error: {}", result2.content[0].text);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let files2 = output2["files"].as_array().unwrap();
+    let paths2: Vec<&str> = files2.iter().map(|f| f["path"].as_str().unwrap()).collect();
+
+    assert!(paths2.iter().any(|p| p.contains("User.cs")),
+        "User.cs (depth 2 from src) should be included with maxDepth=2. Got paths: {:?}", paths2);
+    assert!(!paths2.iter().any(|p| p.contains("Deep.cs")),
+        "Deep.cs (depth 3 from src) should still be excluded with maxDepth=2. Got paths: {:?}", paths2);
+    assert!(!paths2.iter().any(|p| p.contains("Test.cs")),
+        "Test.cs (outside src) should not appear with maxDepth=2. Got paths: {:?}", paths2);
+
+    cleanup_tmp(&tmp_dir);
+}
+
 /// T16 — xray_fast regex mode.
 #[test]
 fn test_xray_fast_regex_mode() {
     let (ctx, tmp) = make_xray_fast_ctx();
 
-    let result = handle_xray_fast(&ctx, &json!({"pattern": ".*State\\.cs$", "regex": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ".*Tracker\\.cs$", "regex": true}));
     assert!(!result.is_error, "regex search should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1,
-        "Regex '.*State\\.cs$' should match exactly ScannerJobState.cs");
+        "Regex '.*Tracker\\.cs$' should match exactly InventoryTracker.cs");
     let files = output["files"].as_array().unwrap();
-    assert!(files[0]["path"].as_str().unwrap().contains("ScannerJobState"),
-        "Matched file should be ScannerJobState.cs");
+    assert!(files[0]["path"].as_str().unwrap().contains("InventoryTracker"),
+        "Matched file should be InventoryTracker.cs");
 
-    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "Model.*\\.cs$", "regex": true}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "Order.*\\.cs$", "regex": true}));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     assert_eq!(output2["summary"]["totalMatches"], 2,
-        "Regex 'Model.*\\.cs$' should match ModelSchemaStorage.cs and ModelSchemaManager.cs");
+        "Regex 'Order.*\\.cs");
 
     cleanup_tmp(&tmp);
 }
@@ -294,8 +516,8 @@ fn test_xray_fast_empty_pattern_returns_error() {
 #[test]
 fn test_xray_fast_wildcard_star() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    // make_xray_fast_ctx creates 6 files: ModelSchemaStorage.cs, ModelSchemaManager.cs,
-    // ScannerJobState.cs, WorkspaceInfoUtils.cs, UserService.cs, OtherFile.txt
+    // make_xray_fast_ctx creates 6 files: OrderProcessor.cs, OrderValidator.cs,
+    // InventoryTracker.cs, ConfigurationHelper.cs, UserService.cs, OtherFile.txt
     let result = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
     assert!(!result.is_error, "Wildcard '*' should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -985,7 +1207,7 @@ fn test_xray_fast_filecount_with_absolute_dir() {
 }
 
 
-/// Regression test: when `dir` is the absolute path of a subdirectory that 
+/// Regression test: when `dir` is the absolute path of a subdirectory that
 /// equals index.root (load_index built the index FOR that subdir),
 /// dir_prefix should be empty — fileCount should count all files in the index.
 #[test]

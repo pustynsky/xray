@@ -3953,6 +3953,28 @@ returns only file entries.
 
 **Status:** ✅ Implemented (regression fix 2026-03-13)
 
+#### T-FAST-SUBDIR: `xray_fast` — Subdirectory reuses parent index (no orphan file-list index)
+
+**Tool:** `xray_fast`
+
+**Scenario:** When `xray_fast` is called with `dir` pointing to a subdirectory of the server's `--dir`, it should reuse the existing parent directory's file-list index instead of creating a separate orphan index file. Results should be scoped to the requested subdirectory. `maxDepth` should be computed relative to the subdirectory, not the index root.
+
+**Expected:**
+
+- No new `.file-list` index file created for the subdirectory
+- Results include only entries under the requested subdirectory
+- Entries outside the subdirectory are excluded (e.g., `tests/Test.cs` excluded when `dir=src`)
+- `maxDepth=1` with `dir=src` returns immediate children of `src`, not of root
+- External directories (outside `server_dir`) still auto-build their own index as before
+
+**Unit tests:** [`test_xray_fast_subdir_reuses_parent_index`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_outside_dir_still_builds_index`](../src/mcp/handlers/handlers_tests_fast.rs), [`test_xray_fast_subdir_max_depth_relative_to_dir`](../src/mcp/handlers/handlers_tests_fast.rs)
+
+**E2E test:** `T-FAST-SUBDIR` in [`e2e-test.ps1`](../e2e-test.ps1) — creates temp dir with `src/` and `tests/` subdirectories, calls `xray_fast` via MCP with `dir=src`, verifies: (1) `App.cs` in results, (2) `Test.cs` NOT in results, (3) no orphan file-list index created.
+
+**Status:** ✅ Implemented (regression fix 2026-03-13)
+
+---
+
 ---
 
 #### T79c: `xray_fast` — `maxDepth` limits directory depth
