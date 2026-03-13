@@ -717,7 +717,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("NEVER USE apply_diff, search_and_replace, or insert_content when search_edit is available.\n");
     out.push_str("   DECISION TRIGGER: before calling apply_diff, search_and_replace, insert_content, or write_to_file (for edits) — STOP. Use search_edit instead.\n");
     out.push_str("   search_edit: atomic, no whitespace issues, multi-file batch, dryRun preview.\n");
-    out.push_str("   search_edit auto-creates new files (treats as empty — only insert operations succeed). No need for write_to_file.\n\n");
+    out.push_str("   search_edit auto-creates new files (treats as empty — use Mode A: operations [{startLine:1, endLine:0, content:'...'}]). No need for write_to_file.\n\n");
 
     // --- FILE SEARCH DECISION TRIGGER ---
     out.push_str("NEVER USE search_files (built-in regex search) when search_grep is available.\n");
@@ -745,7 +745,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — omit kind filter to get everything at once\n");
     out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n");
     out.push_str("  - NEVER use list_files, list_directory, or directory_tree for ANY purpose when search-index is connected — even for simple directory listing. Use search_fast pattern='*' dir='<path>' dirsOnly=true for directory listing, or search_definitions file='<dir>' for code structure\n");
-    out.push_str("  - NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit — search_edit is atomic, handles whitespace correctly, supports multi-file batch, and costs fewer tokens. search_edit also auto-creates new files (treats as empty — only insert ops succeed)\n");
+    out.push_str("  - NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit — search_edit is atomic, handles whitespace correctly, supports multi-file batch, and costs fewer tokens. search_edit also auto-creates new files (use Mode A operations for new file content)\n");
     out.push_str("  - NEVER use search_files (built-in regex/text search) — use search_grep instead (<1ms vs seconds, pre-built inverted index)\n");
     out.push_str("  - NEVER call search_fast dirsOnly=true to explore code modules — search_definitions file='<dir>' auto-generates directory-grouped summary (autoSummary) when results are too many to list individually\n");
     if !def_extensions.is_empty() {
