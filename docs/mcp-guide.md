@@ -445,7 +445,7 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 | Parameter           | Type    | Default | Description                                                                              |
 | ------------------- | ------- | ------- | ---------------------------------------------------------------------------------------- |
 | `name`              | string  | —       | Substring or comma-separated OR search                                                   |
-| `kind`              | string  | —       | Filter by definition kind (class, method, property, function, typeAlias, variable, etc.) |
+| `kind`              | string  | —       | Filter by definition kind. Comma-separated for multi-kind OR (e.g., `class,interface,enum`). Valid: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember, function, typeAlias, variable, storedProcedure, table, view, sqlFunction, userDefinedType, column, sqlIndex |
 | `attribute`         | string  | —       | Filter by C# attribute or TypeScript decorator                                           |
 | `baseType`          | string  | —       | Filter by base type/interface (substring match — `IAccessTable` finds `IAccessTable<Model>`, etc.) |
 | `baseTypeTransitive`| boolean | false   | With `baseType`, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType |
@@ -692,6 +692,37 @@ When auto-correction produces results, the response includes an `autoCorrection`
 For name corrections, the object also includes `"similarity": "95%"`.
 
 If auto-correction produces 0 results, it falls through to the regular hint system described above.
+
+### Missing Terms Detection
+
+When a multi-name query with a `kind` filter returns results but some terms are silently dropped due to kind mismatch, the response `summary` includes a `missingTerms` array:
+
+```json
+// Request: name="UserService,GetUser" kind="class"
+// UserService is a class (found), GetUser is a method (filtered out by kind)
+{
+  "definitions": [
+    { "name": "UserService", "kind": "class", "file": "UserService.cs" }
+  ],
+  "summary": {
+    "totalResults": 1,
+    "termBreakdown": { "userservice": 1, "getuser": 0 },
+    "missingTerms": [
+      { "term": "getuser", "reason": "kind mismatch: found as method, not class" }
+    ]
+  }
+}
+```
+
+`missingTerms` is only generated when:
+- Multi-name query (2+ comma-separated terms)
+- `kind` filter is active
+- At least one term has results (total > 0)
+- At least one term is missing from results
+
+Possible `reason` values:
+- `"kind mismatch: found as <actual_kind>, not <requested_kind>"` — the term exists but with a different kind
+- `"not found in index"` — the term doesn't exist in the definition index at all
 
 ### Auto-Summary for Broad Queries
 

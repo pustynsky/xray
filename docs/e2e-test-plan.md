@@ -7631,6 +7631,55 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext cs --definitions
 
 **Unit tests:** `test_term_breakdown_multi_term_shows_per_term_counts`, `test_term_breakdown_single_term_not_present`, `test_term_breakdown_regex_not_present`, `test_term_breakdown_no_name_filter_not_present`, `test_term_breakdown_with_zero_match_term`, `test_term_breakdown_counts_are_pre_truncation`
 
+---
+
+### T-MULTI-KIND: `search_definitions` — multi-kind filter
+
+**Tool:** `search_definitions`
+
+**Scenario:** When `kind` contains comma-separated values (e.g., `kind="class,method"`), the response
+includes definitions of ALL specified kinds.
+
+**Steps:**
+1. Call `search_definitions` with `kind="class,method"` on a codebase
+2. Verify response contains both classes and methods
+3. Call `search_definitions` with `kind="class"` (single value) → only classes returned (backward compatibility)
+4. Call `search_definitions` with `kind="class,invalid_kind"` → error returned
+
+**Expected:**
+
+- Multi-kind: results include definitions with different kinds matching the comma-separated list
+- Single kind: backward compatible, works as before
+- Invalid kind in the list: returns error
+
+**Unit tests:** `test_collect_candidates_multi_kind_filter`, `test_collect_candidates_multi_kind_single_value`, `test_collect_candidates_multi_kind_with_name`, `test_collect_candidates_multi_kind_invalid_value`
+
+---
+
+### T-MISSING-TERMS: `search_definitions` — `missingTerms` in summary for multi-name + kind queries
+
+**Tool:** `search_definitions`
+
+**Scenario:** When `name` contains 2+ comma-separated terms AND `kind` filter is active, some terms
+may be silently dropped because they exist with a different kind. The summary includes `missingTerms`
+array diagnosing the issue.
+
+**Steps:**
+1. Call `search_definitions` with `name="UserService,GetUser"` and `kind="class"`
+   - UserService is a class → found
+   - GetUser is a method → dropped by kind filter
+2. Check `summary.missingTerms`
+
+**Expected:**
+
+- `summary.missingTerms` is present (JSON array)
+- Each entry has `term` (lowercased) and `reason` (e.g., `"kind mismatch: found as method, not class"`)
+- `missingTerms` is absent when all terms are found
+- `missingTerms` is absent for single-term queries
+- `missingTerms` is absent when no `kind` filter is set
+
+**Unit tests:** `test_compute_missing_terms_kind_mismatch`, `test_compute_missing_terms_no_kind_filter`, `test_compute_missing_terms_all_found`, `test_compute_missing_terms_single_name`, `test_compute_missing_terms_not_in_index`
+
 **Status:** ✅ Implemented
 
 ---

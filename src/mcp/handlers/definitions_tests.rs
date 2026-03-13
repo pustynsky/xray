@@ -3153,6 +3153,131 @@ fn test_hint_fn_wrong_kind_no_name_or_file_returns_none() {
     assert!(result.is_none(), "Should return None without name/file filter alongside kind");
 }
 
+// ─── Multi-kind filter tests ─────────────────────────────────────────
+
+#[test]
+fn test_collect_candidates_multi_kind_filter() {
+    let index = make_test_def_index();
+    // kind="class,method" should return both classes and methods
+    let args = parse_definition_args(&json!({"kind": "class,method"})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    // make_test_def_index has: UserService (class), GetUser (method), OrderService (class), GetOrder (method)
+    assert_eq!(candidates.len(), 4, "kind=class,method → all 4 definitions");
+    let kinds: Vec<&str> = candidates.iter()
+        .map(|&idx| index.definitions[idx as usize].kind.as_str())
+        .collect();
+    assert!(kinds.contains(&"class"), "Should contain classes");
+    assert!(kinds.contains(&"method"), "Should contain methods");
+}
+
+#[test]
+fn test_collect_candidates_multi_kind_single_value() {
+    // Backward compatibility: single kind value still works
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"kind": "method"})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    assert_eq!(candidates.len(), 2, "kind=method → 2 methods");
+    for &idx in &candidates {
+        assert_eq!(index.definitions[idx as usize].kind, DefinitionKind::Method);
+    }
+}
+
+#[test]
+fn test_collect_candidates_multi_kind_with_name() {
+    let index = make_test_def_index();
+    // kind="class,method" + name="GetUser" → only GetUser (method)
+    let args = parse_definition_args(&json!({"kind": "class,method", "name": "GetUser"})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    assert_eq!(candidates.len(), 1, "kind=class,method + name=GetUser → 1 result");
+    assert_eq!(index.definitions[candidates[0] as usize].name, "GetUser");
+}
+
+#[test]
+fn test_collect_candidates_multi_kind_invalid_value() {
+    let index = make_test_def_index();
+    let args = parse_definition_args(&json!({"kind": "class,invalid_kind"})).unwrap();
+    let result = collect_candidates(&index, &args);
+    assert!(result.is_err(), "Should return Err for invalid kind value");
+}
+
+// ─── Missing terms tests ─────────────────────────────────────────────
+
+#[test]
+fn test_compute_missing_terms_kind_mismatch() {
+    let index = make_test_def_index();
+    // Search for name="UserService,GetUser" with kind="class"
+    // UserService is class (found), GetUser is method (missing due to kind mismatch)
+    let args = parse_definition_args(&json!({
+        "kind": "class",
+        "name": "UserService,GetUser"
+    })).unwrap();
+    let defs_json = vec![json!({"name": "UserService", "kind": "class"})];
+    let result = compute_missing_terms(&index, &defs_json, &args);
+    assert!(result.is_some(), "Should detect missing term GetUser");
+    let missing = result.unwrap();
+    let arr = missing.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "One missing term");
+    assert_eq!(arr[0]["term"].as_str().unwrap(), "getuser");
+    let reason = arr[0]["reason"].as_str().unwrap();
+    assert!(reason.contains("kind mismatch"), "Should mention kind mismatch. Got: {}", reason);
+    assert!(reason.contains("method"), "Should mention actual kind 'method'. Got: {}", reason);
+}
+
+#[test]
+fn test_compute_missing_terms_no_kind_filter() {
+    let index = make_test_def_index();
+    // Without kind filter, missing terms should not be computed
+    let args = parse_definition_args(&json!({"name": "UserService,GetUser"})).unwrap();
+    let defs_json = vec![json!({"name": "UserService", "kind": "class"})];
+    let result = compute_missing_terms(&index, &defs_json, &args);
+    assert!(result.is_none(), "Should return None without kind filter");
+}
+
+#[test]
+fn test_compute_missing_terms_all_found() {
+    let index = make_test_def_index();
+    // Both terms are classes — both found
+    let args = parse_definition_args(&json!({
+        "kind": "class",
+        "name": "UserService,OrderService"
+    })).unwrap();
+    let defs_json = vec![
+        json!({"name": "UserService", "kind": "class"}),
+        json!({"name": "OrderService", "kind": "class"}),
+    ];
+    let result = compute_missing_terms(&index, &defs_json, &args);
+    assert!(result.is_none(), "Should return None when all terms are found");
+}
+
+#[test]
+fn test_compute_missing_terms_single_name() {
+    let index = make_test_def_index();
+    // Single name — missing terms not applicable
+    let args = parse_definition_args(&json!({"kind": "class", "name": "GetUser"})).unwrap();
+    let defs_json: Vec<Value> = vec![];
+    let result = compute_missing_terms(&index, &defs_json, &args);
+    assert!(result.is_none(), "Should return None for single name");
+}
+
+#[test]
+fn test_compute_missing_terms_not_in_index() {
+    let index = make_test_def_index();
+    // One term exists (UserService), other doesn't exist at all
+    let args = parse_definition_args(&json!({
+        "kind": "class",
+        "name": "UserService,NonExistentClass"
+    })).unwrap();
+    let defs_json = vec![json!({"name": "UserService", "kind": "class"})];
+    let result = compute_missing_terms(&index, &defs_json, &args);
+    assert!(result.is_some(), "Should detect missing term");
+    let arr = result.unwrap();
+    let arr = arr.as_array().unwrap();
+    assert_eq!(arr.len(), 1);
+    assert_eq!(arr[0]["term"].as_str().unwrap(), "nonexistentclass");
+    let reason = arr[0]["reason"].as_str().unwrap();
+    assert!(reason.contains("not found in index"), "Should say not found. Got: {}", reason);
+}
+
 #[test]
 fn test_hint_fn_file_has_defs_returns_some() {
     let index = make_test_def_index();

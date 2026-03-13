@@ -231,8 +231,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "kind": {
                         "type": "string",
-                        "enum": ["class", "interface", "method", "property", "field", "enum", "struct", "record", "constructor", "delegate", "event", "enumMember", "function", "typeAlias", "variable", "storedProcedure", "table", "view", "sqlFunction", "userDefinedType", "column", "sqlIndex"],
-                        "description": "Filter by definition kind (see enum for valid values)."
+                        "description": "Filter by definition kind. Comma-separated for multi-kind OR (e.g., 'class,interface,enum'). Valid values: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember, function, typeAlias, variable, storedProcedure, table, view, sqlFunction, userDefinedType, column, sqlIndex."
                     },
                     "attribute": {
                         "type": "string",

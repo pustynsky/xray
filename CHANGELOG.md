@@ -29,6 +29,8 @@
 
 ### Features
 
+- **search_definitions: Multi-kind filter** — The `kind` parameter now supports comma-separated values for multi-kind OR filtering (e.g., `kind='class,interface,enum'`). Previously, searching for definitions of mixed kinds required separate queries or omitting the `kind` filter entirely. Now `kind='class,interface'` returns both classes and interfaces in a single call. Backward compatible — single values work as before. 4 new unit tests.
+- **search_definitions: Missing terms detection (`missingTerms`)** — When a multi-name query with a `kind` filter returns results but some terms are silently dropped due to kind mismatch, the response `summary` now includes a `missingTerms` array with `{term, reason}` for each dropped term (e.g., `"kind mismatch: found as method, not class"`). Previously, the LLM had no way to know that 2 of 4 terms produced 0 results when total results > 0. This eliminates 1-2 unnecessary round-trips per exploration session. 5 new unit tests.
 - **search_definitions: Name+kind mismatch hint** — When `name=X` + `kind=method/property/field/constructor` returns only type-level definitions (class/interface/struct), the response now includes a hint suggesting `parent=X` instead of `name=X`. This eliminates a common LLM confusion pattern where the model searches for class members using `name` instead of `parent`.
 - **search_definitions: File path fuzzy-match hint (Hint F)** — When `file` filter returns 0 results and no other hints fire, the server normalizes paths (removing slashes, dashes, underscores) and suggests the nearest matching file path. Catches cases like `file='Components/Utils'` when the actual path is `ComponentsUtils`.
 

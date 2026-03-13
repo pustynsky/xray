@@ -454,18 +454,26 @@ fn collect_candidates(
 
     // Filter by kind first (most selective usually)
     if let Some(ref kind_str) = args.kind_filter {
-        match kind_str.parse::<DefinitionKind>() {
-            Ok(kind) => {
-                if let Some(indices) = index.kind_index.get(&kind) {
-                    candidate_indices = Some(indices.clone());
-                } else {
-                    candidate_indices = Some(Vec::new());
+        let kind_parts: Vec<&str> = kind_str.split(',')
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let mut all_kind_indices = Vec::new();
+        for part in &kind_parts {
+            match part.parse::<DefinitionKind>() {
+                Ok(kind) => {
+                    if let Some(indices) = index.kind_index.get(&kind) {
+                        all_kind_indices.extend(indices);
+                    }
+                }
+                Err(e) => {
+                    return Err(e);
                 }
             }
-            Err(e) => {
-                return Err(e);
-            }
         }
+        all_kind_indices.sort_unstable();
+        all_kind_indices.dedup();
+        candidate_indices = Some(all_kind_indices);
     }
 
     // Filter by attribute
@@ -717,6 +725,69 @@ fn compute_term_breakdown(
         breakdown.insert(term.clone(), json!(count));
     }
     Some(json!(breakdown))
+}
+
+/// Detect missing terms in multi-name queries when kind filter causes some terms to silently drop.
+/// Returns a JSON array of `{term, reason}` objects for terms that exist in the index
+/// but were filtered out by the kind constraint.
+fn compute_missing_terms(
+    index: &DefinitionIndex,
+    defs_json: &[Value],
+    args: &DefinitionSearchArgs,
+) -> Option<Value> {
+    // Only relevant for multi-name + kind filter + non-regex + results > 0
+    if args.use_regex { return None; }
+    let name = args.name_filter.as_deref()?;
+    let kind_str = args.kind_filter.as_deref()?;
+
+    let terms: Vec<String> = name.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if terms.len() < 2 { return None; }
+    if defs_json.is_empty() { return None; } // 0-result case handled by auto-correction
+
+    // Determine which terms produced results (from JSON output)
+    let found_names: std::collections::HashSet<String> = defs_json.iter()
+        .filter_map(|d| d.get("name").and_then(|v| v.as_str()))
+        .map(|n| n.to_lowercase())
+        .collect();
+
+    let mut missing = Vec::new();
+    for term in &terms {
+        let term_found = found_names.iter().any(|n| n.contains(term.as_str()));
+        if term_found { continue; }
+
+        // Check if this term exists in name_index with a DIFFERENT kind
+        let mut actual_kinds: Vec<&str> = Vec::new();
+        for (n, indices) in &index.name_index {
+            if n.contains(term.as_str()) {
+                for &idx in indices {
+                    if let Some(def) = index.definitions.get(idx as usize) {
+                        let k = def.kind.as_str();
+                        if !actual_kinds.contains(&k) {
+                            actual_kinds.push(k);
+                        }
+                    }
+                }
+            }
+        }
+
+        if !actual_kinds.is_empty() {
+            missing.push(json!({
+                "term": term,
+                "reason": format!("kind mismatch: found as {}, not {}",
+                    actual_kinds.join("/"), kind_str)
+            }));
+        } else {
+            missing.push(json!({
+                "term": term,
+                "reason": "not found in index"
+            }));
+        }
+    }
+
+    if missing.is_empty() { None } else { Some(json!(missing)) }
 }
 
 // ─── Sorting ─────────────────────────────────────────────────────────
@@ -1018,6 +1089,9 @@ fn build_search_summary(
     }
     if let Some(breakdown) = term_breakdown {
         summary["termBreakdown"] = breakdown.clone();
+    }
+    if let Some(missing) = compute_missing_terms(index, defs_json, args) {
+        summary["missingTerms"] = missing;
     }
     inject_branch_warning(&mut summary, ctx);
 
