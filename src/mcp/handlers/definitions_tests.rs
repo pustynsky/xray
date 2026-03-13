@@ -2760,6 +2760,12 @@ fn test_should_auto_summary_not_triggered_with_include_body() {
 }
 
 #[test]
+fn test_should_auto_summary_not_triggered_with_sort_by() {
+    let args = parse_definition_args(&json!({"file": "Services/", "sortBy": "cognitiveComplexity", "maxResults": 3})).unwrap();
+    assert!(!should_auto_summary(&args, 7), "should NOT trigger: sortBy is set — user wants ranked individual results");
+}
+
+#[test]
 fn test_auto_summary_groups_by_directory() {
     let index = make_auto_summary_test_index();
     let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 3})).unwrap();

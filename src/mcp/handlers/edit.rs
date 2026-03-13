@@ -104,7 +104,12 @@ struct EditResult {
 fn read_and_validate_file(server_dir: &str, path_str: &str) -> Result<(PathBuf, String, &'static str), String> {
     let resolved = resolve_path(server_dir, path_str);
     if !resolved.exists() {
-        return Err(format!("File not found: {}", path_str));
+        // File doesn't exist — treat as empty (allows creation via insert operations)
+        if let Some(parent) = resolved.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("Failed to create directories for '{}': {}", path_str, e))?;
+        }
+        return Ok((resolved, String::new(), "\n"));
     }
     if resolved.is_dir() {
         return Err(format!("Path is a directory, not a file: {}", path_str));
@@ -224,6 +229,7 @@ fn handle_single_file_edit(
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
+    let file_created = normalized.is_empty() && !resolved.exists();
 
     // Apply edits
     let edit_result = match apply_edits_to_content(path_str, &normalized, operations, edits, is_regex, expected_line_count) {
@@ -271,6 +277,10 @@ fn handle_single_file_edit(
         response["diff"] = json!(edit_result.diff);
     } else {
         response["diff"] = json!("(no changes)");
+    }
+
+    if file_created {
+        response["fileCreated"] = json!(true);
     }
 
     ToolCallResult::success(json_to_string(&response))

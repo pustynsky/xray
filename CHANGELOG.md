@@ -9,6 +9,12 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 ## 2026-03-12
 
 ### Features
+- **`search_edit` auto-creates new files** — `search_edit` now treats non-existent files as empty files instead of returning "File not found" error. Insert operations (Mode A: `startLine: 1, endLine: 0`) succeed and create the file; search/replace operations fail naturally (no text to find in empty content). Parent directories are created automatically. Response includes `fileCreated: true` when a new file was created. This eliminates the need for `write_to_file` as a separate tool — LLMs can use `search_edit` for both editing and creating files. For Mode B (text-match), search/replace and insertAfter/insertBefore still require the target text to exist, so they fail gracefully on empty files. Multi-file `paths` mode also supports mixed existing + new files. 6 new unit tests.
+
+### Bug Fixes
+- **`search_definitions autoSummary` blocked `sortBy` queries** — When `search_definitions` was called with `sortBy` (e.g., `sortBy='cognitiveComplexity'`) and no `name` filter, the `autoSummary` mode intercepted the results and returned a directory-grouped summary instead of the top-N sorted individual results. This caused LLMs to waste 3-4 calls trying different filter combinations before resorting to explicit `name` lists. Root cause: `should_auto_summary()` didn't check for `sort_by`. Fix: added `args.sort_by.is_none()` condition — when `sortBy` is set, individual ranked results are returned. Found via MCP transcript analysis (`roo_task_mar-13-2026_1-01-20-am.md`, episodes 26-29). 1 new unit test.
+
+### Features
 - **`search_fast` directory enrichment: `fileCount`, `maxDepth`, sorting** — Three improvements to `search_fast` for large repository exploration:
   1. **`fileCount` field** — When `dirsOnly=true` with wildcard pattern (`*`), each directory entry now includes `fileCount` — the total number of files recursively contained in that directory. Computed in O(N) via a single pass over the file index with ancestor directory counting.
   2. **Sorting by `fileCount`** — Wildcard `dirsOnly` results are sorted by `fileCount` descending (largest modules first), ensuring the most important directories appear at the top even when truncation occurs on large repos (10K+ directories).
