@@ -314,7 +314,11 @@ fn test_parent_filter_comma_separated_no_match_returns_empty() {
 
 #[test]
 fn test_audit_cross_validate_no_file_index_returns_skipped() {
-    let ctx = make_transitive_inheritance_ctx();
+    let mut ctx = make_transitive_inheritance_ctx();
+    // Use isolated temp dir so no file-list index from other tests is found
+    let tmp = std::env::temp_dir().join(format!("xray_audit_cv_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&tmp);
+    ctx.index_base = tmp.clone();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
         "audit": true,
         "crossValidate": true

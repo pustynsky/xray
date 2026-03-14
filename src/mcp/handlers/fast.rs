@@ -42,6 +42,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let files_only = args.get("filesOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let count_only = args.get("countOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let max_depth = args.get("maxDepth").and_then(|v| v.as_u64()).map(|d| d as usize);
+    let max_results = args.get("maxResults").and_then(|v| v.as_u64()).map(|d| d as usize).unwrap_or(0);
 
     let start = Instant::now();
 
@@ -285,6 +286,8 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         }
     }
 
+    // ── maxResults truncation (before sorting for efficiency, but we sort first for quality) ──
+
     // ── Sorting ──
     // For wildcard + dirsOnly: sort by fileCount descending (largest modules first)
     if !count_only && is_wildcard && dirs_only {
@@ -318,6 +321,14 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         });
     }
 
+    // Apply maxResults truncation after sorting
+    let truncated = if max_results > 0 && results.len() > max_results {
+        results.truncate(max_results);
+        true
+    } else {
+        false
+    };
+
     let elapsed = start.elapsed();
 
     let mut summary = json!({
@@ -334,6 +345,10 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
             "Too many directories. Use maxDepth=1 for immediate children only, \
              or use xray_definitions file='<dir>' for code-level module overview with autoSummary."
         );
+    }
+    if truncated {
+        summary["truncated"] = json!(true);
+        summary["maxResults"] = json!(max_results);
     }
     inject_branch_warning(&mut summary, ctx);
     let output = json!({

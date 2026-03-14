@@ -367,14 +367,16 @@ fn test_dispatch_reindex_while_content_index_building() {
 
 #[test]
 fn test_dispatch_fast_while_content_index_building() {
+    // xray_fast uses its own file-list index, NOT the content index.
+    // It should work even when content index is still building.
     let ctx = HandlerContext {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
     let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": "foo"}));
-    assert!(result.is_error);
-    assert!(result.content[0].text.contains("being built"),
-        "Expected 'being built' message, got: {}", result.content[0].text);
+    assert!(!result.is_error,
+        "xray_fast should not be blocked by content_ready=false, got: {}",
+        result.content[0].text);
 }
 
 #[test]

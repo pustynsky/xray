@@ -224,6 +224,34 @@ fn write_file_with_endings(resolved: &Path, content: &str, line_ending: &str) ->
         .map_err(|e| format!("Failed to write file: {}", e))
 }
 
+/// Generate a temp file path in the same directory as `target` for atomic writes.
+fn temp_path_for(target: &Path) -> PathBuf {
+    let file_name = target.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    target.with_file_name(format!(".{}.xray_tmp", file_name))
+}
+
+/// Rename `src` to `dst`, replacing `dst` if it exists.
+/// On Windows, std::fs::rename may fail if `dst` exists, so we remove first.
+fn rename_replace(src: &Path, dst: &Path) -> Result<(), String> {
+    // Try direct rename first (works on most platforms)
+    match std::fs::rename(src, dst) {
+        Ok(()) => Ok(()),
+        Err(e) => {
+            // Fallback: remove target first, then rename
+            if dst.exists() {
+                std::fs::remove_file(dst)
+                    .map_err(|e2| format!("Cannot remove original '{}': {}", dst.display(), e2))?;
+                std::fs::rename(src, dst)
+                    .map_err(|e2| format!("Cannot rename temp to '{}': {} (original error: {})", dst.display(), e2, e))
+            } else {
+                Err(format!("Cannot rename temp to '{}': {}", dst.display(), e))
+            }
+        }
+    }
+}
+
 /// Handle single-file edit (original behavior).
 fn handle_single_file_edit(
     ctx: &HandlerContext,
@@ -346,12 +374,37 @@ fn handle_multi_file_edit(
         }
     }
 
-    // Phase 3: Write all (only if !dry_run)
+    // Phase 3: Write all (only if !dry_run) — atomic multi-file via temp+rename
     if !dry_run {
+        // Phase 3a: Write to temp files (validates I/O before touching originals)
+        let mut temp_files: Vec<(&str, PathBuf, PathBuf)> = Vec::with_capacity(edit_results.len());
         for (path_str, resolved, result, line_ending) in &edit_results {
-            if let Err(e) = write_file_with_endings(resolved, &result.modified_content, line_ending) {
+            let temp = temp_path_for(resolved);
+            if let Err(e) = write_file_with_endings(&temp, &result.modified_content, line_ending) {
+                // Clean up temp files already written
+                for (_, _, tp) in &temp_files {
+                    let _ = std::fs::remove_file(tp);
+                }
                 return ToolCallResult::error(format!("File '{}': {}", path_str, e));
             }
+            temp_files.push((path_str, resolved.clone(), temp));
+        }
+
+        // Phase 3b: Rename temp files to targets (fast, unlikely to fail)
+        let mut renamed: usize = 0;
+        for (path_str, resolved, temp) in &temp_files {
+            if let Err(e) = rename_replace(temp, resolved) {
+                // Best-effort cleanup of remaining temp files
+                for (_, _, tp) in &temp_files[renamed..] {
+                    let _ = std::fs::remove_file(tp);
+                }
+                return ToolCallResult::error(format!(
+                    "File '{}': rename failed after {} of {} files committed: {}. \
+                     Already-committed files cannot be rolled back.",
+                    path_str, renamed, temp_files.len(), e
+                ));
+            }
+            renamed += 1;
         }
     }
 
@@ -824,13 +877,10 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                         result = re.replace_all(&result, |caps: &regex::Captures| {
                             current += 1;
                             if current == n {
-                                // Apply capture group substitution
-                                let mut out = replace_str.clone();
-                                for i in 0..caps.len() {
-                                    if let Some(m) = caps.get(i) {
-                                        out = out.replace(&format!("${}", i), m.as_str());
-                                    }
-                                }
+                                // Use caps.expand() to avoid cascade bug where
+                                // $0 expansion containing "$1" gets double-substituted
+                                let mut out = String::new();
+                                caps.expand(&replace_str, &mut out);
                                 out
                             } else {
                                 caps[0].to_string()

@@ -144,7 +144,8 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "dirsOnly": { "type": "boolean", "description": "Show only directories. When true with wildcard pattern, returns directories sorted by fileCount descending (largest first). Useful for identifying important modules. ext filter is ignored (directories have no extension)" },
                     "filesOnly": { "type": "boolean", "description": "Show only files" },
                     "countOnly": { "type": "boolean", "description": "Count only" },
-                    "maxDepth": { "type": "integer", "description": "Max directory depth for dirsOnly results (1=immediate children only). Default: unlimited" }
+                    "maxDepth": { "type": "integer", "description": "Max directory depth for dirsOnly results (1=immediate children only). Default: unlimited" },
+                    "maxResults": { "type": "integer", "description": "Max results to return (0=unlimited, default: 0). Use to limit response size for large directories." }
                 },
                 "required": ["pattern"]
             }),
@@ -791,7 +792,8 @@ const MULTI_METHOD_RESPONSE_MAX: usize = 131_072;
 
 /// Returns true when a tool requires the content index to be ready.
 fn requires_content_index(tool_name: &str) -> bool {
-    matches!(tool_name, "xray_grep" | "xray_fast" | "xray_reindex")
+    // Note: xray_fast uses its own file-list index, not the content index
+    matches!(tool_name, "xray_grep" | "xray_reindex")
 }
 
 /// Returns true when a tool requires the definition index to be ready.
@@ -1210,6 +1212,17 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let file_count = new_index.files.len();
     let token_count = new_index.index.len();
+
+    // Rebuild path_to_id if watcher is active (old index had path_to_id).
+    // Without this, watcher becomes no-op after reindex (path_to_id = None).
+    let had_watch = ctx.index.read()
+        .map(|idx| idx.path_to_id.is_some())
+        .unwrap_or(false);
+    let new_index = if had_watch {
+        crate::mcp::watcher::build_watch_index_from(new_index)
+    } else {
+        new_index
+    };
 
     // Update in-memory cache
     match ctx.index.write() {

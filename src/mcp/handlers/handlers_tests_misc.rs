@@ -429,6 +429,12 @@ fn test_xray_info_response_structure() {
                 assert!(idx["sizeMb"].is_number(), "Git history should have 'sizeMb'");
                 assert!(idx["ageHours"].is_number(), "Git history should have 'ageHours'");
             }
+            "file-list" => {
+                // File-list indexes may be left over from other tests (e.g. xray_fast).
+                // MCP handler only emits root + sizeMb (no full deserialization).
+                assert!(idx["root"].is_string(), "File-list index should have 'root'");
+                assert!(idx["sizeMb"].is_number(), "File-list index should have 'sizeMb'");
+            }
             other => panic!("Unexpected index type: {}", other),
         }
     }
