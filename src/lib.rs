@@ -398,6 +398,23 @@ impl ContentIndex {
 
         (trigram_count, token_count)
     }
+
+    /// Shrink all internal HashMaps to fit their current size.
+    /// Call after loading from disk to reclaim excess capacity.
+    /// Saves ~20-50 MB for large indexes by eliminating HashMap over-allocation.
+    pub fn shrink_maps(&mut self) {
+        self.index.shrink_to_fit();
+        for postings in self.index.values_mut() {
+            postings.shrink_to_fit();
+        }
+        self.trigram.trigram_map.shrink_to_fit();
+        for list in self.trigram.trigram_map.values_mut() {
+            list.shrink_to_fit();
+        }
+        if let Some(ref mut p2id) = self.path_to_id {
+            p2id.shrink_to_fit();
+        }
+    }
 }
 
 impl Default for ContentIndex {

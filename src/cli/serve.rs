@@ -107,11 +107,12 @@ pub fn cmd_serve(args: ServeArgs) {
             load_method, idx.files.len(), idx.index.len(),
             idx.trigram.trigram_map.len(), cache_age
         ));
-        let idx = if args.watch {
+        let mut idx = if args.watch {
             mcp::watcher::build_watch_index_from(idx)
         } else {
             idx
         };
+        idx.shrink_maps();
         *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
         content_ready.store(true, Ordering::Release);
         crate::index::log_memory("serve: content ready");
@@ -196,11 +197,12 @@ pub fn cmd_serve(args: ServeArgs) {
             };
 
             crate::index::log_memory("serve: after reload content from disk");
-            let new_idx = if bg_watch {
+            let mut new_idx = if bg_watch {
                 mcp::watcher::build_watch_index_from(new_idx)
             } else {
                 new_idx
             };
+            new_idx.shrink_maps();
             let elapsed = build_start.elapsed();
             info!(
                 elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
@@ -314,6 +316,8 @@ pub fn cmd_serve(args: ServeArgs) {
                 def_load_method, def_file_count, def_count,
                 idx.method_calls.len(), cache_age
             ));
+            let mut idx = idx;
+            idx.shrink_maps();
             *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
             def_ready.store(true, Ordering::Release);
         } else {
@@ -366,6 +370,8 @@ pub fn cmd_serve(args: ServeArgs) {
                     files = file_count,
                     "Definition index ready (background build complete)"
                 );
+                let mut new_idx = new_idx;
+                new_idx.shrink_maps();
                 *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
                 bg_def_ready.store(true, Ordering::Release);
                 crate::index::log_memory("serve: def ready");

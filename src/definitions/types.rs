@@ -251,6 +251,33 @@ pub struct DefinitionIndex {
     pub extension_methods: HashMap<String, Vec<String>>,
 }
 
+impl DefinitionIndex {
+    /// Shrink all internal HashMaps to fit their current size.
+    /// Call after loading from disk to reclaim excess capacity.
+    /// Saves ~20-50 MB for large indexes by eliminating HashMap over-allocation.
+    pub fn shrink_maps(&mut self) {
+        self.name_index.shrink_to_fit();
+        self.kind_index.shrink_to_fit();
+        self.attribute_index.shrink_to_fit();
+        self.base_type_index.shrink_to_fit();
+        self.file_index.shrink_to_fit();
+        self.selector_index.shrink_to_fit();
+        self.method_calls.shrink_to_fit();
+        self.code_stats.shrink_to_fit();
+        self.template_children.shrink_to_fit();
+        self.path_to_id.shrink_to_fit();
+        self.extension_methods.shrink_to_fit();
+        // Also shrink inner Vecs for maps with non-trivial value sizes
+        for v in self.name_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.kind_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.attribute_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.base_type_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.file_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.selector_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.method_calls.values_mut() { v.shrink_to_fit(); }
+    }
+}
+
 
 // ─── Parser result type aliases ──────────────────────────────────────
 // Shared by all parser entry points to avoid clippy::type_complexity.

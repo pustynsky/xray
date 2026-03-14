@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Performance
+
+- **Memory estimate accuracy improved (`xray_info`)** — Updated memory estimation coefficients in `estimate_content_index_memory()` and `estimate_definition_index_memory()` to more accurately reflect real Working Set consumption. Key changes: (1) HashMap entry overhead increased from 80B to 120B (includes bucket + hash + metadata + alignment padding); (2) Each `Posting.lines` Vec now accounts for 32B allocator overhead per heap allocation; (3) String allocator overhead (32B) added to key estimates; (4) CallSite estimate increased from 60B to 100B (accounts for String headers + allocator overhead); (5) `selector_index` added to secondary index count (was missing); (6) `methodCallsOverheadMB` separated as a distinct field; (7) New `allocatorOverheadMB` field (20% of data size) for mimalloc/jemalloc fragmentation estimate. Previously, `xray_info` reported ~488 MB for a content index that actually consumed ~620 MB in Working Set (3.6× undercount overall). New estimates should be within 50% of actual WS.
+
+- **`shrink_to_fit()` on all HashMaps after index load** — Added `ContentIndex::shrink_maps()` and `DefinitionIndex::shrink_maps()` methods that reclaim excess HashMap capacity after loading indexes from disk. Called automatically in all 4 index load paths in `serve.rs` (direct content load, background content build+reload, direct def load, background def build+reload). Shrinks all 11 HashMaps in `DefinitionIndex` and 3 in `ContentIndex`, plus inner Vecs for maps with non-trivial value sizes. Expected savings: ~20-50 MB for large projects (65K files). Zero latency impact on queries; ~50-80ms one-time cost at startup.
+
 ### Bug Fixes (Audit Batch 2026-03-14)
 
 - **Removed `xray_find` tool** — deprecated slow filesystem-walk tool removed entirely. Closes 7 audit findings (L27-L31, M13, M14). Use `xray_fast` for all file lookups (90x+ faster). Removed from: MCP tool definitions, CLI commands, tips, E2E tests. **Breaking change**: `xray_find` MCP tool and `xray find` CLI command no longer exist.
