@@ -768,6 +768,14 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         }
     }
 
+    // --- Workspace discovery ---
+    out.push_str("\nWORKSPACE DISCOVERY:\n");
+    out.push_str("  Every tool response includes serverDir, workspaceStatus, workspaceSource, workspaceGeneration in summary.\n");
+    out.push_str("  If workspaceStatus=\"unresolved\" — tools return WORKSPACE_UNRESOLVED error with hint.\n");
+    out.push_str("  Fix: call xray_reindex dir=<project_path> to bind workspace and build index.\n");
+    out.push_str("  If client supports MCP roots — workspace is auto-detected from roots/list.\n");
+    out.push_str("  Always check serverDir in responses to confirm you're searching the right directory.\n");
+
     // --- Git tools (brief mention) ---
     out.push_str("\nGit tools: xray_git_history, xray_git_authors, xray_git_activity, xray_git_blame, xray_branch_status -- use for code history/blame/authorship investigations. Call xray_help for details.\n");
 

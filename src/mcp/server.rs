@@ -14,12 +14,111 @@ use crate::definitions;
 ///
 /// Accepts a fully-constructed [`HandlerContext`] instead of 12 individual parameters.
 /// The caller (`cmd_serve`) builds the context and passes it in.
+/// MCP server event loop state — tracks protocol handshake and pending requests.
+struct ServerState {
+    /// Whether the client advertised `capabilities.roots`.
+    client_supports_roots: bool,
+    /// Whether the client advertised `capabilities.roots.listChanged`.
+    client_supports_roots_list_changed: bool,
+    /// ID of the pending `roots/list` request (if any).
+    pending_roots_request_id: Option<u64>,
+    /// Next request ID for server-initiated requests.
+    next_id: u64,
+}
+
+impl ServerState {
+    fn new() -> Self {
+        Self {
+            client_supports_roots: false,
+            client_supports_roots_list_changed: false,
+            pending_roots_request_id: None,
+            next_id: 1,
+        }
+    }
+}
+
+/// Convert a file:// URI to a local path string using the `url` crate.
+/// Handles percent-encoding, drive letters, Unicode, and UNC paths.
+pub(crate) fn uri_to_path(uri: &str) -> Option<String> {
+    let parsed = url::Url::parse(uri).ok()?;
+    if parsed.scheme() != "file" { return None; }
+    let path = parsed.to_file_path().ok()?;
+    Some(crate::clean_path(&path.to_string_lossy()))
+}
+
+/// Send a JSON-RPC request to the client (server-initiated).
+fn send_request(writer: &mut impl io::Write, state: &mut ServerState, method: &str, params: Value) -> io::Result<u64> {
+    let id = state.next_id;
+    state.next_id += 1;
+    let request = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    let s = serde_json::to_string(&request).unwrap();
+    debug!(request = %s, "Sending server request");
+    writeln!(writer, "{}", s)?;
+    writer.flush()?;
+    Ok(id)
+}
+
+/// Handle a response to a server-initiated request (e.g., roots/list).
+fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerContext) {
+    let id = raw.get("id").and_then(|v| v.as_u64());
+
+    // Check if this is the roots/list response
+    if let Some(pending_id) = state.pending_roots_request_id {
+        if id == Some(pending_id) {
+            state.pending_roots_request_id = None;
+
+            if let Some(result) = raw.get("result") {
+                if let Some(roots) = result.get("roots").and_then(|r| r.as_array()) {
+                    if let Some(first_root) = roots.first() {
+                        if let Some(uri) = first_root.get("uri").and_then(|u| u.as_str()) {
+                            if let Some(path) = uri_to_path(uri) {
+                                let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+                                let old_dir = ws.dir.clone();
+                                if !path.eq_ignore_ascii_case(&old_dir) {
+                                    ws.dir = path.clone();
+                                    ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
+                                    ws.generation += 1;
+                                    ws.status = handlers::WorkspaceStatus::Reindexing;
+                                    info!(dir = %path, previous = %old_dir, generation = ws.generation,
+                                        roots_count = roots.len(), "Workspace set from roots/list");
+                                    // Note: reindexing will happen on next tool call or via xray_reindex.
+                                    // For now, set status to Reindexing — tools will see this and
+                                    // the LLM can call xray_reindex to complete the switch.
+                                } else {
+                                    // Same directory — just update mode
+                                    ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
+                                    info!(dir = %path, "Workspace confirmed by roots/list (same dir)");
+                                }
+                            }
+                        }
+                    }
+                    if roots.len() > 1 {
+                        warn!(count = roots.len(), "Multiple roots received, using first one");
+                    }
+                }
+            } else if let Some(error) = raw.get("error") {
+                warn!(error = %error, "roots/list request failed");
+            }
+            return;
+        }
+    }
+
+    debug!(id = ?id, "Received response to unknown server request");
+}
+
 pub fn run_server(ctx: HandlerContext) {
 
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let stdout = io::stdout();
     let mut writer = stdout.lock();
+
+    let mut state = ServerState::new();
 
     const MAX_REQUEST_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
@@ -51,90 +150,154 @@ pub fn run_server(ctx: HandlerContext) {
                 if line.len() > MAX_REQUEST_SIZE {
                     error!(size = line.len(), "Request too large (exceeded {} bytes), skipping", MAX_REQUEST_SIZE);
                     // Drain remaining bytes until newline to re-sync the stream.
-                    // Use bounded reads in a loop to avoid OOM on the drain itself.
                     let mut discard = String::new();
                     loop {
                         discard.clear();
                         match reader.by_ref().take(8192).read_line(&mut discard) {
-                            Ok(0) => break,                         // EOF
-                            Ok(_) if discard.ends_with('\n') => break, // found newline
-                            Ok(_) => continue,                      // keep draining
+                            Ok(0) => break,
+                            Ok(_) if discard.ends_with('\n') => break,
+                            Ok(_) => continue,
                             Err(_) => break,
                         }
                     }
                     continue;
                 }
-                let line = line.trim().to_string();
-                if line.is_empty() {
+                let trimmed = line.trim().to_string();
+                if trimmed.is_empty() {
                     continue;
                 }
 
-                debug!(request = %line, "Incoming JSON-RPC");
+                debug!(request = %trimmed, "Incoming JSON-RPC");
 
-                let request: JsonRpcRequest = match serde_json::from_str(&line) {
-                    Ok(r) => r,
+                // Parse as generic Value first to route requests vs responses
+                let raw: Value = match serde_json::from_str(&trimmed) {
+                    Ok(v) => v,
                     Err(e) => {
-                        warn!(error = %e, "Failed to parse JSON-RPC request");
+                        warn!(error = %e, "Failed to parse JSON-RPC message");
                         let err = JsonRpcErrorResponse::new(
-                                Value::Null,
-                                -32700,
-                                format!("Parse error: {}", e),
-                            );
-                            let resp = match serde_json::to_string(&err) {
-                                Ok(s) => s,
-                                Err(ser_err) => {
-                                    error!(error = %ser_err, "Failed to serialize parse-error response, skipping");
-                                    continue;
-                                }
-                            };
-                        debug!(response = %resp, "Error response");
-                        if let Err(e) = writeln!(writer, "{}", resp) {
-                            error!(error = %e, "Failed to write error response to stdout, shutting down");
-                            break;
-                        }
-                        if let Err(e) = writer.flush() {
-                            error!(error = %e, "Failed to flush stdout, shutting down");
-                            break;
+                            Value::Null, -32700, format!("Parse error: {}", e),
+                        );
+                        if let Ok(resp) = serde_json::to_string(&err) {
+                            let _ = writeln!(writer, "{}", resp);
+                            let _ = writer.flush();
                         }
                         continue;
                     }
                 };
 
-                // Notifications have no id — don't send a response
-                let Some(id) = request.id else {
-                    debug!(method = %request.method, "Received notification");
-                    continue;
-                };
+                // Route: if has "method" → request or notification; else → response
+                if raw.get("method").is_some() {
+                    // Request or notification
+                    let request: JsonRpcRequest = match serde_json::from_value(raw.clone()) {
+                        Ok(r) => r,
+                        Err(e) => {
+                            warn!(error = %e, "Failed to parse JSON-RPC request structure");
+                            continue;
+                        }
+                    };
 
-                let response = handle_request(&ctx, &request.method, &request.params, id.clone());
-
-                let resp_str = match serde_json::to_string(&response) {
-                    Ok(s) => s,
-                    Err(ser_err) => {
-                        error!(error = %ser_err, "Failed to serialize JSON-RPC response");
-                        // Send a JSON-RPC internal error instead of panicking
-                        let fallback = JsonRpcErrorResponse::new(
-                            id,
-                            -32603,
-                            format!("Internal error: response serialization failed: {}", ser_err),
-                        );
-                        match serde_json::to_string(&fallback) {
-                            Ok(s) => s,
-                            Err(e2) => {
-                                error!(error = %e2, "Failed to serialize fallback error response, skipping");
-                                continue;
+                    // Handle notifications (no id)
+                    if request.id.is_none() {
+                        debug!(method = %request.method, "Received notification");
+                        // Handle initialized notification — trigger roots/list
+                        if request.method == "notifications/initialized" {
+                            let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+                            let is_pinned = ws.mode == handlers::WorkspaceBindingMode::PinnedCli;
+                            drop(ws);
+                            if state.client_supports_roots && !is_pinned {
+                                match send_request(&mut writer, &mut state, "roots/list", json!({})) {
+                                    Ok(id) => {
+                                        state.pending_roots_request_id = Some(id);
+                                        info!(request_id = id, "Requesting roots/list from client");
+                                    }
+                                    Err(e) => warn!(error = %e, "Failed to send roots/list request"),
+                                }
                             }
                         }
+                        // Handle roots/list_changed notification
+                        if request.method == "notifications/roots/list_changed" {
+                            let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+                            match ws.mode {
+                                handlers::WorkspaceBindingMode::PinnedCli => {
+                                    debug!("roots/list_changed ignored — workspace is PinnedCli");
+                                }
+                                handlers::WorkspaceBindingMode::ManualOverride => {
+                                    info!("roots/list_changed received but workspace was manually overridden");
+                                }
+                                _ => {
+                                    drop(ws); // release read lock
+                                    if state.client_supports_roots {
+                                        match send_request(&mut writer, &mut state, "roots/list", json!({})) {
+                                            Ok(id) => {
+                                                state.pending_roots_request_id = Some(id);
+                                                info!(request_id = id, "Re-requesting roots/list after roots_changed");
+                                            }
+                                            Err(e) => warn!(error = %e, "Failed to send roots/list request"),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        continue;
                     }
-                };
-                debug!(response = %resp_str, "Outgoing JSON-RPC");
-                if let Err(e) = writeln!(writer, "{}", resp_str) {
-                    error!(error = %e, "Failed to write response to stdout, shutting down");
-                    break;
-                }
-                if let Err(e) = writer.flush() {
-                    error!(error = %e, "Failed to flush stdout, shutting down");
-                    break;
+
+                    let id = request.id.unwrap();
+
+                    // Special handling for initialize — parse client capabilities
+                    if request.method == "initialize" {
+                        if let Some(ref params) = request.params {
+                            let has_roots = params
+                                .pointer("/capabilities/roots")
+                                .is_some();
+                            let has_list_changed = params
+                                .pointer("/capabilities/roots/listChanged")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            state.client_supports_roots = has_roots;
+                            state.client_supports_roots_list_changed = has_list_changed;
+                            info!(roots = has_roots, list_changed = has_list_changed,
+                                "Client capabilities parsed");
+                        }
+                    }
+
+                    // After initialized notification handling is not needed here —
+                    // it's handled above in the notification branch.
+                    // But we need to trigger roots/list after initialize response.
+                    // We do this after sending the initialize response below.
+
+                    let response = handle_request(&ctx, &request.method, &request.params, id.clone());
+
+                    let resp_str = match serde_json::to_string(&response) {
+                        Ok(s) => s,
+                        Err(ser_err) => {
+                            error!(error = %ser_err, "Failed to serialize JSON-RPC response");
+                            let fallback = JsonRpcErrorResponse::new(
+                                id, -32603,
+                                format!("Internal error: response serialization failed: {}", ser_err),
+                            );
+                            match serde_json::to_string(&fallback) {
+                                Ok(s) => s,
+                                Err(e2) => {
+                                    error!(error = %e2, "Failed to serialize fallback error response, skipping");
+                                    continue;
+                                }
+                            }
+                        }
+                    };
+                    debug!(response = %resp_str, "Outgoing JSON-RPC");
+                    if let Err(e) = writeln!(writer, "{}", resp_str) {
+                        error!(error = %e, "Failed to write response to stdout, shutting down");
+                        break;
+                    }
+                    if let Err(e) = writer.flush() {
+                        error!(error = %e, "Failed to flush stdout, shutting down");
+                        break;
+                    }
+                } else if raw.get("result").is_some() || raw.get("error").is_some() {
+                    // Response to a server-initiated request
+                    handle_pending_response(&raw, &mut state, &ctx);
+                } else {
+                    warn!("Received message with no 'method', 'result', or 'error' field");
                 }
             }
             Err(e) => {

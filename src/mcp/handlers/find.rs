@@ -16,10 +16,10 @@ pub(crate) fn handle_xray_find(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         None => return ToolCallResult::error("Missing required parameter: pattern".to_string()),
     };
 
-    let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir).to_string();
+    let dir = args.get("dir").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| ctx.server_dir());
 
     // Validate dir parameter -- must match server dir or be a subdirectory
-    if let Err(msg) = validate_search_dir(&dir, &ctx.server_dir) {
+    if let Err(msg) = validate_search_dir(&dir, &ctx.server_dir()) {
         return ToolCallResult::error(msg);
     }
 

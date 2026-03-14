@@ -57,7 +57,7 @@ fn make_rs_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         server_ext: "rs".to_string(),
         ..Default::default()
     };
@@ -178,7 +178,7 @@ fn test_rust_incremental_update_through_handler() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         server_ext: "rs".to_string(),
         ..Default::default()
     };
@@ -250,7 +250,7 @@ fn test_rust_reindex_definitions_success() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: dir_str,
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))),
         index_base: tmp_dir.join(".index"),
         server_ext: "rs".to_string(),
         ..Default::default()

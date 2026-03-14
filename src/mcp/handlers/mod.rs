@@ -19,7 +19,7 @@ use tracing::{info, warn};
 
 use crate::mcp::protocol::{ToolCallResult, ToolDefinition};
 use crate::{
-    build_content_index, clean_path, load_content_index,
+    build_content_index, clean_path, load_content_index, find_content_index_for_dir,
     save_content_index, ContentIndex, ContentIndexArgs,
     DEFAULT_MIN_TOKEN_LEN,
 };
@@ -160,7 +160,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "xray_reindex".to_string(),
-            description: "Force rebuild the content index and reload it into the server's in-memory cache. Useful after many file changes or when --watch is not enabled. The rebuilt index replaces the current in-memory index immediately.".to_string(),
+            description: "Force rebuild the content index and reload it into the server's in-memory cache. Also rebinds workspace when dir parameter switches to a different directory (updates workspace binding, loads cached index first for speed, falls back to full rebuild). Response includes workspaceChanged, previousServerDir, indexAction fields. When workspace is UNRESOLVED (wrong CWD), call this with dir=<project_path> to fix it.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -556,11 +556,150 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
     tools
 }
 
+/// How the workspace directory was determined.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceBindingMode {
+    /// `--dir /explicit/path` — nothing overrides this.
+    PinnedCli,
+    /// `roots/list` response from MCP client — authoritative.
+    ClientRoots,
+    /// `xray_reindex dir=X` — explicit LLM/user action.
+    ManualOverride,
+    /// `--dir .` in a CWD that has source files — temporary until roots.
+    DotBootstrap,
+    /// Workspace not determined (--dir . in wrong CWD, no roots yet).
+    Unresolved,
+}
+
+impl std::fmt::Display for WorkspaceBindingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::PinnedCli => write!(f, "pinned_cli"),
+            Self::ClientRoots => write!(f, "client_roots"),
+            Self::ManualOverride => write!(f, "manual_override"),
+            Self::DotBootstrap => write!(f, "dot_bootstrap"),
+            Self::Unresolved => write!(f, "unresolved"),
+        }
+    }
+}
+
+/// Current workspace status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceStatus {
+    /// Workspace determined, indexes ready.
+    Resolved,
+    /// Workspace switching / indexes building.
+    Reindexing,
+    /// Workspace not determined, workspace-dependent tools blocked.
+    Unresolved,
+}
+
+impl std::fmt::Display for WorkspaceStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resolved => write!(f, "resolved"),
+            Self::Reindexing => write!(f, "reindexing"),
+            Self::Unresolved => write!(f, "unresolved"),
+        }
+    }
+}
+
+/// Workspace binding state — tracks how the server's working directory was determined
+/// and whether it's ready for use.
+pub struct WorkspaceBinding {
+    /// Current workspace path.
+    pub dir: String,
+    /// How the workspace was determined.
+    pub mode: WorkspaceBindingMode,
+    /// Current status.
+    pub status: WorkspaceStatus,
+    /// Incremented on every workspace directory change (for generation-safe commits).
+    pub generation: u64,
+}
+
+impl WorkspaceBinding {
+    /// Create a new resolved workspace binding (PinnedCli mode).
+    pub fn pinned(dir: String) -> Self {
+        Self {
+            dir,
+            mode: WorkspaceBindingMode::PinnedCli,
+            status: WorkspaceStatus::Resolved,
+            generation: 1,
+        }
+    }
+
+    /// Create a new DotBootstrap workspace binding.
+    pub fn dot_bootstrap(dir: String) -> Self {
+        Self {
+            dir,
+            mode: WorkspaceBindingMode::DotBootstrap,
+            status: WorkspaceStatus::Resolved,
+            generation: 1,
+        }
+    }
+
+    /// Create an unresolved workspace binding.
+    pub fn unresolved(dir: String) -> Self {
+        Self {
+            dir,
+            mode: WorkspaceBindingMode::Unresolved,
+            status: WorkspaceStatus::Unresolved,
+            generation: 0,
+        }
+    }
+}
+
 /// Context for tool handlers -- shared state
+
+/// Quick check: does a directory contain any files with the given extensions?
+/// Uses a shallow walk (max_depth levels) with early exit on first match.
+/// Returns `true` if at least one matching file is found.
+pub fn has_source_files(dir: &str, extensions: &[String], max_depth: usize) -> bool {
+    use ignore::WalkBuilder;
+    let walker = WalkBuilder::new(dir)
+        .max_depth(Some(max_depth))
+        .hidden(false)
+        .build();
+    for entry in walker {
+        if let Ok(entry) = entry {
+            if entry.file_type().is_some_and(|ft| ft.is_file()) {
+                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
+                    if extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Determine the initial WorkspaceBindingMode based on --dir argument.
+/// - Explicit non-dot path → PinnedCli
+/// - Dot path with source files → DotBootstrap  
+/// - Dot path without source files → Unresolved
+pub fn determine_initial_binding(dir: &str, extensions: &[String]) -> WorkspaceBinding {
+    let is_dot = dir == "." || dir == "./" || dir == ".\\";
+    if !is_dot {
+        // Explicit path — PinnedCli, always resolved
+        WorkspaceBinding::pinned(dir.to_string())
+    } else {
+        // Dot path — check if CWD has source files
+        let canonical = std::fs::canonicalize(dir)
+            .map(|p| crate::clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| dir.to_string());
+        if has_source_files(&canonical, extensions, 3) {
+            WorkspaceBinding::dot_bootstrap(canonical)
+        } else {
+            WorkspaceBinding::unresolved(canonical)
+        }
+    }
+}
 pub struct HandlerContext {
     pub index: Arc<RwLock<ContentIndex>>,
     pub def_index: Option<Arc<RwLock<DefinitionIndex>>>,
-    pub server_dir: String,
+    /// Workspace binding state: directory, mode, status, generation.
+    pub workspace: Arc<RwLock<WorkspaceBinding>>,
     pub server_ext: String,
     pub metrics: bool,
     /// Base directory for index file storage.
@@ -589,12 +728,20 @@ pub struct HandlerContext {
     pub def_extensions: Vec<String>,
 }
 
+impl HandlerContext {
+    /// Convenience accessor: read the current workspace directory.
+    /// This replaces direct access to the old `server_dir` field.
+    pub fn server_dir(&self) -> String {
+        self.workspace.read().unwrap_or_else(|e| e.into_inner()).dir.clone()
+    }
+}
+
 impl Default for HandlerContext {
     fn default() -> Self {
         HandlerContext {
             index: Arc::new(RwLock::new(ContentIndex::default())),
             def_index: None,
-            server_dir: ".".to_string(),
+            workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(".".to_string()))),
             server_ext: "cs".to_string(),
             metrics: false,
             index_base: PathBuf::from("."),
@@ -661,6 +808,37 @@ pub fn dispatch_tool(
 ) -> ToolCallResult {
     let dispatch_start = Instant::now();
 
+    // Workspace gate: always-available tools bypass the workspace check
+    let is_workspace_independent = matches!(tool_name,
+        "xray_info" | "xray_help" | "xray_reindex" | "xray_reindex_definitions"
+    );
+    if !is_workspace_independent {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        match ws.status {
+            WorkspaceStatus::Unresolved => {
+                let error_msg = serde_json::json!({
+                    "error": "WORKSPACE_UNRESOLVED",
+                    "message": format!("Server started with --dir . which resolved to '{}' — no source files found.", ws.dir),
+                    "hint": "Call xray_reindex with dir parameter pointing to your project: xray_reindex dir=C:/Projects/MyApp",
+                    "serverDir": ws.dir,
+                    "workspaceStatus": "unresolved"
+                });
+                return ToolCallResult::error(error_msg.to_string());
+            }
+            WorkspaceStatus::Reindexing => {
+                let error_msg = serde_json::json!({
+                    "error": "WORKSPACE_REINDEXING",
+                    "message": format!("Workspace is switching to '{}'. Indexes are not ready yet.", ws.dir),
+                    "hint": "Call xray_reindex to complete the workspace switch and build indexes.",
+                    "serverDir": ws.dir,
+                    "workspaceStatus": "reindexing"
+                });
+                return ToolCallResult::error(error_msg.to_string());
+            }
+            WorkspaceStatus::Resolved => { /* proceed */ }
+        }
+    }
+
     // Check readiness: if the required index is still building, return early
     if requires_content_index(tool_name) && !ctx.content_ready.load(Ordering::Acquire) {
         if tool_name == "xray_reindex" {
@@ -697,7 +875,7 @@ pub fn dispatch_tool(
         return result;
     }
 
-    let result = utils::inject_response_guidance(result, tool_name, &ctx.server_ext);
+    let result = utils::inject_response_guidance(result, tool_name, &ctx.server_ext, ctx);
 
     // Determine effective response budget:
     // - xray_help: 32KB (static reference content)
@@ -852,7 +1030,7 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
 
     // ── File list index (disk metadata only — small file, no full deserialization) ──
     {
-        let file_index_path = crate::index::index_path_for(&ctx.server_dir, &ctx.index_base);
+        let file_index_path = crate::index::index_path_for(&ctx.server_dir(), &ctx.index_base);
         if file_index_path.exists()
             && let Some(root) = crate::index::read_root_from_index_file_pub(&file_index_path) {
                 let size_mb = std::fs::metadata(&file_index_path)
@@ -870,7 +1048,7 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
     if ctx.git_cache_ready.load(Ordering::Acquire)
         && let Ok(guard) = ctx.git_cache.read()
             && let Some(ref cache) = *guard {
-                let cache_path = crate::git::cache::GitHistoryCache::cache_path_for(&ctx.server_dir, &ctx.index_base);
+                let cache_path = crate::git::cache::GitHistoryCache::cache_path_for(&ctx.server_dir(), &ctx.index_base);
                 let size_mb = std::fs::metadata(&cache_path)
                     .map(|m| (m.len() as f64 / 1_048_576.0 * 10.0).round() / 10.0)
                     .unwrap_or(0.0);
@@ -894,8 +1072,20 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
         memory_estimate["process"] = process_memory;
     }
 
+    // Workspace state
+    let workspace_state = {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        json!({
+            "dir": ws.dir,
+            "mode": ws.mode.to_string(),
+            "status": ws.status.to_string(),
+            "generation": ws.generation,
+        })
+    };
+
     let mut info = json!({
         "directory": ctx.index_base.display().to_string(),
+        "workspace": workspace_state,
         "indexes": indexes,
     });
 
@@ -907,69 +1097,119 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
 }
 
 fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
-    let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir);
+    let current_dir = ctx.server_dir();
+    let dir = args.get("dir").and_then(|v| v.as_str())
+        .map(|d| {
+            std::fs::canonicalize(d)
+                .map(|p| clean_path(&p.to_string_lossy()))
+                .unwrap_or_else(|_| d.to_string())
+        })
+        .unwrap_or_else(|| current_dir.clone());
     let ext = args.get("ext").and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| ctx.server_ext.clone());
 
-    // Check dir matches server dir
-    let requested = std::fs::canonicalize(dir)
-        .map(|p| clean_path(&p.to_string_lossy()))
-        .unwrap_or_else(|_| dir.to_string());
-    let server = std::fs::canonicalize(&ctx.server_dir)
-        .map(|p| clean_path(&p.to_string_lossy()))
-        .unwrap_or_else(|_| ctx.server_dir.clone());
-    if !requested.eq_ignore_ascii_case(&server) {
-        return ToolCallResult::error(format!(
-            "Server started with --dir {}. For other directories, start another server instance or use CLI.",
-            ctx.server_dir
-        ));
+    // Determine if workspace is changing
+    let previous_dir = current_dir.clone();
+    let workspace_changed = !dir.eq_ignore_ascii_case(&previous_dir);
+
+    // Check if workspace switch is allowed (only blocked in PinnedCli mode)
+    if workspace_changed {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        if ws.mode == WorkspaceBindingMode::PinnedCli {
+            return ToolCallResult::error(format!(
+                "Server started with --dir {} (pinned). Cannot switch workspace. \
+                 Start another server instance or use CLI.",
+                previous_dir
+            ));
+        }
+    }
+
+    // Save old state for rollback on error
+    let (old_mode, old_generation) = {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        (ws.mode, ws.generation)
+    };
+
+    // Update workspace binding if dir changed
+    if workspace_changed {
+        let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+        ws.dir = dir.clone();
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+        ws.generation += 1;
+        ws.status = WorkspaceStatus::Reindexing;
+        info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex");
     }
 
     info!(dir = %dir, ext = %ext, "Rebuilding content index");
     let start = Instant::now();
 
-    let new_index = match build_content_index(&ContentIndexArgs {
-        dir: dir.to_string(),
-        ext: ext.clone(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false,
-        threads: 0,
-        min_token_len: DEFAULT_MIN_TOKEN_LEN,
-    }) {
-        Ok(idx) => idx,
-        Err(e) => return ToolCallResult::error(format!("Failed to build content index: {}", e)),
-    };
+    // Load-first: try cached index from disk (~1-2s), fall back to build (~30s)
+    let extensions: Vec<String> = ext.split(',').map(|s| s.trim().to_string()).collect();
+    let loaded = load_content_index(&dir, &ext, &ctx.index_base)
+        .ok()
+        .or_else(|| find_content_index_for_dir(&dir, &ctx.index_base, &extensions));
 
-    // Save to disk
-    if let Err(e) = save_content_index(&new_index, &ctx.index_base) {
-        warn!(error = %e, "Failed to save reindexed content to disk");
-    }
+    let (new_index, index_action) = if let Some(idx) = loaded {
+        (idx, "loaded_cache")
+    } else {
+        // Build from scratch
+        let idx = match build_content_index(&ContentIndexArgs {
+            dir: dir.to_string(),
+            ext: ext.clone(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            threads: 0,
+            min_token_len: DEFAULT_MIN_TOKEN_LEN,
+        }) {
+            Ok(idx) => idx,
+            Err(e) => {
+                // Full rollback on failure
+                if workspace_changed {
+                    let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+                    ws.dir = previous_dir.clone();
+                    ws.mode = old_mode;
+                    ws.generation = old_generation;
+                    ws.status = WorkspaceStatus::Resolved;
+                }
+                return ToolCallResult::error(format!("Failed to build content index: {}", e));
+            }
+        };
+
+        // Save to disk
+        if let Err(e) = save_content_index(&idx, &ctx.index_base) {
+            warn!(error = %e, "Failed to save reindexed content to disk");
+        }
+
+        let file_count = idx.files.len();
+        let token_count = idx.index.len();
+
+        // Drop build result and reload from disk for compact memory layout
+        drop(idx);
+        crate::index::force_mimalloc_collect();
+        crate::index::log_memory("reindex: after drop+mi_collect (content)");
+
+        let reloaded = match load_content_index(&dir, &ext, &ctx.index_base) {
+            Ok(idx) => idx,
+            Err(e) => {
+                warn!(error = %e, "Failed to reload content index from disk after reindex, rebuilding");
+                match build_content_index(&ContentIndexArgs {
+                    dir: dir.to_string(), ext: ext.clone(),
+                    max_age_hours: 24, hidden: false, no_ignore: false,
+                    threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                }) {
+                    Ok(idx) => idx,
+                    Err(e2) => return ToolCallResult::error(format!("Failed to rebuild content index: {}", e2)),
+                }
+            }
+        };
+        let _ = (file_count, token_count); // suppress unused warnings
+        (reloaded, "rebuilt")
+    };
 
     let file_count = new_index.files.len();
     let token_count = new_index.index.len();
-
-    // Drop build result and reload from disk for compact memory layout
-    // (same pattern as serve.rs startup — eliminates allocator fragmentation)
-    drop(new_index);
-    crate::index::force_mimalloc_collect();
-    crate::index::log_memory("reindex: after drop+mi_collect (content)");
-
-    let new_index = match load_content_index(dir, &ext, &ctx.index_base) {
-        Ok(idx) => idx,
-        Err(e) => {
-            warn!(error = %e, "Failed to reload content index from disk after reindex, rebuilding");
-            match build_content_index(&ContentIndexArgs {
-                dir: dir.to_string(), ext: ext.clone(),
-                max_age_hours: 24, hidden: false, no_ignore: false,
-                threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-            }) {
-                Ok(idx) => idx,
-                Err(e2) => return ToolCallResult::error(format!("Failed to rebuild content index: {}", e2)),
-            }
-        }
-    };
 
     // Update in-memory cache
     match ctx.index.write() {
@@ -979,18 +1219,30 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Err(e) => return ToolCallResult::error(format!("Failed to update in-memory index: {}", e)),
     }
 
+    // Mark workspace as resolved
+    {
+        let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+        ws.status = WorkspaceStatus::Resolved;
+    }
+
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after replace+mi_collect (content)");
 
     let elapsed = start.elapsed();
 
-    let output = json!({
+    let mut output = json!({
         "status": "ok",
         "files": file_count,
         "uniqueTokens": token_count,
         "rebuildTimeMs": elapsed.as_secs_f64() * 1000.0,
+        "indexAction": index_action,
     });
+    if workspace_changed {
+        output["workspaceChanged"] = json!(true);
+        output["previousServerDir"] = json!(previous_dir);
+    }
+    output["serverDir"] = json!(dir);
 
     ToolCallResult::success(utils::json_to_string(&output))
 }
@@ -1003,23 +1255,42 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
         ),
     };
 
-    let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir);
+    let current_dir = ctx.server_dir();
+    let dir = args.get("dir").and_then(|v| v.as_str())
+        .map(|d| {
+            std::fs::canonicalize(d)
+                .map(|p| clean_path(&p.to_string_lossy()))
+                .unwrap_or_else(|_| d.to_string())
+        })
+        .unwrap_or_else(|| current_dir.clone());
     let ext = args.get("ext").and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| ctx.server_ext.clone());
 
-    // Check dir matches server dir
-    let requested = std::fs::canonicalize(dir)
-        .map(|p| clean_path(&p.to_string_lossy()))
-        .unwrap_or_else(|_| dir.to_string());
-    let server = std::fs::canonicalize(&ctx.server_dir)
-        .map(|p| clean_path(&p.to_string_lossy()))
-        .unwrap_or_else(|_| ctx.server_dir.clone());
-    if !requested.eq_ignore_ascii_case(&server) {
-        return ToolCallResult::error(format!(
-            "Server started with --dir {}. For other directories, start another server instance or use CLI.",
-            ctx.server_dir
-        ));
+    // Determine if workspace is changing
+    let previous_dir = current_dir.clone();
+    let workspace_changed = !dir.eq_ignore_ascii_case(&previous_dir);
+
+    // Check if workspace switch is allowed (only blocked in PinnedCli mode)
+    if workspace_changed {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        if ws.mode == WorkspaceBindingMode::PinnedCli {
+            return ToolCallResult::error(format!(
+                "Server started with --dir {} (pinned). Cannot switch workspace. \
+                 Start another server instance or use CLI.",
+                previous_dir
+            ));
+        }
+    }
+
+    // Update workspace binding if dir changed
+    if workspace_changed {
+        let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+        ws.dir = dir.clone();
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+        ws.generation += 1;
+        ws.status = WorkspaceStatus::Reindexing;
+        info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex_definitions");
     }
 
     info!(dir = %dir, ext = %ext, "Rebuilding definition index");
@@ -1052,7 +1323,7 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after drop+mi_collect (def)");
 
-    let new_index = match crate::definitions::load_definition_index(dir, &ext, &ctx.index_base) {
+    let new_index = match crate::definitions::load_definition_index(&dir, &ext, &ctx.index_base) {
         Ok(idx) => idx,
         Err(e) => {
             warn!(error = %e, "Failed to reload def index from disk after reindex, rebuilding");
@@ -1070,13 +1341,19 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
         Err(e) => return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e)),
     }
 
+    // Mark workspace as resolved
+    {
+        let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+        ws.status = WorkspaceStatus::Resolved;
+    }
+
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after replace+mi_collect (def)");
 
     let elapsed = start.elapsed();
 
-    let output = json!({
+    let mut output = json!({
         "status": "ok",
         "files": file_count,
         "definitions": def_count,
@@ -1085,6 +1362,11 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
         "sizeMb": (size_mb * 10.0).round() / 10.0,
         "rebuildTimeMs": elapsed.as_secs_f64() * 1000.0,
     });
+    if workspace_changed {
+        output["workspaceChanged"] = json!(true);
+        output["previousServerDir"] = json!(previous_dir);
+    }
+    output["serverDir"] = json!(dir);
 
     ToolCallResult::success(utils::json_to_string(&output))
 }

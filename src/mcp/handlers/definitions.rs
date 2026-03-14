@@ -319,7 +319,7 @@ fn handle_audit_mode(
 
     // Cross-index validation
     if args.cross_validate {
-        let cross = cross_validate_indexes(index, &ctx.server_dir, &ctx.index_base);
+        let cross = cross_validate_indexes(index, &ctx.server_dir(), &ctx.index_base);
         output["crossValidation"] = cross;
     }
 

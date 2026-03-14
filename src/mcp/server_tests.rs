@@ -231,3 +231,51 @@ fn test_shutdown_flag_initially_false_and_can_be_set() {
     flag_clone.store(true, Ordering::SeqCst);
     assert!(flag.load(Ordering::SeqCst), "shutdown flag should be true after setting");
 }
+
+// ─── uri_to_path tests ─────────────────────────────────────────
+
+#[test]
+fn test_uri_to_path_windows_drive_letter() {
+    let result = uri_to_path("file:///C:/Projects/MyApp");
+    assert!(result.is_some());
+    let path = result.unwrap();
+    assert!(path.contains("C:") || path.contains("c:"), "Should contain drive letter, got: {}", path);
+    assert!(path.contains("Projects/MyApp") || path.contains("Projects\\MyApp"),
+        "Should contain path, got: {}", path);
+}
+
+#[test]
+fn test_uri_to_path_percent_encoding() {
+    let result = uri_to_path("file:///C:/My%20Projects/My%20App");
+    assert!(result.is_some());
+    let path = result.unwrap();
+    assert!(path.contains("My Projects"), "Should decode percent-encoding, got: {}", path);
+}
+
+#[test]
+fn test_uri_to_path_non_file_scheme_returns_none() {
+    assert!(uri_to_path("https://example.com").is_none());
+    assert!(uri_to_path("http://localhost").is_none());
+    assert!(uri_to_path("ftp://server/path").is_none());
+}
+
+#[test]
+fn test_uri_to_path_invalid_uri_returns_none() {
+    assert!(uri_to_path("not a uri").is_none());
+    assert!(uri_to_path("").is_none());
+}
+
+#[test]
+fn test_uri_to_path_unix_style() {
+    let result = uri_to_path("file:///home/user/projects/myapp");
+    // On Windows, url::Url::to_file_path() returns Err for Unix-style paths (no drive letter).
+    // On Unix, it returns the path correctly.
+    if cfg!(windows) {
+        assert!(result.is_none(), "On Windows, Unix-style file URIs are not supported");
+    } else {
+        assert!(result.is_some());
+        let path = result.unwrap();
+        assert!(path.contains("home/user/projects/myapp"),
+            "Should contain unix path, got: {}", path);
+    }
+}

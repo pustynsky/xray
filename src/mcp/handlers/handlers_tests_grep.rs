@@ -215,7 +215,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         index_base: tmp_dir.join(".index"),
         ..Default::default()
     };
@@ -298,7 +298,7 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     assert_eq!(loaded.files.len(), orig_files);
     assert_eq!(loaded.index.len(), orig_tokens);
     assert_eq!(loaded.trigram.trigram_map.len(), orig_trigrams);
-    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), server_dir: root, ..Default::default() };
+    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root.to_string()))), ..Default::default() };
     let result = dispatch_tool(&loaded_ctx, "xray_grep", &json!({"terms": "databaseconn", "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -480,7 +480,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         server_ext: "xml".to_string(),
         index_base: tmp_dir.join(".index"),
         ..Default::default()
@@ -552,7 +552,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
     std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
     let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 }).unwrap();
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), server_dir: tmp.to_string_lossy().to_string(), server_ext: "txt".to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), server_ext: "txt".to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
     let r_all = handle_xray_grep(&ctx, &json!({"terms": "productcatalog"}));
     let o_all: Value = serde_json::from_str(&r_all.content[0].text).unwrap();
     assert_eq!(o_all["summary"]["totalFiles"], 2);
@@ -566,7 +566,7 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let tmp_holder = tempfile::tempdir().unwrap();
     let tmp = tmp_holder.path();
     let index = ContentIndex { root: tmp.to_string_lossy().to_string(), ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), server_dir: tmp.to_string_lossy().to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), index_base: tmp.to_path_buf(), ..Default::default() };
     let result = handle_xray_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
     assert!(result.is_error);
 }
@@ -819,7 +819,7 @@ fn test_xray_grep_phrase_search_with_show_lines() {
 
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         server_ext: "sql".to_string(),
         index_base: tmp_dir.join(".index"),
         ..Default::default()
@@ -953,7 +953,7 @@ fn test_xray_grep_phrase_sort_by_occurrences() {
     }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         index_base: tmp_dir.join(".index"),
         ..Default::default()
     };
@@ -1051,7 +1051,7 @@ fn test_substring_matched_tokens_filtered_by_dir() {
     );
     // Override server_dir to match the file paths
     let ctx = HandlerContext {
-        server_dir: "C:\\project".to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned("C:\\project".to_string()))),
         ..ctx
     };
 
@@ -1166,7 +1166,7 @@ fn test_substring_matched_tokens_empty_when_no_files_match() {
         ],
     );
     let ctx = HandlerContext {
-        server_dir: "C:\\project".to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned("C:\\project".to_string()))),
         ..ctx
     };
 
@@ -1274,7 +1274,7 @@ fn test_substring_space_sql_create_table() {
     }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         server_ext: "sql".to_string(),
         index_base: tmp_dir.join(".index"),
         ..Default::default()
@@ -1494,7 +1494,7 @@ fn test_multi_phrase_fn_signatures() {
     }).unwrap();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         server_ext: "rs".to_string(),
         index_base: tmp_dir.join(".index"),
         ..Default::default()

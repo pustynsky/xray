@@ -84,7 +84,7 @@ fn test_handler_context_field_count_guard() {
     let _guard = HandlerContext {
         index: Arc::new(RwLock::new(ContentIndex::default())),
         def_index: None,
-        server_dir: ".".to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(".".to_string()))),
         server_ext: "cs".to_string(),
         metrics: false,
         index_base: PathBuf::from("."),
@@ -103,7 +103,7 @@ fn test_handler_context_field_count_guard() {
 #[test]
 fn test_handler_context_default_values() {
     let ctx = HandlerContext::default();
-    assert_eq!(ctx.server_dir, ".");
+    assert_eq!(ctx.server_dir(), ".");
     assert_eq!(ctx.server_ext, "cs");
     assert!(!ctx.metrics);
     assert_eq!(ctx.index_base, PathBuf::from("."));

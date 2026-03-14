@@ -1,11 +1,13 @@
 use super::*;
+use std::sync::{Arc, RwLock};
+use crate::mcp::handlers::WorkspaceBinding;
 use serde_json::json;
 use std::path::PathBuf;
 
 /// Helper: create a HandlerContext with server_dir pointing to a temp directory.
 fn make_ctx(dir: &std::path::Path) -> HandlerContext {
     HandlerContext {
-        server_dir: dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir.to_string_lossy().to_string()))),
         ..HandlerContext::default()
     }
 }

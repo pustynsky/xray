@@ -34,7 +34,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     let pattern = raw_pattern.unwrap_or("").to_string();
 
-    let dir = args.get("dir").and_then(|v| v.as_str()).unwrap_or(&ctx.server_dir).to_string();
+    let dir = args.get("dir").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| ctx.server_dir());
     let ext = args.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string());
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let ignore_case = args.get("ignoreCase").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -54,8 +54,8 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         Err(_) => {
             // Fallback: if dir is a subdirectory of server_dir, reuse the server_dir's index.
             // The server_dir index contains ALL files including subdirectories.
-            let fallback = if dir != ctx.server_dir {
-                crate::load_index(&ctx.server_dir, &ctx.index_base).ok().filter(|idx| {
+            let fallback = if dir != ctx.server_dir() {
+                crate::load_index(&ctx.server_dir(), &ctx.index_base).ok().filter(|idx| {
                     let dir_canon = std::fs::canonicalize(&dir)
                         .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
                         .unwrap_or_else(|_| dir.replace('\\', "/").to_lowercase());
@@ -70,7 +70,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
             };
 
             if let Some(parent_idx) = fallback {
-                info!(dir = %dir, root = %parent_idx.root, "Reusing server_dir file index for subdirectory");
+                info!(dir = %dir, root = %parent_idx.root, "Reusing workspace file index for subdirectory");
                 parent_idx
             } else {
                 // Auto-build (only when no parent index is available)
@@ -157,7 +157,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let file_counts: HashMap<&str, usize> = if dirs_only && is_wildcard && !count_only {
         let root_normalized = index.root.replace('\\', "/");
         let dir_normalized = dir.replace('\\', "/");
-        let server_dir_normalized = ctx.server_dir.replace('\\', "/");
+        let server_dir_normalized = ctx.server_dir().replace('\\', "/");
         // Resolve dir_prefix to match absolute paths in the index.
         // Bug fix: raw `dir` can be relative (e.g. "src") while entry paths are
         // absolute (e.g. "C:/Repos/project/src/..."). Also handles the case

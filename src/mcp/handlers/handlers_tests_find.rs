@@ -29,7 +29,7 @@ fn test_xray_find_combined_parameters() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: None,
-        server_dir: dir_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         index_base: tmp_dir.join(".index"),
         ..Default::default()
     };
@@ -108,7 +108,7 @@ fn test_xray_find_contents_mode() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: None,
-        server_dir: dir_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         server_ext: "txt".to_string(),
         index_base: tmp_dir.join(".index"),
         ..Default::default()

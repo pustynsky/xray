@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::{Arc, RwLock};
+use crate::mcp::handlers::WorkspaceBinding;
 use crate::definitions::DefinitionKind;
 
 // ─── kind_priority tests ─────────────────────────────────────────
@@ -375,7 +377,7 @@ fn test_audit_cross_validate_with_file_index() {
     let ctx = super::HandlerContext {
         index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
         def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_index))),
-        server_dir: project_str,
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(project_str.to_string()))),
         index_base: idx_base,
         ..Default::default()
     };

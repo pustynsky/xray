@@ -337,7 +337,8 @@ fn test_truncate_response_if_needed_small() {
 #[test]
 fn test_inject_response_guidance_creates_summary() {
     let result = ToolCallResult::success(r#"{"files":[]}"#.to_string());
-    let result = inject_response_guidance(result, "xray_grep", "rs, md");
+    let ctx = HandlerContext::default();
+    let result = inject_response_guidance(result, "xray_grep", "rs, md", &ctx);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output.get("summary").is_some());
     let reminder = output["summary"]["policyReminder"].as_str().unwrap();
@@ -349,14 +350,16 @@ fn test_inject_response_guidance_creates_summary() {
 #[test]
 fn test_inject_response_guidance_skips_non_json_success() {
     let result = ToolCallResult::success("plain text".to_string());
-    let result = inject_response_guidance(result, "xray_grep", "rs, md");
+    let ctx = HandlerContext::default();
+    let result = inject_response_guidance(result, "xray_grep", "rs, md", &ctx);
     assert_eq!(result.content[0].text, "plain text");
 }
 
 #[test]
 fn test_inject_response_guidance_empty_ext() {
     let result = ToolCallResult::success(r#"{"files":[]}"#.to_string());
-    let result = inject_response_guidance(result, "xray_grep", "");
+    let ctx = HandlerContext::default();
+    let result = inject_response_guidance(result, "xray_grep", "", &ctx);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let reminder = output["summary"]["policyReminder"].as_str().unwrap();
     assert!(reminder.contains("XRAY_POLICY"), "should contain policy header");

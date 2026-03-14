@@ -37,7 +37,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     path_to_id.insert(file0_path, 0); path_to_id.insert(file1_path, 1);
     let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, file_index, path_to_id, ..Default::default() };
     let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), files: vec![file0_str, file1_str], extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), server_dir: tmp_dir.to_string_lossy().to_string(), ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))), ..Default::default() };
     (ctx, tmp_dir)
 }
 
@@ -839,7 +839,7 @@ fn test_xray_definitions_enum_member_kind() {
     for (i, def) in definitions.iter().enumerate() { ni.entry(def.name.to_lowercase()).or_default().push(i as u32); ki.entry(def.kind).or_default().push(i as u32); fi.entry(def.file_id).or_default().push(i as u32); }
     let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, file_index: fi, ..Default::default() };
     let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), files: vec![fs], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), server_dir: tmp.to_string_lossy().to_string(), ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), ..Default::default() };
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "StaleClass", "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["definitions"].as_array().unwrap()[0].get("bodyWarning").is_some());
@@ -897,7 +897,7 @@ fn test_reindex_definitions_success() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: dir_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         index_base: tmp_dir.join(".index"),
         ..Default::default()
     };

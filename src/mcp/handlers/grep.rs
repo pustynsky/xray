@@ -450,7 +450,7 @@ fn inject_grep_ext_hint(
 
 
 pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
-    let parsed = match parse_grep_args(args, &ctx.server_dir) {
+    let parsed = match parse_grep_args(args, &ctx.server_dir()) {
         Ok(p) => p,
         Err(e) => return e,
     };

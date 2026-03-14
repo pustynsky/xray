@@ -292,7 +292,7 @@ fn next_step_hint(tool_name: &str) -> Option<&'static str> {
     }
 }
 
-pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, indexed_ext: &str) -> ToolCallResult {
+pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, indexed_ext: &str, ctx: &super::HandlerContext) -> ToolCallResult {
     let text = match result.content.first() {
         Some(c) => &c.text,
         None => return result,
@@ -315,6 +315,13 @@ pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, 
         summary.insert("policyReminder".to_string(), json!(build_policy_reminder(indexed_ext)));
         if let Some(hint) = next_step_hint(tool_name) {
             summary.insert("nextStepHint".to_string(), json!(hint));
+        }
+        // Inject workspace metadata into every response
+        if let Ok(ws) = ctx.workspace.read() {
+            summary.insert("serverDir".to_string(), json!(ws.dir));
+            summary.insert("workspaceStatus".to_string(), json!(ws.status.to_string()));
+            summary.insert("workspaceSource".to_string(), json!(ws.mode.to_string()));
+            summary.insert("workspaceGeneration".to_string(), json!(ws.generation));
         }
     }
 

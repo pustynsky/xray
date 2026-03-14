@@ -342,7 +342,7 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         server_ext: "ts".to_string(),
         ..Default::default()
     };
@@ -1248,7 +1248,7 @@ fn test_ts_incremental_update_through_handler() {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: tmp_dir.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
         server_ext: "ts".to_string(),
         ..Default::default()
     };

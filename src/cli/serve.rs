@@ -557,7 +557,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let ctx = mcp::handlers::HandlerContext {
         index,
         def_index,
-        server_dir: dir_str,
+        workspace: Arc::new(RwLock::new(mcp::handlers::determine_initial_binding(&dir_str, &exts_for_load.split(',').map(|s| s.to_string()).collect::<Vec<_>>()))),
         server_ext: exts_for_load,
         metrics: args.metrics,
         index_base: idx_base,

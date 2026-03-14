@@ -23,7 +23,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
     (ctx, tmp_dir)
 }
 
@@ -119,7 +119,7 @@ fn test_xray_fast_dirs_only_and_files_only() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     let result_dirs = handle_xray_fast(&ctx, &json!({"pattern": "Models", "dirsOnly": true}));
     assert!(!result_dirs.is_error, "dirsOnly should not error: {}", result_dirs.content[0].text);
@@ -175,7 +175,7 @@ fn test_xray_fast_subdir_reuses_parent_index() {
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: dir_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         index_base: idx_base.clone(),
         ..Default::default()
     };
@@ -239,7 +239,7 @@ fn test_xray_fast_outside_dir_still_builds_index() {
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: srv_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(srv_str.clone()))),
         index_base: idx_base.clone(),
         ..Default::default()
     };
@@ -312,7 +312,7 @@ fn test_xray_fast_subdir_max_depth_relative_to_dir() {
     };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: dir_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         index_base: idx_base.clone(),
         ..Default::default()
     };
@@ -424,7 +424,7 @@ fn test_xray_fast_ranking_exact_stem_first() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     let result = handle_xray_fast(&ctx, &json!({"pattern": "UserService"}));
     assert!(!result.is_error, "xray_fast should not error: {}", result.content[0].text);
@@ -472,7 +472,7 @@ fn test_xray_fast_ranking_shorter_stem_first() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     let result = handle_xray_fast(&ctx, &json!({"pattern": "Order"}));
     assert!(!result.is_error);
@@ -548,7 +548,7 @@ fn test_xray_fast_wildcard_star_dirs_only() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
     assert!(!result.is_error, "Wildcard + dirsOnly should not error: {}", result.content[0].text);
@@ -587,7 +587,7 @@ fn test_xray_fast_empty_pattern_with_dir() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str.clone(), index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))), index_base: idx_base, ..Default::default() };
 
     // Empty pattern + dir → wildcard (not an error)
     let result = handle_xray_fast(&ctx, &json!({"pattern": "", "dir": dir_str}));
@@ -633,7 +633,7 @@ fn test_xray_fast_dirs_only_ignores_ext_filter() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     // dirsOnly=true + ext="cs" should find the "Services" directory (ext is ignored for dirs)
     let result = handle_xray_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true, "ext": "cs"}));
@@ -672,7 +672,7 @@ fn test_xray_fast_dirs_only_without_ext() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     // dirsOnly=true without ext should work fine
     let result = handle_xray_fast(&ctx, &json!({"pattern": "Controllers", "dirsOnly": true}));
@@ -704,7 +704,7 @@ fn test_xray_fast_files_only_with_ext_still_filters() {
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), server_dir: dir_str, index_base: idx_base, ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     // filesOnly + ext="cs" should only return Report.cs, not Report.txt
     let result = handle_xray_fast(&ctx, &json!({"pattern": "Report", "filesOnly": true, "ext": "cs"}));
@@ -770,7 +770,7 @@ fn test_xray_fast_dirsonly_wildcard_filecount() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: dir_str,
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))),
         index_base: idx_base,
         ..Default::default()
     };
@@ -848,7 +848,7 @@ fn test_xray_fast_dirsonly_non_wildcard_no_filecount() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: dir_str,
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))),
         index_base: idx_base,
         ..Default::default()
     };
@@ -898,7 +898,7 @@ fn test_xray_fast_max_depth() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["rs".to_string()], ..Default::default() };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: dir_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         index_base: idx_base,
         ..Default::default()
     };
@@ -963,7 +963,7 @@ fn test_xray_fast_dirsonly_truncation_hint() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: dir_str,
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))),
         index_base: idx_base,
         ..Default::default()
     };
@@ -1021,7 +1021,7 @@ fn test_xray_fast_max_depth_server_dir_mismatch() {
     // KEY: server_dir is "." (like real MCP), but index.root is the full path
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: ".".to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(".".to_string()))),
         index_base: idx_base,
         ..Default::default()
     };
@@ -1092,7 +1092,7 @@ fn test_xray_fast_filecount_with_subdir() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: dir_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         index_base: idx_base,
         ..Default::default()
     };
@@ -1181,7 +1181,7 @@ fn test_xray_fast_filecount_with_absolute_dir() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: dir_str.clone(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
         index_base: idx_base,
         ..Default::default()
     };
@@ -1251,7 +1251,7 @@ fn test_xray_fast_filecount_when_dir_equals_root() {
     let parent_str = tmp_dir.to_string_lossy().to_string();
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
-        server_dir: parent_str,
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(parent_str.to_string()))),
         index_base: idx_base,
         ..Default::default()
     };

@@ -234,7 +234,7 @@ fn handle_single_file_edit(
     expected_line_count: Option<usize>,
 ) -> ToolCallResult {
     // Read and validate
-    let (resolved, normalized, line_ending) = match read_and_validate_file(&ctx.server_dir, path_str) {
+    let (resolved, normalized, line_ending) = match read_and_validate_file(&ctx.server_dir(), path_str) {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
@@ -327,7 +327,7 @@ fn handle_multi_file_edit(
     // Phase 1: Read all files
     let mut file_data: Vec<(&str, PathBuf, String, &'static str)> = Vec::with_capacity(path_strings.len());
     for path_str in &path_strings {
-        match read_and_validate_file(&ctx.server_dir, path_str) {
+        match read_and_validate_file(&ctx.server_dir(), path_str) {
             Ok((resolved, normalized, line_ending)) => {
                 file_data.push((path_str, resolved, normalized, line_ending));
             }

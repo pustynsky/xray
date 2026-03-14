@@ -747,3 +747,237 @@ fn test_contains_line_sql_stored_procedure() {
     assert_eq!(defs_arr[0]["kind"], "storedProcedure",
         "Definition kind should be storedProcedure");
 }
+
+
+// ─── Workspace Discovery tests ─────────────────────────────────
+
+#[test]
+fn test_workspace_binding_pinned() {
+    let ws = WorkspaceBinding::pinned("C:/Projects/MyApp".to_string());
+    assert_eq!(ws.dir, "C:/Projects/MyApp");
+    assert_eq!(ws.mode, WorkspaceBindingMode::PinnedCli);
+    assert_eq!(ws.status, WorkspaceStatus::Resolved);
+    assert_eq!(ws.generation, 1);
+}
+
+#[test]
+fn test_workspace_binding_dot_bootstrap() {
+    let ws = WorkspaceBinding::dot_bootstrap("/home/user/project".to_string());
+    assert_eq!(ws.mode, WorkspaceBindingMode::DotBootstrap);
+    assert_eq!(ws.status, WorkspaceStatus::Resolved);
+    assert_eq!(ws.generation, 1);
+}
+
+#[test]
+fn test_workspace_binding_unresolved() {
+    let ws = WorkspaceBinding::unresolved("C:/Program Files/VS Code".to_string());
+    assert_eq!(ws.mode, WorkspaceBindingMode::Unresolved);
+    assert_eq!(ws.status, WorkspaceStatus::Unresolved);
+    assert_eq!(ws.generation, 0);
+}
+
+#[test]
+fn test_workspace_binding_mode_display() {
+    assert_eq!(WorkspaceBindingMode::PinnedCli.to_string(), "pinned_cli");
+    assert_eq!(WorkspaceBindingMode::ClientRoots.to_string(), "client_roots");
+    assert_eq!(WorkspaceBindingMode::ManualOverride.to_string(), "manual_override");
+    assert_eq!(WorkspaceBindingMode::DotBootstrap.to_string(), "dot_bootstrap");
+    assert_eq!(WorkspaceBindingMode::Unresolved.to_string(), "unresolved");
+}
+
+#[test]
+fn test_workspace_status_display() {
+    assert_eq!(WorkspaceStatus::Resolved.to_string(), "resolved");
+    assert_eq!(WorkspaceStatus::Reindexing.to_string(), "reindexing");
+    assert_eq!(WorkspaceStatus::Unresolved.to_string(), "unresolved");
+}
+
+#[test]
+fn test_unresolved_blocks_workspace_dependent_tools() {
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "test"}));
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("WORKSPACE_UNRESOLVED"), "Should contain WORKSPACE_UNRESOLVED, got: {}", text);
+}
+
+#[test]
+fn test_unresolved_allows_workspace_independent_tools() {
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error, "xray_info should work even when UNRESOLVED");
+    let result = dispatch_tool(&ctx, "xray_help", &json!({}));
+    assert!(!result.is_error, "xray_help should work even when UNRESOLVED");
+}
+
+#[test]
+fn test_workspace_metadata_in_tool_response() {
+    let ctx = HandlerContext::default();
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output.get("workspace").is_some(), "xray_info should have workspace section");
+    assert_eq!(output["workspace"]["mode"], "pinned_cli");
+    assert_eq!(output["workspace"]["status"], "resolved");
+}
+
+#[test]
+fn test_workspace_metadata_in_summary() {
+    let ctx = HandlerContext::default();
+    let result = dispatch_tool(&ctx, "xray_help", &json!({}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+    assert!(summary.get("serverDir").is_some(), "summary should have serverDir");
+    assert_eq!(summary["workspaceStatus"], "resolved");
+    assert_eq!(summary["workspaceSource"], "pinned_cli");
+    assert!(summary["workspaceGeneration"].as_u64().unwrap() >= 1);
+}
+
+#[test]
+fn test_has_source_files_with_current_dir() {
+    let exts = vec!["rs".to_string()];
+    assert!(has_source_files(".", &exts, 3), "Current dir should have .rs files");
+}
+
+#[test]
+fn test_has_source_files_nonexistent_ext() {
+    let exts = vec!["zzznotreal".to_string()];
+    assert!(!has_source_files(".", &exts, 3), "Should not find .zzznotreal files");
+}
+
+#[test]
+fn test_determine_initial_binding_explicit_path() {
+    let ws = determine_initial_binding("C:/Projects/MyApp", &vec!["rs".to_string()]);
+    assert_eq!(ws.mode, WorkspaceBindingMode::PinnedCli);
+    assert_eq!(ws.dir, "C:/Projects/MyApp");
+}
+
+#[test]
+fn test_determine_initial_binding_dot_with_sources() {
+    let ws = determine_initial_binding(".", &vec!["rs".to_string()]);
+    assert_eq!(ws.mode, WorkspaceBindingMode::DotBootstrap);
+    assert_eq!(ws.status, WorkspaceStatus::Resolved);
+}
+
+#[test]
+fn test_determine_initial_binding_dot_without_sources() {
+    let ws = determine_initial_binding(".", &vec!["zzznotreal".to_string()]);
+    assert_eq!(ws.mode, WorkspaceBindingMode::Unresolved);
+    assert_eq!(ws.status, WorkspaceStatus::Unresolved);
+}
+
+
+#[test]
+fn test_unresolved_blocks_definitions() {
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "test"}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
+}
+
+#[test]
+fn test_unresolved_blocks_callers() {
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "test"}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
+}
+
+#[test]
+fn test_unresolved_blocks_fast() {
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": "test"}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
+}
+
+#[test]
+fn test_unresolved_blocks_find() {
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_find", &json!({"pattern": "test"}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
+}
+
+#[test]
+fn test_unresolved_blocks_edit() {
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_edit", &json!({"path": "test.rs"}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
+}
+
+#[test]
+fn test_unresolved_blocks_git_tools() {
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({"repo": ".", "file": "test.rs"}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
+    let result = dispatch_tool(&ctx, "xray_branch_status", &json!({"repo": "."}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
+}
+
+#[test]
+fn test_reindexing_blocks_workspace_dependent_tools() {
+    let ws = WorkspaceBinding {
+        dir: ".".to_string(),
+        mode: WorkspaceBindingMode::ManualOverride,
+        status: WorkspaceStatus::Reindexing,
+        generation: 2,
+    };
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(ws)),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "test"}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("WORKSPACE_REINDEXING"));
+}
+
+#[test]
+fn test_reindexing_allows_workspace_independent_tools() {
+    let ws = WorkspaceBinding {
+        dir: ".".to_string(),
+        mode: WorkspaceBindingMode::ManualOverride,
+        status: WorkspaceStatus::Reindexing,
+        generation: 2,
+    };
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(ws)),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error, "xray_info should work during REINDEXING");
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({}));
+    // xray_reindex may error due to empty index, but NOT due to workspace gate
+    if result.is_error {
+        assert!(!result.content[0].text.contains("WORKSPACE_REINDEXING"),
+            "xray_reindex should not be blocked by REINDEXING status");
+    }
+}

@@ -319,7 +319,7 @@ fn test_xray_callers_multi_ext_filter() {
     let multi_ext_ctx = HandlerContext {
         index: ctx.index.clone(),
         def_index: ctx.def_index.clone(),
-        server_dir: ctx.server_dir.clone(),
+        workspace: ctx.workspace.clone(),
         server_ext: "cs,xml,sql".to_string(),
         ..Default::default()
     };
@@ -1989,7 +1989,7 @@ fn make_callers_body_ctx() -> (HandlerContext, std::path::PathBuf) {
     let ctx = HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
-        server_dir: tmp.to_string_lossy().to_string(),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))),
         max_response_bytes: 0, // no truncation for tests
         ..Default::default()
     };
