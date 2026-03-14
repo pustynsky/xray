@@ -135,6 +135,9 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         terms.clone()
     };
 
+    // Guard: if pattern is "*" and regex=true, treat as wildcard ("*" is invalid regex)
+    let use_regex = if is_wildcard && use_regex { false } else { use_regex };
+
     let re_list: Option<Vec<regex::Regex>> = if use_regex {
         let mut regexes = Vec::with_capacity(terms.len());
         for t in &terms {

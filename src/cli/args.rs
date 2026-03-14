@@ -2,51 +2,6 @@
 
 use clap::Parser;
 
-#[derive(Parser, Debug)]
-pub struct FindArgs {
-    /// Search pattern (substring or regex with --regex)
-    pub pattern: String,
-
-    /// Root directory to search in
-    #[arg(short, long, default_value = ".")]
-    pub dir: String,
-
-    /// Treat pattern as a regular expression
-    #[arg(short, long)]
-    pub regex: bool,
-
-    /// Search file contents instead of file names
-    #[arg(long)]
-    pub contents: bool,
-
-    /// Show hidden files
-    #[arg(long)]
-    pub hidden: bool,
-
-    /// Maximum search depth (0 = unlimited)
-    #[arg(long, default_value = "0")]
-    pub max_depth: usize,
-
-    /// Number of parallel threads (0 = auto)
-    #[arg(short, long, default_value = "0")]
-    pub threads: usize,
-
-    /// Case-insensitive search
-    #[arg(short = 'i', long)]
-    pub ignore_case: bool,
-
-    /// Also search .gitignore'd files
-    #[arg(long)]
-    pub no_ignore: bool,
-
-    /// Show only the count of matches
-    #[arg(short = 'c', long)]
-    pub count: bool,
-
-    /// File extension filter
-    #[arg(short, long)]
-    pub ext: Option<String>,
-}
 
 #[derive(Parser, Debug)]
 pub struct IndexArgs {
@@ -211,7 +166,6 @@ AVAILABLE TOOLS (exposed via MCP):
                        Note: calls through local variables (var x = ...; x.Method())
                        may not be detected (AST parsing without type inference).
                        (requires --definitions flag)
-  xray_find        -- Live filesystem search (no index, slow for large dirs)
   xray_fast        -- Search file name index (instant)
   xray_info        -- Show all indexes
   xray_reindex     -- Force rebuild + reload index
@@ -327,8 +281,8 @@ pub struct GrepArgs {
     #[arg(short, long)]
     pub ext: Option<String>,
 
-    /// Maximum results to display (0 = all).
-    #[arg(long, default_value = "0")]
+    /// Maximum results to display (0 = all, default: 50 — same as MCP).
+    #[arg(long, default_value = "50")]
     pub max_results: usize,
 
     /// AND mode: file must contain ALL terms.

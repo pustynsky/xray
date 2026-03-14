@@ -913,16 +913,6 @@ fn test_unresolved_blocks_fast() {
     assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
 }
 
-#[test]
-fn test_unresolved_blocks_find() {
-    let ctx = HandlerContext {
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
-        ..Default::default()
-    };
-    let result = dispatch_tool(&ctx, "xray_find", &json!({"pattern": "test"}));
-    assert!(result.is_error);
-    assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
-}
 
 #[test]
 fn test_unresolved_blocks_edit() {

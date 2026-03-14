@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Bug Fixes (Audit Batch 2026-03-14)
+
+- **Removed `xray_find` tool** — deprecated slow filesystem-walk tool removed entirely. Closes 7 audit findings (L27-L31, M13, M14). Use `xray_fast` for all file lookups (90x+ faster). Removed from: MCP tool definitions, CLI commands, tips, E2E tests. **Breaking change**: `xray_find` MCP tool and `xray find` CLI command no longer exist.
+
+- **TF-IDF division-by-zero guards** (L22, L23) — `score_normal_token_search` in `grep.rs` now guards against `doc_freq == 0` (unreachable but defensive) and `file_token_counts[file_id] == 0` (converts to 1.0 to avoid NaN/Inf). Applied to both scoring paths.
+
+- **Initial commit diff crash** (L34) — `get_commit_diff()` in `git/mod.rs` no longer crashes on initial commits (no parent). Uses `git rev-parse --verify hash^` to detect parentless commits, then diffs against the empty tree hash.
+
+- **Non-UTF8 git output handling** (L35) — `run_git()` now uses `String::from_utf8_lossy` instead of `String::from_utf8`, preventing full failure on non-UTF8 git output (e.g., binary file names, non-Latin commit messages).
+
+- **`excludeDir` segment matching** (L25) — `passes_file_filters` in `grep.rs` now matches directory names by path segment instead of full-path substring. `excludeDir=["test"]` no longer falsely excludes files in directories like "contest" or "testing". Normalizes path separators for cross-platform correctness.
+
+- **`xray_fast` wildcard + regex guard** (L14) — `pattern="*"` with `regex=true` no longer crashes with a regex parse error. When the pattern is a wildcard, `regex=true` is silently ignored.
+
+- **CLI/MCP `maxResults` parity** (L36) — CLI `xray grep --max-results` default changed from 0 (unlimited) to 50 to match the MCP default.
+
 ### Features
 
 - **Workspace Discovery (auto-detect project directory)** — The MCP server now automatically detects the correct workspace directory via three mechanisms: (1) **MCP `roots/list` protocol** — if the client supports roots (Roo Code, VS Code Copilot), the server requests `roots/list` after initialization and uses the first root as the workspace. Handles `roots/list_changed` notifications for live project switching. (2) **`--dir .` auto-detection** — when started with `--dir .`, the server checks if the CWD contains source files matching `--ext`. If yes → `DotBootstrap` mode (works immediately, roots can override). If no → `Unresolved` mode (tools blocked with `WORKSPACE_UNRESOLVED` structured error + hint). (3) **`xray_reindex dir=<path>` workspace switch** — LLMs can explicitly bind the workspace by calling `xray_reindex` with a `dir` parameter. Only blocked in `PinnedCli` mode (`--dir /explicit/path`). Load-first: tries cached index from disk before full rebuild. Response includes `workspaceChanged`, `previousServerDir`, `indexAction` fields.
@@ -9,7 +25,7 @@
   - **Workspace metadata in every response**: `summary` now includes `serverDir`, `workspaceStatus`, `workspaceSource`, `workspaceGeneration` in all tool responses.
   - **`xray_info` workspace section**: shows current workspace dir, mode, status, and generation.
   - **Event loop refactored**: parses stdin as `Value` first, routes requests vs responses. Handles server-initiated `roots/list` requests and client responses.
-  - **`WORKSPACE_UNRESOLVED` gate**: workspace-dependent tools (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`, `xray_find`, `xray_edit`, `xray_git_*`) are blocked with structured error. Workspace-independent tools (`xray_info`, `xray_help`, `xray_reindex`, `xray_reindex_definitions`) always work.
+  - **`WORKSPACE_UNRESOLVED` gate**: workspace-dependent tools (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`, `xray_edit`, `xray_git_*`) are blocked with structured error. Workspace-independent tools (`xray_info`, `xray_help`, `xray_reindex`, `xray_reindex_definitions`) always work.
   - New dependency: `url = "2"` for `uri_to_path()` (file:// URI parsing with percent-encoding, drive letters, Unicode).
   - Backward compatible: `--dir /explicit/path` works exactly as before (PinnedCli mode, roots ignored).
 

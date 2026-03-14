@@ -178,8 +178,7 @@ fn run_git(cmd: &mut Command) -> Result<String, String> {
         return Err(format!("git command failed: {}", stderr.trim()));
     }
 
-    String::from_utf8(output.stdout)
-        .map_err(|e| format!("git output is not valid UTF-8: {}", e))
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
 }
 
 /// Parse a git log record (using FIELD_SEP-separated fields) into CommitInfo.
@@ -268,12 +267,35 @@ pub fn file_history(
 
 /// Get the diff/patch for a specific commit and file.
 fn get_commit_diff(repo_path: &str, hash: &str, file: &str) -> Result<String, String> {
+    // Check if this is an initial commit (no parent) by testing git rev-parse
+    let parent_check = Command::new("git")
+        .current_dir(repo_path)
+        .arg("rev-parse")
+        .arg("--verify")
+        .arg(format!("{}^", hash))
+        .output();
+
     let mut cmd = Command::new("git");
-    cmd.current_dir(repo_path)
-        .arg("diff")
-        .arg(format!("{}^..{}", hash, hash))
-        .arg("--")
-        .arg(file);
+    cmd.current_dir(repo_path);
+
+    let has_parent = parent_check
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    if has_parent {
+        cmd.arg("diff")
+            .arg(format!("{}^..{}", hash, hash))
+            .arg("--")
+            .arg(file);
+    } else {
+        // Initial commit: show diff against empty tree
+        let empty_tree = "4b825dc642cb6eb9a060e54bf899d69f7cb0cb10";
+        cmd.arg("diff")
+            .arg(empty_tree)
+            .arg(hash)
+            .arg("--")
+            .arg(file);
+    }
 
     let output = run_git(&mut cmd)?;
 

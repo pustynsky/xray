@@ -616,3 +616,73 @@ fn test_inject_grep_ext_hint_mixed_ext_filter() {
     assert!(hint.contains("ps1"), "hint should mention non-indexed ps1");
     assert!(!hint.contains("'rs"), "hint should NOT mention indexed rs");
 }
+
+
+// ─── L25: excludeDir matches by directory segment, not full path substring ──
+
+#[test]
+fn test_exclude_dir_matches_segment_not_substring() {
+    // L25: excludeDir=["test"] should NOT exclude a file at "contest/file.rs"
+    // because "test" is a substring of "contest" but not a directory segment
+    let excl = vec!["test".to_string()];
+    let params = GrepSearchParams {
+        exclude_dir: &excl,
+        ..make_params_default()
+    };
+    // Should NOT be excluded — "contest" is not the same directory segment as "test"
+    assert!(passes_file_filters("src/contest/file.rs", &params),
+        "excludeDir='test' should NOT exclude 'contest/file.rs' (substring match was wrong)");
+    // Should be excluded — "test" is a directory segment
+    assert!(!passes_file_filters("src/test/file.rs", &params),
+        "excludeDir='test' should exclude 'src/test/file.rs'");
+    // Should be excluded — case-insensitive
+    assert!(!passes_file_filters("src/Test/file.rs", &params),
+        "excludeDir='test' should exclude 'src/Test/file.rs' (case-insensitive)");
+    // Should NOT be excluded — "testing" != "test"
+    assert!(passes_file_filters("src/testing/file.rs", &params),
+        "excludeDir='test' should NOT exclude 'testing/file.rs'");
+    // Should be excluded — "test" at the start of path
+    assert!(!passes_file_filters("test/file.rs", &params),
+        "excludeDir='test' should exclude 'test/file.rs' (at path start)");
+}
+
+#[test]
+fn test_exclude_dir_matches_backslash_segments() {
+    // Windows paths use backslashes
+    let excl = vec!["test".to_string()];
+    let params = GrepSearchParams {
+        exclude_dir: &excl,
+        ..make_params_default()
+    };
+    assert!(!passes_file_filters("src\\test\\file.rs", &params),
+        "excludeDir should match backslash-separated segments");
+    assert!(passes_file_filters("src\\contest\\file.rs", &params),
+        "excludeDir should NOT match substring in backslash paths");
+}
+
+// ─── L22/L23: TF-IDF zero guards ───────────────────────────────────
+
+#[test]
+fn test_tfidf_zero_file_token_count_no_division_by_zero() {
+    // L23: file_token_counts[file_id] = 0 should not cause NaN/Inf in TF-IDF
+    let mut index = ContentIndex {
+        root: "/test".to_string(),
+        extensions: vec!["rs".to_string()],
+        files: vec!["src/zero.rs".to_string()],
+        file_token_counts: vec![0], // zero token count
+        ..Default::default()
+    };
+    index.index.insert("hello".to_string(), vec![crate::Posting {
+        file_id: 0,
+        lines: vec![1],
+    }]);
+
+    let params = GrepSearchParams {
+        ..make_params_default()
+    };
+    // Should not panic or produce NaN — the guard converts 0 to 1.0
+    let results = score_normal_token_search(&["hello".to_string()], &index, &params);
+    assert_eq!(results.len(), 1, "Should find one file");
+    let entry = results.values().next().unwrap();
+    assert!(entry.tf_idf.is_finite(), "TF-IDF should be finite, not NaN/Inf");
+}

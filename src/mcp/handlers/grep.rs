@@ -150,10 +150,22 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
     if let Some(ext) = params.ext_filter
         && !matches_ext_filter(file_path, ext) { return false; }
 
-    // Exclude dir filter
-    if params.exclude_dir.iter().any(|excl| {
-        file_path.to_lowercase().contains(&excl.to_lowercase())
-    }) { return false; }
+    // Exclude dir filter — match by directory segment name, not full path substring
+    if !params.exclude_dir.is_empty() {
+        // Normalize path separators to forward slashes for uniform matching
+        let path_norm = file_path.to_lowercase().replace('\\', "/");
+        for excl in params.exclude_dir {
+            let excl_lower = excl.to_lowercase();
+            // Match as a path segment: /excl/ anywhere, or excl/ at start
+            let segment = format!("/{}/", excl_lower);
+            let at_start = format!("{}/", excl_lower);
+            if path_norm.contains(&segment)
+                || path_norm.starts_with(&at_start)
+            {
+                return false;
+            }
+        }
+    }
 
     // Exclude pattern filter
     if params.exclude.iter().any(|excl| {
@@ -303,6 +315,7 @@ fn score_normal_token_search(
     for term in terms {
         if let Some(postings) = index.index.get(term.as_str()) {
             let doc_freq = postings.len() as f64;
+            if doc_freq == 0.0 { continue; }
             let idf = (total_docs / doc_freq).ln();
 
             for posting in postings {
@@ -315,7 +328,8 @@ fn score_normal_token_search(
 
                 let occurrences = posting.lines.len();
                 let file_total = if (posting.file_id as usize) < index.file_token_counts.len() {
-                    index.file_token_counts[posting.file_id as usize] as f64
+                    let count = index.file_token_counts[posting.file_id as usize] as f64;
+                    if count == 0.0 { 1.0 } else { count }
                 } else {
                     1.0
                 };
@@ -707,7 +721,8 @@ fn score_token_postings(
 
                 let occurrences = posting.lines.len();
                 let file_total = if (posting.file_id as usize) < index.file_token_counts.len() {
-                    index.file_token_counts[posting.file_id as usize] as f64
+                    let count = index.file_token_counts[posting.file_id as usize] as f64;
+                    if count == 0.0 { 1.0 } else { count }
                 } else {
                     1.0
                 };

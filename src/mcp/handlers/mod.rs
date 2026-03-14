@@ -4,7 +4,6 @@ mod callers;
 mod definitions;
 mod edit;
 mod fast;
-mod find;
 mod git;
 mod grep;
 pub(crate) mod utils;
@@ -103,36 +102,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                 "required": ["terms"]
             }),
         },
-        ToolDefinition {
-            name: "xray_find".to_string(),
-            description: "[SLOW — USE xray_fast INSTEAD] Search for files by name using live filesystem walk. This is 90x+ slower than xray_fast (~3s vs ~35ms). Only use when: (1) no file name index exists, or (2) you need to search outside the indexed directory. For all normal file lookups, use xray_fast.".to_string(),
-            input_schema: json!({
-                "type": "object",
-                "properties": {
-                    "pattern": {
-                        "type": "string",
-                        "description": "File name pattern to search for"
-                    },
-                    "dir": { "type": "string", "description": "Root directory to search" },
-                    "ext": { "type": "string", "description": "Filter by extension" },
-                    "contents": {
-                        "type": "boolean",
-                        "description": "Search file contents instead of names"
-                    },
-                    "regex": { "type": "boolean", "description": "Treat pattern as regex" },
-                    "ignoreCase": {
-                        "type": "boolean",
-                        "description": "Case-insensitive search"
-                    },
-                    "maxDepth": { "type": "integer", "description": "Max directory depth" },
-                    "countOnly": { "type": "boolean", "description": "Return count only" }
-                },
-                "required": ["pattern"]
-            }),
-        },
+
         ToolDefinition {
             name: "xray_fast".to_string(),
-            description: "PREFERRED file lookup tool — searches pre-built file name index. 90x+ faster than xray_find (~35ms vs ~3s for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Supports pattern='*' or empty pattern with dir to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files, list_directory, or xray_find. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field.".to_string(),
+            description: "PREFERRED file lookup tool — searches pre-built file name index. Instant results (~35ms for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Supports pattern='*' or empty pattern with dir to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files or list_directory. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -857,7 +830,6 @@ pub fn dispatch_tool(
 
     let result = match tool_name {
         "xray_grep" => grep::handle_xray_grep(ctx, arguments),
-        "xray_find" => find::handle_xray_find(ctx, arguments),
         "xray_fast" => fast::handle_xray_fast(ctx, arguments),
         "xray_info" => handle_xray_info(ctx),
         "xray_reindex" => handle_xray_reindex(ctx, arguments),
@@ -1409,9 +1381,6 @@ mod tests_grep;
 #[path = "handlers_tests_fast.rs"]
 mod tests_fast;
 
-#[cfg(test)]
-#[path = "handlers_tests_find.rs"]
-mod tests_find;
 
 #[cfg(test)]
 #[path = "handlers_tests_git.rs"]

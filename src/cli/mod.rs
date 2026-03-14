@@ -11,10 +11,8 @@ use clap::{Parser, Subcommand};
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Instant;
 
-use ignore::WalkBuilder;
 use regex::Regex;
 
 use crate::{
@@ -51,9 +49,6 @@ pub(crate) struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub(crate) enum Commands {
-    /// Search for files (live filesystem walk)
-    Find(FindArgs),
-
     /// Build a file index for a directory
     Index(IndexArgs),
 
@@ -95,7 +90,6 @@ pub fn run() {
     let cli = Cli::parse();
 
     let result = match cli.command {
-        Commands::Find(args) => cmd_find(args),
         Commands::Index(args) => cmd_index(args),
         Commands::Fast(args) => cmd_fast(args),
         Commands::Info => { info::cmd_info(); Ok(()) },
@@ -249,166 +243,9 @@ fn cmd_def_audit(args: definitions::DefAuditArgs) -> Result<(), SearchError> {
     Ok(())
 }
 
-// ─── cmd_find ───────────────────────────────────────────────────────
 
-fn cmd_find(args: FindArgs) -> Result<(), SearchError> {
-    let start = Instant::now();
 
-    let pattern = if args.ignore_case {
-        args.pattern.to_lowercase()
-    } else {
-        args.pattern.clone()
-    };
 
-    let re = if args.regex {
-        let pat = if args.ignore_case {
-            format!("(?i){}", &args.pattern)
-        } else {
-            args.pattern.clone()
-        };
-        match Regex::new(&pat) {
-            Ok(r) => Some(r),
-            Err(e) => {
-                return Err(SearchError::InvalidRegex { pattern: pat, source: e });
-            }
-        }
-    } else {
-        None
-    };
-
-    let root = Path::new(&args.dir);
-    if !root.exists() {
-        return Err(SearchError::DirNotFound(args.dir.clone()));
-    }
-
-    let match_count = AtomicUsize::new(0);
-    let file_count = AtomicUsize::new(0);
-
-    let mut builder = WalkBuilder::new(root);
-    builder.hidden(!args.hidden);
-    builder.git_ignore(!args.no_ignore);
-    builder.git_global(!args.no_ignore);
-    builder.git_exclude(!args.no_ignore);
-
-    if args.max_depth > 0 {
-        builder.max_depth(Some(args.max_depth));
-    }
-
-    let thread_count = if args.threads == 0 {
-        std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4)
-    } else {
-        args.threads
-    };
-    builder.threads(thread_count);
-
-    if args.contents {
-        builder.build_parallel().run(|| {
-            let pattern = pattern.clone();
-            let re = re.clone();
-            let ignore_case = args.ignore_case;
-            let count_only = args.count;
-            let ext_filter = args.ext.clone();
-            let match_count = &match_count;
-            let file_count = &file_count;
-
-            Box::new(move |entry| {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => return ignore::WalkState::Continue,
-                };
-                if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-                    return ignore::WalkState::Continue;
-                }
-                if let Some(ref ext) = ext_filter {
-                    let matches_ext = entry.path().extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
-                    if !matches_ext { return ignore::WalkState::Continue; }
-                }
-                file_count.fetch_add(1, Ordering::Relaxed);
-                let content = match fs::read_to_string(entry.path()) {
-                    Ok(c) => c,
-                    Err(_) => return ignore::WalkState::Continue,
-                };
-                let matched = if let Some(ref re) = re {
-                    re.is_match(&content)
-                } else if ignore_case {
-                    content.to_lowercase().contains(&pattern)
-                } else {
-                    content.contains(&pattern)
-                };
-                if matched {
-                    match_count.fetch_add(1, Ordering::Relaxed);
-                    if !count_only {
-                        for (line_num, line) in content.lines().enumerate() {
-                            let line_matched = if let Some(ref re) = re {
-                                re.is_match(line)
-                            } else if ignore_case {
-                                line.to_lowercase().contains(&pattern)
-                            } else {
-                                line.contains(&pattern)
-                            };
-                            if line_matched {
-                                println!("{}:{}: {}", entry.path().display(), line_num + 1, line.trim());
-                            }
-                        }
-                    }
-                }
-                ignore::WalkState::Continue
-            })
-        });
-    } else {
-        builder.build_parallel().run(|| {
-            let pattern = pattern.clone();
-            let re = re.clone();
-            let ignore_case = args.ignore_case;
-            let count_only = args.count;
-            let ext_filter = args.ext.clone();
-            let match_count = &match_count;
-            let file_count = &file_count;
-
-            Box::new(move |entry| {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(_) => return ignore::WalkState::Continue,
-                };
-                file_count.fetch_add(1, Ordering::Relaxed);
-                let name = match entry.file_name().to_str() {
-                    Some(n) => n.to_string(),
-                    None => return ignore::WalkState::Continue,
-                };
-                if let Some(ref ext) = ext_filter {
-                    let matches_ext = entry.path().extension()
-                        .and_then(|e| e.to_str())
-                        .is_some_and(|e| e.eq_ignore_ascii_case(ext));
-                    if !matches_ext { return ignore::WalkState::Continue; }
-                }
-                let search_name = if ignore_case { name.to_lowercase() } else { name.clone() };
-                let matched = if let Some(ref re) = re {
-                    re.is_match(&search_name)
-                } else {
-                    search_name.contains(&pattern)
-                };
-                if matched {
-                    match_count.fetch_add(1, Ordering::Relaxed);
-                    if !count_only {
-                        println!("{}", entry.path().display());
-                    }
-                }
-                ignore::WalkState::Continue
-            })
-        });
-    }
-
-    let elapsed = start.elapsed();
-    let matches = match_count.load(Ordering::Relaxed);
-    let files = file_count.load(Ordering::Relaxed);
-    eprintln!("\n{} matches found among {} entries in {:.3}s ({} threads)",
-        matches, files, elapsed.as_secs_f64(), thread_count);
-    Ok(())
-}
 
 // ─── cmd_fast ───────────────────────────────────────────────────────
 

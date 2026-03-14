@@ -11,7 +11,7 @@ use std::sync::{Arc, RwLock};
 #[test]
 fn test_tool_definitions_count() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
-    assert_eq!(tools.len(), 16);
+    assert_eq!(tools.len(), 15);
 }
 
 #[test]
@@ -19,7 +19,6 @@ fn test_tool_definitions_names() {
     let tools = tool_definitions(&vec!["cs".to_string()]);
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"xray_grep"));
-    assert!(names.contains(&"xray_find"));
     assert!(names.contains(&"xray_fast"));
     assert!(names.contains(&"xray_info"));
     assert!(names.contains(&"xray_reindex"));
@@ -69,12 +68,6 @@ fn test_xray_grep_required_fields() {
     assert_eq!(required[0], "terms");
 }
 
-#[test]
-fn test_xray_find_has_slow_warning() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
-    let find = tools.iter().find(|t| t.name == "xray_find").unwrap();
-    assert!(find.description.contains("SLOW") || find.description.contains("xray_fast"), "xray_find should discourage use and point to xray_fast");
-}
 
 /// Compile-time guard: lists ALL HandlerContext fields explicitly.
 /// If a new field is added to HandlerContext, this test will fail to compile,
@@ -393,12 +386,3 @@ fn test_dispatch_help_works_while_index_building() {
     assert!(!result.is_error, "xray_info should work during index build");
 }
 
-#[test]
-fn test_dispatch_find_works_while_index_building() {
-    let ctx = HandlerContext {
-        content_ready: Arc::new(AtomicBool::new(false)),
-        ..make_empty_ctx()
-    };
-    let result = dispatch_tool(&ctx, "xray_find", &json!({"pattern": "nonexistent_xyz"}));
-    assert!(!result.is_error, "xray_find should work during index build");
-}

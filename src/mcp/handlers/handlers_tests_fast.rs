@@ -1348,3 +1348,21 @@ fn test_xray_fast_max_results_truncation() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+// ─── L14: pattern="*" + regex=true should not crash ────────────────
+
+#[test]
+fn test_xray_fast_wildcard_regex_no_crash() {
+    // L14: pattern="*" with regex=true used to crash with regex parse error
+    // Now it should be treated as wildcard (regex=true is silently ignored)
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = dispatch_tool(&ctx, "xray_fast", &json!({
+        "pattern": "*",
+        "regex": true
+    }));
+    assert!(!result.is_error, "pattern='*' + regex=true should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["totalMatches"].as_u64().unwrap() > 0,
+        "Wildcard should still match files even with regex=true");
+    cleanup_tmp(&tmp);
+}

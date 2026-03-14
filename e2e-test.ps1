@@ -51,12 +51,7 @@ if ($Binary -eq "cargo run --") {
 
 Write-Host "`n=== Sequential CLI tests ===`n"
 
-# T01-T05: find
-Run-Test "T01 find-filename"       "$Binary find main -d $TestDir -e $TestExt"
-Run-Test "T02 find-contents"       "$Binary find `"fn main`" -d $TestDir -e $TestExt --contents"
-Run-Test "T03 find-regex"          "$Binary find `"fn\s+\w+`" -d $TestDir -e $TestExt --contents --regex"
-Run-Test "T04 find-case-insensitive" "$Binary find CONTENTINDEX -d $TestDir -e $TestExt --contents -i"
-Run-Test "T05 find-count"          "$Binary find fn -d $TestDir -e $TestExt --contents -c"
+# T01-T05: find (REMOVED — xray find tool was removed in audit batch 2026-03-14)
 
 # T06-T09: index + fast
 Run-Test "T06 index-build"         "$Binary index -d $TestDir"
@@ -147,7 +142,7 @@ catch {
 
 # T21-T23: error handling
 Run-Test "T21 invalid-regex"       "$Binary grep `"[invalid`" -d $TestDir -e $TestExt --regex" -ExpectedExit 1
-Run-Test "T22 nonexistent-dir"     "$Binary find test -d /nonexistent/path/xyz" -ExpectedExit 1
+Run-Test "T22 nonexistent-dir"     "$Binary fast test -d /nonexistent/path/xyz" -ExpectedExit 1
 
 # T42/T42b: tips
 Run-Test "T42 tips-strategy-recipes" "$Binary tips | Select-String 'STRATEGY RECIPES'"

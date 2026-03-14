@@ -175,9 +175,9 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
     let lang_list = format_supported_languages(def_extensions);
     vec![
         Tip {
-            rule: "File lookup: use xray_fast, not xray_find".into(),
-            why: "xray_fast uses a pre-built index (~35ms). xray_find does a live filesystem walk (~3s). 90x+ faster.".into(),
-            example: "xray_fast with pattern='UserService' instead of xray_find".into(),
+            rule: "File lookup: use xray_fast, not built-in list_files".into(),
+            why: "xray_fast uses a pre-built index (~35ms). Built-in list_files does a live filesystem walk (~3s). 90x+ faster.".into(),
+            example: "xray_fast with pattern='UserService' instead of built-in list_files".into(),
         },
         Tip {
             rule: "Multi-term OR: find all variants in ONE query".into(),
@@ -436,11 +436,7 @@ pub fn performance_tiers() -> Vec<PerfTier> {
             range: "10-100ms",
             operations: &["xray_fast", "xray_definitions name/parent/includeBody", "xray_grep regex/phrase"],
         },
-        PerfTier {
-            name: "Slow",
-            range: ">1s",
-            operations: &["xray_find (live filesystem walk - avoid!)"],
-        },
+
     ]
 }
 
@@ -455,9 +451,8 @@ pub fn tool_priority(def_extensions: &[String]) -> Vec<ToolPriority> {
         ToolPriority { rank: 2, tool: "xray_definitions", description: Cow::Owned(format!("structural: classes, methods, functions, interfaces, typeAliases, variables, containsLine ({})", lang_desc)) },
         ToolPriority { rank: 3, tool: "xray_grep", description: "content: exact/OR/AND, substring, phrase, regex (any language)".into() },
         ToolPriority { rank: 4, tool: "xray_fast", description: "file name lookup (~35ms, any file)".into() },
-        ToolPriority { rank: 5, tool: "xray_find", description: "live walk (~3s, last resort)".into() },
-        ToolPriority { rank: 6, tool: "xray_branch_status", description: "call first when investigating production bugs".into() },
-        ToolPriority { rank: 7, tool: "xray_edit", description: "reliable file editing -- line-range or text-match, atomic, no whitespace issues. Supports multi-file (paths), insert after/before, expectedContext".into() },
+        ToolPriority { rank: 5, tool: "xray_branch_status", description: "call first when investigating production bugs".into() },
+        ToolPriority { rank: 6, tool: "xray_edit", description: "reliable file editing -- line-range or text-match, atomic, no whitespace issues. Supports multi-file (paths), insert after/before, expectedContext".into() },
     ]
 }
 
