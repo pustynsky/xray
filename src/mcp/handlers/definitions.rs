@@ -657,8 +657,11 @@ fn apply_stats_filters(
         return Ok(StatsFilterInfo { applied: false, before_count });
     }
 
-    // sortBy='lines' works without code_stats
-    let needs_code_stats = args.sort_by.as_deref() != Some("lines");
+    // sortBy='lines' works without code_stats, but min* filters always need code_stats
+    let has_min_filters = args.min_complexity.is_some() || args.min_cognitive.is_some()
+        || args.min_nesting.is_some() || args.min_params.is_some()
+        || args.min_returns.is_some() || args.min_calls.is_some();
+    let needs_code_stats = has_min_filters || args.sort_by.as_deref() != Some("lines");
 
     if needs_code_stats && index.code_stats.is_empty() {
         return Err(

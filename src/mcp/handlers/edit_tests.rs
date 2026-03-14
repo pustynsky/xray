@@ -2076,3 +2076,152 @@ fn test_auto_create_multi_file_mixed_existing_and_new() {
     let new_content = std::fs::read_to_string(tmp.path().join("new_file.txt")).unwrap();
     assert!(new_content.contains("inserted"), "New file should contain inserted text");
 }
+// ═══════════════════════════════════════════════════════════════════════
+// Regression tests for audit-2026-03-14 fixes
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Regression: regex capture group cascade bug.
+/// When $0 (full match) expansion contains "$1" as literal text,
+/// the old manual sequential replacement would double-substitute.
+/// Fix: use caps.expand() which handles this correctly.
+#[cfg(test)]
+mod audit_regression_tests {
+    use super::*;
+    use std::sync::{Arc, RwLock};
+    use crate::mcp::handlers::WorkspaceBinding;
+    use serde_json::json;
+
+    fn make_ctx(dir: &std::path::Path) -> super::HandlerContext {
+        super::HandlerContext {
+            workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir.to_string_lossy().to_string()))),
+            ..super::HandlerContext::default()
+        }
+    }
+
+    #[test]
+    fn test_regex_capture_group_no_cascade_when_match_contains_dollar_sign() {
+        // Content: "price: $100" — the $0 expansion is "price: $100"
+        // which contains "$1". Old code would replace "$1" again.
+        // With caps.expand(), only the explicit capture groups in the replacement are expanded.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("test.txt");
+        std::fs::write(&path, "price: $100\nprice: $200\n").unwrap();
+
+        let ctx = make_ctx(tmp.path());
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "test.txt",
+            "edits": [
+                { "search": r"price: (\$\d+)", "replace": "cost: $1", "occurrence": 1 }
+            ],
+            "regex": true
+        }));
+
+        assert!(!result.is_error, "Should succeed: {:?}", result.content[0].text);
+        let content = std::fs::read_to_string(&path).unwrap();
+        // First occurrence should be replaced: "price: $100" → "cost: $100"
+        assert!(content.contains("cost: $100"), "First should be replaced to 'cost: $100', got: {}", content);
+        // Second should be unchanged
+        assert!(content.contains("price: $200"), "Second should remain unchanged, got: {}", content);
+    }
+
+    #[test]
+    fn test_multi_file_temp_files_cleaned_up_on_write_failure() {
+        // Test that temp files (.xray_tmp) are cleaned up even when writing succeeds.
+        // After successful multi-file edit, no .xray_tmp files should remain.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("a.txt"), "hello\n").unwrap();
+        std::fs::write(tmp.path().join("b.txt"), "hello\n").unwrap();
+
+        let ctx = make_ctx(tmp.path());
+        let result = handle_xray_edit(&ctx, &json!({
+            "paths": ["a.txt", "b.txt"],
+            "edits": [
+                { "search": "hello", "replace": "world" }
+            ]
+        }));
+
+        assert!(!result.is_error, "Should succeed: {:?}", result.content[0].text);
+
+        // Verify no .xray_tmp files remain
+        let tmp_files: Vec<_> = std::fs::read_dir(tmp.path()).unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".xray_tmp"))
+            .collect();
+        assert!(tmp_files.is_empty(),
+            "No .xray_tmp files should remain after successful edit, found: {:?}",
+            tmp_files.iter().map(|e| e.file_name()).collect::<Vec<_>>());
+
+        // Verify files were actually modified
+        assert_eq!(std::fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "world\n");
+        assert_eq!(std::fs::read_to_string(tmp.path().join("b.txt")).unwrap(), "world\n");
+    }
+
+    #[test]
+    fn test_temp_path_for_generates_correct_path() {
+        use std::path::PathBuf;
+        let target = PathBuf::from("/some/dir/myfile.rs");
+        let temp = super::temp_path_for(&target);
+        assert_eq!(temp, PathBuf::from("/some/dir/.myfile.rs.xray_tmp"));
+    }
+
+    // ─── A1: Multi-file path dedup ───────────────────────────────────────
+
+    #[test]
+    fn test_multi_file_duplicate_path_relative_variants() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_named_temp_file(tmp.path(), "file.txt", "hello\n");
+        let ctx = make_ctx(tmp.path());
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "paths": ["./file.txt", "file.txt"],
+            "edits": [
+                { "search": "hello", "replace": "world" }
+            ]
+        }));
+
+        assert!(result.is_error, "Should reject duplicate paths");
+        let text = &result.content[0].text;
+        assert!(text.contains("Duplicate path"), "Error should mention duplicate: {}", text);
+    }
+
+    #[test]
+    fn test_multi_file_duplicate_path_different_files_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        create_named_temp_file(tmp.path(), "a.txt", "hello\n");
+        create_named_temp_file(tmp.path(), "b.txt", "hello\n");
+        let ctx = make_ctx(tmp.path());
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "paths": ["a.txt", "b.txt"],
+            "edits": [
+                { "search": "hello", "replace": "world" }
+            ]
+        }));
+        assert!(!result.is_error, "Different files should succeed: {:?}", result);
+    }
+
+    // ─── B1: CRLF normalization in Mode A ────────────────────────────────
+
+    #[test]
+    fn test_mode_a_crlf_content_no_double_cr() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file_path = tmp.path().join("crlf.txt");
+        std::fs::write(&file_path, "line1\r\nline2\r\nline3\r\n").unwrap();
+        let ctx = make_ctx(tmp.path());
+
+        // Mode A insert with CRLF content
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "crlf.txt",
+            "operations": [
+                { "startLine": 2, "endLine": 1, "content": "inserted\r\nline" }
+            ]
+        }));
+
+        assert!(!result.is_error, "Mode A insert should succeed: {:?}", result);
+        let content = std::fs::read(&file_path).unwrap();
+        let text = String::from_utf8_lossy(&content);
+        // Should have CRLF line endings but NO \r\r\n
+        assert!(!text.contains("\r\r\n"), "Should not have double CR: {:?}", text);
+        assert!(text.contains("inserted\r\nline"), "Should contain inserted content");
+    }
+}

@@ -793,10 +793,17 @@ fn test_is_implementation_of_suffix_tolerant() {
 
 #[test]
 fn test_is_implementation_of_short_stem_no_match() {
-    // IFoo → stem "Foo" (3 chars < 4 minimum) → no fuzzy match
+    // IFoo → stem "Foo" (3 chars < 5 minimum) → no fuzzy match
     assert!(!is_implementation_of("FooBar", "IFoo"));
     // IFoo → "Foo" exact match should still work
     assert!(is_implementation_of("Foo", "IFoo"));
+    // IData → stem "Data" (4 chars < 5 minimum) → no fuzzy match
+    // This prevents false positives like DataProcessor matching IData
+    assert!(!is_implementation_of("DataProcessor", "IData"));
+    // IData → "Data" exact match should still work
+    assert!(is_implementation_of("Data", "IData"));
+    // IDataService → stem "DataService" (11 chars >= 5) → fuzzy match should work
+    assert!(is_implementation_of("DataServiceImpl", "IDataService"));
 }
 
 // ─── Test 19: is_implementation_of — no false positive for unrelated classes ──

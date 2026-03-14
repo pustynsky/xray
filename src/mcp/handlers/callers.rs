@@ -1408,7 +1408,10 @@ fn build_root_method_info(
 
     // Find the best matching method definition
     for &di in name_indices {
-        let def = def_idx.definitions.get(di as usize)?;
+        let def = match def_idx.definitions.get(di as usize) {
+            Some(d) => d,
+            None => continue, // tombstone or invalid index — skip
+        };
         if !matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
             | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
             continue;
@@ -1420,7 +1423,10 @@ fn build_root_method_info(
             }
         }
 
-        let file_path = def_idx.files.get(def.file_id as usize)?;
+        let file_path = match def_idx.files.get(def.file_id as usize) {
+            Some(fp) => fp,
+            None => return None, // invalid file_id — can't build rootMethod
+        };
         let mut node = json!({
             "method": def.name,
             "line": def.line_start,
@@ -1622,7 +1628,11 @@ fn build_caller_tree(
 
     // Safety cap: collect more callers than needed so we can sort test vs non-test
     // before truncating. This avoids scanning ALL postings for popular tokens.
-    let collection_limit = ctx.limits.max_callers_per_level * 3;
+    let collection_limit = if ctx.impact_analysis {
+        usize::MAX  // don't cap when searching for tests
+    } else {
+        ctx.limits.max_callers_per_level * 3
+    };
 
     for posting in postings {
         if caller_map.len() >= collection_limit { break; }
@@ -2191,7 +2201,7 @@ fn is_implementation_of(class_name: &str, interface_name: &str) -> bool {
     }
 
     // Stem too short → skip fuzzy to avoid false positives
-    if stem.len() < 4 {
+    if stem.len() < 5 {
         return false;
     }
 

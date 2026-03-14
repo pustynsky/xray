@@ -1286,3 +1286,65 @@ fn test_xray_fast_filecount_when_dir_equals_root() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+// ═══════════════════════════════════════════════════════════════════════
+// Regression: xray_fast maxResults truncation (audit-2026-03-14 fix)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// maxResults parameter truncates results and adds truncated/maxResults to summary.
+#[test]
+fn test_xray_fast_max_results_truncation() {
+    use super::*;
+    use super::fast::handle_xray_fast;
+    use super::handlers_test_utils::cleanup_tmp;
+    use std::io::Write;
+
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_maxr_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create 10 files
+    for i in 0..10 {
+        let p = tmp_dir.join(format!("File{}.cs", i));
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "// File{}", i).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = crate::ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // Without maxResults: should find all 10
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "File"}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalMatches"].as_u64().unwrap(), 10);
+    assert!(output["summary"]["truncated"].is_null(), "Should NOT have truncated flag without maxResults");
+
+    // With maxResults=3: should truncate
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "File", "maxResults": 3}));
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let files2 = output2["files"].as_array().unwrap();
+    assert_eq!(files2.len(), 3, "Should return exactly 3 results, got {}", files2.len());
+    assert_eq!(output2["summary"]["totalMatches"].as_u64().unwrap(), 10, "totalMatches should still be 10");
+    assert_eq!(output2["summary"]["truncated"], true, "Should have truncated=true");
+    assert_eq!(output2["summary"]["maxResults"].as_u64().unwrap(), 3);
+
+    // With maxResults=0 (unlimited): should return all
+    let result3 = handle_xray_fast(&ctx, &json!({"pattern": "File", "maxResults": 0}));
+    let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+    assert_eq!(output3["files"].as_array().unwrap().len(), 10, "maxResults=0 should be unlimited");
+    assert!(output3["summary"]["truncated"].is_null(), "maxResults=0 should NOT have truncated flag");
+
+    cleanup_tmp(&tmp_dir);
+}

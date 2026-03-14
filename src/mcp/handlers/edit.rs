@@ -2,6 +2,7 @@
 //! - Mode A (operations): line-range splice, applied bottom-up to avoid offset cascade
 //! - Mode B (edits): text find-replace, literal or regex, with insert after/before support
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -352,11 +353,28 @@ fn handle_multi_file_edit(
         Err(e) => return ToolCallResult::error(e),
     };
 
-    // Phase 1: Read all files
+    // Phase 1: Read all files (with duplicate path detection)
     let mut file_data: Vec<(&str, PathBuf, String, &'static str)> = Vec::with_capacity(path_strings.len());
+    let mut seen_paths: HashSet<PathBuf> = HashSet::with_capacity(path_strings.len());
     for path_str in &path_strings {
         match read_and_validate_file(&ctx.server_dir(), path_str) {
             Ok((resolved, normalized, line_ending)) => {
+                // Normalize path to handle ./file.txt vs file.txt
+                let normalized_path: PathBuf = resolved.components().collect();
+                if !seen_paths.insert(normalized_path.clone()) {
+                    // Find the original path string that resolved to the same file
+                    let original = file_data.iter()
+                        .find(|(_, r, _, _)| {
+                            let nr: PathBuf = r.components().collect();
+                            nr == normalized_path
+                        })
+                        .map(|(p, _, _, _)| *p)
+                        .unwrap_or("?");
+                    return ToolCallResult::error(format!(
+                        "Duplicate path: '{}' and '{}' resolve to the same file",
+                        original, path_str
+                    ));
+                }
                 file_data.push((path_str, resolved, normalized, line_ending));
             }
             Err(e) => return ToolCallResult::error(format!("File '{}': {}", path_str, e)),
@@ -507,6 +525,7 @@ fn parse_line_operations(ops_array: &[Value]) -> Result<Vec<LineOperation>, Stri
             .and_then(|v| v.as_str())
             .ok_or_else(|| format!("operations[{}]: missing or invalid 'content'", i))?
             .to_string();
+        let content = normalize_crlf(&content);
 
         if start_line == 0 {
             return Err(format!("operations[{}]: startLine must be >= 1", i));

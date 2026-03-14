@@ -1351,7 +1351,12 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
         Ok(mut idx) => {
             *idx = new_index;
         }
-        Err(e) => return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e)),
+        Err(e) => {
+            // Rollback workspace status to avoid getting stuck in Reindexing
+            let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+            ws.status = WorkspaceStatus::Resolved;
+            return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e));
+        }
     }
 
     // Mark workspace as resolved

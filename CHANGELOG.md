@@ -39,6 +39,23 @@
   - 26 new unit tests: 11 for truncation phases + 15 for hint functions. All 1614 unit tests + 71 E2E tests pass.
 
 ### Bug Fixes
+- **7 more bugs fixed from code audit, session 2 (2026-03-14)** — Continued systematic fix of audit findings:
+  1. **[MEDIUM] `xray_edit` multi-file path dedup** — `paths: ["./foo.rs", "foo.rs"]` could resolve both to the same file, causing Phase 3 to write it twice (second write overwrites first). Added `HashSet<PathBuf>` dedup in Phase 1 with path normalization via `components().collect()`. Returns descriptive error showing both path variants.
+  2. **[MEDIUM] `xray_edit` CRLF normalization in Mode A** — `parse_line_operations` content with `\r\n` combined with `write_file_with_endings`'s `replace('\n', "\r\n")` produced `\r\r\n`. Added `normalize_crlf()` call in `parse_line_operations` (Mode B already normalized).
+  3. **[MEDIUM] `xray_definitions` sortBy='lines' skipped min* filters** — `needs_code_stats` was false when `sortBy='lines'`, causing ALL min* filters (minComplexity, minCognitive, etc.) to be bypassed. Split into `has_min_filters` (always true when any min* set) + original check.
+  4. **[MEDIUM] `xray_callers` build_root_method_info early exit** — `?` operator on definition/file lookup silently returned None on tombstone indices. Replaced with `match/continue` (tries next index) and `match/return None` (invalid file_id).
+  5. **[MEDIUM] `xray_callers` is_implementation_of false positives** — `IData` stem "Data" (4 chars) passed `< 4` threshold and matched `DataProcessor` via `contains()`. Raised threshold to `< 5`.
+  6. **[MEDIUM] `xray_callers` impactAnalysis collection_limit** — `collection_limit = maxCallersPerLevel × 3` (default 30) could miss test callers. Set to `usize::MAX` when `impact_analysis=true`.
+  7. **[MEDIUM] `xray_reindex_definitions` no rollback on poisoned lock** — If `def_index_arc.write()` failed, workspace stayed in Reindexing. Added rollback to `WorkspaceStatus::Resolved` before error return.
+
+- **5 bugs fixed from code audit (2026-03-14)** — Systematic validation and fix of top findings from the 67-item code audit:
+  1. **[HIGH] `xray_edit` multi-file write atomicity** — Multi-file `paths` mode now uses a two-phase write strategy: Phase 3a writes all edited content to `.xray_tmp` temp files; Phase 3b renames temp files to targets. If any temp write fails, all temp files are cleaned up and no originals are touched. Previously, I/O failure on file N+1 left files 1..N already written with no rollback.
+  2. **[MEDIUM] Watcher no-op after `xray_reindex`** — `handle_xray_reindex` now rebuilds `path_to_id` (via `build_watch_index_from`) when the previous index had `path_to_id` set (indicating `--watch` mode). Previously, the new index had `path_to_id = None`, causing the watcher to silently skip all incremental updates.
+  3. **[MEDIUM] `xray_fast` blocked by `content_ready`** — Removed `xray_fast` from `requires_content_index()`. `xray_fast` uses its own file-list index, not the content index, so it should not be blocked during content index build.
+  4. **[MEDIUM] `xray_fast` unbounded response** — Added `maxResults` parameter (default: 0 = unlimited). Response includes `truncated: true` and `maxResults` in summary when truncation occurs. Schema updated.
+  5. **[MEDIUM] `xray_edit` regex capture group cascade** — Replaced manual `$0`/`$1`/`$2` sequential replacement with `caps.expand()` (regex crate standard API). The manual loop could double-substitute when `$0` expansion text contained `$1` literal.
+  - Also fixed 2 pre-existing test issues: `test_xray_info_response_structure` missing `file-list` type handler, `test_audit_cross_validate_no_file_index_returns_skipped` test isolation.
+
 
 - **`xray_grep` dir= silently returned 0 results when pointing to a file** — When `xray_grep` was called with `dir` = path to a file (not a directory), it silently returned 0 results because `is_under_dir()` appends `/` to the dir prefix, making a file path like `parser_sql.rs/` match nothing. Now `parse_grep_args()` detects file paths via `Path::is_file()` (filesystem check) and `looks_like_file_path()` (heuristic for non-existent paths), returning an error with a helpful hint: try `dir='<parent_dir>'` or `xray_definitions file='<filename>'`. Tool description and `xray_help` parameter examples updated. 8 new unit tests + 1 E2E test.
 
@@ -812,8 +829,8 @@ Changes are grouped by date and organized into categories: **Features**, **Bug F
 
 | Metric                  | Value                       |
 | ----------------------- | --------------------------- |
-| Unit tests (latest)     | ~1520 (with lang-rust)      |
-| E2E tests (latest)      | 67                          |
+| Unit tests (latest)     | 1676 (with lang-rust)       |
+| E2E tests (latest)      | 72                          |
 | Binary size reduction   | 20.4 MB → 9.8 MB (−52%)     |
 | Index size reduction    | 566 MB → 327 MB (−42%, LZ4) |
 | Memory reduction        | 3.7 GB → 2.1 GB (−43%)      |
