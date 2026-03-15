@@ -27,6 +27,8 @@ pub enum DefinitionKind {
     Function,
     TypeAlias,
     Variable,
+    // XML kinds (on-demand, not indexed)
+    XmlElement,
     // SQL kinds
     StoredProcedure,
     Table,
@@ -62,6 +64,7 @@ impl DefinitionKind {
             Self::UserDefinedType => "userDefinedType",
             Self::Column => "column",
             Self::SqlIndex => "sqlIndex",
+            Self::XmlElement => "xmlElement",
         }
     }
 }
@@ -99,6 +102,7 @@ impl std::str::FromStr for DefinitionKind {
             "userdefinedtype" => Ok(Self::UserDefinedType),
             "column" => Ok(Self::Column),
             "sqlindex" => Ok(Self::SqlIndex),
+            "xmlelement" => Ok(Self::XmlElement),
             other => Err(format!("Unknown definition kind: '{}'", other)),
         }
     }
@@ -251,6 +255,33 @@ pub struct DefinitionIndex {
     pub extension_methods: HashMap<String, Vec<String>>,
 }
 
+impl DefinitionIndex {
+    /// Shrink all internal HashMaps to fit their current size.
+    /// Call after loading from disk to reclaim excess capacity.
+    /// Saves ~20-50 MB for large indexes by eliminating HashMap over-allocation.
+    pub fn shrink_maps(&mut self) {
+        self.name_index.shrink_to_fit();
+        self.kind_index.shrink_to_fit();
+        self.attribute_index.shrink_to_fit();
+        self.base_type_index.shrink_to_fit();
+        self.file_index.shrink_to_fit();
+        self.selector_index.shrink_to_fit();
+        self.method_calls.shrink_to_fit();
+        self.code_stats.shrink_to_fit();
+        self.template_children.shrink_to_fit();
+        self.path_to_id.shrink_to_fit();
+        self.extension_methods.shrink_to_fit();
+        // Also shrink inner Vecs for maps with non-trivial value sizes
+        for v in self.name_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.kind_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.attribute_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.base_type_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.file_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.selector_index.values_mut() { v.shrink_to_fit(); }
+        for v in self.method_calls.values_mut() { v.shrink_to_fit(); }
+    }
+}
+
 
 // ─── Parser result type aliases ──────────────────────────────────────
 // Shared by all parser entry points to avoid clippy::type_complexity.
@@ -336,9 +367,9 @@ pub struct DefIndexArgs {
   This is a read-only operation — it does NOT rebuild the index.
 
 EXAMPLES:
-  Audit with defaults:     search def-audit --dir C:\Projects --ext cs
-  Lower threshold:         search def-audit --dir C:\Projects --ext cs --min-bytes 2000
-  Show lossy files too:    search def-audit --dir C:\Projects --ext cs --show-lossy
+  Audit with defaults:     xray def-audit --dir C:\Projects --ext cs
+  Lower threshold:         xray def-audit --dir C:\Projects --ext cs --min-bytes 2000
+  Show lossy files too:    xray def-audit --dir C:\Projects --ext cs --show-lossy
 "#)]
 pub struct DefAuditArgs {
     /// Directory that was indexed (must match the --dir used during def-index)

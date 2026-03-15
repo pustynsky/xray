@@ -365,6 +365,11 @@ fn test_estimate_content_index_memory_nonempty() {
     assert!(estimate["trigramMapMB"].as_f64().is_some());
     assert!(estimate["filesMB"].as_f64().is_some());
     assert!(estimate["trigramCount"].as_u64().is_some());
+    // New fields from memory optimization
+    assert!(estimate["allocatorOverheadMB"].as_f64().is_some(),
+        "Should have allocatorOverheadMB field");
+    assert!(estimate["allocatorOverheadMB"].as_f64().unwrap() >= 0.0,
+        "allocatorOverheadMB should be >= 0");
 }
 
 #[test]
@@ -787,9 +792,106 @@ fn test_estimate_definition_index_memory_nonempty() {
     assert!(estimate["filesMB"].as_f64().is_some());
     assert!(estimate["indexesMB"].as_f64().is_some());
     assert!(estimate["codeStatsMB"].as_f64().is_some());
+    // New fields from memory optimization
+    assert!(estimate["allocatorOverheadMB"].as_f64().is_some(),
+        "Should have allocatorOverheadMB field");
+    assert!(estimate["methodCallsOverheadMB"].as_f64().is_some(),
+        "Should have methodCallsOverheadMB field");
     // Verify counts are non-zero (the actual source of truth)
     assert!(estimate["definitionCount"].as_u64().unwrap() > 0);
     assert!(estimate["callSiteCount"].as_u64().unwrap() > 0);
+}
+
+// ─── shrink_maps tests ────────────────────────────────────────────
+
+#[test]
+fn test_content_index_shrink_maps_preserves_data() {
+    let mut index = HashMap::new();
+    index.insert("httpclient".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1, 5, 10] },
+        Posting { file_id: 1, lines: vec![3] },
+    ]);
+    index.insert("ilogger".to_string(), vec![
+        Posting { file_id: 0, lines: vec![2] },
+    ]);
+
+    let mut idx = code_xray::ContentIndex {
+        root: ".".to_string(),
+        files: vec!["file0.cs".to_string(), "file1.cs".to_string()],
+        index,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 30],
+        ..Default::default()
+    };
+
+    // Record state before shrink
+    let tokens_before = idx.index.len();
+    let postings_before: usize = idx.index.values().map(|v| v.len()).sum();
+
+    // Shrink should not change data
+    idx.shrink_maps();
+
+    assert_eq!(idx.index.len(), tokens_before, "Token count should be preserved after shrink");
+    let postings_after: usize = idx.index.values().map(|v| v.len()).sum();
+    assert_eq!(postings_after, postings_before, "Posting count should be preserved after shrink");
+
+    // Data should still be accessible
+    let httpclient = idx.index.get("httpclient").unwrap();
+    assert_eq!(httpclient.len(), 2);
+    assert_eq!(httpclient[0].lines, vec![1, 5, 10]);
+}
+
+#[test]
+fn test_definition_index_shrink_maps_preserves_data() {
+    use crate::definitions::{DefinitionEntry, DefinitionKind, CallSite};
+
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "UserService".to_string(), kind: DefinitionKind::Class,
+            line_start: 1, line_end: 50, parent: None, signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut name_index = std::collections::HashMap::new();
+    name_index.insert("userservice".to_string(), vec![0u32]);
+
+    let mut kind_index = std::collections::HashMap::new();
+    kind_index.insert(DefinitionKind::Class, vec![0u32]);
+
+    let mut file_index = std::collections::HashMap::new();
+    file_index.insert(0u32, vec![0u32]);
+
+    let mut method_calls = std::collections::HashMap::new();
+    method_calls.insert(0u32, vec![
+        CallSite { method_name: "Save".to_string(), receiver_type: Some("DbContext".to_string()), line: 10, receiver_is_generic: false },
+    ]);
+
+    let mut idx = crate::definitions::DefinitionIndex {
+        root: ".".to_string(),
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        method_calls,
+        ..Default::default()
+    };
+
+    // Record state before shrink
+    let name_count = idx.name_index.len();
+    let call_count: usize = idx.method_calls.values().map(|v| v.len()).sum();
+
+    // Shrink should not change data
+    idx.shrink_maps();
+
+    assert_eq!(idx.name_index.len(), name_count, "name_index count should be preserved");
+    let call_count_after: usize = idx.method_calls.values().map(|v| v.len()).sum();
+    assert_eq!(call_count_after, call_count, "method_calls count should be preserved");
+
+    // Data should still be accessible
+    assert!(idx.name_index.contains_key("userservice"), "name_index should still contain key");
+    assert_eq!(idx.method_calls.get(&0).unwrap()[0].method_name, "Save", "CallSite data should be preserved");
 }
 
 // ─── estimate_git_cache_memory tests ────────────────────────────

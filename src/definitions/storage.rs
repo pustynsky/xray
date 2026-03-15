@@ -35,7 +35,7 @@ pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path
     match crate::index::read_format_version_from_index_file(&path) {
         Some(v) if v != super::types::DEFINITION_INDEX_VERSION => {
             eprintln!(
-                "[definition-index] Format version mismatch (found {}, expected {}), will rebuild",
+                "[definition-index] Format version mismatch (found {}, expected {}), index outdated",
                 v, super::types::DEFINITION_INDEX_VERSION
             );
             return Err(crate::SearchError::IndexLoad {
@@ -44,7 +44,7 @@ pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path
             });
         }
         None => {
-            eprintln!("[definition-index] Cannot read format version from {}, will rebuild", path.display());
+            eprintln!("[definition-index] Cannot read format version from {}, index outdated", path.display());
             return Err(crate::SearchError::IndexLoad {
                 path: path.display().to_string(),
                 message: "cannot read format version (legacy or corrupt index)".to_string(),

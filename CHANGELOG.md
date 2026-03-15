@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### Bug Fixes
+- **CLI `xray grep` fails with "No content index found" when index format is outdated** — When a content index file existed on disk but had an incompatible format version (legacy or version mismatch), `xray grep` returned `Error: No content index found for '.'` instead of rebuilding the index. The misleading `[content-index] ... will rebuild` stderr message was printed by `load_content_index()`, but the function only returned an error — the CLI caller (`load_grep_index`) never actually rebuilt. **Root cause**: `load_grep_index`'s `Err(_)` branch only tried `find_content_index_for_dir()` as a fallback (which also failed for the same version reason), while the MCP `cmd_serve` correctly rebuilt in the same scenario. **Fix**: When `auto_reindex=true` (default) and `load_content_index` fails, `load_grep_index` now reads extensions from the `.meta` sidecar file and calls `build_content_index()` — consistent with `cmd_serve` behavior. If rebuild also fails, falls through to `find_content_index_for_dir` as last resort. Changed misleading "will rebuild" messages to "index outdated" in both content and definition index loaders. 1 new E2E test (`T-GREP-STALE`).
+
+- **`def-index` warning message says `search def-audit` instead of `xray def-audit`** — The warning printed during `xray def-index` when files with 0 definitions are found incorrectly suggested running `search def-audit`. Changed to `xray def-audit` in both the runtime message and the `--help` examples.
+
+### Features
+- **Smart whitespace auto-retry in `xray_edit` Mode B** — Extended the text-match auto-retry cascade with two new steps to handle common LLM-vs-editor whitespace mismatches. Previously, `xray_edit` only retried with trailing whitespace stripped. Now the cascade is:
+  1. Exact match (existing)
+  2. Strip trailing whitespace per line (existing)
+  3. **NEW: Trim leading/trailing blank lines** — handles cases where the LLM starts search text with `##` but the file has `\n##`. Also strips trailing whitespace per line in combination.
+  4. **NEW: Flex-space regex matching** — converts the search text to a regex where each whitespace gap becomes `[ \t]+`, matching text with different amounts of horizontal whitespace (tabs, multiple spaces). Handles VS Code auto-formatted markdown tables where `| Issue |` becomes `| Issue       |`.
+  - Flex-space replacement uses `regex::NoExpand` — `$` characters in replacement text are treated literally.
+  - `expectedContext` check also gets a flex-space fallback (collapse whitespace in both context window and expected text).
+  - Warnings emitted for each non-exact match (e.g., `"edits[0]: text matched with flexible whitespace (spaces collapsed)"`).
+  - Flex-space is NOT applied in regex mode (`is_regex: true`) — only for literal text matching.
+  - Exact match is always preferred (cascade stops at first success).
+  - Anchor matching (`insertAfter`/`insertBefore`) also gets the full 4-step cascade with per-occurrence match length tracking for flex-space.
+  - 20 new unit tests. 1 existing test updated for new behavior. All 1720 unit tests pass.
+
+
+- **XML Structural Context — On-demand parsing via tree-sitter-xml** — `xray_definitions` now supports on-demand XML parsing for `.xml`, `.config`, `.csproj`, `.manifestxml`, `.props`, `.targets`, `.resx` files. XML files are NOT added to the definition index — they are parsed on-the-fly when `containsLine` or `name` filter is specified. Key features:
+  - **Parent Promotion**: When `containsLine` targets a leaf element (no child elements), the result is automatically promoted to the parent block. For example, searching for `<ServiceType>Search</ServiceType>` returns the entire `<SearchService>` block with all siblings — not just the trivial leaf.
+  - **textContent field**: Leaf elements include a `textContent` field with their text value (truncated to 200 chars).
+  - **XPath-like signatures**: Each element has a structural path like `configuration > appSettings > add[@key=DbConnection]`.
+  - **Absolute paths**: Supports XML files outside the workspace via absolute file paths.
+  - **`xmlHint` in grep results**: When `xray_grep` finds matches in XML files, the response includes an `xmlHint` suggesting `xray_definitions containsLine=N` for structural context.
+  - **`onDemand: true`**: Response includes this flag so the LLM knows data is from on-demand parsing, not the definition index.
+  - **Text content search**: The `name` filter now searches both XML element names AND `textContent` of leaf elements. For example, `name='PremiumStorage'` finds `<ServiceType>PremiumStorage</ServiceType>` — previously only element tag names were searchable.
+  - **Directory path error hint**: Passing a directory path (e.g., `file='Definitions/Prod.xml'` where that's a directory) now returns a clear error: `"XML on-demand requires a file path, not a directory"` with guidance to use `xray_fast` to find specific files.
+
+- **XML text_content filter V2 — Parent promotion and noise reduction** — When the `name` filter matches XML text content (not tag name), leaf elements are now **automatically promoted to their parent block** with full structural context. Key improvements:
+  - **Parent Promotion**: `name='PremiumStorage'` finding `<ServiceType>PremiumStorage</ServiceType>` now returns the entire `<SearchService>` parent block — not the trivial leaf `ServiceType`.
+  - **`matchedBy` field**: Response includes `matchedBy: "name"` or `matchedBy: "textContent"` so the LLM understands why each result was found.
+  - **`matchedChild` / `matchedChildren`**: Promoted results include `matchedChild: "ServiceType"` (single leaf) or `matchedChildren` array (multiple leaves in same parent).
+  - **De-duplication**: Multiple textContent matches in the same parent block are merged into one result with a `matchedChildren` array — not returned as separate results.
+  - **Name priority**: If a parent is already matched by tag name, textContent-promoted results for the same parent are suppressed to avoid duplicates.
+  - **Min-length guard**: Terms shorter than 3 characters are not searched in text content (only in tag names), preventing noise from short terms like `'ab'` or `'id'`.
+  - **Result ordering**: Name matches appear first, then textContent-promoted results.
+  - 6 new unit tests + 1 updated test. Tool descriptions updated in `mod.rs` and `tips.rs`.
+  - New `lang-xml` Cargo feature (in default build). New dependency: `tree-sitter-xml 0.7`. 25 new XML parser tests + 4 updated hint tests. All 1702 unit tests + 67 E2E tests pass.
+
+
+### Performance
+
+- **Memory estimate accuracy improved (`xray_info`)** — Updated memory estimation coefficients in `estimate_content_index_memory()` and `estimate_definition_index_memory()` to more accurately reflect real Working Set consumption. Key changes: (1) HashMap entry overhead increased from 80B to 120B (includes bucket + hash + metadata + alignment padding); (2) Each `Posting.lines` Vec now accounts for 32B allocator overhead per heap allocation; (3) String allocator overhead (32B) added to key estimates; (4) CallSite estimate increased from 60B to 100B (accounts for String headers + allocator overhead); (5) `selector_index` added to secondary index count (was missing); (6) `methodCallsOverheadMB` separated as a distinct field; (7) New `allocatorOverheadMB` field (20% of data size) for mimalloc/jemalloc fragmentation estimate. Previously, `xray_info` reported ~488 MB for a content index that actually consumed ~620 MB in Working Set (3.6× undercount overall). New estimates should be within 50% of actual WS.
+
+- **`shrink_to_fit()` on all HashMaps after index load** — Added `ContentIndex::shrink_maps()` and `DefinitionIndex::shrink_maps()` methods that reclaim excess HashMap capacity after loading indexes from disk. Called automatically in all 4 index load paths in `serve.rs` (direct content load, background content build+reload, direct def load, background def build+reload). Shrinks all 11 HashMaps in `DefinitionIndex` and 3 in `ContentIndex`, plus inner Vecs for maps with non-trivial value sizes. Expected savings: ~20-50 MB for large projects (65K files). Zero latency impact on queries; ~50-80ms one-time cost at startup.
+
 ### Bug Fixes (Audit Batch 2026-03-14)
 
 - **Removed `xray_find` tool** — deprecated slow filesystem-walk tool removed entirely. Closes 7 audit findings (L27-L31, M13, M14). Use `xray_fast` for all file lookups (90x+ faster). Removed from: MCP tool definitions, CLI commands, tips, E2E tests. **Breaking change**: `xray_find` MCP tool and `xray find` CLI command no longer exist.

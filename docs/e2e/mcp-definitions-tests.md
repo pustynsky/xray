@@ -452,3 +452,82 @@ Tests for the `xray_definitions` MCP tool: body extraction, containsLine, auto-s
 **Expected:** `isError: true`, message: `"containsLine must be >= 1"`
 
 **Unit tests:** `test_xray_definitions_contains_line_negative_returns_error`
+
+
+## XML On-Demand Structural Context
+
+### T-XML-CONTAINS-LINE — containsLine with parent promotion
+
+**Scenario**: `xray_definitions file='test.xml' containsLine=3 includeBody=true` where line 3 is a leaf element
+
+**Expected**: Parent block returned with `matchedChild`, `matchedLine`, `onDemand: true`. Body includes all siblings.
+
+### T-XML-NAME-FILTER — name filter for XML elements
+
+**Scenario**: `xray_definitions file='test.config' name='appSettings' includeBody=true`
+
+**Expected**: XML element returned with body, signature, attributes. `onDemand: true` in summary.
+
+### T-XML-GREP-HINT — xmlHint in grep results for XML matches
+
+**Scenario**: `xray_grep terms='ServiceType' ext='xml'`
+
+**Expected**: Response `summary.xmlHint` present, suggesting `xray_definitions containsLine=N`.
+
+### T-XML-ABSOLUTE-PATH — absolute path for XML outside workspace
+
+**Scenario**: `xray_definitions file='C:/path/to/file.xml' containsLine=5 includeBody=true`
+
+**Expected**: File parsed on-demand with structural context returned.
+
+### T-XML-HINT-UNSUPPORTED — XML hint when no containsLine/name specified
+
+**Scenario**: `xray_definitions file='config.xml'` (no containsLine or name)
+
+**Expected**: Hint suggests using `containsLine` or `name` for XML on-demand.
+
+### T-XML-TEXT-CONTENT — name filter matches text content with parent promotion (V2)
+
+**Scenario**: `xray_definitions file='services.xml' name='PremiumStorage'` where `PremiumStorage` is text content inside `<ServiceType>PremiumStorage</ServiceType>`
+
+**Expected**: Returns the **parent block** `SearchService` (not the leaf `ServiceType`) with:
+- `matchedBy: "textContent"`
+- `matchedChild: "ServiceType"`
+- `matchedLine: <line number>`
+- `onDemand: true` in summary
+
+Name matches appear first in results, textContent-promoted results after.
+
+**Unit tests:** `test_xml_on_demand_name_matches_text_content`, `test_xml_on_demand_name_matches_element_name_not_just_text`, `test_xml_text_content_parent_promotion_with_body`
+
+### T-XML-TEXT-CONTENT-DEDUP — de-duplication of multiple leaf matches in same parent
+
+**Scenario**: XML with `<Service><Type>PremiumFeature</Type><Feature>PremiumFeature</Feature></Service>`. Search `name='PremiumFeature'`.
+
+**Expected**: Returns 1 result: parent `Service` with `matchedChildren` array containing both `Type` and `Feature`. Not 2 separate results.
+
+**Unit tests:** `test_xml_text_content_deduplication`
+
+### T-XML-TEXT-CONTENT-MIN-LENGTH — min 3-char guard for textContent search
+
+**Scenario**: XML with `<Root><AB>xy</AB><Item>ab</Item></Root>`. Search `name='ab'`.
+
+**Expected**: Returns only `AB` (tag name match with `matchedBy: "name"`). Does NOT return `Item` (textContent "ab" — term too short for textContent search).
+
+**Unit tests:** `test_xml_text_content_min_length_guard`
+
+### T-XML-TEXT-CONTENT-NAME-PRIORITY — name match takes priority over textContent
+
+**Scenario**: XML with `<Service><Type>ServicePlan</Type></Service>`. Search `name='Service'`.
+
+**Expected**: `Service` returned with `matchedBy: "name"`. The textContent match on `Type` (containing "Service") is de-duplicated since parent `Service` is already in results by name.
+
+**Unit tests:** `test_xml_text_content_name_priority_over_text_content`
+
+### T-XML-DIRECTORY-HINT — directory path returns clear error
+
+**Scenario**: `xray_definitions file='dirname.xml' name='SomeElement'` where `dirname.xml` is a directory (not a file)
+
+**Expected**: Error with message containing `"directory"` and `"xray_fast"` guidance.
+
+**Unit tests:** `test_xml_on_demand_directory_returns_error_hint`

@@ -419,10 +419,41 @@ fn load_grep_index(
                 idx
             }
         }
-        Err(_) => {
-            match find_content_index_for_dir(dir, &idx_base, &[]) {
-                Some(idx) => idx,
-                None => return Err(SearchError::IndexNotFound { dir: dir.to_string() }),
+        Err(e) => {
+            if auto_reindex {
+                // Index exists but has incompatible format version — rebuild automatically
+                // (consistent with MCP server behavior in cmd_serve)
+                let rebuild_ext = {
+                    let idx_path = content_index_path_for(dir, &exts_for_load, &idx_base);
+                    crate::index::load_index_meta(&idx_path)
+                        .map(|m| m.extensions.join(","))
+                        .unwrap_or_else(|| exts_for_load.clone())
+                };
+                eprintln!("Auto-rebuilding content index for '{}' (ext={})...", dir, rebuild_ext);
+                match build_content_index(&ContentIndexArgs {
+                    dir: dir.to_string(), ext: rebuild_ext,
+                    max_age_hours: 24, hidden: false, no_ignore: false,
+                    threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                }) {
+                    Ok(new_idx) => {
+                        let _ = save_content_index(&new_idx, &idx_base);
+                        new_idx
+                    }
+                    Err(build_err) => {
+                        eprintln!("Auto-rebuild failed: {}", build_err);
+                        // Fall through to find_content_index_for_dir as last resort
+                        match find_content_index_for_dir(dir, &idx_base, &[]) {
+                            Some(idx) => idx,
+                            None => return Err(SearchError::IndexNotFound { dir: dir.to_string() }),
+                        }
+                    }
+                }
+            } else {
+                eprintln!("Content index load failed: {}", e);
+                match find_content_index_for_dir(dir, &idx_base, &[]) {
+                    Some(idx) => idx,
+                    None => return Err(SearchError::IndexNotFound { dir: dir.to_string() }),
+                }
             }
         }
     };

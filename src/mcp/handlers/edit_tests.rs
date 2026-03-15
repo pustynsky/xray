@@ -1813,16 +1813,16 @@ fn test_trailing_whitespace_skip_if_not_found_with_retry() {
 
 #[test]
 fn test_byte_diff_hint_trailing_space() {
-    // File has "hello" but search has "hello " (trailing space)
-    // Since trailing whitespace auto-retry catches this case, we need a case
-    // where the difference is NOT trailing whitespace (e.g., tab vs space)
-    let (tmp, filename, _) = create_temp_file("hello\tworld\n");
+    // Test byte-level diff diagnostic when similarity is very high.
+    // Use non-whitespace difference (hyphen vs underscore) since flex-space
+    // auto-retry now handles tab-vs-space differences.
+    let (tmp, filename, _) = create_temp_file("hello_world\n");
     let ctx = make_ctx(tmp.path());
 
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "search": "hello world", "replace": "x" }
+            { "search": "hello-world", "replace": "x" }
         ]
     }));
 
@@ -1830,7 +1830,7 @@ fn test_byte_diff_hint_trailing_space() {
     let text = &result.content[0].text;
     // Should show nearest match with byte diff since similarity is very high
     assert!(text.contains("Nearest match"), "Should show nearest match hint");
-    // The hint should show byte difference (tab vs space)
+    // The hint should show byte difference (hyphen vs underscore)
     assert!(text.contains("First difference") || text.contains("similarity"),
         "Should show byte-level diff or high similarity. Got: {}", text);
 }
@@ -1929,6 +1929,350 @@ fn test_all_whitespace_search_does_not_panic() {
 
     // "  " (two spaces) is not in the file, and after trim becomes "" which should NOT match anything
     assert!(result.is_error, "All-whitespace search that doesn't match should error");
+}
+
+// ─── Step 3: Trim leading/trailing blank lines ───────────────────────
+
+#[test]
+fn test_blank_line_trim_search_leading_newline() {
+    // File has content without leading blank line, search starts with \n
+    let (tmp, filename, _) = create_temp_file("## Heading\n\nSome text\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "\n## Heading", "replace": "## New Heading" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match after trimming leading blank line. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let text = &result.content[0].text;
+    assert!(text.contains("warnings"), "Response should contain warning about blank line trimming");
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("## New Heading"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_blank_line_trim_search_trailing_newlines() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello world\n\n", "replace": "goodbye world" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match after trimming trailing blank lines. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("goodbye world"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_blank_line_trim_anchor_leading_newline() {
+    let (tmp, filename, _) = create_temp_file("line one\nline two\nline three\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "insertAfter": "\nline one", "content": "inserted line" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match anchor after trimming leading blank line. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("inserted line"), "Insert should have been applied");
+}
+
+#[test]
+fn test_blank_line_trim_no_change_needed() {
+    // Search text has no leading/trailing blank lines — exact match should work, no warning
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello world", "replace": "goodbye world" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let text = &result.content[0].text;
+    assert!(!text.contains("warnings"), "No warnings for exact match");
+}
+
+// ─── Step 4: Flex-space matching ─────────────────────────────────────
+
+#[test]
+fn test_flex_space_table_padding() {
+    // File has padded markdown table, search has compact version
+    let (tmp, filename, _) = create_temp_file(
+        "| Issue       | Count     | Action              |\n|---|---|---|\n| Bug 1       | 5         | Fix it              |\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "| Bug 1 | 5 | Fix it |", "replace": "| Bug 2 | 10 | Done |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match with flex-space. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let text = &result.content[0].text;
+    assert!(text.contains("warnings"), "Should have flex-space warning");
+    assert!(text.contains("flexible whitespace"), "Warning should mention flexible whitespace");
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("Bug 2"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_flex_space_multiline_table() {
+    let (tmp, filename, _) = create_temp_file(
+        "| A       | B     |\n|---|---|\n| 1       | 2     |\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "| A | B |\n|---|---|\n| 1 | 2 |", "replace": "| X | Y |\n|---|---|\n| 3 | 4 |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match multiline flex-space. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("| X | Y |"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_flex_space_exact_match_preferred() {
+    // File has exact match — should use exact, no warnings
+    let (tmp, filename, _) = create_temp_file("| A | B |\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "| A | B |", "replace": "| X | Y |" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let text = &result.content[0].text;
+    assert!(!text.contains("warnings"), "Exact match should not produce warnings");
+}
+
+#[test]
+fn test_flex_space_anchor_insert_after() {
+    let (tmp, filename, _) = create_temp_file(
+        "| Issue       | Count     |\n|---|---|\n| Bug 1       | 5         |\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "insertAfter": "| Bug 1 | 5 |", "content": "| Bug 2 | 10 |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match anchor with flex-space. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("Bug 2"), "Insert should have been applied");
+}
+
+#[test]
+fn test_flex_space_anchor_insert_before() {
+    let (tmp, filename, _) = create_temp_file(
+        "| Issue       | Count     |\n|---|---|\n| Bug 1       | 5         |\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "insertBefore": "| Bug 1 | 5 |", "content": "| Bug 0 | 0 |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match anchor with flex-space for insertBefore. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("Bug 0"), "Insert should have been applied");
+}
+
+#[test]
+fn test_flex_space_with_occurrence() {
+    let (tmp, filename, _) = create_temp_file(
+        "| A       |\n| A       |\n| A       |\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "| A |", "replace": "| B |", "occurrence": 2 }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match occurrence 2 with flex-space. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    let lines: Vec<&str> = content.lines().collect();
+    // Line 0 should still be | A       |
+    assert!(lines[0].contains("A"), "First line should be unchanged");
+    // Line 1 should be replaced with | B |
+    assert!(lines[1].contains("B"), "Second line should be replaced");
+    // Line 2 should still be | A       |
+    assert!(lines[2].contains("A"), "Third line should be unchanged");
+}
+
+#[test]
+fn test_flex_space_not_used_for_regex_mode() {
+    // is_regex=true should not use flex-space fallback
+    let (tmp, filename, _) = create_temp_file("| A       | B     |\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "regex": true,
+        "edits": [
+            { "search": "\\| A \\| B \\|", "replace": "| X | Y |" }
+        ]
+    }));
+
+    // Regex mode should NOT flex-match — the regex "\| A \| B \|" doesn't match "| A       | B     |"
+    assert!(result.is_error, "Regex mode should not use flex-space fallback");
+}
+
+#[test]
+fn test_flex_space_replacement_dollar_sign_safety() {
+    // Replacement text with $ should be treated literally (NoExpand)
+    let (tmp, filename, _) = create_temp_file("| Price       |\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "| Price |", "replace": "| $100 |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match with flex-space. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("$100"), "Replacement with $ should be literal");
+}
+
+// ─── Step 5: expectedContext flex-space ──────────────────────────────
+
+#[test]
+fn test_expected_context_flex_space() {
+    // File has padded table, expectedContext uses compact version
+    let (tmp, filename, _) = create_temp_file(
+        "header\n| Issue       | Count     |\nfooter\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "header", "replace": "HEADER", "expectedContext": "| Issue | Count |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "expectedContext should match with collapsed whitespace. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("HEADER"), "Edit should have been applied");
+}
+
+#[test]
+fn test_expected_context_exact_match_still_works() {
+    // Exact expectedContext match should work as before
+    let (tmp, filename, _) = create_temp_file("line1\nline2\nline3\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "line2", "replace": "LINE2", "expectedContext": "line1" }
+        ]
+    }));
+
+    assert!(!result.is_error);
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("LINE2"));
+}
+
+#[test]
+fn test_expected_context_wrong_context_still_fails() {
+    // Wrong context should still fail even with flex-space
+    let (tmp, filename, _) = create_temp_file("line1\nline2\nline3\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "line2", "replace": "LINE2", "expectedContext": "completely wrong" }
+        ]
+    }));
+
+    assert!(result.is_error, "Wrong expectedContext should still fail");
+}
+
+// ─── Helper function unit tests ──────────────────────────────────────
+
+#[test]
+fn test_trim_blank_lines() {
+    assert_eq!(trim_blank_lines("\n## Heading"), "## Heading");
+    assert_eq!(trim_blank_lines("text\n\n"), "text");
+    assert_eq!(trim_blank_lines("\n\n## Heading\n\nContent\n\n"), "## Heading\n\nContent");
+    assert_eq!(trim_blank_lines("no change"), "no change");
+    assert_eq!(trim_blank_lines(""), "");
+}
+
+#[test]
+fn test_collapse_spaces() {
+    assert_eq!(collapse_spaces("| A       | B     |"), "| A | B |");
+    assert_eq!(collapse_spaces("  hello   world  "), "hello world");
+    assert_eq!(collapse_spaces("no  change"), "no change");
+    assert_eq!(collapse_spaces("line1\n  line2  \nline3"), "line1\nline2\nline3");
+}
+
+#[test]
+fn test_search_to_flex_pattern() {
+    // Basic table pattern
+    let p = search_to_flex_pattern("| A | B |").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(re.is_match("| A       | B     |"));
+    assert!(re.is_match("| A | B |"));
+    assert!(re.is_match("  | A  | B |  "));
+
+    // Multi-line
+    let p = search_to_flex_pattern("| A |\n|---|\n| 1 |").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(re.is_match("| A       |\n|---|\n| 1       |"));
+
+    // All-whitespace returns None
+    assert!(search_to_flex_pattern("   ").is_none());
+    assert!(search_to_flex_pattern("").is_none());
+
+    // Should not match when non-whitespace differs
+    let p = search_to_flex_pattern("| A |").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(!re.is_match("| B |"));
 }
 
 #[test]

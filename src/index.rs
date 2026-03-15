@@ -298,11 +298,14 @@ pub fn estimate_content_index_memory(idx: &ContentIndex) -> serde_json::Value {
     // If we only sampled, extrapolate total postings
     let full_total_postings: usize = idx.index.values().map(|v| v.len()).sum();
 
-    // Inverted index estimate:
-    // Each HashMap entry: ~80 bytes overhead + key String (24 + len) + Vec<Posting> (24 + postings)
-    // Each Posting: 4 (file_id) + 24 (Vec header) + lines * 4 = 28 + avg_lines * 4
-    let per_entry = 80.0 + 24.0 + avg_key_len + 24.0;
-    let per_posting = 28.0 + avg_lines * 4.0;
+    // Inverted index estimate (realistic coefficients):
+    // Each HashMap entry: ~120 bytes overhead (bucket + hash + metadata + alignment padding)
+    // + key String (24 stack + avg_len heap + 32 allocator overhead)
+    // + Vec<Posting> (24 stack + postings)
+    // Each Posting: 4 (file_id) + 24 (Vec<u32> header) + lines * 4
+    //   + 32 (allocator overhead for each Vec<u32> heap allocation)
+    let per_entry = 120.0 + 24.0 + avg_key_len + 32.0 + 24.0;
+    let per_posting = 28.0 + avg_lines * 4.0 + 32.0; // +32 for Vec<u32> allocator overhead
     let inverted_mb = (idx.index.len() as f64 * per_entry + full_total_postings as f64 * per_posting) / 1_048_576.0;
 
     // Trigram tokens estimate
@@ -329,13 +332,17 @@ pub fn estimate_content_index_memory(idx: &ContentIndex) -> serde_json::Value {
     };
     let files_mb = idx.files.len() as f64 * (24.0 + avg_file_path_len) / 1_048_576.0;
 
-    let total_mb = inverted_mb + trigram_tokens_mb + trigram_map_mb + files_mb;
+    // Allocator overhead: mimalloc/jemalloc typically adds 15-25% fragmentation
+    let data_mb = inverted_mb + trigram_tokens_mb + trigram_map_mb + files_mb;
+    let allocator_overhead_mb = data_mb * 0.20; // 20% estimate
+    let total_mb = data_mb + allocator_overhead_mb;
 
     serde_json::json!({
         "invertedIndexMB": round1(inverted_mb),
         "trigramTokensMB": round1(trigram_tokens_mb),
         "trigramMapMB": round1(trigram_map_mb),
         "filesMB": round1(files_mb),
+        "allocatorOverheadMB": round1(allocator_overhead_mb),
         "totalEstimateMB": round1(total_mb),
         "uniqueTokens": idx.index.len(),
         "totalPostings": full_total_postings,
@@ -349,34 +356,46 @@ pub fn estimate_content_index_memory(idx: &ContentIndex) -> serde_json::Value {
 pub fn estimate_definition_index_memory(idx: &crate::definitions::DefinitionIndex) -> serde_json::Value {
     let round1 = |v: f64| (v * 10.0).round() / 10.0;
 
-    // Each definition: ~200 bytes (name, kind, attributes, base_types, parent, signature, line range)
+    // Each definition: ~280 bytes (name String 24+avg_len+32 allocator, kind, attributes Vec,
+    // base_types Vec, parent Option<String>, signature Option<String>, line range, modifiers Vec)
     // Use active count (excludes tombstones from incremental updates)
     let active_defs: usize = idx.file_index.values().map(|v| v.len()).sum();
-    let defs_mb = active_defs as f64 * 200.0 / 1_048_576.0;
+    let defs_mb = active_defs as f64 * 280.0 / 1_048_576.0;
 
-    // Call sites: ~60 bytes each (method_name, receiver, line, col)
+    // Call sites: ~100 bytes each (method_name String 24+avg+32, receiver Option<String> 24+avg+32,
+    // line u32, receiver_is_generic bool, + struct padding)
     let total_calls: usize = idx.method_calls.values().map(|v| v.len()).sum();
-    let calls_mb = total_calls as f64 * 60.0 / 1_048_576.0;
+    let calls_mb = total_calls as f64 * 100.0 / 1_048_576.0;
 
-    // Files: ~50 bytes avg path
+    // Files: ~74 bytes avg (24 String header + ~50 avg path length)
     let files_mb = idx.files.len() as f64 * 74.0 / 1_048_576.0;
 
-    // Indexes (name_index, kind_index, file_index, etc.): ~80 bytes per entry + Vec overhead
+    // Indexes (name_index, kind_index, file_index, etc.):
+    // ~120 bytes per HashMap entry + key overhead + Vec<u32> per value
     let index_entries = idx.name_index.len() + idx.kind_index.len() + idx.file_index.len()
-        + idx.attribute_index.len() + idx.base_type_index.len();
-    let indexes_mb = index_entries as f64 * 100.0 / 1_048_576.0;
+        + idx.attribute_index.len() + idx.base_type_index.len() + idx.selector_index.len();
+    let indexes_mb = index_entries as f64 * 140.0 / 1_048_576.0;
 
-    // Code stats: ~64 bytes each
-    let stats_mb = idx.code_stats.len() as f64 * 64.0 / 1_048_576.0;
+    // method_calls HashMap overhead (separate from call site data):
+    // ~120 bytes per HashMap entry
+    let method_calls_overhead_mb = idx.method_calls.len() as f64 * 120.0 / 1_048_576.0;
 
-    let total_mb = defs_mb + calls_mb + files_mb + indexes_mb + stats_mb;
+    // Code stats: ~64 bytes each + HashMap entry overhead
+    let stats_mb = idx.code_stats.len() as f64 * (64.0 + 120.0) / 1_048_576.0;
+
+    // Allocator overhead: 15-25% fragmentation
+    let data_mb = defs_mb + calls_mb + files_mb + indexes_mb + method_calls_overhead_mb + stats_mb;
+    let allocator_overhead_mb = data_mb * 0.20;
+    let total_mb = data_mb + allocator_overhead_mb;
 
     serde_json::json!({
         "definitionsMB": round1(defs_mb),
         "callSitesMB": round1(calls_mb),
         "filesMB": round1(files_mb),
         "indexesMB": round1(indexes_mb),
+        "methodCallsOverheadMB": round1(method_calls_overhead_mb),
         "codeStatsMB": round1(stats_mb),
+        "allocatorOverheadMB": round1(allocator_overhead_mb),
         "totalEstimateMB": round1(total_mb),
         "definitionCount": active_defs,
         "callSiteCount": total_calls,
@@ -772,7 +791,7 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
     match read_format_version_from_index_file(&path) {
         Some(v) if v != CONTENT_INDEX_VERSION => {
             eprintln!(
-                "[content-index] Format version mismatch (found {}, expected {}), will rebuild",
+                "[content-index] Format version mismatch (found {}, expected {}), index outdated",
                 v, CONTENT_INDEX_VERSION
             );
             return Err(SearchError::IndexLoad {
@@ -781,7 +800,7 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
             });
         }
         None => {
-            eprintln!("[content-index] Cannot read format version from {}, will rebuild", path.display());
+            eprintln!("[content-index] Cannot read format version from {}, index outdated", path.display());
             return Err(SearchError::IndexLoad {
                 path: path.display().to_string(),
                 message: "cannot read format version (legacy or corrupt index)".to_string(),

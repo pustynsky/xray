@@ -10,6 +10,8 @@ mod parser_typescript;
 mod parser_sql;
 #[cfg(feature = "lang-rust")]
 mod parser_rust;
+#[cfg(feature = "lang-xml")]
+pub(crate) mod parser_xml;
 mod storage;
 mod incremental;
 
@@ -477,7 +479,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         .filter(|(_, size)| *size > suspicious_threshold)
         .count();
     if suspicious_count > 0 {
-        eprintln!("[def-index] WARNING: {} files with >{}B but 0 definitions. Run 'search def-audit' to see full list.",
+        eprintln!("[def-index] WARNING: {} files with >{}B but 0 definitions. Run 'xray def-audit' to see full list.",
             suspicious_count, suspicious_threshold);
     }
 
@@ -565,6 +567,10 @@ mod tests_sql;
 #[cfg(all(test, feature = "lang-rust"))]
 #[path = "definitions_tests_rust.rs"]
 mod tests_rust;
+
+#[cfg(all(test, feature = "lang-xml"))]
+#[path = "definitions_tests_xml.rs"]
+mod tests_xml;
 
 #[cfg(all(test, feature = "lang-csharp", feature = "lang-typescript"))]
 #[path = "audit_tests.rs"]

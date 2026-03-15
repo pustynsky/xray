@@ -50,6 +50,11 @@ pub fn cmd_serve(args: ServeArgs) {
     }
     crate::index::log_memory("serve: startup");
 
+    // Log CWD and canonical dir for debugging dir-agnostic mode
+    let cwd = std::env::current_dir().map(|p| crate::clean_path(&p.to_string_lossy())).unwrap_or_else(|_| "<unknown>".to_string());
+    let canonical_dir = std::fs::canonicalize(&dir_str).map(|p| crate::clean_path(&p.to_string_lossy())).unwrap_or_else(|_| dir_str.clone());
+    eprintln!("[startup] dir={:?}, cwd={}, canonical={}", dir_str, cwd, canonical_dir);
+
     // ─── Async startup: create empty indexes, start event loop immediately ───
     use std::collections::HashMap;
 
@@ -77,9 +82,15 @@ pub fn cmd_serve(args: ServeArgs) {
 
     // Try fast load from disk (typically < 3s)
     let start = Instant::now();
-    let loaded = load_content_index(&dir_str, &exts_for_load, &idx_base)
-        .ok()
-        .or_else(|| find_content_index_for_dir(&dir_str, &idx_base, &extensions));
+    let direct_load = load_content_index(&dir_str, &exts_for_load, &idx_base).ok();
+    let load_method;
+    let loaded = if direct_load.is_some() {
+        load_method = "direct";
+        direct_load
+    } else {
+        load_method = "fallback";
+        find_content_index_for_dir(&dir_str, &idx_base, &extensions)
+    };
 
     if let Some(idx) = loaded {
         let load_elapsed = start.elapsed();
@@ -92,14 +103,16 @@ pub fn cmd_serve(args: ServeArgs) {
             "Content index loaded from disk"
         );
         crate::index::log_memory(&format!(
-            "serve: content loaded (files={}, tokens={}, age={})",
-            idx.files.len(), idx.index.len(), cache_age
+            "serve: content loaded [{}] (files={}, tokens={}, trigrams={}, age={})",
+            load_method, idx.files.len(), idx.index.len(),
+            idx.trigram.trigram_map.len(), cache_age
         ));
-        let idx = if args.watch {
+        let mut idx = if args.watch {
             mcp::watcher::build_watch_index_from(idx)
         } else {
             idx
         };
+        idx.shrink_maps();
         *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
         content_ready.store(true, Ordering::Release);
         crate::index::log_memory("serve: content ready");
@@ -114,6 +127,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 .warm_up();
             eprintln!("[warmup] Trigram pre-warm completed in {:.1}ms ({} trigrams, {} tokens)",
                 start.elapsed().as_secs_f64() * 1000.0, trigrams, tokens);
+            crate::index::log_memory("serve: trigram warm-up done");
         });
     } else {
         // Build in background — don't block the event loop
@@ -183,11 +197,12 @@ pub fn cmd_serve(args: ServeArgs) {
             };
 
             crate::index::log_memory("serve: after reload content from disk");
-            let new_idx = if bg_watch {
+            let mut new_idx = if bg_watch {
                 mcp::watcher::build_watch_index_from(new_idx)
             } else {
                 new_idx
             };
+            new_idx.shrink_maps();
             let elapsed = build_start.elapsed();
             info!(
                 elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
@@ -274,9 +289,15 @@ pub fn cmd_serve(args: ServeArgs) {
         // Try fast load from disk
         let def_start = Instant::now();
         let def_ext_vec: Vec<String> = def_exts.split(',').map(|s| s.to_string()).collect();
-        let def_loaded = definitions::load_definition_index(&dir_str, &def_exts, &idx_base)
-            .ok()
-            .or_else(|| definitions::find_definition_index_for_dir(&dir_str, &idx_base, &def_ext_vec));
+        let def_direct = definitions::load_definition_index(&dir_str, &def_exts, &idx_base).ok();
+        let def_load_method;
+        let def_loaded = if def_direct.is_some() {
+            def_load_method = "direct";
+            def_direct
+        } else {
+            def_load_method = "fallback";
+            definitions::find_definition_index_for_dir(&dir_str, &idx_base, &def_ext_vec)
+        };
 
         if let Some(idx) = def_loaded {
             let def_elapsed = def_start.elapsed();
@@ -291,9 +312,12 @@ pub fn cmd_serve(args: ServeArgs) {
                 "Definition index loaded from disk"
             );
             crate::index::log_memory(&format!(
-                "serve: def loaded (files={}, defs={}, age={})",
-                def_file_count, def_count, cache_age
+                "serve: def loaded [{}] (files={}, defs={}, calls={}, age={})",
+                def_load_method, def_file_count, def_count,
+                idx.method_calls.len(), cache_age
             ));
+            let mut idx = idx;
+            idx.shrink_maps();
             *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
             def_ready.store(true, Ordering::Release);
         } else {
@@ -346,6 +370,8 @@ pub fn cmd_serve(args: ServeArgs) {
                     files = file_count,
                     "Definition index ready (background build complete)"
                 );
+                let mut new_idx = new_idx;
+                new_idx.shrink_maps();
                 *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
                 bg_def_ready.store(true, Ordering::Release);
                 crate::index::log_memory("serve: def ready");
@@ -364,6 +390,7 @@ pub fn cmd_serve(args: ServeArgs) {
     if args.watch {
         let watch_dir = std::fs::canonicalize(&dir_str)
             .unwrap_or_else(|_| PathBuf::from(&dir_str));
+        crate::index::log_memory("serve: starting watcher");
         if let Err(e) = mcp::watcher::start_watcher(
             Arc::clone(&index),
             def_index.as_ref().map(Arc::clone),
@@ -570,6 +597,7 @@ pub fn cmd_serve(args: ServeArgs) {
         def_extensions: def_extensions_vec,
     };
     mcp::server::run_server(ctx);
+    crate::index::log_memory("serve: event loop exited");
 }
 
 /// Format a cache age as a human-readable string (e.g., "2h 15m", "5m", "3d 1h").
