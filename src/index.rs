@@ -791,7 +791,7 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
     match read_format_version_from_index_file(&path) {
         Some(v) if v != CONTENT_INDEX_VERSION => {
             eprintln!(
-                "[content-index] Format version mismatch (found {}, expected {}), will rebuild",
+                "[content-index] Format version mismatch (found {}, expected {}), index outdated",
                 v, CONTENT_INDEX_VERSION
             );
             return Err(SearchError::IndexLoad {
@@ -800,7 +800,7 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
             });
         }
         None => {
-            eprintln!("[content-index] Cannot read format version from {}, will rebuild", path.display());
+            eprintln!("[content-index] Cannot read format version from {}, index outdated", path.display());
             return Err(SearchError::IndexLoad {
                 path: path.display().to_string(),
                 message: "cannot read format version (legacy or corrupt index)".to_string(),

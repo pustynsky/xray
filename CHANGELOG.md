@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Bug Fixes
+- **CLI `xray grep` fails with "No content index found" when index format is outdated** — When a content index file existed on disk but had an incompatible format version (legacy or version mismatch), `xray grep` returned `Error: No content index found for '.'` instead of rebuilding the index. The misleading `[content-index] ... will rebuild` stderr message was printed by `load_content_index()`, but the function only returned an error — the CLI caller (`load_grep_index`) never actually rebuilt. **Root cause**: `load_grep_index`'s `Err(_)` branch only tried `find_content_index_for_dir()` as a fallback (which also failed for the same version reason), while the MCP `cmd_serve` correctly rebuilt in the same scenario. **Fix**: When `auto_reindex=true` (default) and `load_content_index` fails, `load_grep_index` now reads extensions from the `.meta` sidecar file and calls `build_content_index()` — consistent with `cmd_serve` behavior. If rebuild also fails, falls through to `find_content_index_for_dir` as last resort. Changed misleading "will rebuild" messages to "index outdated" in both content and definition index loaders. 1 new E2E test (`T-GREP-STALE`).
+
+- **`def-index` warning message says `search def-audit` instead of `xray def-audit`** — The warning printed during `xray def-index` when files with 0 definitions are found incorrectly suggested running `search def-audit`. Changed to `xray def-audit` in both the runtime message and the `--help` examples.
+
 ### Features
 - **Smart whitespace auto-retry in `xray_edit` Mode B** — Extended the text-match auto-retry cascade with two new steps to handle common LLM-vs-editor whitespace mismatches. Previously, `xray_edit` only retried with trailing whitespace stripped. Now the cascade is:
   1. Exact match (existing)

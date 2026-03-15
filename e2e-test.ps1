@@ -352,6 +352,48 @@ catch {
     Remove-Item -Recurse -Force $tvDir -ErrorAction SilentlyContinue
 }
 
+# T-GREP-STALE: CLI grep auto-rebuilds stale content index (format version mismatch)
+Write-Host -NoNewline "  T-GREP-STALE grep-auto-rebuild-stale ... "
+$total++
+try {
+    $gsDir = Join-Path $env:TEMP "search_e2e_grep_stale_$PID"
+    if (Test-Path $gsDir) { Remove-Item -Recurse -Force $gsDir }
+    New-Item -ItemType Directory -Path $gsDir | Out-Null
+    Set-Content -Path (Join-Path $gsDir "hello.rs") -Value "fn hello() { println!(""hello""); }"
+
+    $searchBin3 = (Get-Command xray.exe -ErrorAction SilentlyContinue).Source
+    if (-not $searchBin3) { $searchBin3 = ".\target\debug\xray.exe" }
+
+    # Create a stale index with format_version=0
+    $ErrorActionPreference = "Continue"
+    & $searchBin3 test-create-stale-index -d $gsDir -e rs --version 0 2>&1 | Out-Null
+    $ErrorActionPreference = "Stop"
+
+    # Run grep — should auto-rebuild and return results (exit 0), not fail
+    $ErrorActionPreference = "Continue"
+    $gsOutput = & $searchBin3 grep hello -d $gsDir -e rs 2>&1 | Out-String
+    $gsExitCode = $LASTEXITCODE
+    $ErrorActionPreference = "Stop"
+
+    if ($gsExitCode -eq 0 -and $gsOutput -match "hello") {
+        Write-Host "OK" -ForegroundColor Green
+        $passed++
+    }
+    else {
+        Write-Host "FAILED (exit=$gsExitCode)" -ForegroundColor Red
+        Write-Host "    output: $gsOutput" -ForegroundColor Yellow
+        $failed++
+    }
+
+    & $searchBin3 cleanup --dir $gsDir 2>&1 | Out-Null
+    Remove-Item -Recurse -Force $gsDir -ErrorAction SilentlyContinue
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+    Remove-Item -Recurse -Force $gsDir -ErrorAction SilentlyContinue
+}
+
 # === PARALLEL TEST SECTION ===
 # These tests are independent: MCP callers tests use isolated temp directories,
 # Git MCP tests are read-only. Safe to run concurrently via Start-Job.

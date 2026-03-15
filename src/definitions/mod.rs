@@ -479,7 +479,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         .filter(|(_, size)| *size > suspicious_threshold)
         .count();
     if suspicious_count > 0 {
-        eprintln!("[def-index] WARNING: {} files with >{}B but 0 definitions. Run 'search def-audit' to see full list.",
+        eprintln!("[def-index] WARNING: {} files with >{}B but 0 definitions. Run 'xray def-audit' to see full list.",
             suspicious_count, suspicious_threshold);
     }
 

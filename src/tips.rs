@@ -1,5 +1,5 @@
 //! Single source of truth for best practices and tips.
-//! Used by: CLI `search tips`, MCP `xray_help` tool, MCP `instructions` field.
+//! Used by: CLI `xray tips`, MCP `xray_help` tool, MCP `instructions` field.
 
 use std::borrow::Cow;
 use serde_json::{json, Value};

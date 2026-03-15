@@ -367,9 +367,9 @@ pub struct DefIndexArgs {
   This is a read-only operation — it does NOT rebuild the index.
 
 EXAMPLES:
-  Audit with defaults:     search def-audit --dir C:\Projects --ext cs
-  Lower threshold:         search def-audit --dir C:\Projects --ext cs --min-bytes 2000
-  Show lossy files too:    search def-audit --dir C:\Projects --ext cs --show-lossy
+  Audit with defaults:     xray def-audit --dir C:\Projects --ext cs
+  Lower threshold:         xray def-audit --dir C:\Projects --ext cs --min-bytes 2000
+  Show lossy files too:    xray def-audit --dir C:\Projects --ext cs --show-lossy
 "#)]
 pub struct DefAuditArgs {
     /// Directory that was indexed (must match the --dir used during def-index)

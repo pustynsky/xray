@@ -40,7 +40,7 @@ if (-not (Test-Path $InputFile)) {
     Write-Error "Input file not found: $InputFile"
     exit 1
 }
-$raw = Get-Content -Path $InputFile -Raw -Encoding UTF8
+$raw = [System.IO.File]::ReadAllText($InputFile, [System.Text.Encoding]::UTF8)
 $fileName = Split-Path $InputFile -Leaf
 
 # ============================================================
@@ -119,21 +119,23 @@ function Extract-McpResult {
     return $null
 }
 
+$builtinToolNames = @('update_todo_list','read_file','apply_diff','write_to_file','search_files',
+    'execute_command','insert_content','search_and_replace','attempt_completion',
+    'ask_followup_question','list_files','list_code_definition_names')
+$builtinToolRegex = [regex]::new('<(' + ($builtinToolNames -join '|') + ')>', 'Compiled')
+
 function Extract-BuiltinToolCalls {
     param([string]$text)
     [System.Collections.Generic.List[string]]$tools = @()
-    if ($text -match '<update_todo_list>') { $tools.Add('update_todo_list') }
-    if ($text -match '<read_file>') { $tools.Add('read_file') }
-    if ($text -match '<apply_diff>') { $tools.Add('apply_diff') }
-    if ($text -match '<write_to_file>') { $tools.Add('write_to_file') }
-    if ($text -match '<search_files>') { $tools.Add('search_files') }
-    if ($text -match '<execute_command>') { $tools.Add('execute_command') }
-    if ($text -match '<insert_content>') { $tools.Add('insert_content') }
-    if ($text -match '<search_and_replace>') { $tools.Add('search_and_replace') }
-    if ($text -match '<attempt_completion>') { $tools.Add('attempt_completion') }
-    if ($text -match '<ask_followup_question>') { $tools.Add('ask_followup_question') }
-    if ($text -match '<list_files>') { $tools.Add('list_files') }
-    if ($text -match '<list_code_definition_names>') { $tools.Add('list_code_definition_names') }
+    $matches_ = $builtinToolRegex.Matches($text)
+    $seen = @{}
+    foreach ($m in $matches_) {
+        $name = $m.Groups[1].Value
+        if (-not $seen.ContainsKey($name)) {
+            $seen[$name] = $true
+            $tools.Add($name)
+        }
+    }
     return @(,$tools)
 }
 
@@ -220,9 +222,9 @@ function Summarize-Text {
 }
 
 function Normalize-Params {
-    param([string]$argsJson)
+    param($parsedObj, [string]$argsJson)
     try {
-        $obj = $argsJson | ConvertFrom-Json -ErrorAction Stop
+        $obj = if ($parsedObj) { $parsedObj } else { $argsJson | ConvertFrom-Json -ErrorAction Stop }
         $parts = @()
         foreach ($prop in ($obj.PSObject.Properties | Sort-Object Name)) {
             $val = $prop.Value
@@ -296,10 +298,11 @@ function Extract-ResponseSummary {
 }
 
 function Get-ParamDiff {
-    param([string]$prevArgs, [string]$currArgs)
+    param($prevParsed, $currParsed)
     try {
-        $prev = $prevArgs | ConvertFrom-Json -ErrorAction Stop
-        $curr = $currArgs | ConvertFrom-Json -ErrorAction Stop
+        $prev = $prevParsed
+        $curr = $currParsed
+        if (-not $prev -or -not $curr) { return '' }
         $diffs = @()
         $allKeys = @($prev.PSObject.Properties.Name) + @($curr.PSObject.Properties.Name) | Sort-Object -Unique
         foreach ($key in $allKeys) {
@@ -333,10 +336,11 @@ function Is-TargetRefinement {
         the model is refining the same query. Returns $false if targets are completely
         different, indicating sequential exploration of different entities.
     #>
-    param([string]$prevArgs, [string]$currArgs, [string]$toolName)
+    param($prevParsed, $currParsed, [string]$toolName)
     try {
-        $prev = $prevArgs | ConvertFrom-Json -ErrorAction Stop
-        $curr = $currArgs | ConvertFrom-Json -ErrorAction Stop
+        $prev = $prevParsed
+        $curr = $currParsed
+        if (-not $prev -or -not $curr) { return $true }
 
         # Define target keys per tool
         $targetKeys = switch ($toolName) {
@@ -427,8 +431,8 @@ function Analyze-TruncationCause {
     if ($returnedMatch.Success -and $totalMatch.Success) {
         $returned = [int]$returnedMatch.Groups[1].Value
         $total = [int]$totalMatch.Groups[1].Value
-        try {
-            $args_ = $episode._call_args | ConvertFrom-Json -ErrorAction Stop
+        $args_ = $episode._parsed_args
+        if ($args_) {
             $maxR = if ($args_.maxResults) { [int]$args_.maxResults } else { 100 }
             if ($returned -lt $maxR -and $total -gt $returned) {
                 # Truncated below maxResults — byte budget was the limit
@@ -436,11 +440,11 @@ function Analyze-TruncationCause {
                     $causes += 'response_size_limit'
                 }
             }
-        } catch {}
+        }
     }
 
-    try {
-        $args_ = $episode._call_args | ConvertFrom-Json -ErrorAction Stop
+    $args_ = $episode._parsed_args
+    if ($args_) {
         # Wide file scope (no specific file or very broad path)
         if ($args_.file) {
             $fileVal = "$($args_.file)"
@@ -455,7 +459,6 @@ function Analyze-TruncationCause {
         # NOTE: no_kind_filter and no_name_filter removed — they are noise for exploration sessions
         # where broad queries without kind/name are normal and expected.
     }
-    catch {}
 
     # Tool-specific truncation markers
     $toolName = $episode.tool
@@ -535,6 +538,8 @@ function Extract-Hints {
 # ============================================================
 
 [System.Collections.Generic.List[hashtable]]$episodes = @()
+$firstMcpTurnIdx = -1
+$lastMcpTurnIdx = -1
 $builtinCallCount = 0
 $builtinCallDetails = @{}
 [System.Collections.Generic.List[hashtable]]$builtinCallDetailsList = @()
@@ -650,6 +655,10 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
     $mcpCalls = Extract-McpToolCall $turn.content
     if ($mcpCalls.Count -eq 0) { continue }
 
+    # Track first/last MCP turn (replaces Step 5 re-scan)
+    if ($firstMcpTurnIdx -eq -1) { $firstMcpTurnIdx = $i }
+    $lastMcpTurnIdx = $i
+
     # Extract thinking before
     $thinkings = Extract-Tag $turn.content 'thinking'
     $thinkingBefore = if ($thinkings.Count -gt 0) { Summarize-Text $thinkings[-1] 300 } else { '' }
@@ -758,12 +767,16 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
             }
         }
 
+        # Pre-parse JSON args once (used by multiple functions downstream)
+        $parsedArgs = $null
+        try { $parsedArgs = $call.args | ConvertFrom-Json -ErrorAction Stop } catch {}
+
         # Compute param_diff from previous episode (if same tool)
         $paramDiff = ''
         if ($episodes.Count -gt 0) {
             $prevEp = $episodes[$episodes.Count - 1]
             if ($prevEp.tool -eq $call.tool -and $prevEp.server -eq $call.server) {
-                $paramDiff = Get-ParamDiff $prevEp._call_args $call.args
+                $paramDiff = Get-ParamDiff $prevEp._parsed_args $parsedArgs
             }
         }
 
@@ -771,7 +784,7 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
             index               = $episodes.Count + 1
             server              = $call.server
             tool                = $call.tool
-            params_summary      = Normalize-Params $call.args
+            params_summary      = Normalize-Params $parsedArgs $call.args
             response_status     = $status.status
             response_size_bytes = $responseSize
             response_summary    = $responseSummary
@@ -788,6 +801,7 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
             term_breakdown      = $termBreakdown
             _result_raw         = $resultContent
             _call_args          = $call.args
+            _parsed_args        = $parsedArgs
             _hints              = @(Extract-Hints $resultContent)
         }
 
@@ -836,7 +850,7 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
             }
             else {
                 # Check if target entity is the same (refinement) or different (exploration)
-                $isRefinement = Is-TargetRefinement $prev._call_args $ep._call_args $ep.tool
+                $isRefinement = Is-TargetRefinement $prev._parsed_args $ep._parsed_args $ep.tool
                 if ($isRefinement) {
                     $ep.tags.Add('progressive_refinement')
                 }
@@ -884,11 +898,12 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
         $nextEp = $episodes[$e + 1]
         # Check refinement inline (nextEp tags may not be computed yet in this forward pass)
         $isNextRefinement = ($nextEp.tool -eq 'xray_definitions' -and $nextEp.server -eq $ep.server -and
-            $nextEp._call_args -ne $ep._call_args -and (Is-TargetRefinement $ep._call_args $nextEp._call_args 'xray_definitions'))
+            $nextEp._call_args -ne $ep._call_args -and (Is-TargetRefinement $ep._parsed_args $nextEp._parsed_args 'xray_definitions'))
         if ($nextEp.tool -eq 'xray_definitions' -and $isNextRefinement) {
             try {
-                $currParams = $ep._call_args | ConvertFrom-Json -ErrorAction Stop
-                $nextParams = $nextEp._call_args | ConvertFrom-Json -ErrorAction Stop
+                $currParams = $ep._parsed_args
+                $nextParams = $nextEp._parsed_args
+                if (-not $currParams -or -not $nextParams) { throw 'no parsed args' }
                 $currKind = if ($currParams.PSObject.Properties['kind']) { "$($currParams.kind)" } else { '' }
                 $nextKind = if ($nextParams.PSObject.Properties['kind']) { "$($nextParams.kind)" } else { '' }
                 # Only if kind changed between episodes
@@ -970,23 +985,11 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
 }
 
 # ============================================================
-# STEP 5: Phase model
+# STEP 5: Phase model (uses firstMcpTurnIdx/lastMcpTurnIdx from Step 3)
 # ============================================================
 
-$firstMcpTurn = -1
-$lastMcpTurn = -1
-for ($i = 0; $i -lt $turns.Count; $i++) {
-    if ($turns[$i].role -eq 'assistant') {
-        $calls = Extract-McpToolCall $turns[$i].content
-        if ($calls.Count -gt 0) {
-            if ($firstMcpTurn -eq -1) { $firstMcpTurn = $i }
-            $lastMcpTurn = $i
-        }
-    }
-}
-
-$setupTurns = if ($firstMcpTurn -gt 0) { $firstMcpTurn } else { 0 }
-$synthesisTurns = if ($lastMcpTurn -ge 0) { $totalTurns - $lastMcpTurn - 1 } else { 0 }
+$setupTurns = if ($firstMcpTurnIdx -gt 0) { $firstMcpTurnIdx } else { 0 }
+$synthesisTurns = if ($lastMcpTurnIdx -ge 0) { $totalTurns - $lastMcpTurnIdx - 1 } else { 0 }
 $explorationTurns = $totalTurns - $setupTurns - $synthesisTurns
 
 $hasCompletion = $completionText.Length -gt 0
@@ -1151,8 +1154,9 @@ for ($e = 1; $e -lt $episodes.Count; $e++) {
     if ($ep.tool -eq $prev.tool -and $ep.server -eq $prev.server -and
         $ep.tags -contains 'progressive_refinement') {
         try {
-            $prevP = $prev._call_args | ConvertFrom-Json -ErrorAction Stop
-            $currP = $ep._call_args | ConvertFrom-Json -ErrorAction Stop
+            $prevP = $prev._parsed_args
+            $currP = $ep._parsed_args
+            if (-not $prevP -or -not $currP) { continue }
             # Check: same params except 'dir' changed
             $prevDir = if ($prevP.PSObject.Properties['dir']) { "$($prevP.dir)" } else { '' }
             $currDir = if ($currP.PSObject.Properties['dir']) { "$($currP.dir)" } else { '' }
@@ -1202,8 +1206,9 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
             elseif ($nextEp.tool -eq $ep.tool -and $nextEp.server -eq $ep.server) {
                 # Same tool progressive refinement: check if params overlap significantly
                 try {
-                    $prevParams = $ep._call_args | ConvertFrom-Json -ErrorAction Stop
-                    $nextParams = $nextEp._call_args | ConvertFrom-Json -ErrorAction Stop
+                    $prevParams = $ep._parsed_args
+                    $nextParams = $nextEp._parsed_args
+                    if (-not $prevParams -or -not $nextParams) { continue }
                     # If the same 'name' or 'method' or 'file' param exists in both, it's scope narrowing = waste
                     $sharedKeys = @('name', 'method', 'file', 'terms')
                     foreach ($key in $sharedKeys) {
