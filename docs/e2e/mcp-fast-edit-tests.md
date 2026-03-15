@@ -338,3 +338,65 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 - All-whitespace search text fails gracefully
 
 **Status:** ✅ Covered by 22 unit tests
+
+
+---
+
+### T-EDIT-18: Blank line trimming — leading/trailing blank lines in search text
+
+**Expected:**
+
+- Search `"\n## Heading"` matches `"## Heading"` in file → edit applied with warning
+- Search `"text\n\n"` matches `"text"` in file → edit applied with warning
+- Anchor `"\nline one"` matches `"line one"` → insert applied with warning
+- No blank lines in search text → exact match, no warning
+
+**Unit tests:** `test_blank_line_trim_search_leading_newline`, `test_blank_line_trim_search_trailing_newlines`, `test_blank_line_trim_anchor_leading_newline`, `test_blank_line_trim_no_change_needed`
+
+**Status:** ✅ Covered by 4 unit tests
+
+---
+
+### T-EDIT-19: Flex-space matching — whitespace-collapsed search
+
+**Expected:**
+
+- Search `"| A | B |"` matches file content `"| A       | B     |"` (padded table) → edit applied with warning mentioning "flexible whitespace"
+- Multi-line search with padding → matched correctly
+- Anchor `"| Bug 1 | 5 |"` matches padded version → insertAfter/insertBefore applied
+- `occurrence: 2` with flex-space → correct occurrence replaced
+- Exact match preferred → no warning when file matches exactly
+- Regex mode (`is_regex: true`) → flex-space NOT applied (error returned)
+- Replacement text with `$` → treated literally (no regex expansion)
+
+**Unit tests:** `test_flex_space_table_padding`, `test_flex_space_multiline_table`, `test_flex_space_exact_match_preferred`, `test_flex_space_anchor_insert_after`, `test_flex_space_anchor_insert_before`, `test_flex_space_with_occurrence`, `test_flex_space_not_used_for_regex_mode`, `test_flex_space_replacement_dollar_sign_safety`
+
+**Status:** ✅ Covered by 8 unit tests
+
+---
+
+### T-EDIT-20: expectedContext flex-space fallback
+
+**Expected:**
+
+- Padded `expectedContext` like `"| Issue | Count |"` matches file content `"| Issue       | Count     |"` → edit not rejected
+- Exact context still works
+- Completely wrong context still fails
+
+**Unit tests:** `test_expected_context_flex_space`, `test_expected_context_exact_match_still_works`, `test_expected_context_wrong_context_still_fails`
+
+**Status:** ✅ Covered by 3 unit tests
+
+---
+
+### T-EDIT-21: Helper functions — trim_blank_lines, collapse_spaces, search_to_flex_pattern
+
+**Expected:**
+
+- `trim_blank_lines` strips leading/trailing `\n`, preserves interior
+- `collapse_spaces` collapses runs of spaces/tabs to single space per line
+- `search_to_flex_pattern` produces valid regex matching padded text, returns `None` for all-whitespace input
+
+**Unit tests:** `test_trim_blank_lines`, `test_collapse_spaces`, `test_search_to_flex_pattern`
+
+**Status:** ✅ Covered by 3 unit tests

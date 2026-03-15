@@ -27,6 +27,8 @@ pub enum DefinitionKind {
     Function,
     TypeAlias,
     Variable,
+    // XML kinds (on-demand, not indexed)
+    XmlElement,
     // SQL kinds
     StoredProcedure,
     Table,
@@ -62,6 +64,7 @@ impl DefinitionKind {
             Self::UserDefinedType => "userDefinedType",
             Self::Column => "column",
             Self::SqlIndex => "sqlIndex",
+            Self::XmlElement => "xmlElement",
         }
     }
 }
@@ -99,6 +102,7 @@ impl std::str::FromStr for DefinitionKind {
             "userdefinedtype" => Ok(Self::UserDefinedType),
             "column" => Ok(Self::Column),
             "sqlindex" => Ok(Self::SqlIndex),
+            "xmlelement" => Ok(Self::XmlElement),
             other => Err(format!("Unknown definition kind: '{}'", other)),
         }
     }

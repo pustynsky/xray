@@ -15,11 +15,12 @@ name = "xray"
 path = "src/main.rs"
 
 [features]
-default = ["lang-csharp", "lang-typescript", "lang-sql", "lang-rust"]
+default = ["lang-csharp", "lang-typescript", "lang-sql", "lang-rust", "lang-xml"]
 lang-csharp = ["dep:tree-sitter", "dep:tree-sitter-c-sharp"]
 lang-typescript = ["dep:tree-sitter", "dep:tree-sitter-typescript"]
 lang-sql = []
 lang-rust = ["dep:tree-sitter", "dep:tree-sitter-rust"]
+lang-xml = ["dep:tree-sitter", "dep:tree-sitter-xml"]
 
 [dependencies]
 ignore = "0.4"
@@ -34,6 +35,7 @@ tree-sitter = { version = "0.24", optional = true }
 tree-sitter-c-sharp = { version = "0.23", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-rust = { version = "0.23", optional = true }
+tree-sitter-xml = { version = "0.7", optional = true }
 # tree-sitter-sequel-tsql removed: version 0.4.2 requires tree-sitter language ABI version 15,
 # but tree-sitter 0.24 only supports versions 13-14. Verified 2026-02-23: still incompatible.
 # SQL parsing is disabled until a compatible T-SQL grammar is available.

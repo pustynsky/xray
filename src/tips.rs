@@ -747,7 +747,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     if !def_extensions.is_empty() {
         let ext_dotted: Vec<String> = def_extensions.iter().map(|e| format!(".{}", e)).collect();
         out.push_str(&format!(
-            "  - NEVER use xray_definitions for non-{} files (XML, JSON, config, YAML, MD) — \
+            "  - NEVER use xray_definitions for non-{} files (JSON, YAML, MD) — \
              it only supports AST parsing for {}. Use xray_grep instead\n",
             ext_dotted.join("/"), ext_dotted.join("/")
         ));

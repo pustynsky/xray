@@ -10,6 +10,8 @@ mod parser_typescript;
 mod parser_sql;
 #[cfg(feature = "lang-rust")]
 mod parser_rust;
+#[cfg(feature = "lang-xml")]
+pub(crate) mod parser_xml;
 mod storage;
 mod incremental;
 
@@ -565,6 +567,10 @@ mod tests_sql;
 #[cfg(all(test, feature = "lang-rust"))]
 #[path = "definitions_tests_rust.rs"]
 mod tests_rust;
+
+#[cfg(all(test, feature = "lang-xml"))]
+#[path = "definitions_tests_xml.rs"]
+mod tests_xml;
 
 #[cfg(all(test, feature = "lang-csharp", feature = "lang-typescript"))]
 #[path = "audit_tests.rs"]

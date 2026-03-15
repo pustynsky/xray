@@ -2584,9 +2584,8 @@ fn make_hint_e_ctx() -> HandlerContext {
 }
 
 #[test]
-fn test_hint_e_xml_extension_suggests_xray_grep() {
-    // file='something.xml' → Hint E should fire because .xml is not in def_extensions
-    // but IS in server_ext (content index)
+fn test_hint_e_xml_extension_suggests_on_demand() {
+    // file='something.xml' → Hint should suggest XML on-demand parsing via containsLine/name
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
         "file": "config.xml"
@@ -2594,10 +2593,9 @@ fn test_hint_e_xml_extension_suggests_xray_grep() {
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = v["summary"]["hint"].as_str()
-        .expect("Should have hint for unsupported extension");
+        .expect("Should have hint for XML extension");
     assert!(hint.contains(".xml"), "Hint should mention .xml extension. Got: {}", hint);
-    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep. Got: {}", hint);
-    assert!(hint.contains("content index"), "Hint should mention content index. Got: {}", hint);
+    assert!(hint.contains("containsLine") || hint.contains("on-demand"), "Hint should suggest XML on-demand. Got: {}", hint);
 }
 
 #[test]
@@ -2635,7 +2633,7 @@ fn test_hint_e_cs_extension_no_hint() {
 
 #[test]
 fn test_hint_e_case_insensitive_extension() {
-    // file='Config.XML' (uppercase) → should still match .xml as unsupported
+    // file='Config.XML' (uppercase) → should still match .xml as XML on-demand
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
         "file": "Config.XML"
@@ -2644,12 +2642,12 @@ fn test_hint_e_case_insensitive_extension() {
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = v["summary"]["hint"].as_str()
         .expect("Should have hint for .XML (case-insensitive)");
-    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep for .XML. Got: {}", hint);
+    assert!(hint.contains("containsLine") || hint.contains("on-demand"), "Hint should suggest XML on-demand for .XML. Got: {}", hint);
 }
 
 #[test]
 fn test_hint_e_comma_separated_file_filter() {
-    // file='foo.xml,bar.xml' → first term has unsupported extension → Hint E fires
+    // file='foo.xml,bar.xml' → XML extension → XML on-demand hint fires
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
         "file": "foo.xml,bar.xml"
@@ -2657,8 +2655,8 @@ fn test_hint_e_comma_separated_file_filter() {
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = v["summary"]["hint"].as_str()
-        .expect("Should have hint for comma-separated unsupported extensions");
-    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep. Got: {}", hint);
+        .expect("Should have hint for comma-separated XML extensions");
+    assert!(hint.contains("containsLine") || hint.contains("on-demand"), "Hint should suggest XML on-demand. Got: {}", hint);
 }
 
 // ─── Tests for Hint: name+kind mismatch (Fix 1) ─────────────────────
@@ -3110,10 +3108,10 @@ fn test_hint_fn_unsupported_extension_xml_returns_some() {
     let ctx = make_hint_e_ctx();
     let args = parse_definition_args(&json!({"file": "config.xml"})).unwrap();
     let result = hint_unsupported_extension(&args, &ctx);
-    assert!(result.is_some(), "Should return Some for unsupported .xml extension");
+    assert!(result.is_some(), "Should return Some for .xml extension");
     let hint = result.unwrap();
     assert!(hint.contains(".xml"), "Hint should mention .xml");
-    assert!(hint.contains("xray_grep"), "Hint should suggest xray_grep");
+    assert!(hint.contains("containsLine") || hint.contains("on-demand"), "Hint should suggest XML on-demand. Got: {}", hint);
 }
 
 #[test]
@@ -3513,4 +3511,154 @@ fn test_hint_fn_content_not_defs_no_name_returns_none() {
     let args = parse_definition_args(&json!({})).unwrap();
     let result = hint_name_in_content_not_defs(&args, &ctx);
     assert!(result.is_none(), "Should return None without name filter");
+}
+
+// ═══════════════════════════════════════════════════════════════════
+// XML on-demand: text content search + directory path hint
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_name_matches_text_content() {
+    // name="PremiumStorage" should find <ServiceType>PremiumStorage</ServiceType>
+    use std::io::Write;
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_text_content_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let xml_content = r#"<?xml version="1.0"?>
+<SearchServices>
+  <SearchService>
+    <Deploy>true</Deploy>
+    <ServiceType>PremiumStorage</ServiceType>
+    <Name>Service-1</Name>
+  </SearchService>
+  <SearchService>
+    <Deploy>false</Deploy>
+    <ServiceType>Search</ServiceType>
+    <Name>Service-2</Name>
+  </SearchService>
+</SearchServices>"#;
+
+    let xml_path = tmp_dir.join("services.xml");
+    {
+        let mut f = std::fs::File::create(&xml_path).unwrap();
+        f.write_all(xml_content.as_bytes()).unwrap();
+    }
+
+    let content_index = crate::ContentIndex {
+        root: tmp_dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+
+    // Search by text content value "PremiumStorage"
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": "services.xml",
+        "name": "PremiumStorage"
+    }));
+    assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().expect("Should have definitions");
+    assert!(!defs.is_empty(), "Should find ServiceType element via text content match. Response: {}",
+        result.content[0].text);
+
+    // The match should be ServiceType with textContent "PremiumStorage"
+    let found = defs.iter().any(|d| {
+        d["name"].as_str() == Some("ServiceType") &&
+        d.get("textContent").and_then(|v| v.as_str()) == Some("PremiumStorage")
+    });
+    assert!(found, "Should find ServiceType with textContent=PremiumStorage. Got: {:?}",
+        defs.iter().map(|d| d["name"].as_str()).collect::<Vec<_>>());
+
+    // Should be on-demand
+    assert_eq!(v["summary"]["onDemand"], true, "Should be on-demand parsed");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_name_matches_element_name_not_just_text() {
+    // name="ServiceType" should still match by element name (existing behavior)
+    use std::io::Write;
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_elem_name_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let xml_content = r#"<Root><ServiceType>Search</ServiceType></Root>"#;
+    let xml_path = tmp_dir.join("test.xml");
+    {
+        let mut f = std::fs::File::create(&xml_path).unwrap();
+        f.write_all(xml_content.as_bytes()).unwrap();
+    }
+
+    let content_index = crate::ContentIndex {
+        root: tmp_dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": "test.xml",
+        "name": "ServiceType"
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 1, "Should find exactly 1 ServiceType element");
+    assert_eq!(defs[0]["name"], "ServiceType");
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_directory_returns_error_hint() {
+    // Passing a directory with XML-like extension should return clear error
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_dir_hint_{}.xml", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let content_index = crate::ContentIndex {
+        root: std::env::temp_dir().to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(std::env::temp_dir().to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+
+    let dir_name = tmp_dir.file_name().unwrap().to_string_lossy().to_string();
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": dir_name,
+        "name": "SomeElement"
+    }));
+    assert!(result.is_error, "Should return error for directory path");
+    let text = &result.content[0].text;
+    assert!(text.contains("directory"), "Error should mention 'directory': {}", text);
+    assert!(text.contains("xray_fast"), "Error should suggest xray_fast: {}", text);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

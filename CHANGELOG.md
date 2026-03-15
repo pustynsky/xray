@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+### Features
+- **Smart whitespace auto-retry in `xray_edit` Mode B** — Extended the text-match auto-retry cascade with two new steps to handle common LLM-vs-editor whitespace mismatches. Previously, `xray_edit` only retried with trailing whitespace stripped. Now the cascade is:
+  1. Exact match (existing)
+  2. Strip trailing whitespace per line (existing)
+  3. **NEW: Trim leading/trailing blank lines** — handles cases where the LLM starts search text with `##` but the file has `\n##`. Also strips trailing whitespace per line in combination.
+  4. **NEW: Flex-space regex matching** — converts the search text to a regex where each whitespace gap becomes `[ \t]+`, matching text with different amounts of horizontal whitespace (tabs, multiple spaces). Handles VS Code auto-formatted markdown tables where `| Issue |` becomes `| Issue       |`.
+  - Flex-space replacement uses `regex::NoExpand` — `$` characters in replacement text are treated literally.
+  - `expectedContext` check also gets a flex-space fallback (collapse whitespace in both context window and expected text).
+  - Warnings emitted for each non-exact match (e.g., `"edits[0]: text matched with flexible whitespace (spaces collapsed)"`).
+  - Flex-space is NOT applied in regex mode (`is_regex: true`) — only for literal text matching.
+  - Exact match is always preferred (cascade stops at first success).
+  - Anchor matching (`insertAfter`/`insertBefore`) also gets the full 4-step cascade with per-occurrence match length tracking for flex-space.
+  - 20 new unit tests. 1 existing test updated for new behavior. All 1720 unit tests pass.
+
+
+- **XML Structural Context — On-demand parsing via tree-sitter-xml** — `xray_definitions` now supports on-demand XML parsing for `.xml`, `.config`, `.csproj`, `.manifestxml`, `.props`, `.targets`, `.resx` files. XML files are NOT added to the definition index — they are parsed on-the-fly when `containsLine` or `name` filter is specified. Key features:
+  - **Parent Promotion**: When `containsLine` targets a leaf element (no child elements), the result is automatically promoted to the parent block. For example, searching for `<ServiceType>Search</ServiceType>` returns the entire `<SearchService>` block with all siblings — not just the trivial leaf.
+  - **textContent field**: Leaf elements include a `textContent` field with their text value (truncated to 200 chars).
+  - **XPath-like signatures**: Each element has a structural path like `configuration > appSettings > add[@key=DbConnection]`.
+  - **Absolute paths**: Supports XML files outside the workspace via absolute file paths.
+  - **`xmlHint` in grep results**: When `xray_grep` finds matches in XML files, the response includes an `xmlHint` suggesting `xray_definitions containsLine=N` for structural context.
+  - **`onDemand: true`**: Response includes this flag so the LLM knows data is from on-demand parsing, not the definition index.
+  - **Text content search**: The `name` filter now searches both XML element names AND `textContent` of leaf elements. For example, `name='PremiumStorage'` finds `<ServiceType>PremiumStorage</ServiceType>` — previously only element tag names were searchable.
+  - **Directory path error hint**: Passing a directory path (e.g., `file='Definitions/Prod.xml'` where that's a directory) now returns a clear error: `"XML on-demand requires a file path, not a directory"` with guidance to use `xray_fast` to find specific files.
+  - New `lang-xml` Cargo feature (in default build). New dependency: `tree-sitter-xml 0.7`. 25 new XML parser tests + 4 updated hint tests. All 1702 unit tests + 67 E2E tests pass.
+
+
 ### Performance
 
 - **Memory estimate accuracy improved (`xray_info`)** — Updated memory estimation coefficients in `estimate_content_index_memory()` and `estimate_definition_index_memory()` to more accurately reflect real Working Set consumption. Key changes: (1) HashMap entry overhead increased from 80B to 120B (includes bucket + hash + metadata + alignment padding); (2) Each `Posting.lines` Vec now accounts for 32B allocator overhead per heap allocation; (3) String allocator overhead (32B) added to key estimates; (4) CallSite estimate increased from 60B to 100B (accounts for String headers + allocator overhead); (5) `selector_index` added to secondary index count (was missing); (6) `methodCallsOverheadMB` separated as a distinct field; (7) New `allocatorOverheadMB` field (20% of data size) for mimalloc/jemalloc fragmentation estimate. Previously, `xray_info` reported ~488 MB for a content index that actually consumed ~620 MB in Working Set (3.6× undercount overall). New estimates should be within 50% of actual WS.

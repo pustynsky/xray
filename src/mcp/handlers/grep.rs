@@ -393,10 +393,28 @@ fn build_grep_response(
         file_obj
     }).collect();
 
-    let summary = build_grep_base_summary(
+    let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!(terms), search_mode,
         index, search_elapsed, ctx, true,
     );
+
+    // XML structural context hint: if results contain XML files, suggest containsLine
+    #[cfg(feature = "lang-xml")]
+    {
+        use crate::definitions::parser_xml::is_xml_extension;
+        let has_xml = results.iter().any(|r| {
+            std::path::Path::new(&r.file_path)
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| is_xml_extension(e))
+        });
+        if has_xml {
+            summary["xmlHint"] = json!(
+                "XML matches found. Use xray_definitions file='<path>' containsLine=<N> includeBody=true for structural context (returns enclosing XML block with siblings)."
+            );
+        }
+    }
+
     let output = json!({
         "files": files_json,
         "summary": summary
