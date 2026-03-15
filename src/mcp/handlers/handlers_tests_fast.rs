@@ -144,6 +144,26 @@ fn test_xray_fast_dirs_only_and_files_only() {
     cleanup_tmp(&tmp_dir);
 }
 
+
+#[test]
+fn test_xray_fast_dirs_only_and_files_only_mutual_exclusion() {
+    // B1 fix: passing both filesOnly and dirsOnly should return an error
+    let content_index = ContentIndex { root: ".".to_string(), ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(".".to_string()))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dirsOnly": true,
+        "filesOnly": true
+    }));
+    assert!(result.is_error, "Should return error when both dirsOnly and filesOnly are true");
+    assert!(result.content[0].text.contains("mutually exclusive"),
+        "Error should mention mutual exclusion: {}", result.content[0].text);
+}
 /// Regression test: xray_fast should reuse the server_dir's file-list index
 /// when dir is a subdirectory, instead of creating a new orphan index file.
 /// Bug: LLM calling xray_fast(dir="docs/design/rest-api") created

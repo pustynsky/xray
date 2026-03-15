@@ -660,7 +660,9 @@ fn normalize_crlf(s: &str) -> String {
 /// Strip trailing whitespace from each line of a string.
 /// Used for fuzzy-retry when exact match fails due to invisible trailing spaces.
 fn strip_trailing_whitespace_per_line(s: &str) -> String {
-    s.lines()
+    // C3 fix: Use split('\n') instead of .lines() to preserve trailing newline.
+    // .lines() drops the trailing empty element for "foo\n", causing newline loss.
+    s.split('\n')
         .map(|line| line.trim_end())
         .collect::<Vec<_>>()
         .join("\n")

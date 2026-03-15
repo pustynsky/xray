@@ -635,7 +635,15 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
     // Try to parse as JSON and inject metrics into "summary"
     if let Ok(mut output) = serde_json::from_str::<Value>(text) {
         if let Some(summary) = output.get_mut("summary") {
-            summary["searchTimeMs"] = json!((elapsed_ms * 100.0).round() / 100.0);
+            // B4 fix: Don't overwrite handler-specific searchTimeMs.
+            // Many handlers (grep, definitions, callers) set precise search time
+            // without serialization/truncation overhead. Preserve it and add
+            // totalTimeMs for the full dispatch-to-response time.
+            let total_time = (elapsed_ms * 100.0).round() / 100.0;
+            if summary.get("searchTimeMs").is_none() {
+                summary["searchTimeMs"] = json!(total_time);
+            }
+            summary["totalTimeMs"] = json!(total_time);
 
             if let Ok(idx) = ctx.index.read() {
                 summary["indexFiles"] = json!(idx.files.len());

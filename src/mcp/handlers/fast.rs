@@ -40,6 +40,12 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let ignore_case = args.get("ignoreCase").and_then(|v| v.as_bool()).unwrap_or(false);
     let dirs_only = args.get("dirsOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let files_only = args.get("filesOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+    // B1 fix: Reject mutually exclusive flags early
+    if dirs_only && files_only {
+        return ToolCallResult::error(
+            "filesOnly and dirsOnly are mutually exclusive. Use one or neither.".to_string()
+        );
+    }
     let count_only = args.get("countOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let max_depth = args.get("maxDepth").and_then(|v| v.as_u64()).map(|d| d as usize);
     let max_results = args.get("maxResults").and_then(|v| v.as_u64()).map(|d| d as usize).unwrap_or(0);
@@ -339,15 +345,20 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         "totalIndexed": index.entries.len(),
         "searchTimeMs": elapsed.as_secs_f64() * 1000.0,
     });
+    // B2 fix: Use hints array to avoid overwriting
+    let mut hints: Vec<String> = Vec::new();
     if ext_ignored_for_dirs {
-        summary["hint"] = json!("ext filter ignored when dirsOnly=true (directories have no file extension)");
+        hints.push("ext filter ignored when dirsOnly=true (directories have no file extension)".to_string());
     }
     // Hint when dirsOnly results are likely to be truncated
     if dirs_only && match_count > 150 && max_depth.is_none() {
-        summary["hint"] = json!(
+        hints.push(
             "Too many directories. Use maxDepth=1 for immediate children only, \
-             or use xray_definitions file='<dir>' for code-level module overview with autoSummary."
+             or use xray_definitions file='<dir>' for code-level module overview with autoSummary.".to_string()
         );
+    }
+    if !hints.is_empty() {
+        summary["hint"] = json!(hints.join(". "));
     }
     if truncated {
         summary["truncated"] = json!(true);

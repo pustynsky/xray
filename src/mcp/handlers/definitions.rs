@@ -361,11 +361,37 @@ fn handle_contains_line_mode(
         if !file_path.replace('\\', "/").to_lowercase().contains(&file_substr) {
             continue;
         }
+        // A2 fix: Apply excludeDir filter at the file level
+        if !args.exclude_dir.is_empty() {
+            let path_lower = file_path.to_lowercase();
+            if args.exclude_dir.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) {
+                continue;
+            }
+        }
         if let Some(def_indices) = index.file_index.get(&(file_id as u32)) {
             let mut matching: Vec<&DefinitionEntry> = def_indices.iter()
                 .filter_map(|&di| index.definitions.get(di as usize))
                 .filter(|d| d.line_start <= line_num && d.line_end >= line_num)
                 .collect();
+
+            // A2 fix: Apply kind filter
+            if let Some(ref kind_str) = args.kind_filter {
+                let kinds: Vec<&str> = kind_str.split(',').map(|s| s.trim()).collect();
+                matching.retain(|d| kinds.iter().any(|k| d.kind.as_str().eq_ignore_ascii_case(k)));
+            }
+            // A2 fix: Apply parent filter
+            if let Some(ref parent_str) = args.parent_filter {
+                let parent_lower = parent_str.to_lowercase();
+                let parent_terms: Vec<&str> = parent_lower.split(',').map(|s| s.trim()).collect();
+                matching.retain(|d| {
+                    d.parent.as_ref()
+                        .map(|p| {
+                            let p_lower = p.to_lowercase();
+                            parent_terms.iter().any(|term| p_lower.contains(term))
+                        })
+                        .unwrap_or(false)
+                });
+            }
 
             // Sort by range size (smallest first = most specific)
             matching.sort_by_key(|d| d.line_end - d.line_start);

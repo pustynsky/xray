@@ -66,6 +66,28 @@
 
 - **CLI/MCP `maxResults` parity** (L36) — CLI `xray grep --max-results` default changed from 0 (unlimited) to 50 to match the MCP default.
 
+### Bug Fixes (Audit Batch 2 — 2026-03-15)
+
+- **12 findings from audit batch fix** — Second systematic pass from the 2026-03-14 code audit. 5 real bugs (Tier A), 4 UX improvements (Tier B), 3 code quality items (Tier C). Source: `docs/user-stories/todo_approved_2026-03-15_audit-findings-batch-fix.md`.
+
+  **Tier A — Real bugs:**
+  1. **[A1] `expand_interface_callers()` kind filter** — Added `DefinitionKind` filter (Method/Constructor/Function/StoredProcedure/SqlFunction) before interface caller expansion. Previously, properties/fields/enum members with the same name as the target method would trigger false caller expansion.
+  2. **[A2] `handle_contains_line_mode()` missing filters** — `containsLine` queries now respect `excludeDir`, `kind`, and `parent` filters. Previously all three were silently ignored, returning unfiltered results.
+  3. **[A3] `build_grep_references()` definition file noise** — `grepReferences` no longer includes the file where the method is defined. The definition file's name appears in its own declaration, creating a false positive in grep references.
+  4. **[A5] Error responses missing guidance** — Error responses from MCP tools now include `policyReminder`, `nextStepHint`, and workspace metadata. Previously, errors returned before `inject_response_guidance()`, causing LLMs to lose tool routing guidance on errors.
+
+  **Tier B — UX improvements:**
+  5. **[B1] `filesOnly` + `dirsOnly` mutual exclusion** — `xray_fast` now returns a descriptive error when both flags are set (previously returned 0 results silently).
+  6. **[B2] Hint overwrite in `xray_fast`** — Multiple hints (ext_ignored + truncation) are now concatenated instead of the second overwriting the first.
+  7. **[B4] `searchTimeMs` preservation** — `inject_metrics()` no longer overwrites handler-specific `searchTimeMs`. Added `totalTimeMs` field for full dispatch-to-response time.
+
+  **Tier C — Code quality:**
+  8. **[C1] Phrase search deduplication** — `handle_phrase_search()` refactored to use `collect_phrase_matches()`, eliminating ~82 lines of duplicated tokenization/candidate/verification logic.
+  9. **[C2] `caller_popularity()` precache** — Popularity scores pre-cached before sort to avoid O(n log n) string allocations in the sort closure.
+  10. **[C3] Trailing newline preservation** — `strip_trailing_whitespace_per_line()` changed from `.lines()` to `.split('\n')` to preserve trailing newlines.
+
+  6 new unit tests. All 1735 unit tests + 68 E2E tests pass.
+
 ### Features
 
 - **Workspace Discovery (auto-detect project directory)** — The MCP server now automatically detects the correct workspace directory via three mechanisms: (1) **MCP `roots/list` protocol** — if the client supports roots (Roo Code, VS Code Copilot), the server requests `roots/list` after initialization and uses the first root as the workspace. Handles `roots/list_changed` notifications for live project switching. (2) **`--dir .` auto-detection** — when started with `--dir .`, the server checks if the CWD contains source files matching `--ext`. If yes → `DotBootstrap` mode (works immediately, roots can override). If no → `Unresolved` mode (tools blocked with `WORKSPACE_UNRESOLVED` structured error + hint). (3) **`xray_reindex dir=<path>` workspace switch** — LLMs can explicitly bind the workspace by calling `xray_reindex` with a `dir` parameter. Only blocked in `PinnedCli` mode (`--dir /explicit/path`). Load-first: tries cached index from disk before full rebuild. Response includes `workspaceChanged`, `previousServerDir`, `indexAction` fields.

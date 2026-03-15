@@ -85,6 +85,46 @@ fn test_contains_line_no_match() {
     assert!(defs.is_empty(), "Should find no definitions for line 999");
 }
 
+#[test]
+fn test_contains_line_with_kind_filter() {
+    // A2 fix: containsLine should respect kind filter
+    let ctx = make_ctx_with_defs();
+    // Line 800 is inside both QueryService class and QueryInternalAsync method
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
+        "file": "QueryService",
+        "containsLine": 800,
+        "kind": "method"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    // With kind=method, should only return the method, not the class
+    assert!(!defs.is_empty(), "Should find at least one method");
+    for def in defs {
+        assert_eq!(def["kind"], "method",
+            "With kind=method filter, only methods should appear, got: {}", def["kind"]);
+    }
+}
+
+#[test]
+fn test_contains_line_with_parent_filter() {
+    // A2 fix: containsLine should respect parent filter
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
+        "file": "QueryService",
+        "containsLine": 800,
+        "parent": "QueryService"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = output["containingDefinitions"].as_array().unwrap();
+    // With parent=QueryService, should only return definitions with that parent
+    for def in defs {
+        assert_eq!(def["parent"], "QueryService",
+            "With parent filter, only definitions with matching parent should appear");
+    }
+}
+
 // ─── find_containing_method tests ────────────────────────────────────
 
 #[test]

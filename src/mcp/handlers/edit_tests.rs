@@ -1866,9 +1866,10 @@ fn test_describe_byte_common_whitespace() {
 
 #[test]
 fn test_strip_trailing_whitespace_per_line() {
+    // C3 fix: trailing newline is now preserved (split('\n') instead of .lines())
     assert_eq!(
         super::strip_trailing_whitespace_per_line("hello  \nworld\t\n"),
-        "hello\nworld"
+        "hello\nworld\n"
     );
     assert_eq!(
         super::strip_trailing_whitespace_per_line("no trailing"),
@@ -1877,6 +1878,16 @@ fn test_strip_trailing_whitespace_per_line() {
     assert_eq!(
         super::strip_trailing_whitespace_per_line("  leading preserved  "),
         "  leading preserved"
+    );
+    // Trailing newline preserved
+    assert_eq!(
+        super::strip_trailing_whitespace_per_line("line1\n"),
+        "line1\n"
+    );
+    // No trailing newline stays without trailing newline
+    assert_eq!(
+        super::strip_trailing_whitespace_per_line("line1"),
+        "line1"
     );
 }
 

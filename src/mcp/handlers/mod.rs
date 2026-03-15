@@ -845,11 +845,22 @@ pub fn dispatch_tool(
         _ => return ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
     };
 
+    // A5 fix: Apply guidance injection to ALL responses (success AND error).
+    // Previously, error responses skipped inject_response_guidance, losing
+    // policyReminder, nextStepHint, and workspace metadata — which could cause
+    // LLMs to fall back to built-in tools instead of xray tools.
+    let was_error = result.is_error;
+    let result = utils::inject_response_guidance(result, tool_name, &ctx.server_ext, ctx);
+    // Preserve is_error flag (inject_response_guidance returns ToolCallResult::success)
+    let result = if was_error {
+        ToolCallResult { is_error: true, ..result }
+    } else {
+        result
+    };
+
     if result.is_error {
         return result;
     }
-
-    let result = utils::inject_response_guidance(result, tool_name, &ctx.server_ext, ctx);
 
     // Determine effective response budget:
     // - xray_help: 32KB (static reference content)

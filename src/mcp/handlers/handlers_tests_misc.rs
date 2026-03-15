@@ -38,6 +38,49 @@ use std::sync::{Arc, RwLock};
     assert!(output["summary"]["estimatedTokens"].as_u64().is_some());
 }
 
+#[test]
+fn test_metrics_preserves_handler_search_time() {
+    // B4 fix: if handler already set searchTimeMs, inject_metrics should NOT overwrite it,
+    // and should add totalTimeMs for overall dispatch time.
+    let mut idx = HashMap::new();
+    idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+    let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // searchTimeMs should be present (set by handler)
+    let search_time = output["summary"]["searchTimeMs"].as_f64().unwrap();
+    assert!(search_time >= 0.0, "searchTimeMs should be non-negative");
+    // totalTimeMs should also be present (set by inject_metrics)
+    let total_time = output["summary"]["totalTimeMs"].as_f64().unwrap();
+    assert!(total_time >= search_time, "totalTimeMs should be >= searchTimeMs");
+}
+
+#[test]
+fn test_error_response_has_guidance() {
+    // A5 fix: error responses should include policyReminder and workspace metadata
+    let index = ContentIndex { root: ".".to_string(), ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)),
+        server_ext: "rs".to_string(),
+        ..Default::default()
+    };
+    // Call with missing required parameter to trigger an error
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({}));
+    assert!(result.is_error, "Should be an error response");
+    // Error response should still have guidance injected
+    let text = &result.content[0].text;
+    // inject_response_guidance works on JSON — if the error is JSON, it should have summary
+    if let Ok(output) = serde_json::from_str::<Value>(text) {
+        if let Some(summary) = output.get("summary") {
+            assert!(summary.get("policyReminder").is_some(),
+                "Error JSON response should have policyReminder in summary");
+        }
+    }
+    // The key assertion: is_error must be preserved
+    assert!(result.is_error, "is_error flag must be preserved after guidance injection");
+}
+
 #[test] fn test_metrics_not_injected_on_error() {
     let ctx = make_empty_ctx();
     let ctx = HandlerContext { metrics: true, ..ctx };

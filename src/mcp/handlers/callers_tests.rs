@@ -3074,6 +3074,91 @@ fn test_include_grep_references_finds_extra_files() {
 }
 
 #[test]
+fn test_grep_references_excludes_definition_file() {
+    // A3 fix: the file where the method is DEFINED should not appear in grepReferences
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "ProcessOrder", "OrderService", 5, 15),
+        class_def(1, "Consumer", vec![]),
+        method_def(1, "Run", "Consumer", 5, 20),
+    ];
+
+    let mut method_calls_map: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls_map.insert(3, vec![
+        CallSite {
+            method_name: "ProcessOrder".to_string(),
+            receiver_type: Some("OrderService".to_string()),
+            line: 10,
+            receiver_is_generic: false,
+        },
+    ]);
+
+    let mut def_idx = make_def_index(definitions, method_calls_map);
+    // Override files to match content_index paths (make_def_index has hardcoded .ts names)
+    def_idx.files = vec!["src/OrderService.cs".to_string(), "src/Consumer.cs".to_string()];
+    def_idx.path_to_id.insert(PathBuf::from("src/OrderService.cs"), 0);
+    def_idx.path_to_id.insert(PathBuf::from("src/Consumer.cs"), 1);
+
+    // Content index: "processorder" appears in 3 files:
+    // - file 0: OrderService.cs (DEFINITION file → should be excluded by A3)
+    // - file 1: Consumer.cs (in call tree → excluded by tree_files)
+    // - file 2: Utils.cs (neither → should appear in grepReferences)
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("processorder".to_string(), vec![
+        Posting { file_id: 0, lines: vec![5] },
+        Posting { file_id: 1, lines: vec![10] },
+        Posting { file_id: 2, lines: vec![42] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec![
+            "src/OrderService.cs".to_string(),
+            "src/Consumer.cs".to_string(),
+            "src/Utils.cs".to_string(),
+        ],
+        index,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50, 50, 50],
+        ..Default::default()
+    };
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": "ProcessOrder",
+        "class": "OrderService",
+        "depth": 1,
+        "includeGrepReferences": true
+    }));
+    assert!(!result.is_error, "Error: {}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let grep_refs = v.get("grepReferences").and_then(|v| v.as_array());
+    assert!(grep_refs.is_some(), "Should have grepReferences");
+    let refs = grep_refs.unwrap();
+
+    // Only Utils.cs should appear (not OrderService.cs definition file, not Consumer.cs in tree)
+    for r in refs {
+        let file = r["file"].as_str().unwrap();
+        assert!(!file.contains("OrderService"),
+            "Definition file 'OrderService.cs' should be excluded from grepReferences, but found: {}", file);
+        assert!(!file.contains("Consumer"),
+            "Call tree file 'Consumer.cs' should be excluded from grepReferences, but found: {}", file);
+    }
+    assert!(refs.iter().any(|r| r["file"].as_str().unwrap().contains("Utils")),
+        "Utils.cs should appear in grepReferences");
+}
+
+#[test]
 fn test_include_grep_references_default_off() {
     // Without includeGrepReferences param, no grepReferences in output
     let definitions = vec![

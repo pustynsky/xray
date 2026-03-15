@@ -926,95 +926,13 @@ fn handle_phrase_search(
     let max_results = params.max_results;
     let count_only = params.count_only;
     let search_start = params.search_start;
-    let phrase_lower = phrase.to_lowercase();
-    let phrase_tokens = tokenize(&phrase_lower, 2);
 
-    if phrase_tokens.is_empty() {
-        return ToolCallResult::error(format!(
-            "Phrase '{}' has no indexable tokens (min length 2)", phrase
-        ));
-    }
-
-    let phrase_regex_pattern = phrase_tokens.iter()
-        .map(|t| regex::escape(t))
-        .collect::<Vec<_>>()
-        .join(r"\s+");
-    let phrase_re = match regex::Regex::new(&format!("(?i){}", phrase_regex_pattern)) {
+    // C1 refactor: Delegate tokenization, candidate search, and phrase verification
+    // to collect_phrase_matches() — eliminating ~85 lines of duplicated logic.
+    let mut results = match collect_phrase_matches(index, phrase, params) {
         Ok(r) => r,
-        Err(e) => return ToolCallResult::error(format!("Failed to build phrase regex: {}", e)),
+        Err(e) => return ToolCallResult::error(e),
     };
-
-    // Step 1: Find candidate files via AND search
-    let mut candidate_file_ids: Option<std::collections::HashSet<u32>> = None;
-    for token in &phrase_tokens {
-        if let Some(postings) = index.index.get(token.as_str()) {
-            let file_ids: std::collections::HashSet<u32> = postings.iter()
-                .filter(|p| {
-                    let path = match index.files.get(p.file_id as usize) {
-                        Some(p) => p,
-                        None => return false,
-                    };
-                    passes_file_filters(path, params)
-                })
-                .map(|p| p.file_id)
-                .collect();
-            candidate_file_ids = Some(match candidate_file_ids {
-                Some(existing) => existing.intersection(&file_ids).cloned().collect(),
-                None => file_ids,
-            });
-        } else {
-            candidate_file_ids = Some(std::collections::HashSet::new());
-            break;
-        }
-    }
-
-    let candidates = candidate_file_ids.unwrap_or_default();
-
-    // Step 2: Verify phrase match in raw file content.
-    //
-    // When the original phrase contains non-alphanumeric characters (XML tags,
-    // angle brackets, etc.), the tokenizer strips them, causing false positives.
-    // In that case, we match using the original phrase as a case-insensitive
-    // substring against raw file content instead of the tokenized regex.
-    // This eliminates false positives from tokenization stripping punctuation.
-    let phrase_has_punctuation = phrase.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace());
-
-    struct PhraseMatch {
-        file_path: String,
-        lines: Vec<u32>,
-        content: Option<String>, // cached for show_lines to avoid re-reading
-    }
-    let mut results: Vec<PhraseMatch> = Vec::new();
-
-    for &file_id in &candidates {
-        let file_path = &index.files[file_id as usize];
-        if let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(file_path)) {
-            let mut matching_lines = Vec::new();
-            if phrase_has_punctuation {
-                // Use raw phrase substring match (case-insensitive) to avoid
-                // false positives from tokenizer stripping punctuation
-                for (line_num, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(&phrase_lower) {
-                        matching_lines.push((line_num + 1) as u32);
-                    }
-                }
-            } else if phrase_re.is_match(&content) {
-                // Use tokenized phrase regex (no punctuation → no false positives)
-                for (line_num, line) in content.lines().enumerate() {
-                    if phrase_re.is_match(line) {
-                        matching_lines.push((line_num + 1) as u32);
-                    }
-                }
-            }
-            if !matching_lines.is_empty() {
-                results.push(PhraseMatch {
-                    file_path: file_path.clone(),
-                    lines: matching_lines,
-                    content: if show_lines { Some(content) } else { None },
-                });
-            }
-        }
-    }
 
     let total_files = results.len();
     let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();

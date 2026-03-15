@@ -466,7 +466,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         let include_grep_refs = args.get("includeGrepReferences").and_then(|v| v.as_bool()).unwrap_or(false);
         if include_grep_refs && method_name.len() >= 4 {
             let tree_files = collect_files_from_tree(&tree);
-            let grep_refs = build_grep_references(&method_name, &content_index, &tree_files);
+            let grep_refs = build_grep_references(&method_name, &content_index, &tree_files, &def_idx);
             if !grep_refs.is_empty() {
                 output["grepReferences"] = json!(grep_refs);
                 output["grepReferencesNote"] = json!(
@@ -534,7 +534,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         let include_grep_refs = args.get("includeGrepReferences").and_then(|v| v.as_bool()).unwrap_or(false);
         if include_grep_refs && method_name.len() >= 4 {
             let tree_files = collect_files_from_tree(&tree);
-            let grep_refs = build_grep_references(&method_name, &content_index, &tree_files);
+            let grep_refs = build_grep_references(&method_name, &content_index, &tree_files, &def_idx);
             if !grep_refs.is_empty() {
                 output["grepReferences"] = json!(grep_refs);
                 output["grepReferencesNote"] = json!(
@@ -918,6 +918,7 @@ fn build_grep_references(
     method_name: &str,
     content_index: &ContentIndex,
     tree_files: &HashSet<String>,
+    def_index: &DefinitionIndex,
 ) -> Vec<Value> {
     let method_lower = method_name.to_lowercase();
     let postings = match content_index.index.get(&method_lower) {
@@ -925,14 +926,35 @@ fn build_grep_references(
         None => return Vec::new(),
     };
 
+    // A3 fix: Collect files where the method is DEFINED to exclude them.
+    // The definition file contains the method name in its declaration, which would
+    // show up as a false positive in grep references (it's already the root method).
+    let definition_file_names: HashSet<String> = if let Some(indices) = def_index.name_index.get(&method_lower) {
+        indices.iter()
+            .filter_map(|&idx| {
+                let def = def_index.definitions.get(idx as usize)?;
+                let file_path = def_index.files.get(def.file_id as usize)?;
+                Path::new(file_path).file_name()
+                    .and_then(|f| f.to_str())
+                    .map(|s| s.to_string())
+            })
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     let mut grep_refs: Vec<Value> = Vec::new();
     for posting in postings {
         if let Some(file) = content_index.files.get(posting.file_id as usize) {
-            // Compare by filename only (call tree stores filenames, not full paths)
+            // Compare by filename only (call tree stores filenames, not full paths).
+            // Known limitation (A4): if two files in different directories share the
+            // same filename and one is in the call tree, the other is also excluded.
+            // This is a rare edge case; a proper fix would require storing full paths
+            // in call tree nodes.
             let fname = Path::new(file).file_name()
                 .and_then(|f| f.to_str())
                 .unwrap_or(file);
-            if !tree_files.contains(fname) {
+            if !tree_files.contains(fname) && !definition_file_names.contains(fname) {
                 grep_refs.push(json!({
                     "file": file,
                     "tokenCount": posting.lines.len(),
@@ -1131,6 +1153,11 @@ fn expand_interface_callers(
     for &di in name_indices {
         if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
         if let Some(def) = def_idx.definitions.get(di as usize)
+            // A1 fix: Only expand interface callers for method-like definitions.
+            // Without this filter, properties/fields/enum members with the same name
+            // as the target method would be included, creating false callers.
+            && matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor
+                | DefinitionKind::Function | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction)
             && let Some(ref parent_class_name) = def.parent {
                 let parent_lower = parent_class_name.to_lowercase();
 
@@ -1704,6 +1731,13 @@ fn build_caller_tree(
 
     // Phase 1.5: Sort callers — non-test first (primary), popularity DESC (secondary)
     // Then truncate to max_callers_per_level (with impactAnalysis exception for tests)
+    // C2 fix: Precache popularity scores to avoid O(n log n) string allocations in sort closure
+    let popularity_cache: HashMap<String, usize> = caller_order.iter()
+        .map(|key| {
+            let info = &caller_map[key];
+            (key.clone(), caller_popularity(ctx.content_index, &info.name))
+        })
+        .collect();
     caller_order.sort_by(|a, b| {
         let info_a = &caller_map[a];
         let info_b = &caller_map[b];
@@ -1714,8 +1748,8 @@ fn build_caller_tree(
         is_test_a.cmp(&is_test_b)
             // Secondary: more popular callers first (DESC)
             .then_with(|| {
-                let pop_a = caller_popularity(ctx.content_index, &info_a.name);
-                let pop_b = caller_popularity(ctx.content_index, &info_b.name);
+                let pop_a = popularity_cache.get(a).copied().unwrap_or(0);
+                let pop_b = popularity_cache.get(b).copied().unwrap_or(0);
                 pop_b.cmp(&pop_a)
             })
     });
