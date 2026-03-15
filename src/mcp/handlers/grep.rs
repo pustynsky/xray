@@ -150,22 +150,8 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
     if let Some(ext) = params.ext_filter
         && !matches_ext_filter(file_path, ext) { return false; }
 
-    // Exclude dir filter — match by directory segment name, not full path substring
-    if !params.exclude_dir.is_empty() {
-        // Normalize path separators to forward slashes for uniform matching
-        let path_norm = file_path.to_lowercase().replace('\\', "/");
-        for excl in params.exclude_dir {
-            let excl_lower = excl.to_lowercase();
-            // Match as a path segment: /excl/ anywhere, or excl/ at start
-            let segment = format!("/{}/", excl_lower);
-            let at_start = format!("{}/", excl_lower);
-            if path_norm.contains(&segment)
-                || path_norm.starts_with(&at_start)
-            {
-                return false;
-            }
-        }
-    }
+    // Exclude dir filter — segment-based matching (shared with definitions and callers)
+    if super::utils::path_matches_exclude_dir(file_path, params.exclude_dir) { return false; }
 
     // Exclude pattern filter
     if params.exclude.iter().any(|excl| {

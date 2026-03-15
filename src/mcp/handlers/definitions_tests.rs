@@ -1237,12 +1237,67 @@ fn test_apply_entry_filters_parent_filter() {
 
 #[test]
 fn test_apply_entry_filters_exclude_dir() {
-    let index = make_test_def_index();
+    // Use a custom index with directory-based paths to test segment matching.
+    // excludeDir=["orders"] should exclude files under src/orders/ but NOT src/borders/
+    let definitions = vec![
+        DefinitionEntry {
+            name: "UserService".to_string(), kind: DefinitionKind::Class,
+            file_id: 0, line_start: 1, line_end: 100,
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "GetUser".to_string(), kind: DefinitionKind::Method,
+            file_id: 0, line_start: 10, line_end: 30,
+            signature: None, parent: Some("UserService".to_string()), modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "OrderService".to_string(), kind: DefinitionKind::Class,
+            file_id: 1, line_start: 1, line_end: 80,
+            signature: None, parent: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            name: "GetOrder".to_string(), kind: DefinitionKind::Method,
+            file_id: 1, line_start: 10, line_end: 25,
+            signature: None, parent: Some("OrderService".to_string()), modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+    ];
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    let index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![
+            "C:\\src\\users\\UserService.cs".to_string(),
+            "C:\\src\\orders\\OrderService.cs".to_string(),
+        ],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
+    };
     let candidates: Vec<u32> = (0..4).collect();
-    let args = parse_definition_args(&json!({"excludeDir": ["OrderService"]})).unwrap();
+
+    // Segment match: "orders" matches the directory segment in C:\src\orders\OrderService.cs
+    let args = parse_definition_args(&json!({"excludeDir": ["orders"]})).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
-    // OrderService.cs is excluded → only UserService.cs defs remain
-    assert_eq!(results.len(), 2, "excludeDir OrderService → 2 defs from UserService.cs");
+    assert_eq!(results.len(), 2, "excludeDir 'orders' → 2 defs from users/UserService.cs");
+
+    // Segment match: "order" should NOT match "orders" (not a full segment)
+    let args2 = parse_definition_args(&json!({"excludeDir": ["order"]})).unwrap();
+    let results2 = apply_entry_filters(&index, &candidates, &args2);
+    assert_eq!(results2.len(), 4, "excludeDir 'order' should not match 'orders' segment");
 }
 
 #[test]

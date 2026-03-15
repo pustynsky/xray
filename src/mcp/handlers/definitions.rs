@@ -361,12 +361,9 @@ fn handle_contains_line_mode(
         if !file_path.replace('\\', "/").to_lowercase().contains(&file_substr) {
             continue;
         }
-        // A2 fix: Apply excludeDir filter at the file level
-        if !args.exclude_dir.is_empty() {
-            let path_lower = file_path.to_lowercase();
-            if args.exclude_dir.iter().any(|excl| path_lower.contains(&excl.to_lowercase())) {
-                continue;
-            }
+        // A2 fix: Apply excludeDir filter at the file level (segment-based matching)
+        if super::utils::path_matches_exclude_dir(file_path, &args.exclude_dir) {
+            continue;
         }
         if let Some(def_indices) = index.file_index.get(&(file_id as u32)) {
             let mut matching: Vec<&DefinitionEntry> = def_indices.iter()
@@ -656,10 +653,8 @@ fn apply_entry_filters<'a>(
                 }
             }
 
-            // Exclude dir
-            if args.exclude_dir.iter().any(|excl| {
-                file_path.to_lowercase().contains(&excl.to_lowercase())
-            }) {
+            // Exclude dir (segment-based matching)
+            if super::utils::path_matches_exclude_dir(file_path, &args.exclude_dir) {
                 return None;
             }
 

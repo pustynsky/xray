@@ -132,6 +132,28 @@ pub(crate) fn matches_ext_filter(file_path: &str, ext_filter: &str) -> bool {
         })
 }
 
+/// Check if a file path matches any of the exclude directory filters.
+/// Uses segment-based matching: `excludeDir=["test"]` excludes `src/test/file.rs`
+/// but NOT `src/contest/file.rs`. Normalizes backslashes to forward slashes.
+/// This is the canonical implementation — all tools (grep, definitions, callers)
+/// must use this function to ensure consistent behavior.
+pub(crate) fn path_matches_exclude_dir(file_path: &str, exclude_dirs: &[String]) -> bool {
+    if exclude_dirs.is_empty() {
+        return false;
+    }
+    let path_norm = file_path.to_lowercase().replace('\\', "/");
+    for excl in exclude_dirs {
+        let excl_lower = excl.to_lowercase();
+        // Match as a path segment: /excl/ anywhere, or excl/ at start
+        let segment = format!("/{}/", excl_lower);
+        let at_start = format!("{}/", excl_lower);
+        if path_norm.contains(&segment) || path_norm.starts_with(&at_start) {
+            return true;
+        }
+    }
+    false
+}
+
 // ─── Set operations ─────────────────────────────────────────────────
 
 /// Merge-intersect two sorted u32 slices. Returns sorted intersection.

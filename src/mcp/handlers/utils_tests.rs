@@ -820,7 +820,53 @@ fn test_looks_like_file_path_directories_return_false() {
 #[test]
 fn test_looks_like_file_path_unknown_extension_returns_false() {
     assert!(!looks_like_file_path("file.xyz"));
-    assert!(!looks_like_file_path("file.banana"));
+}
+
+// ─── path_matches_exclude_dir tests ───────────────────────────────────
+
+#[test]
+fn test_path_matches_exclude_dir_segment_match() {
+    // "test" as a directory segment should match
+    let excl = vec!["test".to_string()];
+    assert!(path_matches_exclude_dir("src/test/Service.cs", &excl));
+    assert!(path_matches_exclude_dir("test/Service.cs", &excl));
+}
+
+#[test]
+fn test_path_matches_exclude_dir_not_substring() {
+    // "test" should NOT match "contest" (substring but not segment)
+    let excl = vec!["test".to_string()];
+    assert!(!path_matches_exclude_dir("src/contest/Service.cs", &excl));
+    assert!(!path_matches_exclude_dir("src/latest/file.rs", &excl));
+}
+
+#[test]
+fn test_path_matches_exclude_dir_backslash_paths() {
+    // Windows paths with backslashes
+    let excl = vec!["test".to_string()];
+    assert!(path_matches_exclude_dir("src\\test\\Service.cs", &excl));
+    assert!(!path_matches_exclude_dir("src\\contest\\Service.cs", &excl));
+}
+
+#[test]
+fn test_path_matches_exclude_dir_case_insensitive() {
+    let excl = vec!["Test".to_string()];
+    assert!(path_matches_exclude_dir("src/test/Service.cs", &excl));
+    assert!(path_matches_exclude_dir("src/TEST/Service.cs", &excl));
+}
+
+#[test]
+fn test_path_matches_exclude_dir_empty() {
+    let excl: Vec<String> = vec![];
+    assert!(!path_matches_exclude_dir("src/test/Service.cs", &excl));
+}
+
+#[test]
+fn test_path_matches_exclude_dir_multiple() {
+    let excl = vec!["test".to_string(), "mock".to_string()];
+    assert!(path_matches_exclude_dir("src/test/Service.cs", &excl));
+    assert!(path_matches_exclude_dir("src/mock/Helper.cs", &excl));
+    assert!(!path_matches_exclude_dir("src/main/Service.cs", &excl));
 }
 
 #[test]

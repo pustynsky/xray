@@ -247,6 +247,14 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
         None => return ToolCallResult::error("Missing required parameter: file".to_string()),
     };
 
+    // Detect root-level queries and redirect to xray_git_activity
+    if file == "." || file.is_empty() {
+        return ToolCallResult::error(
+            "xray_git_history requires a specific file path, not '.'. \
+             Use xray_git_activity for repo-wide commit history across all files.".to_string()
+        );
+    }
+
     let from = args.get("from").and_then(|v| v.as_str());
     let to = args.get("to").and_then(|v| v.as_str());
     let date = args.get("date").and_then(|v| v.as_str());
@@ -632,6 +640,14 @@ fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Some(f) => f,
         None => return ToolCallResult::error("Missing required parameter: file".to_string()),
     };
+
+    // Detect root-level queries — blame requires a specific file
+    if file == "." || file.is_empty() {
+        return ToolCallResult::error(
+            "xray_git_blame requires a specific file path, not '.'. \
+             Use xray_git_activity for repo-wide commit history.".to_string()
+        );
+    }
     let start_line = match args.get("startLine").and_then(|v| v.as_u64()) {
         Some(n) if n >= 1 => n as usize,
         Some(_) => return ToolCallResult::error("startLine must be >= 1".to_string()),

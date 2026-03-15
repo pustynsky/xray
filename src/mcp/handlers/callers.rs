@@ -1549,8 +1549,9 @@ fn passes_caller_file_filters(
         });
     if !matches_ext { return false; }
 
+    // Use segment-based matching for exclude_dir (consistent with grep and definitions)
+    if super::utils::path_matches_exclude_dir(file_path, exclude_dir) { return false; }
     let path_lower = file_path.to_lowercase();
-    if exclude_dir.iter().any(|excl| path_lower.contains(excl.as_str())) { return false; }
     if exclude_file.iter().any(|excl| path_lower.contains(excl.as_str())) { return false; }
 
     true
