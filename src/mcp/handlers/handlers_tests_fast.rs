@@ -145,6 +145,63 @@ fn test_xray_fast_dirs_only_and_files_only() {
 }
 
 
+// ─── Glob ranking tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_xray_fast_glob_ranking_uses_literal_prefix() {
+    // Regression test: glob "Order*" should rank results using the literal
+    // prefix "Order" (not the regex string "^Order.*$"). This means:
+    //   tier 0 = exact match (stem == "Order")
+    //   tier 1 = prefix match (stem starts with "Order")
+    // Without the fix, all results were tier 2 (default) because
+    // best_match_tier tried to match stem against the regex string.
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_glob_rank_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+    // Create files with varying "Order" prefix lengths + a non-Order file
+    for name in &["Order.cs", "OrderProcessor.cs", "OrderValidatorFactory.cs", "UserService.cs"] {
+        let p = tmp_dir.join(name);
+        let mut f = std::fs::File::create(&p).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str))),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order*"}));
+    assert!(!result.is_error, "Glob pattern should work: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    let filenames: Vec<String> = files.iter().filter_map(|f| {
+        f["path"].as_str().and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str()).map(|s| s.to_string())
+    }).collect();
+
+    assert_eq!(filenames.len(), 3, "Should find 3 Order* files, got: {:?}", filenames);
+    // Order.cs should be FIRST (tier 0: exact match for "Order")
+    assert_eq!(filenames[0], "Order.cs",
+        "Order.cs should be first (exact match for glob literal prefix 'Order'). Got: {:?}", filenames);
+    // OrderProcessor.cs before OrderValidatorFactory.cs (both tier 1, shorter stem first)
+    assert_eq!(filenames[1], "OrderProcessor.cs",
+        "OrderProcessor.cs should be second (prefix match, shorter stem). Got: {:?}", filenames);
+    assert_eq!(filenames[2], "OrderValidatorFactory.cs",
+        "OrderValidatorFactory.cs should be third (prefix match, longer stem). Got: {:?}", filenames);
+
+    cleanup_tmp(&tmp_dir);
+}
+
 #[test]
 fn test_xray_fast_dirs_only_and_files_only_mutual_exclusion() {
     // B1 fix: passing both filesOnly and dirsOnly should return an error
@@ -1385,4 +1442,205 @@ fn test_xray_fast_wildcard_regex_no_crash() {
     assert!(output["summary"]["totalMatches"].as_u64().unwrap() > 0,
         "Wildcard should still match files even with regex=true");
     cleanup_tmp(&tmp);
+}
+
+
+// ─── Relative dir tests ──────────────────────────────────────────────────
+
+#[test]
+fn test_xray_fast_relative_dir_subdir_search() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_reldir_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create: root/src/services/UserService.cs, root/src/services/OrderService.cs, root/README.md
+    let services_dir = tmp_dir.join("src").join("services");
+    std::fs::create_dir_all(&services_dir).unwrap();
+    for name in &["UserService.cs", "OrderService.cs"] {
+        let mut f = std::fs::File::create(services_dir.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+    { let mut f = std::fs::File::create(tmp_dir.join("README.md")).unwrap(); writeln!(f, "# README").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))), index_base: idx_base, ..Default::default() };
+
+    // Use RELATIVE dir path
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": "src/services"
+    }));
+    assert!(!result.is_error, "Relative dir should work: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    // Should find entries in src/services (files + potentially the dir entry)
+    let file_paths: Vec<&str> = files.iter().filter_map(|f| f["path"].as_str()).collect();
+    let has_service_files = file_paths.iter().any(|p| p.contains("UserService") || p.contains("OrderService"));
+    assert!(has_service_files, "Should find service files with relative dir. Got: {:?}", file_paths);
+    // Should NOT find README.md (it's outside src/services)
+    let has_readme = file_paths.iter().any(|p| p.contains("README"));
+    assert!(!has_readme, "Should NOT find README.md outside the dir. Got: {:?}", file_paths);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_xray_fast_relative_dir_pattern_search() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_reldir_pat_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    let services_dir = tmp_dir.join("src").join("services");
+    std::fs::create_dir_all(&services_dir).unwrap();
+    for name in &["UserService.cs", "OrderService.cs"] {
+        let mut f = std::fs::File::create(services_dir.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+    let models_dir = tmp_dir.join("src").join("models");
+    std::fs::create_dir_all(&models_dir).unwrap();
+    { let mut f = std::fs::File::create(models_dir.join("UserModel.cs")).unwrap(); writeln!(f, "// UserModel").unwrap(); }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0 }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))), index_base: idx_base, ..Default::default() };
+
+    // Search for "User" in src/services only (relative dir)
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "User",
+        "dir": "src/services"
+    }));
+    assert!(!result.is_error, "Relative dir + pattern should work: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    let file_paths: Vec<&str> = files.iter().filter_map(|f| f["path"].as_str()).collect();
+    // Should find UserService.cs but NOT UserModel.cs (different dir)
+    assert!(file_paths.iter().any(|p| p.contains("UserService")), "Should find UserService in services dir");
+    assert!(!file_paths.iter().any(|p| p.contains("UserModel")), "Should NOT find UserModel from models dir");
+
+    cleanup_tmp(&tmp_dir);
+}
+
+// ─── Glob pattern tests ─────────────────────────────────────────────────
+
+#[test]
+fn test_xray_fast_glob_star_suffix() {
+    let (ctx, tmp_dir) = make_xray_fast_ctx();
+    // "Order*" should match OrderProcessor.cs and OrderValidator.cs via glob
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order*"}));
+    assert!(!result.is_error, "Glob pattern should work: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(total >= 2, "Order* should match at least OrderProcessor and OrderValidator, got {}", total);
+    let files = output["files"].as_array().unwrap();
+    // Extract just filenames for assertions (full paths contain C:/Users/... which would match "User")
+    let filenames: Vec<String> = files.iter().filter_map(|f| {
+        f["path"].as_str().and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str()).map(|s| s.to_string())
+    }).collect();
+    assert!(filenames.iter().any(|n| n.contains("OrderProcessor")), "Should find OrderProcessor");
+    assert!(filenames.iter().any(|n| n.contains("OrderValidator")), "Should find OrderValidator");
+    // Should NOT find files not starting with "Order"
+    assert!(!filenames.iter().any(|n| n.contains("UserService")), "Should NOT find UserService. Got: {:?}", filenames);
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_xray_fast_glob_star_prefix() {
+    let (ctx, tmp_dir) = make_xray_fast_ctx();
+    // "*Tracker*" should match InventoryTracker.cs
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*Tracker*"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    assert!(!files.is_empty(), "*Tracker* should find InventoryTracker");
+    assert!(files.iter().any(|f| f["path"].as_str().unwrap().contains("InventoryTracker")));
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_xray_fast_glob_question_mark() {
+    let (ctx, tmp_dir) = make_xray_fast_ctx();
+    // "Order?alidator*" should match OrderValidator.cs (? = single char)
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order?alidator*"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    assert!(files.iter().any(|f| f["path"].as_str().unwrap().contains("OrderValidator")),
+        "Order?alidator* should match OrderValidator");
+    // Should NOT match OrderProcessor (P != single char match for V position)
+    assert!(!files.iter().any(|f| f["path"].as_str().unwrap().contains("OrderProcessor")),
+        "Order?alidator* should NOT match OrderProcessor");
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_xray_fast_no_glob_unchanged_behavior() {
+    let (ctx, tmp_dir) = make_xray_fast_ctx();
+    // "Order" without glob chars should still use substring matching
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(total >= 2, "Substring 'Order' should match OrderProcessor and OrderValidator, got {}", total);
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_xray_fast_glob_with_ext_filter() {
+    let (ctx, tmp_dir) = make_xray_fast_ctx();
+    // "*.cs" pattern — *.cs matches all .cs files
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*.cs"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    // Should find .cs files
+    let cs_files: Vec<_> = files.iter().filter(|f| f["path"].as_str().unwrap().ends_with(".cs")).collect();
+    assert!(!cs_files.is_empty(), "*.cs should find .cs files");
+    // Should NOT find .txt files
+    assert!(!files.iter().any(|f| f["path"].as_str().unwrap().ends_with(".txt")),
+        "*.cs should NOT match .txt files");
+    cleanup_tmp(&tmp_dir);
+}
+
+
+#[test]
+fn test_xray_fast_glob_ignore_case() {
+    let (ctx, tmp_dir) = make_xray_fast_ctx();
+    // "order*" with ignoreCase should match OrderProcessor.cs (case-insensitive glob)
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "order*", "ignoreCase": true}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(total >= 2, "order* with ignoreCase should match OrderProcessor and OrderValidator, got {}", total);
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_xray_fast_glob_comma_separated_multi_term() {
+    let (ctx, tmp_dir) = make_xray_fast_ctx();
+    // "Order*,*Helper*" should find OrderProcessor, OrderValidator, ConfigurationHelper
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order*,*Helper*"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(total >= 3, "Order*,*Helper* should match at least 3 files, got {}", total);
+    let files = output["files"].as_array().unwrap();
+    let filenames: Vec<String> = files.iter().filter_map(|f| {
+        f["path"].as_str().and_then(|p| std::path::Path::new(p).file_name())
+            .and_then(|n| n.to_str()).map(|s| s.to_string())
+    }).collect();
+    assert!(filenames.iter().any(|n| n.contains("OrderProcessor")), "Should find OrderProcessor");
+    assert!(filenames.iter().any(|n| n.contains("ConfigurationHelper")), "Should find ConfigurationHelper");
+    cleanup_tmp(&tmp_dir);
 }

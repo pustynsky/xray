@@ -55,8 +55,36 @@ pub(crate) fn normalize_path_sep(p: &str) -> String {
 /// Returns `Ok(None)` if exact match (no filtering needed),
 /// `Ok(Some(canonical_subdir))` if it's a proper subdirectory (use as filter),
 /// or `Err(message)` if outside the server dir.
+/// Resolve a potentially relative directory path to absolute, using server_dir as base.
+/// Absolute paths pass through unchanged. Relative paths are joined with server_dir.
+/// Uses canonicalize when possible to resolve symlinks and normalize the path.
+pub(crate) fn resolve_dir_to_absolute(dir: &str, server_dir: &str) -> String {
+    let normalized = dir.replace('\\', "/");
+    if std::path::Path::new(dir).is_absolute() {
+        // Already absolute — just canonicalize for normalization
+        std::fs::canonicalize(dir)
+            .map(|p| clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| normalized)
+    } else if dir == "." {
+        // Dot path = server_dir itself
+        server_dir.to_string()
+    } else {
+        // Relative path — resolve against server_dir
+        let full = format!(
+            "{}/{}",
+            server_dir.replace('\\', "/").trim_end_matches('/'),
+            normalized.trim_matches('/')
+        );
+        std::fs::canonicalize(&full)
+            .map(|p| clean_path(&p.to_string_lossy()))
+            .unwrap_or(full)
+    }
+}
+
 pub(crate) fn validate_search_dir(requested_dir: &str, server_dir: &str) -> Result<Option<String>, String> {
-    let requested = std::fs::canonicalize(requested_dir)
+    // Pre-resolve relative paths against server_dir before canonicalize
+    let requested_dir = resolve_dir_to_absolute(requested_dir, server_dir);
+    let requested = std::fs::canonicalize(&requested_dir)
         .map(|p| clean_path(&p.to_string_lossy()))
         .unwrap_or_else(|_| requested_dir.to_string());
     let server = std::fs::canonicalize(server_dir)

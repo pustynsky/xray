@@ -49,7 +49,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "dir": {
                         "type": "string",
-                        "description": "Directory to search (default: server's --dir). Accepts directories only — if you pass a file path, an error with a helpful hint is returned."
+                        "description": "Directory to search (default: server's --dir). Supports both absolute and relative paths — relative paths are resolved against server_dir. Accepts directories only — if you pass a file path, an error with a helpful hint is returned."
                     },
                     "ext": {
                         "type": "string",
@@ -109,8 +109,8 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "File name pattern. Comma-separated for multi-term OR. Use '*' to list all entries. Empty string with dir also lists all." },
-                    "dir": { "type": "string", "description": "Directory to search" },
+                    "pattern": { "type": "string", "description": "File name substring or glob pattern. Comma-separated for multi-term OR. Glob characters (* and ?) are auto-detected and converted to regex (e.g., 'Order*' finds files starting with Order, 'Use?Service' matches single char). Without glob chars, uses substring matching. Use '*' to list all entries. Empty string with dir also lists all." },
+                    "dir": { "type": "string", "description": "Directory to search. Supports both absolute and relative paths. Relative paths are resolved against server_dir (e.g., 'src/services' resolves to server_dir/src/services)." },
                     "ext": { "type": "string", "description": "Filter by extension" },
                     "regex": { "type": "boolean", "description": "Treat as regex" },
                     "ignoreCase": { "type": "boolean", "description": "Case-insensitive" },

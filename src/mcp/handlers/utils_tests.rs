@@ -63,17 +63,31 @@ fn test_is_under_dir_exact_match() {
 
 #[test]
 fn test_validate_search_dir_exact_match() {
-    // We can't easily test this without real directories, but we can test the logic
-    // with paths that don't exist (canonicalize will fail, falling back to raw string)
-    let result = validate_search_dir("/nonexistent/dir", "/nonexistent/dir");
+    // Use a real temp directory so canonicalize works on all platforms
+    let tmp = tempfile::tempdir().unwrap();
+    let dir_str = tmp.path().to_string_lossy().to_string();
+    let result = validate_search_dir(&dir_str, &dir_str);
     assert!(result.is_ok());
     assert!(result.unwrap().is_none());
 }
 
 #[test]
 fn test_validate_search_dir_outside_rejects() {
-    let result = validate_search_dir("/other/dir", "/my/dir");
-    assert!(result.is_err());
+    // Use two real sibling temp directories — neither is a subdirectory of the other
+    let parent = std::env::temp_dir();
+    let dir_a = parent.join(format!("xray_vsd_a_{}_{}", std::process::id(),
+        std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let dir_b = parent.join(format!("xray_vsd_b_{}_{}", std::process::id(),
+        std::sync::atomic::AtomicU64::new(0).fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    std::fs::create_dir_all(&dir_a).unwrap();
+    std::fs::create_dir_all(&dir_b).unwrap();
+    let result = validate_search_dir(
+        &dir_a.to_string_lossy(),
+        &dir_b.to_string_lossy(),
+    );
+    assert!(result.is_err(), "Sibling directories should be rejected");
+    let _ = std::fs::remove_dir_all(&dir_a);
+    let _ = std::fs::remove_dir_all(&dir_b);
 }
 
 #[test]
@@ -1449,6 +1463,7 @@ fn test_inject_body_body_line_range_outside_method() {
 
 #[test]
 fn test_inject_body_body_line_range_with_none_is_full_body() {
+
     let dir = tempfile::tempdir().unwrap();
     let file = dir.path().join("big5.cs");
     let content = (1..=10).map(|i| format!("line {}", i)).collect::<Vec<_>>().join("\n");
@@ -1497,4 +1512,93 @@ fn test_name_similarity_partial_match() {
 fn test_name_similarity_typo() {
     let score = name_similarity("userservice", "userservise");
     assert!(score > 0.8, "Typo should have high similarity, got {}", score);
+}
+
+
+// ─── resolve_dir_to_absolute tests ────────────────────────────────────────
+
+#[test]
+fn test_resolve_dir_to_absolute_absolute_path_passthrough() {
+    // Create a real absolute temp dir so canonicalize works on Windows
+    let tmp = tempfile::tempdir().unwrap();
+    let abs_path = tmp.path().to_string_lossy().to_string();
+    let result = resolve_dir_to_absolute(&abs_path, "/server/dir");
+    // Absolute path should not be prefixed with server_dir
+    assert!(!result.contains("server"), "Result '{}' should not contain server_dir", result);
+    // Should contain the original path components
+    let result_norm = result.replace('\\', "/").to_lowercase();
+    let abs_norm = abs_path.replace('\\', "/").to_lowercase();
+    assert!(result_norm.contains(&abs_norm.trim_start_matches("\\\\?\\").to_string()) 
+        || result_norm == abs_norm,
+        "Result '{}' should match input '{}'", result, abs_path);
+}
+
+#[test]
+fn test_resolve_dir_to_absolute_relative_path_resolved() {
+    // Create a real temp directory structure so canonicalize works
+    let base = tempfile::tempdir().unwrap();
+    let sub = base.path().join("subdir").join("nested");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let base_str = base.path().to_string_lossy().to_string();
+    let result = resolve_dir_to_absolute("subdir/nested", &base_str);
+
+    // Should be resolved to absolute path containing the base + subdir
+    let result_norm = result.replace('\\', "/").to_lowercase();
+    let base_norm = base_str.replace('\\', "/").to_lowercase();
+    assert!(result_norm.contains(&base_norm.trim_end_matches('/').to_string()),
+        "Result '{}' should contain server_dir '{}'", result, base_str);
+    assert!(result_norm.contains("subdir/nested") || result_norm.contains("subdir\\nested"),
+        "Result '{}' should contain 'subdir/nested'", result);
+}
+
+#[test]
+fn test_resolve_dir_to_absolute_dot_path() {
+    let result = resolve_dir_to_absolute(".", "/server/dir");
+    assert_eq!(result, "/server/dir");
+}
+
+#[test]
+fn test_resolve_dir_to_absolute_nonexistent_relative_fallback() {
+    // When canonicalize fails (path doesn't exist), should still return resolved string
+    let result = resolve_dir_to_absolute("nonexistent/path", "/server/dir");
+    assert!(result.contains("server/dir"), "Should contain server_dir");
+    assert!(result.contains("nonexistent/path"), "Should contain relative path");
+}
+
+#[test]
+fn test_resolve_dir_to_absolute_windows_backslashes() {
+    let result = resolve_dir_to_absolute("sub\\nested", "/server/dir");
+    // Should normalize backslashes
+    assert!(result.contains("sub") && result.contains("nested"));
+}
+
+// ─── validate_search_dir with relative paths ────────────────────────────────
+
+#[test]
+fn test_validate_search_dir_relative_subdir_resolved() {
+    // Create a real directory structure
+    let base = tempfile::tempdir().unwrap();
+    let sub = base.path().join("src").join("models");
+    std::fs::create_dir_all(&sub).unwrap();
+
+    let base_str = base.path().to_string_lossy().to_string();
+    let result = validate_search_dir("src/models", &base_str);
+
+    assert!(result.is_ok(), "Relative subdir should be accepted, got: {:?}", result);
+    // Should return Some(canonical_path) since it's a proper subdirectory
+    assert!(result.unwrap().is_some(), "Should return Some(subdir_filter)");
+}
+
+#[test]
+fn test_validate_search_dir_relative_nonexistent_accepted_as_subdir() {
+    let base = tempfile::tempdir().unwrap();
+    let base_str = base.path().to_string_lossy().to_string();
+
+    // Non-existent relative path — resolves to base_str/nonexistent/dir
+    // This is WITHIN server_dir, so it should be accepted (returns Ok(Some(...)))
+    // The directory doesn't exist, but validate_search_dir only checks path prefix
+    let result = validate_search_dir("nonexistent/dir", &base_str);
+    assert!(result.is_ok(), "Relative path within server_dir should be accepted: {:?}", result);
+    assert!(result.unwrap().is_some(), "Should return Some(subdir_filter)");
 }

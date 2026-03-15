@@ -1583,3 +1583,24 @@ fn test_grep_dir_as_file_returns_error_with_hint() {
         "Error should suggest parent dir or xray_definitions: {}", err_msg);
     cleanup_tmp(&tmp);
 }
+
+
+// ─── Grep with relative dir ─────────────────────────────────────────────
+
+#[test]
+fn test_grep_with_relative_subdir_filter() {
+    let tmp_holder = tempfile::tempdir().unwrap();
+    let tmp = tmp_holder.path();
+    let sub_a = tmp.join("subA"); let sub_b = tmp.join("subB");
+    std::fs::create_dir_all(&sub_a).unwrap(); std::fs::create_dir_all(&sub_b).unwrap();
+    std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
+    std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
+    let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 1, min_token_len: 2 }).unwrap();
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), server_ext: "txt".to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
+
+    // Use RELATIVE dir path "subA" instead of absolute
+    let r_sub = handle_xray_grep(&ctx, &json!({"terms": "productcatalog", "dir": "subA"}));
+    assert!(!r_sub.is_error, "Relative dir should work for grep: {}", r_sub.content[0].text);
+    let o_sub: Value = serde_json::from_str(&r_sub.content[0].text).unwrap();
+    assert_eq!(o_sub["summary"]["totalFiles"], 1, "Should find 1 file in subA with relative dir");
+}

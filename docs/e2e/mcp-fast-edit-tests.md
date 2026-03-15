@@ -31,6 +31,19 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 
 ---
 
+### T-FAST-GLOB-RANKING: `xray_fast` — Glob pattern ranking uses literal prefix
+
+**Expected:**
+- `pattern: "Order*"` ranks `Order.cs` (exact match for literal prefix "Order") before `OrderProcessor.cs` (prefix match) before `OrderValidatorFactory.cs` (prefix match, longer stem)
+- Non-glob patterns are unaffected (ranking uses original search terms)
+- `pattern: "*Helper*"` produces no ranking terms (empty literal prefix) → falls back to length-based sort
+
+**Unit tests:** `test_extract_glob_literal_no_glob`, `test_extract_glob_literal_star_suffix`, `test_extract_glob_literal_star_prefix`, `test_extract_glob_literal_question_mark`, `test_extract_glob_literal_mixed`, `test_xray_fast_glob_ranking_uses_literal_prefix`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T79a-fix: `xray_fast` — `fileCount` correct when `dir` is a subdirectory (regression)
 
 **Expected:**
@@ -45,6 +58,51 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 ---
 
 ### T-FAST-SUBDIR: `xray_fast` — Subdirectory reuses parent index
+
+---
+
+### T-FAST-RELDIR: `xray_fast` — Relative dir parameter resolution
+
+**Expected:**
+
+- `dir: "src/services"` (relative) → resolves against server_dir, finds files in subdirectory
+- `dir: "src/services"` + `pattern: "User"` → scoped search (only finds files in that subdir)
+- Relative dir does NOT create orphan index files
+
+**Unit tests:** `test_xray_fast_relative_dir_subdir_search`, `test_xray_fast_relative_dir_pattern_search`
+
+**Status:** ✅ Implemented
+
+---
+
+### T-FAST-GLOB: `xray_fast` — Glob pattern auto-detection
+
+**Expected:**
+
+- `pattern: "Order*"` → auto-converts to regex `^Order.*$`, finds OrderProcessor.cs and OrderValidator.cs
+- `pattern: "*Tracker*"` → finds InventoryTracker.cs
+- `pattern: "Order?alidator*"` → `?` matches single char, finds OrderValidator.cs but NOT OrderProcessor.cs
+- `pattern: "*.cs"` → finds all .cs files, excludes .txt
+- `pattern: "Order"` (no glob chars) → unchanged substring behavior
+- Glob detection does NOT interfere with `pattern: "*"` (wildcard-all)
+- Glob detection does NOT interfere with `regex: true` (user-specified regex)
+
+**Unit tests:** `test_xray_fast_glob_star_suffix`, `test_xray_fast_glob_star_prefix`, `test_xray_fast_glob_question_mark`, `test_xray_fast_glob_with_ext_filter`, `test_xray_fast_no_glob_unchanged_behavior`
+
+**Status:** ✅ Implemented
+
+---
+
+### T-GREP-RELDIR: `xray_grep` — Relative dir parameter resolution
+
+**Expected:**
+
+- `dir: "subA"` (relative) → resolves against server_dir, scopes grep to subdirectory
+- Results contain only files from the specified subdirectory
+
+**Unit test:** `test_grep_with_relative_subdir_filter`
+
+**Status:** ✅ Implemented
 
 **Expected:**
 

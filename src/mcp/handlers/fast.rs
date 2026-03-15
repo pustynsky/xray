@@ -12,6 +12,44 @@ use crate::mcp::protocol::ToolCallResult;
 use super::HandlerContext;
 use super::utils::{best_match_tier, inject_branch_warning, json_to_string};
 
+/// Convert a simple glob pattern (containing * or ?) to a regex string.
+/// Returns None if the pattern has no glob characters.
+/// Only applies to filename matching — anchored to match the full name.
+fn maybe_glob_to_regex(pattern: &str) -> Option<String> {
+    if pattern == "*" {
+        return None; // Special wildcard-all case, handled separately
+    }
+    if !pattern.contains('*') && !pattern.contains('?') {
+        return None; // No glob chars — use normal substring matching
+    }
+    let mut regex = String::with_capacity(pattern.len() * 2);
+    regex.push('^');
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            // Escape regex metacharacters
+            '.' | '+' | '(' | ')' | '[' | ']' | '{' | '}' | '|' | '^' | '$' | '\\' => {
+                regex.push('\\');
+                regex.push(ch);
+            }
+            _ => regex.push(ch),
+        }
+    }
+    regex.push('$');
+    Some(regex)
+}
+
+/// Extract the literal (fixed) prefix from a glob pattern — the part before
+/// the first glob character (`*` or `?`). Used for ranking results when glob
+/// patterns are converted to regex (the regex string itself is useless for
+/// `best_match_tier` which does literal `contains`/`starts_with` checks).
+/// For non-glob patterns returns the full string unchanged.
+fn extract_glob_literal(pattern: &str) -> &str {
+    let end = pattern.find(|c: char| c == '*' || c == '?').unwrap_or(pattern.len());
+    &pattern[..end]
+}
+
 pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let raw_pattern = args.get("pattern").and_then(|v| v.as_str());
     let dir_provided = args.get("dir").and_then(|v| v.as_str()).is_some();
@@ -34,7 +72,9 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     let pattern = raw_pattern.unwrap_or("").to_string();
 
-    let dir = args.get("dir").and_then(|v| v.as_str()).map(|s| s.to_string()).unwrap_or_else(|| ctx.server_dir());
+    let dir = args.get("dir").and_then(|v| v.as_str())
+        .map(|s| super::utils::resolve_dir_to_absolute(s, &ctx.server_dir()))
+        .unwrap_or_else(|| ctx.server_dir());
     let ext = args.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string());
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let ignore_case = args.get("ignoreCase").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -103,19 +143,11 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // the parent index, not just those under the requested dir.
     let subdir_entry_filter: Option<String> = {
         let root_norm = index.root.replace('\\', "/");
-        // Resolve dir to absolute path consistent with index entry paths.
-        // Must use clean_path to strip Windows \\?\ prefix from canonicalize.
-        let dir_abs = if std::path::Path::new(&dir).is_absolute() {
-            std::fs::canonicalize(&dir)
-                .map(|p| code_xray::clean_path(&p.to_string_lossy()))
-                .unwrap_or_else(|_| dir.replace('\\', "/"))
-        } else {
-            // Relative path — resolve against index root
-            let full = format!("{}/{}", root_norm.trim_end_matches('/'), dir.replace('\\', "/").trim_matches('/'));
-            std::fs::canonicalize(&full)
-                .map(|p| code_xray::clean_path(&p.to_string_lossy()))
-                .unwrap_or(full)
-        };
+        // dir is already absolute (resolved by resolve_dir_to_absolute at the top).
+        // Canonicalize to normalize path separators and resolve symlinks.
+        let dir_abs = std::fs::canonicalize(&dir)
+            .map(|p| code_xray::clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| dir.replace('\\', "/"));
         let root_abs = std::fs::canonicalize(&index.root)
             .map(|p| code_xray::clean_path(&p.to_string_lossy()))
             .unwrap_or(root_norm);
@@ -135,14 +167,45 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         .filter(|t| !t.is_empty())
         .collect();
 
+    // Guard: if pattern is "*" and regex=true, treat as wildcard ("*" is invalid regex)
+    let use_regex = if is_wildcard && use_regex { false } else { use_regex };
+
+    // Save original terms for ranking before potential glob→regex conversion.
+    // `extract_glob_literal` will pull the fixed prefix out later.
+    let original_terms = terms.clone();
+
+    // Auto-detect glob patterns (*, ?) and convert to regex
+    // Only when not already in regex mode and not a wildcard-all request
+    let (use_regex, terms) = if !use_regex && !is_wildcard {
+        let mut any_glob = false;
+        let converted: Vec<String> = terms.iter().map(|t| {
+            if let Some(re) = maybe_glob_to_regex(t) {
+                any_glob = true;
+                re
+            } else {
+                t.clone()
+            }
+        }).collect();
+        if any_glob { (true, converted) } else { (use_regex, terms) }
+    } else {
+        (use_regex, terms)
+    };
+
+    // Recompute search_terms after potential glob conversion
     let search_terms: Vec<String> = if ignore_case {
         terms.iter().map(|t| t.to_lowercase()).collect()
     } else {
         terms.clone()
     };
 
-    // Guard: if pattern is "*" and regex=true, treat as wildcard ("*" is invalid regex)
-    let use_regex = if is_wildcard && use_regex { false } else { use_regex };
+    // Ranking terms: extract literal parts from original patterns (before glob→regex
+    // conversion). For non-glob "Order", extract_glob_literal returns "Order" (unchanged).
+    // For glob "Order*", it returns "Order" — enabling proper tier ranking.
+    // For "*Helper*", it returns "" which is filtered out → tier-2 fallback (length sort).
+    let ranking_terms: Vec<String> = original_terms.iter()
+        .map(|t| extract_glob_literal(t).to_lowercase())
+        .filter(|t| !t.is_empty())
+        .collect();
 
     let re_list: Option<Vec<regex::Regex>> = if use_regex {
         let mut regexes = Vec::with_capacity(terms.len());
@@ -322,8 +385,8 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
                 .and_then(|s| s.to_str())
                 .unwrap_or("");
 
-            let tier_a = best_match_tier(stem_a, &search_terms);
-            let tier_b = best_match_tier(stem_b, &search_terms);
+            let tier_a = best_match_tier(stem_a, &ranking_terms);
+            let tier_b = best_match_tier(stem_b, &ranking_terms);
             tier_a.cmp(&tier_b)
                 .then_with(|| stem_a.len().cmp(&stem_b.len()))
                 .then_with(|| path_a.cmp(path_b))
@@ -371,4 +434,40 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     });
 
     ToolCallResult::success(json_to_string(&output))
+}
+
+#[cfg(test)]
+mod fast_unit_tests {
+    use super::extract_glob_literal;
+
+    #[test]
+    fn test_extract_glob_literal_no_glob() {
+        assert_eq!(extract_glob_literal("Order"), "Order");
+        assert_eq!(extract_glob_literal("UserService.cs"), "UserService.cs");
+        assert_eq!(extract_glob_literal(""), "");
+    }
+
+    #[test]
+    fn test_extract_glob_literal_star_suffix() {
+        assert_eq!(extract_glob_literal("Order*"), "Order");
+        assert_eq!(extract_glob_literal("User*"), "User");
+    }
+
+    #[test]
+    fn test_extract_glob_literal_star_prefix() {
+        assert_eq!(extract_glob_literal("*Helper"), "");
+        assert_eq!(extract_glob_literal("*Helper*"), "");
+    }
+
+    #[test]
+    fn test_extract_glob_literal_question_mark() {
+        assert_eq!(extract_glob_literal("Use?Service"), "Use");
+        assert_eq!(extract_glob_literal("?Service"), "");
+    }
+
+    #[test]
+    fn test_extract_glob_literal_mixed() {
+        assert_eq!(extract_glob_literal("Order*.cs"), "Order");
+        assert_eq!(extract_glob_literal("Config*Helper?"), "Config");
+    }
 }
