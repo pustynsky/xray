@@ -26,6 +26,16 @@
   - **`onDemand: true`**: Response includes this flag so the LLM knows data is from on-demand parsing, not the definition index.
   - **Text content search**: The `name` filter now searches both XML element names AND `textContent` of leaf elements. For example, `name='PremiumStorage'` finds `<ServiceType>PremiumStorage</ServiceType>` — previously only element tag names were searchable.
   - **Directory path error hint**: Passing a directory path (e.g., `file='Definitions/Prod.xml'` where that's a directory) now returns a clear error: `"XML on-demand requires a file path, not a directory"` with guidance to use `xray_fast` to find specific files.
+
+- **XML text_content filter V2 — Parent promotion and noise reduction** — When the `name` filter matches XML text content (not tag name), leaf elements are now **automatically promoted to their parent block** with full structural context. Key improvements:
+  - **Parent Promotion**: `name='PremiumStorage'` finding `<ServiceType>PremiumStorage</ServiceType>` now returns the entire `<SearchService>` parent block — not the trivial leaf `ServiceType`.
+  - **`matchedBy` field**: Response includes `matchedBy: "name"` or `matchedBy: "textContent"` so the LLM understands why each result was found.
+  - **`matchedChild` / `matchedChildren`**: Promoted results include `matchedChild: "ServiceType"` (single leaf) or `matchedChildren` array (multiple leaves in same parent).
+  - **De-duplication**: Multiple textContent matches in the same parent block are merged into one result with a `matchedChildren` array — not returned as separate results.
+  - **Name priority**: If a parent is already matched by tag name, textContent-promoted results for the same parent are suppressed to avoid duplicates.
+  - **Min-length guard**: Terms shorter than 3 characters are not searched in text content (only in tag names), preventing noise from short terms like `'ab'` or `'id'`.
+  - **Result ordering**: Name matches appear first, then textContent-promoted results.
+  - 6 new unit tests + 1 updated test. Tool descriptions updated in `mod.rs` and `tips.rs`.
   - New `lang-xml` Cargo feature (in default build). New dependency: `tree-sitter-xml 0.7`. 25 new XML parser tests + 4 updated hint tests. All 1702 unit tests + 67 E2E tests pass.
 
 

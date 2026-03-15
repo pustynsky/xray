@@ -484,7 +484,8 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "audit": "Shows: total files, files with/without definitions, read errors, lossy UTF-8, suspicious files (large files with 0 definitions)",
             "angular": "Angular @Component classes include 'selector' and 'templateChildren' in output, showing which child components are used in the template",
             "includeUsageCount": "includeUsageCount=true -> each definition gets usageCount (number of files containing this name in content index). usageCount=0 or 1 = potential dead code. Counts ALL text occurrences including comments/strings. Exact token match only",
-            "autoSummary": "Triggered automatically when results > maxResults and no name filter. Returns directory-grouped overview with counts and top-3 definitions per subdirectory. To get individual definitions instead, add name filter or narrow file scope"
+            "autoSummary": "Triggered automatically when results > maxResults and no name filter. Returns directory-grouped overview with counts and top-3 definitions per subdirectory. To get individual definitions instead, add name filter or narrow file scope",
+            "xmlTextContent": "XML on-demand: name filter searches both element names AND text content. Example: name='PremiumStorage' finds <ServiceType>PremiumStorage</ServiceType> and returns parent block via auto-promotion. Response includes matchedBy ('name' or 'textContent'), matchedChild (single leaf) or matchedChildren (multiple leaves). Min 3-char term for text content search. Name matches appear first, then textContent-promoted results. Multiple leaf matches in same parent are de-duplicated"
         },
         "xray_grep": {
             "terms": "Token: 'HttpClient'. Multi-term OR: 'HttpClient,ILogger,Task'. Multi-term AND (mode='and'): 'ServiceProvider,IUserService'. Phrase (phrase=true): 'new HttpClient'. Regex (regex=true): 'I.*Cache'",

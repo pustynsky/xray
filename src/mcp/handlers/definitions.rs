@@ -1635,6 +1635,7 @@ fn handle_xml_contains_line(
 }
 
 /// Handle XML name filter (search by element name).
+
 #[cfg(feature = "lang-xml")]
 fn handle_xml_name_filter(
     xml_defs: &[crate::definitions::parser_xml::XmlDefinition],
@@ -1651,41 +1652,144 @@ fn handle_xml_name_filter(
         .filter(|s| !s.is_empty())
         .collect();
 
-    let matching: Vec<&crate::definitions::parser_xml::XmlDefinition> = xml_defs.iter()
-        .filter(|d| {
-            let def_name_lower = d.entry.name.to_lowercase();
-            // Match against element name OR text content
-            let name_matches = terms.iter().any(|t| def_name_lower.contains(t));
-            if name_matches {
-                return true;
-            }
-            // Also search in text_content for leaf elements
-            if let Some(ref tc) = d.text_content {
+    // Phase 1: Classify matches — name (tag) vs textContent
+    // Min-length guard: only search textContent for terms >= 3 chars
+    let long_terms: Vec<&str> = terms.iter().filter(|t| t.len() >= 3).copied().collect();
+
+    struct XmlMatch {
+        def_index: usize,
+        is_text_content: bool,
+    }
+
+    let mut matches: Vec<XmlMatch> = Vec::new();
+    for (idx, def) in xml_defs.iter().enumerate() {
+        let def_name_lower = def.entry.name.to_lowercase();
+        if terms.iter().any(|t| def_name_lower.contains(t)) {
+            matches.push(XmlMatch { def_index: idx, is_text_content: false });
+            continue;
+        }
+        if !long_terms.is_empty() {
+            if let Some(ref tc) = def.text_content {
                 let tc_lower = tc.to_lowercase();
-                return terms.iter().any(|t| tc_lower.contains(t));
+                if long_terms.iter().any(|t| tc_lower.contains(t)) {
+                    matches.push(XmlMatch { def_index: idx, is_text_content: true });
+                }
             }
-            false
-        })
+        }
+    }
+
+    // Phase 2: Collect name-matched indices for de-duplication
+    let name_matched_indices: std::collections::HashSet<usize> = matches.iter()
+        .filter(|m| !m.is_text_content)
+        .map(|m| m.def_index)
         .collect();
 
-    let mut defs_json: Vec<Value> = Vec::new();
-    let max_results = if args.max_results > 0 { args.max_results } else { 100 };
-
-    for def in matching.iter().take(max_results) {
-        let mut obj = build_xml_def_json(def, file_path);
-        if args.include_body {
-            let body = extract_body_from_source(source, def.entry.line_start, def.entry.line_end, args.max_body_lines);
-            obj["body"] = json!(body);
-            obj["bodyStartLine"] = json!(def.entry.line_start);
-        }
-        defs_json.push(obj);
+    // Phase 3: Build results with parent promotion and de-duplication
+    struct PromotedGroup {
+        parent_index: usize,
+        matched_children: Vec<(String, u32)>, // (child_name, child_line_start)
     }
+
+    let mut name_results: Vec<Value> = Vec::new();
+    let mut promoted_groups: HashMap<usize, PromotedGroup> = HashMap::new();
+    let mut text_content_direct: Vec<Value> = Vec::new();
+
+    for m in &matches {
+        let def = &xml_defs[m.def_index];
+
+        if !m.is_text_content {
+            // Name match — direct result, no promotion
+            let mut obj = build_xml_def_json(def, file_path);
+            obj["matchedBy"] = json!("name");
+            if args.include_body {
+                let body = extract_body_from_source(source, def.entry.line_start, def.entry.line_end, args.max_body_lines);
+                obj["body"] = json!(body);
+                obj["bodyStartLine"] = json!(def.entry.line_start);
+            }
+            name_results.push(obj);
+        } else {
+            // textContent match
+            if !def.has_child_elements {
+                // Leaf → promote to parent
+                if let Some(parent_idx) = def.parent_index {
+                    // Skip if parent already matched by name
+                    if name_matched_indices.contains(&parent_idx) {
+                        continue;
+                    }
+                    promoted_groups.entry(parent_idx)
+                        .or_insert_with(|| PromotedGroup {
+                            parent_index: parent_idx,
+                            matched_children: Vec::new(),
+                        })
+                        .matched_children.push((def.entry.name.clone(), def.entry.line_start));
+                } else {
+                    // No parent (root leaf) — return as-is
+                    let mut obj = build_xml_def_json(def, file_path);
+                    obj["matchedBy"] = json!("textContent");
+                    if args.include_body {
+                        let body = extract_body_from_source(source, def.entry.line_start, def.entry.line_end, args.max_body_lines);
+                        obj["body"] = json!(body);
+                        obj["bodyStartLine"] = json!(def.entry.line_start);
+                    }
+                    text_content_direct.push(obj);
+                }
+            } else {
+                // Block matched by textContent (unusual) — return as-is
+                let mut obj = build_xml_def_json(def, file_path);
+                obj["matchedBy"] = json!("textContent");
+                if args.include_body {
+                    let body = extract_body_from_source(source, def.entry.line_start, def.entry.line_end, args.max_body_lines);
+                    obj["body"] = json!(body);
+                    obj["bodyStartLine"] = json!(def.entry.line_start);
+                }
+                text_content_direct.push(obj);
+            }
+        }
+    }
+
+    // Phase 4: Build promoted results from groups
+    let mut promoted_results: Vec<Value> = Vec::new();
+    // Sort promoted groups by parent line_start for deterministic order
+    let mut sorted_groups: Vec<&PromotedGroup> = promoted_groups.values().collect();
+    sorted_groups.sort_by_key(|g| xml_defs[g.parent_index].entry.line_start);
+
+    for group in sorted_groups {
+        let parent_def = &xml_defs[group.parent_index];
+        let mut obj = build_xml_def_json(parent_def, file_path);
+        obj["matchedBy"] = json!("textContent");
+
+        if group.matched_children.len() == 1 {
+            obj["matchedChild"] = json!(group.matched_children[0].0);
+            obj["matchedLine"] = json!(group.matched_children[0].1);
+        } else {
+            let children: Vec<Value> = group.matched_children.iter()
+                .map(|(name, line)| json!({"name": name, "line": line}))
+                .collect();
+            obj["matchedChildren"] = json!(children);
+        }
+
+        if args.include_body {
+            let body = extract_body_from_source(source, parent_def.entry.line_start, parent_def.entry.line_end, args.max_body_lines);
+            obj["body"] = json!(body);
+            obj["bodyStartLine"] = json!(parent_def.entry.line_start);
+        }
+        promoted_results.push(obj);
+    }
+
+    // Combine: name matches first, then promoted textContent, then direct textContent
+    let max_results = if args.max_results > 0 { args.max_results } else { 100 };
+    let total_results = name_results.len() + promoted_results.len() + text_content_direct.len();
+    let defs_json: Vec<Value> = name_results.into_iter()
+        .chain(promoted_results)
+        .chain(text_content_direct)
+        .take(max_results)
+        .collect();
 
     let search_elapsed = search_start.elapsed();
     let output = json!({
         "definitions": defs_json,
         "summary": {
-            "totalResults": matching.len(),
+            "totalResults": total_results,
             "returned": defs_json.len(),
             "onDemand": true,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,

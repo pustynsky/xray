@@ -3571,19 +3571,305 @@ fn test_xml_on_demand_name_matches_text_content() {
     assert!(!defs.is_empty(), "Should find ServiceType element via text content match. Response: {}",
         result.content[0].text);
 
-    // The match should be ServiceType with textContent "PremiumStorage"
+    // V2: textContent match on leaf "ServiceType" promotes to parent "SearchService"
     let found = defs.iter().any(|d| {
-        d["name"].as_str() == Some("ServiceType") &&
-        d.get("textContent").and_then(|v| v.as_str()) == Some("PremiumStorage")
+        d["name"].as_str() == Some("SearchService") &&
+        d["matchedBy"].as_str() == Some("textContent") &&
+        d["matchedChild"].as_str() == Some("ServiceType")
     });
-    assert!(found, "Should find ServiceType with textContent=PremiumStorage. Got: {:?}",
-        defs.iter().map(|d| d["name"].as_str()).collect::<Vec<_>>());
+    assert!(found, "Should find parent SearchService with matchedChild=ServiceType. Got: {:?}",
+        defs.iter().map(|d| format!("{}: matchedBy={}, matchedChild={}",
+            d["name"].as_str().unwrap_or("?"),
+            d.get("matchedBy").and_then(|v| v.as_str()).unwrap_or("?"),
+            d.get("matchedChild").and_then(|v| v.as_str()).unwrap_or("?"))).collect::<Vec<_>>());
 
     // Should be on-demand
     assert_eq!(v["summary"]["onDemand"], true, "Should be on-demand parsed");
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+    // ===== V2: XML text_content filter tests =====
+
+    #[test]
+    #[cfg(feature = "lang-xml")]
+    fn test_xml_text_content_parent_promotion_with_body() {
+        // textContent match on leaf should promote to parent block with body
+        use std::io::Write;
+        let tmp_dir = std::env::temp_dir().join(format!("xray_xml_tc_promo_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let xml_content = r#"<?xml version="1.0"?>
+<Root>
+  <SearchService>
+    <Deploy>true</Deploy>
+    <ServiceType>PremiumStorage</ServiceType>
+    <Name>SVC-1</Name>
+  </SearchService>
+  <SearchService>
+    <Deploy>false</Deploy>
+    <ServiceType>Search</ServiceType>
+    <Name>SVC-2</Name>
+  </SearchService>
+</Root>"#;
+
+        let xml_path = tmp_dir.join("services.xml");
+        { let mut f = std::fs::File::create(&xml_path).unwrap(); f.write_all(xml_content.as_bytes()).unwrap(); }
+
+        let content_index = crate::ContentIndex { root: tmp_dir.to_string_lossy().to_string(), ..Default::default() };
+        let ctx = HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+            server_ext: "xml".to_string(),
+            workspace: std::sync::Arc::new(std::sync::RwLock::new(
+                WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+            )),
+            ..Default::default()
+        };
+
+        let result = handle_xray_definitions(&ctx, &json!({ "file": "services.xml", "name": "PremiumStorage", "includeBody": true }));
+        assert!(!result.is_error, "Error: {:?}", result.content[0].text);
+        let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+
+        // Should return exactly 1 result: the parent SearchService block
+        assert_eq!(defs.len(), 1, "Should find exactly 1 promoted parent. Got: {}", result.content[0].text);
+        assert_eq!(defs[0]["name"].as_str(), Some("SearchService"));
+        assert_eq!(defs[0]["matchedBy"].as_str(), Some("textContent"));
+        assert_eq!(defs[0]["matchedChild"].as_str(), Some("ServiceType"));
+        // matchedLine should point to the ServiceType line
+        assert!(defs[0]["matchedLine"].as_u64().is_some(), "Should have matchedLine");
+        // Body should contain the parent SearchService block, including PremiumStorage
+        let body = defs[0]["body"].as_array().unwrap();
+        let body_text = body.iter().map(|l| l.as_str().unwrap_or("")).collect::<Vec<_>>().join("\n");
+        assert!(body_text.contains("PremiumStorage"), "Body should contain PremiumStorage. Body: {}", body_text);
+        assert!(body_text.contains("SearchService"), "Body should contain SearchService tag");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-xml")]
+    fn test_xml_text_content_deduplication() {
+        // Two leaves in same parent match by textContent → 1 result with matchedChildren
+        use std::io::Write;
+        let tmp_dir = std::env::temp_dir().join(format!("xray_xml_tc_dedup_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let xml_content = r#"<Root>
+  <Service>
+    <Type>PremiumFeature</Type>
+    <Feature>PremiumFeature</Feature>
+    <Name>SVC</Name>
+  </Service>
+</Root>"#;
+
+        let xml_path = tmp_dir.join("dedup.xml");
+        { let mut f = std::fs::File::create(&xml_path).unwrap(); f.write_all(xml_content.as_bytes()).unwrap(); }
+
+        let content_index = crate::ContentIndex { root: tmp_dir.to_string_lossy().to_string(), ..Default::default() };
+        let ctx = HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+            server_ext: "xml".to_string(),
+            workspace: std::sync::Arc::new(std::sync::RwLock::new(
+                WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+            )),
+            ..Default::default()
+        };
+
+        let result = handle_xray_definitions(&ctx, &json!({ "file": "dedup.xml", "name": "PremiumFeature" }));
+        assert!(!result.is_error);
+        let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+
+        // Should return 1 promoted parent with matchedChildren (not 2 separate results)
+        assert_eq!(defs.len(), 1, "Should de-duplicate to 1 parent. Got: {}", result.content[0].text);
+        assert_eq!(defs[0]["name"].as_str(), Some("Service"));
+        assert_eq!(defs[0]["matchedBy"].as_str(), Some("textContent"));
+        // With 2+ matched children, should use matchedChildren array
+        let children = defs[0]["matchedChildren"].as_array()
+            .expect("Should have matchedChildren array for 2+ matches");
+        assert_eq!(children.len(), 2, "Should have 2 matched children");
+        let child_names: Vec<&str> = children.iter()
+            .map(|c| c["name"].as_str().unwrap())
+            .collect();
+        assert!(child_names.contains(&"Type"), "Should contain Type. Got: {:?}", child_names);
+        assert!(child_names.contains(&"Feature"), "Should contain Feature. Got: {:?}", child_names);
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-xml")]
+    fn test_xml_text_content_min_length_guard() {
+        // Terms < 3 chars should NOT match in textContent (only in tag name)
+        use std::io::Write;
+        let tmp_dir = std::env::temp_dir().join(format!("xray_xml_tc_minlen_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let xml_content = r#"<Root><AB>xy</AB><Item>ab</Item></Root>"#;
+        let xml_path = tmp_dir.join("minlen.xml");
+        { let mut f = std::fs::File::create(&xml_path).unwrap(); f.write_all(xml_content.as_bytes()).unwrap(); }
+
+        let content_index = crate::ContentIndex { root: tmp_dir.to_string_lossy().to_string(), ..Default::default() };
+        let ctx = HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+            server_ext: "xml".to_string(),
+            workspace: std::sync::Arc::new(std::sync::RwLock::new(
+                WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+            )),
+            ..Default::default()
+        };
+
+        // Search with 2-char term "ab" — should match tag <AB> by name, but NOT textContent "ab" in <Item>
+        let result = handle_xray_definitions(&ctx, &json!({ "file": "minlen.xml", "name": "ab" }));
+        assert!(!result.is_error);
+        let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+
+        // Should find AB (tag name match), but NOT Item (textContent "ab" is < 3 chars term)
+        assert_eq!(defs.len(), 1, "Should find only AB tag. Got: {}", result.content[0].text);
+        assert_eq!(defs[0]["name"].as_str(), Some("AB"));
+        assert_eq!(defs[0]["matchedBy"].as_str(), Some("name"));
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-xml")]
+    fn test_xml_text_content_case_insensitive() {
+        // textContent search should be case-insensitive
+        use std::io::Write;
+        let tmp_dir = std::env::temp_dir().join(format!("xray_xml_tc_case_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let xml_content = r#"<Root><Service><Type>PremiumStorage</Type></Service></Root>"#;
+        let xml_path = tmp_dir.join("case.xml");
+        { let mut f = std::fs::File::create(&xml_path).unwrap(); f.write_all(xml_content.as_bytes()).unwrap(); }
+
+        let content_index = crate::ContentIndex { root: tmp_dir.to_string_lossy().to_string(), ..Default::default() };
+        let ctx = HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+            server_ext: "xml".to_string(),
+            workspace: std::sync::Arc::new(std::sync::RwLock::new(
+                WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+            )),
+            ..Default::default()
+        };
+
+        // Search with lowercase — should still find PremiumStorage
+        let result = handle_xray_definitions(&ctx, &json!({ "file": "case.xml", "name": "premiumstorage" }));
+        assert!(!result.is_error);
+        let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert!(!defs.is_empty(), "Should find result with case-insensitive textContent match");
+        assert_eq!(defs[0]["matchedBy"].as_str(), Some("textContent"));
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-xml")]
+    fn test_xml_text_content_name_priority_over_text_content() {
+        // If parent is matched by name, textContent-promoted result should be skipped
+        use std::io::Write;
+        let tmp_dir = std::env::temp_dir().join(format!("xray_xml_tc_prio_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        // "Service" matches <Service> by tag name; <Type>ServicePlan</Type> also has "Service" in textContent
+        let xml_content = r#"<Root>
+  <Service>
+    <Type>ServicePlan</Type>
+    <Name>SVC</Name>
+  </Service>
+</Root>"#;
+        let xml_path = tmp_dir.join("prio.xml");
+        { let mut f = std::fs::File::create(&xml_path).unwrap(); f.write_all(xml_content.as_bytes()).unwrap(); }
+
+        let content_index = crate::ContentIndex { root: tmp_dir.to_string_lossy().to_string(), ..Default::default() };
+        let ctx = HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+            server_ext: "xml".to_string(),
+            workspace: std::sync::Arc::new(std::sync::RwLock::new(
+                WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+            )),
+            ..Default::default()
+        };
+
+        let result = handle_xray_definitions(&ctx, &json!({ "file": "prio.xml", "name": "Service" }));
+        assert!(!result.is_error);
+        let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+
+        // <Service> is matched by name. <Type>ServicePlan</Type> textContent match
+        // should be de-duplicated because parent <Service> is already in results by name.
+        let name_matched: Vec<&Value> = defs.iter()
+            .filter(|d| d["matchedBy"].as_str() == Some("name"))
+            .collect();
+        let tc_matched: Vec<&Value> = defs.iter()
+            .filter(|d| d["matchedBy"].as_str() == Some("textContent"))
+            .collect();
+
+        // Service should appear as name match
+        assert!(name_matched.iter().any(|d| d["name"].as_str() == Some("Service")),
+            "Service should be matched by name");
+        // No textContent-promoted duplicates for the same parent
+        let tc_service: Vec<&&Value> = tc_matched.iter()
+            .filter(|d| d["name"].as_str() == Some("Service"))
+            .collect();
+        assert!(tc_service.is_empty(),
+            "Should NOT have textContent-promoted Service (already matched by name). Got: {:?}",
+            tc_matched.iter().map(|d| d["name"].as_str()).collect::<Vec<_>>());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    #[cfg(feature = "lang-xml")]
+    fn test_xml_text_content_matched_by_field_on_name_match() {
+        // Name matches should have matchedBy="name"
+        use std::io::Write;
+        let tmp_dir = std::env::temp_dir().join(format!("xray_xml_tc_mb_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).unwrap();
+
+        let xml_content = r#"<Root><SearchService><Name>X</Name></SearchService></Root>"#;
+        let xml_path = tmp_dir.join("mb.xml");
+        { let mut f = std::fs::File::create(&xml_path).unwrap(); f.write_all(xml_content.as_bytes()).unwrap(); }
+
+        let content_index = crate::ContentIndex { root: tmp_dir.to_string_lossy().to_string(), ..Default::default() };
+        let ctx = HandlerContext {
+            index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+            def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+            server_ext: "xml".to_string(),
+            workspace: std::sync::Arc::new(std::sync::RwLock::new(
+                WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+            )),
+            ..Default::default()
+        };
+
+        let result = handle_xray_definitions(&ctx, &json!({ "file": "mb.xml", "name": "SearchService" }));
+        assert!(!result.is_error);
+        let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let defs = v["definitions"].as_array().unwrap();
+        assert!(!defs.is_empty());
+        // All name-matched results should have matchedBy="name"
+        for d in defs {
+            assert_eq!(d["matchedBy"].as_str(), Some("name"),
+                "Name-matched result should have matchedBy=name. Got: {:?}", d);
+        }
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
 
 #[test]
 #[cfg(feature = "lang-xml")]

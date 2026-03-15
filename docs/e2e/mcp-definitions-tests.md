@@ -486,13 +486,43 @@ Tests for the `xray_definitions` MCP tool: body extraction, containsLine, auto-s
 
 **Expected**: Hint suggests using `containsLine` or `name` for XML on-demand.
 
-### T-XML-TEXT-CONTENT — name filter matches text content of leaf elements
+### T-XML-TEXT-CONTENT — name filter matches text content with parent promotion (V2)
 
 **Scenario**: `xray_definitions file='services.xml' name='PremiumStorage'` where `PremiumStorage` is text content inside `<ServiceType>PremiumStorage</ServiceType>`
 
-**Expected**: Returns the `ServiceType` element with `textContent: "PremiumStorage"`. `onDemand: true` in summary.
+**Expected**: Returns the **parent block** `SearchService` (not the leaf `ServiceType`) with:
+- `matchedBy: "textContent"`
+- `matchedChild: "ServiceType"`
+- `matchedLine: <line number>`
+- `onDemand: true` in summary
 
-**Unit tests:** `test_xml_on_demand_name_matches_text_content`, `test_xml_on_demand_name_matches_element_name_not_just_text`
+Name matches appear first in results, textContent-promoted results after.
+
+**Unit tests:** `test_xml_on_demand_name_matches_text_content`, `test_xml_on_demand_name_matches_element_name_not_just_text`, `test_xml_text_content_parent_promotion_with_body`
+
+### T-XML-TEXT-CONTENT-DEDUP — de-duplication of multiple leaf matches in same parent
+
+**Scenario**: XML with `<Service><Type>PremiumFeature</Type><Feature>PremiumFeature</Feature></Service>`. Search `name='PremiumFeature'`.
+
+**Expected**: Returns 1 result: parent `Service` with `matchedChildren` array containing both `Type` and `Feature`. Not 2 separate results.
+
+**Unit tests:** `test_xml_text_content_deduplication`
+
+### T-XML-TEXT-CONTENT-MIN-LENGTH — min 3-char guard for textContent search
+
+**Scenario**: XML with `<Root><AB>xy</AB><Item>ab</Item></Root>`. Search `name='ab'`.
+
+**Expected**: Returns only `AB` (tag name match with `matchedBy: "name"`). Does NOT return `Item` (textContent "ab" — term too short for textContent search).
+
+**Unit tests:** `test_xml_text_content_min_length_guard`
+
+### T-XML-TEXT-CONTENT-NAME-PRIORITY — name match takes priority over textContent
+
+**Scenario**: XML with `<Service><Type>ServicePlan</Type></Service>`. Search `name='Service'`.
+
+**Expected**: `Service` returned with `matchedBy: "name"`. The textContent match on `Type` (containing "Service") is de-duplicated since parent `Service` is already in results by name.
+
+**Unit tests:** `test_xml_text_content_name_priority_over_text_content`
 
 ### T-XML-DIRECTORY-HINT — directory path returns clear error
 
