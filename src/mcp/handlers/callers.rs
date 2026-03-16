@@ -320,8 +320,6 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         content_index: &content_index,
         def_idx: &def_idx,
         ext_filter: &ext_filter,
-        exclude_dir: &exclude_dir,
-        exclude_file: &exclude_file,
         resolve_interfaces,
         limits: &limits,
         node_count: &node_count,
@@ -626,8 +624,6 @@ fn handle_multi_method_callers(
             content_index: &content_index,
             def_idx: &def_idx,
             ext_filter: &ext_filter,
-            exclude_dir: &exclude_dir,
-            exclude_file: &exclude_file,
             resolve_interfaces,
             limits: &limits,
             node_count: &node_count,
@@ -1058,8 +1054,6 @@ struct CallerTreeContext<'a> {
     content_index: &'a ContentIndex,
     def_idx: &'a DefinitionIndex,
     ext_filter: &'a str,
-    exclude_dir: &'a [String],
-    exclude_file: &'a [String],
     resolve_interfaces: bool,
     limits: &'a CallerLimits,
     node_count: &'a AtomicUsize,
@@ -1074,6 +1068,36 @@ struct CallerTreeContext<'a> {
     exclude_file_lower: Vec<String>,
     /// Pre-split extension filter list
     ext_filter_list: Vec<String>,
+}
+
+#[cfg(test)]
+impl CallerTreeContext<'_> {
+    /// Test-only default with "cs" ext filter and empty excludes.
+    /// Override specific fields with struct update syntax:
+    /// `CallerTreeContext { ext_filter: "ts", ..CallerTreeContext::test_default(&ci, &di, &l, &nc) }`
+    fn test_default<'a>(
+        content_index: &'a ContentIndex,
+        def_idx: &'a DefinitionIndex,
+        limits: &'a CallerLimits,
+        node_count: &'a AtomicUsize,
+    ) -> CallerTreeContext<'a> {
+        CallerTreeContext {
+            content_index,
+            def_idx,
+            ext_filter: "cs",
+            resolve_interfaces: true,
+            limits,
+            node_count,
+            include_body: false,
+            include_doc_comments: false,
+            max_body_lines: 0,
+            max_total_body_lines: 0,
+            impact_analysis: false,
+            exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+            exclude_file_lower: vec![],
+            ext_filter_list: super::utils::prepare_ext_filter("cs"),
+        }
+    }
 }
 
 impl CallerTreeContext<'_> {
@@ -1631,28 +1655,7 @@ fn collect_definition_locations(
 
 /// Check if a file path matches the extension filter and does not match any exclusion patterns.
 /// Returns `true` if the file passes all filters.
-fn passes_caller_file_filters(
-    file_path: &str,
-    ext_filter: &str,
-    exclude_dir: &[String],
-    exclude_file: &[String],
-) -> bool {
-    let matches_ext = Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| {
-            ext_filter.split(',')
-                .any(|allowed| e.eq_ignore_ascii_case(allowed.trim()))
-        });
-    if !matches_ext { return false; }
 
-    // Use segment-based matching for exclude_dir (consistent with grep and definitions)
-    if super::utils::path_matches_exclude_dir(file_path, exclude_dir) { return false; }
-    let path_lower = file_path.to_lowercase();
-    if exclude_file.iter().any(|excl| path_lower.contains(excl.as_str())) { return false; }
-
-    true
-}
 
 /// Build a JSON node for a single caller in the call tree.
 /// Includes method name, definition line, call site line(s), optional class, optional file name,
@@ -2148,8 +2151,6 @@ fn build_callee_tree(
     }
     let def_idx = ctx.def_idx;
     let _ext_filter = ctx.ext_filter;
-    let _exclude_dir = ctx.exclude_dir;
-    let _exclude_file = ctx.exclude_file;
     let limits = ctx.limits;
     let node_count = ctx.node_count;
 

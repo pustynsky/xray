@@ -1026,7 +1026,7 @@ public class UserService
     // temp_file_id should be preserved in definitions
     assert_eq!(result.definitions[0].file_id, 99);
     assert_eq!(result.path, cs_file);
-    assert!(!result.was_lossy);
+
 }
 
 #[test]
@@ -1118,7 +1118,7 @@ fn test_apply_parsed_result_new_file() {
         call_sites: vec![],
         code_stats: vec![],
         extension_methods: HashMap::new(),
-        was_lossy: false,
+
     };
 
     super::incremental::apply_parsed_result(&mut index, result);
@@ -1157,7 +1157,7 @@ fn test_apply_parsed_result_existing_file_replaces_defs() {
             },
         ],
         call_sites: vec![], code_stats: vec![],
-        extension_methods: HashMap::new(), was_lossy: false,
+        extension_methods: HashMap::new(),
     };
     super::incremental::apply_parsed_result(&mut index, result1);
     assert!(index.name_index.contains_key("classa"));
@@ -1173,7 +1173,7 @@ fn test_apply_parsed_result_existing_file_replaces_defs() {
             },
         ],
         call_sites: vec![], code_stats: vec![],
-        extension_methods: HashMap::new(), was_lossy: false,
+        extension_methods: HashMap::new(),
     };
     super::incremental::apply_parsed_result(&mut index, result2);
 
@@ -1206,7 +1206,7 @@ fn test_apply_parsed_result_merges_extension_methods() {
         ],
         call_sites: vec![], code_stats: vec![],
         extension_methods: ext_methods,
-        was_lossy: false,
+
     };
 
     super::incremental::apply_parsed_result(&mut index, result);
@@ -1243,7 +1243,7 @@ fn test_apply_parsed_result_remaps_file_id_in_all_defs() {
             },
         ],
         call_sites: vec![], code_stats: vec![],
-        extension_methods: HashMap::new(), was_lossy: false,
+        extension_methods: HashMap::new(),
     };
 
     super::incremental::apply_parsed_result(&mut index, result);
@@ -1296,7 +1296,7 @@ fn test_apply_parsed_result_with_call_sites_and_code_stats() {
             }),
         ],
         extension_methods: HashMap::new(),
-        was_lossy: false,
+
     };
 
     super::incremental::apply_parsed_result(&mut index, result);

@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+### Internal
+
+- **Test boilerplate reduction: dual-field antipattern eliminated, test factories added** — Systematic cleanup of test construction boilerplate across 3 handler structs, reducing future field-addition effort from 10-12 places to 1 place per struct.
+
+  **Dead field removal:**
+  - `GrepSearchParams`: removed `exclude_dir` and `exclude` fields (dead code — only `exclude_patterns` and `exclude_lower` were used in production filtering). 12 inline constructions + 1 production constructor updated.
+  - `CallerTreeContext`: removed `exclude_dir` and `exclude_file` fields (dead code — assigned to `_` variables, never read). 7 inline constructions + 2 production constructors updated.
+  - `DefinitionSearchArgs`: removed `exclude_dir` field (dead code — only used to create `exclude_patterns` at parse time, never read after). 2 test assertions migrated to `exclude_patterns`.
+  - Deleted standalone `passes_caller_file_filters()` function (duplicated `CallerTreeContext::passes_file_filters()` logic using raw inputs instead of pre-computed patterns; called only from 9 tests). Tests removed — equivalent coverage exists via handler integration tests and `utils_tests.rs`.
+
+  **Test factory constructors:**
+  - `CallerTreeContext::test_default()` — `#[cfg(test)]` constructor with 4 required params (content_index, def_idx, limits, node_count) and sensible defaults for all 10 remaining fields. 7 inline 14-line constructions → 1-3 line struct-update expressions.
+  - `make_params_default()` / `make_params()` — consolidated as single GrepSearchParams factory, all inline constructions replaced with `..make_params_default()` overrides.
+
+  **Dead code cleanup:**
+  - Removed `ParsedFileResult.was_lossy` field (set but never read — incremental parsing sets it, nothing consumes it). Updated 7 struct literals in tests.
+  - Removed `matches_ext_filter_prepared()` utility (inlined equivalent exists in `CallerTreeContext::passes_file_filters()`).
+  - Removed `path_matches_exclude_dir()` wrapper — 6 tests rewritten to test `ExcludePatterns::from_dirs()` + `.matches()` directly.
+  - `update_file_definitions()`, `reconcile_definition_index()` marked `#[cfg(test)]` — used only from tests (14 callers), never from production code.
+
+  All 1764 unit tests + 68 E2E tests pass. 0 compiler warnings.
+
 ### Performance
 
 - **Performance audit: 6 findings fixed (Findings 1-6)** — Systematic performance optimization based on full code audit. Three groups of fixes:

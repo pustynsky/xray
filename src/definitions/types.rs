@@ -306,7 +306,6 @@ pub struct ParsedFileResult {
     pub call_sites: Vec<(usize, Vec<CallSite>)>,
     pub code_stats: Vec<(usize, CodeStats)>,
     pub extension_methods: HashMap<String, Vec<String>>,
-    pub was_lossy: bool,
 }
 
 // ─── CLI Args ────────────────────────────────────────────────────────

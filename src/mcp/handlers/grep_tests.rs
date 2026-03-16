@@ -5,13 +5,11 @@ use std::time::{Duration, Instant};
 fn make_params<'a>(
     dir_filter: &'a Option<String>,
     ext_filter: &'a Option<String>,
-    exclude_dir: &'a [String],
-    exclude: &'a [String],
+    exclude_dir: &[String],
+    exclude: &[String],
 ) -> GrepSearchParams<'a> {
     GrepSearchParams {
         ext_filter,
-        exclude_dir,
-        exclude,
         show_lines: false,
         context_lines: 0,
         max_results: 50,
@@ -430,18 +428,8 @@ fn test_build_grep_response_count_only() {
     let index = ContentIndex::default();
     let ctx = HandlerContext::default();
     let params = GrepSearchParams {
-        ext_filter: &None,
-        exclude_dir: &[],
-        exclude: &[],
-        show_lines: false,
-        context_lines: 0,
-        max_results: 50,
-        mode_and: false,
         count_only: true,
-        search_start: Instant::now(),
-        dir_filter: &None,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_lower: vec![],
+        ..make_params(&None, &None, &[], &[])
     };
 
     let results = vec![FileScoreEntry {
@@ -465,20 +453,7 @@ fn test_build_grep_response_count_only() {
 fn test_build_grep_response_with_files() {
     let index = ContentIndex::default();
     let ctx = HandlerContext::default();
-    let params = GrepSearchParams {
-        ext_filter: &None,
-        exclude_dir: &[],
-        exclude: &[],
-        show_lines: false,
-        context_lines: 0,
-        max_results: 50,
-        mode_and: false,
-        count_only: false,
-        search_start: Instant::now(),
-        dir_filter: &None,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_lower: vec![],
-    };
+    let params = make_params(&None, &None, &[], &[]);
 
     let results = vec![FileScoreEntry {
         file_path: "test.cs".to_string(),

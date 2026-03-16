@@ -459,22 +459,8 @@ fn test_prefilter_does_not_expand_by_base_types() {
     let node_count = AtomicUsize::new(0);
 
     let caller_ctx = CallerTreeContext {
-        content_index: &content_index,
-        def_idx: &def_idx,
-        ext_filter: "cs",
-        exclude_dir: &[],
-        exclude_file: &[],
         resolve_interfaces: false,
-        limits: &limits,
-        node_count: &node_count,
-        include_body: false,
-        include_doc_comments: false,
-        max_body_lines: 0,
-        max_total_body_lines: 0,
-        impact_analysis: false,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_file_lower: vec![],
-        ext_filter_list: super::utils::prepare_ext_filter("cs"),
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -565,23 +551,13 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
 
+    let empty_ci = crate::ContentIndex::default();
     let caller_ctx = CallerTreeContext {
-        content_index: &crate::ContentIndex::default(),
-        def_idx: &def_idx,
+        content_index: &empty_ci,
         ext_filter: "ts",
-        exclude_dir: &[],
-        exclude_file: &[],
         resolve_interfaces: false,
-        limits: &limits,
-        node_count: &node_count,
-        include_body: false,
-        include_doc_comments: false,
-        max_body_lines: 0,
-        max_total_body_lines: 0,
-        impact_analysis: false,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_file_lower: vec![],
         ext_filter_list: super::utils::prepare_ext_filter("ts"),
+        ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count)
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -1486,22 +1462,8 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
     let node_count = AtomicUsize::new(0);
 
     let caller_ctx = CallerTreeContext {
-        content_index: &content_index,
-        def_idx: &def_idx,
-        ext_filter: "cs",
-        exclude_dir: &[],
-        exclude_file: &[],
         resolve_interfaces: false,
-        limits: &limits,
-        node_count: &node_count,
-        include_body: false,
-        include_doc_comments: false,
-        max_body_lines: 0,
-        max_total_body_lines: 0,
-        impact_analysis: false,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_file_lower: vec![],
-        ext_filter_list: super::utils::prepare_ext_filter("cs"),
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -1894,23 +1856,13 @@ fn test_sql_callee_tree_exec_dependencies() {
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
 
+    let empty_ci = crate::ContentIndex::default();
     let caller_ctx = CallerTreeContext {
-        content_index: &crate::ContentIndex::default(),
-        def_idx: &def_idx,
+        content_index: &empty_ci,
         ext_filter: "sql",
-        exclude_dir: &[],
-        exclude_file: &[],
         resolve_interfaces: false,
-        limits: &limits,
-        node_count: &node_count,
-        include_body: false,
-        include_doc_comments: false,
-        max_body_lines: 0,
-        max_total_body_lines: 0,
-        impact_analysis: false,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_file_lower: vec![],
         ext_filter_list: super::utils::prepare_ext_filter("sql"),
+        ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count)
     };
 
     let mut file_cache = HashMap::new();
@@ -2015,22 +1967,10 @@ fn test_sql_caller_tree_who_calls_sp() {
     let node_count = AtomicUsize::new(0);
 
     let caller_ctx = CallerTreeContext {
-        content_index: &content_index,
-        def_idx: &def_idx,
         ext_filter: "sql",
-        exclude_dir: &[],
-        exclude_file: &[],
         resolve_interfaces: false,
-        limits: &limits,
-        node_count: &node_count,
-        include_body: false,
-        include_doc_comments: false,
-        max_body_lines: 0,
-        max_total_body_lines: 0,
-        impact_analysis: false,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_file_lower: vec![],
         ext_filter_list: super::utils::prepare_ext_filter("sql"),
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
     };
 
     let mut file_cache = HashMap::new();
@@ -2223,38 +2163,7 @@ fn test_collect_definition_locations_excludes_classes() {
 
 // ─── passes_caller_file_filters tests ───────────────────────────
 
-#[test]
-fn test_passes_caller_file_filters_matching_ext() {
-    assert!(passes_caller_file_filters("src/OrderService.cs", "cs", &[], &[]));
-    assert!(passes_caller_file_filters("src/app.ts", "ts", &[], &[]));
-}
 
-#[test]
-fn test_passes_caller_file_filters_non_matching_ext() {
-    assert!(!passes_caller_file_filters("src/OrderService.cs", "ts", &[], &[]));
-    assert!(!passes_caller_file_filters("src/README.md", "cs", &[], &[]));
-}
-
-#[test]
-fn test_passes_caller_file_filters_multi_ext() {
-    assert!(passes_caller_file_filters("src/OrderService.cs", "cs,ts", &[], &[]));
-    assert!(passes_caller_file_filters("src/app.ts", "cs,ts", &[], &[]));
-    assert!(!passes_caller_file_filters("src/README.md", "cs,ts", &[], &[]));
-}
-
-#[test]
-fn test_passes_caller_file_filters_exclude_dir() {
-    let exclude_dir = vec!["test".to_string()];
-    assert!(!passes_caller_file_filters("src/test/OrderService.cs", "cs", &exclude_dir, &[]));
-    assert!(passes_caller_file_filters("src/main/OrderService.cs", "cs", &exclude_dir, &[]));
-}
-
-#[test]
-fn test_passes_caller_file_filters_exclude_file() {
-    let exclude_file = vec!["mock".to_string()];
-    assert!(!passes_caller_file_filters("src/MockOrderService.cs", "cs", &[], &exclude_file));
-    assert!(passes_caller_file_filters("src/OrderService.cs", "cs", &[], &exclude_file));
-}
 
 // ─── build_caller_node tests ────────────────────────────────────
 
@@ -2599,22 +2508,9 @@ fn test_impact_analysis_finds_test_methods() {
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
     let caller_ctx = CallerTreeContext {
-        content_index: &content_index,
-        def_idx: &def_idx,
-        ext_filter: "cs",
-        exclude_dir: &[],
-        exclude_file: &[],
         resolve_interfaces: false,
-        limits: &limits,
-        node_count: &node_count,
-        include_body: false,
-        include_doc_comments: false,
-        max_body_lines: 0,
-        max_total_body_lines: 0,
         impact_analysis: true,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_file_lower: vec![],
-        ext_filter_list: super::utils::prepare_ext_filter("cs"),
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
     };
 
     let mut visited = HashSet::new();
@@ -2743,22 +2639,9 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
     let caller_ctx = CallerTreeContext {
-        content_index: &content_index,
-        def_idx: &def_idx,
-        ext_filter: "cs",
-        exclude_dir: &[],
-        exclude_file: &[],
         resolve_interfaces: false,
-        limits: &limits,
-        node_count: &node_count,
-        include_body: false,
-        include_doc_comments: false,
-        max_body_lines: 0,
-        max_total_body_lines: 0,
         impact_analysis: true,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_file_lower: vec![],
-        ext_filter_list: super::utils::prepare_ext_filter("cs"),
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
     };
 
     let mut visited = HashSet::new();

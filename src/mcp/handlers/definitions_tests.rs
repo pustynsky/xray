@@ -956,7 +956,7 @@ fn test_parse_args_empty_returns_defaults() {
     assert!(parsed.contains_line.is_none());
     assert!(!parsed.use_regex);
     assert_eq!(parsed.max_results, 100);
-    assert!(parsed.exclude_dir.is_empty());
+    assert!(parsed.exclude_patterns.is_empty());
     assert!(!parsed.include_body);
     assert_eq!(parsed.max_body_lines, 100);
     assert_eq!(parsed.max_total_body_lines, 500);
@@ -1057,7 +1057,7 @@ fn test_parse_args_include_code_stats_explicit() {
 fn test_parse_args_exclude_dir() {
     let args = json!({"excludeDir": ["node_modules", "bin"]});
     let parsed = parse_definition_args(&args).unwrap();
-    assert_eq!(parsed.exclude_dir, vec!["node_modules".to_string(), "bin".to_string()]);
+    assert!(!parsed.exclude_patterns.is_empty(), "exclude_patterns should be non-empty when excludeDir is set");
 }
 
 #[test]

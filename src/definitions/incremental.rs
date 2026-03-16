@@ -79,7 +79,6 @@ pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFil
         call_sites: calls,
         code_stats: stats,
         extension_methods,
-        was_lossy,
     })
 }
 
@@ -154,7 +153,6 @@ fn parse_file_with_parsers(
         call_sites: calls,
         code_stats: stats,
         extension_methods,
-        was_lossy,
     })
 }
 
@@ -199,6 +197,7 @@ pub fn apply_parsed_result(
 /// Update definitions for a single file (incremental).
 /// Removes old definitions for the file, parses it again, adds new ones.
 /// This is a convenience wrapper around `parse_file_standalone()` + `apply_parsed_result()`.
+#[cfg(test)]
 pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
     // Determine a temp file_id for parsing (we use 0 since it will be remapped in apply)
     let temp_file_id = 0u32;
@@ -400,6 +399,7 @@ fn remap_index_values<K: Eq + Hash>(map: &mut HashMap<K, Vec<u32>>, remap: &Hash
 /// WalkBuilder provides mtime via `entry.metadata()` — no extra `stat()` calls needed.
 ///
 /// Returns `(added, modified, removed)` counts.
+#[cfg(test)]
 pub fn reconcile_definition_index(
     index: &mut DefinitionIndex,
     dir: &str,

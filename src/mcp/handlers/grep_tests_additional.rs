@@ -5,8 +5,6 @@ use std::time::Instant;
 fn make_params_default<'a>() -> GrepSearchParams<'a> {
     GrepSearchParams {
         ext_filter: &None,
-        exclude_dir: &[],
-        exclude: &[],
         show_lines: false,
         context_lines: 0,
         max_results: 50,
@@ -145,17 +143,7 @@ fn test_score_token_postings_filters_applied() {
     let ext = Some("cs".to_string());
     let params = GrepSearchParams {
         ext_filter: &ext,
-        exclude_dir: &[],
-        exclude: &[],
-        show_lines: false,
-        context_lines: 0,
-        max_results: 50,
-        mode_and: false,
-        count_only: false,
-        search_start: Instant::now(),
-        dir_filter: &None,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_lower: vec![],
+        ..make_params_default()
     };
 
     let mut tokens_with_hits = HashSet::new();
@@ -212,18 +200,8 @@ fn test_build_substring_response_count_only() {
     let index = ContentIndex::default();
     let ctx = HandlerContext::default();
     let params = GrepSearchParams {
-        ext_filter: &None,
-        exclude_dir: &[],
-        exclude: &[],
-        show_lines: false,
-        context_lines: 0,
-        max_results: 50,
-        mode_and: false,
         count_only: true,
-        search_start: Instant::now(),
-        dir_filter: &None,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_lower: vec![],
+        ..make_params_default()
     };
 
     let results = vec![FileScoreEntry {
@@ -255,20 +233,7 @@ fn test_build_substring_response_count_only() {
 fn test_build_substring_response_normal() {
     let index = ContentIndex::default();
     let ctx = HandlerContext::default();
-    let params = GrepSearchParams {
-        ext_filter: &None,
-        exclude_dir: &[],
-        exclude: &[],
-        show_lines: false,
-        context_lines: 0,
-        max_results: 50,
-        mode_and: false,
-        count_only: false,
-        search_start: Instant::now(),
-        dir_filter: &None,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_lower: vec![],
-    };
+    let params = make_params_default();
 
     let results = vec![FileScoreEntry {
         file_path: "test.cs".to_string(),
@@ -332,17 +297,7 @@ fn test_score_normal_token_search_with_ext_filter() {
     let ext = Some("cs".to_string());
     let params = GrepSearchParams {
         ext_filter: &ext,
-        exclude_dir: &[],
-        exclude: &[],
-        show_lines: false,
-        context_lines: 0,
-        max_results: 50,
-        mode_and: false,
-        count_only: false,
-        search_start: Instant::now(),
-        dir_filter: &None,
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_lower: vec![],
+        ..make_params_default()
     };
     let terms = vec!["hello".to_string()];
     let scores = score_normal_token_search(&terms, &index, &params);
@@ -639,7 +594,6 @@ fn test_exclude_dir_matches_segment_not_substring() {
     // because "test" is a substring of "contest" but not a directory segment
     let excl = vec!["test".to_string()];
     let params = GrepSearchParams {
-        exclude_dir: &excl,
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(&excl),
         ..make_params_default()
     };
@@ -665,7 +619,6 @@ fn test_exclude_dir_matches_backslash_segments() {
     // Windows paths use backslashes
     let excl = vec!["test".to_string()];
     let params = GrepSearchParams {
-        exclude_dir: &excl,
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(&excl),
         ..make_params_default()
     };

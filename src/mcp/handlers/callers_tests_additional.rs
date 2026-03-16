@@ -126,39 +126,7 @@ fn test_collect_definition_locations_includes_sql_function() {
 
 // ─── passes_caller_file_filters — additional edge cases ─────────
 
-#[test]
-fn test_passes_caller_file_filters_case_insensitive_ext() {
-    // Extension comparison should be case-insensitive
-    assert!(passes_caller_file_filters("src/File.CS", "cs", &[], &[]));
-    assert!(passes_caller_file_filters("src/File.Cs", "CS", &[], &[]));
-}
 
-#[test]
-fn test_passes_caller_file_filters_combined_exclude() {
-    let exclude_dir = vec!["test".to_string()];
-    let exclude_file = vec!["mock".to_string()];
-    // File in test dir
-    assert!(!passes_caller_file_filters("src/test/Service.cs", "cs", &exclude_dir, &exclude_file));
-    // File matching exclude_file
-    assert!(!passes_caller_file_filters("src/MockService.cs", "cs", &exclude_dir, &exclude_file));
-    // Both excluded
-    assert!(!passes_caller_file_filters("src/test/MockService.cs", "cs", &exclude_dir, &exclude_file));
-    // Neither excluded
-    assert!(passes_caller_file_filters("src/main/Service.cs", "cs", &exclude_dir, &exclude_file));
-}
-
-#[test]
-fn test_passes_caller_file_filters_no_extension() {
-    // File without extension should not match any ext filter
-    assert!(!passes_caller_file_filters("Makefile", "cs", &[], &[]));
-}
-
-#[test]
-fn test_passes_caller_file_filters_ext_with_spaces() {
-    // Comma-separated ext with spaces should be trimmed
-    assert!(passes_caller_file_filters("src/File.cs", "cs, ts", &[], &[]));
-    assert!(passes_caller_file_filters("src/File.ts", " cs , ts ", &[], &[]));
-}
 
 // ─── dedup_caller_tree tests ────────────────────────────────────────
 

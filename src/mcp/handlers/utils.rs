@@ -193,13 +193,6 @@ pub(crate) fn prepare_ext_filter(ext_filter: &str) -> Vec<String> {
         .collect()
 }
 
-/// Check if a file matches pre-split extension filter.
-pub(crate) fn matches_ext_filter_prepared(file_path: &str, ext_list: &[String]) -> bool {
-    std::path::Path::new(file_path)
-        .extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| ext_list.iter().any(|allowed| e.eq_ignore_ascii_case(allowed)))
-}
 
 pub(crate) fn matches_ext_filter(file_path: &str, ext_filter: &str) -> bool {
     std::path::Path::new(file_path)
@@ -215,17 +208,6 @@ pub(crate) fn matches_ext_filter(file_path: &str, ext_filter: &str) -> bool {
 /// Uses segment-based matching: `excludeDir=["test"]` excludes `src/test/file.rs`
 /// but NOT `src/contest/file.rs`. Normalizes backslashes to forward slashes.
 /// This is the canonical implementation — all tools (grep, definitions, callers)
-/// must use this function to ensure consistent behavior.
-/// Convenience wrapper: creates ExcludePatterns on each call.
-/// For hot paths iterating many files, prefer ExcludePatterns::from_dirs() + matches() directly.
-pub(crate) fn path_matches_exclude_dir(file_path: &str, exclude_dirs: &[String]) -> bool {
-    if exclude_dirs.is_empty() {
-        return false;
-    }
-    let patterns = ExcludePatterns::from_dirs(exclude_dirs);
-    let path_norm = file_path.to_lowercase().replace('\\', "/");
-    patterns.matches(&path_norm)
-}
 
 // ─── Set operations ─────────────────────────────────────────────────
 

@@ -836,51 +836,62 @@ fn test_looks_like_file_path_unknown_extension_returns_false() {
     assert!(!looks_like_file_path("file.xyz"));
 }
 
-// ─── path_matches_exclude_dir tests ───────────────────────────────────
+// ─── ExcludePatterns tests ─────────────────────────────────────────────
 
-#[test]
-fn test_path_matches_exclude_dir_segment_match() {
-    // "test" as a directory segment should match
-    let excl = vec!["test".to_string()];
-    assert!(path_matches_exclude_dir("src/test/Service.cs", &excl));
-    assert!(path_matches_exclude_dir("test/Service.cs", &excl));
+/// Helper: normalize path (lowercase + forward slashes) as production code does
+fn normalize_path(p: &str) -> String {
+    p.to_lowercase().replace('\\', "/")
 }
 
 #[test]
-fn test_path_matches_exclude_dir_not_substring() {
+fn test_exclude_patterns_segment_match() {
+    let excl = vec!["test".to_string()];
+    let patterns = ExcludePatterns::from_dirs(&excl);
+    assert!(patterns.matches(&normalize_path("src/test/Service.cs")));
+    assert!(patterns.matches(&normalize_path("test/Service.cs")));
+}
+
+#[test]
+fn test_exclude_patterns_not_substring() {
     // "test" should NOT match "contest" (substring but not segment)
     let excl = vec!["test".to_string()];
-    assert!(!path_matches_exclude_dir("src/contest/Service.cs", &excl));
-    assert!(!path_matches_exclude_dir("src/latest/file.rs", &excl));
+    let patterns = ExcludePatterns::from_dirs(&excl);
+    assert!(!patterns.matches(&normalize_path("src/contest/Service.cs")));
+    assert!(!patterns.matches(&normalize_path("src/latest/file.rs")));
 }
 
 #[test]
-fn test_path_matches_exclude_dir_backslash_paths() {
-    // Windows paths with backslashes
+fn test_exclude_patterns_backslash_paths() {
+    // Windows paths with backslashes — normalize_path converts to forward slashes
     let excl = vec!["test".to_string()];
-    assert!(path_matches_exclude_dir("src\\test\\Service.cs", &excl));
-    assert!(!path_matches_exclude_dir("src\\contest\\Service.cs", &excl));
+    let patterns = ExcludePatterns::from_dirs(&excl);
+    assert!(patterns.matches(&normalize_path("src\\test\\Service.cs")));
+    assert!(!patterns.matches(&normalize_path("src\\contest\\Service.cs")));
 }
 
 #[test]
-fn test_path_matches_exclude_dir_case_insensitive() {
+fn test_exclude_patterns_case_insensitive() {
     let excl = vec!["Test".to_string()];
-    assert!(path_matches_exclude_dir("src/test/Service.cs", &excl));
-    assert!(path_matches_exclude_dir("src/TEST/Service.cs", &excl));
+    let patterns = ExcludePatterns::from_dirs(&excl);
+    assert!(patterns.matches(&normalize_path("src/test/Service.cs")));
+    assert!(patterns.matches(&normalize_path("src/TEST/Service.cs")));
 }
 
 #[test]
-fn test_path_matches_exclude_dir_empty() {
+fn test_exclude_patterns_empty() {
     let excl: Vec<String> = vec![];
-    assert!(!path_matches_exclude_dir("src/test/Service.cs", &excl));
+    let patterns = ExcludePatterns::from_dirs(&excl);
+    assert!(patterns.is_empty());
+    assert!(!patterns.matches(&normalize_path("src/test/Service.cs")));
 }
 
 #[test]
-fn test_path_matches_exclude_dir_multiple() {
+fn test_exclude_patterns_multiple() {
     let excl = vec!["test".to_string(), "mock".to_string()];
-    assert!(path_matches_exclude_dir("src/test/Service.cs", &excl));
-    assert!(path_matches_exclude_dir("src/mock/Helper.cs", &excl));
-    assert!(!path_matches_exclude_dir("src/main/Service.cs", &excl));
+    let patterns = ExcludePatterns::from_dirs(&excl);
+    assert!(patterns.matches(&normalize_path("src/test/Service.cs")));
+    assert!(patterns.matches(&normalize_path("src/mock/Helper.cs")));
+    assert!(!patterns.matches(&normalize_path("src/main/Service.cs")));
 }
 
 #[test]

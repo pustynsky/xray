@@ -22,8 +22,6 @@ use super::HandlerContext;
 /// Eliminates 10+ positional parameters from handle_substring_search and handle_phrase_search.
 pub(crate) struct GrepSearchParams<'a> {
     pub ext_filter: &'a Option<String>,
-    pub exclude_dir: &'a [String],
-    pub exclude: &'a [String],
     pub show_lines: bool,
     pub context_lines: usize,
     pub max_results: usize,
@@ -504,8 +502,6 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         .collect();
     let grep_params = GrepSearchParams {
         ext_filter: &parsed.ext_filter,
-        exclude_dir: &parsed.exclude_dir,
-        exclude: &parsed.exclude,
         show_lines: parsed.show_lines,
         context_lines: parsed.context_lines,
         max_results: parsed.max_results,
