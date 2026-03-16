@@ -114,7 +114,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "ext": { "type": "string", "description": "Filter by extension" },
                     "regex": { "type": "boolean", "description": "Treat as regex" },
                     "ignoreCase": { "type": "boolean", "description": "Case-insensitive" },
-                    "dirsOnly": { "type": "boolean", "description": "Show only directories. When true with wildcard pattern, returns directories sorted by fileCount descending (largest first). Useful for identifying important modules. ext filter is ignored (directories have no extension)" },
+                    "dirsOnly": { "type": "boolean", "description": "Show only directories. Returns directories sorted by fileCount descending (largest first). Useful for identifying important modules. Works with both wildcard (pattern='*') and filtered patterns (e.g., 'Storage,Redis'). ext filter is ignored (directories have no extension)" },
                     "filesOnly": { "type": "boolean", "description": "Show only files" },
                     "countOnly": { "type": "boolean", "description": "Count only" },
                     "maxDepth": { "type": "integer", "description": "Max directory depth for dirsOnly results (1=immediate children only). Default: unlimited" },

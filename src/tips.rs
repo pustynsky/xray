@@ -511,7 +511,7 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
         },
         "xray_fast": {
             "pattern": "Substring or glob. Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor'. Glob: 'Order*', '*Service.cs', 'Use?Service' — auto-converts to regex. No glob chars → substring. '*' or '' with dir → list all. dirsOnly=true for subdirectory listing",
-            "dirsOnly": "When true with wildcard pattern, returns directories sorted by fileCount descending (largest modules first). Each directory entry includes 'fileCount' — total files recursively. Useful for identifying important modules in large repos",
+            "dirsOnly": "Returns directories with fileCount, sorted descending (largest first). Works with wildcard and filtered patterns (e.g., 'Storage,Redis')",
             "maxDepth": "Limit directory depth for dirsOnly results (1=immediate children only, 2=two levels). Default: unlimited. Use maxDepth=1 to avoid truncation on large repos"
         },
         "xray_git_history": {

@@ -237,7 +237,9 @@ fn test_build_substring_response_count_only() {
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     let summary = &v["summary"];
-    assert!(summary.get("matchedTokens").is_some());
+    // Block A fix: matchedTokens should NOT be present in countOnly mode
+    assert!(summary.get("matchedTokens").is_none(),
+        "matchedTokens should be absent in countOnly mode (Block A fix)");
     assert!(summary.get("warnings").is_some());
     assert!(v.get("files").is_none());
 }

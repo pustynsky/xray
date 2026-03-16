@@ -425,6 +425,9 @@ function Analyze-TruncationCause {
     if ($resultText -match 'capped lines' -or $resultText -match 'removed lineContent' -or $resultText -match 'lineContentOmitted') {
         $causes += 'response_size_limit'
     }
+    if ($resultText -match 'capped matchedTokens') {
+        $causes += 'matchedTokens_capped'
+    }
     # Detect when returned < maxResults despite totalResults > returned (byte budget exceeded)
     $returnedMatch = [regex]::Match($resultText, '"returned"\s*:\s*(\d+)')
     $totalMatch = [regex]::Match($resultText, '"totalResults"\s*:\s*(\d+)')
@@ -433,7 +436,8 @@ function Analyze-TruncationCause {
         $total = [int]$totalMatch.Groups[1].Value
         $args_ = $episode._parsed_args
         if ($args_) {
-            $maxR = if ($args_.maxResults) { [int]$args_.maxResults } else { 100 }
+            $maxRProp = $args_.PSObject.Properties['maxResults']
+            $maxR = if ($maxRProp -and $maxRProp.Value) { [int]$maxRProp.Value } else { 100 }
             if ($returned -lt $maxR -and $total -gt $returned) {
                 # Truncated below maxResults — byte budget was the limit
                 if ($causes -notcontains 'response_size_limit') {
@@ -446,14 +450,14 @@ function Analyze-TruncationCause {
     $args_ = $episode._parsed_args
     if ($args_) {
         # Wide file scope (no specific file or very broad path)
-        if ($args_.file) {
+        if ($args_.PSObject.Properties['file']) {
             $fileVal = "$($args_.file)"
             $commaCount = ($fileVal.ToCharArray() | Where-Object { $_ -eq ',' }).Count
             if ($commaCount -ge 3) { $causes += "wide_file_scope ($($commaCount + 1) paths)" }
             if ($fileVal -notmatch '/' -or $fileVal.Length -lt 20) { $causes += "broad_directory" }
         }
         # Large maxResults
-        if ($args_.maxResults -and [int]$args_.maxResults -gt 50) {
+        if ($args_.PSObject.Properties['maxResults'] -and [int]$args_.maxResults -gt 50) {
             $causes += "high_maxResults ($($args_.maxResults))"
         }
         # NOTE: no_kind_filter and no_name_filter removed — they are noise for exploration sessions
@@ -705,6 +709,14 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
         $responseSummary = Extract-ResponseSummary $resultContent
         $responseSize = [System.Text.Encoding]::UTF8.GetByteCount($resultContent)
 
+        # Extract searchMode and searchTimeMs (Block A)
+        $searchMode = ''
+        $searchTimeMs = 0.0
+        $smMatch = [regex]::Match($resultContent, '"searchMode"\s*:\s*"([^"]+)"')
+        if ($smMatch.Success) { $searchMode = $smMatch.Groups[1].Value }
+        $stMatch = [regex]::Match($resultContent, '"searchTimeMs"\s*:\s*([\d.]+)')
+        if ($stMatch.Success) { $searchTimeMs = [double]$stMatch.Groups[1].Value }
+
         # Extract estimatedTokens from response (improvement 2), with fallback to bytes/4
         $estimatedTokens = 0
         $tokensMatch = [regex]::Match($resultContent, '"estimatedTokens"\s*:\s*(\d+)')
@@ -734,6 +746,22 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
                 type    = $acType
                 reason  = $acReason
             })
+        }
+
+        # Detect phrase-mode auto-switch as auto-correction (Block B)
+        if ($searchMode -eq 'phrase-or') {
+            $smNoteMatch = [regex]::Match($resultContent, '"searchModeNote"\s*:\s*"([^"]+)"')
+            $smNote = if ($smNoteMatch.Success) { $smNoteMatch.Groups[1].Value } else { 'phrase-or auto-switch' }
+            $autoCorrections.Add(@{
+                episode = $episodes.Count + 1
+                tool    = $call.tool
+                type    = 'phrase_mode_auto_switch'
+                reason  = $smNote
+            })
+            $autoCorrectionInfo = @{
+                type   = 'phrase_mode_auto_switch'
+                reason = $smNote
+            }
         }
 
         # Count bodyOmitted entries (improvement 4)
@@ -799,6 +827,8 @@ for ($i = 0; $i -lt $turns.Count; $i++) {
             auto_correction     = $autoCorrectionInfo
             body_omitted_count  = $bodyOmittedCount
             term_breakdown      = $termBreakdown
+            search_mode         = $searchMode
+            search_time_ms      = $searchTimeMs
             _result_raw         = $resultContent
             _call_args          = $call.args
             _parsed_args        = $parsedArgs
@@ -829,6 +859,14 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
 
     # truncated_response
     if ($ep.response_status -eq 'partial') { $ep.tags.Add('truncated_response') }
+
+    # server_bug_countOnly_truncated: countOnly=true but response truncated (Block D)
+    if ($ep.response_status -eq 'partial' -and $ep._parsed_args) {
+        $co = $ep._parsed_args.PSObject.Properties['countOnly']
+        if ($co -and $co.Value -eq $true) {
+            $ep.tags.Add('server_bug_countOnly_truncated')
+        }
+    }
 
     # heavy_response: large non-truncated response (improvement 3)
     if ($ep.response_status -eq 'success' -and $ep.response_size_bytes -gt 20000) {
@@ -998,7 +1036,7 @@ $selfAnalysis = @{}
 
 if ($hasCompletion) {
     # Detect self-analysis sections
-    if ($completionText -match '(?i)(suboptimal|session analysis|tool improvement|stats)') {
+    if ($completionText -match '(?i)(suboptimal|session analysis|tool improvement|stats|phrase.mode|phrase-or)') {
         $hasSelfAnalysis = $true
 
         # Extract suboptimal count
@@ -1029,6 +1067,21 @@ if ($hasCompletion) {
         # Fallback: if hasSelfAnalysis but no specific patterns matched, extract raw text
         if ($selfAnalysis.Count -eq 0) {
             $selfAnalysis['raw_text'] = (Summarize-Text $completionText 500)
+        }
+    }
+}
+
+# Block E: Self-analysis in text before attempt_completion (outside the tag)
+if (-not $hasSelfAnalysis) {
+    for ($t = $turns.Count - 1; $t -ge 0; $t--) {
+        if ($turns[$t].role -eq 'assistant' -and $turns[$t].content -match '<attempt_completion>') {
+            $fullText = $turns[$t].content
+            if ($fullText -match '(?i)(suboptimal|redundan|phrase.mode|phrase-or)' -or $fullText -match '(неэффективн|медленн|избыточн)') {
+                $hasSelfAnalysis = $true
+                $beforeCompletion = ($fullText -split '<attempt_completion>')[0]
+                $selfAnalysis['raw_text'] = (Summarize-Text $beforeCompletion.Trim() 500)
+                break
+            }
         }
     }
 }
@@ -1072,6 +1125,12 @@ foreach ($group in $toolGroups) {
     $totalTokens = ($toolEps | Measure-Object -Property estimated_tokens -Sum).Sum
     $totalBodyOmitted = ($toolEps | Measure-Object -Property body_omitted_count -Sum).Sum
 
+    # Search timing metrics (Block A)
+    $searchTimeEps = @($toolEps | Where-Object { $_.search_time_ms -gt 0 })
+    $avgSearchTimeMs = if ($searchTimeEps.Count -gt 0) { [math]::Round(($searchTimeEps | Measure-Object -Property search_time_ms -Average).Average, 1) } else { 0 }
+    $maxSearchTimeMs = if ($searchTimeEps.Count -gt 0) { [math]::Round(($searchTimeEps | Measure-Object -Property search_time_ms -Maximum).Maximum, 1) } else { 0 }
+    $phraseModeCount = @($toolEps | Where-Object { $_.search_mode -eq 'phrase-or' }).Count
+
     $toolScorecard[$toolName] = @{
         total_calls                 = $toolEps.Count
         result_used_count           = $usedCount
@@ -1090,6 +1149,9 @@ foreach ($group in $toolGroups) {
         heavy_response_count        = $heavyCount
         total_estimated_tokens      = $totalTokens
         total_body_omitted          = [int]$totalBodyOmitted
+        avg_search_time_ms          = $avgSearchTimeMs
+        max_search_time_ms          = $maxSearchTimeMs
+        phrase_mode_count           = $phraseModeCount
     }
 }
 
@@ -1271,6 +1333,21 @@ if ($dqComplaints.Count -gt 0) {
     $recommendations += "[data_quality] Model flagged data quality issues $($dqComplaints.Count) time(s) in thinking (tools: $dqTools). Review thinking_before content for specific complaints."
 }
 
+# countOnly + truncation = server bug (Block D)
+$countOnlyTruncated = @($episodes | Where-Object { $_.tags -contains 'server_bug_countOnly_truncated' })
+if ($countOnlyTruncated.Count -gt 0) {
+    $recommendations += "[server_bug] $($countOnlyTruncated.Count) response(s) truncated despite countOnly=true. Server should suppress matchedTokens when countOnly is set."
+}
+
+# Phrase-mode timing recommendation (Block A)
+$phraseOrEps = @($episodes | Where-Object { $_.search_mode -eq 'phrase-or' })
+$substringEps = @($episodes | Where-Object { $_.search_time_ms -gt 0 -and $_.search_mode -ne 'phrase-or' })
+if ($phraseOrEps.Count -gt 0) {
+    $avgPhraseMs = if ($phraseOrEps.Count -gt 0) { [math]::Round(($phraseOrEps | Measure-Object -Property search_time_ms -Average).Average, 1) } else { 0 }
+    $avgSubMs = if ($substringEps.Count -gt 0) { [math]::Round(($substringEps | Measure-Object -Property search_time_ms -Average).Average, 1) } else { 0 }
+    $recommendations += "[phrase_mode] $($phraseOrEps.Count) call(s) used phrase-or mode (avg ${avgPhraseMs}ms vs ${avgSubMs}ms for substring). Phrase-or is 100-6000x slower — consider term tokenization or quoting guidance."
+}
+
 # Forced enumeration chains
 if ($forcedEnumerationChains.Count -gt 0) {
     $totalForcedCalls = ($forcedEnumerationChains | Measure-Object -Property length -Sum).Sum
@@ -1322,6 +1399,8 @@ foreach ($ep in $episodes) {
     if ($ep.auto_correction) { $clean['auto_correction'] = $ep.auto_correction }
     if ($ep.body_omitted_count -gt 0) { $clean['body_omitted_count'] = $ep.body_omitted_count }
     if ($ep.term_breakdown) { $clean['term_breakdown'] = $ep.term_breakdown }
+    if ($ep.search_mode) { $clean['search_mode'] = $ep.search_mode }
+    if ($ep.search_time_ms -gt 0) { $clean['search_time_ms'] = $ep.search_time_ms }
     $cleanEpisodes += $clean
 }
 
@@ -1463,6 +1542,11 @@ foreach ($ep in $cleanEpisodes) {
     }
     [void]$md.AppendLine("- **Response size**: $sizeStr")
     [void]$md.AppendLine("- **Summary**: $($ep.response_summary)")
+    if ($ep.ContainsKey('search_time_ms') -and $ep.search_time_ms -gt 0) {
+        $slowEmoji = if ($ep.search_time_ms -gt 100) { ' ⏱️ slow' } else { '' }
+        $modeStr = if ($ep.ContainsKey('search_mode') -and $ep.search_mode) { " (mode: $($ep.search_mode))" } else { '' }
+        [void]$md.AppendLine("- **Search time**: $([math]::Round($ep.search_time_ms, 1))ms${modeStr}${slowEmoji}")
+    }
     if ($ep.ContainsKey('auto_correction') -and $ep.auto_correction) {
         [void]$md.AppendLine("- **Auto-correction**: $($ep.auto_correction.type) — $($ep.auto_correction.reason)")
     }

@@ -259,8 +259,9 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let ext_ignored_for_dirs = dirs_only && ext.is_some();
     let effective_ext = if dirs_only { &None } else { &ext };
 
-    // Build file-count-per-directory map (only when dirsOnly + wildcard, not count_only)
-    let file_counts: HashMap<&str, usize> = if dirs_only && is_wildcard && !count_only {
+    // Build file-count-per-directory map for any dirsOnly request (not just wildcard).
+    // The traversal is O(N) over index entries (~1ms for 66K files) — negligible cost.
+    let file_counts: HashMap<&str, usize> = if dirs_only && !count_only {
         let root_normalized = index.root.replace('\\', "/");
         let dir_normalized = dir.replace('\\', "/");
         let server_dir_normalized = ctx.server_dir().replace('\\', "/");
@@ -372,7 +373,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         if matched {
             match_count += 1;
             if !count_only {
-                if dirs_only && is_wildcard {
+                if dirs_only {
                     let fc = file_counts.get(entry.path.as_str()).copied().unwrap_or(0);
                     results.push(json!({
                         "path": entry.path,
@@ -394,17 +395,16 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // ── maxResults truncation (before sorting for efficiency, but we sort first for quality) ──
 
     // ── Sorting ──
-    // For wildcard + dirsOnly: sort by fileCount descending (largest modules first)
-    if !count_only && is_wildcard && dirs_only {
+    // For dirsOnly: sort by fileCount descending (largest modules first)
+    if !count_only && dirs_only {
         results.sort_by(|a, b| {
             let fc_b = b["fileCount"].as_u64().unwrap_or(0);
             let fc_a = a["fileCount"].as_u64().unwrap_or(0);
             fc_b.cmp(&fc_a)
         });
-    }
+    } else if !count_only && !is_wildcard {
     // Relevance ranking: exact match first, then prefix, then contains
     // Skip ranking for wildcard (no search terms to rank against)
-    if !count_only && !is_wildcard {
         results.sort_by(|a, b| {
             let path_a = a["path"].as_str().unwrap_or("");
             let path_b = b["path"].as_str().unwrap_or("");

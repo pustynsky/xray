@@ -23,9 +23,9 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 
 - Each directory includes `fileCount` (integer ≥ 0)
 - Sorted by `fileCount` descending (largest modules first)
-- Non-wildcard queries do NOT include `fileCount`
+- `fileCount` is included for all `dirsOnly` requests (wildcard and filtered patterns)
 
-**Unit tests:** `test_xray_fast_dirsonly_wildcard_filecount`, `test_xray_fast_dirsonly_non_wildcard_no_filecount`
+**Unit tests:** `test_xray_fast_dirsonly_wildcard_filecount`, `test_xray_fast_dirsonly_non_wildcard_has_filecount`, `test_xray_fast_multi_pattern_dirs_only_filecount`
 
 **Status:** ✅ Implemented
 

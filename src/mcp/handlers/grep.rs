@@ -631,11 +631,17 @@ fn auto_switch_to_phrase_if_needed(
     if let Some(text) = result.content.first_mut().map(|c| &mut c.text)
         && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
             if let Some(summary) = output.get_mut("summary") {
-                summary["searchModeNote"] = serde_json::Value::String(
+                let note = if has_punctuation {
+                    format!("{} — auto-switched to phrase search (~100x slower). \
+                     Tip: use last segment only for faster substring search \
+                     (e.g., 'SqlClient' instead of 'System.Data.SqlClient', \
+                     'Blobs' instead of 'Azure.Storage.Blobs')", reason)
+                } else {
                     format!("{} — auto-switched to phrase search \
                      (substring mode operates on individual tokens which only contain \
-                     alphanumeric characters and underscores)", reason),
-                );
+                     alphanumeric characters and underscores)", reason)
+                };
+                summary["searchModeNote"] = serde_json::Value::String(note);
             }
             *text = json_to_string(&output);
         }
@@ -773,7 +779,9 @@ fn build_substring_response(
             total_files, total_occurrences, &json!(raw_terms),
             &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false,
         );
-        summary["matchedTokens"] = json!(all_matched_tokens);
+        // Don't include matchedTokens in countOnly mode — the caller only needs
+        // totalFiles/totalOccurrences. Including tokens wastes bytes and can trigger
+        // false truncation ("capped matchedTokens to 20") that confuses LLMs.
         if !warnings.is_empty() {
             summary["warnings"] = json!(warnings);
         }

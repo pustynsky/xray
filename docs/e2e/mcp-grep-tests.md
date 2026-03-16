@@ -188,6 +188,23 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 - `summary.searchMode` = `"phrase"` (auto-switched)
 - `summary.searchModeNote` contains `"non-token characters"` and `"auto-switched"`
+- When triggered by punctuation (dots/brackets), `searchModeNote` contains `"Tip:"` and `"~100x slower"`
+- When triggered by spaces only, `searchModeNote` does NOT contain `"Tip:"` (phrase is correct for spaces)
+
+**Unit tests:** `test_auto_switch_phrase_hint_is_actionable`
+
+### T-COUNTONLY-NO-TOKENS: `serve` — xray_grep countOnly=true does NOT include matchedTokens
+
+**Input:** `{"terms": "service", "substring": true, "countOnly": true}`
+
+**Expected:**
+
+- `summary.totalFiles` ≥ 1
+- `summary.totalOccurrences` ≥ 1
+- `summary.matchedTokens` is ABSENT (not just empty)
+- No `responseTruncated` from matchedTokens capping
+
+**Unit tests:** `test_substring_count_only_no_matched_tokens`, `test_substring_non_count_only_still_has_matched_tokens`
 - Alphanumeric+underscore terms stay in substring mode
 
 **Unit tests:** `test_auto_switch_with_punctuation_returns_some`, `test_has_non_token_chars_brackets`

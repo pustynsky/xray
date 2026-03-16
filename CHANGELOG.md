@@ -4,6 +4,16 @@
 
 ### Bug Fixes
 
+- **`xray_grep` substring `countOnly=true` included unnecessary `matchedTokens`** — When `xray_grep` was called with `countOnly=true` in substring mode, the response still included the `matchedTokens` array. This wasted ~200-1000 bytes and could trigger false truncation ("capped matchedTokens to 20") that confused LLMs into thinking results were incomplete. Fix: `build_substring_response()` no longer emits `matchedTokens` when `count_only=true`. The normal token search mode (`build_grep_response`) was already correct. 2 new tests + 1 existing test updated.
+
+- **`xray_grep` phrase auto-switch hint not actionable** — When dotted namespace terms (e.g., `System.Data.SqlClient`) triggered auto-switch to phrase mode (~100x slower), the `searchModeNote` only explained the mechanism but didn't tell the LLM what to do. LLMs continued submitting dotted terms across multiple calls. Fix: when punctuation triggers the auto-switch, the hint now includes actionable advice: "Tip: use last segment only for faster substring search (e.g., 'SqlClient' instead of 'System.Data.SqlClient')". Space-only auto-switches (e.g., "public class") retain the explanatory note since phrase search is the correct semantic for those queries.
+
+### Features
+
+- **`xray_fast` `dirsOnly` now includes `fileCount` for all patterns** — Previously, `fileCount` was only included in `dirsOnly` responses when using wildcard pattern (`pattern='*'`). Now `fileCount` is included for any `dirsOnly` request, including filtered patterns like `pattern='Storage,Redis'`. Results are sorted by `fileCount` descending. The fileCount traversal is O(N) over index entries (~1ms for 66K files) — negligible cost. Tool description updated in `mod.rs` and `tips.rs`. 1 new test + 1 existing test updated.
+
+### Bug Fixes
+
 - **`xray_fast` stale file-list index after file creation/deletion** — `xray_fast` now uses an in-memory file-list index with dirty-flag invalidation, ensuring newly created and deleted files are always visible. Previously, the file-list index (used by `xray_fast`) was loaded from disk on every call and never updated by the file watcher or `xray_reindex`, causing stale results until server restart. Four root causes fixed: (1) FileIndex added to `HandlerContext` as `Arc<RwLock<Option<FileIndex>>>` with lazy initialization; (2) Watcher sets `file_index_dirty` flag on ANY file create/delete event BEFORE the `--ext` filter (FileIndex indexes all files, not just `--ext`); (3) `handle_xray_fast` checks dirty flag → rebuilds from filesystem (~35ms) → caches in memory → resets flag; (4) `handle_xray_reindex` invalidates the cache (sets to `None` + dirty). Outside-server-dir requests use disk-cached indexes (load or build+save) for fast repeated access. `FileIndex` and `FileEntry` structs now derive `Clone`. 3 new unit tests (dirty-flag rebuild, deletion detection, None invalidation) + live E2E verification (create → search → delete → search). All 1769 unit tests + 68 E2E tests pass.
 
 ### Bug Fixes (Audit 2026-03-16)

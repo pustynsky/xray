@@ -1181,9 +1181,11 @@ fn test_substring_matched_tokens_empty_when_no_files_match() {
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
 
     assert_eq!(output["summary"]["totalFiles"], 0);
-    let matched_tokens = output["summary"]["matchedTokens"].as_array().unwrap();
-    assert!(matched_tokens.is_empty(),
-        "BUG-7: matchedTokens should be empty when 0 files match dir filter. Got: {:?}", matched_tokens);
+    // With countOnly=true, matchedTokens should be absent from the response
+    // (Block A fix: suppress matchedTokens in countOnly mode to avoid false truncation).
+    assert!(output["summary"].get("matchedTokens").is_none(),
+        "matchedTokens should be absent in countOnly mode. Got: {:?}",
+        output["summary"]["matchedTokens"]);
 }
 // ─── Substring auto-switch to phrase for spaced terms tests ─────────
 
@@ -1603,4 +1605,94 @@ fn test_grep_with_relative_subdir_filter() {
     assert!(!r_sub.is_error, "Relative dir should work for grep: {}", r_sub.content[0].text);
     let o_sub: Value = serde_json::from_str(&r_sub.content[0].text).unwrap();
     assert_eq!(o_sub["summary"]["totalFiles"], 1, "Should find 1 file in subA with relative dir");
+}
+
+// ─── Block A: countOnly should NOT include matchedTokens ─────────
+
+/// Block A regression: substring countOnly=true must NOT include matchedTokens in response.
+/// Before fix, matchedTokens was always emitted, causing false truncation warnings.
+#[test]
+fn test_substring_count_only_no_matched_tokens() {
+    let ctx = make_substring_ctx(
+        vec![
+            ("userservice", 0, vec![5]),
+            ("orderservice", 1, vec![10]),
+        ],
+        vec![
+            "C:\\project\\UserService.cs",
+            "C:\\project\\OrderService.cs",
+        ],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": "service",
+        "substring": true,
+        "countOnly": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // countOnly should still return counts
+    assert_eq!(output["summary"]["totalFiles"], 2);
+    assert!(output["summary"]["totalOccurrences"].as_u64().unwrap() >= 2);
+
+    // But matchedTokens should be absent
+    assert!(output["summary"].get("matchedTokens").is_none(),
+        "matchedTokens should NOT be present in countOnly response. Got: {:?}",
+        output["summary"]["matchedTokens"]);
+
+    // files array should also be absent
+    assert!(output.get("files").is_none(),
+        "files should not be present in countOnly mode");
+}
+
+/// Block A: non-countOnly substring should still include matchedTokens (regression guard).
+#[test]
+fn test_substring_non_count_only_still_has_matched_tokens() {
+    let ctx = make_substring_ctx(
+        vec![
+            ("userservice", 0, vec![5]),
+        ],
+        vec![
+            "C:\\project\\UserService.cs",
+        ],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": "service",
+        "substring": true
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // matchedTokens SHOULD be present in non-countOnly mode
+    let tokens = output["summary"]["matchedTokens"].as_array()
+        .expect("matchedTokens should be present in non-countOnly response");
+    assert!(!tokens.is_empty(), "matchedTokens should not be empty");
+}
+
+// ─── Block B: auto-switch hint should be actionable ─────────
+
+/// Block B: when dotted terms trigger phrase auto-switch, the hint should contain
+/// actionable advice ("Tip: use last segment only") not just explain the mechanism.
+#[test]
+fn test_auto_switch_phrase_hint_is_actionable() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // Use a dotted namespace term that triggers auto-switch
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": "System.Data.SqlClient"
+    }));
+    assert!(!result.is_error, "Dotted term grep should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let note = output["summary"]["searchModeNote"].as_str()
+        .expect("searchModeNote should exist for auto-switched phrase search");
+
+    // Hint should contain actionable advice
+    assert!(note.contains("Tip:"),
+        "searchModeNote should contain 'Tip:' with actionable advice. Got: {}", note);
+    assert!(note.contains("SqlClient"),
+        "searchModeNote should contain example like 'SqlClient'. Got: {}", note);
+    assert!(note.contains("~100x slower"),
+        "searchModeNote should warn about slowdown (~100x slower). Got: {}", note);
+
+    cleanup_tmp(&tmp);
 }

@@ -202,6 +202,85 @@ fn test_xray_fast_glob_ranking_uses_literal_prefix() {
     cleanup_tmp(&tmp_dir);
 }
 
+
+// ─── Block D: multi-pattern dirsOnly should include fileCount ─────────
+
+/// Block D: xray_fast with multi-pattern + dirsOnly should include fileCount
+/// for each matched directory and sort by fileCount descending.
+#[test]
+fn test_xray_fast_multi_pattern_dirs_only_filecount() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_mp_fc_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create directories with different file counts
+    let storage_dir = tmp_dir.join("Storage");
+    let redis_dir = tmp_dir.join("Redis");
+    let other_dir = tmp_dir.join("OtherModule");
+    let _ = std::fs::create_dir_all(&storage_dir);
+    let _ = std::fs::create_dir_all(&redis_dir);
+    let _ = std::fs::create_dir_all(&other_dir);
+
+    // Storage: 3 files, Redis: 1 file, OtherModule: 2 files
+    for name in &["BlobClient.cs", "TableClient.cs", "QueueClient.cs"] {
+        let mut f = std::fs::File::create(storage_dir.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+    { let mut f = std::fs::File::create(redis_dir.join("RedisCache.cs")).unwrap(); writeln!(f, "// redis").unwrap(); }
+    for name in &["Helper.cs", "Config.cs"] {
+        let mut f = std::fs::File::create(other_dir.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let file_index = crate::build_index(&crate::IndexArgs {
+        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+    }).unwrap();
+    let idx_base = tmp_dir.join(".index");
+    let _ = crate::save_index(&file_index, &idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // Multi-pattern: find Storage and Redis dirs only
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "Storage,Redis",
+        "dirsOnly": true
+    }));
+    assert!(!result.is_error, "Multi-pattern dirsOnly should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+
+    // Should find exactly 2 directories (Storage and Redis)
+    assert_eq!(files.len(), 2, "Should find 2 dirs (Storage, Redis), got: {:?}", files);
+
+    // Each should have fileCount
+    for entry in files {
+        assert!(entry.get("fileCount").is_some(),
+            "Multi-pattern dirsOnly should include fileCount. Entry: {}", entry);
+    }
+
+    // Sorted by fileCount descending: Storage (3) should come before Redis (1)
+    let fc_first = files[0]["fileCount"].as_u64().unwrap();
+    let fc_second = files[1]["fileCount"].as_u64().unwrap();
+    assert!(fc_first >= fc_second,
+        "Results should be sorted by fileCount descending. Got: {} then {}", fc_first, fc_second);
+    assert_eq!(fc_first, 3, "Storage should have 3 files");
+    assert_eq!(fc_second, 1, "Redis should have 1 file");
+
+    // OtherModule should NOT be in results (not matched by pattern)
+    let paths: Vec<&str> = files.iter().map(|f| f["path"].as_str().unwrap()).collect();
+    assert!(!paths.iter().any(|p| p.contains("OtherModule")),
+        "OtherModule should not be in results. Got: {:?}", paths);
+
+    cleanup_tmp(&tmp_dir);
+}
 #[test]
 fn test_xray_fast_dirs_only_and_files_only_mutual_exclusion() {
     // B1 fix: passing both filesOnly and dirsOnly should return an error
@@ -903,9 +982,9 @@ fn test_xray_fast_dirsonly_wildcard_filecount() {
     cleanup_tmp(&tmp_dir);
 }
 
-/// Non-wildcard dirsOnly does NOT add fileCount.
+/// Block D: non-wildcard dirsOnly now ALSO includes fileCount (previously wildcard-only).
 #[test]
-fn test_xray_fast_dirsonly_non_wildcard_no_filecount() {
+fn test_xray_fast_dirsonly_non_wildcard_has_filecount() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -936,10 +1015,12 @@ fn test_xray_fast_dirsonly_non_wildcard_no_filecount() {
     let files = output["files"].as_array().unwrap();
     assert!(!files.is_empty(), "Should find Services directory");
 
-    // Non-wildcard: should NOT have fileCount
+    // Block D fix: non-wildcard dirsOnly should now ALSO have fileCount
     for entry in files {
-        assert!(entry.get("fileCount").is_none(),
-            "Non-wildcard dirsOnly should not have fileCount, got: {}", entry);
+        assert!(entry.get("fileCount").is_some(),
+            "Non-wildcard dirsOnly should have fileCount (Block D fix), got: {}", entry);
+        assert!(entry["fileCount"].as_u64().unwrap() >= 1,
+            "Services dir should have at least 1 file, got: {}", entry["fileCount"]);
     }
 
     cleanup_tmp(&tmp_dir);
