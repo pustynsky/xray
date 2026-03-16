@@ -19,6 +19,8 @@ fn make_params<'a>(
         count_only: false,
         search_start: Instant::now(),
         dir_filter,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(exclude_dir),
+        exclude_lower: exclude.iter().map(|s| s.to_lowercase()).collect(),
     }
 }
 
@@ -438,6 +440,8 @@ fn test_build_grep_response_count_only() {
         count_only: true,
         search_start: Instant::now(),
         dir_filter: &None,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: vec![],
     };
 
     let results = vec![FileScoreEntry {
@@ -472,6 +476,8 @@ fn test_build_grep_response_with_files() {
         count_only: false,
         search_start: Instant::now(),
         dir_filter: &None,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: vec![],
     };
 
     let results = vec![FileScoreEntry {

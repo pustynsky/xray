@@ -1,6 +1,5 @@
 //! xray_fast handler: pre-built file name index search.
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::time::Instant;
 
@@ -105,9 +104,8 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         let dir_canon = std::fs::canonicalize(&dir)
             .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
             .unwrap_or_else(|_| dir.replace('\\', "/").to_lowercase());
-        let srv_canon = std::fs::canonicalize(&server_dir)
-            .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
-            .unwrap_or_else(|_| server_dir.replace('\\', "/").to_lowercase());
+        // Use cached canonical server_dir (avoids ~1-5ms syscall per request)
+        let srv_canon = ctx.canonical_server_dir().to_lowercase();
         let srv_prefix = format!("{}/", srv_canon.trim_end_matches('/'));
         dir_canon != srv_canon && !dir_canon.starts_with(&srv_prefix)
     };
@@ -259,55 +257,9 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let ext_ignored_for_dirs = dirs_only && ext.is_some();
     let effective_ext = if dirs_only { &None } else { &ext };
 
-    // Build file-count-per-directory map for any dirsOnly request (not just wildcard).
-    // The traversal is O(N) over index entries (~1ms for 66K files) — negligible cost.
-    let file_counts: HashMap<&str, usize> = if dirs_only && !count_only {
-        let root_normalized = index.root.replace('\\', "/");
-        let dir_normalized = dir.replace('\\', "/");
-        let server_dir_normalized = ctx.server_dir().replace('\\', "/");
-        // Resolve dir_prefix to match absolute paths in the index.
-        // Bug fix: raw `dir` can be relative (e.g. "src") while entry paths are
-        // absolute (e.g. "C:/Repos/project/src/..."). Also handles the case
-        // where load_index built an index FOR the subdir (root == resolved dir).
-        let dir_trimmed = dir_normalized.trim_matches('/');
-        let dir_prefix = if dir_normalized == root_normalized
-            || dir_normalized == server_dir_normalized
-            || dir_normalized == "."
-            || root_normalized.ends_with(&format!("/{}", dir_trimmed))
-        {
-            // dir IS the root of this index (or equivalent) — no filtering
-            String::new()
-        } else if dir_normalized.starts_with(&root_normalized) {
-            // Already absolute path within root
-            format!("{}/", dir_normalized)
-        } else {
-            // Relative path — resolve against index root
-            format!(
-                "{}/{}/",
-                root_normalized.trim_end_matches('/'),
-                dir_trimmed
-            )
-        };
-        let mut counts: HashMap<&str, usize> = HashMap::new();
-        for entry in &index.entries {
-            if entry.is_dir { continue; }
-            let path = entry.path.as_str();
-            // Only count files under the requested dir
-            if !dir_prefix.is_empty() && !path.starts_with(dir_prefix.as_str()) {
-                continue;
-            }
-            // Walk up all ancestor directories and increment their counts
-            let mut pos = path.len();
-            while let Some(slash) = path[..pos].rfind('/') {
-                let ancestor = &path[..slash];
-                *counts.entry(ancestor).or_insert(0) += 1;
-                pos = slash;
-            }
-        }
-        counts
-    } else {
-        HashMap::new()
-    };
+    // fileCount is computed AFTER the main loop (two-pass approach).
+    // This avoids O(N × depth) HashMap operations for ALL directories when only
+    // ~29 matched directories actually need counts. See Finding 1 in performance audit.
 
     // Compute base depth for maxDepth filtering.
     // When subdir_entry_filter is active (parent index reused for subdirectory),
@@ -374,12 +326,11 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
             match_count += 1;
             if !count_only {
                 if dirs_only {
-                    let fc = file_counts.get(entry.path.as_str()).copied().unwrap_or(0);
                     results.push(json!({
                         "path": entry.path,
                         "size": entry.size,
                         "isDir": true,
-                        "fileCount": fc,
+                        "fileCount": 0,
                     }));
                 } else {
                     results.push(json!({
@@ -393,6 +344,22 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     }
 
     // ── maxResults truncation (before sorting for efficiency, but we sort first for quality) ──
+
+    // ── Two-pass fileCount: count files only for matched directories ──
+    // Instead of building a HashMap for ALL ~10K directories (O(N × depth)),
+    // we only count files for the ~29 matched directories (O(matched × N)).
+    // This reduces ~435ms to ~30ms on 100K-file repos.
+    if dirs_only && !count_only && !results.is_empty() {
+        for result in &mut results {
+            if let Some(dir_path) = result["path"].as_str() {
+                let prefix = format!("{}/", dir_path);
+                let count = index.entries.iter()
+                    .filter(|e| !e.is_dir && e.path.starts_with(&prefix))
+                    .count();
+                result["fileCount"] = json!(count);
+            }
+        }
+    }
 
     // ── Sorting ──
     // For dirsOnly: sort by fileCount descending (largest modules first)

@@ -11,7 +11,8 @@ use crate::{read_file_lossy, tokenize, ContentIndex};
 use crate::index::build_trigram_index;
 use code_xray::generate_trigrams;
 
-use super::utils::{
+#[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
+use super::utils::{self,
     build_line_content_from_matches, inject_branch_warning, is_under_dir, json_to_string,
     matches_ext_filter, sorted_intersect, validate_search_dir,
 };
@@ -30,6 +31,10 @@ pub(crate) struct GrepSearchParams<'a> {
     pub count_only: bool,
     pub search_start: Instant,
     pub dir_filter: &'a Option<String>,
+    /// Pre-computed exclude dir patterns (avoids per-file allocations)
+    pub exclude_patterns: super::utils::ExcludePatterns,
+    /// Pre-lowercased exclude path substrings
+    pub exclude_lower: Vec<String>,
 }
 
 pub(crate) struct FileScoreEntry {
@@ -150,12 +155,21 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
     if let Some(ext) = params.ext_filter
         && !matches_ext_filter(file_path, ext) { return false; }
 
-    // Exclude dir filter — segment-based matching (shared with definitions and callers)
-    if super::utils::path_matches_exclude_dir(file_path, params.exclude_dir) { return false; }
+    // Pre-compute lowercased + normalized path once for all exclude checks
+    let needs_lower = !params.exclude_patterns.is_empty() || !params.exclude_lower.is_empty();
+    let path_lower = if needs_lower {
+        file_path.to_lowercase().replace('\\', "/")
+    } else {
+        String::new()
+    };
 
-    // Exclude pattern filter
-    if params.exclude.iter().any(|excl| {
-        file_path.to_lowercase().contains(&excl.to_lowercase())
+    // Exclude dir filter — use pre-computed patterns (zero per-file allocations for patterns)
+    if !params.exclude_patterns.is_empty()
+        && params.exclude_patterns.matches(&path_lower) { return false; }
+
+    // Exclude pattern filter — use pre-lowercased excludes
+    if params.exclude_lower.iter().any(|excl| {
+        path_lower.contains(excl.as_str())
     }) { return false; }
 
     true
@@ -484,6 +498,10 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         Err(e) => return ToolCallResult::error(format!("Failed to acquire index lock: {}", e)),
     };
 
+    let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&parsed.exclude_dir);
+    let exclude_lower: Vec<String> = parsed.exclude.iter()
+        .map(|s| s.to_lowercase())
+        .collect();
     let grep_params = GrepSearchParams {
         ext_filter: &parsed.ext_filter,
         exclude_dir: &parsed.exclude_dir,
@@ -495,6 +513,8 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         count_only: parsed.count_only,
         search_start,
         dir_filter: &parsed.dir_filter,
+        exclude_patterns,
+        exclude_lower,
     };
 
     // --- Substring search mode

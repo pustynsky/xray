@@ -14,6 +14,8 @@ fn make_params_default<'a>() -> GrepSearchParams<'a> {
         count_only: false,
         search_start: Instant::now(),
         dir_filter: &None,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: vec![],
     }
 }
 
@@ -152,7 +154,10 @@ fn test_score_token_postings_filters_applied() {
         count_only: false,
         search_start: Instant::now(),
         dir_filter: &None,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: vec![],
     };
+
     let mut tokens_with_hits = HashSet::new();
     let mut file_scores = HashMap::new();
     let mut file_matched_terms = HashMap::new();
@@ -217,6 +222,8 @@ fn test_build_substring_response_count_only() {
         count_only: true,
         search_start: Instant::now(),
         dir_filter: &None,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: vec![],
     };
 
     let results = vec![FileScoreEntry {
@@ -259,6 +266,8 @@ fn test_build_substring_response_normal() {
         count_only: false,
         search_start: Instant::now(),
         dir_filter: &None,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: vec![],
     };
 
     let results = vec![FileScoreEntry {
@@ -332,6 +341,8 @@ fn test_score_normal_token_search_with_ext_filter() {
         count_only: false,
         search_start: Instant::now(),
         dir_filter: &None,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: vec![],
     };
     let terms = vec!["hello".to_string()];
     let scores = score_normal_token_search(&terms, &index, &params);
@@ -629,6 +640,7 @@ fn test_exclude_dir_matches_segment_not_substring() {
     let excl = vec!["test".to_string()];
     let params = GrepSearchParams {
         exclude_dir: &excl,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&excl),
         ..make_params_default()
     };
     // Should NOT be excluded — "contest" is not the same directory segment as "test"
@@ -654,6 +666,7 @@ fn test_exclude_dir_matches_backslash_segments() {
     let excl = vec!["test".to_string()];
     let params = GrepSearchParams {
         exclude_dir: &excl,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&excl),
         ..make_params_default()
     };
     assert!(!passes_file_filters("src\\test\\file.rs", &params),

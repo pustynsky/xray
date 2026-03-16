@@ -60,6 +60,10 @@ pub(crate) struct DefinitionSearchArgs {
     pub include_code_stats: bool,
     // Cross-index enrichment
     pub include_usage_count: bool,
+    // Pre-computed filter patterns (avoid per-item allocations)
+    pub exclude_patterns: super::utils::ExcludePatterns,
+    pub file_filter_terms: Option<Vec<String>>,
+    pub parent_filter_terms: Option<Vec<String>>,
 }
 
 impl DefinitionSearchArgs {
@@ -160,6 +164,21 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
 
     let include_usage_count = args.get("includeUsageCount").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    // Pre-compute filter patterns to avoid per-item allocations
+    let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
+    let file_filter_terms = file_filter.as_ref().map(|ff| {
+        ff.split(',')
+            .map(|s| s.trim().replace('\\', "/").to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<String>>()
+    });
+    let parent_filter_terms = parent_filter.as_ref().map(|pf| {
+        pf.split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<String>>()
+    });
+
     Ok(DefinitionSearchArgs {
         name_filter,
         kind_filter,
@@ -190,6 +209,9 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         min_calls,
         include_code_stats,
         include_usage_count,
+        exclude_patterns,
+        file_filter_terms,
+        parent_filter_terms,
     })
 }
 
@@ -361,9 +383,12 @@ fn handle_contains_line_mode(
         if !file_path.replace('\\', "/").to_lowercase().contains(&file_substr) {
             continue;
         }
-        // A2 fix: Apply excludeDir filter at the file level (segment-based matching)
-        if super::utils::path_matches_exclude_dir(file_path, &args.exclude_dir) {
-            continue;
+        // A2 fix: Apply excludeDir filter using pre-computed patterns
+        if !args.exclude_patterns.is_empty() {
+            let path_lower = file_path.to_lowercase().replace('\\', "/");
+            if args.exclude_patterns.matches(&path_lower) {
+                continue;
+            }
         }
         if let Some(def_indices) = index.file_index.get(&(file_id as u32)) {
             let mut matching: Vec<&DefinitionEntry> = def_indices.iter()
@@ -624,28 +649,20 @@ fn apply_entry_filters<'a>(
             let def = index.definitions.get(idx as usize)?;
             let file_path = index.files.get(def.file_id as usize)?;
 
-            // File filter: comma-separated OR with substring matching
-            if let Some(ref ff) = args.file_filter {
+            // File filter: use pre-parsed terms (avoids re-parsing per candidate)
+            if let Some(ref file_terms) = args.file_filter_terms {
                 let file_lower = file_path.replace('\\', "/").to_lowercase();
-                let file_terms: Vec<String> = ff.split(',')
-                    .map(|s| s.trim().replace('\\', "/").to_lowercase())
-                    .filter(|s| !s.is_empty())
-                    .collect();
-                if !file_terms.iter().any(|t| file_lower.contains(t)) {
+                if !file_terms.iter().any(|t| file_lower.contains(t.as_str())) {
                     return None;
                 }
             }
 
-            // Parent filter: comma-separated OR with substring matching
-            if let Some(ref pf) = args.parent_filter {
-                let parent_terms: Vec<String> = pf.split(',')
-                    .map(|s| s.trim().to_lowercase())
-                    .filter(|s| !s.is_empty())
-                    .collect();
+            // Parent filter: use pre-parsed terms
+            if let Some(ref parent_terms) = args.parent_filter_terms {
                 match &def.parent {
                     Some(parent) => {
                         let parent_lower = parent.to_lowercase();
-                        if !parent_terms.iter().any(|t| parent_lower.contains(t)) {
+                        if !parent_terms.iter().any(|t| parent_lower.contains(t.as_str())) {
                             return None;
                         }
                     }
@@ -653,9 +670,12 @@ fn apply_entry_filters<'a>(
                 }
             }
 
-            // Exclude dir (segment-based matching)
-            if super::utils::path_matches_exclude_dir(file_path, &args.exclude_dir) {
-                return None;
+            // Exclude dir: use pre-computed patterns (avoids per-candidate allocations)
+            if !args.exclude_patterns.is_empty() {
+                let path_lower = file_path.to_lowercase().replace('\\', "/");
+                if args.exclude_patterns.matches(&path_lower) {
+                    return None;
+                }
             }
 
             Some((idx, def))

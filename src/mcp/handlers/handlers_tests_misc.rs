@@ -985,6 +985,7 @@ fn test_unresolved_blocks_git_tools() {
 #[test]
 fn test_reindexing_blocks_workspace_dependent_tools() {
     let ws = WorkspaceBinding {
+        canonical_dir: String::new(),
         dir: ".".to_string(),
         mode: WorkspaceBindingMode::ManualOverride,
         status: WorkspaceStatus::Reindexing,
@@ -1002,6 +1003,7 @@ fn test_reindexing_blocks_workspace_dependent_tools() {
 #[test]
 fn test_reindexing_allows_workspace_independent_tools() {
     let ws = WorkspaceBinding {
+        canonical_dir: String::new(),
         dir: ".".to_string(),
         mode: WorkspaceBindingMode::ManualOverride,
         status: WorkspaceStatus::Reindexing,

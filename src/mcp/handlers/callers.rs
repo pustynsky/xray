@@ -13,7 +13,8 @@ use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionK
 use code_xray::generate_trigrams;
 
 use super::HandlerContext;
-use super::utils::{inject_body_into_obj, inject_branch_warning, json_to_string, name_similarity, sorted_intersect};
+#[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
+use super::utils::{self, inject_body_into_obj, inject_branch_warning, json_to_string, name_similarity, sorted_intersect};
 
 /// Compute total body lines available from a call tree (for size hint).
 /// Walks the JSON tree and sums body lines: `body.len()` for emitted bodies,
@@ -312,6 +313,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     }
     // ─── End Angular template tree ───────────────────────────────────
 
+    let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
+    let exclude_file_lower: Vec<String> = exclude_file.iter().map(|s| s.to_lowercase()).collect();
+    let ext_filter_list = super::utils::prepare_ext_filter(&ext_filter);
     let caller_ctx = CallerTreeContext {
         content_index: &content_index,
         def_idx: &def_idx,
@@ -326,6 +330,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         max_body_lines,
         max_total_body_lines,
         impact_analysis,
+        exclude_patterns,
+        exclude_file_lower,
+        ext_filter_list,
     };
 
     // Mutable state for body injection (shared across recursive calls)
@@ -605,6 +612,11 @@ fn handle_multi_method_callers(
 
     let mut results: Vec<Value> = Vec::new();
 
+    // Pre-compute filter patterns once for all methods
+    let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
+    let exclude_file_lower: Vec<String> = exclude_file.iter().map(|s| s.to_lowercase()).collect();
+    let ext_filter_list = super::utils::prepare_ext_filter(&ext_filter);
+
     for method_name in methods {
         // Each method gets its OWN node_count and visited set (per-method budget)
         let node_count = AtomicUsize::new(0);
@@ -624,6 +636,9 @@ fn handle_multi_method_callers(
             max_body_lines,
             max_total_body_lines,
             impact_analysis,
+            exclude_patterns: exclude_patterns.clone(),
+            exclude_file_lower: exclude_file_lower.clone(),
+            ext_filter_list: ext_filter_list.clone(),
         };
 
         let method_lower = method_name.to_lowercase();
@@ -1053,6 +1068,38 @@ struct CallerTreeContext<'a> {
     max_body_lines: usize,
     max_total_body_lines: usize,
     impact_analysis: bool,
+    /// Pre-computed exclude dir patterns (avoids per-file allocations)
+    exclude_patterns: super::utils::ExcludePatterns,
+    /// Pre-lowercased exclude file substrings
+    exclude_file_lower: Vec<String>,
+    /// Pre-split extension filter list
+    ext_filter_list: Vec<String>,
+}
+
+impl CallerTreeContext<'_> {
+    /// Optimized file filter using pre-computed patterns.
+    fn passes_file_filters(&self, file_path: &str) -> bool {
+        let matches_ext = std::path::Path::new(file_path)
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| self.ext_filter_list.iter().any(|allowed| e.eq_ignore_ascii_case(allowed)));
+        if !matches_ext { return false; }
+
+        // Use pre-computed patterns (zero per-file allocations for the patterns)
+        if !self.exclude_patterns.is_empty() {
+            let path_lower = file_path.to_lowercase().replace('\\', "/");
+            if self.exclude_patterns.matches(&path_lower) { return false; }
+        }
+
+        if !self.exclude_file_lower.is_empty() {
+            let path_lower = file_path.to_lowercase();
+            if self.exclude_file_lower.iter().any(|excl| path_lower.contains(excl.as_str())) {
+                return false;
+            }
+        }
+
+        true
+    }
 }
 
 /// Find the containing method for a given file_id and line number in the definition index.
@@ -1223,6 +1270,9 @@ fn expand_interface_callers(
                                             && (impl_def.kind == DefinitionKind::Class || impl_def.kind == DefinitionKind::Struct) {
                                                 let no_iface_ctx = CallerTreeContext {
                                                     resolve_interfaces: false,
+                                                    exclude_patterns: ctx.exclude_patterns.clone(),
+                                                    exclude_file_lower: ctx.exclude_file_lower.clone(),
+                                                    ext_filter_list: ctx.ext_filter_list.clone(),
                                                     ..*ctx
                                                 };
                                                 let impl_callers = build_caller_tree(
@@ -1723,7 +1773,7 @@ fn build_caller_tree(
             None => continue,
         };
 
-        if !passes_caller_file_filters(file_path, ctx.ext_filter, ctx.exclude_dir, ctx.exclude_file) {
+        if !ctx.passes_file_filters(file_path) {
             continue;
         }
 
@@ -2097,9 +2147,9 @@ fn build_callee_tree(
         return Vec::new();
     }
     let def_idx = ctx.def_idx;
-    let ext_filter = ctx.ext_filter;
-    let exclude_dir = ctx.exclude_dir;
-    let exclude_file = ctx.exclude_file;
+    let _ext_filter = ctx.ext_filter;
+    let _exclude_dir = ctx.exclude_dir;
+    let _exclude_file = ctx.exclude_file;
     let limits = ctx.limits;
     let node_count = ctx.node_count;
 
@@ -2188,7 +2238,7 @@ fn build_callee_tree(
                 let callee_file = def_idx.files.get(callee_def.file_id as usize)
                     .map(|s| s.as_str()).unwrap_or("");
 
-                if !passes_caller_file_filters(callee_file, ext_filter, exclude_dir, exclude_file) {
+                if !ctx.passes_file_filters(callee_file) {
                     continue;
                 }
 

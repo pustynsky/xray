@@ -87,6 +87,8 @@ pub(crate) fn validate_search_dir(requested_dir: &str, server_dir: &str) -> Resu
     let requested = std::fs::canonicalize(&requested_dir)
         .map(|p| clean_path(&p.to_string_lossy()))
         .unwrap_or_else(|_| requested_dir.to_string());
+    // Note: server_dir is already canonical when coming from HandlerContext::server_dir().
+    // The canonicalize here is a safety fallback for direct callers.
     let server = std::fs::canonicalize(server_dir)
         .map(|p| clean_path(&p.to_string_lossy()))
         .unwrap_or_else(|_| server_dir.to_string());
@@ -150,6 +152,55 @@ pub(crate) fn looks_like_file_path(path: &str) -> bool {
 /// Check if a file path's extension matches a filter string.
 /// Supports comma-separated extensions: `"cs,sql"` matches both `.cs` and `.sql`.
 /// Comparison is case-insensitive. Whitespace around extensions is trimmed.
+/// Pre-computed exclude-directory patterns for zero-allocation per-file matching.
+/// Create once per query via `from_dirs()`, then call `matches()` per file.
+#[derive(Debug, Clone)]
+pub(crate) struct ExcludePatterns {
+    /// Pre-lowercased segment patterns: [("/test/", "test/"), ...]
+    segments: Vec<(String, String)>,
+}
+
+impl ExcludePatterns {
+    /// Build from raw exclude_dir strings (e.g., ["test", "Mock"]).
+    /// Lowercases and formats patterns once.
+    pub fn from_dirs(exclude_dirs: &[String]) -> Self {
+        let segments = exclude_dirs.iter().map(|excl| {
+            let lower = excl.to_lowercase();
+            (format!("/{}/", lower), format!("{}/", lower))
+        }).collect();
+        Self { segments }
+    }
+
+    /// Check if a path matches any exclude pattern.
+    /// `path_lower_normalized` MUST be pre-lowercased and use forward slashes.
+    pub fn matches(&self, path_lower_normalized: &str) -> bool {
+        self.segments.iter().any(|(segment, at_start)| {
+            path_lower_normalized.contains(segment.as_str())
+            || path_lower_normalized.starts_with(at_start.as_str())
+        })
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.segments.is_empty()
+    }
+}
+
+/// Pre-split a comma-separated extension filter string.
+pub(crate) fn prepare_ext_filter(ext_filter: &str) -> Vec<String> {
+    ext_filter.split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
+/// Check if a file matches pre-split extension filter.
+pub(crate) fn matches_ext_filter_prepared(file_path: &str, ext_list: &[String]) -> bool {
+    std::path::Path::new(file_path)
+        .extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| ext_list.iter().any(|allowed| e.eq_ignore_ascii_case(allowed)))
+}
+
 pub(crate) fn matches_ext_filter(file_path: &str, ext_filter: &str) -> bool {
     std::path::Path::new(file_path)
         .extension()
@@ -165,21 +216,15 @@ pub(crate) fn matches_ext_filter(file_path: &str, ext_filter: &str) -> bool {
 /// but NOT `src/contest/file.rs`. Normalizes backslashes to forward slashes.
 /// This is the canonical implementation — all tools (grep, definitions, callers)
 /// must use this function to ensure consistent behavior.
+/// Convenience wrapper: creates ExcludePatterns on each call.
+/// For hot paths iterating many files, prefer ExcludePatterns::from_dirs() + matches() directly.
 pub(crate) fn path_matches_exclude_dir(file_path: &str, exclude_dirs: &[String]) -> bool {
     if exclude_dirs.is_empty() {
         return false;
     }
+    let patterns = ExcludePatterns::from_dirs(exclude_dirs);
     let path_norm = file_path.to_lowercase().replace('\\', "/");
-    for excl in exclude_dirs {
-        let excl_lower = excl.to_lowercase();
-        // Match as a path segment: /excl/ anywhere, or excl/ at start
-        let segment = format!("/{}/", excl_lower);
-        let at_start = format!("{}/", excl_lower);
-        if path_norm.contains(&segment) || path_norm.starts_with(&at_start) {
-            return true;
-        }
-    }
-    false
+    patterns.matches(&path_norm)
 }
 
 // ─── Set operations ─────────────────────────────────────────────────

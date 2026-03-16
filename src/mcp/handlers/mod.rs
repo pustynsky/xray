@@ -583,6 +583,8 @@ impl std::fmt::Display for WorkspaceStatus {
 pub struct WorkspaceBinding {
     /// Current workspace path.
     pub dir: String,
+    /// Cached canonicalized form of `dir` (computed once on set, avoids ~1-5ms syscall per request).
+    pub canonical_dir: String,
     /// How the workspace was determined.
     pub mode: WorkspaceBindingMode,
     /// Current status.
@@ -594,8 +596,10 @@ pub struct WorkspaceBinding {
 impl WorkspaceBinding {
     /// Create a new resolved workspace binding (PinnedCli mode).
     pub fn pinned(dir: String) -> Self {
+        let canonical_dir = Self::compute_canonical(&dir);
         Self {
             dir,
+            canonical_dir,
             mode: WorkspaceBindingMode::PinnedCli,
             status: WorkspaceStatus::Resolved,
             generation: 1,
@@ -604,8 +608,10 @@ impl WorkspaceBinding {
 
     /// Create a new DotBootstrap workspace binding.
     pub fn dot_bootstrap(dir: String) -> Self {
+        let canonical_dir = Self::compute_canonical(&dir);
         Self {
             dir,
+            canonical_dir,
             mode: WorkspaceBindingMode::DotBootstrap,
             status: WorkspaceStatus::Resolved,
             generation: 1,
@@ -614,12 +620,27 @@ impl WorkspaceBinding {
 
     /// Create an unresolved workspace binding.
     pub fn unresolved(dir: String) -> Self {
+        let canonical_dir = Self::compute_canonical(&dir);
         Self {
             dir,
+            canonical_dir,
             mode: WorkspaceBindingMode::Unresolved,
             status: WorkspaceStatus::Unresolved,
             generation: 0,
         }
+    }
+
+    /// Compute canonical form of a path (once, at bind time).
+    fn compute_canonical(dir: &str) -> String {
+        std::fs::canonicalize(dir)
+            .map(|p| crate::clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| dir.replace('\\', "/"))
+    }
+
+    /// Update dir and recompute canonical form. Use instead of `ws.dir = ...` directly.
+    pub fn set_dir(&mut self, dir: String) {
+        self.canonical_dir = Self::compute_canonical(&dir);
+        self.dir = dir;
     }
 }
 
@@ -713,6 +734,12 @@ impl HandlerContext {
     /// This replaces direct access to the old `server_dir` field.
     pub fn server_dir(&self) -> String {
         self.workspace.read().unwrap_or_else(|e| e.into_inner()).dir.clone()
+    }
+
+    /// Cached canonical form of server_dir (computed once at workspace bind time).
+    /// Avoids ~1-5ms canonicalize() syscall per request on Windows.
+    pub fn canonical_server_dir(&self) -> String {
+        self.workspace.read().unwrap_or_else(|e| e.into_inner()).canonical_dir.clone()
     }
 }
 
@@ -1127,7 +1154,7 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // Update workspace binding if dir changed
     if workspace_changed {
         let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-        ws.dir = dir.clone();
+        ws.set_dir(dir.clone());
         ws.mode = WorkspaceBindingMode::ManualOverride;
         ws.generation += 1;
         ws.status = WorkspaceStatus::Reindexing;
@@ -1161,7 +1188,7 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 // Full rollback on failure
                 if workspace_changed {
                     let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-                    ws.dir = previous_dir.clone();
+                    ws.set_dir(previous_dir.clone());
                     ws.mode = old_mode;
                     ws.generation = old_generation;
                     ws.status = WorkspaceStatus::Resolved;
@@ -1224,7 +1251,7 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             // Rollback workspace state to avoid getting stuck in Reindexing
             if workspace_changed {
                 let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-                ws.dir = previous_dir.clone();
+                ws.set_dir(previous_dir.clone());
                 ws.mode = old_mode;
                 ws.generation = old_generation;
                 ws.status = WorkspaceStatus::Resolved;
@@ -1315,7 +1342,7 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
     // Update workspace binding if dir changed
     if workspace_changed {
         let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-        ws.dir = dir.clone();
+        ws.set_dir(dir.clone());
         ws.mode = WorkspaceBindingMode::ManualOverride;
         ws.generation += 1;
         ws.status = WorkspaceStatus::Reindexing;
@@ -1371,7 +1398,7 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
             // Rollback workspace state to avoid getting stuck in Reindexing
             if workspace_changed {
                 let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-                ws.dir = previous_dir.clone();
+                ws.set_dir(previous_dir.clone());
                 ws.mode = old_mode;
                 ws.generation = old_generation;
                 ws.status = WorkspaceStatus::Resolved;

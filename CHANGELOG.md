@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Performance
+
+- **Performance audit: 6 findings fixed (Findings 1-6)** — Systematic performance optimization based on full code audit. Three groups of fixes:
+
+  **Finding 1 (CRITICAL, ~400ms → ~30ms): Two-pass `fileCount` in `xray_fast dirsOnly`** — Replaced O(N × depth) ancestor-walking HashMap for ALL directories (~10K) with a two-pass approach: (1) main loop collects matched directories (~29 typical), (2) post-loop counts files only for matched dirs via `starts_with`. For 29 dirs × 100K entries = 2.9M cheap string comparisons instead of ~800K HashMap operations. Removed ~50 lines of complex `dir_prefix` resolution code.
+
+  **Finding 2 (MODERATE, ~5-40ms → <1ms): Cached `canonical_server_dir`** — Added `canonical_dir: String` field to `WorkspaceBinding`, computed once at bind time via `compute_canonical()`. New `set_dir()` method ensures canonical is always recomputed on workspace changes. `HandlerContext::canonical_server_dir()` provides cached access. Eliminated 1-2 `std::fs::canonicalize()` syscalls per request in `fast.rs dir_is_outside` check (~1-5ms each on Windows).
+
+  **Findings 3+4+5+6 (MODERATE): Pre-computed filter patterns** — Introduced `ExcludePatterns` struct in `utils.rs` with pre-lowercased segment patterns, eliminating thousands of per-file String allocations across grep, definitions, and callers handlers:
+  - **Finding 3**: `path_matches_exclude_dir()` — patterns pre-computed once per query instead of per-file × per-exclude-dir
+  - **Finding 4**: `apply_entry_filters()` in definitions — `file_filter_terms` and `parent_filter_terms` pre-parsed in `DefinitionSearchArgs` at parse time
+  - **Finding 5**: `matches_ext_filter()` — added `prepare_ext_filter()` for pre-split ext lists (used in callers)
+  - **Finding 6**: `passes_file_filters()` in grep — pre-lowercased exclude patterns and path normalization computed once per file
+
+  All 1865 unit tests + 68 E2E tests pass. Finding 7 (phrase search file I/O) deferred — inherent cost, needs LRU cache.
+
 ### Bug Fixes
 
 - **`xray_grep` substring `countOnly=true` included unnecessary `matchedTokens`** — When `xray_grep` was called with `countOnly=true` in substring mode, the response still included the `matchedTokens` array. This wasted ~200-1000 bytes and could trigger false truncation ("capped matchedTokens to 20") that confused LLMs into thinking results were incomplete. Fix: `build_substring_response()` no longer emits `matchedTokens` when `count_only=true`. The normal token search mode (`build_grep_response`) was already correct. 2 new tests + 1 existing test updated.

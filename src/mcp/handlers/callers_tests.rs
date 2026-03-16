@@ -472,6 +472,9 @@ fn test_prefilter_does_not_expand_by_base_types() {
         max_body_lines: 0,
         max_total_body_lines: 0,
         impact_analysis: false,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_file_lower: vec![],
+        ext_filter_list: super::utils::prepare_ext_filter("cs"),
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -576,6 +579,9 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
         max_body_lines: 0,
         max_total_body_lines: 0,
         impact_analysis: false,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_file_lower: vec![],
+        ext_filter_list: super::utils::prepare_ext_filter("ts"),
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -1493,6 +1499,9 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         max_body_lines: 0,
         max_total_body_lines: 0,
         impact_analysis: false,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_file_lower: vec![],
+        ext_filter_list: super::utils::prepare_ext_filter("cs"),
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -1899,6 +1908,9 @@ fn test_sql_callee_tree_exec_dependencies() {
         max_body_lines: 0,
         max_total_body_lines: 0,
         impact_analysis: false,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_file_lower: vec![],
+        ext_filter_list: super::utils::prepare_ext_filter("sql"),
     };
 
     let mut file_cache = HashMap::new();
@@ -2016,6 +2028,9 @@ fn test_sql_caller_tree_who_calls_sp() {
         max_body_lines: 0,
         max_total_body_lines: 0,
         impact_analysis: false,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_file_lower: vec![],
+        ext_filter_list: super::utils::prepare_ext_filter("sql"),
     };
 
     let mut file_cache = HashMap::new();
@@ -2597,6 +2612,9 @@ fn test_impact_analysis_finds_test_methods() {
         max_body_lines: 0,
         max_total_body_lines: 0,
         impact_analysis: true,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_file_lower: vec![],
+        ext_filter_list: super::utils::prepare_ext_filter("cs"),
     };
 
     let mut visited = HashSet::new();
@@ -2738,6 +2756,9 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         max_body_lines: 0,
         max_total_body_lines: 0,
         impact_analysis: true,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_file_lower: vec![],
+        ext_filter_list: super::utils::prepare_ext_filter("cs"),
     };
 
     let mut visited = HashSet::new();

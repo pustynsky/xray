@@ -118,6 +118,7 @@ fn test_content_index_field_count_guard() {
         path_to_id: None,
         read_errors: 0,
         lossy_file_count: 0,
+        format_version: crate::CONTENT_INDEX_VERSION,
     };
     drop(_guard);
 }
