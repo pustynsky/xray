@@ -857,6 +857,11 @@ for ($e = 0; $e -lt $episodes.Count; $e++) {
     if ($sameToolBefore -eq 0) { $ep.tags.Add('first_call') }
     if ($sameToolAfter -eq 0) { $ep.tags.Add('final_call') }
 
+    # cold_start: first call for this tool with high search time (index building)
+    if ($sameToolBefore -eq 0 -and $ep.search_time_ms -gt 1000) {
+        $ep.tags.Add('cold_start')
+    }
+
     # truncated_response
     if ($ep.response_status -eq 'partial') { $ep.tags.Add('truncated_response') }
 
@@ -1543,7 +1548,7 @@ foreach ($ep in $cleanEpisodes) {
     [void]$md.AppendLine("- **Response size**: $sizeStr")
     [void]$md.AppendLine("- **Summary**: $($ep.response_summary)")
     if ($ep.ContainsKey('search_time_ms') -and $ep.search_time_ms -gt 0) {
-        $slowEmoji = if ($ep.search_time_ms -gt 100) { ' ⏱️ slow' } else { '' }
+        $slowEmoji = if ($ep.tags -contains 'cold_start') { ' ⏱️ cold start' } elseif ($ep.search_time_ms -gt 100) { ' ⏱️ slow' } else { '' }
         $modeStr = if ($ep.ContainsKey('search_mode') -and $ep.search_mode) { " (mode: $($ep.search_mode))" } else { '' }
         [void]$md.AppendLine("- **Search time**: $([math]::Round($ep.search_time_ms, 1))ms${modeStr}${slowEmoji}")
     }
