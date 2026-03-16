@@ -26,7 +26,6 @@ pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Pa
     Ok(())
 }
 
-#[allow(dead_code)]
 pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
     let path = definition_index_path_for(dir, exts, index_base);
 
@@ -70,7 +69,6 @@ pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path
 /// without loading the full index (~200 bytes vs 100+ MB). Falls back to
 /// `read_root_from_index_file` if no sidecar exists. Only loads the full
 /// index after metadata confirms a match.
-#[allow(dead_code)]
 pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, expected_exts: &[String]) -> Option<DefinitionIndex> {
     let canonical = std::fs::canonicalize(dir).ok()?;
     let dir_str = clean_path(&canonical.to_string_lossy());

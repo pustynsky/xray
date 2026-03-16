@@ -206,6 +206,7 @@ pub fn cmd_info() {
 }
 
 /// Convert an IndexMeta to a JSON value for cmd_info_json output.
+#[cfg(test)]
 fn meta_to_json(meta: &IndexMeta, size: u64, filename: &str) -> serde_json::Value {
     let size_mb = (size as f64 / 1_048_576.0 * 10.0).round() / 10.0;
     let age_h = (age_hours(meta.created_at) * 10.0).round() / 10.0;
@@ -282,15 +283,10 @@ fn meta_to_json(meta: &IndexMeta, size: u64, filename: &str) -> serde_json::Valu
     }
 }
 
-/// Return index info as JSON value (for MCP handler and CLI)
-pub fn cmd_info_json() -> serde_json::Value {
-    cmd_info_json_for_dir(&index_dir())
-}
-
 /// Return index info as JSON value for a specific directory.
 /// Reads .meta sidecar files when available (zero-allocation),
 /// falls back to full deserialization for old indexes without .meta.
-#[cfg_attr(not(test), allow(dead_code))]
+#[cfg(test)]
 pub(crate) fn cmd_info_json_for_dir(dir: &std::path::Path) -> serde_json::Value {
     if !dir.exists() {
         return serde_json::json!({ "indexes": [], "directory": dir.display().to_string() });

@@ -5,7 +5,6 @@ mod info;
 mod serve;
 
 pub use args::*;
-pub use info::cmd_info_json;
 
 use clap::{Parser, Subcommand};
 use std::collections::HashMap;

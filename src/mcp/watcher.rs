@@ -603,57 +603,6 @@ fn batch_purge_files(
     });
 }
 
-/// Re-tokenize a file and insert new postings into the index.
-///
-/// This function assumes the file's old postings have ALREADY been purged
-/// (via `batch_purge_files`). It only reads the file, tokenizes, and inserts.
-/// For new files (not in path_to_id), it assigns a new file_id.
-///
-/// Superseded by `tokenize_file_standalone` + `apply_tokenized_file` in production.
-#[cfg(test)]
-#[allow(dead_code)]
-fn reindex_file_after_purge(index: &mut ContentIndex, path: &Path) {
-    let path_str = path.to_string_lossy().to_string();
-
-    let (content, _was_lossy) = match crate::read_file_lossy(path) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-
-    if let Some(ref mut path_to_id) = index.path_to_id {
-        let file_id = if let Some(&fid) = path_to_id.get(path) {
-            // Existing file — already purged, just re-tokenize
-            fid
-        } else {
-            // New file — assign new file_id
-            let fid = index.files.len() as u32;
-            index.files.push(path_str);
-            path_to_id.insert(path.to_path_buf(), fid);
-            index.file_token_counts.push(0); // will be updated below
-            fid
-        };
-
-        let mut file_tokens: HashMap<String, Vec<u32>> = HashMap::new();
-        let mut file_total: u32 = 0;
-        for (line_num, line) in content.lines().enumerate() {
-            for token in tokenize(line, DEFAULT_MIN_TOKEN_LEN) {
-                index.total_tokens += 1;
-                file_total += 1;
-                file_tokens.entry(token).or_default().push((line_num + 1) as u32);
-            }
-        }
-
-        for (token, lines) in &file_tokens {
-            index.index.entry(token.clone())
-                .or_default()
-                .push(Posting { file_id, lines: lines.clone() });
-        }
-
-        if (file_id as usize) < index.file_token_counts.len() {
-            index.file_token_counts[file_id as usize] = file_total;
-        }
-    }
-}
 
 /// Remove all postings for a given file_id from the inverted index.
 /// This is a brute-force O(total_tokens) scan that replaces the forward index lookup.

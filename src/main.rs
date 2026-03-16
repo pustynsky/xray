@@ -27,7 +27,6 @@ pub use index::{
 
 // Re-export CLI types used by other modules
 pub use cli::args::{IndexArgs, ContentIndexArgs, ServeArgs};
-pub use cli::cmd_info_json;
 
 fn main() {
     cli::run();
