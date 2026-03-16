@@ -19,7 +19,7 @@ use tracing::{info, warn};
 use crate::mcp::protocol::{ToolCallResult, ToolDefinition};
 use crate::{
     build_content_index, clean_path, load_content_index, find_content_index_for_dir,
-    save_content_index, ContentIndex, ContentIndexArgs,
+    save_content_index, ContentIndex, ContentIndexArgs, FileIndex,
     DEFAULT_MIN_TOKEN_LEN,
 };
 use crate::definitions::DefinitionIndex;
@@ -700,6 +700,12 @@ pub struct HandlerContext {
     /// Computed as intersection of --ext and definition_extensions() at startup.
     /// Used to dynamically generate tool descriptions with correct language lists.
     pub def_extensions: Vec<String>,
+    /// In-memory cache for file-list index (used by xray_fast).
+    /// `None` means not yet built (lazy initialization on first xray_fast call).
+    pub file_index: Arc<RwLock<Option<FileIndex>>>,
+    /// Dirty flag for file-list index. Set by watcher on any FS create/delete/rename.
+    /// When true, xray_fast rebuilds the file index before serving results.
+    pub file_index_dirty: Arc<AtomicBool>,
 }
 
 impl HandlerContext {
@@ -726,6 +732,8 @@ impl Default for HandlerContext {
             git_cache_ready: Arc::new(AtomicBool::new(false)),
             current_branch: None,
             def_extensions: Vec::new(),
+            file_index: Arc::new(RwLock::new(None)),
+            file_index_dirty: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -1252,6 +1260,12 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         output["previousServerDir"] = json!(previous_dir);
     }
     output["serverDir"] = json!(dir);
+
+    // Invalidate file-list index so xray_fast rebuilds it on next call
+    if let Ok(mut fi) = ctx.file_index.write() {
+        *fi = None;
+    }
+    ctx.file_index_dirty.store(true, Ordering::Relaxed);
 
     ToolCallResult::success(utils::json_to_string(&output))
 }

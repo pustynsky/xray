@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+### Bug Fixes
+
+- **`xray_fast` stale file-list index after file creation/deletion** — `xray_fast` now uses an in-memory file-list index with dirty-flag invalidation, ensuring newly created and deleted files are always visible. Previously, the file-list index (used by `xray_fast`) was loaded from disk on every call and never updated by the file watcher or `xray_reindex`, causing stale results until server restart. Four root causes fixed: (1) FileIndex added to `HandlerContext` as `Arc<RwLock<Option<FileIndex>>>` with lazy initialization; (2) Watcher sets `file_index_dirty` flag on ANY file create/delete event BEFORE the `--ext` filter (FileIndex indexes all files, not just `--ext`); (3) `handle_xray_fast` checks dirty flag → rebuilds from filesystem (~35ms) → caches in memory → resets flag; (4) `handle_xray_reindex` invalidates the cache (sets to `None` + dirty). Outside-server-dir requests use disk-cached indexes (load or build+save) for fast repeated access. `FileIndex` and `FileEntry` structs now derive `Clone`. 3 new unit tests (dirty-flag rebuild, deletion detection, None invalidation) + live E2E verification (create → search → delete → search). All 1769 unit tests + 68 E2E tests pass.
+
 ### Bug Fixes (Audit 2026-03-16)
 
 - **OOM safety cap for `git log` in CLI fallback** — `top_authors()` and `repo_activity()` in `src/git/mod.rs` now include `--max-count` safety caps (50K and 10K respectively) to prevent unbounded stdout on huge repos without date filters. Previously, a repo with 500K+ commits could cause OOM when git log read all output into a single String. Mitigated by cache (MCP handler checks cache first) and date/path filters, but the safety cap ensures no crash even in worst case.

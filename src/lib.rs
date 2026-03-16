@@ -231,7 +231,7 @@ fn decode_utf16be(bytes: &[u8]) -> String {
 // ─── File index types ────────────────────────────────────────────────
 
 /// An entry in the file index — represents a single file or directory.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileEntry {
     pub path: String,
     pub size: u64,
@@ -242,7 +242,7 @@ pub struct FileEntry {
 /// File index: a flat list of all files/directories under a root.
 ///
 /// Used for fast file-name search without filesystem walk.
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileIndex {
     pub root: String,
     pub created_at: u64,

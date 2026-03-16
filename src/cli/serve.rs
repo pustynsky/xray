@@ -60,6 +60,7 @@ pub fn cmd_serve(args: ServeArgs) {
 
     let content_ready = Arc::new(AtomicBool::new(false));
     let def_ready = Arc::new(AtomicBool::new(false));
+    let file_index_dirty = Arc::new(AtomicBool::new(true));
 
     // Create an empty ContentIndex so the event loop can start immediately
     let empty_index = ContentIndex {
@@ -400,6 +401,7 @@ pub fn cmd_serve(args: ServeArgs) {
             idx_base.clone(),
             Arc::clone(&content_ready),
             Arc::clone(&def_ready),
+            Arc::clone(&file_index_dirty),
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
@@ -581,6 +583,8 @@ pub fn cmd_serve(args: ServeArgs) {
         Vec::new()
     };
 
+    let file_index = Arc::new(RwLock::new(None));
+
     let ctx = mcp::handlers::HandlerContext {
         index,
         def_index,
@@ -595,6 +599,8 @@ pub fn cmd_serve(args: ServeArgs) {
         git_cache_ready,
         current_branch,
         def_extensions: def_extensions_vec,
+        file_index,
+        file_index_dirty: Arc::clone(&file_index_dirty),
     };
     mcp::server::run_server(ctx);
     crate::index::log_memory("serve: event loop exited");

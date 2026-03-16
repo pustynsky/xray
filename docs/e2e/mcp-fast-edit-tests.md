@@ -59,6 +59,24 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 
 ### T-FAST-SUBDIR: `xray_fast` — Subdirectory reuses parent index
 
+### T-FAST-DIRTY-FLAG: `xray_fast` — In-memory dirty-flag invalidation
+
+**Expected:**
+
+- First `xray_fast` call builds file index in memory (dirty=true by default)
+- Second call uses cached index (~0ms, no rebuild)
+- After file creation (watcher sets dirty flag): next call rebuilds and finds new files
+- After file deletion (watcher sets dirty flag): next call rebuilds and removed files disappear
+- `xray_reindex` invalidates file index cache (sets to None + dirty)
+- Outside-server-dir requests use disk-cached indexes (not in-memory cache)
+
+**Unit tests:** `test_xray_fast_dirty_flag_rebuild`, `test_xray_fast_dirty_flag_detects_deletion`, `test_xray_fast_invalidate_via_none`
+
+**Live E2E verification:** Create files → search → delete → search (verified via MCP xray_fast calls)
+
+**Status:** ✅ Implemented
+
+
 ---
 
 ### T-FAST-RELDIR: `xray_fast` — Relative dir parameter resolution

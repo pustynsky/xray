@@ -331,7 +331,7 @@ fn test_xray_fast_outside_dir_still_builds_index() {
     assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
         "Should find files in the outside directory");
 
-    // Should have created a NEW file-list index (2 total: server_dir + other_dir)
+    // Outside-dir index is saved to disk (for fast repeated access).
     let file_list_count: usize = std::fs::read_dir(&idx_base).unwrap()
         .filter(|e| e.as_ref().unwrap().path().extension()
             .is_some_and(|ext| ext == "file-list"))
@@ -1642,5 +1642,179 @@ fn test_xray_fast_glob_comma_separated_multi_term() {
     }).collect();
     assert!(filenames.iter().any(|n| n.contains("OrderProcessor")), "Should find OrderProcessor");
     assert!(filenames.iter().any(|n| n.contains("ConfigurationHelper")), "Should find ConfigurationHelper");
+    cleanup_tmp(&tmp_dir);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════════
+// File index dirty-flag / in-memory cache tests (bug: stale file-list index)
+// ═══════════════════════════════════════════════════════════════════════
+
+/// Verify that xray_fast uses in-memory cache and dirty flag:
+/// - First call builds the index (dirty=true by default)
+/// - Second call uses cached index (dirty=false, no rebuild)
+/// - After setting dirty=true, third call rebuilds
+#[test]
+fn test_xray_fast_dirty_flag_rebuild() {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_dirty_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Create initial files
+    for name in &["FileA.cs", "FileB.cs"] {
+        let mut f = std::fs::File::create(tmp_dir.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let idx_base = tmp_dir.join(".index");
+    let _ = std::fs::create_dir_all(&idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // First call: dirty=true → builds index
+    let result1 = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    assert!(!result1.is_error, "First call should succeed: {}", result1.content[0].text);
+    let output1: Value = serde_json::from_str(&result1.content[0].text).unwrap();
+    let count1 = output1["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(count1 >= 2, "Should find at least 2 files, got {}", count1);
+
+    // Dirty flag should now be false
+    assert!(!ctx.file_index_dirty.load(Ordering::Relaxed), "dirty flag should be false after build");
+    // In-memory cache should be populated
+    assert!(ctx.file_index.read().unwrap().is_some(), "file_index cache should be populated");
+
+    // Create a new file AFTER the index was built
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("FileC.cs")).unwrap();
+        writeln!(f, "// FileC").unwrap();
+    }
+
+    // Second call: dirty=false → uses cached (stale) index, FileC NOT visible
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    assert!(!result2.is_error);
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    let count2 = output2["summary"]["totalMatches"].as_u64().unwrap();
+    assert_eq!(count2, count1, "Cached index should return same count (FileC not yet visible)");
+
+    // Simulate watcher setting dirty flag
+    ctx.file_index_dirty.store(true, Ordering::Relaxed);
+
+    // Third call: dirty=true → rebuilds, FileC IS visible
+    let result3 = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    assert!(!result3.is_error);
+    let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+    let count3 = output3["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(count3 > count1, "After dirty flag, rebuild should find FileC. Before: {}, after: {}", count1, count3);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Verify that file deletion is detected after dirty flag is set
+#[test]
+fn test_xray_fast_dirty_flag_detects_deletion() {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_dirty_del_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    for name in &["Keep.cs", "Delete.cs", "Also.cs"] {
+        let mut f = std::fs::File::create(tmp_dir.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let idx_base = tmp_dir.join(".index");
+    let _ = std::fs::create_dir_all(&idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // First call: builds index with 3 files
+    let result1 = handle_xray_fast(&ctx, &json!({"pattern": "*", "filesOnly": true}));
+    assert!(!result1.is_error);
+    let output1: Value = serde_json::from_str(&result1.content[0].text).unwrap();
+    let count1 = output1["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(count1 >= 3, "Should find 3 files initially, got {}", count1);
+
+    // Delete a file
+    std::fs::remove_file(tmp_dir.join("Delete.cs")).unwrap();
+
+    // Without dirty flag: cached, still shows 3
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "*", "filesOnly": true}));
+    let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
+    assert_eq!(output2["summary"]["totalMatches"].as_u64().unwrap(), count1, "Should still show 3 (cached)");
+
+    // Set dirty and rebuild
+    ctx.file_index_dirty.store(true, Ordering::Relaxed);
+    let result3 = handle_xray_fast(&ctx, &json!({"pattern": "*", "filesOnly": true}));
+    let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
+    let count3 = output3["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(count3 < count1, "After dirty rebuild, should find fewer files. Before: {}, after: {}", count1, count3);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Verify that invalidating file_index via None forces rebuild on next call
+#[test]
+fn test_xray_fast_invalidate_via_none() {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_inv_none_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    for name in &["A.cs", "B.cs"] {
+        let mut f = std::fs::File::create(tmp_dir.join(name)).unwrap();
+        writeln!(f, "// {}", name).unwrap();
+    }
+
+    let dir_str = tmp_dir.to_string_lossy().to_string();
+    let idx_base = tmp_dir.join(".index");
+    let _ = std::fs::create_dir_all(&idx_base);
+    let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // Build initial
+    let _ = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    assert!(!ctx.file_index_dirty.load(Ordering::Relaxed));
+    assert!(ctx.file_index.read().unwrap().is_some());
+
+    // Invalidate by setting to None (simulates xray_reindex)
+    *ctx.file_index.write().unwrap() = None;
+
+    // Add a file
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("C.cs")).unwrap();
+        writeln!(f, "// C").unwrap();
+    }
+
+    // Even though dirty is false, None cache forces rebuild
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let count = output["summary"]["totalMatches"].as_u64().unwrap();
+    assert!(count >= 3, "After invalidation + new file, should find at least 3, got {}", count);
+
     cleanup_tmp(&tmp_dir);
 }

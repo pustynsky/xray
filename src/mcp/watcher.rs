@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use crate::{clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Start a file watcher thread that incrementally updates the in-memory index
 pub fn start_watcher(
@@ -22,6 +22,7 @@ pub fn start_watcher(
     index_base: PathBuf,
     _content_ready: Arc<AtomicBool>,
     _def_ready: Arc<AtomicBool>,
+    file_index_dirty: Arc<AtomicBool>,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -66,6 +67,16 @@ pub fn start_watcher(
                         // and .git/config matches the "config" extension filter
                         if is_inside_git_dir(path) {
                             continue;
+                        }
+                        // Invalidate file-list index on ANY create/delete/rename,
+                        // BEFORE the extension filter. FileIndex indexes ALL files
+                        // (not just --ext), so changes to .json, .yaml, etc. must
+                        // also trigger a rebuild.
+                        match event.kind {
+                            EventKind::Create(_) | EventKind::Remove(_) => {
+                                file_index_dirty.store(true, Ordering::Relaxed);
+                            }
+                            _ => {}
                         }
                         if !matches_extensions(path, &extensions) {
                             continue;

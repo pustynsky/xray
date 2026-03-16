@@ -88,6 +88,8 @@ fn test_handler_context_field_count_guard() {
         git_cache_ready: Arc::new(AtomicBool::new(false)),
         current_branch: None,
         def_extensions: Vec::new(),
+        file_index: Arc::new(RwLock::new(None)),
+        file_index_dirty: Arc::new(AtomicBool::new(true)),
     };
     drop(_guard);
 }
@@ -107,6 +109,8 @@ fn test_handler_context_default_values() {
     assert!(ctx.def_index.is_none());
     assert!(ctx.current_branch.is_none());
     assert!(ctx.def_extensions.is_empty(), "def_extensions should default to empty Vec");
+    assert!(ctx.file_index.read().unwrap().is_none(), "file_index should default to None");
+    assert!(ctx.file_index_dirty.load(std::sync::atomic::Ordering::Relaxed), "file_index_dirty should default to true");
 }
 
 fn make_empty_ctx() -> HandlerContext {

@@ -7,6 +7,8 @@ use std::time::Instant;
 use serde_json::{json, Value};
 use tracing::info;
 
+use std::sync::atomic::Ordering;
+
 use crate::mcp::protocol::ToolCallResult;
 
 use super::HandlerContext;
@@ -92,36 +94,32 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     let start = Instant::now();
 
-    // Load file index.
-    // Strategy: try exact dir first, then fall back to server_dir's index if dir is
-    // a subdirectory. This prevents creating orphan file-list indexes for every
-    // subdirectory the LLM explores (bug: each subdir call created a separate index file).
-    let index = match crate::load_index(&dir, &ctx.index_base) {
-        Ok(idx) => idx,
-        Err(_) => {
-            // Fallback: if dir is a subdirectory of server_dir, reuse the server_dir's index.
-            // The server_dir index contains ALL files including subdirectories.
-            let fallback = if dir != ctx.server_dir() {
-                crate::load_index(&ctx.server_dir(), &ctx.index_base).ok().filter(|idx| {
-                    let dir_canon = std::fs::canonicalize(&dir)
-                        .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
-                        .unwrap_or_else(|_| dir.replace('\\', "/").to_lowercase());
-                    let root_canon = std::fs::canonicalize(&idx.root)
-                        .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
-                        .unwrap_or_else(|_| idx.root.replace('\\', "/").to_lowercase());
-                    let root_prefix = format!("{}/", root_canon.trim_end_matches('/'));
-                    dir_canon.starts_with(&root_prefix) || dir_canon == root_canon
-                })
-            } else {
-                None
-            };
+    // Load file index from in-memory cache (with dirty-flag invalidation).
+    // If dirty or not yet built → rebuild from filesystem (~35ms for 100K files).
+    // Otherwise use cached in-memory index (~0ms).
+    //
+    // Special case: when dir is outside server_dir, build a one-off index
+    // for that directory (not cached in memory).
+    let server_dir = ctx.server_dir();
+    let dir_is_outside = {
+        let dir_canon = std::fs::canonicalize(&dir)
+            .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
+            .unwrap_or_else(|_| dir.replace('\\', "/").to_lowercase());
+        let srv_canon = std::fs::canonicalize(&server_dir)
+            .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
+            .unwrap_or_else(|_| server_dir.replace('\\', "/").to_lowercase());
+        let srv_prefix = format!("{}/", srv_canon.trim_end_matches('/'));
+        dir_canon != srv_canon && !dir_canon.starts_with(&srv_prefix)
+    };
 
-            if let Some(parent_idx) = fallback {
-                info!(dir = %dir, root = %parent_idx.root, "Reusing workspace file index for subdirectory");
-                parent_idx
-            } else {
-                // Auto-build (only when no parent index is available)
-                info!(dir = %dir, "No file index found, building automatically");
+    let index = if dir_is_outside {
+        // Outside server_dir: try loading from disk, fall back to build+save.
+        // Not cached in memory (it's for a different directory), but saved to disk
+        // so repeated calls to the same outside dir are fast.
+        match crate::load_index(&dir, &ctx.index_base) {
+            Ok(idx) => idx,
+            Err(_) => {
+                info!(dir = %dir, "Building file-list index for outside directory");
                 let new_index = match crate::build_index(&crate::IndexArgs {
                     dir: dir.clone(),
                     max_age_hours: 24,
@@ -135,6 +133,41 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
                 let _ = crate::save_index(&new_index, &ctx.index_base);
                 new_index
             }
+        }
+    } else {
+        // Inside server_dir (or same): use in-memory cache
+        let needs_rebuild = ctx.file_index_dirty.load(Ordering::Relaxed)
+            || ctx.file_index.read().map(|fi| fi.is_none()).unwrap_or(true);
+
+        if needs_rebuild {
+            info!(dir = %server_dir, "Building file-list index (dirty or first use)");
+            let new_index = match crate::build_index(&crate::IndexArgs {
+                dir: server_dir.clone(),
+                max_age_hours: 24,
+                hidden: false,
+                no_ignore: false,
+                threads: 0,
+            }) {
+                Ok(idx) => idx,
+                Err(e) => return ToolCallResult::error(format!("Failed to build file index: {}", e)),
+            };
+            // Save to disk for CLI/other consumers
+            let _ = crate::save_index(&new_index, &ctx.index_base);
+            // Store in memory and reset dirty flag
+            if let Ok(mut fi) = ctx.file_index.write() {
+                *fi = Some(new_index);
+            }
+            ctx.file_index_dirty.store(false, Ordering::Relaxed);
+        }
+
+        // Read from in-memory cache
+        let guard = match ctx.file_index.read() {
+            Ok(g) => g,
+            Err(e) => return ToolCallResult::error(format!("Failed to read file index: {}", e)),
+        };
+        match guard.as_ref() {
+            Some(idx) => idx.clone(),
+            None => return ToolCallResult::error("File index not available after build".to_string()),
         }
     };
 
