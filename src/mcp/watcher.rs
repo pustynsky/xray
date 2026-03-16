@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -49,6 +49,9 @@ pub fn start_watcher(
             );
         }
 
+        let mut batch_start: Option<Instant> = None;
+        const MAX_ACCUMULATE: Duration = Duration::from_secs(3);
+
         let mut dirty_files: HashSet<PathBuf> = HashSet::new();
         let mut removed_files: HashSet<PathBuf> = HashSet::new();
         let mut last_autosave = std::time::Instant::now();
@@ -71,12 +74,28 @@ pub fn start_watcher(
                             EventKind::Create(_) | EventKind::Modify(_) => {
                                 removed_files.remove(path);
                                 dirty_files.insert(path.clone());
+                                if batch_start.is_none() {
+                                    batch_start = Some(Instant::now());
+                                }
                             }
                             EventKind::Remove(_) => {
                                 dirty_files.remove(path);
                                 removed_files.insert(path.clone());
+                                if batch_start.is_none() {
+                                    batch_start = Some(Instant::now());
+                                }
                             }
                             _ => {}
+                        }
+                    }
+                    // Force flush if accumulating too long (prevents debounce starvation)
+                    if let Some(start) = batch_start {
+                        if start.elapsed() >= MAX_ACCUMULATE {
+                            if !process_batch(&index, &def_index, &mut dirty_files, &mut removed_files) {
+                                error!("RwLock poisoned, watcher thread exiting");
+                                break;
+                            }
+                            batch_start = None;
                         }
                     }
                 }
@@ -97,6 +116,7 @@ pub fn start_watcher(
                         error!("RwLock poisoned, watcher thread exiting to avoid infinite error loop");
                         break;
                     }
+                    batch_start = None;
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     info!("Watcher channel disconnected, stopping");

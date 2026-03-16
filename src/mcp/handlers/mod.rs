@@ -1212,7 +1212,20 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Ok(mut idx) => {
             *idx = new_index;
         }
-        Err(e) => return ToolCallResult::error(format!("Failed to update in-memory index: {}", e)),
+        Err(e) => {
+            // Rollback workspace state to avoid getting stuck in Reindexing
+            if workspace_changed {
+                let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+                ws.dir = previous_dir.clone();
+                ws.mode = old_mode;
+                ws.generation = old_generation;
+                ws.status = WorkspaceStatus::Resolved;
+            } else {
+                let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+                ws.status = WorkspaceStatus::Resolved;
+            }
+            return ToolCallResult::error(format!("Failed to update in-memory index: {}", e));
+        }
     }
 
     // Mark workspace as resolved
@@ -1279,6 +1292,12 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
         }
     }
 
+    // Save old state for rollback on error
+    let (old_mode, old_generation) = {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        (ws.mode, ws.generation)
+    };
+
     // Update workspace binding if dir changed
     if workspace_changed {
         let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
@@ -1335,9 +1354,17 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
             *idx = new_index;
         }
         Err(e) => {
-            // Rollback workspace status to avoid getting stuck in Reindexing
-            let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-            ws.status = WorkspaceStatus::Resolved;
+            // Rollback workspace state to avoid getting stuck in Reindexing
+            if workspace_changed {
+                let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+                ws.dir = previous_dir.clone();
+                ws.mode = old_mode;
+                ws.generation = old_generation;
+                ws.status = WorkspaceStatus::Resolved;
+            } else {
+                let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+                ws.status = WorkspaceStatus::Resolved;
+            }
             return ToolCallResult::error(format!("Failed to update in-memory definition index: {}", e));
         }
     }

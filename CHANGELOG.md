@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Bug Fixes (Audit 2026-03-16)
+
+- **OOM safety cap for `git log` in CLI fallback** — `top_authors()` and `repo_activity()` in `src/git/mod.rs` now include `--max-count` safety caps (50K and 10K respectively) to prevent unbounded stdout on huge repos without date filters. Previously, a repo with 500K+ commits could cause OOM when git log read all output into a single String. Mitigated by cache (MCP handler checks cache first) and date/path filters, but the safety cap ensures no crash even in worst case.
+
+- **Incomplete rollback on RwLock write failure in reindex handlers** — `handle_xray_reindex()` now fully rolls back workspace state (dir, mode, generation, status) when `ctx.index.write()` fails (poisoned RwLock). Previously, workspace metadata would remain pointing to the new dir while the in-memory index stayed old. Also enhanced `handle_xray_reindex_definitions()` with the same full rollback (previously only reset `ws.status`).
+
+- **Debounce starvation in file watcher** — `start_watcher()` now has a `MAX_ACCUMULATE` timeout (3 seconds) that forces batch processing even when filesystem events arrive continuously faster than the debounce interval (500ms). Previously, continuous events could prevent the debounce timeout from ever firing, causing `dirty_files` to accumulate indefinitely without being processed.
+
+- **Batch callers parity with single-method path** — `handle_multi_method_callers()` now includes per-method `warning` (ambiguity check), `hint` (nearest match), `truncated`, and `nodesVisited` fields — matching the single-method path behavior. Extracted `check_method_ambiguity()` helper function (DRY refactor) used by both paths. Overall `truncated` flag added to batch summary. 2 new unit tests.
+
 ### Features
 - **`xray_fast` / `xray_grep` — relative `dir` paths** — The `dir` parameter now accepts relative paths (e.g., `dir: "src/services"`) which are resolved against `server_dir`. Previously, relative paths silently returned 0 results in `xray_fast` and errors in `xray_grep` because `std::fs::canonicalize` resolved them against the process CWD instead of the server directory. New `resolve_dir_to_absolute()` utility handles both absolute and relative paths consistently across both tools. 15 new unit tests.
 - **`xray_fast` — glob pattern auto-detection** — The `pattern` parameter now supports glob-style wildcards: `Order*` (starts with), `*Service.cs` (ends with), `Use?Service` (single-char wildcard). Glob characters (`*`, `?`) are auto-detected and converted to anchored regex. Without glob chars, behavior is unchanged (substring matching). 5 new unit tests.

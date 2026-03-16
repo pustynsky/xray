@@ -353,6 +353,21 @@ Tests for the `xray_callers` MCP tool: call trees (up/down), DI resolution, over
 
 ### T-MULTI-METHOD: Multi-method batch returns results array
 
+### T-BATCH-PARITY: Batch callers warning/hint/truncated parity (2026-03-16)
+
+**Scenario:** Batch callers include per-method warning, hint, and truncated fields
+
+1. Call `xray_callers` with `method="Foo,NonExistent"` where `Foo` exists in 2+ classes
+2. Verify per-method results:
+   - `Foo` result has `warning` field (ambiguity: found in N classes)
+   - `NonExistent` result has `hint` field (nearest match suggestion)
+   - Both results have `truncated` field (boolean)
+   - `nodesVisited` present for `up` direction
+3. Call with `maxTotalNodes=1` → verify `summary.truncated = true`
+
+**Expected:** Batch callers return the same diagnostic fields as single-method callers.
+**Regression:** Previously, batch path had no warning/hint/truncated/nodesVisited.
+
 **Expected:**
 
 - `method: "process,validate"` → `results` array with 2 entries

@@ -339,6 +339,10 @@ pub fn top_authors(
 
     add_date_args(&mut cmd, filter);
 
+    // Safety cap: prevent OOM on huge repos without date filters.
+    // 50K commits covers ~10 years of daily commits for most projects.
+    cmd.arg("--max-count=50000");
+
     if let Some(message) = message_filter {
         cmd.arg(format!("--grep={}", message));
     }
@@ -424,6 +428,10 @@ pub fn repo_activity(
         .arg("--name-only");
 
     add_date_args(&mut cmd, filter);
+
+    // Safety cap: repo_activity with --name-only produces more output per commit.
+    // 10K commits is a reasonable limit for activity overview.
+    cmd.arg("--max-count=10000");
 
     if let Some(author) = author_filter {
         cmd.arg(format!("--author={}", author));

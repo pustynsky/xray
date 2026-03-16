@@ -270,38 +270,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
     // Check for ambiguous method names and generate warning
     let method_lower = method_name.to_lowercase();
-    let mut ambiguity_warning: Option<String> = None;
-    if class_filter.is_none()
-        && let Some(name_indices) = def_idx.name_index.get(&method_lower) {
-            let method_defs: Vec<&DefinitionEntry> = name_indices.iter()
-                .filter_map(|&di| def_idx.definitions.get(di as usize))
-                .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function
-                    || d.kind == DefinitionKind::StoredProcedure || d.kind == DefinitionKind::SqlFunction)
-                .collect();
-
-            let unique_classes: HashSet<&str> = method_defs.iter()
-                .filter_map(|d| d.parent.as_deref())
-                .collect();
-
-            if unique_classes.len() > 1 {
-                let total = unique_classes.len();
-                let mut class_list: Vec<&str> = unique_classes.into_iter().collect();
-                class_list.sort_unstable();
-                const MAX_LISTED: usize = 10;
-                if total <= MAX_LISTED {
-                    ambiguity_warning = Some(format!(
-                        "Method '{}' found in {} classes: {}. Results may mix callers from different classes. Use 'class' parameter to scope the search.",
-                        method_name, total, class_list.join(", ")
-                    ));
-                } else {
-                    let shown: Vec<&str> = class_list.into_iter().take(MAX_LISTED).collect();
-                    ambiguity_warning = Some(format!(
-                        "Method '{}' found in {} classes (showing first {}): {}… Use 'class' parameter to scope the search.",
-                        method_name, total, MAX_LISTED, shown.join(", ")
-                    ));
-                }
-            }
-        }
+    let ambiguity_warning = check_method_ambiguity(&method_name, &method_lower, class_filter.as_deref(), &def_idx);
 
     // ─── Angular template tree (check before standard call tree) ─────
     let is_down = direction == "down";
@@ -659,6 +628,9 @@ fn handle_multi_method_callers(
 
         let method_lower = method_name.to_lowercase();
 
+        // Per-method ambiguity check (same logic as single-method path)
+        let method_warning = check_method_ambiguity(method_name, &method_lower, class_filter, &def_idx);
+
         // Build root method info
         let root_method = if include_body {
             build_root_method_info(
@@ -701,9 +673,19 @@ fn handle_multi_method_callers(
 
             method_result["callTree"] = json!(tree);
             method_result["nodesInTree"] = json!(method_nodes);
+            method_result["nodesVisited"] = json!(visited.len());
+            let method_truncated = method_nodes >= max_total_nodes;
+            method_result["truncated"] = json!(method_truncated);
 
             if let Some(root) = &root_method {
                 method_result["rootMethod"] = root.clone();
+            }
+
+            // Nearest-match hint when callTree is empty
+            if tree.is_empty() {
+                if let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
+                    method_result["hint"] = json!(h);
+                }
             }
 
             if impact_analysis && !tests_found.is_empty() {
@@ -738,10 +720,24 @@ fn handle_multi_method_callers(
 
             method_result["callTree"] = json!(tree);
             method_result["nodesInTree"] = json!(method_nodes);
+            let method_truncated = method_nodes >= max_total_nodes;
+            method_result["truncated"] = json!(method_truncated);
 
             if let Some(root) = &root_method {
                 method_result["rootMethod"] = root.clone();
             }
+
+            // Nearest-match hint when callTree is empty
+            if tree.is_empty() {
+                if let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
+                    method_result["hint"] = json!(h);
+                }
+            }
+        }
+
+        // Add per-method ambiguity warning
+        if let Some(ref warning) = method_warning {
+            method_result["warning"] = json!(warning);
         }
 
         results.push(method_result);
@@ -753,6 +749,11 @@ fn handle_multi_method_callers(
         "totalNodes": total_nodes_all,
         "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
     });
+    // Any method truncated = overall truncated
+    let any_truncated = results.iter().any(|r| r["truncated"].as_bool().unwrap_or(false));
+    if any_truncated {
+        summary["truncated"] = json!(true);
+    }
     if include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
         // Compute available from all result trees
@@ -792,9 +793,55 @@ fn handle_multi_method_callers(
 
 // ─── Nearest-match hints for callers ─────────────────────────────────
 
+/// Check if method name is ambiguous (exists in multiple classes) and return warning.
+/// Returns None if class_filter is set or method exists in 0-1 classes.
+fn check_method_ambiguity(
+    method_name: &str,
+    method_lower: &str,
+    class_filter: Option<&str>,
+    def_idx: &DefinitionIndex,
+) -> Option<String> {
+    if class_filter.is_some() {
+        return None;
+    }
+    let name_indices = def_idx.name_index.get(method_lower)?;
+    let method_defs: Vec<&DefinitionEntry> = name_indices.iter()
+        .filter_map(|&di| def_idx.definitions.get(di as usize))
+        .filter(|d| d.kind == DefinitionKind::Method || d.kind == DefinitionKind::Constructor || d.kind == DefinitionKind::Function
+            || d.kind == DefinitionKind::StoredProcedure || d.kind == DefinitionKind::SqlFunction)
+        .collect();
+
+    let unique_classes: HashSet<&str> = method_defs.iter()
+        .filter_map(|d| d.parent.as_deref())
+        .collect();
+
+    if unique_classes.len() <= 1 {
+        return None;
+    }
+
+    let total = unique_classes.len();
+    let mut class_list: Vec<&str> = unique_classes.into_iter().collect();
+    class_list.sort_unstable();
+    const MAX_LISTED: usize = 10;
+    if total <= MAX_LISTED {
+        Some(format!(
+            "Method '{}' found in {} classes: {}. Results may mix callers from different classes. Use 'class' parameter to scope the search.",
+            method_name, total, class_list.join(", ")
+        ))
+    } else {
+        let shown: Vec<&str> = class_list.into_iter().take(MAX_LISTED).collect();
+        Some(format!(
+            "Method '{}' found in {} classes (showing first {}): {}… Use 'class' parameter to scope the search.",
+            method_name, total, MAX_LISTED, shown.join(", ")
+        ))
+    }
+}
+
+
 /// Generate a nearest-match hint when callTree is empty.
 /// Checks both method name and class name for typos using Jaro-Winkler similarity.
 /// Falls back to a generic hint if both names exist but no call sites were found.
+
 fn generate_callers_hint(
     method_name: &str,
     class_filter: Option<&str>,

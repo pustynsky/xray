@@ -350,6 +350,18 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 
 ### T-RECONCILE: Watcher startup reconciliation — catches stale cache files
 
+### T-WATCHER-DEBOUNCE: Watcher debounce starvation fix (2026-03-16)
+
+**Scenario:** Watcher flushes within 3s even under continuous file changes
+
+1. Start server with `--watch`
+2. Create 100 files in rapid succession (interval < 500ms each)
+3. Verify that the content index is updated within 3-5 seconds (not waiting for complete silence)
+
+**Expected:** `MAX_ACCUMULATE` (3s) forces batch processing even when events arrive continuously.
+**Regression:** Previously, continuous events prevented the debounce timeout from firing.
+
+
 **Expected:**
 
 - Added/modified/deleted files while server was offline are detected and fixed

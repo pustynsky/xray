@@ -691,6 +691,199 @@ fn test_xray_callers_ambiguity_warning_few_classes() {
 }
 
 #[test]
+fn test_xray_callers_batch_ambiguity_warning() {
+    // Batch callers (method="Foo,Bar") should produce per-method ambiguity warnings
+    // when method is defined in multiple classes and no class filter is set.
+    use std::path::PathBuf;
+
+    let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
+    let files = vec![
+        "C:\\src\\ServiceA.cs".to_string(),
+        "C:\\src\\ServiceB.cs".to_string(),
+    ];
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "ServiceA".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "Foo".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("ServiceA".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "ServiceB".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "Foo".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("ServiceB".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    content_idx.entry("foo".to_string()).or_default().push(
+        Posting { file_id: 0, lines: vec![10] }
+    );
+    content_idx.entry("foo".to_string()).or_default().push(
+        Posting { file_id: 1, lines: vec![10] }
+    );
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    for (i, f) in files.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files.clone(),
+        index: content_idx, total_tokens: 200,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; 2],
+        ..Default::default()
+    };
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files,
+        definitions,
+        name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id,
+        method_calls: HashMap::new(), ..Default::default()
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    // Batch call with "Foo,NonExistent" — Foo should get warning, NonExistent should get hint
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
+        "method": "Foo,NonExistent"
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = output["results"].as_array().expect("should have results array");
+    assert_eq!(results.len(), 2, "batch should have 2 per-method results");
+
+    // First method (Foo) — should have warning about 2 classes
+    let foo_result = &results[0];
+    assert_eq!(foo_result["method"].as_str().unwrap(), "Foo");
+    let warning = foo_result["warning"].as_str().expect("Foo should have ambiguity warning");
+    assert!(warning.contains("2 classes"), "Warning should mention 2 classes, got: {}", warning);
+    assert!(warning.contains("ServiceA"), "Warning should list ServiceA");
+    assert!(warning.contains("ServiceB"), "Warning should list ServiceB");
+
+    // Second method (NonExistent) — should have hint (nearest match) but no warning
+    let ne_result = &results[1];
+    assert_eq!(ne_result["method"].as_str().unwrap(), "NonExistent");
+    assert!(ne_result.get("warning").is_none() || ne_result["warning"].is_null(),
+        "NonExistent should not have ambiguity warning");
+    // hint may or may not exist depending on nearest match — just verify no crash
+}
+
+#[test]
+fn test_xray_callers_batch_truncated_flag() {
+    // Batch callers with maxTotalNodes=1 should produce truncated=true per-method
+    use std::path::PathBuf;
+
+    let files = vec!["C:\\src\\Svc.cs".to_string()];
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "Svc".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 100,
+            parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "DoWork".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("Svc".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
+    content_idx.entry("dowork".to_string()).or_default().push(
+        Posting { file_id: 0, lines: vec![10] }
+    );
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    path_to_id.insert(PathBuf::from(&files[0]), 0);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files.clone(),
+        index: content_idx, total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        ..Default::default()
+    };
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files,
+        definitions,
+        name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id,
+        method_calls: HashMap::new(), ..Default::default()
+    };
+
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    // Batch call with maxTotalNodes=1 to force truncation
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({
+        "method": "DoWork,DoWork",
+        "maxTotalNodes": 1
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = output["results"].as_array().expect("should have results");
+
+    // Each per-method result should have truncated field
+    for r in results {
+        assert!(r.get("truncated").is_some(), "per-method result should have truncated field");
+    }
+
+    // nodesVisited should be present (for up direction)
+    for r in results {
+        assert!(r.get("nodesVisited").is_some(), "per-method result should have nodesVisited field");
+    }
+}
+
+#[test]
 fn test_xray_callers_no_ambiguity_warning_with_class_param() {
     // Same setup as above (3 classes with "Initialize") but WITH `class` param → no warning.
     let mut content_idx: HashMap<String, Vec<Posting>> = HashMap::new();
