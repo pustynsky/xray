@@ -4,6 +4,7 @@ use std::fs;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::{index_dir, index::load_compressed, ContentIndex, FileIndex};
+#[allow(unused_imports)] // Used in tests (info_tests.rs) and in cmd_info_json
 use crate::index::{load_index_meta, save_index_meta, IndexDetails, IndexMeta};
 
 /// Check if an index is stale based on created_at and max_age_secs from metadata.

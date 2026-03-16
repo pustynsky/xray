@@ -1,5 +1,25 @@
 # Changelog
 
+### Bug Fixes
+
+- **Workspace switch does not update directory-bound resources** — Fixed 3 bugs (P0+P1+P2) where workspace switch (via `roots/list` or `xray_reindex dir=new`) left definition index, file watcher, and git cache pointing at the old directory. LLM got 0 results from `xray_definitions` without error, silently falling back to `read_file` (10x slower). Root causes and fixes:
+
+  **Pre-fix (P0 blocker): Separated `ready` and `building` flags** — `content_ready`/`def_ready` flags served dual purpose: "index available" AND "no concurrent build". After workspace switch, `ready=false` blocked `xray_reindex` with "already building" even though no build was running (deadlock). Fix: added separate `content_building`/`def_building` `AtomicBool` flags with `compare_exchange` for concurrent build protection. Removed `xray_reindex`/`xray_reindex_definitions` from `requires_content_index`/`requires_def_index` guards. 3 new unit tests (not-blocked-when-not-ready, blocked-when-building, def-blocked-when-building).
+
+  **Bug 1 (P0): Definition index not reloaded on workspace switch** — `handle_xray_reindex` only rebuilt content index. Definition index stayed empty from the old workspace. Fix: cross-load definition index from cache on workspace switch; if no cache, start background build. Mirror fix in `handle_xray_reindex_definitions` (cross-loads content index). Response includes `defIndexAction`/`contentIndexAction` field.
+
+  **Root fix (P0): Don't index Unresolved workspace** — `determine_initial_binding` was called AFTER index building in `cmd_serve`. When CWD was VS Code install dir (no source files), empty indexes were built and `ready=true` masked the problem. Fix: moved `determine_initial_binding` BEFORE index building. When `Unresolved`: skip content/def index build, watcher, git cache. Leave `ready=false`.
+
+  **Fix B (P0): Reset ready flags on roots/list** — `handle_pending_response` set `ws.status=Reindexing` but didn't reset `content_ready`/`def_ready`. Old indexes remained "ready" for queries, returning stale results. Fix: reset both flags when workspace changes via `roots/list`.
+
+  **Bug 2 (P1): File watcher not restarted** — Watcher bound to startup directory, never restarted on workspace switch. Fix: added generation counter (`AtomicU64`) to watcher. On workspace switch, increment generation → old watcher exits on next timeout, new watcher starts for new directory. Supports unlimited sequential workspace switches.
+
+  **Bug 3 (P2): Git cache stale after workspace switch** — Git cache built once at startup for the original directory. Fix: clear cache + start background rebuild for new workspace in `handle_xray_reindex`.
+
+  Modified files: `src/mcp/handlers/mod.rs` (HandlerContext fields, dispatch guards, cross-load logic, watcher restart, git cache rebuild), `src/cli/serve.rs` (early binding, skip-unresolved, building flags), `src/mcp/server.rs` (ready flag reset), `src/mcp/watcher.rs` (generation-based stop). All 1766 unit tests + 68 E2E tests pass. 0 warnings.
+
+- **Unused imports `IndexDetails` and `IndexMeta` in `info.rs`** — Removed two unused imports that produced a compiler warning.
+
 ## Unreleased
 
 ### Internal

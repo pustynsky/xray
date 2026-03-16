@@ -1,7 +1,7 @@
 //! MCP server startup and configuration.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -61,6 +61,18 @@ pub fn cmd_serve(args: ServeArgs) {
     let content_ready = Arc::new(AtomicBool::new(false));
     let def_ready = Arc::new(AtomicBool::new(false));
     let file_index_dirty = Arc::new(AtomicBool::new(true));
+    let content_building = Arc::new(AtomicBool::new(false));
+    let def_building = Arc::new(AtomicBool::new(false));
+
+    // ─── Workspace binding: determine BEFORE index building ───
+    // This prevents building indexes for wrong directory (e.g., VS Code install dir)
+    // when server starts with --dir . and CWD has no source files.
+    let extensions_vec: Vec<String> = exts_for_load.split(',').map(|s| s.to_string()).collect();
+    let ws_binding = mcp::handlers::determine_initial_binding(&dir_str, &extensions_vec);
+    let is_unresolved = ws_binding.status == mcp::handlers::WorkspaceStatus::Unresolved;
+    if is_unresolved {
+        eprintln!("[startup] Workspace UNRESOLVED (no source files in '{}'), skipping index build", ws_binding.dir);
+    }
 
     // Create an empty ContentIndex so the event loop can start immediately
     let empty_index = ContentIndex {
@@ -82,15 +94,18 @@ pub fn cmd_serve(args: ServeArgs) {
     let index = Arc::new(RwLock::new(empty_index));
 
     // Try fast load from disk (typically < 3s)
+    // Skip if workspace is Unresolved — no point loading/building indexes for wrong directory.
     let start = Instant::now();
-    let direct_load = load_content_index(&dir_str, &exts_for_load, &idx_base).ok();
+    let direct_load = if is_unresolved { None } else {
+        load_content_index(&dir_str, &exts_for_load, &idx_base).ok()
+    };
     let load_method;
     let loaded = if direct_load.is_some() {
         load_method = "direct";
         direct_load
     } else {
         load_method = "fallback";
-        find_content_index_for_dir(&dir_str, &idx_base, &extensions)
+        if is_unresolved { None } else { find_content_index_for_dir(&dir_str, &idx_base, &extensions) }
     };
 
     if let Some(idx) = loaded {
@@ -130,16 +145,18 @@ pub fn cmd_serve(args: ServeArgs) {
                 start.elapsed().as_secs_f64() * 1000.0, trigrams, tokens);
             crate::index::log_memory("serve: trigram warm-up done");
         });
-    } else {
+    } else if !is_unresolved {
         // Build in background — don't block the event loop
         let bg_index: Arc<RwLock<ContentIndex>> = Arc::clone(&index);
         let bg_ready = Arc::clone(&content_ready);
+        let bg_building = Arc::clone(&content_building);
         let bg_dir = dir_str.clone();
         let bg_ext = exts_for_load.clone();
         let bg_idx_base = idx_base.clone();
         let bg_watch = args.watch;
 
         std::thread::spawn(move || {
+            bg_building.store(true, Ordering::Release);
             info!("Building content index in background...");
             crate::index::log_memory("content-build: starting");
             let build_start = Instant::now();
@@ -155,6 +172,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 Ok(idx) => idx,
                 Err(e) => {
                     warn!(error = %e, "Failed to build content index");
+                    bg_building.store(false, Ordering::Release);
                     bg_ready.store(true, Ordering::Release);
                     return;
                 }
@@ -190,6 +208,7 @@ pub fn cmd_serve(args: ServeArgs) {
                         Ok(idx) => idx,
                         Err(e2) => {
                             warn!(error = %e2, "Failed to rebuild content index from scratch");
+                            bg_building.store(false, Ordering::Release);
                             bg_ready.store(true, Ordering::Release);
                             return;
                         }
@@ -212,6 +231,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 "Content index ready (background build complete)"
             );
             *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
+            bg_building.store(false, Ordering::Release);
             bg_ready.store(true, Ordering::Release);
             crate::index::log_memory("serve: content ready");
 
@@ -290,14 +310,16 @@ pub fn cmd_serve(args: ServeArgs) {
         // Try fast load from disk
         let def_start = Instant::now();
         let def_ext_vec: Vec<String> = def_exts.split(',').map(|s| s.to_string()).collect();
-        let def_direct = definitions::load_definition_index(&dir_str, &def_exts, &idx_base).ok();
+        let def_direct = if is_unresolved { None } else {
+            definitions::load_definition_index(&dir_str, &def_exts, &idx_base).ok()
+        };
         let def_load_method;
         let def_loaded = if def_direct.is_some() {
             def_load_method = "direct";
             def_direct
         } else {
             def_load_method = "fallback";
-            definitions::find_definition_index_for_dir(&dir_str, &idx_base, &def_ext_vec)
+            if is_unresolved { None } else { definitions::find_definition_index_for_dir(&dir_str, &idx_base, &def_ext_vec) }
         };
 
         if let Some(idx) = def_loaded {
@@ -321,15 +343,17 @@ pub fn cmd_serve(args: ServeArgs) {
             idx.shrink_maps();
             *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
             def_ready.store(true, Ordering::Release);
-        } else {
+        } else if !is_unresolved {
             // Build in background
             let bg_def = Arc::clone(&def_arc);
             let bg_def_ready = Arc::clone(&def_ready);
+            let bg_def_building = Arc::clone(&def_building);
             let bg_dir = dir_str.clone();
             let bg_def_exts = def_exts.clone();
             let bg_idx_base = idx_base.clone();
 
             std::thread::spawn(move || {
+                bg_def_building.store(true, Ordering::Release);
                 info!("Building definition index in background...");
                 crate::index::log_memory("def-build: starting");
                 let build_start = Instant::now();
@@ -374,6 +398,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 let mut new_idx = new_idx;
                 new_idx.shrink_maps();
                 *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
+                bg_def_building.store(false, Ordering::Release);
                 bg_def_ready.store(true, Ordering::Release);
                 crate::index::log_memory("serve: def ready");
             });
@@ -388,7 +413,8 @@ pub fn cmd_serve(args: ServeArgs) {
 
     // Start file watcher if --watch (only after content index is available)
     // Watcher works fine with an empty index — it will update it as files change.
-    if args.watch {
+    let watcher_generation = Arc::new(AtomicU64::new(0));
+    if args.watch && !is_unresolved {
         let watch_dir = std::fs::canonicalize(&dir_str)
             .unwrap_or_else(|_| PathBuf::from(&dir_str));
         crate::index::log_memory("serve: starting watcher");
@@ -402,6 +428,8 @@ pub fn cmd_serve(args: ServeArgs) {
             Arc::clone(&content_ready),
             Arc::clone(&def_ready),
             Arc::clone(&file_index_dirty),
+            Arc::clone(&watcher_generation),
+            0, // initial generation
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
@@ -411,7 +439,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let git_cache: Arc<RwLock<Option<GitHistoryCache>>> = Arc::new(RwLock::new(None));
     let git_cache_ready = Arc::new(AtomicBool::new(false));
 
-    {
+    if !is_unresolved {
         let bg_git_cache = Arc::clone(&git_cache);
         let bg_git_ready = Arc::clone(&git_cache_ready);
         let bg_dir = dir_str.clone();
@@ -588,7 +616,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let ctx = mcp::handlers::HandlerContext {
         index,
         def_index,
-        workspace: Arc::new(RwLock::new(mcp::handlers::determine_initial_binding(&dir_str, &exts_for_load.split(',').map(|s| s.to_string()).collect::<Vec<_>>()))),
+        workspace: Arc::new(RwLock::new(ws_binding)),
         server_ext: exts_for_load,
         metrics: args.metrics,
         index_base: idx_base,
@@ -601,6 +629,11 @@ pub fn cmd_serve(args: ServeArgs) {
         def_extensions: def_extensions_vec,
         file_index,
         file_index_dirty: Arc::clone(&file_index_dirty),
+        content_building,
+        def_building,
+        watcher_generation,
+        watch_enabled: args.watch,
+        watch_debounce_ms: args.debounce_ms,
     };
     mcp::server::run_server(ctx);
     crate::index::log_memory("serve: event loop exited");

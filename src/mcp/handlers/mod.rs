@@ -9,7 +9,7 @@ mod grep;
 pub(crate) mod utils;
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -671,7 +671,7 @@ pub fn has_source_files(dir: &str, extensions: &[String], max_depth: usize) -> b
 
 /// Determine the initial WorkspaceBindingMode based on --dir argument.
 /// - Explicit non-dot path → PinnedCli
-/// - Dot path with source files → DotBootstrap  
+/// - Dot path with source files → DotBootstrap
 /// - Dot path without source files → Unresolved
 pub fn determine_initial_binding(dir: &str, extensions: &[String]) -> WorkspaceBinding {
     let is_dot = dir == "." || dir == "./" || dir == ".\\";
@@ -727,6 +727,22 @@ pub struct HandlerContext {
     /// Dirty flag for file-list index. Set by watcher on any FS create/delete/rename.
     /// When true, xray_fast rebuilds the file index before serving results.
     pub file_index_dirty: Arc<AtomicBool>,
+    /// Whether a content index build is currently in progress (background thread or reindex).
+    /// Used to prevent concurrent builds. Different from `content_ready` which means
+    /// "index is available for queries".
+    pub content_building: Arc<AtomicBool>,
+    /// Whether a definition index build is currently in progress.
+    /// Used to prevent concurrent builds. Different from `def_ready`.
+    pub def_building: Arc<AtomicBool>,
+    /// Generation counter for the file watcher. Each watcher thread receives its
+    /// generation at start, and exits when the counter changes (workspace switch).
+    /// Supports unlimited sequential workspace switches (unlike a boolean stop flag).
+    pub watcher_generation: Arc<AtomicU64>,
+    /// Whether --watch was requested at startup. Needed to know whether to
+    /// restart the watcher on workspace switch.
+    pub watch_enabled: bool,
+    /// Debounce milliseconds for the file watcher.
+    pub watch_debounce_ms: u64,
 }
 
 impl HandlerContext {
@@ -761,6 +777,11 @@ impl Default for HandlerContext {
             def_extensions: Vec::new(),
             file_index: Arc::new(RwLock::new(None)),
             file_index_dirty: Arc::new(AtomicBool::new(true)),
+            content_building: Arc::new(AtomicBool::new(false)),
+            def_building: Arc::new(AtomicBool::new(false)),
+            watcher_generation: Arc::new(AtomicU64::new(0)),
+            watch_enabled: false,
+            watch_debounce_ms: 500,
         }
     }
 }
@@ -800,13 +821,18 @@ const MULTI_METHOD_RESPONSE_MAX: usize = 131_072;
 
 /// Returns true when a tool requires the content index to be ready.
 fn requires_content_index(tool_name: &str) -> bool {
-    // Note: xray_fast uses its own file-list index, not the content index
-    matches!(tool_name, "xray_grep" | "xray_reindex")
+    // Note: xray_fast uses its own file-list index, not the content index.
+    // xray_reindex is NOT included here — it needs to run even when content_ready=false
+    // (e.g., after workspace switch). Concurrent build protection is handled by
+    // content_building flag inside handle_xray_reindex.
+    matches!(tool_name, "xray_grep")
 }
 
 /// Returns true when a tool requires the definition index to be ready.
 fn requires_def_index(tool_name: &str) -> bool {
-    matches!(tool_name, "xray_definitions" | "xray_callers" | "xray_reindex_definitions")
+    // xray_reindex_definitions is NOT included — it needs to run even when def_ready=false.
+    // Concurrent build protection is handled by def_building flag inside the handler.
+    matches!(tool_name, "xray_definitions" | "xray_callers")
 }
 
 /// Dispatch a tool call to the right handler.
@@ -849,17 +875,14 @@ pub fn dispatch_tool(
         }
     }
 
-    // Check readiness: if the required index is still building, return early
+    // Check readiness: if the required index is still building, return early.
+    // Note: xray_reindex and xray_reindex_definitions are NOT in these guards —
+    // they need to run even when ready=false (e.g., after workspace switch).
+    // Their concurrent build protection uses content_building/def_building flags.
     if requires_content_index(tool_name) && !ctx.content_ready.load(Ordering::Acquire) {
-        if tool_name == "xray_reindex" {
-            return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
-        }
         return ToolCallResult::error(INDEX_BUILDING_MSG.to_string());
     }
     if requires_def_index(tool_name) && !ctx.def_ready.load(Ordering::Acquire) {
-        if tool_name == "xray_reindex_definitions" {
-            return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
-        }
         return ToolCallResult::error(DEF_INDEX_BUILDING_MSG.to_string());
     }
 
@@ -1117,6 +1140,19 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
 }
 
 fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+    // Concurrent build protection: prevent two reindex calls from running simultaneously.
+    // Uses compare_exchange for atomic "test-and-set" — only one caller wins.
+    if ctx.content_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
+    }
+
+    // SAFETY: from this point, content_building=true. We MUST reset it on ALL exit paths.
+    let result = handle_xray_reindex_inner(ctx, args);
+    ctx.content_building.store(false, Ordering::Release);
+    result
+}
+
+fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let current_dir = ctx.server_dir();
     let dir = args.get("dir").and_then(|v| v.as_str())
         .map(|d| {
@@ -1263,15 +1299,167 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         }
     }
 
-    // Mark workspace as resolved
+    // Mark workspace as resolved and content index as ready.
+    // CRITICAL: content_ready must be set to true here because Fix B
+    // (handle_pending_response) may have reset it to false during workspace switch.
     {
         let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
         ws.status = WorkspaceStatus::Resolved;
     }
+    ctx.content_ready.store(true, Ordering::Release);
 
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after replace+mi_collect (content)");
+
+    // ─── Cross-load definition index on workspace switch ───
+    // When workspace changes, the old def index is for the wrong directory.
+    // Try to load from cache; if unavailable, start a background build.
+    let def_index_action = if workspace_changed {
+        if let Some(ref def_arc) = ctx.def_index {
+            let def_ext_str = ctx.def_extensions.join(",");
+            let def_ext_vec: Vec<String> = ctx.def_extensions.clone();
+
+            // Try cache load
+            let def_loaded = crate::definitions::load_definition_index(&dir, &def_ext_str, &ctx.index_base).ok()
+                .or_else(|| crate::definitions::find_definition_index_for_dir(&dir, &ctx.index_base, &def_ext_vec));
+
+            if let Some(mut idx) = def_loaded {
+                idx.shrink_maps();
+                *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
+                ctx.def_ready.store(true, Ordering::Release);
+                info!(dir = %dir, "Definition index cross-loaded from cache on workspace switch");
+                Some("loaded_cache")
+            } else {
+                // No cache — start background build
+                ctx.def_ready.store(false, Ordering::Release);
+                let bg_def = Arc::clone(def_arc);
+                let bg_dir = dir.clone();
+                let bg_ext = def_ext_str.clone();
+                let bg_idx_base = ctx.index_base.clone();
+                let bg_ready = Arc::clone(&ctx.def_ready);
+                let bg_building = Arc::clone(&ctx.def_building);
+                std::thread::spawn(move || {
+                    if bg_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                        return; // another build already running
+                    }
+                    info!(dir = %bg_dir, "Building definition index in background (workspace switch)");
+                    let new_idx = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+                        dir: bg_dir.clone(), ext: bg_ext.clone(), threads: 0,
+                    });
+                    if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
+                        warn!(error = %e, "Failed to save definition index to disk");
+                    }
+                    // Drop + reload pattern for compact memory
+                    drop(new_idx);
+                    crate::index::force_mimalloc_collect();
+                    let new_idx = crate::definitions::load_definition_index(&bg_dir, &bg_ext, &bg_idx_base)
+                        .unwrap_or_else(|e| {
+                            warn!(error = %e, "Failed to reload def index, rebuilding");
+                            crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+                                dir: bg_dir, ext: bg_ext, threads: 0,
+                            })
+                        });
+                    *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
+                    bg_building.store(false, Ordering::Release);
+                    bg_ready.store(true, Ordering::Release);
+                    crate::index::log_memory("reindex: def cross-build complete");
+                });
+                info!(dir = %dir, "Definition index background build started (no cache)");
+                Some("background_build")
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    // ─── Restart watcher for new workspace ───
+    if workspace_changed && ctx.watch_enabled {
+        // Increment watcher generation — old watcher will detect the mismatch and exit.
+        // This supports unlimited sequential workspace switches (generation counter, not boolean).
+        let new_gen = ctx.watcher_generation.fetch_add(1, Ordering::Release) + 1;
+        // Start new watcher for new directory.
+        let watch_dir = std::fs::canonicalize(&dir)
+            .unwrap_or_else(|_| std::path::PathBuf::from(&dir));
+        let ext_vec: Vec<String> = ctx.server_ext.split(',').map(|s| s.trim().to_string()).collect();
+        if let Err(e) = crate::mcp::watcher::start_watcher(
+            Arc::clone(&ctx.index),
+            ctx.def_index.as_ref().map(Arc::clone),
+            watch_dir,
+            ext_vec,
+            ctx.watch_debounce_ms,
+            ctx.index_base.clone(),
+            Arc::clone(&ctx.content_ready),
+            Arc::clone(&ctx.def_ready),
+            Arc::clone(&ctx.file_index_dirty),
+            Arc::clone(&ctx.watcher_generation),
+            new_gen,
+        ) {
+            warn!(error = %e, "Failed to restart file watcher for new workspace");
+        } else {
+            info!(dir = %dir, generation = new_gen, "File watcher restarted for new workspace");
+        }
+    }
+
+    // ─── Rebuild git cache for new workspace ───
+    if workspace_changed {
+        // Clear stale cache for old workspace
+        if let Ok(mut cache) = ctx.git_cache.write() {
+            *cache = None;
+        }
+        ctx.git_cache_ready.store(false, Ordering::Release);
+
+        // Start background rebuild
+        let bg_git_cache = Arc::clone(&ctx.git_cache);
+        let bg_git_ready = Arc::clone(&ctx.git_cache_ready);
+        let bg_dir = dir.clone();
+        let bg_idx_base = ctx.index_base.clone();
+        std::thread::spawn(move || {
+            let repo_path = std::path::PathBuf::from(&bg_dir);
+            let git_dir = repo_path.join(".git");
+            if !git_dir.exists() {
+                info!(dir = %bg_dir, "No .git directory in new workspace, skipping git cache");
+                bg_git_ready.store(true, Ordering::Release);
+                return;
+            }
+            let branch = match GitHistoryCache::detect_default_branch(&repo_path) {
+                Ok(b) => b,
+                Err(e) => {
+                    warn!(error = %e, "Failed to detect default branch for new workspace");
+                    bg_git_ready.store(true, Ordering::Release);
+                    return;
+                }
+            };
+            let cache_path = GitHistoryCache::cache_path_for(&bg_dir, &bg_idx_base);
+            // Try load from disk first
+            let cache = if cache_path.exists() {
+                GitHistoryCache::load_from_disk(&cache_path).ok()
+            } else {
+                None
+            };
+            let cache = match cache {
+                Some(c) => c,
+                None => {
+                    match GitHistoryCache::build(&repo_path, &branch) {
+                        Ok(c) => {
+                            let _ = c.save_to_disk(&cache_path);
+                            c
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Failed to build git cache for new workspace");
+                            bg_git_ready.store(true, Ordering::Release);
+                            return;
+                        }
+                    }
+                }
+            };
+            info!(dir = %bg_dir, commits = cache.commits.len(), "Git cache rebuilt for new workspace");
+            *bg_git_cache.write().unwrap_or_else(|e| e.into_inner()) = Some(cache);
+            bg_git_ready.store(true, Ordering::Release);
+        });
+    }
 
     let elapsed = start.elapsed();
 
@@ -1286,6 +1474,9 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         output["workspaceChanged"] = json!(true);
         output["previousServerDir"] = json!(previous_dir);
     }
+    if let Some(action) = def_index_action {
+        output["defIndexAction"] = json!(action);
+    }
     output["serverDir"] = json!(dir);
 
     // Invalidate file-list index so xray_fast rebuilds it on next call
@@ -1298,6 +1489,17 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 }
 
 fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+    // Concurrent build protection (same pattern as handle_xray_reindex).
+    if ctx.def_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
+    }
+
+    let result = handle_xray_reindex_definitions_inner(ctx, args);
+    ctx.def_building.store(false, Ordering::Release);
+    result
+}
+
+fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index_arc = match &ctx.def_index {
         Some(di) => Arc::clone(di),
         None => return ToolCallResult::error(
@@ -1410,15 +1612,92 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
         }
     }
 
-    // Mark workspace as resolved
+    // Mark workspace as resolved and def index as ready.
+    // CRITICAL: def_ready must be set to true here because Fix B
+    // (handle_pending_response) may have reset it to false during workspace switch.
     {
         let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
         ws.status = WorkspaceStatus::Resolved;
     }
+    ctx.def_ready.store(true, Ordering::Release);
 
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after replace+mi_collect (def)");
+
+    // ─── Cross-load content index on workspace switch ───
+    let content_index_action = if workspace_changed {
+        let content_ext = ctx.server_ext.clone();
+        let content_loaded = load_content_index(&dir, &content_ext, &ctx.index_base).ok()
+            .or_else(|| {
+                let ext_vec: Vec<String> = content_ext.split(',').map(|s| s.to_string()).collect();
+                find_content_index_for_dir(&dir, &ctx.index_base, &ext_vec)
+            });
+
+        if let Some(idx) = content_loaded {
+            let had_watch = ctx.index.read()
+                .map(|i| i.path_to_id.is_some())
+                .unwrap_or(false);
+            let idx = if had_watch {
+                crate::mcp::watcher::build_watch_index_from(idx)
+            } else {
+                idx
+            };
+            match ctx.index.write() {
+                Ok(mut current) => {
+                    *current = idx;
+                    ctx.content_ready.store(true, Ordering::Release);
+                    info!(dir = %dir, "Content index cross-loaded from cache on workspace switch");
+                }
+                Err(e) => {
+                    warn!(error = %e, "Failed to update content index on workspace switch");
+                }
+            }
+            // Invalidate file-list index
+            if let Ok(mut fi) = ctx.file_index.write() { *fi = None; }
+            ctx.file_index_dirty.store(true, Ordering::Relaxed);
+            Some("loaded_cache")
+        } else {
+            // No cache — start background build
+            ctx.content_ready.store(false, Ordering::Release);
+            let bg_index = Arc::clone(&ctx.index);
+            let bg_dir = dir.clone();
+            let bg_ext = content_ext;
+            let bg_idx_base = ctx.index_base.clone();
+            let bg_ready = Arc::clone(&ctx.content_ready);
+            let bg_building = Arc::clone(&ctx.content_building);
+            let bg_file_dirty = Arc::clone(&ctx.file_index_dirty);
+            std::thread::spawn(move || {
+                if bg_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+                    return;
+                }
+                info!(dir = %bg_dir, "Building content index in background (workspace switch)");
+                match build_content_index(&ContentIndexArgs {
+                    dir: bg_dir.clone(), ext: bg_ext.clone(),
+                    max_age_hours: 24, hidden: false, no_ignore: false,
+                    threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                }) {
+                    Ok(idx) => {
+                        if let Err(e) = save_content_index(&idx, &bg_idx_base) {
+                            warn!(error = %e, "Failed to save content index");
+                        }
+                        *bg_index.write().unwrap_or_else(|e| e.into_inner()) = idx;
+                        bg_file_dirty.store(true, Ordering::Relaxed);
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to build content index");
+                    }
+                }
+                bg_building.store(false, Ordering::Release);
+                bg_ready.store(true, Ordering::Release);
+                crate::index::log_memory("reindex_def: content cross-build complete");
+            });
+            info!(dir = %dir, "Content index background build started (no cache)");
+            Some("background_build")
+        }
+    } else {
+        None
+    };
 
     let elapsed = start.elapsed();
 
@@ -1434,6 +1713,9 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
     if workspace_changed {
         output["workspaceChanged"] = json!(true);
         output["previousServerDir"] = json!(previous_dir);
+    }
+    if let Some(action) = content_index_action {
+        output["contentIndexAction"] = json!(action);
     }
     output["serverDir"] = json!(dir);
 

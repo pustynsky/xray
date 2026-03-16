@@ -90,6 +90,11 @@ fn test_handler_context_field_count_guard() {
         def_extensions: Vec::new(),
         file_index: Arc::new(RwLock::new(None)),
         file_index_dirty: Arc::new(AtomicBool::new(true)),
+        content_building: Arc::new(AtomicBool::new(false)),
+        def_building: Arc::new(AtomicBool::new(false)),
+        watcher_generation: Arc::new(AtomicU64::new(0)),
+        watch_enabled: false,
+        watch_debounce_ms: 500,
     };
     drop(_guard);
 }
@@ -351,15 +356,62 @@ fn test_dispatch_callers_while_def_index_building() {
 }
 
 #[test]
-fn test_dispatch_reindex_while_content_index_building() {
+fn test_dispatch_reindex_not_blocked_when_content_not_ready() {
+    // After the pre-fix (Stage 0), xray_reindex is NOT blocked by content_ready=false.
+    // It should proceed to execute (not return "already building").
+    // This is critical for the workspace switch flow where content_ready=false
+    // but no background build is running.
     let ctx = HandlerContext {
         content_ready: Arc::new(AtomicBool::new(false)),
+        ..make_empty_ctx()
+    };
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({}));
+    // Should succeed (not error), even though content_ready is false
+    assert!(!result.is_error,
+        "xray_reindex should NOT be blocked by content_ready=false, got: {}", result.content[0].text);
+}
+
+#[test]
+fn test_dispatch_reindex_blocked_when_content_building() {
+    // content_building=true means another build is in progress — should block.
+    let ctx = HandlerContext {
+        content_building: Arc::new(AtomicBool::new(true)),
         ..make_empty_ctx()
     };
     let result = dispatch_tool(&ctx, "xray_reindex", &json!({}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("already being built"),
         "Expected 'already being built' message, got: {}", result.content[0].text);
+}
+
+#[test]
+fn test_dispatch_reindex_definitions_blocked_when_def_building() {
+    // def_building=true means another build is in progress — should block.
+    let ctx = HandlerContext {
+        def_index: Some(Arc::new(RwLock::new(crate::definitions::DefinitionIndex::default()))),
+        def_building: Arc::new(AtomicBool::new(true)),
+        ..make_empty_ctx()
+    };
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({}));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("already being built"),
+        "Expected 'already being built' message, got: {}", result.content[0].text);
+}
+
+#[test]
+fn test_reindex_sets_content_ready_true_after_completion() {
+    // Regression test: when content_ready=false (e.g., after roots/list reset),
+    // xray_reindex must set it back to true after loading the index.
+    // Without this, xray_grep stays permanently blocked with "building" error.
+    let ctx = HandlerContext {
+        content_ready: Arc::new(AtomicBool::new(false)),
+        ..make_empty_ctx()
+    };
+    assert!(!ctx.content_ready.load(std::sync::atomic::Ordering::Acquire));
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({}));
+    assert!(!result.is_error, "xray_reindex should succeed, got: {}", result.content[0].text);
+    assert!(ctx.content_ready.load(std::sync::atomic::Ordering::Acquire),
+        "content_ready must be true after xray_reindex completes");
 }
 
 #[test]

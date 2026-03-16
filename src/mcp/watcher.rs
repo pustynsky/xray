@@ -10,7 +10,7 @@ use tracing::{error, info, warn};
 use crate::{clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Start a file watcher thread that incrementally updates the in-memory index
 pub fn start_watcher(
@@ -23,6 +23,8 @@ pub fn start_watcher(
     _content_ready: Arc<AtomicBool>,
     _def_ready: Arc<AtomicBool>,
     file_index_dirty: Arc<AtomicBool>,
+    watcher_generation: Arc<AtomicU64>,
+    my_generation: u64,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -35,6 +37,12 @@ pub fn start_watcher(
 
     std::thread::spawn(move || {
         let _watcher = watcher; // move watcher into thread to keep it alive
+
+        // Check generation before starting reconciliation
+        if watcher_generation.load(Ordering::Acquire) != my_generation {
+            info!(my_generation, "Watcher generation changed before reconciliation, exiting");
+            return;
+        }
 
         // ── Reconciliation: catch files added/modified/removed while server was offline ──
         // Watcher is already listening — events during reconciliation are buffered in rx channel.
@@ -114,6 +122,11 @@ pub fn start_watcher(
                     warn!(error = %e, "File watcher error");
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    // Check generation on each timeout (watcher restart)
+                    if watcher_generation.load(Ordering::Acquire) != my_generation {
+                        info!(dir = %dir_str, my_generation, "Watcher generation changed, exiting");
+                        break;
+                    }
                     // Debounce window expired — process batch
                     if dirty_files.is_empty() && removed_files.is_empty() {
                         // Check periodic autosave

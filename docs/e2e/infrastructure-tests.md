@@ -201,9 +201,13 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 
 ---
 
-### T-ASYNC-05: `xray_reindex` returns "already building" during background build
+### T-ASYNC-05: `xray_reindex` blocked only by `content_building` flag (not `content_ready`)
 
-**Unit test:** `test_dispatch_reindex_while_content_index_building`
+After the workspace-switch fix, `xray_reindex` is NOT blocked by `content_ready=false` —
+it can run even when no index is loaded (needed for workspace switch). Concurrent build
+protection uses a separate `content_building` flag with `compare_exchange`.
+
+**Unit tests:** `test_dispatch_reindex_not_blocked_when_content_not_ready`, `test_dispatch_reindex_blocked_when_content_building`, `test_dispatch_reindex_definitions_blocked_when_def_building`
 
 ---
 
@@ -468,3 +472,85 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 ### T-VAL-05: `xray_fast` — Empty pattern returns error
 
 **Unit test:** `test_xray_fast_empty_pattern_returns_error`
+
+
+---
+
+## Workspace Switch (2026-03-16)
+
+### T-WS-UNRESOLVED: Server started without `--dir`, CWD has no source files
+
+**Scenario (manual — requires Cline/Roo):**
+1. Configure MCP without `--dir`: `{ "command": "xray", "args": ["serve", "--ext", "rs", "--definitions"] }`
+2. Start server from a CWD without `.rs` files (e.g., VS Code install dir)
+
+**Expected:**
+- stderr: `Workspace UNRESOLVED`
+- `xray_definitions` returns `WORKSPACE_UNRESOLVED` error with hint
+- `xray_reindex` is NOT blocked (can be called to fix workspace)
+- `content_ready = false`, `def_ready = false`
+- No indexes built, no watcher started, no git cache built
+
+**Unit tests:** `test_determine_initial_binding_dot_without_sources`, `test_dispatch_reindex_not_blocked_when_content_not_ready`
+
+---
+
+### T-WS-ROOTS-LIST: Workspace switch via roots/list resets ready flags
+
+**Scenario (manual — requires MCP client with roots support):**
+1. Start server with `--dir .` (Unresolved)
+2. Client responds to `roots/list` with project directory
+3. LLM calls `xray_reindex`
+
+**Expected:**
+- After roots/list: `ws.status = Reindexing`, `content_ready = false`, `def_ready = false`
+- `xray_definitions` returns `WORKSPACE_REINDEXING` error (not 0 results!)
+- After `xray_reindex`: content + def indexes loaded, `ws.status = Resolved`
+- Response includes `defIndexAction` (loaded_cache or background_build)
+
+---
+
+### T-WS-CROSS-LOAD: xray_reindex cross-loads definition index on workspace switch
+
+**Scenario (manual):**
+1. Server running on Project A with both indexes loaded
+2. LLM calls `xray_reindex(dir=ProjectB)`
+
+**Expected:**
+- Content index loaded for Project B
+- Definition index cross-loaded from cache (if available)
+- If no def cache: background build started, `def_ready = false`
+- Watcher restarted for new directory (if `--watch`)
+- Git cache cleared and rebuilt in background
+- File-list index invalidated
+
+---
+
+### T-WS-WATCHER-RESTART: Watcher generation-based restart
+
+**Scenario (manual):**
+1. Server running with `--watch` on Project A
+2. LLM calls `xray_reindex(dir=ProjectB)`
+3. Modify a file in Project B
+
+**Expected:**
+- Old watcher stops (generation mismatch detected at next timeout)
+- New watcher starts for Project B
+- File changes in Project B are tracked
+- stderr: `Watcher generation changed, exiting` + `File watcher restarted for new workspace`
+
+---
+
+### T-WS-SEQUENTIAL: Multiple sequential workspace switches
+
+**Scenario (manual):**
+1. `xray_reindex(dir=A)` → workspace A
+2. `xray_reindex(dir=B)` → workspace B
+3. `xray_reindex(dir=C)` → workspace C
+
+**Expected:**
+- Each switch loads correct indexes
+- Old watchers exit (generation counter increments)
+- No resource leaks (old threads exit cleanly)
+
+---

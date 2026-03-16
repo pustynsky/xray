@@ -84,6 +84,12 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
                                     ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
                                     ws.generation += 1;
                                     ws.status = handlers::WorkspaceStatus::Reindexing;
+                                    // Reset ready flags — old indexes are for the wrong workspace.
+                                    // This prevents tools from returning stale results from old indexes.
+                                    ctx.content_ready.store(false, std::sync::atomic::Ordering::Release);
+                                    if ctx.def_index.is_some() {
+                                        ctx.def_ready.store(false, std::sync::atomic::Ordering::Release);
+                                    }
                                     info!(dir = %path, previous = %old_dir, generation = ws.generation,
                                         roots_count = roots.len(), "Workspace set from roots/list");
                                     // Note: reindexing will happen on next tool call or via xray_reindex.
