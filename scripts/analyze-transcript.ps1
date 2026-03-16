@@ -452,7 +452,7 @@ function Analyze-TruncationCause {
         # Wide file scope (no specific file or very broad path)
         if ($args_.PSObject.Properties['file']) {
             $fileVal = "$($args_.file)"
-            $commaCount = ($fileVal.ToCharArray() | Where-Object { $_ -eq ',' }).Count
+            $commaCount = @($fileVal.ToCharArray() | Where-Object { $_ -eq ',' }).Count
             if ($commaCount -ge 3) { $causes += "wide_file_scope ($($commaCount + 1) paths)" }
             if ($fileVal -notmatch '/' -or $fileVal.Length -lt 20) { $causes += "broad_directory" }
         }
