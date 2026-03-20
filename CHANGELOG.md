@@ -1,5 +1,19 @@
 # Changelog
 
+### Features
+
+- **`xray_definitions` UX improvements for multi-client MCP compatibility** — Four improvements to reduce response size and improve LLM self-correction, especially for MCP clients without access to server instructions (VS Code Copilot, Cursor):
+
+  **Phase 1: Auto-compact mode (`detail` parameter)** — When `xray_definitions` returns >20 results without a `name` filter and `includeBody=false`, responses automatically switch to compact format: only `name`, `kind`, `file`, `lines`, `parent` per definition — omitting `signature`, `modifiers`, `attributes`, `baseTypes`, `templateChildren`, `selector`. Reduces response size 7-12x (e.g., 39 definitions: ~20KB → ~3-4KB). New `detail='full'` parameter overrides auto-compact. Summary includes `compactMode: true` and `compactReason` with instructions.
+
+  **Phase 2: Name discoverability** — Updated `name` parameter description to emphasize short fragment strategy (e.g., `name='Scan'` finds `PostScanOrdersAsAdmin`). New CamelCase fragment hint: when a long name (>15 chars) returns 0 results, suggests shorter fragments split by CamelCase boundaries (e.g., `PostUpdateOrdersAsAdmin` → `Post`, `Update`, `Orders`, `Admin`).
+
+  **Phase 3: autoSummary `memberNames`** — Auto-summary groups now include `memberNames` — alphabetically sorted list of `Parent.Method` names (deduped across overloads, globally capped at 50). Only includes method/function/constructor kinds. Eliminates the need for a follow-up `parent='ClassName'` call to discover method names.
+
+  **Phase 4: Improved zero-result hints** — `hint_name_in_content_not_defs` now includes class/method counts from matched files via cross-index lookup, plus a `parent='<ClassName>'` strategy tip. Helps LLMs discover the `parent=` query pattern.
+
+  10 new unit tests. `XRAY_HELP_MIN_RESPONSE_BYTES` increased from 32KB to 40KB. All 1777 unit tests + 68 E2E tests pass.
+
 ### Bug Fixes
 
 - **Workspace switch does not update directory-bound resources** — Fixed 3 bugs (P0+P1+P2) where workspace switch (via `roots/list` or `xray_reindex dir=new`) left definition index, file watcher, and git cache pointing at the old directory. LLM got 0 results from `xray_definitions` without error, silently falling back to `read_file` (10x slower). Root causes and fixes:

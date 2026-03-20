@@ -59,6 +59,8 @@ pub(crate) struct DefinitionSearchArgs {
     pub include_code_stats: bool,
     // Cross-index enrichment
     pub include_usage_count: bool,
+    // Detail level: None = auto (compact when >20 results), Some("full") = always full
+    pub detail: Option<String>,
     // Pre-computed filter patterns (avoid per-item allocations)
     pub exclude_patterns: super::utils::ExcludePatterns,
     pub file_filter_terms: Option<Vec<String>>,
@@ -162,6 +164,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         || has_stats;
 
     let include_usage_count = args.get("includeUsageCount").and_then(|v| v.as_bool()).unwrap_or(false);
+    let detail = args.get("detail").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // Pre-compute filter patterns to avoid per-item allocations
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
@@ -207,6 +210,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         min_calls,
         include_code_stats,
         include_usage_count,
+        detail,
         exclude_patterns,
         file_filter_terms,
         parent_filter_terms,
@@ -918,10 +922,18 @@ fn format_search_output(
         results.iter().map(|(_, def)| (def.line_end.saturating_sub(def.line_start) + 1) as usize).sum()
     } else { 0 };
 
+    // Determine auto-compact mode
+    let force_full = args.detail.as_deref() == Some("full");
+    let auto_compact = !force_full
+        && !args.include_body
+        && results.len() > 20
+        && args.name_filter.is_none();
+
     let mut defs_json: Vec<Value> = results.iter().map(|(def_idx_value, def)| {
         format_definition_entry(
             index, *def_idx_value, def, args,
             &mut file_cache, &mut total_body_lines_emitted,
+            auto_compact,
         )
     }).collect();
 
@@ -940,11 +952,20 @@ fn format_search_output(
         }
     }
 
-    let summary = build_search_summary(
+    let mut summary = build_search_summary(
         index, &defs_json, args, total_results,
         stats_info, term_breakdown, total_body_lines_emitted,
         total_body_lines_available, search_elapsed, ctx,
     );
+
+    // Add compact mode indicators to summary
+    if auto_compact {
+        summary["compactMode"] = json!(true);
+        summary["compactReason"] = json!(format!(
+            "Auto-compact: {} results without name filter. Use detail='full' for signatures/modifiers, or name='X' to get full details for specific definitions.",
+            results.len()
+        ));
+    }
 
     let output = json!({
         "definitions": defs_json,
@@ -962,6 +983,7 @@ fn format_definition_entry(
     args: &DefinitionSearchArgs,
     file_cache: &mut HashMap<String, Option<String>>,
     total_body_lines_emitted: &mut usize,
+    compact: bool,
 ) -> Value {
     let file_path = index.files.get(def.file_id as usize)
         .map(|s| s.as_str())
@@ -974,6 +996,15 @@ fn format_definition_entry(
         "lines": format!("{}-{}", def.line_start, def.line_end),
     });
 
+    // In compact mode, only include parent (for context) — skip signature, modifiers, attributes, baseTypes
+    if let Some(ref parent) = def.parent {
+        obj["parent"] = json!(parent);
+    }
+
+    if compact {
+        return obj;
+    }
+
     if !def.modifiers.is_empty() {
         obj["modifiers"] = json!(def.modifiers);
     }
@@ -985,9 +1016,6 @@ fn format_definition_entry(
     }
     if let Some(ref sig) = def.signature {
         obj["signature"] = json!(sig);
-    }
-    if let Some(ref parent) = def.parent {
-        obj["parent"] = json!(parent);
     }
     // Angular template metadata
     if let Some(children) = index.template_children.get(&def_idx) {
@@ -2270,11 +2298,90 @@ fn hint_name_in_content_not_defs(
     let lower = name.to_lowercase();
     let postings = content_idx.index.get(&lower)?;
     let file_count = postings.len();
+
+    // Phase 4: Count classes and methods in matched files via definition index
+    let (class_count, method_count) = if let Some(ref def_arc) = ctx.def_index {
+        if let Ok(def_idx) = def_arc.read() {
+            let matched_files: std::collections::HashSet<&str> = postings.iter()
+                .filter_map(|p| content_idx.files.get(p.file_id as usize))
+                .map(|s| s.as_str())
+                .collect();
+            let mut classes = 0usize;
+            let mut methods = 0usize;
+            for def in &def_idx.definitions {
+                if let Some(file_path) = def_idx.files.get(def.file_id as usize) {
+                    if matched_files.contains(file_path.as_str()) {
+                        match def.kind {
+                            DefinitionKind::Class | DefinitionKind::Interface
+                            | DefinitionKind::Struct | DefinitionKind::Record => classes += 1,
+                            DefinitionKind::Method | DefinitionKind::Function
+                            | DefinitionKind::Constructor => methods += 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            (classes, methods)
+        } else {
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    let counts_info = if class_count > 0 || method_count > 0 {
+        format!(
+            " The files contain {} classes and {} methods total. \
+             Tip: use parent='<ClassName>' kind='method' to list all methods of a specific class.",
+            class_count, method_count
+        )
+    } else {
+        String::new()
+    };
+
     Some(format!(
-        "'{}' not found as an AST definition name, but appears in {} files as text content. \
-         xray_definitions searches structural names (classes, methods, etc.), not arbitrary text. \
+        "'{}' not found as an AST definition name, but appears in {} files as text content.{} \
          Use xray_grep terms='{}' for content search.",
-        name, file_count, name
+        name, file_count, counts_info, name
+    ))
+}
+
+/// Phase 2: Suggest shorter CamelCase fragments when a long name query returns 0 results.
+fn hint_suggest_shorter_fragments(
+    args: &DefinitionSearchArgs,
+) -> Option<String> {
+    let name = args.name_filter.as_ref()?;
+    if name.len() <= 15 || args.use_regex {
+        return None;
+    }
+    // Split by CamelCase boundaries: find sequences starting with uppercase
+    let mut fragments: Vec<String> = Vec::new();
+    let mut current = String::new();
+    for ch in name.chars() {
+        if ch.is_uppercase() && !current.is_empty() {
+            if current.len() >= 3 {
+                fragments.push(current.clone());
+            }
+            current.clear();
+        }
+        current.push(ch);
+    }
+    if current.len() >= 3 {
+        fragments.push(current);
+    }
+    if fragments.len() < 2 {
+        return None; // Not enough fragments to be useful
+    }
+    let fragment_list = fragments.iter()
+        .map(|f| format!("name='{}'", f))
+        .collect::<Vec<_>>()
+        .join(" or ");
+    let csv = fragments.join(",");
+    Some(format!(
+        "No definitions match name='{}'. \
+         Try shorter fragments: {}. \
+         Or use comma-separated: name='{}' for multi-term OR.",
+        name, fragment_list, csv
     ))
 }
 
@@ -2290,7 +2397,8 @@ fn generate_zero_result_hints(
         .or_else(|| hint_file_has_defs_but_filters_narrow(index, args))
         .or_else(|| hint_file_fuzzy_match(index, args))
         .or_else(|| hint_nearest_name(index, args))
-        .or_else(|| hint_name_in_content_not_defs(args, ctx));
+        .or_else(|| hint_name_in_content_not_defs(args, ctx))
+        .or_else(|| hint_suggest_shorter_fragments(args));
 
     if let Some(hint_text) = hint {
         summary["hint"] = json!(hint_text);
@@ -2319,11 +2427,20 @@ fn should_auto_summary(args: &DefinitionSearchArgs, total_results: usize) -> boo
 }
 
 /// Internal accumulator for grouping definitions by directory.
+/// Kinds eligible for memberNames in autoSummary (methods, functions)
+const MEMBER_KINDS: &[DefinitionKind] = &[
+    DefinitionKind::Method,
+    DefinitionKind::Function,
+    DefinitionKind::Constructor,
+];
+
 #[derive(Default)]
 struct AutoSummaryGroup {
     counts: HashMap<String, usize>,
     /// (name, line_count) for container kinds — used to pick topDefinitions
     containers: Vec<(String, u32)>,
+    /// (parent_name, member_name) for method/function kinds — used for memberNames
+    member_names: Vec<(String, String)>,
 }
 
 impl AutoSummaryGroup {
@@ -2333,6 +2450,10 @@ impl AutoSummaryGroup {
         if CONTAINER_KINDS.contains(&def.kind) {
             let line_count = def.line_end.saturating_sub(def.line_start) + 1;
             self.containers.push((def.name.clone(), line_count));
+        }
+        if MEMBER_KINDS.contains(&def.kind) {
+            let parent = def.parent.as_deref().unwrap_or("").to_string();
+            self.member_names.push((parent, def.name.clone()));
         }
     }
 
@@ -2374,15 +2495,37 @@ fn build_auto_summary(
     let mut sorted_groups: Vec<(String, AutoSummaryGroup)> = groups.into_iter().collect();
     sorted_groups.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
 
+    // Collect all member names across groups, dedup, sort, cap at 50
+    let mut all_members: Vec<String> = Vec::new();
+    for (_, data) in &sorted_groups {
+        for (parent, name) in &data.member_names {
+            let formatted = if parent.is_empty() {
+                name.clone()
+            } else {
+                format!("{}.{}", parent, name)
+            };
+            all_members.push(formatted);
+        }
+    }
+    // Dedup by name (removes overloads)
+    all_members.sort();
+    all_members.dedup();
+    let global_member_cap = 50;
+    all_members.truncate(global_member_cap);
+
     // Format JSON groups
     let groups_json: Vec<Value> = sorted_groups.iter().map(|(dir, data)| {
         let top = data.top_definitions(3);
-        json!({
+        let mut group = json!({
             "directory": dir,
             "total": data.total(),
             "counts": data.counts,
             "topDefinitions": top,
-        })
+        });
+        if !all_members.is_empty() {
+            group["memberNames"] = json!(all_members);
+        }
+        group
     }).collect();
 
     // Build contextual hint

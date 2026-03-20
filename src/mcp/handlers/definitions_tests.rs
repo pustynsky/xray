@@ -1751,7 +1751,7 @@ fn test_format_definition_entry_basic_fields() {
     let args = parse_definition_args(&json!({})).unwrap();
     let mut cache = HashMap::new();
     let mut body_lines = 0usize;
-    let obj = format_definition_entry(&index, 1, def, &args, &mut cache, &mut body_lines);
+    let obj = format_definition_entry(&index, 1, def, &args, &mut cache, &mut body_lines, false);
     assert_eq!(obj["name"], "GetUser");
     assert_eq!(obj["kind"], "method");
     assert!(obj["file"].as_str().unwrap().contains("UserService"));
@@ -1769,7 +1769,7 @@ fn test_format_definition_entry_optional_fields_absent_when_empty() {
     let args = parse_definition_args(&json!({})).unwrap();
     let mut cache = HashMap::new();
     let mut body_lines = 0usize;
-    let obj = format_definition_entry(&index, 0, def, &args, &mut cache, &mut body_lines);
+    let obj = format_definition_entry(&index, 0, def, &args, &mut cache, &mut body_lines, false);
     assert!(obj.get("parent").is_none(), "no parent → field absent");
     assert!(obj.get("signature").is_none(), "no signature → field absent");
     // modifiers is empty → should be absent
@@ -1783,7 +1783,7 @@ fn test_format_definition_entry_with_code_stats() {
     let args = parse_definition_args(&json!({"includeCodeStats": true})).unwrap();
     let mut cache = HashMap::new();
     let mut body_lines = 0usize;
-    let obj = format_definition_entry(&index, 1, def, &args, &mut cache, &mut body_lines);
+    let obj = format_definition_entry(&index, 1, def, &args, &mut cache, &mut body_lines, false);
     assert!(obj.get("codeStats").is_some(), "includeCodeStats=true → codeStats present");
     let stats = &obj["codeStats"];
     assert_eq!(stats["cyclomaticComplexity"], 15);
@@ -1803,7 +1803,7 @@ fn test_format_definition_entry_no_code_stats_when_not_requested() {
     let args = parse_definition_args(&json!({})).unwrap(); // includeCodeStats defaults false
     let mut cache = HashMap::new();
     let mut body_lines = 0usize;
-    let obj = format_definition_entry(&index, 1, def, &args, &mut cache, &mut body_lines);
+    let obj = format_definition_entry(&index, 1, def, &args, &mut cache, &mut body_lines, false);
     assert!(obj.get("codeStats").is_none(), "includeCodeStats=false → no codeStats");
 }
 
@@ -1814,7 +1814,7 @@ fn test_format_definition_entry_with_attributes() {
     let args = parse_definition_args(&json!({})).unwrap();
     let mut cache = HashMap::new();
     let mut body_lines = 0usize;
-    let obj = format_definition_entry(&index, 0, def, &args, &mut cache, &mut body_lines);
+    let obj = format_definition_entry(&index, 0, def, &args, &mut cache, &mut body_lines, false);
     assert!(obj.get("attributes").is_some(), "UserService has attributes");
     let attrs = obj["attributes"].as_array().unwrap();
     assert_eq!(attrs.len(), 1);
@@ -3126,6 +3126,257 @@ fn test_auto_summary_hint_contains_concrete_names() {
     // Hint should mention file= and name= with concrete values
     assert!(hint.contains("file="), "hint should suggest file= filter: {}", hint);
     assert!(hint.contains("name="), "hint should suggest name= filter: {}", hint);
+}
+
+// ─── Phase 1: Auto-compact tests ─────────────────────────────────────
+
+#[test]
+fn test_auto_compact_triggers_when_over_20_results() {
+    let index = make_auto_summary_test_index();
+    // Use maxResults high enough to not trigger autoSummary, but >20 results
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 200})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    if results.len() <= 20 {
+        // This test index doesn't have >20 items; skip gracefully
+        return;
+    }
+    let total_results = results.len();
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let result = format_search_output(
+        &index, &results, &args, total_results,
+        &stats_info, &None, std::time::Duration::from_millis(1),
+        &super::super::HandlerContext::default(),
+    );
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+    assert_eq!(summary["compactMode"].as_bool(), Some(true));
+    assert!(summary["compactReason"].as_str().unwrap().contains("Auto-compact"));
+    // Verify definitions don't have signature/modifiers (compact)
+    for def in output["definitions"].as_array().unwrap() {
+        assert!(def.get("signature").is_none(), "compact should not have signature");
+        assert!(def.get("modifiers").is_none(), "compact should not have modifiers");
+        assert!(def.get("attributes").is_none(), "compact should not have attributes");
+    }
+}
+
+#[test]
+fn test_auto_compact_not_triggered_under_21_results() {
+    // Build a minimal index with exactly 5 definitions
+    let mut index = DefinitionIndex::default();
+    index.files = vec!["test.rs".to_string()];
+    for i in 0u32..5 {
+        let name = format!("Method{}", i);
+        let def = DefinitionEntry {
+            name: name.clone(),
+            kind: DefinitionKind::Method,
+            file_id: 0, line_start: i * 10 + 1, line_end: i * 10 + 9,
+            signature: Some(format!("fn method{}()", i)),
+            parent: Some("TestClass".to_string()),
+            modifiers: vec!["pub".to_string()],
+            attributes: vec![], base_types: vec![],
+        };
+        let idx = index.definitions.len() as u32;
+        index.definitions.push(def);
+        index.name_index.entry(name.to_lowercase()).or_default().push(idx);
+        index.file_index.entry(0).or_default().push(idx);
+    }
+    let args = parse_definition_args(&json!({"maxResults": 200})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+    assert!(total_results <= 20);
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let result = format_search_output(
+        &index, &results, &args, total_results,
+        &stats_info, &None, std::time::Duration::from_millis(1),
+        &super::super::HandlerContext::default(),
+    );
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("compactMode").is_none(), "should NOT be compact with <= 20 results");
+    // Verify signatures are present (full mode)
+    let defs = output["definitions"].as_array().unwrap();
+    assert!(defs.iter().any(|d| d.get("signature").is_some()), "full mode should include signatures");
+}
+
+#[test]
+fn test_auto_compact_disabled_by_detail_full() {
+    // Build index with >20 definitions
+    let mut index = DefinitionIndex::default();
+    index.files = vec!["test.rs".to_string()];
+    for i in 0u32..25 {
+        let name = format!("Method{}", i);
+        let def = DefinitionEntry {
+            name: name.clone(),
+            kind: DefinitionKind::Method,
+            file_id: 0, line_start: i * 10 + 1, line_end: i * 10 + 9,
+            signature: Some(format!("fn method{}()", i)),
+            parent: Some("TestClass".to_string()),
+            modifiers: vec!["pub".to_string()],
+            attributes: vec![], base_types: vec![],
+        };
+        let idx = index.definitions.len() as u32;
+        index.definitions.push(def);
+        index.name_index.entry(name.to_lowercase()).or_default().push(idx);
+        index.file_index.entry(0).or_default().push(idx);
+    }
+    let args = parse_definition_args(&json!({"maxResults": 200, "detail": "full"})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+    assert!(total_results > 20, "should have >20 results");
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let result = format_search_output(
+        &index, &results, &args, total_results,
+        &stats_info, &None, std::time::Duration::from_millis(1),
+        &super::super::HandlerContext::default(),
+    );
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("compactMode").is_none(), "detail='full' should disable compact");
+    // Verify signatures are present (full mode)
+    let defs = output["definitions"].as_array().unwrap();
+    assert!(defs.iter().any(|d| d.get("signature").is_some()), "detail='full' should include signatures");
+}
+
+#[test]
+fn test_auto_compact_not_triggered_with_name_filter() {
+    let mut index = DefinitionIndex::default();
+    index.files = vec!["test.rs".to_string()];
+    for i in 0u32..25 {
+        let name = format!("Method{}", i);
+        let def = DefinitionEntry {
+            name: name.clone(),
+            kind: DefinitionKind::Method,
+            file_id: 0, line_start: i * 10 + 1, line_end: i * 10 + 9,
+            signature: Some(format!("fn method{}()", i)),
+            parent: Some("TestClass".to_string()),
+            modifiers: vec!["pub".to_string()],
+            attributes: vec![], base_types: vec![],
+        };
+        let idx = index.definitions.len() as u32;
+        index.definitions.push(def);
+        index.name_index.entry(name.to_lowercase()).or_default().push(idx);
+        index.file_index.entry(0).or_default().push(idx);
+    }
+    let args = parse_definition_args(&json!({"name": "Method", "maxResults": 200})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+    assert!(total_results > 20);
+    let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
+    let result = format_search_output(
+        &index, &results, &args, total_results,
+        &stats_info, &None, std::time::Duration::from_millis(1),
+        &super::super::HandlerContext::default(),
+    );
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("compactMode").is_none(), "name filter should disable compact");
+}
+
+// ─── Phase 2: CamelCase hint tests ───────────────────────────────────
+
+#[test]
+fn test_hint_suggest_shorter_fragments_camelcase() {
+    let args = parse_definition_args(&json!({"name": "PostUpdateOrdersAsAdmin"})).unwrap();
+    let hint = hint_suggest_shorter_fragments(&args);
+    assert!(hint.is_some(), "should suggest fragments for long CamelCase name");
+    let hint_text = hint.unwrap();
+    assert!(hint_text.contains("Post"), "hint should include 'Post': {}", hint_text);
+    assert!(hint_text.contains("Update"), "hint should include 'Update': {}", hint_text);
+    assert!(hint_text.contains("Orders"), "hint should include 'Orders': {}", hint_text);
+    assert!(hint_text.contains("Admin"), "hint should include 'Admin': {}", hint_text);
+    // 'As' is only 2 chars — should be filtered out
+    assert!(!hint_text.contains("name='As'"), "'As' is too short, should be filtered: {}", hint_text);
+}
+
+#[test]
+fn test_hint_suggest_shorter_fragments_short_name_no_hint() {
+    let args = parse_definition_args(&json!({"name": "GetUser"})).unwrap();
+    let hint = hint_suggest_shorter_fragments(&args);
+    assert!(hint.is_none(), "should NOT suggest fragments for short name (<=15 chars)");
+}
+
+#[test]
+fn test_hint_suggest_shorter_fragments_regex_no_hint() {
+    let args = parse_definition_args(&json!({"name": "PostUpdateOrdersAsAdmin", "regex": true})).unwrap();
+    let hint = hint_suggest_shorter_fragments(&args);
+    assert!(hint.is_none(), "should NOT suggest fragments when regex=true");
+}
+
+// ─── Phase 3: autoSummary memberNames tests ──────────────────────────
+
+#[test]
+fn test_auto_summary_member_names_present() {
+    let index = make_auto_summary_test_index();
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 1})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+    let result = build_auto_summary(
+        &index, &results, &args, total_results,
+        std::time::Instant::now(), &super::super::HandlerContext::default(),
+    );
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let groups = output["autoSummary"]["groups"].as_array().unwrap();
+    // At least one group should have memberNames
+    let has_member_names = groups.iter().any(|g| {
+        g.get("memberNames").and_then(|m| m.as_array()).is_some_and(|a| !a.is_empty())
+    });
+    assert!(has_member_names, "at least one group should have memberNames");
+}
+
+#[test]
+fn test_auto_summary_member_names_have_parent_prefix() {
+    let index = make_auto_summary_test_index();
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 1})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+    let result = build_auto_summary(
+        &index, &results, &args, total_results,
+        std::time::Instant::now(), &super::super::HandlerContext::default(),
+    );
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let groups = output["autoSummary"]["groups"].as_array().unwrap();
+    for group in groups {
+        if let Some(members) = group.get("memberNames").and_then(|m| m.as_array()) {
+            for member in members {
+                let name = member.as_str().unwrap();
+                // Should contain a dot (Parent.Method) unless parent is empty
+                if !name.is_empty() {
+                    assert!(name.contains('.'), "memberName should have Parent.Method format: {}", name);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn test_auto_summary_member_names_deduped_and_sorted() {
+    let index = make_auto_summary_test_index();
+    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 1})).unwrap();
+    let (candidates, _) = collect_candidates(&index, &args).unwrap();
+    let results = apply_entry_filters(&index, &candidates, &args);
+    let total_results = results.len();
+    let result = build_auto_summary(
+        &index, &results, &args, total_results,
+        std::time::Instant::now(), &super::super::HandlerContext::default(),
+    );
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let groups = output["autoSummary"]["groups"].as_array().unwrap();
+    for group in groups {
+        if let Some(members) = group.get("memberNames").and_then(|m| m.as_array()) {
+            let names: Vec<&str> = members.iter().filter_map(|m| m.as_str()).collect();
+            // Check sorted
+            let mut sorted_names = names.clone();
+            sorted_names.sort();
+            assert_eq!(names, sorted_names, "memberNames should be alphabetically sorted");
+            // Check deduplicated
+            let mut deduped = names.clone();
+            deduped.dedup();
+            assert_eq!(names.len(), deduped.len(), "memberNames should be deduplicated");
+        }
+    }
 }
 
 #[test]

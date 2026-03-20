@@ -531,3 +531,94 @@ Name matches appear first in results, textContent-promoted results after.
 **Expected**: Error with message containing `"directory"` and `"xray_fast"` guidance.
 
 **Unit tests:** `test_xml_on_demand_directory_returns_error_hint`
+
+---
+
+## Auto-Compact Mode
+
+### T-COMPACT-01: Auto-compact triggers for >20 results without name filter
+
+**Scenario**: `xray_definitions file='<dir with >20 definitions>'` (no name filter, includeBody=false)
+
+**Expected**:
+- `summary.compactMode` = `true`
+- `summary.compactReason` contains `"Auto-compact"`
+- Each definition has only: `name`, `kind`, `file`, `lines`, `parent`
+- No `signature`, `modifiers`, `attributes`, `baseTypes` in definitions
+
+**Unit tests:** `test_auto_compact_triggers_when_over_20_results`
+
+---
+
+### T-COMPACT-02: Auto-compact NOT triggered under 21 results
+
+**Scenario**: `xray_definitions` returning ≤20 results
+
+**Expected**: Full format with signatures, modifiers, etc.
+
+**Unit tests:** `test_auto_compact_not_triggered_under_21_results`
+
+---
+
+### T-COMPACT-03: `detail='full'` disables auto-compact
+
+**Scenario**: `xray_definitions file='<dir>' detail='full'` with >20 results
+
+**Expected**: Full format with all fields despite >20 results
+
+**Unit tests:** `test_auto_compact_disabled_by_detail_full`
+
+---
+
+### T-COMPACT-04: Auto-compact NOT triggered with name filter
+
+**Scenario**: `xray_definitions name='Method'` with >20 results
+
+**Expected**: Full format (name filter disables compact)
+
+**Unit tests:** `test_auto_compact_not_triggered_with_name_filter`
+
+---
+
+## CamelCase Fragment Hint
+
+### T-HINT-CAMELCASE: CamelCase fragment suggestion for long names
+
+**Scenario**: `xray_definitions name='PostUpdateOrdersAsAdmin'` (>15 chars, 0 results)
+
+**Expected**: hint contains fragment suggestions (Post, Update, Orders, Admin) and comma-separated OR format
+
+**Unit tests:** `test_hint_suggest_shorter_fragments_camelcase`, `test_hint_suggest_shorter_fragments_short_name_no_hint`, `test_hint_suggest_shorter_fragments_regex_no_hint`
+
+**Status:** ✅ Implemented
+
+---
+
+## Auto-Summary memberNames
+
+### T-AS-MEMBERS: autoSummary includes memberNames with Parent.Method format
+
+**Scenario**: `xray_definitions file='Services/' maxResults=1` (triggers autoSummary)
+
+**Expected**:
+- `autoSummary.groups[].memberNames` is present
+- Each entry has `Parent.Method` format
+- Alphabetically sorted
+- No duplicates (overloads deduped)
+- Globally capped at 50
+
+**Unit tests:** `test_auto_summary_member_names_present`, `test_auto_summary_member_names_have_parent_prefix`, `test_auto_summary_member_names_deduped_and_sorted`
+
+**Status:** ✅ Implemented
+
+---
+
+## Improved Zero-Result Hints
+
+### T-HINT-CONTENT-COUNTS: Content hint includes class/method counts and parent= tip
+
+**Scenario**: `xray_definitions name='SomeLongNameNotInIndex'` where the name exists in content index
+
+**Expected**: hint includes class/method count from matched files and `parent='<ClassName>'` strategy tip
+
+**Status:** ✅ Implemented

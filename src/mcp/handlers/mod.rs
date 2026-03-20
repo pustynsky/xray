@@ -189,9 +189,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                      Requires server started with --definitions flag. \
                      Supports 'containsLine' to find which method/class contains a given line number. \
                      Supports 'includeBody' to return actual source code inline. \
+                     When results > 20 without name filter (and includeBody=false), auto-compact mode strips signature/modifiers/attributes/baseTypes — use detail='full' to override. \
                      When results exceed maxResults and no name filter is set, automatically returns a \
-                     directory-grouped summary (autoSummary) with definition counts per subdirectory and \
-                     top-3 largest classes/interfaces per group, instead of truncated entries. \
+                     directory-grouped summary (autoSummary) with definition counts per subdirectory, \
+                     top-3 largest classes/interfaces per group, and memberNames (Parent.Method, deduped, capped at 50), instead of truncated entries. \
                      Add a name filter or narrow the file scope to get individual definitions.",
                     lang_list
                 )
@@ -201,7 +202,11 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                 "properties": {
                     "name": {
                         "type": "string",
-                        "description": "Name to search (substring). Comma-separated for multi-term OR."
+                        "description": "Name substring filter. Use short fragments (e.g., name='Scan' finds 'PostScanOrdersAsAdmin'). Comma-separated for multi-term OR (name='Post,Admin' matches either). Use regex=true for patterns (name='Post.*Admin')."
+                    },
+                    "detail": {
+                        "type": "string",
+                        "description": "Detail level for results. Omit for auto (compact format when >20 results without name filter — omits signature, modifiers, attributes, baseTypes). Use detail='full' to force full format with all fields."
                     },
                     "kind": {
                         "type": "string",
@@ -801,8 +806,8 @@ const ALREADY_BUILDING_MSG: &str =
 /// Minimum response budget for xray_help (32KB).
 /// xray_help returns reference content (best practices, strategies, parameter examples)
 /// that exceeds the default 16KB search-result budget (~20KB as of 23 tips + parameter examples).
-/// 32KB gives comfortable headroom for adding more tips and parameter examples.
-const XRAY_HELP_MIN_RESPONSE_BYTES: usize = 32_768;
+/// 40KB gives comfortable headroom for adding more tips and parameter examples.
+const XRAY_HELP_MIN_RESPONSE_BYTES: usize = 40_960;
 
 /// Minimum response budget for tools called with includeBody=true (64KB).
 /// When includeBody is true, responses contain source code of methods which

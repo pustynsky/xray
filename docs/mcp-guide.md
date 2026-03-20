@@ -444,7 +444,8 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 
 | Parameter           | Type    | Default | Description                                                                              |
 | ------------------- | ------- | ------- | ---------------------------------------------------------------------------------------- |
-| `name`              | string  | —       | Substring or comma-separated OR search                                                   |
+| `name`              | string  | —       | Substring filter — use short fragments (e.g., `name='Scan'` finds `PostScanOrdersAsAdmin`). Comma-separated for multi-term OR. Use `regex=true` for patterns |
+| `detail`            | string  | —       | Detail level: omit for auto (compact format when >20 results without name filter), `'full'` to force all fields |
 | `kind`              | string  | —       | Filter by definition kind. Comma-separated for multi-kind OR (e.g., `class,interface,enum`). Valid: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember, function, typeAlias, variable, storedProcedure, table, view, sqlFunction, userDefinedType, column, sqlIndex |
 | `attribute`         | string  | —       | Filter by C# attribute or TypeScript decorator                                           |
 | `baseType`          | string  | —       | Filter by base type/interface (substring match — `IAccessTable` finds `IAccessTable<Model>`, etc.) |
@@ -660,7 +661,8 @@ Five types of hints are generated (first matching wins):
 | **Wrong kind** | `kind` filter set + `name` or `file` filter set, but definitions exist with different kinds | `"0 results with kind='method'. Without kind filter: 8 defs found (5 function, 2 struct). Did you mean kind='function'?"` |
 | **File has definitions** | `file` filter matches files with definitions, but other filters (name/kind/parent) are too narrow | If name exists in other files: `"File 'tips.rs' has 8 definitions (...). Found 'X' in other.rs — consider removing file filter."` If name doesn't exist anywhere: `"File 'tips.rs' has 8 definitions (...). Use xray_grep for content search."` |
 | **Nearest name** | `name` filter set (non-regex), closest name in index has ≥80% Jaro-Winkler similarity | `"0 results for name='getusr'. Nearest match: 'getuser' (1 definition, similarity 96%)"` |
-| **Name in content** | `name` not found as AST definition but exists in content index as text | `"'inputSchema' not found as an AST definition name, but appears in 3 files. Use xray_grep."` |
+| **Name in content** | `name` not found as AST definition but exists in content index as text | `"'inputSchema' not found as an AST definition name, but appears in 3 files. The files contain 2 classes and 15 methods total. Tip: use parent='<ClassName>' kind='method'. Use xray_grep."` |
+| **CamelCase fragments** | Long `name` (>15 chars) returns 0 results and no other hint fired | `"No definitions match name='PostUpdateOrdersAsAdmin'. Try shorter fragments: name='Post' or name='Update' or name='Orders' or name='Admin'. Or use comma-separated: name='Post,Update,Orders,Admin' for multi-term OR."` |
 
 Hints are **not generated** when results are found (zero overhead for successful queries). The existing `kind='property'` → `kind='field'` TypeScript hint is preserved and takes priority.
 
@@ -724,9 +726,15 @@ Possible `reason` values:
 - `"kind mismatch: found as <actual_kind>, not <requested_kind>"` — the term exists but with a different kind
 - `"not found in index"` — the term doesn't exist in the definition index at all
 
+### Auto-Compact Mode
+
+When `xray_definitions` returns more than 20 results **without a `name` filter** and `includeBody` is false, it automatically switches to **compact format** — each definition contains only `name`, `kind`, `file`, `lines`, and `parent`. Fields like `signature`, `modifiers`, `attributes`, `baseTypes`, `templateChildren`, and `selector` are omitted to reduce response size (7-12x smaller).
+
+The summary includes `compactMode: true` and `compactReason` with instructions on how to get full details. Use `detail='full'` to override and force full format with all fields.
+
 ### Auto-Summary for Broad Queries
 
-When `xray_definitions` finds more results than `maxResults` and **no `name` filter** is set (and `includeBody` is false, and `sortBy` is not set), it automatically returns a **directory-grouped summary** instead of truncated entries. This eliminates the need for preliminary `xray_fast dirsOnly=true` calls when exploring unfamiliar code modules.
+When `xray_definitions` finds more results than `maxResults` and **no `name` filter** is set (and `includeBody` is false, and `sortBy` is not set), it automatically returns a **directory-grouped summary** instead of truncated entries. This eliminates the need for preliminary `xray_fast dirsOnly=true` calls when exploring unfamiliar code modules. Each group includes `memberNames` — an alphabetically sorted list of `Parent.Method` names (deduped, globally capped at 50) for quick method discovery.
 
 ```json
 // Request: explore a large service directory
@@ -777,6 +785,7 @@ When `xray_definitions` finds more results than `maxResults` and **no `name` fil
 | `groups[].total` | Total definitions in this directory |
 | `groups[].counts` | Definition counts by kind (`class`, `method`, etc.) |
 | `groups[].topDefinitions` | Top-3 largest classes/interfaces/structs/enums by line count |
+| `groups[].memberNames` | Alphabetically sorted list of `Parent.Method` names (deduped, globally capped at 50). Only includes method/function/constructor kinds |
 | `autoSummary.totalDefinitions` | Grand total of all matching definitions |
 | `autoSummary.hint` | Context-aware suggestion for next query |
 | `summary.autoSummaryMode` | `true` when auto-summary is active |
