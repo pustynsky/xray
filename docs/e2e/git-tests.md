@@ -40,14 +40,15 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 
 ---
 
-### T-GIT-04: `xray_git_activity` — Repo-wide changes
+### T-GIT-04: `xray_git_activity` — Repo-wide changes (groupBy=file, default)
 
 **Expected:**
 
-- `activity` array with `path`, `commits`, `commitCount`
-- Sorted by commit count descending
+- `activity` array with `path`, `commitCount`, `lastModified`, `authors`, `subjects`
+- `subjects` array: deduped commit messages for each file
+- Sorted by last_modified descending (cache) or commit count descending (CLI)
 
-**Unit test:** `test_repo_activity_returns_files`
+**Unit tests:** `test_repo_activity_returns_files`, `test_query_activity_returns_subjects`, `test_query_activity_subjects_deduped`
 
 ---
 
@@ -59,6 +60,23 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 - Nonexistent path → `warning` field
 
 **Unit tests:** `test_repo_activity_with_path_filter`, `test_git_activity_nonexistent_path_has_warning`
+
+**Status:** ✅ Implemented
+
+---
+
+### T-GIT-04c: `xray_git_activity` with `groupBy=commit`
+
+**Expected:**
+
+- `commits` array (not `activity`) with `hash`, `subject`, `author`, `date`, `filesChanged`, `files`
+- Sorted by date descending (newest first)
+- `maxResults` default = 50 (caps number of commits)
+- `maxFilesPerCommit` default = 20 (caps files per commit, `truncatedFiles` field shows remainder)
+- `summary.groupBy` = `"commit"`
+- All filters work: from/to/date, author, message, path
+
+**Unit tests:** `test_query_activity_by_commit_basic`, `test_query_activity_by_commit_files`, `test_query_activity_by_commit_date_filter`, `test_query_activity_by_commit_author_filter`, `test_query_activity_by_commit_message_filter`, `test_query_activity_by_commit_path_filter`, `test_query_activity_by_commit_max_results`, `test_query_activity_by_commit_max_files_per_commit`, `test_query_activity_by_commit_sorted_by_date_desc`, `test_query_activity_by_commit_empty_result`, `test_query_activity_by_commit_hash_format`
 
 **Status:** ✅ Implemented
 
@@ -334,6 +352,18 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 ### T-CACHE-21: Author/message filtering — query_activity
 
 **Unit tests:** `test_query_activity_author_filter`, `test_query_activity_message_filter`
+
+---
+
+### T-CACHE-23: Subjects in FileActivity
+
+**Unit tests:** `test_query_activity_returns_subjects`, `test_query_activity_subjects_deduped`, `test_query_activity_subjects_with_message_filter`
+
+---
+
+### T-CACHE-24: query_activity_by_commit — commit-level grouping
+
+**Unit tests:** `test_query_activity_by_commit_basic`, `test_query_activity_by_commit_files`, `test_query_activity_by_commit_date_filter`, `test_query_activity_by_commit_author_filter`, `test_query_activity_by_commit_message_filter`, `test_query_activity_by_commit_path_filter`, `test_query_activity_by_commit_max_results`, `test_query_activity_by_commit_max_files_per_commit`, `test_query_activity_by_commit_sorted_by_date_desc`, `test_query_activity_by_commit_empty_result`, `test_query_activity_by_commit_hash_format`
 
 ---
 

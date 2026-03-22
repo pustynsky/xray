@@ -117,6 +117,19 @@ pub struct FileActivity {
     pub commit_count: usize,
     pub last_modified: i64,
     pub authors: Vec<String>,
+    pub subjects: Vec<String>,
+}
+
+/// Commit-level activity entry (used by `groupBy=commit` in xray_git_activity).
+#[derive(Clone, Debug)]
+pub struct CommitActivity {
+    pub hash: String,
+    pub subject: String,
+    pub author: String,
+    pub timestamp: i64,
+    pub files: Vec<String>,
+    /// Original file count before truncation by maxFilesPerCommit.
+    pub total_files: usize,
 }
 
 // ─── Builder (used during streaming parse) ──────────────────────────
@@ -830,11 +843,19 @@ impl GitHistoryCache {
                 })
                 .collect();
 
+            // Collect unique subjects (deduped)
+            let mut subjects: Vec<String> = matching_commits.iter()
+                .map(|m| self.get_subject(m).to_string())
+                .collect();
+            subjects.sort();
+            subjects.dedup();
+
             activities.push(FileActivity {
                 file_path: file_path.clone(),
                 commit_count: matching_commits.len(),
                 last_modified,
                 authors,
+                subjects,
             });
         }
 
@@ -842,6 +863,108 @@ impl GitHistoryCache {
         activities.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
 
         activities
+    }
+
+    /// Query activity grouped by commit (inverted: commit → files).
+    ///
+    /// Returns commits sorted by timestamp descending (newest first).
+    /// Used by `xray_git_activity` with `groupBy=commit`.
+    pub fn query_activity_by_commit(
+        &self,
+        path: &str,
+        from: Option<i64>,
+        to: Option<i64>,
+        author_filter: Option<&str>,
+        message_filter: Option<&str>,
+        max_results: Option<usize>,
+        max_files_per_commit: Option<usize>,
+    ) -> Vec<CommitActivity> {
+        let normalized = Self::normalize_path(path);
+
+        // Pre-compute matching author indices for O(1) lookup
+        let matching_author_idxs: Option<std::collections::HashSet<u16>> = author_filter.map(|pattern| {
+            let pattern_lower = pattern.to_lowercase();
+            self.authors.iter().enumerate()
+                .filter(|(_, a)| a.name.to_lowercase().contains(&pattern_lower) || a.email.to_lowercase().contains(&pattern_lower))
+                .map(|(i, _)| i as u16)
+                .collect()
+        });
+        let message_filter_lower = message_filter.map(|m| m.to_lowercase());
+
+        // Build commit_idx → files map (inverted from file_commits)
+        let mut commit_files: std::collections::HashMap<u32, Vec<String>> = std::collections::HashMap::new();
+
+        for (file_path, commit_ids) in &self.file_commits {
+            if !matches_path_prefix(file_path, &normalized) {
+                continue;
+            }
+            for &idx in commit_ids {
+                commit_files.entry(idx).or_default().push(file_path.clone());
+            }
+        }
+
+        // Filter commits and build results
+        let mut results: Vec<CommitActivity> = Vec::new();
+
+        for (commit_idx, mut files) in commit_files {
+            let meta = match self.commits.get(commit_idx as usize) {
+                Some(m) => m,
+                None => continue,
+            };
+
+            // Date filter
+            if let Some(from_ts) = from {
+                if meta.timestamp < from_ts { continue; }
+            }
+            if let Some(to_ts) = to {
+                if meta.timestamp > to_ts { continue; }
+            }
+
+            // Author filter
+            if let Some(ref idxs) = matching_author_idxs {
+                if !idxs.contains(&meta.author_idx) { continue; }
+            }
+
+            // Message filter
+            if let Some(ref msg_pattern) = message_filter_lower {
+                let subject = self.get_subject(meta);
+                if !subject.to_lowercase().contains(msg_pattern.as_str()) { continue; }
+            }
+
+            let author = self.authors.get(meta.author_idx as usize)
+                .map(|a| format!("{} <{}>", a.name, a.email))
+                .unwrap_or_default();
+
+            // Sort files for deterministic output
+            files.sort();
+            let total_files = files.len();
+
+            // Apply maxFilesPerCommit cap
+            let file_cap = max_files_per_commit.unwrap_or(20);
+            if files.len() > file_cap {
+                files.truncate(file_cap);
+            }
+
+            results.push(CommitActivity {
+                hash: bytes_to_hex(&meta.hash),
+                subject: self.get_subject(meta).to_string(),
+                author,
+                timestamp: meta.timestamp,
+                files,
+                total_files,
+            });
+        }
+
+        // Sort by timestamp descending (newest first)
+        results.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+        // Apply maxResults (default: 50)
+        let limit = max_results.unwrap_or(50);
+        if results.len() > limit {
+            results.truncate(limit);
+        }
+
+        results
     }
 
     /// Check if cache is still valid for the given HEAD hash.

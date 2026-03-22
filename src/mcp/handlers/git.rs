@@ -98,7 +98,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
         },
         crate::mcp::protocol::ToolDefinition {
             name: "xray_git_activity".to_string(),
-            description: "Get activity across ALL files in a repository for a date range. Returns a map of changed files with their commits. Useful for answering 'what changed this week?' Date filters are recommended to keep results manageable.".to_string(),
+            description: "Get activity across ALL files in a repository for a date range. Default groupBy=file returns files with commit counts, authors, and subjects. Use groupBy=commit for commit-level view (commit → files) — ideal for 'what was developed this week?' queries. Date filters are recommended to keep results manageable.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -109,7 +109,10 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
                     "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
                     "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
-                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" }
+                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" },
+                    "groupBy": { "type": "string", "enum": ["file", "commit"], "description": "Grouping mode: 'file' (default) = file→commits with subjects, 'commit' = commit→files. Use 'commit' for 'what was developed' queries." },
+                    "maxResults": { "type": "integer", "description": "Max results. For groupBy=commit: max commits (default: 50). For groupBy=file: 0=unlimited (default)." },
+                    "maxFilesPerCommit": { "type": "integer", "description": "Max files per commit when groupBy=commit (default: 20). Excess files truncated with count." }
                 },
                 "required": ["repo"]
             }),
@@ -507,6 +510,9 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let author_filter = args.get("author").and_then(|v| v.as_str());
     let message_filter = args.get("message").and_then(|v| v.as_str());
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
+    let group_by = args.get("groupBy").and_then(|v| v.as_str()).unwrap_or("file");
+    let max_results = args.get("maxResults").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let max_files_per_commit = args.get("maxFilesPerCommit").and_then(|v| v.as_u64()).map(|v| v as usize);
 
     // ── Cache path ──
     if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
@@ -523,6 +529,54 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     Err(e) => return ToolCallResult::error(e),
                 };
 
+                // ── groupBy=commit: return commits with their files ──
+                if group_by == "commit" {
+                    let commits = cache.query_activity_by_commit(
+                        &normalized, from_ts, to_ts, author_filter, message_filter,
+                        max_results, max_files_per_commit,
+                    );
+                    let elapsed = start.elapsed();
+
+                    let total_commits = commits.len();
+                    let commits_json: Vec<Value> = commits.iter().map(|c| {
+                        let mut obj = json!({
+                            "hash": &c.hash[..12.min(c.hash.len())],
+                            "subject": c.subject,
+                            "author": c.author,
+                            "date": format_timestamp(c.timestamp),
+                            "filesChanged": c.total_files,
+                            "files": c.files,
+                        });
+                        if c.total_files > c.files.len() {
+                            obj["truncatedFiles"] = json!(c.total_files - c.files.len());
+                        }
+                        obj
+                    }).collect();
+
+                    let mut output = json!({
+                        "commits": commits_json,
+                        "summary": {
+                            "tool": "xray_git_activity",
+                            "groupBy": "commit",
+                            "totalCommits": total_commits,
+                            "returned": commits_json.len(),
+                            "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
+                            "hint": "(from cache, grouped by commit)"
+                        }
+                    });
+
+                    // Empty results validation
+                    if total_commits == 0 && !query_path.is_empty() {
+                        let has_entries = cache.file_commits.contains_key(&normalized);
+                        if !has_entries && !git::file_exists_in_git(repo, query_path) {
+                            output["warning"] = json!(format!("File not found in git: {}. Check the path.", query_path));
+                        }
+                    }
+
+                    return ToolCallResult::success(json_to_string(&output));
+                }
+
+                // ── groupBy=file (default): return files with their activity ──
                 let activities = cache.query_activity(&normalized, from_ts, to_ts, author_filter, message_filter);
                 let elapsed = start.elapsed();
 
@@ -535,6 +589,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                         "commitCount": a.commit_count,
                         "lastModified": format_timestamp(a.last_modified),
                         "authors": a.authors,
+                        "subjects": a.subjects,
                     })
                 }).collect();
 
@@ -575,6 +630,78 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Ok((file_map, commits_processed)) => {
             let elapsed = start.elapsed();
 
+            // ── CLI fallback: groupBy=commit ──
+            if group_by == "commit" {
+                // Invert file_map: commit_hash → (CommitInfo, files)
+                let mut commit_map: std::collections::HashMap<String, (&git::CommitInfo, Vec<String>)> = std::collections::HashMap::new();
+                for (path, commits) in &file_map {
+                    for commit in commits {
+                        commit_map.entry(commit.hash.clone())
+                            .or_insert_with(|| (commit, Vec::new()))
+                            .1.push(path.clone());
+                    }
+                }
+
+                let mut commits_vec: Vec<_> = commit_map.into_values().collect();
+                // Sort by date descending
+                commits_vec.sort_by(|a, b| b.0.date.cmp(&a.0.date));
+
+                // Apply maxResults
+                let limit = max_results.unwrap_or(50);
+                if commits_vec.len() > limit {
+                    commits_vec.truncate(limit);
+                }
+
+                let file_cap = max_files_per_commit.unwrap_or(20);
+                let commits_json: Vec<Value> = commits_vec.iter().map(|(info, files)| {
+                    let total_files = files.len();
+                    let mut sorted_files = files.clone();
+                    sorted_files.sort();
+                    if sorted_files.len() > file_cap {
+                        sorted_files.truncate(file_cap);
+                    }
+                    let mut obj = json!({
+                        "hash": &info.hash[..12.min(info.hash.len())],
+                        "subject": info.message,
+                        "author": info.author_name,
+                        "date": info.date,
+                        "filesChanged": total_files,
+                        "files": sorted_files,
+                    });
+                    if total_files > sorted_files.len() {
+                        obj["truncatedFiles"] = json!(total_files - sorted_files.len());
+                    }
+                    obj
+                }).collect();
+
+                let total_commits = commits_json.len();
+                let activity_path_str = activity_path.unwrap_or("");
+
+                let mut output = json!({
+                    "commits": commits_json,
+                    "summary": {
+                        "tool": "xray_git_activity",
+                        "groupBy": "commit",
+                        "totalCommits": total_commits,
+                        "returned": commits_json.len(),
+                        "commitsProcessed": commits_processed,
+                        "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
+                        "hint": if from.is_none() && to.is_none() && date.is_none() {
+                            "No date filter applied. Use from/to to narrow results for large repos."
+                        } else {
+                            ""
+                        }
+                    }
+                });
+
+                if total_commits == 0 && !activity_path_str.is_empty() && !git::file_exists_in_git(repo, activity_path_str) {
+                    output["warning"] = json!(format!("File not found in git: {}. Check the path.", activity_path_str));
+                }
+
+                return ToolCallResult::success(json_to_string(&output));
+            }
+
+            // ── CLI fallback: groupBy=file (default) ──
             // Convert to array format for truncation compatibility
             let mut files_array: Vec<Value> = file_map.iter().map(|(path, commits)| {
                 let commits_json: Vec<Value> = commits.iter().map(|c| {

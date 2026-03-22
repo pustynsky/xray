@@ -352,6 +352,19 @@ pub fn strategies() -> Vec<Strategy> {
             ],
         },
         Strategy {
+            name: "Weekly Activity Summary",
+            when: "User asks 'what was developed this week', 'what changed this sprint', 'team activity', or 'release notes'",
+            steps: &[
+                "Step 1 (1 call): xray_git_activity repo='.' groupBy='commit' from='2025-03-15' to='2025-03-22' -> returns commits with subjects, authors, and changed files. Use path='src/services' to narrow to a specific module",
+                "Step 2 (optional) - Drill into specific commit: xray_git_diff repo='.', file='<file from step 1>' from='<date>' -> full diff for review",
+            ],
+            anti_patterns: &[
+                "Don't use groupBy=file for 'what was developed' questions -- it returns 1000+ files without commit messages. Use groupBy=commit instead",
+                "Don't use xray_git_history without a file -- it requires a specific file path. Use xray_git_activity groupBy=commit for repo-wide commits",
+                "Don't fall back to terminal git log -- xray_git_activity groupBy=commit uses cached data (<1ms) and respects all filters",
+            ],
+        },
+        Strategy {
             name: "Code History Investigation",
             when: "User asks 'when was this bug introduced', 'who changed this file', or 'trace the origin of this code'",
             steps: &[
@@ -540,7 +553,10 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "path": "'src/controllers' — filter by directory. Aggregates across all files within. Omit for whole repo",
             "from": "'2025-01-01' — RECOMMENDED to narrow results. Without date filter, returns ALL repo activity",
             "author": "'alice' — filter by author",
-            "message": "'refactor' — filter by commit message"
+            "message": "'refactor' — filter by commit message",
+            "groupBy": "'file' (default) = file→commits with subjects. 'commit' = commit→files — ideal for 'what was developed this week?' Use groupBy=commit for release notes, sprint summaries, team activity reports",
+            "maxResults": "For groupBy=commit: max commits (default: 50). For groupBy=file: 0=unlimited (default)",
+            "maxFilesPerCommit": "Max files per commit when groupBy=commit (default: 20). Merge commits with 500 files get truncated to top 20 + truncatedFiles count"
         },
         "xray_git_blame": {
             "file": "'src/UserService.cs' — file path relative to repo root",

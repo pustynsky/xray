@@ -42,6 +42,14 @@
 
 ## Unreleased
 
+### Features
+
+- **`xray_git_activity` — commit-level grouping (`groupBy=commit`)** — New parameter `groupBy` with two modes: `"file"` (default, existing behavior) and `"commit"` (new). `groupBy=commit` returns commits with their changed files — ideal for "what was developed this week?" queries. Includes `maxResults` (default: 50) and `maxFilesPerCommit` (default: 20) parameters to control response size. Works with all existing filters (from/to, author, message, path). Both cache and CLI fallback paths supported.
+
+- **`xray_git_activity` — commit subjects in file-level response** — File-level activity now includes `subjects` array with deduped commit messages for each file, using data already stored in the git cache. Previously only path/commitCount/authors were returned.
+
+- **New strategy recipe: "Weekly Activity Summary"** — Added to `xray_help` and LLM instructions. Guides LLMs to use `groupBy=commit` for sprint/weekly activity queries instead of falling back to terminal `git log`.
+
 ### Internal
 
 - **Test boilerplate reduction: dual-field antipattern eliminated, test factories added** — Systematic cleanup of test construction boilerplate across 3 handler structs, reducing future field-addition effort from 10-12 places to 1 place per struct.

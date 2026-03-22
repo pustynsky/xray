@@ -1739,3 +1739,163 @@ fn test_query_file_history_total_count_nonexistent_file() {
     assert!(history.is_empty());
     assert_eq!(total_count, 0, "Nonexistent file should have 0 total");
 }
+
+// ─── Tests for subjects in FileActivity (Change A) ──────────────────
+
+#[test]
+fn test_query_activity_returns_subjects() {
+    let cache = parse_mock_log(multi_commit_log());
+    let activity = cache.query_activity("src/main.rs", None, None, None, None);
+    assert_eq!(activity.len(), 1);
+    assert_eq!(activity[0].subjects.len(), 3, "src/main.rs has 3 commits with unique subjects");
+    assert!(activity[0].subjects.contains(&"Add feature X".to_string()));
+    assert!(activity[0].subjects.contains(&"Fix bug in main".to_string()));
+    assert!(activity[0].subjects.contains(&"Initial commit".to_string()));
+}
+
+#[test]
+fn test_query_activity_subjects_deduped() {
+    // Two commits with same subject should be deduped
+    let log = concat!(
+        "COMMIT:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa␞1700000000␞alice@example.com␞Alice␞Fix tests\n",
+        "src/main.rs\n",
+        "\n",
+        "COMMIT:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb␞1700001000␞bob@example.com␞Bob␞Fix tests\n",
+        "src/main.rs\n",
+        "\n",
+    );
+    let cache = parse_mock_log(log);
+    let activity = cache.query_activity("", None, None, None, None);
+    assert_eq!(activity.len(), 1);
+    assert_eq!(activity[0].subjects.len(), 1, "Duplicate subjects should be deduped");
+    assert_eq!(activity[0].subjects[0], "Fix tests");
+}
+
+#[test]
+fn test_query_activity_subjects_with_message_filter() {
+    let cache = parse_mock_log(multi_commit_log());
+    // Filter to "Initial" only
+    let activity = cache.query_activity("src/main.rs", None, None, None, Some("Initial"));
+    assert_eq!(activity.len(), 1);
+    assert_eq!(activity[0].subjects.len(), 1);
+    assert_eq!(activity[0].subjects[0], "Initial commit");
+}
+
+// ─── Tests for query_activity_by_commit (Change B) ──────────────────
+
+#[test]
+fn test_query_activity_by_commit_basic() {
+    let cache = parse_mock_log(multi_commit_log());
+    let commits = cache.query_activity_by_commit("", None, None, None, None, None, None);
+    assert_eq!(commits.len(), 3, "Should have 3 commits");
+    // Sorted by timestamp desc (newest first)
+    assert_eq!(commits[0].subject, "Fix bug in main");
+    assert_eq!(commits[1].subject, "Add feature X");
+    assert_eq!(commits[2].subject, "Initial commit");
+}
+
+#[test]
+fn test_query_activity_by_commit_files() {
+    let cache = parse_mock_log(multi_commit_log());
+    let commits = cache.query_activity_by_commit("", None, None, None, None, None, None);
+    // "Fix bug in main" (commit ccc) touched src/main.rs
+    assert_eq!(commits[0].files, vec!["src/main.rs"]);
+    assert_eq!(commits[0].total_files, 1);
+    // "Add feature X" (commit bbb) touched src/lib.rs and src/main.rs
+    assert_eq!(commits[1].files, vec!["src/lib.rs", "src/main.rs"]);
+    assert_eq!(commits[1].total_files, 2);
+    // "Initial commit" (commit aaa) touched Cargo.toml and src/main.rs
+    assert_eq!(commits[2].files, vec!["Cargo.toml", "src/main.rs"]);
+    assert_eq!(commits[2].total_files, 2);
+}
+
+#[test]
+fn test_query_activity_by_commit_date_filter() {
+    let cache = parse_mock_log(multi_commit_log());
+    // Only commits after 1700001500
+    let commits = cache.query_activity_by_commit("", Some(1700001500), None, None, None, None, None);
+    assert_eq!(commits.len(), 1, "Only 1 commit after 1700001500");
+    assert_eq!(commits[0].subject, "Fix bug in main");
+}
+
+#[test]
+fn test_query_activity_by_commit_author_filter() {
+    let cache = parse_mock_log(multi_commit_log());
+    let commits = cache.query_activity_by_commit("", None, None, Some("Bob"), None, None, None);
+    assert_eq!(commits.len(), 1, "Bob has 1 commit");
+    assert_eq!(commits[0].subject, "Add feature X");
+}
+
+#[test]
+fn test_query_activity_by_commit_message_filter() {
+    let cache = parse_mock_log(multi_commit_log());
+    let commits = cache.query_activity_by_commit("", None, None, None, Some("bug"), None, None);
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].subject, "Fix bug in main");
+}
+
+#[test]
+fn test_query_activity_by_commit_path_filter() {
+    let cache = parse_mock_log(multi_commit_log());
+    // Only commits that touched src/lib.rs
+    let commits = cache.query_activity_by_commit("src/lib.rs", None, None, None, None, None, None);
+    assert_eq!(commits.len(), 1, "Only 1 commit touched src/lib.rs");
+    assert_eq!(commits[0].subject, "Add feature X");
+    // Files should only include files matching the path filter
+    assert_eq!(commits[0].files, vec!["src/lib.rs"]);
+}
+
+#[test]
+fn test_query_activity_by_commit_max_results() {
+    let cache = parse_mock_log(multi_commit_log());
+    let commits = cache.query_activity_by_commit("", None, None, None, None, Some(2), None);
+    assert_eq!(commits.len(), 2, "Should return only 2 commits");
+    // Most recent first
+    assert_eq!(commits[0].subject, "Fix bug in main");
+    assert_eq!(commits[1].subject, "Add feature X");
+}
+
+#[test]
+fn test_query_activity_by_commit_max_files_per_commit() {
+    // Create a commit that touches many files
+    let mut log = String::from("COMMIT:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa␞1700000000␞alice@example.com␞Alice␞Big refactor\n");
+    for i in 0..30 {
+        log.push_str(&format!("src/file_{:02}.rs\n", i));
+    }
+    log.push('\n');
+    let cache = parse_mock_log(&log);
+    let commits = cache.query_activity_by_commit("", None, None, None, None, None, Some(5));
+    assert_eq!(commits.len(), 1);
+    assert_eq!(commits[0].files.len(), 5, "Should cap files at 5");
+    assert_eq!(commits[0].total_files, 30, "total_files should reflect original count");
+}
+
+#[test]
+fn test_query_activity_by_commit_sorted_by_date_desc() {
+    let cache = parse_mock_log(multi_commit_log());
+    let commits = cache.query_activity_by_commit("", None, None, None, None, None, None);
+    for i in 1..commits.len() {
+        assert!(
+            commits[i - 1].timestamp >= commits[i].timestamp,
+            "Commits should be sorted by timestamp descending"
+        );
+    }
+}
+
+#[test]
+fn test_query_activity_by_commit_empty_result() {
+    let cache = parse_mock_log(multi_commit_log());
+    // No commits in this date range
+    let commits = cache.query_activity_by_commit("", Some(1800000000), None, None, None, None, None);
+    assert!(commits.is_empty(), "Should return empty for future dates");
+}
+
+#[test]
+fn test_query_activity_by_commit_hash_format() {
+    let cache = parse_mock_log(multi_commit_log());
+    let commits = cache.query_activity_by_commit("", None, None, None, None, None, None);
+    for c in &commits {
+        assert_eq!(c.hash.len(), 40, "Hash should be 40-char hex string");
+        assert!(c.hash.chars().all(|ch| ch.is_ascii_hexdigit()), "Hash should be hex");
+    }
+}

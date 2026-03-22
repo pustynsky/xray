@@ -69,7 +69,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `xray_git_history`         | Commit history for a file. Uses in-memory cache when available (sub-millisecond), falls back to CLI (~2–6 sec)                          |
 | `xray_git_diff`            | Commit history with full diff/patch. Always uses CLI (cache has no patch data)                                                          |
 | `xray_git_authors`         | Top authors for a file ranked by commit count. Uses in-memory cache when available (sub-millisecond), falls back to CLI                  |
-| `xray_git_activity`        | Activity (changed files) for a date range, optionally filtered by path. Uses in-memory cache when available (sub-millisecond), falls back to CLI |
+| `xray_git_activity`        | Activity for a date range. `groupBy=file` (default): files with commit counts, authors, subjects. `groupBy=commit`: commits with changed files — ideal for "what was developed?" Uses cache (<1ms) or CLI |
 | `xray_git_blame`           | Line-level attribution (`git blame`) for a file or line range. Returns commit hash, author, date, and content per line                   |
 | `xray_branch_status`       | Shows current git branch status: branch name, main/master check, behind/ahead counts, dirty files, fetch age. Call before investigating production bugs |
 
@@ -1097,32 +1097,58 @@ The `path` parameter (or its backward-compatible alias `file`) accepts:
 
 ### xray_git_activity
 
-Get activity across files in a repository for a date range. Returns a list of changed files with their commit counts. Useful for answering "what changed this week?" Date filters are recommended to keep results manageable.
+Get activity across files in a repository for a date range. Two grouping modes:
+
+- **`groupBy=file`** (default): Returns files with commit counts, authors, and commit subjects. Best for "which files changed?"
+- **`groupBy=commit`**: Returns commits with their changed files. Best for "what was developed this week?" — ideal for sprint summaries, release notes, team activity reports
 
 The optional `path` parameter filters activity to a specific file or directory:
 - **File path** — activity for a single file (e.g., `"path": "src/main.rs"`)
 - **Directory path** — activity across all files in a directory (e.g., `"path": "src/controllers"`)
 - **Omitted** — activity across the entire repository
 
-Path filtering uses native `git log -- <pathspec>` for efficiency — git itself filters commits at the source.
+#### Additional Parameters
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `groupBy` | string | `"file"` | Grouping mode: `"file"` = file→commits with subjects, `"commit"` = commit→files |
+| `maxResults` | integer | — | For `groupBy=commit`: max commits (default: 50). For `groupBy=file`: unlimited |
+| `maxFilesPerCommit` | integer | 20 | Max files per commit when `groupBy=commit`. Excess truncated with `truncatedFiles` count |
+
+#### groupBy=file (default)
 
 ```json
-// Request — whole repo
+// Request — whole repo, file grouping
 {"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","from":"2025-01-01","to":"2025-01-31"}}}
-
-// Request — specific directory
-{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","path":"src/controllers","from":"2025-01-01","to":"2025-01-31"}}}
 
 // Response (abbreviated — from cache)
 {
   "activity": [
-    {"path":"src/main.rs","commitCount":12,"lastModified":"2025-01-31 18:45:00 +0000","authors":["Alice","Bob"]},
-    {"path":"src/lib.rs","commitCount":8,"lastModified":"2025-01-28 10:20:00 +0000","authors":["Alice"]},
-    {"path":"Cargo.toml","commitCount":3,"lastModified":"2025-01-15 09:00:00 +0000","authors":["Carol"]}
+    {"path":"src/main.rs","commitCount":12,"lastModified":"2025-01-31 18:45:00 +0000","authors":["Alice <alice@example.com>","Bob <bob@example.com>"],"subjects":["Add caching layer","Fix retry logic","Refactor auth"]},
+    {"path":"src/lib.rs","commitCount":8,"lastModified":"2025-01-28 10:20:00 +0000","authors":["Alice <alice@example.com>"],"subjects":["Add caching layer","Extract utils"]},
+    {"path":"Cargo.toml","commitCount":3,"lastModified":"2025-01-15 09:00:00 +0000","authors":["Carol <carol@example.com>"],"subjects":["Bump dependencies"]}
   ],
   "summary": {"filesChanged":3,"totalEntries":23,"commitsProcessed":150,"elapsedMs":0.12,"hint":"(from cache)","tool":"xray_git_activity"}
 }
 ```
+
+#### groupBy=commit
+
+```json
+// Request — commit grouping ("what was developed this week?")
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","groupBy":"commit","from":"2025-01-20","to":"2025-01-26"}}}
+
+// Response (abbreviated — from cache)
+{
+  "commits": [
+    {"hash":"abc123def456","subject":"Add caching layer for user queries","author":"Alice <alice@example.com>","date":"2025-01-26 14:30:00 +0000","filesChanged":5,"files":["src/cache.rs","src/lib.rs","src/main.rs","src/services/user.rs","tests/cache_tests.rs"]},
+    {"hash":"def789abc012","subject":"Fix retry logic in HTTP client","author":"Bob <bob@example.com>","date":"2025-01-25 10:15:00 +0000","filesChanged":2,"files":["src/http.rs","tests/http_tests.rs"]}
+  ],
+  "summary": {"groupBy":"commit","totalCommits":2,"returned":2,"elapsedMs":0.08,"hint":"(from cache, grouped by commit)","tool":"xray_git_activity"}
+}
+```
+
+When a commit touches more than `maxFilesPerCommit` files, the `files` array is truncated and a `truncatedFiles` field shows how many files were omitted.
 
 ### xray_git_blame
 
