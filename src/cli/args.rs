@@ -51,9 +51,9 @@ pub struct FastArgs {
     #[arg(short, long)]
     pub ext: Option<String>,
 
-    /// Auto-reindex if index is stale
-    #[arg(long, default_value = "true")]
-    pub auto_reindex: bool,
+    /// Don't auto-reindex if index is stale.
+    #[arg(long)]
+    pub no_auto_reindex: bool,
 
     /// Search only directories
     #[arg(long)]
@@ -273,9 +273,9 @@ pub struct GrepArgs {
     #[arg(long)]
     pub show_lines: bool,
 
-    /// Automatically rebuild index if stale.
-    #[arg(long, default_value = "true")]
-    pub auto_reindex: bool,
+    /// Don't automatically rebuild stale indexes.
+    #[arg(long)]
+    pub no_auto_reindex: bool,
 
     /// Filter by file extension.
     #[arg(short, long)]

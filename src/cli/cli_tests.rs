@@ -603,3 +603,104 @@ fn test_score_grep_results_nonexistent_term() {
     let results = score_grep_results(&index, &terms, &None, &[], &[], false, 1);
     assert!(results.is_empty());
 }
+
+
+// ─── load_grep_index_from tests ───────────────────────────────────────
+
+#[test]
+fn test_load_grep_index_ext_none_discovers_existing_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let root_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+    // Save a non-empty content index with "cs" extension
+    let idx = code_xray::ContentIndex {
+        root: root_str.clone(),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        max_age_secs: 86400,
+        extensions: vec!["cs".to_string()],
+        files: vec!["src/app.cs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx, index_base).unwrap();
+
+    // Call load_grep_index_from with ext=None — should discover the "cs" index
+    let result = super::load_grep_index_from(&root_str, &None, false, index_base);
+    assert!(result.is_ok(), "Should discover existing content index when ext=None");
+    let (loaded_idx, _duration) = result.unwrap();
+    assert_eq!(loaded_idx.extensions, vec!["cs".to_string()]);
+    assert_eq!(loaded_idx.files.len(), 1);
+}
+
+#[test]
+fn test_load_grep_index_ext_none_rejects_empty_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let root_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+    // Save a poisoned empty content index (0 files)
+    let idx = code_xray::ContentIndex {
+        root: root_str.clone(),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        max_age_secs: 86400,
+        extensions: vec![String::new()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx, index_base).unwrap();
+
+    // Call load_grep_index_from with ext=None — should reject the empty index
+    let result = super::load_grep_index_from(&root_str, &None, false, index_base);
+    assert!(result.is_err(), "Should reject poisoned empty content index");
+}
+
+#[test]
+fn test_load_grep_index_ext_none_no_index_returns_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let root_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+    // No index saved — should return IndexNotFound
+    let result = super::load_grep_index_from(&root_str, &None, false, index_base);
+    assert!(result.is_err(), "Should return error when no index exists");
+}
+
+#[test]
+fn test_load_grep_index_ext_some_uses_exact_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let root_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let root_str = crate::clean_path(&root_dir.to_string_lossy());
+
+    // Save a content index with "cs" extension
+    let idx = code_xray::ContentIndex {
+        root: root_str.clone(),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        max_age_secs: 86400,
+        extensions: vec!["cs".to_string()],
+        files: vec!["src/app.cs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx, index_base).unwrap();
+
+    // ext=Some("cs") — should find the index via exact hash
+    let result = super::load_grep_index_from(&root_str, &Some("cs".to_string()), false, index_base);
+    assert!(result.is_ok(), "Should find index with exact ext match");
+
+    // ext=Some("rs") — exact hash won't match, but fallback
+    // find_content_index_for_dir() discovers the "cs" index (error recovery by design)
+    let result = super::load_grep_index_from(&root_str, &Some("rs".to_string()), false, index_base);
+    assert!(result.is_ok(), "Fallback should discover cs index even when rs was requested");
+    let (fallback_idx, _) = result.unwrap();
+    assert_eq!(fallback_idx.extensions, vec!["cs".to_string()]);
+}

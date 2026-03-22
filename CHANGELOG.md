@@ -1,5 +1,11 @@
 # Changelog
 
+### Bug Fixes
+
+- **CLI `xray grep` without `--ext` silently returns 0 results** — When running `xray grep <term>` from a directory without specifying `--ext`, the CLI returned 0 files and 0 tokens. **Root cause:** `GrepArgs.ext` defaults to `None`, and `load_grep_index()` converted it to an empty string (`""`). Since `content_index_path_for()` hashes both `dir` AND `exts`, the hash for `ext=""` never matched an index built with actual extensions (e.g., `ext="cs"`). Worse, `auto_reindex` with `ext=""` built and saved a poisoned empty index (0 files), which was loaded on subsequent runs. **Fix:** When `ext` is `None`, `load_grep_index()` now uses `find_content_index_for_dir()` to discover any existing content index for the directory regardless of extensions. Poisoned empty indexes (0 files) are detected and rejected with a helpful error message. Refactored `load_grep_index()` into testable `load_grep_index_from()` accepting `index_base` parameter. 4 new unit tests. All 1781 unit tests + 68 E2E tests pass.
+
+- **CLI `--auto-reindex false` rejected by clap** — The `--auto-reindex` flag in `xray grep` and `xray fast` used `default_value = "true"` with `bool` type, making it impossible to disable via `--auto-reindex false` or `--auto-reindex=false` (clap treated it as a pure flag). **Fix:** Replaced with `--no-auto-reindex` negation flag (idiomatic clap pattern). Usage: `xray grep test --no-auto-reindex` to skip stale index rebuild. **Breaking change:** `--auto-reindex` flag removed from `xray grep` and `xray fast`.
+
 ### Features
 
 - **`xray_definitions` UX improvements for multi-client MCP compatibility** — Four improvements to reduce response size and improve LLM self-correction, especially for MCP clients without access to server instructions (VS Code Copilot, Cursor):

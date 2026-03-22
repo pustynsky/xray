@@ -258,7 +258,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
 
     let index = match load_index(&args.dir, &idx_base) {
         Ok(idx) => {
-            if idx.is_stale() && args.auto_reindex {
+            if idx.is_stale() && !args.no_auto_reindex {
                 eprintln!("Index is stale, rebuilding...");
                 let new_index = build_index(&IndexArgs {
                     dir: args.dir.clone(), max_age_hours: idx.max_age_secs / 3600,
@@ -398,11 +398,51 @@ fn load_grep_index(
     ext: &Option<String>,
     auto_reindex: bool,
 ) -> Result<(ContentIndex, Duration), SearchError> {
+    load_grep_index_from(dir, ext, auto_reindex, &index_dir())
+}
+
+fn load_grep_index_from(
+    dir: &str,
+    ext: &Option<String>,
+    auto_reindex: bool,
+    idx_base: &std::path::Path,
+) -> Result<(ContentIndex, Duration), SearchError> {
     let start = Instant::now();
-    let idx_base = index_dir();
+
+    // When --ext is not specified, discover any existing content index for this
+    // directory instead of looking up by exact hash(dir, ""). The hash includes
+    // extensions, so ext="" would never match an index built with ext="cs".
+    if ext.is_none() {
+        if let Some(idx) = find_content_index_for_dir(dir, idx_base, &[]) {
+            // Skip poisoned empty indexes (from previous runs without --ext)
+            if idx.files.is_empty() {
+                eprintln!("Found content index for '{}' but it has 0 files (extensions: {:?}). \
+                    Build a proper index with: xray content-index -d {} -e <extensions>",
+                    dir, idx.extensions, dir);
+                return Err(SearchError::IndexNotFound { dir: dir.to_string() });
+            }
+            if idx.is_stale() && auto_reindex {
+                eprintln!("Content index is stale, rebuilding...");
+                let ext_str = idx.extensions.join(",");
+                let new_idx = build_content_index(&ContentIndexArgs {
+                    dir: dir.to_string(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
+                    hidden: false, no_ignore: false, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                })?;
+                let _ = save_content_index(&new_idx, idx_base);
+                return Ok((new_idx, start.elapsed()));
+            } else {
+                if idx.is_stale() { eprintln!("Warning: content index is stale"); }
+                return Ok((idx, start.elapsed()));
+            }
+        }
+        // No index found for this directory
+        eprintln!("No content index found for '{}'. Build one with: xray content-index -d {} -e <extensions>", dir, dir);
+        return Err(SearchError::IndexNotFound { dir: dir.to_string() });
+    }
+
     let exts_for_load = ext.clone().unwrap_or_default();
 
-    let index = match load_content_index(dir, &exts_for_load, &idx_base) {
+    let index = match load_content_index(dir, &exts_for_load, idx_base) {
         Ok(idx) => {
             if idx.is_stale() && auto_reindex {
                 eprintln!("Content index is stale, rebuilding...");
@@ -411,7 +451,7 @@ fn load_grep_index(
                     dir: dir.to_string(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
                     hidden: false, no_ignore: false, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 })?;
-                let _ = save_content_index(&new_idx, &idx_base);
+                let _ = save_content_index(&new_idx, idx_base);
                 new_idx
             } else {
                 if idx.is_stale() { eprintln!("Warning: content index is stale"); }
@@ -423,7 +463,7 @@ fn load_grep_index(
                 // Index exists but has incompatible format version — rebuild automatically
                 // (consistent with MCP server behavior in cmd_serve)
                 let rebuild_ext = {
-                    let idx_path = content_index_path_for(dir, &exts_for_load, &idx_base);
+                    let idx_path = content_index_path_for(dir, &exts_for_load, idx_base);
                     crate::index::load_index_meta(&idx_path)
                         .map(|m| m.extensions.join(","))
                         .unwrap_or_else(|| exts_for_load.clone())
@@ -435,13 +475,13 @@ fn load_grep_index(
                     threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 }) {
                     Ok(new_idx) => {
-                        let _ = save_content_index(&new_idx, &idx_base);
+                        let _ = save_content_index(&new_idx, idx_base);
                         new_idx
                     }
                     Err(build_err) => {
                         eprintln!("Auto-rebuild failed: {}", build_err);
                         // Fall through to find_content_index_for_dir as last resort
-                        match find_content_index_for_dir(dir, &idx_base, &[]) {
+                        match find_content_index_for_dir(dir, idx_base, &[]) {
                             Some(idx) => idx,
                             None => return Err(SearchError::IndexNotFound { dir: dir.to_string() }),
                         }
@@ -449,7 +489,7 @@ fn load_grep_index(
                 }
             } else {
                 eprintln!("Content index load failed: {}", e);
-                match find_content_index_for_dir(dir, &idx_base, &[]) {
+                match find_content_index_for_dir(dir, idx_base, &[]) {
                     Some(idx) => idx,
                     None => return Err(SearchError::IndexNotFound { dir: dir.to_string() }),
                 }
@@ -718,7 +758,7 @@ fn score_grep_results(
 
 fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let start = Instant::now();
-    let (index, load_elapsed) = load_grep_index(&args.dir, &args.ext, args.auto_reindex)?;
+    let (index, load_elapsed) = load_grep_index(&args.dir, &args.ext, !args.no_auto_reindex)?;
     let search_start = Instant::now();
 
     // Default: substring search (like MCP). Disabled by --exact, --regex, or --phrase.

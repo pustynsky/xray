@@ -709,3 +709,35 @@ cargo run -- def-index -d $TEST_DIR -e cs
 - No TypeScript grammar loading errors
 
 **Validates:** Extension-based parser filtering prevents unnecessary grammar loading.
+
+---
+
+## `grep` — Index Discovery Without `--ext`
+
+### T-GREP-NO-EXT: `grep` without `--ext` discovers existing index
+
+**Setup:**
+
+```powershell
+# Build a content index with explicit extensions
+xray content-index -d $TEST_DIR -e $TEST_EXT
+```
+
+**Command:**
+
+```powershell
+# Run grep WITHOUT --ext — should discover the existing index
+xray grep "tokenize" -d $TEST_DIR
+```
+
+**Expected:**
+
+- Exit code: 0
+- stdout: at least 1 result file
+- Uses the index built with `$TEST_EXT` extensions (discovered via `find_content_index_for_dir`)
+
+**Validates:** CLI grep without `--ext` discovers any existing content index for the directory instead of failing with 0 results.
+
+**Unit tests:** `test_load_grep_index_ext_none_discovers_existing_index`, `test_load_grep_index_ext_none_rejects_empty_index`, `test_load_grep_index_ext_none_no_index_returns_error`, `test_load_grep_index_ext_some_uses_exact_hash`
+
+**Status:** ✅ Implemented
