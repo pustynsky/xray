@@ -286,6 +286,12 @@ fn update_content_index(
             // Mark trigram index as dirty — will be rebuilt lazily on next substring search
             idx.trigram_dirty = true;
 
+            // Update created_at — watcher detects subsequent changes via fsnotify, so now() is safe
+            idx.created_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::ZERO)
+                .as_secs();
+
             // Conditionally shrink collections after retain() to release excess capacity.
             shrink_if_oversized(&mut idx);
         }
@@ -341,6 +347,12 @@ fn update_definition_index(
                     }
                 }
             }
+
+            // Update created_at — watcher detects subsequent changes via fsnotify, so now() is safe
+            idx.created_at = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::ZERO)
+                .as_secs();
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire definition index write lock (poisoned)");
@@ -686,6 +698,12 @@ fn reconcile_content_index(
     extensions: &[String],
 ) {
     let start = std::time::Instant::now();
+    // Capture walk start time for created_at update (not now() at end — avoids race condition
+    // where files modified during tokenization phase would be missed by next reconciliation)
+    let walk_start = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_secs();
     let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
 
     // ── Phase 1: Walk filesystem (NO LOCK) ──
@@ -818,8 +836,9 @@ fn reconcile_content_index(
                 apply_tokenized_file(&mut idx, result);
             }
 
-            // Mark trigram as dirty if anything changed
+            // Mark trigram as dirty and update created_at if anything changed
             if added > 0 || modified > 0 || removed > 0 {
+                idx.created_at = walk_start;
                 idx.trigram_dirty = true;
             }
 

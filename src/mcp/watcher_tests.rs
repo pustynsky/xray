@@ -576,6 +576,14 @@ fn test_process_batch_dirty_file() {
     assert!(dirty.is_empty(), "dirty set should be drained after process_batch");
     // trigram should be marked dirty
     assert!(idx.trigram_dirty, "trigram should be marked dirty after update");
+    // created_at should be updated to recent time
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(idx.created_at > 0, "created_at should be updated after batch with changes");
+    assert!(idx.created_at <= now, "created_at should not be in the future");
+    assert!(now - idx.created_at < 10, "created_at should be within last 10 seconds");
 }
 
 #[test]

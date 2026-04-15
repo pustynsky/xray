@@ -554,3 +554,22 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 - No resource leaks (old threads exit cleanly)
 
 ---
+
+### T-AGE-HOURS-FRESHNESS: `ageHours` reflects data freshness after reconciliation and watcher updates
+
+**Scenario:**
+1. Start server with `--watch`, load cached index with old `created_at`
+2. Modify a file → watcher incremental update fires
+3. Call `xray_info` → check `ageHours`
+
+**Expected:**
+- After reconciliation with changes: `ageHours` < 1 minute
+- After watcher incremental update: `ageHours` < debounce interval
+- Reconciliation without changes: `ageHours` unchanged (no reset)
+- Reconciliation uses `walk_start` (not `now()`) to avoid race condition with files modified during tokenization phase
+
+**Unit tests:** `test_reconcile_adds_new_file` (created_at assertion), `test_reconcile_skips_unchanged_files` (created_at unchanged), `test_reconcile_nonblocking_adds_new_files` (created_at updated from 0), `test_reconcile_nonblocking_no_changes` (created_at stays 0), `test_process_batch_dirty_file` (created_at recent after batch)
+
+**E2E tests:** `T-RECONCILE` (watcher-startup-reconciliation), `T-BATCH-WATCHER` (batch-watcher-multi-file-update)
+
+---

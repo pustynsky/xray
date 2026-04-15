@@ -406,6 +406,10 @@ pub fn reconcile_definition_index(
     extensions: &[String],
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
+    let walk_start = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_secs();
 
     let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
 
@@ -472,6 +476,11 @@ pub fn reconcile_definition_index(
         }
     }
 
+    // Update created_at if anything changed (use walk_start, not now(), to avoid race condition)
+    if added > 0 || modified > 0 || removed > 0 {
+        index.created_at = walk_start;
+    }
+
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     if added > 0 || modified > 0 || removed > 0 {
@@ -515,6 +524,12 @@ pub fn reconcile_definition_index_nonblocking(
     extensions: &[String],
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
+    // Capture walk start time for created_at update (not now() at end — avoids race condition
+    // where files modified during parsing phase would be missed by next reconciliation)
+    let walk_start = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_secs();
 
     let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
 
@@ -692,6 +707,11 @@ pub fn reconcile_definition_index_nonblocking(
                     remove_file_definitions(&mut idx, file_id);
                 }
             }
+        }
+
+        // Update created_at if anything changed (use walk_start, not now(), to avoid race condition)
+        if added > 0 || modified > 0 || removed > 0 {
+            idx.created_at = walk_start;
         }
     }
     // WRITE lock released here

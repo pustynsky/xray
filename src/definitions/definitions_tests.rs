@@ -233,6 +233,14 @@ fn test_reconcile_adds_new_file() {
     assert_eq!(index.files.len(), 2, "Should now have 2 files");
     assert!(index.name_index.contains_key("newservice"), "New class should be in index");
     assert!(index.name_index.contains_key("process"), "New method should be in index");
+    // created_at should be updated after reconciliation with changes
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(index.created_at > 0, "created_at should be updated");
+    assert!(index.created_at <= now, "created_at should use walk_start, not future time");
+    assert!(now - index.created_at < 10, "created_at should be within last 10 seconds");
 }
 
 #[cfg(feature = "lang-csharp")]
@@ -344,6 +352,8 @@ fn test_reconcile_skips_unchanged_files() {
     assert_eq!(removed, 0);
     assert_eq!(index.definitions.len(), original_def_count, "No definitions should have been added");
     assert!(index.name_index.contains_key("stableservice"), "Original definition should remain");
+    // created_at should NOT be updated when no changes detected
+    assert_eq!(index.created_at, 4_102_444_800, "created_at should remain unchanged when no files changed");
 }
 
 // ─── Compact Definitions Tests ──────────────────────────────────────
@@ -1339,6 +1349,14 @@ fn test_reconcile_nonblocking_adds_new_files() {
 
     let idx = arc_index.read().unwrap();
     assert!(idx.name_index.contains_key("newclass"));
+    // created_at should be updated after reconciliation with changes
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    assert!(idx.created_at > 0, "created_at should be updated from initial 0");
+    assert!(idx.created_at <= now, "created_at should use walk_start, not future time");
+    assert!(now - idx.created_at < 10, "created_at should be within last 10 seconds");
 }
 
 #[test]
@@ -1407,6 +1425,9 @@ fn test_reconcile_nonblocking_no_changes() {
     assert_eq!(added, 0);
     assert_eq!(modified, 0);
     assert_eq!(removed, 0);
+    // created_at should NOT be updated when no changes detected
+    let idx = arc_index.read().unwrap();
+    assert_eq!(idx.created_at, 0, "created_at should remain unchanged when no files changed");
 }
 
 
