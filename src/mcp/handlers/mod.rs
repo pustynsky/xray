@@ -97,6 +97,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "substring": {
                         "type": "boolean",
                         "description": "Match within tokens (default: true). Auto-disabled for regex/phrase."
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Search scope: 'primary' (default), 'all' (primary + all attached), or specific attached root path."
                     }
                 },
                 "required": ["terms"]
@@ -118,7 +122,8 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "filesOnly": { "type": "boolean", "description": "Show only files" },
                     "countOnly": { "type": "boolean", "description": "Count only" },
                     "maxDepth": { "type": "integer", "description": "Max directory depth for dirsOnly results (1=immediate children only). Default: unlimited" },
-                    "maxResults": { "type": "integer", "description": "Max results to return (0=unlimited, default: 0). Use to limit response size for large directories." }
+                    "maxResults": { "type": "integer", "description": "Max results to return (0=unlimited, default: 0). Use to limit response size for large directories." },
+                    "scope": { "type": "string", "description": "Search scope: 'primary' (default), 'all' (primary + all attached), or specific attached root path." }
                 },
                 "required": ["pattern"]
             }),
@@ -134,7 +139,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "xray_reindex".to_string(),
-            description: "Force rebuild the content index and reload it into the server's in-memory cache. Also rebinds workspace when dir parameter switches to a different directory (updates workspace binding, loads cached index first for speed, falls back to full rebuild). Response includes workspaceChanged, previousServerDir, indexAction fields. When workspace is UNRESOLVED (wrong CWD), call this with dir=<project_path> to fix it.".to_string(),
+            description: "Force rebuild the content index and reload it into the server's in-memory cache. Also rebinds workspace when dir parameter switches to a different directory (updates workspace binding, loads cached index first for speed, falls back to full rebuild). Response includes workspaceChanged, previousServerDir, indexAction fields. When workspace is UNRESOLVED (wrong CWD), call this with dir=<project_path> to fix it. Supports attach=true to add workspace, detach=true to remove.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -142,6 +147,14 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "ext": {
                         "type": "string",
                         "description": "File extensions (comma-separated)"
+                    },
+                    "attach": {
+                        "type": "boolean",
+                        "description": "Load dir as additional attached workspace (eager). Indexes are built/loaded immediately. Max 3 attached. Does not change primary workspace."
+                    },
+                    "detach": {
+                        "type": "boolean",
+                        "description": "Unload attached workspace for dir. Frees memory."
                     }
                 },
                 "required": []
@@ -321,6 +334,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "includeUsageCount": {
                         "type": "boolean",
                         "description": "Add usageCount to each definition — number of files containing this name in content index (not call count). Useful for dead code detection (usageCount=0 or 1). Counts ALL text occurrences including comments and strings. (default: false)"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Search scope: 'primary' (default), 'all' (primary + all attached), or specific attached root path."
                     }
                 },
                 "required": []
@@ -419,6 +436,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "includeGrepReferences": {
                         "type": "boolean",
                         "description": "Add grepReferences[] — files containing the method name as text but NOT in the call tree. Catches delegate usage, method groups, reflection. Skipped for method names shorter than 4 characters to avoid noise. (default: false)"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Search scope: 'primary' (default), 'all' (primary + all attached). For attached workspaces, shows content-index references (not full call trees)."
                     }
                 },
                 "required": ["method"]
@@ -581,6 +602,25 @@ impl std::fmt::Display for WorkspaceStatus {
             Self::Unresolved => write!(f, "unresolved"),
         }
     }
+}
+
+/// An additional workspace attached to the server for cross-workspace search.
+/// Holds its own content, definition, and file indexes in memory.
+pub struct AttachedWorkspace {
+    /// Original root path as provided by the user.
+    pub root: String,
+    /// Canonicalized root path for duplicate detection.
+    pub canonical_root: String,
+    /// File extensions indexed for this workspace.
+    pub extensions: Vec<String>,
+    /// Unix timestamp when this workspace was attached.
+    pub attached_at: u64,
+    /// Content index (grep/text search).
+    pub content_index: ContentIndex,
+    /// Definition index (AST-based code search). None if --definitions not enabled.
+    pub def_index: Option<DefinitionIndex>,
+    /// File index (file name search). None if not yet built.
+    pub file_index: Option<FileIndex>,
 }
 
 /// Workspace binding state — tracks how the server's working directory was determined
@@ -748,6 +788,11 @@ pub struct HandlerContext {
     pub watch_enabled: bool,
     /// Debounce milliseconds for the file watcher.
     pub watch_debounce_ms: u64,
+    /// Attached workspaces for cross-workspace search.
+    /// Each workspace has its own content, definition, and file indexes.
+    pub attached: Arc<RwLock<Vec<AttachedWorkspace>>>,
+    /// Maximum number of attached workspaces (default: 3, configurable via --max-attached).
+    pub max_attached: usize,
 }
 
 impl HandlerContext {
@@ -787,6 +832,8 @@ impl Default for HandlerContext {
             watcher_generation: Arc::new(AtomicU64::new(0)),
             watch_enabled: false,
             watch_debounce_ms: 500,
+            attached: Arc::new(RwLock::new(Vec::new())),
+            max_attached: 3,
         }
     }
 }
@@ -1131,6 +1178,40 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
         })
     };
 
+    // ── Attached workspaces ──
+    let attached_info = {
+        let attached = ctx.attached.read().unwrap_or_else(|e| e.into_inner());
+        if !attached.is_empty() {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or(std::time::Duration::ZERO)
+                .as_secs();
+            let list: Vec<Value> = attached.iter().map(|ws| {
+                let mut entry = json!({
+                    "root": ws.root,
+                    "extensions": ws.extensions,
+                    "contentFiles": ws.content_index.files.len(),
+                    "contentTokens": ws.content_index.index.len(),
+                    "ageHours": ((now.saturating_sub(ws.attached_at)) as f64 / 3600.0 * 10.0).round() / 10.0,
+                });
+                if let Some(ref def) = ws.def_index {
+                    entry["definitions"] = json!(def.definitions.len());
+                }
+                if let Some(ref fi) = ws.file_index {
+                    entry["fileEntries"] = json!(fi.entries.len());
+                }
+                entry
+            }).collect();
+            Some(json!({
+                "count": attached.len(),
+                "maxAttached": ctx.max_attached,
+                "workspaces": list,
+            }))
+        } else {
+            None
+        }
+    };
+
     let mut info = json!({
         "directory": ctx.index_base.display().to_string(),
         "workspace": workspace_state,
@@ -1139,6 +1220,10 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
 
     if !memory_estimate.as_object().is_none_or(|m| m.is_empty()) {
         info["memoryEstimate"] = memory_estimate;
+    }
+
+    if let Some(attached) = attached_info {
+        info["attachedWorkspaces"] = attached;
     }
 
     ToolCallResult::success(utils::json_to_string(&info))
@@ -1169,6 +1254,202 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     let ext = args.get("ext").and_then(|v| v.as_str())
         .map(|s| s.to_string())
         .unwrap_or_else(|| ctx.server_ext.clone());
+
+    // ─── Attached workspace: attach / detach ───
+    let attach = args.get("attach").and_then(|v| v.as_bool()).unwrap_or(false);
+    let detach = args.get("detach").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    if attach && detach {
+        return ToolCallResult::error("'attach' and 'detach' are mutually exclusive".to_string());
+    }
+
+    if detach {
+        let canonical_dir = std::fs::canonicalize(&dir)
+            .map(|p| clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| dir.clone());
+        let mut attached = ctx.attached.write().unwrap_or_else(|e| e.into_inner());
+        let before_len = attached.len();
+        attached.retain(|ws| !ws.canonical_root.eq_ignore_ascii_case(&canonical_dir));
+        if attached.len() == before_len {
+            return ToolCallResult::error(format!("No attached workspace found for '{}'. Use xray_info to see attached workspaces.", dir));
+        }
+        let remaining = attached.len();
+        drop(attached);
+        crate::index::force_mimalloc_collect();
+        let output = json!({
+            "status": "ok",
+            "detached": true,
+            "root": dir,
+            "attachedCount": remaining,
+        });
+        return ToolCallResult::success(utils::json_to_string(&output));
+    }
+
+    if attach {
+        let canonical_dir = std::fs::canonicalize(&dir)
+            .map(|p| clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| dir.clone());
+
+        // Validate: directory must exist
+        if !std::path::Path::new(&dir).is_dir() {
+            return ToolCallResult::error(format!("Directory '{}' does not exist", dir));
+        }
+
+        // Validate: cannot attach the primary workspace
+        let primary_canonical = ctx.canonical_server_dir();
+        if canonical_dir.eq_ignore_ascii_case(&primary_canonical) {
+            return ToolCallResult::error("Cannot attach the primary workspace. It is already the active workspace.".to_string());
+        }
+
+        {
+            let attached = ctx.attached.read().unwrap_or_else(|e| e.into_inner());
+
+            // Validate: max limit
+            if attached.len() >= ctx.max_attached {
+                return ToolCallResult::error(format!(
+                    "max_attached limit reached ({}/{}). Detach a workspace first.",
+                    attached.len(), ctx.max_attached
+                ));
+            }
+
+            // Validate: duplicate
+            if attached.iter().any(|ws| ws.canonical_root.eq_ignore_ascii_case(&canonical_dir)) {
+                return ToolCallResult::error(format!("Workspace '{}' is already attached", dir));
+            }
+        }
+
+        // Check overlap with primary (warning, not error)
+        let mut warnings: Vec<String> = Vec::new();
+        let primary_dir_lower = primary_canonical.to_lowercase();
+        let attach_dir_lower = canonical_dir.to_lowercase();
+        if attach_dir_lower.starts_with(&format!("{}/", primary_dir_lower))
+            || primary_dir_lower.starts_with(&format!("{}/", attach_dir_lower)) {
+            warnings.push(format!(
+                "Attached workspace '{}' overlaps with primary '{}'. Results may contain duplicates.",
+                dir, ctx.server_dir()
+            ));
+        }
+
+        let start_attach = Instant::now();
+        let timeout = std::time::Duration::from_secs(120);
+        let extensions_vec: Vec<String> = ext.split(',').map(|s| s.trim().to_string()).collect();
+
+        // 1. Load/build ContentIndex
+        let content_loaded = load_content_index(&dir, &ext, &ctx.index_base).ok()
+            .or_else(|| find_content_index_for_dir(&dir, &ctx.index_base, &extensions_vec));
+
+        let (content_index, content_action) = if let Some(idx) = content_loaded {
+            (idx, "loaded_cache")
+        } else {
+            if start_attach.elapsed() > timeout {
+                return ToolCallResult::error("Attach timed out (120s). Try narrowing ext filter.".to_string());
+            }
+            let idx = match build_content_index(&ContentIndexArgs {
+                dir: dir.to_string(), ext: ext.clone(),
+                max_age_hours: 24, hidden: false, no_ignore: false,
+                threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+            }) {
+                Ok(idx) => idx,
+                Err(e) => return ToolCallResult::error(format!("Failed to build content index for attach: {}", e)),
+            };
+            if let Err(e) = save_content_index(&idx, &ctx.index_base) {
+                warn!(error = %e, "Failed to save attached content index to disk");
+            }
+            // Drop + reload for compact memory
+            drop(idx);
+            crate::index::force_mimalloc_collect();
+            let idx = match load_content_index(&dir, &ext, &ctx.index_base) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    warn!(error = %e, "Failed to reload attached content index, rebuilding");
+                    match build_content_index(&ContentIndexArgs {
+                        dir: dir.to_string(), ext: ext.clone(),
+                        max_age_hours: 24, hidden: false, no_ignore: false,
+                        threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                    }) {
+                        Ok(idx) => idx,
+                        Err(e2) => return ToolCallResult::error(format!("Failed to build attached content index: {}", e2)),
+                    }
+                }
+            };
+            (idx, "rebuilt")
+        };
+
+        let file_count = content_index.files.len();
+        let token_count = content_index.index.len();
+
+        // 2. Load/build DefinitionIndex (if --definitions enabled)
+        let def_index = if ctx.def_index.is_some() && start_attach.elapsed() < timeout {
+            let def_ext_str = ctx.def_extensions.join(",");
+            let def_ext_vec: Vec<String> = ctx.def_extensions.clone();
+            let def_loaded = crate::definitions::load_definition_index(&dir, &def_ext_str, &ctx.index_base).ok()
+                .or_else(|| crate::definitions::find_definition_index_for_dir(&dir, &ctx.index_base, &def_ext_vec));
+            if let Some(idx) = def_loaded {
+                Some(idx)
+            } else if start_attach.elapsed() < timeout {
+                let idx = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+                    dir: dir.to_string(), ext: def_ext_str.clone(), threads: 0,
+                });
+                if let Err(e) = crate::definitions::save_definition_index(&idx, &ctx.index_base) {
+                    warn!(error = %e, "Failed to save attached definition index to disk");
+                }
+                // Drop + reload for compact memory
+                drop(idx);
+                crate::index::force_mimalloc_collect();
+                crate::definitions::load_definition_index(&dir, &def_ext_str, &ctx.index_base).ok()
+            } else {
+                warnings.push("Definition index build skipped (timeout approaching)".to_string());
+                None
+            }
+        } else {
+            None
+        };
+        let def_count = def_index.as_ref().map(|d| d.definitions.len());
+
+        // 3. Build FileIndex
+        let file_index = crate::build_index(&crate::IndexArgs {
+            dir: dir.to_string(), max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+        }).ok();
+
+        // 4. Create and store AttachedWorkspace
+        let attached_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+
+        let ws = AttachedWorkspace {
+            root: dir.clone(),
+            canonical_root: canonical_dir,
+            extensions: extensions_vec,
+            attached_at,
+            content_index,
+            def_index,
+            file_index,
+        };
+
+        let mut attached = ctx.attached.write().unwrap_or_else(|e| e.into_inner());
+        attached.push(ws);
+        let attached_count = attached.len();
+        drop(attached);
+
+        let elapsed = start_attach.elapsed();
+        let mut output = json!({
+            "status": "ok",
+            "attached": true,
+            "root": dir,
+            "files": file_count,
+            "uniqueTokens": token_count,
+            "definitions": def_count,
+            "indexAction": content_action,
+            "attachTimeMs": elapsed.as_millis() as u64,
+            "attachedCount": attached_count,
+            "maxAttached": ctx.max_attached,
+        });
+        if !warnings.is_empty() {
+            output["warnings"] = json!(warnings);
+        }
+        return ToolCallResult::success(utils::json_to_string(&output));
+    }
 
     // Determine if workspace is changing
     let previous_dir = current_dir.clone();

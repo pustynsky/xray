@@ -433,7 +433,107 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         "summary": summary
     });
 
-    ToolCallResult::success(json_to_string(&output))
+    let mut result = ToolCallResult::success(json_to_string(&output));
+
+    // ─── Cross-workspace search (scope=all or scope=<root>) ───
+    let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("primary");
+    if scope != "primary" {
+        merge_attached_fast_results(&mut result, ctx, &pattern, scope, is_wildcard,
+            use_regex, ignore_case, dirs_only, files_only, &ext);
+    }
+
+    result
+}
+
+/// Merge file search results from attached workspaces.
+/// For each attached workspace with a file_index, searches for matching files
+/// and appends results with `workspace` field.
+#[allow(clippy::too_many_arguments)]
+fn merge_attached_fast_results(
+    result: &mut ToolCallResult,
+    ctx: &super::HandlerContext,
+    pattern: &str,
+    scope: &str,
+    _is_wildcard: bool,
+    _use_regex: bool,
+    _ignore_case: bool,
+    _dirs_only: bool,
+    _files_only: bool,
+    _ext: &Option<String>,
+) {
+    if result.is_error { return; }
+
+    let attached = ctx.attached.read().unwrap_or_else(|e| e.into_inner());
+    if attached.is_empty() { return; }
+
+    let workspaces: Vec<&super::AttachedWorkspace> = if scope == "all" {
+        attached.iter().collect()
+    } else {
+        let canonical_scope = std::fs::canonicalize(scope)
+            .map(|p| crate::clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| scope.to_string());
+        attached.iter()
+            .filter(|ws| ws.canonical_root.eq_ignore_ascii_case(&canonical_scope))
+            .collect()
+    };
+
+    if workspaces.is_empty() { return; }
+
+    let text = match result.content.first_mut() {
+        Some(c) => &mut c.text,
+        None => return,
+    };
+    let mut output: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let pattern_lower = pattern.to_lowercase();
+    let mut ws_searched = 0usize;
+    let mut attached_file_count = 0usize;
+
+    for ws in &workspaces {
+        let file_index = match &ws.file_index {
+            Some(idx) => idx,
+            None => continue,
+        };
+        ws_searched += 1;
+
+        // Simple substring search in file entries
+        let matching: Vec<serde_json::Value> = file_index.entries.iter()
+            .filter(|entry| {
+                let path_lower = entry.path.to_lowercase();
+                if pattern_lower.is_empty() || pattern == "*" {
+                    true
+                } else {
+                    // Match against filename part
+                    let filename = std::path::Path::new(&path_lower)
+                        .file_name()
+                        .map(|f| f.to_string_lossy().to_string())
+                        .unwrap_or_else(|| path_lower.clone());
+                    filename.contains(&pattern_lower)
+                }
+            })
+            .map(|entry| {
+                serde_json::json!({
+                    "path": entry.path,
+                    "workspace": ws.root,
+                })
+            })
+            .collect();
+
+        attached_file_count += matching.len();
+        if let Some(files_arr) = output.get_mut("files").and_then(|v| v.as_array_mut()) {
+            files_arr.extend(matching);
+        }
+    }
+
+    if let Some(summary) = output.get_mut("summary") {
+        summary["workspacesSearched"] = serde_json::json!(1 + ws_searched);
+        summary["attachedFiles"] = serde_json::json!(attached_file_count);
+    }
+
+    *text = json_to_string(&output);
 }
 
 #[cfg(test)]

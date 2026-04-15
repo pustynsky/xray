@@ -634,6 +634,8 @@ pub fn cmd_serve(args: ServeArgs) {
         watcher_generation,
         watch_enabled: args.watch,
         watch_debounce_ms: args.debounce_ms,
+        attached: Arc::new(RwLock::new(Vec::new())),
+        max_attached: args.max_attached,
     };
     mcp::server::run_server(ctx);
     crate::index::log_memory("serve: event loop exited");

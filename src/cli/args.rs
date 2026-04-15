@@ -229,6 +229,10 @@ pub struct ServeArgs {
     /// performance issues and MCP traffic.
     #[arg(long)]
     pub debug_log: bool,
+
+    /// Maximum number of attached workspaces for cross-workspace search (default: 3).
+    #[arg(long, default_value = "3")]
+    pub max_attached: usize,
 }
 
 #[derive(Parser, Debug)]

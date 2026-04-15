@@ -528,6 +528,11 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "dirsOnly": "Returns directories with fileCount, sorted descending (largest first). Works with wildcard and filtered patterns (e.g., 'Storage,Redis')",
             "maxDepth": "Limit directory depth for dirsOnly results (1=immediate children only, 2=two levels). Default: unlimited. Use maxDepth=1 to avoid truncation on large repos"
         },
+        "xray_reindex (attach/detach)": {
+            "attach": "true — load dir as additional workspace. Indexes built/loaded eagerly. Max 3 attached",
+            "detach": "true — unload attached workspace for dir. Frees memory",
+            "scope": "'all' on xray_grep/definitions/callers/fast — search primary + all attached workspaces. Default: 'primary'"
+        },
         "xray_git_history": {
             "repo": "'.' (current directory) or absolute path to git repo",
             "file": "File path relative to repo root: 'src/main.rs', 'Services/UserService.cs'",

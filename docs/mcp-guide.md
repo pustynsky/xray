@@ -889,6 +889,29 @@ Shows all existing indexes with their status, sizes, age, and memory usage. No p
 
 ## `xray_reindex` — Rebuild Content Index
 
+Supports cross-workspace search via `attach=true`/`detach=true` parameters.
+
+### Cross-Workspace Parameters
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `attach` | boolean | Load dir as additional attached workspace. Indexes built/loaded eagerly. Max 3 attached. Does not change primary workspace. |
+| `detach` | boolean | Unload attached workspace for dir. Frees memory. |
+
+### Scope Parameter (on search tools)
+
+After attaching workspaces, use `scope` on search tools:
+
+| Value | Behavior |
+|-------|----------|
+| `'primary'` (default) | Search only the primary workspace |
+| `'all'` | Search primary + all attached workspaces |
+| `'<root_path>'` | Search only the specified attached workspace |
+
+Tools supporting `scope`: `xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`.
+
+Results from attached workspaces include a `workspace` field identifying the source workspace.
+
 Force rebuild the content index and reload it into the server's in-memory cache. Useful after many file changes or when `--watch` is not enabled.
 
 ### Parameters

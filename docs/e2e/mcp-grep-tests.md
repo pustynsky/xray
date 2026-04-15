@@ -1,3 +1,39 @@
+
+## Cross-Workspace Search (Attached Workspaces)
+
+### T-ATTACH: Attach workspace
+- **Setup**: Server running with `--dir A`
+- **Action**: `xray_reindex dir='B' ext='rs' attach=true`
+- **Expected**: `attached: true`, `files > 0`, `attachedCount: 1`
+
+### T-ATTACH-DUPLICATE: Attach same workspace twice
+- **Action**: `xray_reindex dir='B' attach=true` (second time)
+- **Expected**: Error "already attached"
+
+### T-ATTACH-MAX: Max attached limit
+- **Setup**: `--max-attached 2`, attach 2 workspaces
+- **Action**: Attach 3rd workspace
+- **Expected**: Error "max_attached limit reached"
+
+### T-DETACH: Detach workspace
+- **Action**: `xray_reindex dir='B' detach=true`
+- **Expected**: `detached: true`, `attachedCount: 0`
+
+### T-GREP-SCOPE-ALL: Grep with scope=all
+- **Setup**: Attach workspace B
+- **Action**: `xray_grep terms='test' scope='all'`
+- **Expected**: `workspacesSearched > 1`, results contain entries with `workspace` field
+
+### T-DEFINITIONS-SCOPE-ALL: Definitions with scope=all
+- **Setup**: Attach workspace B (with --definitions)
+- **Action**: `xray_definitions name='test' scope='all'`
+- **Expected**: `workspacesSearched > 1`, results contain entries with `workspace` field
+
+### T-INFO-ATTACHED: xray_info shows attached
+- **Setup**: Attach workspace B
+- **Action**: `xray_info`
+- **Expected**: `attachedWorkspaces` section with count, workspaces array
+
 # MCP `xray_grep` Tests
 
 Tests for the `xray_grep` MCP tool: substring search, phrase search, truncation, auto-switch, and related features.

@@ -190,6 +190,7 @@ struct ParsedGrepArgs {
     count_only: bool,
     exclude_dir: Vec<String>,
     exclude: Vec<String>,
+    scope: String,
 }
 
 /// Parse and validate all grep parameters from JSON args.
@@ -257,6 +258,8 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
+    let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("primary").to_string();
+
     let exclude: Vec<String> = args.get("exclude")
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
@@ -276,6 +279,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         count_only,
         exclude_dir,
         exclude,
+        scope,
     })
 }
 
@@ -517,6 +521,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     if parsed.use_substring {
         let mut result = handle_substring_search(ctx, &index, &parsed.terms_str, &grep_params);
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+        if parsed.scope != "primary" {
+            merge_attached_grep_results(&mut result, ctx, &parsed);
+        }
         return result;
     }
 
@@ -532,6 +539,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         }
         let mut result = handle_multi_phrase_search(ctx, &index, &phrases, &grep_params);
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+        if parsed.scope != "primary" {
+            merge_attached_grep_results(&mut result, ctx, &parsed);
+        }
         return result;
     }
 
@@ -588,6 +598,11 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     }
 
     inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+
+    // ─── Cross-workspace search (scope=all or scope=<root>) ───
+    if parsed.scope != "primary" {
+        merge_attached_grep_results(&mut result, ctx, &parsed);
+    }
 
     result
 }
@@ -1196,6 +1211,119 @@ fn merge_phrase_results_or(per_phrase: Vec<Vec<PhraseFileMatch>>) -> Vec<PhraseF
         entry.lines.dedup();
     }
     file_map.into_values().collect()
+}
+
+/// Merge results from attached workspaces into the primary grep result.
+/// Searches each attached workspace's content index using normal token search
+/// and appends results (with `workspace` field) to the output JSON.
+fn merge_attached_grep_results(
+    result: &mut ToolCallResult,
+    ctx: &super::HandlerContext,
+    parsed: &ParsedGrepArgs,
+) {
+    if result.is_error { return; }
+
+    let attached = ctx.attached.read().unwrap_or_else(|e| e.into_inner());
+    if attached.is_empty() { return; }
+
+    // Determine which workspaces to search
+    let scope = &parsed.scope;
+    let workspaces: Vec<&super::AttachedWorkspace> = if scope == "all" {
+        attached.iter().collect()
+    } else {
+        let canonical_scope = std::fs::canonicalize(scope)
+            .map(|p| crate::clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| scope.clone());
+        attached.iter()
+            .filter(|ws| ws.canonical_root.eq_ignore_ascii_case(&canonical_scope))
+            .collect()
+    };
+
+    if workspaces.is_empty() { return; }
+
+    // Parse the primary result JSON
+    let text = match result.content.first_mut() {
+        Some(c) => &mut c.text,
+        None => return,
+    };
+    let mut output: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    // Parse search terms
+    let raw_terms: Vec<String> = parsed.terms_str
+        .split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if raw_terms.is_empty() { return; }
+
+    let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&parsed.exclude_dir);
+    let exclude_lower: Vec<String> = parsed.exclude.iter().map(|s| s.to_lowercase()).collect();
+
+    let mut attached_total_files = 0usize;
+    let mut attached_total_occurrences = 0usize;
+    let mut ws_searched = 0usize;
+
+    // Get or create files array in the output
+    let has_files_array = output.get("files").and_then(|v| v.as_array()).is_some();
+
+    for ws in &workspaces {
+        ws_searched += 1;
+        let grep_params = GrepSearchParams {
+            ext_filter: &parsed.ext_filter,
+            show_lines: false, // Skip line content for attached workspaces
+            context_lines: 0,
+            max_results: if parsed.max_results > 0 { parsed.max_results } else { 0 },
+            mode_and: parsed.mode_and,
+            count_only: parsed.count_only,
+            search_start: std::time::Instant::now(),
+            dir_filter: &None,
+            exclude_patterns: exclude_patterns.clone(),
+            exclude_lower: exclude_lower.clone(),
+        };
+        let file_scores = score_normal_token_search(&raw_terms, &ws.content_index, &grep_params);
+        let (mut results, total_f, total_o) = finalize_grep_results(
+            file_scores, parsed.mode_and, raw_terms.len(),
+        );
+        attached_total_files += total_f;
+        attached_total_occurrences += total_o;
+
+        if !parsed.count_only && has_files_array {
+            if parsed.max_results > 0 {
+                results.truncate(parsed.max_results);
+            }
+            if let Some(files_arr) = output.get_mut("files").and_then(|v| v.as_array_mut()) {
+                for r in &results {
+                    files_arr.push(json!({
+                        "path": r.file_path,
+                        "score": (r.tf_idf * 10000.0).round() / 10000.0,
+                        "occurrences": r.occurrences,
+                        "termsMatched": format!("{}/{}", r.terms_matched, raw_terms.len()),
+                        "lines": r.lines,
+                        "workspace": ws.root,
+                    }));
+                }
+            }
+        }
+    }
+
+    // Update summary
+    if let Some(summary) = output.get_mut("summary") {
+        summary["workspacesSearched"] = json!(1 + ws_searched);
+        summary["attachedFiles"] = json!(attached_total_files);
+        summary["attachedOccurrences"] = json!(attached_total_occurrences);
+        // Update totals
+        if let Some(tf) = summary.get("totalFiles").and_then(|v| v.as_u64()) {
+            summary["totalFiles"] = json!(tf + attached_total_files as u64);
+        }
+        if let Some(to) = summary.get("totalOccurrences").and_then(|v| v.as_u64()) {
+            summary["totalOccurrences"] = json!(to + attached_total_occurrences as u64);
+        }
+    }
+
+    *text = json_to_string(&output);
 }
 
 /// Merge phrase results with AND semantics: only files appearing in ALL phrase results.

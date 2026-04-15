@@ -1523,6 +1523,50 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
+# T-ATTACH-GREP: Attach workspace + grep scope=all
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-ATTACH-GREP attach-workspace-grep-scope-all"
+    try {
+        $wsA = Join-Path $env:TEMP "search_par_attach_a_$PID"
+        $wsB = Join-Path $env:TEMP "search_par_attach_b_$PID"
+        if (Test-Path $wsA) { Remove-Item -Recurse -Force $wsA }
+        if (Test-Path $wsB) { Remove-Item -Recurse -Force $wsB }
+        New-Item -ItemType Directory -Path $wsA | Out-Null
+        New-Item -ItemType Directory -Path $wsB | Out-Null
+        Set-Content -Path (Join-Path $wsA "main.rs") -Value "fn workspace_alpha() { }"
+        Set-Content -Path (Join-Path $wsB "lib.rs") -Value "fn workspace_beta_unique_marker() { }"
+        & $Bin content-index -d $wsA -e rs 2>&1 | Out-Null
+        & $Bin content-index -d $wsB -e rs 2>&1 | Out-Null
+        $wsBPath = $wsB -replace '\\', '/'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_reindex","arguments":{"dir":"' + $wsBPath + '","ext":"rs","attach":true}}}'),
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"workspace_beta_unique_marker","scope":"all"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $wsA --ext rs 2>$null) | Out-String
+        $attachLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*3' } | Select-Object -Last 1
+        $grepLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        & $Bin cleanup --dir $wsA 2>&1 | Out-Null
+        & $Bin cleanup --dir $wsB 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $wsA -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $wsB -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $attachLine) { $errors += "no attach response" }
+        elseif ($attachLine -notmatch 'attached') { $errors += "attach response missing 'attached' field" }
+        if (-not $grepLine) { $errors += "no grep response" }
+        elseif ($grepLine -notmatch 'workspace_beta_unique_marker') { $errors += "marker not found in scope=all results" }
+        elseif ($grepLine -notmatch 'workspacesSearched') { $errors += "missing workspacesSearched in summary" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (attach + scope=all grep found marker in attached workspace)" }
+    } catch {
+        Remove-Item -Recurse -Force $wsA -ErrorAction SilentlyContinue
+        Remove-Item -Recurse -Force $wsB -ErrorAction SilentlyContinue
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # T-HINT-F: File fuzzy-match hint — file filter with slashes finds near-miss path
 $testBlocks += , {
     param($Bin, $Dir, $Ext)

@@ -95,6 +95,8 @@ fn test_handler_context_field_count_guard() {
         watcher_generation: Arc::new(AtomicU64::new(0)),
         watch_enabled: false,
         watch_debounce_ms: 500,
+        attached: Arc::new(RwLock::new(Vec::new())),
+        max_attached: 3,
     };
     drop(_guard);
 }

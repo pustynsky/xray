@@ -523,7 +523,15 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
-        ToolCallResult::success(json_to_string(&output))
+        let mut result = ToolCallResult::success(json_to_string(&output));
+
+        // ─── Cross-workspace search (scope=all or scope=<root>) ───
+        let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("primary");
+        if scope != "primary" {
+            merge_attached_callers_results(&mut result, ctx, &method_name, scope);
+        }
+
+        result
     }
 }
 
@@ -1021,6 +1029,76 @@ fn build_grep_references(
         }
     }
     grep_refs
+}
+
+/// Merge caller references from attached workspaces into the primary result.
+/// For attached workspaces, searches the content index for the method name
+/// and adds matching files as `attachedReferences` in the output.
+fn merge_attached_callers_results(
+    result: &mut ToolCallResult,
+    ctx: &super::HandlerContext,
+    method_name: &str,
+    scope: &str,
+) {
+    if result.is_error { return; }
+
+    let attached = ctx.attached.read().unwrap_or_else(|e| e.into_inner());
+    if attached.is_empty() { return; }
+
+    let workspaces: Vec<&super::AttachedWorkspace> = if scope == "all" {
+        attached.iter().collect()
+    } else {
+        let canonical_scope = std::fs::canonicalize(scope)
+            .map(|p| crate::clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| scope.to_string());
+        attached.iter()
+            .filter(|ws| ws.canonical_root.eq_ignore_ascii_case(&canonical_scope))
+            .collect()
+    };
+
+    if workspaces.is_empty() { return; }
+
+    let text = match result.content.first_mut() {
+        Some(c) => &mut c.text,
+        None => return,
+    };
+    let mut output: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let method_lower = method_name.to_lowercase();
+    let mut attached_refs: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+
+    for ws in &workspaces {
+        // Search content index for method name references
+        let mut files_with_method: Vec<Value> = Vec::new();
+        if let Some(postings) = ws.content_index.index.get(&method_lower) {
+            for posting in postings {
+                if let Some(file_path) = ws.content_index.files.get(posting.file_id as usize) {
+                    files_with_method.push(json!({
+                        "file": file_path,
+                        "lines": posting.lines,
+                    }));
+                }
+            }
+        }
+        if !files_with_method.is_empty() {
+            attached_refs.insert(ws.root.clone(), json!({
+                "references": files_with_method,
+                "note": "Content-index references (not AST call tree). Shows files containing the method name."
+            }));
+        }
+    }
+
+    if !attached_refs.is_empty() {
+        output["attachedReferences"] = serde_json::Value::Object(attached_refs);
+    }
+    if let Some(summary) = output.get_mut("summary") {
+        summary["workspacesSearched"] = json!(1 + workspaces.len());
+    }
+
+    *text = json_to_string(&output);
 }
 
 // ─── Internal helpers ───────────────────────────────────────────────

@@ -448,6 +448,7 @@ xray serve --dir C:\Projects --ext rs --watch --definitions
 | `--log-level <LEVEL>`  | Log level: error, warn, info, debug (default: info)                  |
 | `--max-response-kb <N>`| Max response size in KB before truncation, 0 = unlimited (default: 16)|
 | `--debug-log`          | Write MCP request/response traces and memory diagnostics to `.debug.log` in index dir|
+| `--max-attached <N>`   | Maximum number of attached workspaces for cross-workspace search (default: 3)|
 
 ---
 

@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Features
+
+- **Cross-workspace search**: attach additional workspaces via `xray_reindex attach=true dir=X` and search across all of them with `scope='all'`. Up to 3 attached workspaces (configurable via `--max-attached`).
+  - `xray_grep scope='all'` — searches content indexes of primary + all attached workspaces
+  - `xray_definitions scope='all'` — searches definition indexes across workspaces
+  - `xray_callers scope='all'` — shows content-index references from attached workspaces
+  - `xray_fast scope='all'` — searches file indexes across workspaces
+  - `xray_reindex detach=true dir=X` — removes attached workspace, frees memory
+  - `xray_info` — shows attached workspaces with file counts, tokens, age
+  - New CLI flag: `--max-attached` (default: 3)
+  - Results from attached workspaces include `workspace` field for identification
+
 ### Bug Fixes
 
 - **CLI `xray grep` without `--ext` silently returns 0 results** — When running `xray grep <term>` from a directory without specifying `--ext`, the CLI returned 0 files and 0 tokens. **Root cause:** `GrepArgs.ext` defaults to `None`, and `load_grep_index()` converted it to an empty string (`""`). Since `content_index_path_for()` hashes both `dir` AND `exts`, the hash for `ext=""` never matched an index built with actual extensions (e.g., `ext="cs"`). Worse, `auto_reindex` with `ext=""` built and saved a poisoned empty index (0 files), which was loaded on subsequent runs. **Fix:** When `ext` is `None`, `load_grep_index()` now uses `find_content_index_for_dir()` to discover any existing content index for the directory regardless of extensions. Poisoned empty indexes (0 files) are detected and rejected with a helpful error message. Refactored `load_grep_index()` into testable `load_grep_index_from()` accepting `index_base` parameter. 4 new unit tests. All 1781 unit tests + 68 E2E tests pass.

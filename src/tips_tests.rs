@@ -352,9 +352,9 @@ fn test_instructions_token_budget() {
     // Budget: CRITICAL OVERRIDE (~100) + ERROR RECOVERY (~100) + ANTI-PATTERNS (~60) + WORKSPACE DISCOVERY (~30)
     // All justified — prevent LLM fallback to built-in tools (saves 3-5 wasted tool calls per session)
     assert!(
-        approx_tokens < 2100,
+        approx_tokens < 2200,
         "Instructions exceed token budget: ~{} tokens ({} words). \
-         Target: <2100 (includes CRITICAL OVERRIDE + ERROR RECOVERY + ANTI-PATTERNS + WORKSPACE DISCOVERY). Remove redundant sections.",
+         Target: <2200 (includes CRITICAL OVERRIDE + ERROR RECOVERY + ANTI-PATTERNS + WORKSPACE DISCOVERY + cross-workspace scope hints). Remove redundant sections.",
         approx_tokens, word_count
     );
 }

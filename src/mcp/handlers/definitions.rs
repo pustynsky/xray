@@ -65,6 +65,7 @@ pub(crate) struct DefinitionSearchArgs {
     pub exclude_patterns: super::utils::ExcludePatterns,
     pub file_filter_terms: Option<Vec<String>>,
     pub parent_filter_terms: Option<Vec<String>>,
+    pub scope: String,
 }
 
 impl DefinitionSearchArgs {
@@ -214,6 +215,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         exclude_patterns,
         file_filter_terms,
         parent_filter_terms,
+        scope: args.get("scope").and_then(|v| v.as_str()).unwrap_or("primary").to_string(),
     })
 }
 
@@ -314,8 +316,15 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
     let search_elapsed = search_start.elapsed();
 
     // 11. Format output
-    format_search_output(&index, &results, &parsed, total_results, &stats_info,
-                         &term_breakdown, search_elapsed, ctx)
+    let mut result = format_search_output(&index, &results, &parsed, total_results, &stats_info,
+                         &term_breakdown, search_elapsed, ctx);
+
+    // ─── Cross-workspace search (scope=all or scope=<root>) ───
+    if parsed.scope != "primary" {
+        merge_attached_definitions_results(&mut result, ctx, &parsed);
+    }
+
+    result
 }
 
 // ─── Audit mode ──────────────────────────────────────────────────────
@@ -1614,6 +1623,98 @@ fn try_xml_on_demand(
     } else {
         None
     }
+}
+
+/// Merge results from attached workspaces into the primary definitions result.
+/// For each attached workspace with a def_index, runs the same search pipeline
+/// (collect_candidates + apply_entry_filters) and appends results with `workspace` field.
+fn merge_attached_definitions_results(
+    result: &mut ToolCallResult,
+    ctx: &super::HandlerContext,
+    parsed: &DefinitionSearchArgs,
+) {
+    if result.is_error { return; }
+
+    let attached = ctx.attached.read().unwrap_or_else(|e| e.into_inner());
+    if attached.is_empty() { return; }
+
+    let scope = &parsed.scope;
+    let workspaces: Vec<&super::AttachedWorkspace> = if scope == "all" {
+        attached.iter().collect()
+    } else {
+        let canonical_scope = std::fs::canonicalize(scope)
+            .map(|p| crate::clean_path(&p.to_string_lossy()))
+            .unwrap_or_else(|_| scope.clone());
+        attached.iter()
+            .filter(|ws| ws.canonical_root.eq_ignore_ascii_case(&canonical_scope))
+            .collect()
+    };
+
+    if workspaces.is_empty() { return; }
+
+    // Parse the primary result JSON
+    let text = match result.content.first_mut() {
+        Some(c) => &mut c.text,
+        None => return,
+    };
+    let mut output: serde_json::Value = match serde_json::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return,
+    };
+
+    let mut ws_searched = 0usize;
+    let mut attached_def_count = 0usize;
+
+    let mut defs_array = output.get_mut("definitions")
+        .and_then(|v| v.as_array_mut());
+
+    for ws in &workspaces {
+        let def_index = match &ws.def_index {
+            Some(idx) => idx,
+            None => continue,
+        };
+        ws_searched += 1;
+
+        // Run the same search pipeline against this workspace's index
+        let (candidates, _def_to_term) = match collect_candidates(def_index, parsed) {
+            Ok(result) => result,
+            Err(_) => continue,
+        };
+        let results = apply_entry_filters(def_index, &candidates, parsed);
+        attached_def_count += results.len();
+
+        if let Some(ref mut arr) = defs_array {
+            for (_idx, entry) in results.iter().take(parsed.max_results) {
+                let file_path = def_index.files.get(entry.file_id as usize)
+                    .cloned().unwrap_or_default();
+                let mut def_obj = serde_json::json!({
+                    "name": entry.name,
+                    "kind": entry.kind.to_string(),
+                    "file": file_path,
+                    "lines": format!("{}-{}", entry.line_start, entry.line_end),
+                    "workspace": ws.root,
+                });
+                if let Some(ref parent) = entry.parent {
+                    def_obj["parent"] = serde_json::json!(parent);
+                }
+                if let Some(ref sig) = entry.signature {
+                    def_obj["signature"] = serde_json::json!(sig);
+                }
+                arr.push(def_obj);
+            }
+        }
+    }
+
+    // Update summary
+    if let Some(summary) = output.get_mut("summary") {
+        summary["workspacesSearched"] = serde_json::json!(1 + ws_searched);
+        summary["attachedDefinitions"] = serde_json::json!(attached_def_count);
+        if let Some(tr) = summary.get("totalResults").and_then(|v| v.as_u64()) {
+            summary["totalResults"] = serde_json::json!(tr + attached_def_count as u64);
+        }
+    }
+
+    *text = super::utils::json_to_string(&output);
 }
 
 /// Handle XML containsLine with parent promotion.
