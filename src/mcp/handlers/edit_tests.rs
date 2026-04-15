@@ -2186,6 +2186,74 @@ fn test_flex_space_replacement_dollar_sign_safety() {
     assert!(content.contains("$100"), "Replacement with $ should be literal");
 }
 
+#[test]
+fn test_flex_space_markdown_separator_dash_count_mismatch() {
+    // Regression: LLM sends table with |---|---| but file has |---------|-------------|
+    // This is the exact scenario that caused the original xray_edit failure.
+    let (tmp, filename, _) = create_temp_file(
+        "## Overview\n\n| Cluster | Status |\n|---------|-------------|\n| East | OK |\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "| Cluster | Status |\n|---|---|\n| East | OK |", "replace": "| Cluster | Status |\n|---|---|\n| West | FAIL |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match with flex separator dashes. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let text = &result.content[0].text;
+    assert!(text.contains("warnings"), "Should have flex-space warning");
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("West"), "Replacement should have been applied");
+    assert!(content.contains("FAIL"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_flex_space_markdown_separator_with_alignment() {
+    // File has alignment colons in separator, search has plain dashes
+    let (tmp, filename, _) = create_temp_file(
+        "| Name | Value |\n|:---------|----------:|\n| foo | 42 |\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "| Name | Value |\n|---|---|\n| foo | 42 |", "replace": "| Name | Value |\n|---|---|\n| bar | 99 |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match separator with colons via flex. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("bar"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_flex_space_markdown_separator_anchor_insert() {
+    // Insert after a table row where the separator has different dash count
+    let (tmp, filename, _) = create_temp_file(
+        "| Name | Value |\n|---------|-------------|\n| foo | 42 |\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "insertAfter": "|---|---|", "content": "| bar | 99 |" }
+        ]
+    }));
+
+    assert!(!result.is_error, "Should match separator anchor via flex. Error: {:?}",
+        result.content.first().map(|c| &c.text));
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("bar"), "Insert should have been applied");
+}
+
+
 // ─── Step 5: expectedContext flex-space ──────────────────────────────
 
 #[test]
@@ -2284,6 +2352,45 @@ fn test_search_to_flex_pattern() {
     let p = search_to_flex_pattern("| A |").unwrap();
     let re = regex::Regex::new(&p).unwrap();
     assert!(!re.is_match("| B |"));
+
+    // Markdown table separator: flex dash counts
+    let p = search_to_flex_pattern("|---|---|").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(re.is_match("|---|---|"), "Exact separator should match");
+    assert!(re.is_match("|---------|-------------|------------|-----------|")
+        , "Separator with more dashes should match");
+    assert!(re.is_match("|--|--|"), "Separator with fewer dashes should match");
+    assert!(re.is_match("|:---|---:|"), "Separator with colons should match");
+    assert!(re.is_match("|:---:|:---:|"), "Center-aligned separator should match");
+    assert!(re.is_match("| --- | --- |"), "Separator with spaces should match");
+
+    // Separator preserves column count (number of pipes)
+    let p = search_to_flex_pattern("|---|---|---|").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(re.is_match("|---------|-------------|------------|"), "3-col separator should match 3-col");
+    assert!(!re.is_match("|---|---|"), "3-col separator should NOT match 2-col");
+
+    // Multi-line with separator: search has short dashes, file has long dashes
+    let p = search_to_flex_pattern("| A | B |\n|---|---|\n| 1 | 2 |").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(re.is_match("| A       | B     |\n|---------|-------------|\n| 1       | 2     |"),
+        "Multi-line with different dash counts should match");
+
+    // Non-separator line that happens to have dashes should NOT use separator flex
+    // (it has 'a' which is not in the separator char set)
+    let p = search_to_flex_pattern("a-b|c-d").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(!re.is_match("a---b|c---d"), "Non-separator line should use normal flex, not separator flex");
+
+    // En dash (–) and em dash (—) should also be recognized
+    let p = search_to_flex_pattern("|–––|–––|").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(re.is_match("|---|---|"), "En dash separator should match hyphen-minus separator");
+    assert!(re.is_match("|---------|-------------|"), "En dash separator should match long dashes");
+
+    let p = search_to_flex_pattern("|———|———|").unwrap();
+    let re = regex::Regex::new(&p).unwrap();
+    assert!(re.is_match("|---|---|"), "Em dash separator should match hyphen-minus separator");
 }
 
 #[test]

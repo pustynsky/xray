@@ -476,3 +476,19 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 **Unit tests:** `test_trim_blank_lines`, `test_collapse_spaces`, `test_search_to_flex_pattern`
 
 **Status:** ✅ Covered by 3 unit tests
+
+### T-EDIT-22: Flex-space matching — markdown table separator dash count mismatch
+
+**Expected:**
+
+- Search `"| Cluster | Status |\n|---|---|\n| East | OK |"` matches file with `"|---------|-------------|"` separator → edit applied with flex-space warning
+- Search `"|---|---|"` as anchor matches `"|---------|-------------|"` via `insertAfter` → insert applied
+- Separator with alignment colons in file (`|:---|---:|`) matches plain dash search (`|---|---|`)
+- En dash (`–`) and em dash (`—`) in search match regular hyphens in file
+- Column count preserved: `|---|---|---|` does NOT match `|---|---|`
+
+**Unit tests:** `test_flex_space_markdown_separator_dash_count_mismatch`, `test_flex_space_markdown_separator_with_alignment`, `test_flex_space_markdown_separator_anchor_insert`, `test_search_to_flex_pattern` (extended with separator patterns and Unicode dash assertions)
+
+**Status:** ✅ Covered by 4 integration tests + unit test extensions
+
+---

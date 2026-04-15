@@ -691,24 +691,35 @@ fn collapse_spaces(s: &str) -> String {
 /// and leading/trailing whitespace per line becomes `[ \t]*`.
 /// This allows matching text with different amounts of horizontal whitespace.
 ///
+/// Markdown table separator lines (e.g., `|---|---|`) are detected and handled
+/// specially: dash counts become flexible while preserving column structure.
+///
 /// Example: `"| Issue | Count |"` becomes a pattern matching `"| Issue       | Count     |"`
+/// Example: `"|---|---|"` matches `"|---------|-------------|"` (any dash count)
 fn search_to_flex_pattern(search: &str) -> Option<String> {
     let lines: Vec<&str> = search.split('\n').collect();
     let mut pattern_parts: Vec<String> = Vec::new();
     let mut has_content = false;
 
     for line in &lines {
-        let parts: Vec<&str> = line.split_whitespace().collect();
-        if parts.is_empty() {
-            // Empty line: match zero or more horizontal whitespace
-            pattern_parts.push("[ \\t]*".to_string());
-        } else {
+        if is_markdown_table_separator(line) {
+            // Markdown table separator: flex dash/colon counts, preserve pipe structure
             has_content = true;
-            let escaped_parts: Vec<String> = parts.iter()
-                .map(|p| regex::escape(p))
-                .collect();
-            let flexed = escaped_parts.join("[ \\t]+");
-            pattern_parts.push(format!("[ \\t]*{}[ \\t]*", flexed));
+            let sep_pattern = flex_pattern_for_separator(line);
+            pattern_parts.push(format!("[ \\t]*{}[ \\t]*", sep_pattern));
+        } else {
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.is_empty() {
+                // Empty line: match zero or more horizontal whitespace
+                pattern_parts.push("[ \\t]*".to_string());
+            } else {
+                has_content = true;
+                let escaped_parts: Vec<String> = parts.iter()
+                    .map(|p| regex::escape(p))
+                    .collect();
+                let flexed = escaped_parts.join("[ \\t]+");
+                pattern_parts.push(format!("[ \\t]*{}[ \\t]*", flexed));
+            }
         }
     }
 
@@ -717,6 +728,56 @@ fn search_to_flex_pattern(search: &str) -> Option<String> {
     }
 
     Some(pattern_parts.join("\n"))
+}
+
+/// Check if a line is a markdown table separator (e.g., `|---|---|`, `|:---:|---:|`).
+/// Returns true if all characters are from `{|, -, –, —, :, space, tab}` and the line
+/// contains both at least one `|` and at least one dash-like character.
+/// Recognizes en dash (–, U+2013) and em dash (—, U+2014) in addition to
+/// hyphen-minus (-) to handle LLM/auto-formatting substitutions.
+fn is_markdown_table_separator(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let has_pipe = trimmed.contains('|');
+    let has_dash = trimmed.chars().any(|c| matches!(c, '-' | '\u{2013}' | '\u{2014}'));
+    let all_valid = trimmed.chars().all(|c| matches!(c, '|' | '-' | '\u{2013}' | '\u{2014}' | ':' | ' ' | '\t'));
+    has_pipe && has_dash && all_valid
+}
+
+/// Generate a flex regex pattern for a markdown table separator line.
+/// Preserves column count (number of `|` separators) but allows variable
+/// dash/colon/space counts between pipes.
+/// The character class includes en dash (–) and em dash (—) to handle
+/// LLM/auto-formatting substitutions.
+///
+/// Example: `"|---------|-------------|"` → `"\\|[-–—: \\t]+\\|[-–—: \\t]+\\""`
+fn flex_pattern_for_separator(line: &str) -> String {
+    // Character class: hyphen-minus, en dash, em dash, colon, space, tab
+    const DASH_CLASS: &str = "[-\\u{2013}\\u{2014}: \\t]+";
+
+    let mut result = String::new();
+    let mut in_dash_run = false;
+
+    for ch in line.chars() {
+        if ch == '|' {
+            if in_dash_run {
+                result.push_str(DASH_CLASS);
+                in_dash_run = false;
+            }
+            result.push_str("\\|");
+        } else if matches!(ch, '-' | '\u{2013}' | '\u{2014}' | ':' | ' ' | '\t') {
+            in_dash_run = true;
+            // Accumulate — will emit dash class when we hit next pipe or end
+        }
+    }
+    // Handle trailing dash run (for lines like "---|---" without trailing pipe)
+    if in_dash_run {
+        result.push_str(DASH_CLASS);
+    }
+
+    result
 }
 
 /// Describe a byte for diagnostic messages (hex + human-readable name).
