@@ -195,9 +195,9 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
             example: "Default: terms='UserService' finds IUserService, m_userService. Multi-phrase OR: terms='fn handle_foo,fn build_bar'. Exact only: terms='UserService', substring=false".into(),
         },
         Tip {
-            rule: "Phrase search: exact multi-word match".into(),
-            why: "phrase=true finds exact adjacent word sequences. Slower (~80ms) but precise.".into(),
-            example: "xray grep \"new HttpClient\" -e cs --phrase  |  MCP: terms='new HttpClient', phrase=true".into(),
+            rule: "Phrase search: literal match on raw file content (XML, config, any punctuation)".into(),
+            why: "phrase=true matches the exact string in raw file content -- including XML tags, angle brackets, slashes, dots. No escaping needed. Ideal for XML/config search. Slower (~80ms) but precise.".into(),
+            example: "xray grep \"<MaxRetries>3</MaxRetries>\" --phrase  |  MCP: terms='<MaxRetries>3</MaxRetries>', phrase=true. Also: terms='new HttpClient', phrase=true".into(),
         },
         Tip {
             rule: "Regex pattern search".into(),

@@ -151,7 +151,7 @@ Substring search is **on by default** in MCP mode — compound identifiers like 
 | `ext`          | string  | all indexed | File extension filter, comma-separated                                                           |
 | `mode`         | string  | `"or"` | Multi-term mode: `"or"` = ANY term, `"and"` = ALL terms (CLI: `--all`)                               |
 | `regex`        | boolean | false   | Treat terms as regex pattern                                                                         |
-| `phrase`       | boolean | false   | Exact phrase match. Comma-separated phrases are searched independently with OR/AND semantics          |
+| `phrase`       | boolean | false   | Literal string match on raw file content -- works with XML tags, angle brackets, slashes, no escaping needed. Example: `terms='<MaxRetries>3</MaxRetries>', phrase=true`. Comma-separated phrases are searched independently with OR/AND semantics |
 | `substring`    | boolean | true    | Match within tokens (finds `IUserService` when searching `UserService`). Auto-disabled for regex/phrase. (CLI: `--exact` to disable) |
 | `showLines`    | boolean | false   | Include matching source lines in results (CLI: `--show-lines`)                                       |
 | `contextLines` | integer | 0       | Context lines before/after each match, requires `showLines` (CLI: `-C`)                              |

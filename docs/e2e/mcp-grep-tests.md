@@ -163,6 +163,23 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 **Status:** ✅ Implemented
 
+### T37e: `serve` — xray_grep phrase matches full XML tags literally
+
+**Input:** `terms='<MaxRetries>3</MaxRetries>', phrase=true`
+
+**Expected:**
+
+- Finds exactly 1 file containing the literal XML tag
+- No false positives from files containing `MaxRetries` or `3` separately
+
+**Validates:** Phrase search handles XML angle brackets and full tag matching without escaping.
+
+**Unit test:** `test_phrase_postfilter_xml_full_tag`
+
+**Status:** ✅ Implemented
+
+---
+
 ---
 
 ## Auto-Switch to Phrase

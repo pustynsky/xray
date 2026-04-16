@@ -66,7 +66,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "phrase": {
                         "type": "boolean",
-                        "description": "Exact phrase match (default: false). Comma-separated phrases are searched independently with OR/AND semantics."
+                        "description": "Exact phrase match on raw file content (default: false). Matches literal strings including XML tags, angle brackets, slashes — no escaping needed. Example: terms='<MaxRetries>3</MaxRetries>', phrase=true finds the exact XML tag. Comma-separated phrases are searched independently with OR/AND semantics."
                     },
                     "showLines": {
                         "type": "boolean",
@@ -801,8 +801,8 @@ const ALREADY_BUILDING_MSG: &str =
 /// Minimum response budget for xray_help (32KB).
 /// xray_help returns reference content (best practices, strategies, parameter examples)
 /// that exceeds the default 16KB search-result budget (~20KB as of 23 tips + parameter examples).
-/// 32KB gives comfortable headroom for adding more tips and parameter examples.
-const XRAY_HELP_MIN_RESPONSE_BYTES: usize = 32_768;
+/// 48KB gives comfortable headroom for adding more tips and parameter examples.
+const XRAY_HELP_MIN_RESPONSE_BYTES: usize = 49_152;
 
 /// Minimum response budget for tools called with includeBody=true (64KB).
 /// When includeBody is true, responses contain source code of methods which

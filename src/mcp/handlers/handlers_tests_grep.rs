@@ -468,6 +468,12 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
       writeln!(f, "  <Type>ILogger string adapter</Type>").unwrap();
       writeln!(f, "</Config>").unwrap(); }
 
+    { let mut f = std::fs::File::create(tmp_dir.join("AppConfig.xml")).unwrap();
+      writeln!(f, "<AppSettings>").unwrap();
+      writeln!(f, "  <MaxRetries>1</MaxRetries>").unwrap();
+      writeln!(f, "  <TimeoutSeconds>3</TimeoutSeconds>").unwrap();
+      writeln!(f, "</AppSettings>").unwrap(); }
+
     { let mut f = std::fs::File::create(tmp_dir.join("Code.xml")).unwrap();
       writeln!(f, "<Code>").unwrap();
       writeln!(f, "  pub fn main() {{}}").unwrap();
@@ -517,6 +523,22 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let files = output["files"].as_array().unwrap();
     let path = files[0]["path"].as_str().unwrap();
     assert!(path.contains("Code.xml"), "Should match Code.xml, got {}", path);
+    cleanup_tmp(&tmp);
+}
+
+#[test] fn test_phrase_postfilter_xml_full_tag() {
+    let (ctx, tmp) = make_phrase_postfilter_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": "<MaxRetries>1</MaxRetries>",
+        "phrase": true
+    }));
+    assert!(!result.is_error, "Phrase search should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert_eq!(total, 1, "Should find exactly 1 file with literal '<MaxRetries>1</MaxRetries>', got {}", total);
+    let files = output["files"].as_array().unwrap();
+    let path = files[0]["path"].as_str().unwrap();
+    assert!(path.contains("AppConfig.xml"), "Should match AppConfig.xml, got {}", path);
     cleanup_tmp(&tmp);
 }
 
