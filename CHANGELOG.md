@@ -1,5 +1,15 @@
 # Changelog
 
+### Features
+
+- **Symlink support and `.git/info/exclude` handling** — Three changes to improve indexing of symlinked directories and locally-excluded files:
+  1. **`follow_links(true)`** — All 7 `WalkBuilder` instances now follow directory symlinks. Files accessible through symlinks (e.g., `docs/personal` → `ai-boosters/repos/<repo>/docs/personal`) are indexed by all three indexes (content, definitions, file-list) and the file watcher.
+  2. **`.git/info/exclude` not respected by default** — `git_exclude(false)` is now the default for all walkers. Files listed in `.git/info/exclude` (personal notes, local configs) are indexed. `.gitignore` is still respected (node_modules, bin, obj are excluded). Rationale: `.gitignore` contains project-level build artifacts; `.git/info/exclude` contains user's local files they want to search.
+  3. **`--respect-git-exclude` CLI flag** — New opt-in flag for `IndexArgs`, `ContentIndexArgs`, and `ServeArgs`. When set, restores the old behavior of respecting `.git/info/exclude`. Default: `false`.
+  - Circular symlinks are safe — the `ignore` crate handles cycle detection via inode tracking.
+  - Known limitation: `--respect-git-exclude` is not propagated to watcher/reconciler or MCP reindex handler (hardcoded to `false`). Tracked in `docs/todo_approved_2026-04-16_args-default-refactor.md`.
+  - 2 new symlink unit tests. All 1773 unit tests + 68 E2E tests pass.
+
 - **Improved `phrase` parameter discoverability in `xray_grep`** — Updated tool schema description and `xray_help` tips to explicitly document that `phrase=true` performs literal string matching on raw file content, including XML tags, angle brackets, and other punctuation without escaping. Added XML example (`<MaxRetries>3</MaxRetries>`). This prevents LLMs from falling back to built-in search tools when searching XML/config content. Bumped `XRAY_HELP_MIN_RESPONSE_BYTES` from 32KB to 48KB to prevent response truncation with longer descriptions. New test: `test_phrase_postfilter_xml_full_tag`.
 
 ### Features

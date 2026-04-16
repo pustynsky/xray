@@ -360,7 +360,7 @@ fn test_audit_cross_validate_with_file_index() {
 
     let file_index = crate::build_index(&crate::IndexArgs {
         dir: project_str.clone(),
-        max_age_hours: 24, hidden: false, no_ignore: false, threads: 0,
+        max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
     }).unwrap();
     crate::save_index(&file_index, &idx_base).unwrap();
 
@@ -3384,10 +3384,10 @@ fn test_hint_cross_file_match_comma_separated() {
     // file filter = "OrderService.cs" → file_id 1 matches. File has 2 defs (OrderService, GetOrder).
     // name filter = "GetUser,GetOrder" → checks name_index for substring "getuser" and "getorder".
     // In apply_entry_filters, only file_id=1 defs pass → OrderService(idx=2), GetOrder(idx=3).
-    // But name candidates from collect_candidates would include GetUser(idx=1, file_id=0) 
+    // But name candidates from collect_candidates would include GetUser(idx=1, file_id=0)
     // and GetOrder(idx=3, file_id=1). After file filter, only GetOrder survives.
     // So total_results=1 (GetOrder). This hint function wouldn't be called (>0 results).
-    // 
+    //
     // Better test: search for two names that are BOTH absent from the target file.
     let args2 = parse_definition_args(&json!({"file": "UserService.cs", "name": "OrderService,GetOrder"})).unwrap();
     let result2 = hint_file_has_defs_but_filters_narrow(&index, &args2);

@@ -652,6 +652,8 @@ impl WorkspaceBinding {
 pub fn has_source_files(dir: &str, extensions: &[String], max_depth: usize) -> bool {
     use ignore::WalkBuilder;
     let walker = WalkBuilder::new(dir)
+        .follow_links(true)
+        .git_exclude(false)
         .max_depth(Some(max_depth))
         .hidden(false)
         .build();
@@ -1215,7 +1217,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
             ext: ext.clone(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: false,
+            no_ignore: false, respect_git_exclude: false,
             threads: 0,
             min_token_len: DEFAULT_MIN_TOKEN_LEN,
         }) {
@@ -1252,7 +1254,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
                 warn!(error = %e, "Failed to reload content index from disk after reindex, rebuilding");
                 match build_content_index(&ContentIndexArgs {
                     dir: dir.to_string(), ext: ext.clone(),
-                    max_age_hours: 24, hidden: false, no_ignore: false,
+                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false,
                     threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 }) {
                     Ok(idx) => idx,
@@ -1674,7 +1676,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
                 info!(dir = %bg_dir, "Building content index in background (workspace switch)");
                 match build_content_index(&ContentIndexArgs {
                     dir: bg_dir.clone(), ext: bg_ext.clone(),
-                    max_age_hours: 24, hidden: false, no_ignore: false,
+                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false,
                     threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 }) {
                     Ok(idx) => {

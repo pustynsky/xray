@@ -524,7 +524,7 @@ fn test_build_index_nonexistent_dir_returns_error() {
         dir: "/nonexistent/path/that/does/not/exist".to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 0,
     });
     assert!(result.is_err(), "build_index should return Err for nonexistent directory");
@@ -539,7 +539,7 @@ fn test_build_content_index_nonexistent_dir_returns_error() {
         ext: "cs".to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 0,
         min_token_len: 2,
     });
@@ -556,7 +556,7 @@ fn test_build_index_valid_dir_returns_ok() {
         dir: tmp.path().to_string_lossy().to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 1,
     });
     assert!(result.is_ok(), "build_index should succeed for valid directory");
@@ -573,7 +573,7 @@ fn test_build_content_index_valid_dir_returns_ok() {
         ext: "cs".to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 1,
         min_token_len: 2,
     });
@@ -669,7 +669,7 @@ fn test_build_content_index_sets_format_version() {
         ext: "rs".to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 1,
         min_token_len: 2,
     });
@@ -993,7 +993,7 @@ fn test_chunked_content_build_multiple_files_correct_file_ids() {
         ext: "cs".to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 4, // Multi-threaded to exercise sub-chunking
         min_token_len: 2,
     });
@@ -1044,7 +1044,7 @@ fn test_chunked_content_build_file_id_to_path_consistency() {
         ext: "cs".to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 2,
         min_token_len: 2,
     });
@@ -1085,7 +1085,7 @@ fn test_chunked_content_build_single_vs_multi_thread() {
         ext: "cs".to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 1,
         min_token_len: 2,
     }).unwrap();
@@ -1095,7 +1095,7 @@ fn test_chunked_content_build_single_vs_multi_thread() {
         ext: "cs".to_string(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 4,
         min_token_len: 2,
     }).unwrap();

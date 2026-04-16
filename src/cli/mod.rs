@@ -144,7 +144,7 @@ fn cmd_test_create_stale_index(args: TestCreateStaleIndexArgs) -> Result<(), Sea
         ext: args.ext.clone(),
         max_age_hours: 24,
         hidden: false,
-        no_ignore: false,
+        no_ignore: false, respect_git_exclude: false,
         threads: 0,
         min_token_len: 2,
     })?;
@@ -262,7 +262,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
                 eprintln!("Index is stale, rebuilding...");
                 let new_index = build_index(&IndexArgs {
                     dir: args.dir.clone(), max_age_hours: idx.max_age_secs / 3600,
-                    hidden: false, no_ignore: false, threads: 0,
+                    hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
                 })?;
                 if let Err(e) = save_index(&new_index, &idx_base) {
                     eprintln!("Warning: failed to save updated index: {}", e);
@@ -279,7 +279,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
             eprintln!("No index found for '{}'. Building one now...", args.dir);
             let new_index = build_index(&IndexArgs {
                 dir: args.dir.clone(), max_age_hours: 24,
-                hidden: false, no_ignore: false, threads: 0,
+                hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
             })?;
             if let Err(e) = save_index(&new_index, &idx_base) {
                 eprintln!("Warning: failed to save index: {}", e);
@@ -409,7 +409,7 @@ fn load_grep_index(
                 let ext_str = idx.extensions.join(",");
                 let new_idx = build_content_index(&ContentIndexArgs {
                     dir: dir.to_string(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
-                    hidden: false, no_ignore: false, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                    hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 })?;
                 let _ = save_content_index(&new_idx, &idx_base);
                 new_idx
@@ -431,7 +431,7 @@ fn load_grep_index(
                 eprintln!("Auto-rebuilding content index for '{}' (ext={})...", dir, rebuild_ext);
                 match build_content_index(&ContentIndexArgs {
                     dir: dir.to_string(), ext: rebuild_ext,
-                    max_age_hours: 24, hidden: false, no_ignore: false,
+                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false,
                     threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 }) {
                     Ok(new_idx) => {

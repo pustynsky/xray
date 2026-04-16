@@ -710,7 +710,7 @@ fn reconcile_content_index(
     let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
 
     let mut walker = WalkBuilder::new(&dir_path);
-    walker.hidden(false).git_ignore(true);
+    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(false);
 
     for entry in walker.build() {
         let entry = match entry {

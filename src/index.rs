@@ -1126,10 +1126,11 @@ pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
     let start = Instant::now();
 
     let mut builder = WalkBuilder::new(&root);
+    builder.follow_links(true);
     builder.hidden(!args.hidden);
     builder.git_ignore(!args.no_ignore);
     builder.git_global(!args.no_ignore);
-    builder.git_exclude(!args.no_ignore);
+    builder.git_exclude(args.respect_git_exclude);
 
     let thread_count = if args.threads == 0 {
         std::thread::available_parallelism()
@@ -1214,10 +1215,11 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     let start = Instant::now();
 
     let mut builder = WalkBuilder::new(&root);
+    builder.follow_links(true);
     builder.hidden(!args.hidden);
     builder.git_ignore(!args.no_ignore);
     builder.git_global(!args.no_ignore);
-    builder.git_exclude(!args.no_ignore);
+    builder.git_exclude(args.respect_git_exclude);
 
     let thread_count = if args.threads == 0 {
         std::thread::available_parallelism()

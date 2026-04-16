@@ -108,7 +108,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: false,
+            no_ignore: false, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         }).unwrap();
@@ -132,7 +132,7 @@
             dir: dir.to_string_lossy().to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: false,
+            no_ignore: false, respect_git_exclude: false,
             threads: 1,
         }).unwrap();
 
@@ -144,6 +144,72 @@
             .collect();
         assert!(names.contains(&"file1.cs"), "Should contain file1.cs");
         assert!(names.contains(&"file2.rs"), "Should contain file2.rs");
+    }
+
+    #[test]
+    fn test_build_file_index_follows_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let target = tmp.path().join("target");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&target).unwrap();
+
+        // Put a file in the target directory
+        fs::write(target.join("linked.cs"), "public class Linked {}").unwrap();
+
+        // Create a symlink: root/ext -> target
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&target, root.join("ext")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, root.join("ext")).unwrap();
+
+        let index = build_index(&IndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false, respect_git_exclude: false,
+            threads: 1,
+        }).unwrap();
+
+        let names: Vec<&str> = index.entries.iter()
+            .filter_map(|e| std::path::Path::new(&e.path).file_name().and_then(|n| n.to_str()))
+            .collect();
+        assert!(names.contains(&"linked.cs"), "Should find file through symlink, got: {:?}", names);
+    }
+
+    #[test]
+    fn test_build_content_index_follows_symlinks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let target = tmp.path().join("target");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&target).unwrap();
+
+        // Put a file with unique content in the target directory
+        fs::write(target.join("linked.rs"), "fn symlink_unique_token_xyzzy() {}").unwrap();
+
+        // Create a symlink: root/ext -> target
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&target, root.join("ext")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, root.join("ext")).unwrap();
+
+        let index = build_content_index(&ContentIndexArgs {
+            dir: root.to_string_lossy().to_string(),
+            ext: "rs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false, respect_git_exclude: false,
+            threads: 1,
+            min_token_len: 2,
+        }).unwrap();
+
+        // The unique token should be found in the index
+        assert!(
+            index.index.contains_key("symlink_unique_token_xyzzy"),
+            "Should find content through symlink, tokens: {:?}",
+            index.index.keys().collect::<Vec<_>>()
+        );
     }
 
     // ── ContentIndex staleness tests / Serialization roundtrip tests ────────
@@ -271,7 +337,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -317,7 +383,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -356,7 +422,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -391,7 +457,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -418,7 +484,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -461,7 +527,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -506,7 +572,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -608,14 +674,14 @@
         // Save a file index
         let file_idx = build_index(&IndexArgs {
             dir: root_str.clone(), max_age_hours: 24,
-            hidden: false, no_ignore: false, threads: 1,
+            hidden: false, no_ignore: false, respect_git_exclude: false, threads: 1,
         }).unwrap();
         save_index(&file_idx, &idx_base).unwrap();
 
         // Save a content index
         let content_idx = build_content_index(&ContentIndexArgs {
             dir: root_str.clone(), ext: "cs".to_string(), max_age_hours: 24,
-            hidden: false, no_ignore: false, threads: 1, min_token_len: 2,
+            hidden: false, no_ignore: false, respect_git_exclude: false, threads: 1, min_token_len: 2,
         }).unwrap();
         save_content_index(&content_idx, &idx_base).unwrap();
 
@@ -658,13 +724,13 @@
         // Build indexes for both directories
         let idx_a = build_index(&IndexArgs {
             dir: root_a.clone(), max_age_hours: 24,
-            hidden: false, no_ignore: false, threads: 1,
+            hidden: false, no_ignore: false, respect_git_exclude: false, threads: 1,
         }).unwrap();
         save_index(&idx_a, &idx_base).unwrap();
 
         let idx_b = build_index(&IndexArgs {
             dir: root_b.clone(), max_age_hours: 24,
-            hidden: false, no_ignore: false, threads: 1,
+            hidden: false, no_ignore: false, respect_git_exclude: false, threads: 1,
         }).unwrap();
         save_index(&idx_b, &idx_base).unwrap();
 
@@ -705,7 +771,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -764,7 +830,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };
@@ -792,7 +858,7 @@
             ext: "cs".to_string(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: true,
+            no_ignore: true, respect_git_exclude: false,
             threads: 1,
             min_token_len: 2,
         };

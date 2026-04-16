@@ -21,6 +21,10 @@ pub struct IndexArgs {
     #[arg(long)]
     pub no_ignore: bool,
 
+    /// Respect .git/info/exclude (by default xray ignores it so local-excluded files are indexed)
+    #[arg(long)]
+    pub respect_git_exclude: bool,
+
     /// Number of parallel threads (0 = auto)
     #[arg(short, long, default_value = "0")]
     pub threads: usize,
@@ -93,6 +97,10 @@ pub struct ContentIndexArgs {
     /// Include .gitignore'd files
     #[arg(long)]
     pub no_ignore: bool,
+
+    /// Respect .git/info/exclude (by default xray ignores it so local-excluded files are indexed)
+    #[arg(long)]
+    pub respect_git_exclude: bool,
 
     /// Number of parallel threads (0 = auto)
     #[arg(short, long, default_value = "0")]
@@ -229,6 +237,10 @@ pub struct ServeArgs {
     /// performance issues and MCP traffic.
     #[arg(long)]
     pub debug_log: bool,
+
+    /// Respect .git/info/exclude (by default xray ignores it so local-excluded files are indexed)
+    #[arg(long)]
+    pub respect_git_exclude: bool,
 }
 
 #[derive(Parser, Debug)]

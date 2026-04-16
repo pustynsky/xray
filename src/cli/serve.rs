@@ -165,7 +165,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 ext: bg_ext.clone(),
                 max_age_hours: 24,
                 hidden: false,
-                no_ignore: false,
+                no_ignore: false, respect_git_exclude: args.respect_git_exclude,
                 threads: 0,
                 min_token_len: DEFAULT_MIN_TOKEN_LEN,
             }) {
@@ -202,7 +202,7 @@ pub fn cmd_serve(args: ServeArgs) {
                     warn!(error = %e, "Failed to reload content index from disk, rebuilding");
                     match build_content_index(&ContentIndexArgs {
                         dir: bg_dir, ext: bg_ext,
-                        max_age_hours: 24, hidden: false, no_ignore: false,
+                        max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: args.respect_git_exclude,
                         threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                     }) {
                         Ok(idx) => idx,

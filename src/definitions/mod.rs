@@ -64,7 +64,7 @@ pub(crate) fn collect_source_files(
     threads: usize,
 ) -> Vec<String> {
     let mut walker = WalkBuilder::new(dir);
-    walker.hidden(false).git_ignore(true);
+    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(false);
     if threads > 0 {
         walker.threads(threads);
     }
