@@ -1592,9 +1592,12 @@ fn test_grep_single_char_exact_no_oom() {
 
 /// BUG-8: xray_grep with dir= pointing to a file should return error with hint.
 #[test]
-fn test_grep_dir_as_file_returns_error_with_hint() {
+fn test_grep_dir_as_file_auto_converts_to_parent_plus_file_filter() {
+    // Previously this returned an error. Now the tool auto-converts
+    // dir=<file> into dir=<parent> + file=<basename> and surfaces a
+    // `dirAutoConverted` note in the response summary so the LLM can learn
+    // the correct pattern for next time.
     let (ctx, tmp) = make_e2e_substring_ctx();
-    // Use a file that exists in the temp dir
     let file_path = tmp.join("Service.cs");
     assert!(file_path.exists(), "Test setup: Service.cs should exist");
 
@@ -1602,18 +1605,91 @@ fn test_grep_dir_as_file_returns_error_with_hint() {
         "terms": "httpclient",
         "dir": file_path.to_string_lossy().to_string()
     }));
-    assert!(result.is_error, "dir= pointing to a file should return error, got success");
-    let err_msg = &result.content[0].text;
-    assert!(err_msg.contains("is a file path"),
-        "Error should mention 'is a file path': {}", err_msg);
-    assert!(err_msg.contains("directories only"),
-        "Error should say 'directories only': {}", err_msg);
-    assert!(err_msg.contains("Service.cs"),
-        "Error should mention the filename 'Service.cs': {}", err_msg);
-    // Hint should suggest the parent directory
-    let parent_str = tmp.to_string_lossy().to_string();
-    assert!(err_msg.contains(&parent_str) || err_msg.contains("xray_definitions"),
-        "Error should suggest parent dir or xray_definitions: {}", err_msg);
+    assert!(!result.is_error,
+        "dir= pointing to a file should now auto-convert, not error. Got: {}",
+        result.content[0].text);
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let note = output["summary"]["dirAutoConverted"].as_str()
+        .expect("summary.dirAutoConverted note should be present after auto-conversion");
+    assert!(note.contains("auto-converted"),
+        "note should mention auto-conversion, got: {}", note);
+    assert!(note.contains("Service.cs"),
+        "note should mention the filename, got: {}", note);
+    assert!(note.contains("file='"),
+        "note should show the correct next-time pattern with file=, got: {}", note);
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_grep_explicit_file_filter_narrows_results() {
+    // Explicit file= parameter restricts results to paths matching the substring.
+    let (ctx, tmp) = make_e2e_substring_ctx();
+
+    // Baseline: httpclient should appear in multiple files in the fixture.
+    let baseline = handle_xray_grep(&ctx, &json!({ "terms": "httpclient" }));
+    assert!(!baseline.is_error);
+    let baseline_out: serde_json::Value = serde_json::from_str(&baseline.content[0].text).unwrap();
+    let baseline_total = baseline_out["summary"]["totalFiles"].as_u64().unwrap_or(0);
+
+    // Narrowed: only files whose path contains "Service".
+    let narrowed = handle_xray_grep(&ctx, &json!({
+        "terms": "httpclient",
+        "file": "Service"
+    }));
+    assert!(!narrowed.is_error);
+    let narrowed_out: serde_json::Value = serde_json::from_str(&narrowed.content[0].text).unwrap();
+    let narrowed_total = narrowed_out["summary"]["totalFiles"].as_u64().unwrap_or(0);
+    assert!(narrowed_total <= baseline_total,
+        "file= filter should never INCREASE result count (baseline={}, narrowed={})",
+        baseline_total, narrowed_total);
+    // Every returned file must contain the filter substring in its path.
+    if let Some(files) = narrowed_out["files"].as_array() {
+        for f in files {
+            let path = f["path"].as_str().unwrap_or("");
+            assert!(path.to_lowercase().contains("service"),
+                "file= filter violated: path '{}' does not contain 'service'", path);
+        }
+    }
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_grep_file_filter_exact_name_matches_single_file() {
+    // file='ExactName.cs' should match only files with that basename.
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": "httpclient",
+        "file": "Service.cs"
+    }));
+    assert!(!result.is_error);
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    if let Some(files) = output["files"].as_array() {
+        for f in files {
+            let path = f["path"].as_str().unwrap_or("");
+            assert!(path.to_lowercase().ends_with("service.cs"),
+                "Expected basename 'Service.cs', got path '{}'", path);
+        }
+    }
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_grep_file_filter_comma_separated_or_semantics() {
+    // Comma-separated values in file= should OR-match across multiple names.
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": "httpclient",
+        "file": "Service,Client"
+    }));
+    assert!(!result.is_error);
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    if let Some(files) = output["files"].as_array() {
+        for f in files {
+            let path = f["path"].as_str().unwrap_or("").to_lowercase();
+            assert!(path.contains("service") || path.contains("client"),
+                "OR semantics violated: path '{}' matches neither 'service' nor 'client'", path);
+        }
+    }
     cleanup_tmp(&tmp);
 }
 

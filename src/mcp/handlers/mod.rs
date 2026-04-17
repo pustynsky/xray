@@ -49,7 +49,11 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "dir": {
                         "type": "string",
-                        "description": "Directory to search (default: server's --dir). Supports both absolute and relative paths — relative paths are resolved against server_dir. Accepts directories only — if you pass a file path, an error with a helpful hint is returned."
+                        "description": "Directory to search (default: server's --dir). Supports both absolute and relative paths — relative paths are resolved against server_dir. If a FILE path is passed, it is auto-converted to its parent directory + file= basename filter; the response includes a `dirAutoConverted` note explaining the conversion. To narrow to a specific file, prefer `file='<name>'` directly."
+                    },
+                    "file": {
+                        "type": "string",
+                        "description": "Restrict results to files whose path or basename contains this substring (case-insensitive). Comma-separated for multi-term OR (e.g., 'Service,Client'). Combines with `dir`/`ext`/`excludeDir` via AND. Use this to search in a specific file or a small set of files without passing a file path in `dir`."
                     },
                     "ext": {
                         "type": "string",

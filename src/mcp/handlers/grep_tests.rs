@@ -17,8 +17,10 @@ fn make_params<'a>(
         count_only: false,
         search_start: Instant::now(),
         dir_filter,
+        file_filter: &None,
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(exclude_dir),
         exclude_lower: exclude.iter().map(|s| s.to_lowercase()).collect(),
+        dir_auto_converted_note: None,
     }
 }
 
@@ -305,30 +307,65 @@ fn test_parse_grep_args_exclude_lists() {
 }
 
 #[test]
-fn test_parse_grep_args_dir_as_file_path_rejected_by_heuristic() {
-    // Non-existent file path but inside server_dir — detected by looks_like_file_path heuristic
+fn test_parse_grep_args_dir_as_file_path_auto_converts_by_heuristic() {
+    // Non-existent file path but inside server_dir — detected by looks_like_file_path heuristic.
+    // Should auto-convert to parent + file filter instead of rejecting.
     let args = json!({"terms": "hello", "dir": "C:/nonexistent/project/src/parser_sql.rs"});
-    let result = parse_grep_args(&args, "C:/nonexistent/project");
-    assert!(result.is_err(), "File path as dir= should be rejected");
-    let err_msg = result.unwrap_err().content[0].text.clone();
-    assert!(err_msg.contains("is a file path"), "Error should mention file path: {}", err_msg);
-    assert!(err_msg.contains("directories only"), "Error should say directories only: {}", err_msg);
-    assert!(err_msg.contains("parser_sql.rs"), "Error should mention the filename: {}", err_msg);
+    let parsed = parse_grep_args(&args, "C:/nonexistent/project")
+        .expect("heuristic file path should auto-convert, not error");
+    assert_eq!(parsed.file_filter.as_deref(), Some("parser_sql.rs"));
+    let note = parsed.dir_auto_converted_note.expect("note should be set");
+    assert!(note.contains("parser_sql.rs"), "note: {}", note);
 }
 
 #[test]
-fn test_parse_grep_args_dir_as_real_file_rejected() {
-    // Create a real temp file to test is_file() detection
+fn test_parse_grep_args_explicit_file_filter() {
+    // User-provided `file` parameter should be captured verbatim.
+    let args = json!({"terms": "hello", "file": "CHANGELOG.md"});
+    let parsed = parse_grep_args(&args, "C:/project").unwrap();
+    assert_eq!(parsed.file_filter.as_deref(), Some("CHANGELOG.md"));
+    assert!(parsed.dir_auto_converted_note.is_none(),
+        "explicit file= should NOT set dir_auto_converted_note");
+}
+
+#[test]
+fn test_parse_grep_args_explicit_file_wins_over_autoconvert() {
+    // If user passes BOTH dir=<file> and file=<something>, explicit file= wins.
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("Foo.cs");
+    std::fs::write(&file, "x").unwrap();
+    let server_dir = tmp.path().to_string_lossy().to_string();
+    let args = json!({
+        "terms": "hello",
+        "dir": file.to_string_lossy().to_string(),
+        "file": "ExplicitName"
+    });
+    let parsed = parse_grep_args(&args, &server_dir).unwrap();
+    assert_eq!(parsed.file_filter.as_deref(), Some("ExplicitName"),
+        "explicit file= should override auto-populated basename");
+    assert!(parsed.dir_auto_converted_note.is_some(),
+        "auto-conversion note should still be attached so the LLM sees the hint");
+}
+
+#[test]
+fn test_parse_grep_args_dir_as_real_file_auto_converts() {
+    // dir= pointing to a real file should now auto-convert into
+    // dir=<parent> + file=<basename>, with a hint note attached.
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("test_file.txt");
     std::fs::write(&file, "content").unwrap();
     let server_dir = tmp.path().to_string_lossy().to_string();
     let file_str = file.to_string_lossy().to_string();
     let args = json!({"terms": "hello", "dir": file_str});
-    let result = parse_grep_args(&args, &server_dir);
-    assert!(result.is_err(), "Real file as dir= should be rejected");
-    let err_msg = result.unwrap_err().content[0].text.clone();
-    assert!(err_msg.contains("is a file path"), "Error: {}", err_msg);
+    let parsed = parse_grep_args(&args, &server_dir)
+        .expect("file path in dir= should auto-convert, not error");
+    assert_eq!(parsed.file_filter.as_deref(), Some("test_file.txt"),
+        "file_filter should be auto-populated from the basename");
+    assert!(parsed.dir_auto_converted_note.is_some(),
+        "dir_auto_converted_note should be set");
+    let note = parsed.dir_auto_converted_note.unwrap();
+    assert!(note.contains("test_file.txt"), "note: {}", note);
+    assert!(note.contains("auto-converted"), "note: {}", note);
 }
 
 #[test]

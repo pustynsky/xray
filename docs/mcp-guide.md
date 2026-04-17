@@ -150,7 +150,8 @@ Substring search is **on by default** in MCP mode — compound identifiers like 
 | Parameter      | Type    | Default | Description                                                                                          |
 | -------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------- |
 | `terms`        | string  | —       | Search terms (required). Comma-separated for multi-term OR/AND                                       |
-| `dir`          | string  | server's `--dir` | Directory to search                                                                         |
+| `dir`          | string  | server's `--dir` | Directory to search. If a **file path** is passed by mistake, it is auto-converted to its parent directory + `file` filter, and `summary.dirAutoConverted` is populated with a hint (no error) |
+| `file`         | string  | —       | Restrict results to files whose path or basename contains this substring (case-insensitive). Comma-separated for multi-term OR (e.g., `"Service,Client"`). Combines with `dir`/`ext`/`excludeDir` via AND. Prefer this over passing a file path in `dir` |
 | `ext`          | string  | all indexed | File extension filter, comma-separated                                                           |
 | `mode`         | string  | `"or"` | Multi-term mode: `"or"` = ANY term, `"and"` = ALL terms (CLI: `--all`)                               |
 | `regex`        | boolean | false   | Treat terms as regex pattern                                                                         |
@@ -221,7 +222,17 @@ When `showLines: true`:
 
 When `countOnly: true`, returns only summary with file/token counts (~46 tokens vs 265+ for full results).
 
-When `responseTruncated: true` appears in the summary, narrow your query with `ext`, `dir`, `excludeDir`, or use `countOnly: true`.
+When `responseTruncated: true` appears in the summary, narrow your query with `ext`, `dir`, `excludeDir`, `file`, or use `countOnly: true`.
+
+### Summary Fields (grep-specific)
+
+| Field | When present | Description |
+|---|---|---|
+| `dirAutoConverted` | `dir=` resolved to a file path | Human-readable note explaining that `dir=<file>` was auto-split into `dir=<parent>` + `file=<basename>`. Teaches the preferred `file='<name>'` pattern for next time. No error is raised — the query still runs |
+| `totalFiles` | Always | Number of files that matched the query (before `maxResults` truncation) |
+| `returned` | Always | Number of files actually returned in the `files` array |
+| `searchTimeMs` | Always | Search duration in milliseconds |
+| `responseTruncated` | Response exceeds size limit | `true` when the result set was truncated to fit the size budget — narrow the query |
 
 ---
 

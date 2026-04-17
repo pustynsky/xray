@@ -29,10 +29,16 @@ pub(crate) struct GrepSearchParams<'a> {
     pub count_only: bool,
     pub search_start: Instant,
     pub dir_filter: &'a Option<String>,
+    /// Optional file path/name substring filter (lowercase match against full file path).
+    /// Supports comma-separated terms (OR semantics) — any term matching accepts the file.
+    pub file_filter: &'a Option<String>,
     /// Pre-computed exclude dir patterns (avoids per-file allocations)
     pub exclude_patterns: super::utils::ExcludePatterns,
     /// Pre-lowercased exclude path substrings
     pub exclude_lower: Vec<String>,
+    /// Optional note to include in response summary when `dir=` was auto-converted
+    /// from a file path to parent dir + file filter.
+    pub dir_auto_converted_note: Option<String>,
 }
 
 pub(crate) struct FileScoreEntry {
@@ -82,6 +88,14 @@ fn build_grep_base_summary(
     }
     inject_branch_warning(&mut summary, ctx);
     summary
+}
+
+/// Attach the `dirAutoConverted` hint to summary when dir= was a file path.
+/// Called from every response builder so the note reaches the LLM regardless of search mode.
+fn apply_dir_auto_converted_note(summary: &mut Value, params: &GrepSearchParams) {
+    if let Some(ref note) = params.dir_auto_converted_note {
+        summary["dirAutoConverted"] = json!(note);
+    }
 }
 
 /// Finalize grep results: filter by AND mode, sort/dedup lines, sort by TF-IDF descending.
@@ -153,6 +167,25 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
     if let Some(ext) = params.ext_filter
         && !matches_ext_filter(file_path, ext) { return false; }
 
+    // File name/path substring filter (comma-separated OR semantics).
+    // Match is case-insensitive and checks both the full path and the basename
+    // so `file='CHANGELOG.md'` works regardless of the caller's path style.
+    if let Some(file_sub) = params.file_filter {
+        let fp_lower = file_path.to_lowercase().replace('\\', "/");
+        let basename_lower = std::path::Path::new(file_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|s| s.to_lowercase())
+            .unwrap_or_default();
+        let any_match = file_sub.split(',')
+            .map(|t| t.trim().to_lowercase())
+            .filter(|t| !t.is_empty())
+            .any(|needle| {
+                fp_lower.contains(&needle) || basename_lower.contains(&needle)
+            });
+        if !any_match { return false; }
+    }
+
     // Pre-compute lowercased + normalized path once for all exclude checks
     let needs_lower = !params.exclude_patterns.is_empty() || !params.exclude_lower.is_empty();
     let path_lower = if needs_lower {
@@ -180,6 +213,7 @@ struct ParsedGrepArgs {
     terms_str: String,
     dir_filter: Option<String>,
     ext_filter: Option<String>,
+    file_filter: Option<String>,
     mode_and: bool,
     use_regex: bool,
     use_phrase: bool,
@@ -190,6 +224,9 @@ struct ParsedGrepArgs {
     count_only: bool,
     exclude_dir: Vec<String>,
     exclude: Vec<String>,
+    /// Set when user passed a file path in `dir=` — we auto-convert it to
+    /// parent dir + file filter and surface this note in the response summary.
+    dir_auto_converted_note: Option<String>,
 }
 
 /// Parse and validate all grep parameters from JSON args.
@@ -200,28 +237,51 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         None => return Err(ToolCallResult::error("Missing required parameter: terms".to_string())),
     };
 
+    // Explicit `file` filter (user-provided). Takes precedence over dir-autoconvert filename.
+    let mut file_filter: Option<String> = args.get("file")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let mut dir_auto_converted_note: Option<String> = None;
+
     let dir_filter: Option<String> = if let Some(dir) = args.get("dir").and_then(|v| v.as_str()) {
         match validate_search_dir(dir, server_dir) {
             Ok(filter) => {
-                // Detect file paths passed as dir= and reject with helpful hint
+                // Detect file paths passed as dir= and auto-convert to parent-dir + file filter.
+                // Historically this returned an error; now we accept it, surface a note in summary,
+                // and teach the LLM the correct pattern for next time.
                 if let Some(ref resolved) = filter {
                     let path = std::path::Path::new(resolved);
                     if path.is_file() || super::utils::looks_like_file_path(resolved) {
                         let parent = path.parent()
                             .map(|p| p.to_string_lossy().to_string())
+                            .filter(|s| !s.is_empty())
                             .unwrap_or_else(|| server_dir.to_string());
                         let filename = path.file_name()
                             .map(|f| f.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        return Err(ToolCallResult::error(format!(
-                            "dir='{}' is a file path, not a directory. xray_grep dir= accepts directories only. \
-                             Try: dir='{}' to search the parent directory, \
-                             or use xray_definitions file='{}' for AST-based search in a specific file.",
+                        // Explicit `file=` wins; otherwise auto-populate from the filename.
+                        if file_filter.is_none() && !filename.is_empty() {
+                            file_filter = Some(filename.clone());
+                        }
+                        dir_auto_converted_note = Some(format!(
+                            "dir='{}' looked like a file path — auto-converted to dir='{}' file='{}'. \
+                             Next time pass file='<name>' (or dir=<parent>) directly to avoid this conversion.",
                             dir, parent, filename
-                        )));
+                        ));
+                        // Re-validate the parent dir against server_dir scope.
+                        match validate_search_dir(&parent, server_dir) {
+                            Ok(reparent) => reparent,
+                            // If the parent is outside server_dir, fall back to server_dir + file filter.
+                            Err(_) => None,
+                        }
+                    } else {
+                        filter
                     }
+                } else {
+                    filter
                 }
-                filter
             },
             Err(msg) => return Err(ToolCallResult::error(msg)),
         }
@@ -266,6 +326,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         terms_str,
         dir_filter,
         ext_filter,
+        file_filter,
         mode_and,
         use_regex,
         use_phrase,
@@ -276,6 +337,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         count_only,
         exclude_dir,
         exclude,
+        dir_auto_converted_note,
     })
 }
 
@@ -366,10 +428,11 @@ fn build_grep_response(
     let search_elapsed = params.search_start.elapsed();
 
     if params.count_only {
-        let summary = build_grep_base_summary(
+        let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &json!(terms), search_mode,
             index, search_elapsed, ctx, true,
         );
+        apply_dir_auto_converted_note(&mut summary, params);
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -395,6 +458,7 @@ fn build_grep_response(
         total_files, total_occurrences, &json!(terms), search_mode,
         index, search_elapsed, ctx, true,
     );
+    apply_dir_auto_converted_note(&mut summary, params);
 
     // XML structural context hint: if results contain XML files, suggest containsLine
     #[cfg(feature = "lang-xml")]
@@ -509,8 +573,10 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         count_only: parsed.count_only,
         search_start,
         dir_filter: &parsed.dir_filter,
+        file_filter: &parsed.file_filter,
         exclude_patterns,
         exclude_lower,
+        dir_auto_converted_note: parsed.dir_auto_converted_note.clone(),
     };
 
     // --- Substring search mode
@@ -801,6 +867,7 @@ fn build_substring_response(
         if !warnings.is_empty() {
             summary["warnings"] = json!(warnings);
         }
+        apply_dir_auto_converted_note(&mut summary, params);
         let output = json!({ "summary": summary });
         debug!("[substring-trace] Total: {:.3}ms (count_only)", search_start.elapsed().as_secs_f64() * 1000.0);
         return ToolCallResult::success(output.to_string());
@@ -831,6 +898,7 @@ fn build_substring_response(
     if !warnings.is_empty() {
         summary["warnings"] = json!(warnings);
     }
+    apply_dir_auto_converted_note(&mut summary, params);
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -957,10 +1025,11 @@ fn handle_phrase_search(
     let search_elapsed = search_start.elapsed();
 
     if count_only {
-        let summary = build_grep_base_summary(
+        let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &json!([phrase]), "phrase",
             index, search_elapsed, ctx, true,
         );
+        apply_dir_auto_converted_note(&mut summary, params);
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -982,10 +1051,11 @@ fn handle_phrase_search(
         file_obj
     }).collect();
 
-    let summary = build_grep_base_summary(
+    let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!([phrase]), "phrase",
         index, search_elapsed, ctx, true,
     );
+    apply_dir_auto_converted_note(&mut summary, params);
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -1140,10 +1210,11 @@ fn handle_multi_phrase_search(
     let search_mode = if mode_and { "phrase-and" } else { "phrase-or" };
 
     if count_only {
-        let summary = build_grep_base_summary(
+        let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &json!(searched_terms), search_mode,
             index, search_elapsed, ctx, true,
         );
+        apply_dir_auto_converted_note(&mut summary, params);
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -1161,10 +1232,11 @@ fn handle_multi_phrase_search(
         file_obj
     }).collect();
 
-    let summary = build_grep_base_summary(
+    let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!(searched_terms), search_mode,
         index, search_elapsed, ctx, true,
     );
+    apply_dir_auto_converted_note(&mut summary, params);
     let output = json!({
         "files": files_json,
         "summary": summary

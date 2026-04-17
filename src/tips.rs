@@ -493,7 +493,8 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "showLines": "Returns groups of consecutive lines with startLine, lines array, and matchIndices",
             "ext": "'cs', 'cs,sql', 'xml,config' (comma-separated for multiple)",
             "substring": "Default: terms='UserService' finds IUserService, m_userService. Set substring=false for exact-token-only",
-            "dir": "Directory path only (not file path). dir='src/services' searches files under that directory. If you pass a file path (e.g., dir='src/main.rs'), xray_grep returns an error with a hint to use the parent directory or xray_definitions instead"
+            "dir": "Directory to search (default: server's --dir). Example: dir='src/services'. If a FILE path is passed (e.g., dir='src/main.rs'), it is auto-converted to dir='src' + file='main.rs'; the response summary includes a `dirAutoConverted` note. Prefer file= directly to avoid the conversion",
+            "file": "Restrict to files whose path or basename contains this substring (case-insensitive). Single: 'CHANGELOG.md'. Multi-term OR: 'Service,Client' finds files matching either. Combines with dir/ext/excludeDir via AND. Use this instead of passing a file path in `dir`"
         },
         "xray_callers": {
             "class": "'UserService' -> DI-aware: also finds callers using IUserService. SQL: class = schema name (e.g., class='dbo', class='Sales'). Without class, results mix callers from ALL classes/schemas with same method name",

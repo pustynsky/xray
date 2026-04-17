@@ -12,8 +12,10 @@ fn make_params_default<'a>() -> GrepSearchParams<'a> {
         count_only: false,
         search_start: Instant::now(),
         dir_filter: &None,
+        file_filter: &None,
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
         exclude_lower: vec![],
+        dir_auto_converted_note: None,
     }
 }
 

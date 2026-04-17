@@ -59,6 +59,10 @@
 
 ## Unreleased
 
+### Features
+
+- **`xray_grep` — `file=` parameter and `dir=` auto-conversion** — Added explicit `file` parameter for substring filtering by file path/basename (case-insensitive, supports comma-separated OR). When a **file path** is passed to `dir=` (either heuristically — path ends in a known extension — or detected via `fs::metadata`), it is now auto-converted to `dir=<parent>` + `file=<basename>` instead of returning an error. The `summary.dirAutoConverted` field in the response teaches the correct `file='<name>'` pattern so the LLM self-corrects on the next turn. Explicit `file=` wins over the auto-populated value. Combines with `dir`/`ext`/`excludeDir` via AND.
+
 ### Internal
 
 - **Test boilerplate reduction: dual-field antipattern eliminated, test factories added** — Systematic cleanup of test construction boilerplate across 3 handler structs, reducing future field-addition effort from 10-12 places to 1 place per struct.

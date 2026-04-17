@@ -356,14 +356,42 @@ Progressive truncation to stay within ~32KB:
 
 ---
 
-### T-GREP-DIR-FILE: `xray_grep` — dir= pointing to a file returns error with hint
+### T-GREP-DIR-FILE: `xray_grep` — dir= pointing to a file auto-converts to parent + file filter
+
+**Input:** `{"terms":"httpclient","dir":"<absolute-path-to-Service.cs>"}`
 
 **Expected:**
 
-- `isError: true`
-- Error message contains `"is a file path"` and suggests parent directory or `xray_definitions`
+- `isError: false` (no error — the request succeeds)
+- `summary.dirAutoConverted` is a string containing:
+  - The word `auto-converted`
+  - The filename (e.g., `Service.cs`)
+  - The next-time pattern `file='<name>'`
+- Results are scoped to files whose basename/path contains the auto-populated file filter
 
-**Unit tests:** `test_parse_grep_args_dir_as_file_path_rejected_by_heuristic`, `test_grep_dir_as_file_returns_error_with_hint`
+**Rationale:** LLMs frequently pass a file path in `dir=`. Instead of hard-failing, the tool transparently splits it into `dir=<parent>` + `file=<basename>`, runs the search, and teaches the correct pattern via the `dirAutoConverted` note so the LLM self-corrects next turn.
+
+**Unit tests:** `test_parse_grep_args_dir_as_file_path_auto_converts_by_heuristic`, `test_parse_grep_args_dir_as_real_file_auto_converts`, `test_grep_dir_as_file_auto_converts_to_parent_plus_file_filter`
+
+**Status:** ✅ Implemented
+
+---
+
+### T-GREP-FILE-FILTER: `xray_grep` — explicit `file=` filter narrows results
+
+**Input:** `{"terms":"httpclient","file":"Service"}`
+
+**Expected:**
+
+- `isError: false`
+- Every returned file path contains the `file=` substring (case-insensitive, matched against both full path and basename)
+- Narrowed `totalFiles` ≤ baseline `totalFiles` (for the same `terms` without `file=`)
+- Comma-separated values (`file="Service,Client"`) use OR semantics: each returned path matches at least one of the terms
+- Combines with `dir`/`ext`/`excludeDir` via AND
+
+**Rationale:** Replaces the old pattern of searching the whole dir and post-filtering — now the filter is applied during index traversal (cheaper, no allocations for non-matching files).
+
+**Unit tests:** `test_parse_grep_args_explicit_file_filter`, `test_parse_grep_args_explicit_file_wins_over_autoconvert`, `test_grep_explicit_file_filter_narrows_results`, `test_grep_file_filter_exact_name_matches_single_file`, `test_grep_file_filter_comma_separated_or_semantics`
 
 **Status:** ✅ Implemented
 
