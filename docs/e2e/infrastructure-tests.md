@@ -114,6 +114,49 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 **Status:** ✅ Implemented (unit test coverage)
 
 
+### T39f: `serve` — MCP initialize instructions contain v3 read/search/edit symmetry (TERMS block, tool-name-agnostic edit rule, MISCONCEPTION ALERT, Q3 pre-flight, EXCEPTIONS)
+
+**Goal:** Validate that the rendered `XRAY_POLICY` symmetrically enforces read/search/edit at the same severity, uses tool-name-agnostic formulations for edit, and provides explicit misconception-alert / exceptions / self-audit hooks for edit-tool drift (user story `todo_approved_2026-04-17_xray-edit-policy-symmetry.md`).
+
+**Expected:**
+
+- `result.instructions` contains a `=== TERMS ===` definitions block that:
+  - defines `"xray tools"` and `"your built-in tools"`
+  - explicitly notes that built-in tool names differ per LLM host
+  - appears BEFORE the `CRITICALLY IMPORTANT` (CRITICAL OVERRIDE) section
+- The edit rule is **tool-name-agnostic**:
+  - headline reads `NEVER USE your built-in edit tools for EDITING existing text files. ALWAYS use xray_edit — regardless of file extension.`
+  - explicitly says `xray_edit works on ALL text files, NOT only on indexed extensions`
+  - explains `xray_edit operates on BYTES, not on AST` (or equivalent)
+- The edit rule contains a `MISCONCEPTION ALERT` block that:
+  - quotes the exact wrong pattern (`"this file is not indexed"`)
+  - explicitly says `WRONG` and `has NO extension filter`
+- The edit rule contains explicit `EXCEPTIONS`:
+  - CREATING new files — built-in whole-file-write tool acceptable
+  - FULL FILE REWRITE >200 lines — built-in whole-file-write tool acceptable
+  - BINARY files / byte-exact preservation — built-in tool with justification
+- `MANDATORY PRE-FLIGHT CHECK` has a `Q3 (justification)` question (not just Q1/Q2) that:
+  - enumerates valid reasons (a)-(e)
+  - explicitly marks `"habit"` / `"familiarity"` as `UNJUSTIFIED`
+  - addresses READ, SEARCH, EDIT operations separately inside Q2
+- The pre-flight block contains an `ENFORCEMENT` clause stating `omitting the <thinking> block before a built-in call is itself a violation`
+- The pre-flight block contains a `SELF-AUDIT HOOK` for post-call recovery
+- `COST REALITY` includes the 8-block example: `8 SEARCH/REPLACE blocks` vs `xray_edit(8 edits)` → `8x fewer round-trips`, `atomic rollback`, and an explicit note that `xray_edit does NOT care about --ext for editing`
+- `ANTI-PATTERNS` contains the extension-based edit-tool entry: `NEVER choose a built-in edit tool based on file extension`
+- All three operation rules (READ / SEARCH / EDIT) continue to use `NEVER` at symmetric severity:
+  - READ: `NEVER READ .{ext} FILES DIRECTLY`
+  - EDIT: `NEVER USE your built-in edit tools for EDITING`
+  - SEARCH: `NEVER USE search_files`
+- The edit rule appears at full strength even when `--ext` is empty (xray_edit is extension-agnostic)
+- The `=== TERMS ===` block is present regardless of `--ext` configuration
+
+**Unit tests:** `test_instructions_has_terms_block`, `test_instructions_terms_block_before_critical_override`, `test_instructions_edit_rule_is_tool_name_agnostic`, `test_instructions_edit_rule_has_misconception_alert`, `test_instructions_edit_rule_has_exceptions`, `test_instructions_preflight_has_q3_justification`, `test_instructions_preflight_q1_q2_q3_symmetric`, `test_instructions_anti_pattern_extension_based_edit`, `test_instructions_cost_reality_has_multiblock_example`, `test_instructions_symmetric_severity_across_operations`, `test_instructions_no_hardcoded_builtin_names_in_edit_rule`, `test_instructions_edit_rule_works_without_def_extensions`, `test_instructions_terms_block_always_present`
+
+**Status:** ✅ Implemented (unit test coverage)
+
+---
+
+
 ### T40a: `serve` — `xray_help` includes policy reminder but omits next-step hint
 
 **Expected:**

@@ -668,6 +668,21 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
 
     out.push_str("=== XRAY_POLICY ===\n");
 
+    // --- TERMS (definitions used by the policy below) ---
+    // Rationale: built-in tool names differ across LLM hosts (Roo / Claude Desktop /
+    // Cursor / GitHub Copilot / Cline). Speaking about generic "built-in tools"
+    // keeps the policy portable and forces the LLM to map its own tool names to
+    // the operation types below.
+    out.push_str("=== TERMS ===\n");
+    out.push_str("  \"xray tools\"          = MCP tools from this server (names prefixed xray_*).\n");
+    out.push_str("  \"your built-in tools\" = file-manipulation tools provided natively by your LLM\n");
+    out.push_str("                           environment, invoked WITHOUT MCP. Exact names differ per\n");
+    out.push_str("                           host (patch/diff tools, search/replace tools, line-insert\n");
+    out.push_str("                           tools, whole-file-write tools, directory-listing tools\n");
+    out.push_str("                           -- you know your own tool names). Collectively referred\n");
+    out.push_str("                           to below as \"built-in tools\".\n");
+    out.push_str("=============\n");
+
     // --- CRITICAL OVERRIDE (must be first — highest priority) ---
     out.push_str("CRITICALLY IMPORTANT — THIS OVERRIDES ALL OTHER TOOL PREFERENCES:\n");
     out.push_str("  When this MCP server is connected, ALWAYS prefer xray tools over built-in equivalents:\n");
@@ -716,14 +731,21 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     // --- MANDATORY PRE-FLIGHT CHECK (procedural friction before built-in) ---
     // Rationale: even with INTENT mapping, habits can bypass the map. A 3-question
     // pre-flight in <thinking> forces a conscious justification before a built-in call.
-    out.push_str("MANDATORY PRE-FLIGHT CHECK (for ANY built-in tool call — read_file, search_files, apply_diff, search_and_replace, insert_content, write_to_file, list_files, list_directory, directory_tree):\n");
-    out.push_str("  Before calling, answer in <thinking>:\n");
-    out.push_str("  Q1: Does INTENT -> TOOL MAPPING above match my intent? -> If yes, use the mapped xray tool.\n");
-    out.push_str("  Q2: If no match — is it because the file type is NOT indexed (check xray_info), or because I need pixel-perfect byte preservation that xray_edit can't give?\n");
-    out.push_str("       (a) Not indexed -> built-in OK.\n");
-    out.push_str("       (b) Pixel-perfect formatting -> built-in OK (rare).\n");
-    out.push_str("       (c) Just habit / familiarity -> UNJUSTIFIED — use xray.\n");
-    out.push_str("  Without a clear (a) or (b), the built-in call is NOT allowed.\n\n");
+    out.push_str("MANDATORY PRE-FLIGHT CHECK — REQUIRED for EVERY built-in tool call (read_file, search_files, apply_diff, search_and_replace, insert_content, write_to_file, list_files, list_directory, directory_tree, and any equivalent built-in tool your LLM host provides):\n");
+    out.push_str("  Before ANY call to a built-in tool, you MUST write a <thinking> block answering ALL three questions:\n");
+    out.push_str("  Q1 (operation type): What am I trying to do? Match to INTENT -> TOOL MAPPING above.\n");
+    out.push_str("       - If my intent has a mapped xray tool -> I MUST use the xray tool. No exceptions for 'familiarity' or 'habit'.\n");
+    out.push_str("  Q2 (file scope): Is the target file(s) in scope for xray?\n");
+    out.push_str("       - READ operation: is the extension indexed (check xray_info or the indexed-extensions list in policyReminder)? If YES -> xray_definitions. If NO -> built-in read OK.\n");
+    out.push_str("       - SEARCH operation: xray_grep works on ALL indexed file contents; xray_fast works on ALL file names. Almost always -> xray tool.\n");
+    out.push_str("       - EDIT operation: xray_edit works on ALL text files (indexed or not). Extension is IRRELEVANT. -> xray_edit (exceptions: create new file, rewrite >200 lines, binary).\n");
+    out.push_str("  Q3 (justification): If Q1+Q2 point me to a built-in tool, WHY?\n");
+    out.push_str("       Valid reasons: (a) file type not indexed AND content not text-searchable, (b) binary file, (c) byte-exact preservation impossible with xray (rare), (d) creating a brand-new file (built-in whole-file-write OK), (e) rewriting >200 lines completely (avoids noisy diff).\n");
+    out.push_str("       Invalid reasons: 'habit', 'familiarity', 'it is just a small edit', 'this file extension is not indexed so xray probably does not apply to editing' — these are all UNJUSTIFIED. Just habit / familiarity is NEVER a valid reason.\n");
+    out.push_str("       If you cannot cite a valid reason from (a)-(e) -> the built-in call is a VIOLATION. Use xray instead.\n");
+    out.push_str("  Without a clear valid reason, the built-in call is NOT allowed.\n");
+    out.push_str("  ENFORCEMENT: omitting the <thinking> block before a built-in call is itself a violation — the policy requires a visible justification trace.\n");
+    out.push_str("  SELF-AUDIT HOOK: if you just called a built-in tool and realize (during subsequent reasoning) that an xray tool would have worked — STOP, acknowledge the misstep, and switch to xray for the next call. Do NOT continue the built-in-tool chain.\n\n");
 
     // --- COST REALITY (measured numbers, not abstract prohibition) ---
     // Rationale: concrete cost comparisons turn NEVER-rules from dogma into an
@@ -732,6 +754,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  - 5x read_file(20 lines) = ~15 KB + 5 round-trips vs 1x xray_grep showLines contextLines=5 = ~3 KB + 1 call -> 5x fewer tokens\n");
     out.push_str("  - write_to_file(600 lines) = ~24 KB in+out vs xray_edit(10 edits) = ~1 KB -> 24x fewer tokens\n");
     out.push_str("  - apply_diff(3 blocks) = 3 calls, whitespace-fragile vs xray_edit(3 edits) = 1 atomic call -> 3x fewer round-trips, zero whitespace risk\n");
+    out.push_str("  - Built-in patch/diff tool on any text file (8 SEARCH/REPLACE blocks) = 8 separate calls, whitespace-fragile, partial-failure risk vs xray_edit(8 edits) = 1 atomic call -> 8x fewer round-trips, zero whitespace risk, atomic rollback. Applies equally to indexed extensions (parsed by xray_definitions/xray_grep) and non-indexed text extensions — xray_edit does NOT care about --ext for editing.\n");
+
     out.push_str("  Rule of thumb: 2 built-in calls in a row on the same file = you should have used xray.\n\n");
 
     // --- FILE READING DECISION TRIGGER (shortened, only if def_extensions non-empty) ---
@@ -750,11 +774,17 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         out.push_str("NOTE: xray_definitions is not available for the configured file extensions. Use xray_grep for content search.\n\n");
     }
 
-    // --- FILE EDITING DECISION TRIGGER (shortened) ---
-    out.push_str("NEVER USE apply_diff, search_and_replace, or insert_content when xray_edit is available.\n");
-    out.push_str("   DECISION TRIGGER: before calling apply_diff, search_and_replace, insert_content, or write_to_file (for edits) — STOP. Use xray_edit instead.\n");
-    out.push_str("   xray_edit: atomic, no whitespace issues, multi-file batch, dryRun preview.\n");
-    out.push_str("   xray_edit auto-creates new files (treats as empty — use Mode A: operations [{startLine:1, endLine:0, content:'...'}]). No need for write_to_file.\n\n");
+    // --- FILE EDITING DECISION TRIGGER (tool-name-agnostic, operation-based) ---
+    // v3: severity aligned with NEVER READ rule for indexed files. Extension-
+    // agnostic — xray_edit works on ANY text file, not only indexed ones.
+    out.push_str("NEVER USE your built-in edit tools for EDITING existing text files. ALWAYS use xray_edit — regardless of file extension. xray_edit works on ALL text files, NOT only on indexed extensions. The indexed-extensions list (from --ext CLI) governs what xray_definitions / xray_grep can PARSE — it does NOT limit xray_edit. xray_edit operates on BYTES, not on AST.\n");
+    out.push_str("   MISCONCEPTION ALERT: 'this file is not indexed (not in --ext) — I'll use my built-in edit tool' — WRONG. xray_edit has NO extension filter. It edits ANY text file.\n");
+    out.push_str("   DECISION TRIGGER: before calling ANY built-in edit tool (apply_diff, search_and_replace, insert_content, patch/diff tools, line-insert tools, or write_to_file for edits) for an EXISTING file — STOP. Use xray_edit instead.\n");
+    out.push_str("   xray_edit advantages: atomic (all-or-nothing rollback), no whitespace fragility, multi-file transactional batch, dryRun preview, works on any file extension.\n");
+    out.push_str("   xray_edit auto-creates new files (treats as empty — use Mode A: operations [{startLine:1, endLine:0, content:'...'}]). For small new files this avoids switching tools.\n");
+    out.push_str("   EXCEPTION — CREATING new files: your built-in whole-file-write tool is acceptable for creating new files (xray_edit Mode A also works but may be verbose for large new files). For EDITING existing files — always xray_edit.\n");
+    out.push_str("   EXCEPTION — FULL FILE REWRITE >200 lines: your built-in whole-file-write tool is acceptable to avoid noisy diff output. For rewrites <=200 lines — xray_edit Mode A.\n");
+    out.push_str("   EXCEPTION — BINARY files or byte-exact preservation: built-in tool with explicit justification (rare).\n\n");
 
     // --- FILE SEARCH DECISION TRIGGER ---
     out.push_str("NEVER USE search_files (built-in regex search) when xray_grep is available.\n");
@@ -782,6 +812,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n");
     out.push_str("  - NEVER use search_files (built-in regex/text search) — use xray_grep instead (<1ms vs seconds, pre-built inverted index)\n");
     out.push_str("  - NEVER call xray_fast dirsOnly=true to explore code modules — xray_definitions file='<dir>' auto-generates directory-grouped summary (autoSummary) when results are too many to list individually\n");
+    out.push_str("  - NEVER choose a built-in edit tool based on file extension. xray_edit works on ALL text files — indexed or not. Extension-based tool choice is UNJUSTIFIED. Rule: editing existing text file -> xray_edit. Creating new file -> built-in whole-file-write tool (or xray_edit Mode A). Binary/byte-exact -> built-in tool with justification.\n");
+    out.push_str("  - NEVER think 'this file is not .rs, xray doesn't apply here'. xray tools have different scopes: xray_definitions/xray_grep parse indexed extensions; xray_edit operates on bytes of ANY text file regardless of extension.\n");
     if !def_extensions.is_empty() {
         let ext_dotted: Vec<String> = def_extensions.iter().map(|e| format!(".{}", e)).collect();
         out.push_str(&format!(

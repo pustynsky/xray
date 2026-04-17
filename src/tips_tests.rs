@@ -353,11 +353,13 @@ fn test_instructions_token_budget() {
     let word_count = text.split_whitespace().count();
     let approx_tokens = (word_count as f64 / 0.75) as usize;
     // Budget: CRITICAL OVERRIDE (~100) + ERROR RECOVERY (~100) + ANTI-PATTERNS (~60) + WORKSPACE DISCOVERY (~30)
-    // All justified — prevent LLM fallback to built-in tools (saves 3-5 wasted tool calls per session)
+    // v3 additions (2026-04-17): TERMS block (~80) + expanded PRE-FLIGHT Q1/Q2/Q3 with ENFORCEMENT + SELF-AUDIT HOOK (~120)
+    // + operation-based edit rule with MISCONCEPTION ALERT + 3 EXCEPTIONS (~100) + extension-agnostic COST REALITY example (~40)
+    // + 2 new extension-agnostic ANTI-PATTERNS (~60). All justified — prevent LLM fallback to built-in tools on non-.rs files.
     assert!(
-        approx_tokens < 2100,
+        approx_tokens < 2800,
         "Instructions exceed token budget: ~{} tokens ({} words). \
-         Target: <2100 (includes CRITICAL OVERRIDE + ERROR RECOVERY + ANTI-PATTERNS + WORKSPACE DISCOVERY). Remove redundant sections.",
+         Target: <2800 (v3 policy symmetry). Remove redundant sections if growth continues.",
         approx_tokens, word_count
     );
 }
@@ -733,8 +735,9 @@ fn test_instructions_has_preflight_check() {
     let text = render_instructions(&["rs"]);
     assert!(text.contains("MANDATORY PRE-FLIGHT CHECK"),
         "instructions should have MANDATORY PRE-FLIGHT CHECK section");
-    assert!(text.contains("Q1:") && text.contains("Q2:"),
-        "PRE-FLIGHT CHECK should include Q1 and Q2 questions");
+    // v3: Q1/Q2/Q3 use labeled form "Q1 (operation type):" instead of bare "Q1:"
+    assert!(text.contains("Q1 (") && text.contains("Q2 ("),
+        "PRE-FLIGHT CHECK should include Q1 and Q2 labeled questions");
     assert!(text.contains("Just habit / familiarity"),
         "PRE-FLIGHT CHECK should explicitly call out habit/familiarity as UNJUSTIFIED");
     assert!(text.contains("UNJUSTIFIED"),
@@ -827,4 +830,233 @@ fn test_tool_definitions_reindex_defs_dynamic() {
     let reindex_empty = tools_empty.iter().find(|t| t.name == "xray_reindex_definitions").unwrap();
     assert!(reindex_empty.description.contains("not available"),
         "xray_reindex_definitions should say 'not available' when empty");
+}
+
+
+// ============================================================================
+// v3 policy symmetry tests (edit-policy-symmetry user story, 2026-04-17)
+// Verify that XRAY_POLICY has symmetric severity for read/search/edit,
+// uses tool-name-agnostic formulations, and contains the MISCONCEPTION ALERT
+// + EXCEPTIONS block for the edit rule.
+// ============================================================================
+
+#[test]
+fn test_instructions_has_terms_block() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("=== TERMS ==="),
+        "instructions should have a TERMS definitions block at the top");
+    assert!(text.contains("\"xray tools\""),
+        "TERMS block should define 'xray tools'");
+    assert!(text.contains("\"your built-in tools\""),
+        "TERMS block should define 'your built-in tools'");
+    assert!(text.contains("Exact names differ per"),
+        "TERMS should explain that built-in tool names differ per LLM host");
+}
+
+#[test]
+fn test_instructions_terms_block_before_critical_override() {
+    let text = render_instructions(&["rs"]);
+    let terms_idx = text.find("=== TERMS ===")
+        .expect("TERMS block missing");
+    let critical_idx = text.find("CRITICALLY IMPORTANT")
+        .expect("CRITICAL OVERRIDE section missing");
+    assert!(terms_idx < critical_idx,
+        "TERMS block must come BEFORE CRITICAL OVERRIDE so definitions are established first");
+}
+
+#[test]
+fn test_instructions_edit_rule_is_tool_name_agnostic() {
+    let text = render_instructions(&["rs"]);
+    // The edit rule must say 'your built-in edit tools' (tool-name-agnostic)
+    assert!(text.contains("your built-in edit tools"),
+        "Edit rule should use tool-name-agnostic phrase 'your built-in edit tools'");
+    // The edit rule must explicitly say xray_edit works on ALL text files
+    assert!(text.contains("xray_edit works on ALL text files"),
+        "Edit rule should say xray_edit works on ALL text files");
+    assert!(text.contains("NOT only on indexed extensions"),
+        "Edit rule should clarify xray_edit is NOT limited to indexed extensions");
+    // Must explain bytes-not-AST distinction
+    assert!(text.contains("operates on BYTES, not on AST") || text.contains("xray_edit operates on BYTES"),
+        "Edit rule should explain xray_edit operates on BYTES, not on AST");
+}
+
+#[test]
+fn test_instructions_edit_rule_has_misconception_alert() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("MISCONCEPTION ALERT"),
+        "Edit rule should have MISCONCEPTION ALERT block");
+    // MISCONCEPTION ALERT should address the specific misconception
+    assert!(text.contains("this file is not indexed"),
+        "MISCONCEPTION ALERT should quote the specific wrong thinking pattern");
+    assert!(text.contains("WRONG"),
+        "MISCONCEPTION ALERT should explicitly say WRONG");
+    assert!(text.contains("has NO extension filter"),
+        "MISCONCEPTION ALERT should explain xray_edit has NO extension filter");
+}
+
+#[test]
+fn test_instructions_edit_rule_has_exceptions() {
+    let text = render_instructions(&["rs"]);
+    // Explicit EXCEPTIONS for edit rule
+    assert!(text.contains("EXCEPTION — CREATING new files") || text.contains("EXCEPTION -- CREATING new files") || text.contains("CREATING new files"),
+        "Edit rule should have EXCEPTION for creating new files");
+    assert!(text.contains("FULL FILE REWRITE >200") || text.contains("FULL FILE REWRITE"),
+        "Edit rule should have EXCEPTION for full file rewrites >200 lines");
+    assert!(text.contains("BINARY files") || text.contains("byte-exact preservation"),
+        "Edit rule should have EXCEPTION for binary/byte-exact files");
+    assert!(text.contains("whole-file-write"),
+        "EXCEPTIONS should mention built-in whole-file-write tool");
+}
+
+#[test]
+fn test_instructions_preflight_has_q3_justification() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("Q3"),
+        "PRE-FLIGHT CHECK should have Q3 (justification question)");
+    assert!(text.contains("justification"),
+        "Q3 should be about justification");
+    assert!(text.contains("ENFORCEMENT"),
+        "PRE-FLIGHT CHECK should have ENFORCEMENT clause");
+    assert!(text.contains("omitting the <thinking> block"),
+        "ENFORCEMENT should say omitting the <thinking> block is a violation");
+    assert!(text.contains("SELF-AUDIT HOOK"),
+        "PRE-FLIGHT CHECK should have SELF-AUDIT HOOK for recovery after a misstep");
+}
+
+#[test]
+fn test_instructions_preflight_q1_q2_q3_symmetric() {
+    let text = render_instructions(&["rs"]);
+    // All three questions must reference read/search/edit symmetrically
+    let preflight_start = text.find("MANDATORY PRE-FLIGHT CHECK").unwrap();
+    let cost_start = text.find("COST REALITY").unwrap();
+    let preflight = &text[preflight_start..cost_start];
+    assert!(preflight.contains("READ operation"),
+        "PRE-FLIGHT Q2 should explicitly address READ operation");
+    assert!(preflight.contains("SEARCH operation"),
+        "PRE-FLIGHT Q2 should explicitly address SEARCH operation");
+    assert!(preflight.contains("EDIT operation"),
+        "PRE-FLIGHT Q2 should explicitly address EDIT operation");
+    assert!(preflight.contains("UNJUSTIFIED"),
+        "PRE-FLIGHT should call out 'habit/familiarity' as UNJUSTIFIED");
+}
+
+#[test]
+fn test_instructions_anti_pattern_extension_based_edit() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("NEVER choose a built-in edit tool based on file extension"),
+        "ANTI-PATTERNS should have the extension-based edit-tool choice entry");
+    assert!(text.contains("xray tools have different scopes"),
+        "ANTI-PATTERNS should explain that xray tools have different scopes");
+}
+
+#[test]
+fn test_instructions_cost_reality_has_multiblock_example() {
+    let text = render_instructions(&["rs"]);
+    // Extension-agnostic cost example covering indexed + non-indexed
+    assert!(text.contains("8 SEARCH/REPLACE blocks"),
+        "COST REALITY should include the 8-block patch/diff example");
+    assert!(text.contains("8x fewer round-trips"),
+        "COST REALITY should cite the 8x reduction factor");
+    assert!(text.contains("atomic rollback"),
+        "COST REALITY should mention atomic rollback");
+    // Must explicitly say xray_edit does not care about --ext for editing
+    assert!(text.contains("xray_edit does NOT care about --ext for editing") || text.contains("does NOT care about --ext"),
+        "COST REALITY should explicitly say xray_edit ignores --ext for editing");
+}
+
+#[test]
+fn test_instructions_symmetric_severity_across_operations() {
+    // All three operation rules (READ, EDIT, SEARCH) must use the word NEVER at the same severity
+    let text = render_instructions(&["rs"]);
+    // Read rule (only present with indexed exts)
+    assert!(text.contains("NEVER READ"),
+        "READ rule should use NEVER (hard prohibition)");
+    // Edit rule
+    assert!(text.contains("NEVER USE your built-in edit tools"),
+        "EDIT rule should use NEVER USE your built-in edit tools");
+    // Search rule
+    assert!(text.contains("NEVER USE search_files"),
+        "SEARCH rule should use NEVER USE search_files");
+}
+
+#[test]
+fn test_instructions_no_hardcoded_builtin_names_in_edit_rule() {
+    // The NEW edit rule (the one starting with 'NEVER USE your built-in edit tools')
+    // should NOT rely on specific built-in tool names as the primary identifier.
+    // Specific names may appear inside parentheses as examples, but the rule itself
+    // must be tool-name-agnostic.
+    let text = render_instructions(&["rs"]);
+    // The headline MUST not single out one specific tool — it must address the category.
+    assert!(
+        text.contains("NEVER USE your built-in edit tools for EDITING"),
+        "Edit rule headline must address the tool CATEGORY ('your built-in edit tools'), \
+         not a specific named tool. This keeps the policy portable across LLM hosts."
+    );
+}
+
+#[test]
+fn test_instructions_edit_rule_works_without_def_extensions() {
+    // v3 symmetry: even without any indexed definitions, the EDIT rule must still
+    // appear at full strength — xray_edit works on ANY text file regardless of --ext.
+    let text = render_instructions(&[]);
+    assert!(text.contains("NEVER USE your built-in edit tools"),
+        "Edit rule must be present even when def_extensions is empty");
+    assert!(text.contains("xray_edit works on ALL text files"),
+        "Edit rule must say xray_edit works on ALL text files, independent of def_extensions");
+    assert!(text.contains("MISCONCEPTION ALERT"),
+        "MISCONCEPTION ALERT must be present even without def_extensions");
+}
+
+#[test]
+fn test_instructions_terms_block_always_present() {
+    for exts in [&[][..], &["rs"], &["cs", "ts"]] {
+        let text = render_instructions(exts);
+        assert!(text.contains("=== TERMS ==="),
+            "TERMS block must always be present (exts: {:?})", exts);
+    }
+}
+
+
+/// Regression test for Bug #1 (self-review 2026-04-17):
+/// The Invalid-reasons line in PRE-FLIGHT CHECK must NOT hardcode the `.rs`
+/// extension (it should be extension-agnostic since the policy applies to ANY
+/// configured --ext). Also the "Just habit / familiarity" phrase must appear
+/// as a coherent statement, not a malformed suffix to a list.
+#[test]
+fn test_instructions_preflight_invalid_reasons_is_extension_agnostic() {
+    // With a non-.rs extension set, the policy text must still not contain the
+    // literal ".rs" substring inside the Invalid-reasons line.
+    let text_cs = render_instructions(&["cs"]);
+    assert!(
+        !text_cs.contains("this is not a .rs file"),
+        "Invalid-reasons line should NOT hardcode '.rs' — it must be extension-agnostic. \
+         Got text containing 'this is not a .rs file'."
+    );
+    // The policy must express the misconception in a neutral way, referring to
+    // "file extension is not indexed" rather than naming any specific extension.
+    assert!(
+        text_cs.contains("extension is not indexed") || text_cs.contains("not indexed"),
+        "Invalid-reasons line should call out the extension-indexing misconception in neutral wording"
+    );
+}
+
+/// Regression test for Bug #1 (self-review 2026-04-17):
+/// "Just habit / familiarity" must appear as a coherent clause explicitly
+/// marking habit as NEVER a valid reason — not as a malformed dangling suffix
+/// to a comma-separated list.
+#[test]
+fn test_instructions_habit_clause_is_coherent() {
+    let text = render_instructions(&["rs"]);
+    // The fix inserts a clear sentence ending with "NEVER a valid reason" after
+    // the list of invalid reasons. The old broken form had the phrase appended
+    // to the list with a dangling arrow.
+    assert!(
+        text.contains("Just habit / familiarity is NEVER a valid reason"),
+        "Policy should contain a coherent habit clause ending with 'NEVER a valid reason'"
+    );
+    // And the old broken fragment should NOT be present anywhere.
+    assert!(
+        !text.contains("Just habit / familiarity -> UNJUSTIFIED"),
+        "Old broken fragment 'Just habit / familiarity -> UNJUSTIFIED' must not appear — it was a dangling list suffix"
+    );
 }

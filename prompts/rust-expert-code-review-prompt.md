@@ -1,6 +1,6 @@
-# Code Review - Rust Code Analysis Prompt V1.4
+# Code Review - Rust Code Analysis Prompt V1.5
 
-**Version:** 1.4 | **Last Updated:** 2026-03-13
+**Version:** 1.5 | **Last Updated:** 2026-04-17
 
 ## Overview
 
@@ -117,15 +117,28 @@ Execute review steps **in this order**. Do not produce conclusions before gather
 
 ### Diff Acquisition Workflow
 
-When reviewing a branch with tool assistance:
+When reviewing a branch with tool assistance, **prefer xray tools over raw `git` CLI**. Use the mapping below; fall back to `git` CLI only when xray does not cover the scenario.
 
-1. Get the branch name from user (or PR URL)
-2. Fetch the branch: `git fetch origin <base-branch> <target-branch>`
-3. List changed files: `git diff --name-status origin/<base>...origin/<branch>`
-4. Read modified files:
-   - `.rs` files: `xray_definitions file='<filename>' includeBody=true maxBodyLines=0`
-   - Other files: `xray_grep terms='<search>' ext='<ext>' showLines=true`
-5. Get the actual diff: `git diff origin/<base>...origin/<branch> -- <file>`
+| Task | Preferred xray tool | Fallback |
+|---|---|---|
+| Current branch / ahead-behind / dirty state | `xray_branch_status repo=<path>` | `git status`, `git rev-parse` |
+| Commit history of a file | `xray_git_history repo=<path> file=<path>` | `git log -- <file>` |
+| Diff/patch content per commit | `xray_git_diff repo=<path> file=<path>` | `git log -p -- <file>` |
+| Line-level authorship | `xray_git_blame repo=<path> file=<path> startLine=N endLine=M` | `git blame` |
+| Activity across multiple files in a date range | `xray_git_activity repo=<path> from=... to=...` | `git log --name-only` |
+| Authors/contributors of a path | `xray_git_authors repo=<path> path=<path>` | `git shortlog -sn` |
+
+Step-by-step:
+
+1. Get the branch name from user (or PR URL).
+2. Check branch state: `xray_branch_status repo=<repo>` (ahead/behind/dirty).
+3. List changed files vs base branch: fetch with `git fetch origin <base> <target>`, then `git diff --name-status origin/<base>...origin/<branch>` (no xray equivalent for diff-name-status yet — this is a justified `git` CLI call).
+4. Read modified source files:
+   - **`.rs` files: ALWAYS use `xray_definitions file='<filename>' includeBody=true maxBodyLines=0`. NEVER use `read_file` on `.rs` files — it wastes tokens and bypasses the pre-built AST index.**
+   - Other text files (`.toml`, `.md`, `.json`, `.yaml`): `xray_grep terms='<search>' ext='<ext>' showLines=true` or `read_file` if you need the whole document.
+5. Get per-file diff/patch: `xray_git_diff repo=<repo> file=<path>` (preferred) or `git diff origin/<base>...origin/<branch> -- <file>` (fallback for range-diffs not scoped to a single commit).
+
+> **⚠️ Hard rule:** do not call `read_file` on `.rs` files for any reason (exploration, validation, fact-checking). Use `xray_definitions includeBody=true` instead. The only exception: you need exact line numbers for `xray_edit` — but even then `xray_definitions` returns line numbers.
 
 ### Fast Path
 
@@ -177,6 +190,8 @@ xray_callers method='fn_name' direction='down' depth=2
 xray_grep terms='StructName' ext='rs' mode='and' showLines=true
 ```
 
+> **⚠️ `xray_callers` false-negative trap.** AST-based caller search does NOT detect calls through local variables (`let x = service.foo(); x.bar()`), closures captured by value, function pointers stored in fields, or calls through `Box<dyn Trait>` where the concrete type is erased. **Never conclude "no callers → safe to remove" from `xray_callers` alone.** Always cross-check with `xray_grep terms='method_name' ext='rs' showLines=true` to catch text-level references. If `xray_grep` finds references that `xray_callers` missed — note this in Coverage Gaps and manually inspect.
+
 ### Verdict Format
 
 ```
@@ -223,6 +238,7 @@ Any `unsafe` block requires **all** of the following:
 - [ ] Safety comment — `// SAFETY:` explaining why this is sound
 - [ ] Aliasing rules preserved — no `&T` and `&mut T` to same data simultaneously
 - [ ] Initialization validity — all values fully initialized before use
+- [ ] `MaybeUninit::assume_init` correctness — every field/byte actually written before the call; no partial initialization reads
 - [ ] Provenance assumptions sound — pointer provenance not fabricated
 - [ ] Lifetime extension not fabricated — `transmute` to longer lifetime forbidden without proof
 - [ ] No invalid `Send`/`Sync` assumptions — manual impls justified
@@ -256,6 +272,7 @@ Any `unsafe` block requires **all** of the following:
 - [ ] No unbounded task spawning — semaphore or queue limits concurrent tasks
 - [ ] Timeout includes cleanup/compensation — not just `tokio::time::timeout` wrapper
 - [ ] `Pin`/`Unpin` correct if manual `Future` impl
+- [ ] **`Send` bound preserved on futures** — if the future is spawned via `tokio::spawn`, all values held across `.await` must be `Send`. Adding `Rc<T>`, `RefCell<T>`, or raw pointers into a struct stored across `.await` silently breaks `Send` and every `tokio::spawn` site at compile time. Verify with an explicit `fn assert_send<T: Send>(_: T) {}` test or `tokio::spawn(async move { ... })` in tests.
 
 ### Memory & Performance
 
@@ -365,6 +382,21 @@ For non-trivial changes (>3 functions or new modules), assess:
 - **Coherence / orphan rules:** New trait impls that may conflict with upstream crate additions? Defensive strategy with newtypes?
 - **Type-state pattern opportunities?** Runtime checks (`if state == Ready`) where compile-time state machines would prevent entire bug classes?
 
+### Test Presence Check (mandatory)
+
+For every modified **public** function or behaviorally-changed private function, verify:
+
+- [ ] A new or updated test is included **in the same PR** covering the new/changed behavior
+- [ ] Bug fixes have a regression test reproducing the original failure
+- [ ] Behavioral changes to existing functions have updated tests (old test passing on new behavior is suspicious — likely asserts-too-little)
+
+If a modified public function has **no test delta** in the diff, flag as **MAJOR** unless the change is one of:
+- Pure refactor with no semantic change (renaming, extracting, reformatting) — explicitly justified
+- Deleted code path with no behavior
+- Trivial one-liner where the existing test suite demonstrably exercises the new branch
+
+"Existing tests still pass" is NOT sufficient evidence of coverage for new behavior.
+
 ### `[CONDITIONAL]` Additional Checks
 
 Include only when relevant:
@@ -372,6 +404,7 @@ Include only when relevant:
 - **Clippy:** No suppressed warnings without justification (`#[allow(...)]`). No weakening of `#![forbid(unsafe_code)]` or `#![deny(warnings)]`.
 - **MSRV / Edition:** Does the change require newer Rust version or edition features? (e.g., Rust 2024 `gen` keyword, async closures)
 - **Dependencies:** New crate justified? Audited? License compatible? Minimal features? No `*` versions?
+- **Cargo features:** New feature added to `Cargo.toml`? Verify: (1) additive — enabling does not remove functionality; (2) compatible with `default-features = false` consumers; (3) does not accidentally pull a heavy transitive dep into default build; (4) workspace feature unification does not enable unwanted code in sibling crates; (5) `resolver = "2"` implications understood if workspace. Removing or renaming a feature is a **breaking change** for downstream.
 - **Dependency update PRs:** Check advisory database (`cargo audit`), review changelog of updated deps for breaking changes, verify MSRV compatibility.
 - **FFI safety:** `extern "C"` / `#[no_mangle]` — all invariants documented? `repr(C)` explicit?
 - **`#[cfg]` / Conditional compilation:** New `#[cfg()]` gates tested on all target platforms? Feature combinations additive? No `#[cfg(not(feature = "..."))]` hiding unsoundness?
@@ -560,8 +593,10 @@ Before completing the review, verify these items:
 - [ ] **Invariant preservation checked** — for each modified type/function
 - [ ] **No severity inflation** — every MAJOR/BLOCKER has concrete failure mode + scope
 - [ ] **Cross-crate callers searched** if public surface modified
-- [ ] **Tests adequate** — or missing coverage explicitly noted
+- [ ] **Tests adequate** — or missing coverage explicitly noted (see Test Presence Check in Part 4)
 - [ ] **BLOCKER/MAJOR issues include** Evidence + Snippet + Recommendation
+- [ ] **PR description audit** — if breaking changes detected (error variants, signatures, derive removal, visibility narrowing, feature removal, behavioral contract change), PR description must contain a "Breaking Changes" / "Migration notes" section. Missing → MAJOR.
+- [ ] **`xray_callers` cross-checked with `xray_grep`** for every method with claimed-empty caller set
 
 ---
 
@@ -626,6 +661,13 @@ Recommendation: <what to change>
 ## 4. Minor Issues (MINOR)
 
 [None found / Brief format]
+
+---
+
+## 4.5. Nits (NIT) — optional, ≤ 3 items
+
+[Omit this section entirely if any BLOCKER or MAJOR exists — reviewer attention must stay on critical issues.
+Otherwise, list up to 3 style/readability suggestions. Brief one-liner per item.]
 
 ---
 
@@ -700,6 +742,25 @@ _Review completed [DATE]_
 
 ## Changelog
 
+### V1.5 (2026-04-17) — xray tool integration, test presence gate, async Send-bound, NIT output slot
+
+Based on alignment review against the project's XRAY_POLICY and repeated gaps observed during code reviews.
+
+**Must-fix:**
+1. **Diff Acquisition Workflow rewritten** (Part 2) — xray git tools (`xray_branch_status`, `xray_git_diff`, `xray_git_blame`, `xray_git_history`, `xray_git_activity`, `xray_git_authors`) are now the primary tools; `git` CLI is fallback only. Added hard rule: **never use `read_file` on `.rs` files** — always `xray_definitions includeBody=true`.
+2. **`xray_callers` false-negative trap** (Part 3) — explicit warning that AST caller search misses local-variable calls, closure captures, `Box<dyn Trait>` with erased concrete type. Mandatory cross-check with `xray_grep` before concluding "no callers".
+3. **Test Presence Check** (Part 4, mandatory) — every modified public function must have a test in the same PR. Absence → MAJOR unless explicitly justified (pure refactor / deleted path / trivial branch covered by existing test).
+
+**Should-fix:**
+4. **`Send`-bound async check** (Part 4 Async) — explicit item: adding non-`Send` types (`Rc`, `RefCell`, raw pointers) into values held across `.await` silently breaks every `tokio::spawn` site. Verify with `assert_send` helper or spawn in tests.
+5. **`MaybeUninit::assume_init` correctness** (Part 4 Unsafe) — added explicit checklist item for partial-initialization UB.
+6. **Cargo features** (Part 4 `[CONDITIONAL]`) — additive, `default-features = false` compatibility, workspace unification, `resolver = "2"`, feature removal = breaking.
+7. **PR description audit** (Part 8) — Pre-Completion Checklist now enforces presence of "Breaking Changes" section when breaking changes detected.
+8. **NIT section in Output Template** (Part 9 section 4.5) — explicit slot for nits, with rule to omit entirely when BLOCKER/MAJOR exists.
+
+**Nice-to-have:**
+9. Fixed V1.3 changelog date (was duplicated with V1.4 as 2026-03-13, corrected to 2026-03-08).
+
 ### V1.4 (2026-03-13) — Architecture, severity model, review philosophy, Rust depth
 
 Based on Technical Fellow-level meta-review identifying architectural review gap, missing severity definitions, weak review philosophy, and narrow trait/generics/data modeling coverage.
@@ -723,7 +784,7 @@ Based on Technical Fellow-level meta-review identifying architectural review gap
 12. **Quality bar definition** (Part 1) — explicit statement of what makes a finding valuable.
 13. **LLM context note** — Changelog section marked as omittable for LLM use (~70 lines saved).
 
-### V1.3 (2026-03-13) — Redundancy elimination, missing Rust checks, workflow improvements
+### V1.3 (2026-03-08) — Redundancy elimination, missing Rust checks, workflow improvements
 
 Based on systematic review of V1.2 identifying structural redundancy (Part 4 vs Part 5), missing Rust-specific concerns, and practical usability gaps.
 
