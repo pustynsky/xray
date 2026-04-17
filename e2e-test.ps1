@@ -1416,10 +1416,11 @@ $testBlocks += , {
 }
 
 
-# T-TASK-ROUTING: Verify MCP initialize response contains TASK ROUTING in instructions
+# T-INTENT-MAPPING: Verify MCP initialize response contains INTENT -> TOOL MAPPING in instructions.
+# (TASK ROUTING was removed as a 100% duplicate of INTENT -> TOOL MAPPING during Part 4 slimming.)
 $testBlocks += , {
     param($Bin, $Dir, $Ext)
-    $name = "T-TASK-ROUTING mcp-instructions-task-routing"
+    $name = "T-INTENT-MAPPING mcp-instructions-intent-mapping"
     try {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}'
@@ -1428,7 +1429,7 @@ $testBlocks += , {
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*1' } | Select-Object -Last 1
         if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no initialize response)" } }
         $errors = @()
-        if ($jsonLine -notmatch 'TASK ROUTING') { $errors += "missing TASK ROUTING in instructions" }
+        if ($jsonLine -notmatch 'INTENT -\u003e TOOL MAPPING') { $errors += "missing INTENT -> TOOL MAPPING in instructions" }
         if ($jsonLine -notmatch 'NEVER READ') { $errors += "missing NEVER READ decision trigger" }
         if ($jsonLine -notmatch 'DECISION TRIGGER') { $errors += "missing DECISION TRIGGER" }
         if ($jsonLine -notmatch 'uncertain') { $errors += "missing fallback rule" }

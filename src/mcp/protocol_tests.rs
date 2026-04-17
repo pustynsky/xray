@@ -52,7 +52,8 @@ fn test_initialize_includes_instructions() {
     let json = serde_json::to_value(&result).unwrap();
     let instructions = json["instructions"].as_str().unwrap();
     assert!(instructions.contains("=== XRAY_POLICY ==="), "instructions should have named policy wrapper");
-    assert!(instructions.contains("TASK ROUTING"), "instructions should have TASK ROUTING table");
+    // TASK ROUTING was replaced by INTENT -> TOOL MAPPING (100% duplicate removed).
+    assert!(instructions.contains("INTENT -> TOOL MAPPING"), "instructions should have INTENT -> TOOL MAPPING (replaces TASK ROUTING)");
     assert!(instructions.contains("xray_fast"), "instructions should mention xray_fast");
     assert!(instructions.contains("xray_callers"), "instructions should mention xray_callers");
     assert!(instructions.contains("xray_grep"), "instructions should mention xray_grep");

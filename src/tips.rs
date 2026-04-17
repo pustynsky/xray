@@ -97,77 +97,9 @@ pub struct Strategy {
 
 /// Task routing record for auto-generated TASK ROUTING table in MCP instructions.
 /// Maps a user task to the recommended tool, with scope filtering by def_extensions.
-pub struct TaskRouting {
-    /// Task description (task-first framing, e.g., "Read/explore source code")
-    pub task: &'static str,
-    /// Tool name (no arguments — table answers "WHICH tool", not "HOW to call")
-    pub tool: &'static str,
-    /// Whether this routing requires definition index (filtered when def_extensions is empty)
-    pub requires_definitions: bool,
-}
-
-/// Returns all task routing records. Filtered by `def_extensions` at render time.
-pub fn task_routings() -> Vec<TaskRouting> {
-    vec![
-        // --- Require definition index ---
-        TaskRouting {
-            task: "Read/explore source code",
-            tool: "xray_definitions",
-            requires_definitions: true,
-        },
-        TaskRouting {
-            task: "Find method/class at a known line number",
-            tool: "xray_definitions",
-            requires_definitions: true,
-        },
-        TaskRouting {
-            task: "Find callers or callees of a method",
-            tool: "xray_callers",
-            requires_definitions: true,
-        },
-        TaskRouting {
-            task: "Code complexity / health scan",
-            tool: "xray_definitions",
-            requires_definitions: true,
-        },
-        TaskRouting {
-            task: "Explore a module / understand directory structure",
-            tool: "xray_definitions",
-            requires_definitions: true,
-        },
-        // --- Always available ---
-        TaskRouting {
-            task: "Read/search non-code files (XML, JSON, config, YAML, MD, txt)",
-            tool: "xray_grep",
-            requires_definitions: false,
-        },
-        TaskRouting {
-            task: "Search file contents (text, patterns)",
-            tool: "xray_grep",
-            requires_definitions: false,
-        },
-        TaskRouting {
-            task: "Find a file by name",
-            tool: "xray_fast",
-            requires_definitions: false,
-        },
-        TaskRouting {
-            task: "List files or subdirectories in a folder",
-            tool: "xray_fast",
-            requires_definitions: false,
-        },
-        TaskRouting {
-            task: "Edit a file (any modification)",
-            tool: "xray_edit",
-            requires_definitions: false,
-        },
-        TaskRouting {
-            task: "Git blame / history / authorship",
-            tool: "xray_git_blame / xray_git_history / xray_git_authors",
-            requires_definitions: false,
-        },
-    ]
-}
+// TaskRouting struct and task_routings() function were removed as part of
+// the 2026-04-17 prompt slimming (Part 4 audit). TASK ROUTING was a 1:1 duplicate
+// of INTENT -> TOOL MAPPING in render_instructions — merged into the mapping.
 
 // ─── Single source of truth ─────────────────────────────────────────
 
@@ -674,19 +606,10 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
 
     out.push_str("=== XRAY_POLICY ===\n");
 
-    // --- TERMS (definitions used by the policy below) ---
-    // Rationale: built-in tool names differ across LLM hosts (Roo / Claude Desktop /
-    // Cursor / GitHub Copilot / Cline). Speaking about generic "built-in tools"
-    // keeps the policy portable and forces the LLM to map its own tool names to
-    // the operation types below.
+    // --- TERMS (condensed — built-in tool names differ across LLM hosts; think in operations, not names) ---
     out.push_str("=== TERMS ===\n");
-    out.push_str("  \"xray tools\"          = MCP tools from this server (names prefixed xray_*).\n");
-    out.push_str("  \"your built-in tools\" = file-manipulation tools provided natively by your LLM\n");
-    out.push_str("                           environment, invoked WITHOUT MCP. Exact names differ per\n");
-    out.push_str("                           host (patch/diff tools, search/replace tools, line-insert\n");
-    out.push_str("                           tools, whole-file-write tools, directory-listing tools\n");
-    out.push_str("                           -- you know your own tool names). Collectively referred\n");
-    out.push_str("                           to below as \"built-in tools\".\n");
+    out.push_str("  \"xray tools\"       = MCP tools from this server, names prefixed xray_*.\n");
+    out.push_str("  \"built-in tools\"   = your LLM host's native file-manipulation tools (read/search/edit/list), names vary per host — map by OPERATION TYPE, not by name.\n");
     out.push_str("=============\n");
 
     // --- CRITICAL OVERRIDE (must be first — highest priority) ---
@@ -726,16 +649,10 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  \"find a file by name\"                            -> xray_fast pattern='<name>'\n");
     out.push_str("  \"git blame / history / authors\"                  -> xray_git_blame / xray_git_history / xray_git_authors\n\n");
 
-    // --- TASK ROUTING TABLE (replaces CRITICAL block + Quick Reference + Tool Priority) ---
-    out.push_str("TASK ROUTING (check BEFORE using any built-in tool):\n");
-    for tr in task_routings() {
-        if tr.requires_definitions && def_extensions.is_empty() {
-            continue;
-        }
-        out.push_str(&format!("  {} -> {}\n", tr.task, tr.tool));
-    }
-    out.push_str("Use built-in equivalents only when the requested file type or task is not supported by this server.\n");
-    out.push_str("If uncertain whether a file type is supported, use xray_info or xray_grep first. Do not default to raw file reading.\n\n");
+    // (TASK ROUTING removed — 100% duplicate of INTENT -> TOOL MAPPING above.
+    //  All entries from TASK ROUTING are now implicit in the INTENT mapping.
+    //  Fallback guidance kept inline:)
+    out.push_str("If uncertain whether a file type is supported by xray, call xray_info first. Do not default to raw file reading.\n\n");
 
     // --- MANDATORY PRE-FLIGHT CHECK (procedural friction before built-in) ---
     // Rationale: even with INTENT mapping, habits can bypass the map. A 3-question
@@ -744,10 +661,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  Before ANY call to a built-in tool, you MUST write a <thinking> block answering ALL three questions:\n");
     out.push_str("  Q1 (operation type): What am I trying to do? Match to INTENT -> TOOL MAPPING above.\n");
     out.push_str("       - If my intent has a mapped xray tool -> I MUST use the xray tool. No exceptions for 'familiarity' or 'habit'.\n");
-    out.push_str("  Q2 (file scope): Is the target file(s) in scope for xray?\n");
-    out.push_str("       - READ operation: is the extension indexed (check xray_info or the indexed-extensions list in policyReminder)? If YES -> xray_definitions. If NO -> built-in read OK.\n");
-    out.push_str("       - SEARCH operation: xray_grep works on ALL indexed file contents; xray_fast works on ALL file names. Almost always -> xray tool.\n");
-    out.push_str("       - EDIT operation: xray_edit works on ALL text files (indexed or not). Extension is IRRELEVANT. -> xray_edit (exceptions: create new file, rewrite >200 lines, binary).\n");
+    out.push_str("  Q2 (file scope): Is the target file(s) in scope for xray? READ -> xray_definitions if extension indexed, else built-in OK. SEARCH -> xray_grep (ALL indexed contents) or xray_fast (ALL file names) — almost always xray. EDIT -> xray_edit on ANY text file (extension IRRELEVANT; exceptions: create new, rewrite >200 lines, binary).\n");
     out.push_str("  Q3 (justification): If Q1+Q2 point me to a built-in tool, WHY?\n");
     out.push_str("       Valid reasons: (a) file type not indexed AND content not text-searchable, (b) binary file, (c) byte-exact preservation impossible with xray (rare), (d) creating a brand-new file (built-in whole-file-write OK), (e) rewriting >200 lines completely (avoids noisy diff).\n");
     out.push_str("       Invalid reasons: 'habit', 'familiarity', 'it is just a small edit', 'this file extension is not indexed so xray probably does not apply to editing' — these are all UNJUSTIFIED. Just habit / familiarity is NEVER a valid reason.\n");
@@ -761,16 +675,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("       (c) If yes -> STOP built-in call, switch to xray.\n");
     out.push_str("       This takes 1 second per call. It prevents the most common violation class — 'mental shortcuts on seemingly-trivial tasks'.\n\n");
 
-    // --- COST REALITY (measured numbers, not abstract prohibition) ---
-    // Rationale: concrete cost comparisons turn NEVER-rules from dogma into an
-    // economic argument — models optimize more reliably when they see the ratio.
-    out.push_str("COST REALITY (measured, not theoretical):\n");
-    out.push_str("  - 5x read_file(20 lines) = ~15 KB + 5 round-trips vs 1x xray_grep showLines contextLines=5 = ~3 KB + 1 call -> 5x fewer tokens\n");
-    out.push_str("  - write_to_file(600 lines) = ~24 KB in+out vs xray_edit(10 edits) = ~1 KB -> 24x fewer tokens\n");
-    out.push_str("  - apply_diff(3 blocks) = 3 calls, whitespace-fragile vs xray_edit(3 edits) = 1 atomic call -> 3x fewer round-trips, zero whitespace risk\n");
-    out.push_str("  - Built-in patch/diff tool on any text file (8 SEARCH/REPLACE blocks) = 8 separate calls, whitespace-fragile, partial-failure risk vs xray_edit(8 edits) = 1 atomic call -> 8x fewer round-trips, zero whitespace risk, atomic rollback. Applies equally to indexed extensions (parsed by xray_definitions/xray_grep) and non-indexed text extensions — xray_edit does NOT care about --ext for editing.\n");
-
-    out.push_str("  Rule of thumb: 2 built-in calls in a row on the same file = you should have used xray.\n\n");
+    // --- COST REALITY (single rule-of-thumb; details live in xray_help) ---
+    out.push_str("COST REALITY: xray tools are 3-24x cheaper in tokens and round-trips than built-in equivalents (see xray_help for measured ratios). Rule of thumb: 2 built-in calls in a row on the same file = you should have used xray.\n\n");
 
     // --- FILE READING DECISION TRIGGER (shortened, only if def_extensions non-empty) ---
     // Rationale: the dominant observed failure mode is LLM defaulting to built-in
@@ -824,10 +730,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  - NEVER list or browse directories to explore code — xray_definitions file='<dir>' returns ALL classes/methods/interfaces in ONE call\n");
     out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — use kind='class,interface,enum' for multi-kind OR, or omit kind filter to get everything at once\n");
     out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n");
-    out.push_str("  - NEVER use search_files (built-in regex/text search) — use xray_grep instead (<1ms vs seconds, pre-built inverted index)\n");
     out.push_str("  - NEVER call xray_fast dirsOnly=true to explore code modules — xray_definitions file='<dir>' auto-generates directory-grouped summary (autoSummary) when results are too many to list individually\n");
-    out.push_str("  - NEVER choose a built-in edit tool based on file extension. xray_edit works on ALL text files — indexed or not. Extension-based tool choice is UNJUSTIFIED. Rule: editing existing text file -> xray_edit. Creating new file -> built-in whole-file-write tool (or xray_edit Mode A). Binary/byte-exact -> built-in tool with justification.\n");
-    out.push_str("  - NEVER think 'this file is not .rs, xray doesn't apply here'. xray tools have different scopes: xray_definitions/xray_grep parse indexed extensions; xray_edit operates on bytes of ANY text file regardless of extension.\n");
     out.push_str("  EXAMPLE VIOLATION — the most common policy break:\n");
     out.push_str("  - User intent: \"validate/check/verify whether code has/doesn't have X\"\n");
     out.push_str("  - WRONG reasoning: \"I need to search for X -> search_files\"\n");
@@ -844,14 +747,9 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     }
     out.push_str("\n");
 
-    // --- Strategy recipes (top 3 only — remaining recipes available via xray_help) ---
-    out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task; call xray_help for the full catalog):\n");
-    for strat in strategies().into_iter().take(3) {
-        out.push_str(&format!("  [{}] {}\n", strat.name, strat.when));
-        for step in strat.steps {
-            out.push_str(&format!("    - {}\n", step));
-        }
-    }
+    // (STRATEGY RECIPES removed from system-prompt rendering — available on-demand
+    //  via xray_help. Inline reference kept:)
+    out.push_str("STRATEGY RECIPES: aim for <=3 search calls per task. Call xray_help for the full catalog of recipes (architecture exploration, call-chain investigation, stack-trace-to-method, etc.).\n");
 
     // --- Workspace discovery ---
     out.push_str("\nWORKSPACE DISCOVERY:\n");
