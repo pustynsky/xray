@@ -531,3 +531,43 @@ Name matches appear first in results, textContent-promoted results after.
 **Expected**: Error with message containing `"directory"` and `"xray_fast"` guidance.
 
 **Unit tests:** `test_xml_on_demand_directory_returns_error_hint`
+
+### T-XML-SANDBOX-TRAVERSAL — `..`-escape via `file=` rejected
+
+**Scenario**: `xray_definitions file='../../etc/passwd' name='Any'` (or Windows equivalent `file='..\..\Windows\System32\drivers\etc\hosts'`) where the resolved absolute path is outside `server_dir`.
+
+**Expected**: Error response containing `"XML file path is outside workspace"`. No XML parsing performed. `isError: true`.
+
+**Unit tests:** `test_xml_on_demand_rejects_path_traversal`
+
+### T-XML-SANDBOX-ABSOLUTE-OUTSIDE — absolute `file=` outside workspace rejected
+
+**Scenario**: `xray_definitions file='C:/Windows/System32/config.xml' containsLine=1` on a Windows machine where `server_dir=C:/Repos/MyApp`.
+
+**Expected**: Error response `"XML file path is outside workspace: ..."`. Absolute paths pointing INSIDE `server_dir` still work (see `T-XML-ABSOLUTE-PATH`).
+
+**Unit tests:** `test_xml_on_demand_rejects_absolute_outside_workspace`
+
+### T-XML-NO-SUBSTRING-FALLBACK — `file=` collision with substring fallback removed
+
+**Scenario**: Workspace contains `web.config` and `webapp.config`. `xray_definitions file='web.config' name='Any'` when `web.config` does NOT exist but `webapp.config` does (edge case: only `webapp.config` present).
+
+**Expected**: Error `"XML file not found"`. MUST NOT silently resolve to `webapp.config`. Previously the substring fallback matched any indexed file whose path contained `web.config` as a substring, including `webapp.config` — this silent fallback is removed.
+
+**Unit tests:** `test_xml_on_demand_no_substring_fallback_collision`, `test_xml_on_demand_returns_error_for_missing_file`
+
+### T-XML-UTF8-TRUNCATION — UTF-8 safe text content truncation (no panic)
+
+**Scenario**: XML file with an element containing >100 Cyrillic characters (2 bytes each) or >50 emoji (4 bytes each) in its text content, e.g. `<Text>АААА...АААА</Text>` with 250 Cyrillic chars.
+
+**Expected**: Response returned successfully. `textContent` field is truncated to 200 chars (not 200 bytes). No panic at `byte index N is not a char boundary`. Previously byte-indexing into a Cyrillic/emoji string at the 200-byte boundary landed inside a multi-byte codepoint and panicked the handler.
+
+**Unit tests:** `test_text_content_truncation_utf8_cyrillic`, `test_text_content_truncation_utf8_emoji`
+
+### T-XML-UNC-PREFIX [Windows] — canonicalized path does not leak `\\?\` UNC prefix
+
+**Scenario** [Windows only]: `xray_definitions file='app.config' containsLine=1` where `app.config` resolves successfully.
+
+**Expected**: The `file` field in each returned XML definition is a clean path like `C:\Repos\MyApp\app.config` — MUST NOT start with `\\?\` (the Windows UNC prefix returned by `Path::canonicalize()`). Sandbox validation still uses the full canonical form internally.
+
+**Unit tests:** `test_xml_on_demand_resolves_relative_path` (assertion `!returned_path.starts_with("\\\\?\\")` on Windows)

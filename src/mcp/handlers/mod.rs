@@ -7,6 +7,8 @@ mod fast;
 mod git;
 mod grep;
 pub(crate) mod utils;
+#[cfg(feature = "lang-xml")]
+mod xml_on_demand;
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};

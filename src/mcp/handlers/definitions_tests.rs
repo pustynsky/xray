@@ -3639,7 +3639,7 @@ fn test_xml_on_demand_name_matches_text_content() {
             d.get("matchedChild").and_then(|v| v.as_str()).unwrap_or("?"))).collect::<Vec<_>>());
 
     // Should be on-demand
-    assert_eq!(v["summary"]["onDemand"], true, "Should be on-demand parsed");
+    assert_eq!(v["summary"]["xmlOnDemand"], true, "Should be on-demand parsed");
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
@@ -4000,6 +4000,201 @@ fn test_xml_on_demand_directory_returns_error_hint() {
     let text = &result.content[0].text;
     assert!(text.contains("directory"), "Error should mention 'directory': {}", text);
     assert!(text.contains("xray_fast"), "Error should suggest xray_fast: {}", text);
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+
+// ============================================================================
+// XML on-demand — security & resolver regression tests
+// ----------------------------------------------------------------------------
+// MAJOR-1: `resolve_xml_file_path` must not substring-match to unrelated files.
+// MAJOR-2: `resolve_xml_file_path` must reject paths outside the workspace
+//          (absolute paths to other directories, and `..` escapes).
+// ============================================================================
+
+/// MAJOR-1 regression: a file filter that is a substring of another file's
+/// name must NOT silently resolve to that other file.
+/// Before the fix: filter 'web.config' matched 'webapp.config' because the
+/// resolver scanned the server_dir with substring contains().
+/// After the fix: only explicit absolute or relative-from-workspace paths resolve.
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_resolve_no_substring_collision() {
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_collision_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Only 'webapp.config' exists — the filter 'web.config' used to match it
+    // via substring scan. Now it must fail cleanly.
+    std::fs::write(
+        tmp_dir.join("webapp.config"),
+        "<root><item>real</item></root>",
+    ).unwrap();
+
+    let ctx = HandlerContext {
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": "web.config",
+        "name": "item"
+    }));
+
+    assert!(result.is_error, "Should error: no file named 'web.config' exists");
+    let text = &result.content[0].text;
+    // Must not silently return content from webapp.config.
+    assert!(
+        !text.contains("\"name\": \"item\"") && !text.contains("real"),
+        "Must NOT return data from webapp.config. Got: {}",
+        text
+    );
+    // Should hint at xray_fast for file discovery.
+    assert!(
+        text.contains("xray_fast") || text.contains("resolve") || text.contains("Failed"),
+        "Error should be a resolver error, got: {}",
+        text
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+/// MAJOR-2 regression: a relative path with `..` segments that canonicalizes
+/// outside the workspace must be rejected.
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_resolve_rejects_dotdot_escape() {
+    // Layout:
+    //   tmp/
+    //     workspace/       <- server_dir
+    //     secret.config    <- outside workspace
+    let base = std::env::temp_dir().join(format!("xray_xml_dotdot_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let workspace = base.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(base.join("secret.config"), "<root><item>leak</item></root>").unwrap();
+
+    let ctx = HandlerContext {
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(workspace.to_string_lossy().to_string()),
+        )),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": "../secret.config",
+        "name": "item"
+    }));
+
+    assert!(result.is_error, "Should reject `..` escape from workspace");
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains("leak"),
+        "Must NOT leak content from files outside workspace. Got: {}",
+        text
+    );
+    // Resolver should explicitly report the sandbox violation or resolve failure.
+    assert!(
+        text.contains("outside") || text.contains("workspace") || text.contains("Failed to resolve"),
+        "Error should mention workspace sandbox or resolve failure, got: {}",
+        text
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// MAJOR-2 regression: an absolute path pointing outside the workspace must
+/// be rejected — even if the file exists and is readable.
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_resolve_rejects_absolute_outside_workspace() {
+    let base = std::env::temp_dir().join(format!("xray_xml_outside_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&base);
+    std::fs::create_dir_all(&base).unwrap();
+    let workspace = base.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let outside_file = base.join("outside.config");
+    std::fs::write(&outside_file, "<root><item>confidential</item></root>").unwrap();
+
+    let ctx = HandlerContext {
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(workspace.to_string_lossy().to_string()),
+        )),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": outside_file.to_string_lossy().to_string(),
+        "name": "item"
+    }));
+
+    assert!(
+        result.is_error,
+        "Should reject absolute path outside workspace. Got success: {}",
+        result.content[0].text
+    );
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains("confidential"),
+        "Must NOT leak content from files outside workspace. Got: {}",
+        text
+    );
+    assert!(
+        text.contains("outside") || text.contains("workspace"),
+        "Error should mention workspace sandbox, got: {}",
+        text
+    );
+
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// MAJOR-1 positive-path: explicit relative path inside workspace resolves correctly.
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_resolve_accepts_relative_inside_workspace() {
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_positive_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let subdir = tmp_dir.join("src");
+    std::fs::create_dir_all(&subdir).unwrap();
+    std::fs::write(subdir.join("app.config"), "<root><entry>ok</entry></root>").unwrap();
+
+    let ctx = HandlerContext {
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": "src/app.config",
+        "name": "entry"
+    }));
+
+    assert!(
+        !result.is_error,
+        "Should resolve relative path inside workspace. Error: {}",
+        result.content[0].text
+    );
+
+    // Self-review regression: on Windows, canonicalize() returns a UNC path
+    // (`\\?\C:\...`). The resolver must strip this prefix before surfacing
+    // the path in JSON — otherwise every XML response leaks the UNC form
+    // to the user and confuses downstream tooling.
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains(r"\\?\"),
+        "Response must NOT contain Windows UNC prefix '\\\\?\\'. Got: {}",
+        text
+    );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

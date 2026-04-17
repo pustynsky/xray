@@ -797,6 +797,107 @@ When `xray_definitions` finds more results than `maxResults` and **no `name` fil
 
 ---
 
+### XML On-Demand Parsing
+
+`xray_definitions` supports on-the-fly XML parsing for configuration files that are **not** in the build-time definition index. When you call `xray_definitions file='App.config' containsLine=42` or `xray_definitions file='packages.nuspec' name='version'`, the handler detects the XML extension, parses just that one file with `tree-sitter-xml`, and returns XML-element definitions with full path signatures.
+
+**Supported extensions** (case-insensitive):
+
+| Extension        | Typical use                                           |
+| ---------------- | ----------------------------------------------------- |
+| `xml`            | Generic XML                                           |
+| `config`         | .NET `App.config` / `Web.config`                      |
+| `csproj`, `vbproj`, `fsproj`, `vcxproj` | MSBuild project files            |
+| `props`, `targets` | MSBuild shared build logic                          |
+| `nuspec`         | NuGet package manifest                                |
+| `vsixmanifest`   | Visual Studio extension manifest                      |
+| `manifestxml`    | Service / component manifest                          |
+| `appxmanifest`   | UWP / MSIX application manifest                       |
+| `resx`           | .NET resource files                                   |
+
+**How it works:**
+
+- Parsing happens at request time — there is no pre-built XML index.
+- The file must live inside the server's workspace (`--dir`); absolute paths outside the sandbox are rejected with an error.
+- The AST is walked with a persistent ancestry stack and a hard recursion cap (1024 levels) to protect against pathological inputs.
+- Each element becomes one `XmlElement` definition with `signature = "Ancestor1 > Ancestor2 > ElementName[@attr='value']"` (XPath-style path).
+
+**Key parameters (reused from `xray_definitions`):**
+
+| Parameter      | Behavior for XML                                                                 |
+| -------------- | -------------------------------------------------------------------------------- |
+| `file`         | Required. Relative to server dir, or absolute inside sandbox                     |
+| `containsLine` | Returns the innermost element containing the line, plus its parent chain        |
+| `name`         | Filter by element name **or** by leaf text content (≥3 chars, e.g. `name='PremiumStorage'` matches `<ServiceType>PremiumStorage</ServiceType>`) |
+| `includeBody`  | Returns raw XML fragment for the element's line range                            |
+| `maxBodyLines` | Caps body size (default 100; `0` = unlimited)                                    |
+
+**Leaf promotion:** when a leaf element matches `name=`, the result is automatically promoted to the enclosing block (de-duplicated when several leaves inside the same parent match). The response includes `matchedBy: "elementName"` or `matchedBy: "textContent"` and, for text matches, `matchedChild` / `matchedChildren` so you can tell which leaf triggered the hit.
+
+**Response fields specific to XML on-demand:**
+
+| Field                          | Meaning                                                                         |
+| ------------------------------ | ------------------------------------------------------------------------------- |
+| `summary.xmlOnDemand`          | Always `true` for XML-intercepted responses                                     |
+| `summary.parseWarnings`        | Non-fatal issues (malformed tags, depth cap, etc.) — never blocks the response |
+| `definitions[].matchedBy`      | `"elementName"`, `"textContent"`, or absent (for containsLine)                  |
+| `definitions[].parentChain`    | Array of ancestor element names from root to direct parent                      |
+
+**Example — `containsLine` on `App.config`:**
+
+```jsonc
+// Request
+{ "file": "App.config", "containsLine": 17 }
+
+// Response (trimmed)
+{
+  "definitions": [
+    {
+      "name": "setting",
+      "kind": "XmlElement",
+      "signature": "configuration > appSettings > setting[@key='Timeout']",
+      "lineStart": 16, "lineEnd": 18,
+      "parentChain": ["configuration", "appSettings"]
+    }
+  ],
+  "summary": { "xmlOnDemand": true, "parseWarnings": [] }
+}
+```
+
+**Example — `name=` with text-content match on a `.csproj`:**
+
+```jsonc
+// Request
+{ "file": "MyApp.csproj", "name": "net8.0" }
+
+// Response
+{
+  "definitions": [
+    {
+      "name": "PropertyGroup",
+      "signature": "Project > PropertyGroup",
+      "matchedBy": "textContent",
+      "matchedChild": "TargetFramework"
+    }
+  ]
+}
+```
+
+**Limitations — read before relying on exact text content:**
+
+- **Entity escapes are NOT decoded.** `&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`, and numeric entities like `&#xD;` are returned verbatim in `textContent`. If you need the decoded form, post-process on the caller side. Rationale: XML entity decoding is non-trivial (custom DTDs, entity references inside attributes vs. content) and the on-demand path is optimized for structural navigation, not faithful text reconstruction.
+- **CDATA sections** are preserved as-is (including the `<![CDATA[ ... ]]>` markers when appearing in the `includeBody` slice).
+- **Namespaces** are kept as literal prefixes: `<ns:Element>` yields `name: "ns:Element"`. No URI resolution is performed.
+- **Malformed XML** (unterminated tags, junk before the document) still parses — tree-sitter-xml is error-tolerant. A `parseWarnings` entry describes each recovered error, but the surrounding well-formed elements are still reported.
+- **Extremely deep documents** (>1024 nested levels) are truncated at the tripwire with a warning; the rest of the file is parsed normally.
+- **File size**: the whole file is read into memory. There is no streaming path — very large XML (>100 MB) will be slow.
+
+**When to prefer `xray_grep` over on-demand parsing:**
+
+- You only need a count or a line-number list, not structured metadata → `xray_grep countOnly=true`.
+- The file is in an indexed-for-content extension and you want ranked results across many files → `xray_grep terms='...'`.
+- You want to search **across multiple XML files at once** — on-demand parses one file per call; grep works on the whole index in a single pass.
+
 ## `xray_fast` — File Name Search
 
 Search pre-built file name index for instant file lookup (~35ms vs ~3s for live filesystem walk). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Supports `pattern='*'` or empty pattern with `dir` for wildcard listing (all files/directories). Results are relevance-ranked: exact stem match → prefix match → contains match (ranking skipped for wildcard).
