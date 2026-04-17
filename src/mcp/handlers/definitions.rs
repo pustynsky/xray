@@ -1533,8 +1533,11 @@ fn try_xml_on_demand(
         return None;
     }
 
-    // Resolve file path: try absolute path first, then relative to workspace
-    let file_path = resolve_xml_file_path(file_filter, ctx)?;
+    // Resolve file path (sandboxed to workspace, MAJOR-1/MAJOR-2)
+    let file_path = match resolve_xml_file_path(file_filter, ctx) {
+        Ok(p) => p,
+        Err(diag) => return Some(ToolCallResult::error(diag)),
+    };
 
     // Check if path is a directory — XML on-demand requires a specific file
     if std::path::Path::new(&file_path).is_dir() {
@@ -1557,12 +1560,23 @@ fn try_xml_on_demand(
         }
     };
 
-    // Parse XML on-demand
+    // Parse XML on-demand (MAJOR-3: typed errors discriminate infrastructure
+    // issues from user-input issues)
     let xml_defs = match parse_xml_on_demand(&source, &file_path) {
         Ok(defs) => defs,
-        Err(e) => {
+        Err(e @ crate::definitions::parser_xml::XmlParseError::GrammarLoad(_)) => {
+            // Internal bug — grammar couldn't load. Not the user's fault.
             return Some(ToolCallResult::error(format!(
-                "Failed to parse XML file '{}': {}. The file may contain malformed XML.",
+                "Internal error: {}. \
+                 This indicates a bug in xray's XML grammar integration — \
+                 please report it. File attempted: '{}'.",
+                e, file_path
+            )));
+        }
+        Err(e @ crate::definitions::parser_xml::XmlParseError::TreeSitterReturnedNone) => {
+            // User-input issue — file may be malformed or empty.
+            return Some(ToolCallResult::error(format!(
+                "Failed to parse XML file '{}': {}. Hint: check if the file is valid XML.",
                 file_path, e
             )));
         }
@@ -1928,44 +1942,65 @@ fn extract_file_extension(file_filter: &str) -> Option<String> {
 /// Resolve an XML file path from the file filter.
 /// Supports absolute paths and paths relative to server workspace.
 #[cfg(feature = "lang-xml")]
-fn resolve_xml_file_path(file_filter: &str, ctx: &HandlerContext) -> Option<String> {
-    let path = std::path::Path::new(file_filter);
-
-    // Check absolute path first
-    if path.is_absolute() && path.exists() {
-        return Some(file_filter.to_string());
-    }
-
-    // Try relative to server dir
+/// Resolve an XML file filter to a concrete absolute path inside the workspace.
+///
+/// Security contract (MAJOR-2): the resolved path MUST be inside the server's
+/// workspace directory. Both absolute paths outside the workspace and relative
+/// paths containing `..` segments that escape the workspace are rejected.
+///
+/// No substring fallback (MAJOR-1): we do NOT scan the workspace for files whose
+/// path "contains" the filter — that produced wrong-file results (e.g. `web.config`
+/// matching `webapp.config`) and was non-recursive (didn't find files in subdirs).
+/// Callers must pass an explicit path relative to the workspace or an absolute
+/// path inside the workspace. To discover XML files, use `xray_fast pattern='*.xml'`.
+///
+/// Returns `Ok(absolute_path)` on success, `Err(diagnostic_message)` otherwise.
+fn resolve_xml_file_path(file_filter: &str, ctx: &HandlerContext) -> Result<String, String> {
     let server_dir = ctx.server_dir();
-    let full_path = std::path::Path::new(&server_dir).join(file_filter);
-    if full_path.exists() {
-        return Some(full_path.to_string_lossy().to_string());
+    let server_canonical = std::path::Path::new(&server_dir)
+        .canonicalize()
+        .map_err(|e| format!(
+            "Failed to canonicalize server directory '{}': {}. \
+             Hint: ensure the workspace is resolved; try xray_reindex.",
+            server_dir, e
+        ))?;
+
+    let raw_path = std::path::Path::new(file_filter);
+    let candidate = if raw_path.is_absolute() {
+        raw_path.to_path_buf()
+    } else {
+        std::path::Path::new(&server_dir).join(file_filter)
+    };
+
+    // canonicalize() requires the path to exist — this also validates existence.
+    let canonical = candidate.canonicalize().map_err(|e| format!(
+        "Failed to resolve XML file '{}': {}. \
+         Hint: pass a path relative to the workspace ('{}') or an absolute path \
+         inside it. Use xray_fast pattern='*.xml' to discover XML files.",
+        file_filter, e, server_dir
+    ))?;
+
+    // Sandbox check: the resolved path must be inside the workspace.
+    if !canonical.starts_with(&server_canonical) {
+        return Err(format!(
+            "XML file '{}' is outside the workspace ('{}'). \
+             Absolute paths outside the workspace are not allowed.",
+            canonical.display(),
+            server_canonical.display()
+        ));
     }
 
-    // Try to find matching files in server dir by walking
-    // (for substring-style file filters like 'web.config')
-    let filter_lower = file_filter.replace('\\', "/").to_lowercase();
-    if let Ok(entries) = std::fs::read_dir(&server_dir) {
-        for entry in entries.flatten() {
-            let entry_path = entry.path();
-            if entry_path.is_file() {
-                let entry_str = entry_path.to_string_lossy().replace('\\', "/").to_lowercase();
-                if entry_str.contains(&filter_lower) {
-                    return Some(entry_path.to_string_lossy().to_string());
-                }
-            }
-        }
-    }
+    // UX: strip Windows UNC prefix (`\\?\C:\...`) that canonicalize() adds on Windows.
+    // The sandbox check above is performed against the UNC form for safety; stripping
+    // only affects the returned string surfaced to the user in JSON responses and errors.
+    let canonical_str = canonical.to_string_lossy().to_string();
+    #[cfg(windows)]
+    let canonical_str = canonical_str
+        .strip_prefix(r"\\?\")
+        .map(String::from)
+        .unwrap_or(canonical_str);
 
-    // For absolute paths that don't exist yet, still return them
-    // (will fail with a clear error message at read time)
-    if path.is_absolute() {
-        return Some(file_filter.to_string());
-    }
-
-    // Last resort: return the filter as-is, prepend server dir
-    Some(full_path.to_string_lossy().to_string())
+    Ok(canonical_str)
 }
 
 

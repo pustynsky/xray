@@ -59,7 +59,33 @@
 
 ## Unreleased
 
+### Security
+
+- **XML on-demand: workspace sandbox for `file=` resolver** — `resolve_xml_file_path` in `src/mcp/handlers/definitions.rs` now resolves the `file=` parameter via `std::path::Path::canonicalize()` and rejects any path that does not start with the canonicalized `server_dir` prefix. Previously, a relative `file=` was joined to `server_dir` and a substring fallback scanned `index.files` for any entry whose path contained the filter, and as a final "last resort" the function returned the joined path even if the file didn't exist. Two attack/mishap paths were closed: (1) **path traversal via `..` segments** — `file='../../etc/passwd'` (or a Windows equivalent like `file='..\..\Windows\System32\drivers\etc\hosts'`) could resolve to a file outside the workspace and be parsed by the XML handler; (2) **substring-fallback collision** — `file='web.config'` could silently resolve to `webapp.config` (or any other file whose path contains `web.config` as a substring) when the exact path didn't exist under `server_dir`, returning structural data from an unrelated file without any hint to the LLM. Both the substring fallback and the "last resort" non-existent-path return are removed. Absolute paths are still accepted but must canonicalize inside `server_dir`. Returns `Result<String, String>` with precise error messages (`"XML file not found"`, `"XML file path is outside workspace: ..."`). 4 new unit tests in `src/mcp/handlers/definitions_tests.rs`: `test_xml_on_demand_rejects_path_traversal` (dotdot escape), `test_xml_on_demand_rejects_absolute_outside_workspace` (absolute path outside server_dir), `test_xml_on_demand_no_substring_fallback_collision` (`web.config` must not resolve to `webapp.config`), and `test_xml_on_demand_returns_error_for_missing_file` (non-existent path returns `Err`, not silent success).
+
+### Bug Fixes
+
+- **XML on-demand: UTF-8 panic in text content truncation** — `extract_text_content` in `src/definitions/parser_xml.rs` truncated element text via byte-indexing (`&text[..MAX_TEXT_CONTENT_LEN]`) which panicked when the 200-byte boundary fell inside a multi-byte UTF-8 codepoint (Cyrillic letters are 2 bytes each; emoji are 4 bytes). A single well-formed XML element with >100 Cyrillic chars or >50 emoji could crash the MCP tool handler with `byte index N is not a char boundary`. Fix: switched to char-aware truncation via `chars().count()` for the length check and `chars().take(MAX_TEXT_CONTENT_LEN).collect()` for the truncation. 2 new regression tests in `src/definitions/definitions_tests_xml.rs`: `test_text_content_truncation_utf8_cyrillic` (250 Cyrillic chars, no panic, truncated to 200 chars) and `test_text_content_truncation_utf8_emoji` (250 emoji, no panic, truncated to 200 chars).
+
+- **XML on-demand [Windows]: UNC prefix leaks into JSON response** — On Windows, `Path::canonicalize()` returns paths with the `\\?\` UNC prefix (e.g. `\\?\C:\Repos\Xray\app.config`). After adding the sandbox check (see Security entry), the canonicalized path was written verbatim into the `file` field of every XML definition result, exposing an implementation detail that breaks downstream tooling (editor "open file" actions, copy-paste into terminals, path comparison against `xray_grep` output). Fix: `resolve_xml_file_path` now strips the `\\?\` prefix from the returned string on Windows (`#[cfg(windows)]` + `strip_prefix(r"\\?\")`), but only *after* the sandbox validation uses the full canonical form — so the security check remains correct. Regression assertion added to the positive-path test `test_xml_on_demand_resolves_relative_path` to verify the returned path does not start with `\\?\`.
+
+### Internal
+
+- **XML on-demand: typed error enum via `thiserror`** — `parse_xml_on_demand` in `src/definitions/parser_xml.rs` replaced its stringly-typed error return with `XmlParseError` enum (derived via `thiserror`) with two variants: `GrammarLoad(String)` — tree-sitter grammar failed to load (internal bug, should never happen in production; indicates a corrupted or mismatched `tree-sitter-xml` build) — and `TreeSitterReturnedNone` — parser returned `None` for the input, typically a malformed/truncated XML file (expected user-facing error). `try_xml_on_demand` in `src/mcp/handlers/definitions.rs` now `match`es on the variants and emits distinct hints to the LLM (`"internal parser error"` vs `"malformed XML file"`), allowing the caller to distinguish between a bug in xray and bad user input without parsing error strings.
+
 ### Features
+
+- **XML on-demand structural context (initial implementation)** — `xray_definitions` now supports on-demand XML parsing for `.xml`, `.config`, `.csproj`, `.manifestxml`, `.props`, `.targets`, `.resx` files via a new `lang-xml` Cargo feature (in default build) backed by `tree-sitter-xml 0.7`. XML files are NOT added to the definition index — they are parsed on-the-fly when `file=` is combined with `containsLine` or `name`. Key capabilities:
+  - **Parent Promotion (containsLine)**: When `containsLine` targets a leaf element (no child elements), the result is automatically promoted to the parent block so the LLM sees full structural context. For example, searching for `<ServiceType>Search</ServiceType>` returns the entire `<SearchService>` parent block with all siblings, not just the trivial leaf.
+  - **textContent search with Parent Promotion (name filter)**: The `name` filter searches both XML element tag names AND `textContent` of leaf elements. Leaf matches are promoted to their parent block with `matchedBy: "textContent"` and `matchedChild: "<leafTag>"` (or `matchedChildren: [...]` when multiple leaves in the same parent match — de-duplicated into one result). Tag-name matches take priority: if the same parent is already matched by tag name (`matchedBy: "name"`), textContent-promoted duplicates are suppressed. Min-length guard: terms shorter than 3 characters are not searched in text content (only in tag names) to avoid noise. Result ordering: name matches first, then textContent-promoted.
+  - **textContent field on leaves**: Leaf elements include a `textContent` field with their text value (truncated to 200 chars — UTF-8 safe, see Bug Fixes).
+  - **XPath-like signatures**: Each element has a structural path like `configuration > appSettings > add[@key=DbConnection]`.
+  - **`onDemand: true` flag**: Response includes this so the LLM knows data came from on-the-fly parsing, not the definition index.
+  - **`xmlHint` in grep results**: When `xray_grep` finds matches in XML files, the response includes an `xmlHint` suggesting `xray_definitions file=<path> containsLine=N` for structural context.
+  - **Absolute paths supported**: XML files outside the workspace can be addressed via absolute file paths (subject to Phase 1 sandbox — see Security).
+  - **Directory-path error hint**: Passing a directory path to `file=` returns a clear error (`"XML on-demand requires a file path, not a directory"`) with guidance to use `xray_fast` to locate specific files.
+  - 25 new XML parser tests + 6 unit tests for textContent V2 + 4 updated hint tests.
+  - **Phase 1 security hardening applied to this feature is listed in the Security / Bug Fixes / Internal sections above** (path-traversal sandbox, UTF-8 panic fix in text truncation, Windows UNC-prefix leak fix, `XmlParseError` typed enum).
 
 - **`xray_grep` — `file=` parameter and `dir=` auto-conversion** — Added explicit `file` parameter for substring filtering by file path/basename (case-insensitive, supports comma-separated OR). When a **file path** is passed to `dir=` (either heuristically — path ends in a known extension — or detected via `fs::metadata`), it is now auto-converted to `dir=<parent>` + `file=<basename>` instead of returning an error. The `summary.dirAutoConverted` field in the response teaches the correct `file='<name>'` pattern so the LLM self-corrects on the next turn. Explicit `file=` wins over the auto-populated value. Combines with `dir`/`ext`/`excludeDir` via AND.
 
@@ -149,28 +175,6 @@
   - Exact match is always preferred (cascade stops at first success).
   - Anchor matching (`insertAfter`/`insertBefore`) also gets the full 4-step cascade with per-occurrence match length tracking for flex-space.
   - 20 new unit tests. 1 existing test updated for new behavior. All 1720 unit tests pass.
-
-
-- **XML Structural Context — On-demand parsing via tree-sitter-xml** — `xray_definitions` now supports on-demand XML parsing for `.xml`, `.config`, `.csproj`, `.manifestxml`, `.props`, `.targets`, `.resx` files. XML files are NOT added to the definition index — they are parsed on-the-fly when `containsLine` or `name` filter is specified. Key features:
-  - **Parent Promotion**: When `containsLine` targets a leaf element (no child elements), the result is automatically promoted to the parent block. For example, searching for `<ServiceType>Search</ServiceType>` returns the entire `<SearchService>` block with all siblings — not just the trivial leaf.
-  - **textContent field**: Leaf elements include a `textContent` field with their text value (truncated to 200 chars).
-  - **XPath-like signatures**: Each element has a structural path like `configuration > appSettings > add[@key=DbConnection]`.
-  - **Absolute paths**: Supports XML files outside the workspace via absolute file paths.
-  - **`xmlHint` in grep results**: When `xray_grep` finds matches in XML files, the response includes an `xmlHint` suggesting `xray_definitions containsLine=N` for structural context.
-  - **`onDemand: true`**: Response includes this flag so the LLM knows data is from on-demand parsing, not the definition index.
-  - **Text content search**: The `name` filter now searches both XML element names AND `textContent` of leaf elements. For example, `name='PremiumStorage'` finds `<ServiceType>PremiumStorage</ServiceType>` — previously only element tag names were searchable.
-  - **Directory path error hint**: Passing a directory path (e.g., `file='Definitions/Prod.xml'` where that's a directory) now returns a clear error: `"XML on-demand requires a file path, not a directory"` with guidance to use `xray_fast` to find specific files.
-
-- **XML text_content filter V2 — Parent promotion and noise reduction** — When the `name` filter matches XML text content (not tag name), leaf elements are now **automatically promoted to their parent block** with full structural context. Key improvements:
-  - **Parent Promotion**: `name='PremiumStorage'` finding `<ServiceType>PremiumStorage</ServiceType>` now returns the entire `<SearchService>` parent block — not the trivial leaf `ServiceType`.
-  - **`matchedBy` field**: Response includes `matchedBy: "name"` or `matchedBy: "textContent"` so the LLM understands why each result was found.
-  - **`matchedChild` / `matchedChildren`**: Promoted results include `matchedChild: "ServiceType"` (single leaf) or `matchedChildren` array (multiple leaves in same parent).
-  - **De-duplication**: Multiple textContent matches in the same parent block are merged into one result with a `matchedChildren` array — not returned as separate results.
-  - **Name priority**: If a parent is already matched by tag name, textContent-promoted results for the same parent are suppressed to avoid duplicates.
-  - **Min-length guard**: Terms shorter than 3 characters are not searched in text content (only in tag names), preventing noise from short terms like `'ab'` or `'id'`.
-  - **Result ordering**: Name matches appear first, then textContent-promoted results.
-  - 6 new unit tests + 1 updated test. Tool descriptions updated in `mod.rs` and `tips.rs`.
-  - New `lang-xml` Cargo feature (in default build). New dependency: `tree-sitter-xml 0.7`. 25 new XML parser tests + 4 updated hint tests. All 1702 unit tests + 67 E2E tests pass.
 
 
 ### Performance
