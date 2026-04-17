@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 *.ps1
 !e2e-test.ps1
 !scripts/*.ps1

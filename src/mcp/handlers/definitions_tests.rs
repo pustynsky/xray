@@ -3639,7 +3639,7 @@ fn test_xml_on_demand_name_matches_text_content() {
             d.get("matchedChild").and_then(|v| v.as_str()).unwrap_or("?"))).collect::<Vec<_>>());
 
     // Should be on-demand
-    assert_eq!(v["summary"]["onDemand"], true, "Should be on-demand parsed");
+    assert_eq!(v["summary"]["xmlOnDemand"], true, "Should be on-demand parsed");
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }

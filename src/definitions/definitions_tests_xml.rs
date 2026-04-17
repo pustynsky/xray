@@ -1,6 +1,6 @@
 //! Unit tests for XML on-demand parser.
 
-use super::parser_xml::{is_xml_extension, parse_xml_on_demand};
+use super::parser_xml::{is_xml_extension, parse_xml_on_demand, parse_xml_on_demand_with_warnings};
 use crate::definitions::DefinitionKind;
 
 // ─── is_xml_extension ───────────────────────────────────────────────
@@ -457,4 +457,143 @@ fn test_parent_index_correctness() {
     assert_eq!(c1.parent_index, Some(root_idx));
     assert_eq!(c2.parent_index, Some(root_idx));
     assert!(defs[root_idx].parent_index.is_none());
+}
+
+// =========================================================================
+// Phase 2 regression tests (2026-04-17)
+// =========================================================================
+// These tests cover the walker refactor (WALKER-1/2/3/7), the `ParseResult`
+// warnings surface, and the extended extension set (vcxproj, nuspec, etc.).
+// -------------------------------------------------------------------------
+
+/// WALKER-2: even when tree-sitter cannot recover an element name from a
+/// malformed opening tag, the walker must still descend into the children
+/// so well-formed nested elements are not silently lost. A warning is
+/// recorded for the problematic node.
+#[test]
+fn test_walker_malformed_recursion() {
+    // Unterminated outer tag (missing '>') — tree-sitter-xml usually still
+    // parses the inner <Child> as an element node. We want to see it in the
+    // output regardless of what happens to <Broken.
+    let xml = "<Broken <Child>ok</Child>";
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+
+    // The malformed outer node may or may not produce a warning (depends on
+    // tree-sitter-xml's error-recovery shape), but the nested <Child> must
+    // still be captured — that's the contract we care about.
+    let child_count = result
+        .definitions
+        .iter()
+        .filter(|d| d.entry.name == "Child")
+        .count();
+    assert!(
+        child_count >= 1,
+        "WALKER-2: nested <Child> must survive malformed parent, got defs: {:?}",
+        result
+            .definitions
+            .iter()
+            .map(|d| d.entry.name.as_str())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Well-formed input must yield an empty warnings list. This is a sanity
+/// check that the warnings surface does not spuriously fire.
+#[test]
+fn test_warnings_empty_on_wellformed() {
+    let xml = r#"<Root>
+  <Child1 attr="value">text</Child1>
+  <Child2>
+    <Nested>deep</Nested>
+  </Child2>
+</Root>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+
+    assert!(
+        result.warnings.is_empty(),
+        "Well-formed XML should produce zero warnings, got: {:?}",
+        result.warnings
+    );
+    assert!(
+        !result.definitions.is_empty(),
+        "Well-formed XML should produce definitions"
+    );
+}
+
+/// WALKER-3: deeply nested XML must NEVER stack-overflow, regardless of
+/// whether tree-sitter-xml's own parser produces a deep AST or flattens it.
+/// Our walker owns a tripwire at MAX_RECURSION_DEPTH (1024) as defense in
+/// depth — this test proves the path is safe for adversarial input. If the
+/// tripwire fires, we also assert it produces a well-formed warning; if
+/// tree-sitter collapses the structure before our walker sees it, the test
+/// still passes (we care about no-panic, not about which layer defends).
+#[test]
+fn test_deeply_nested_no_stack_overflow() {
+    // Build a pathologically deep document: 2500 levels, well past our 1024
+    // tripwire so that IF tree-sitter surfaces the full depth, our limit
+    // will trip.
+    const DEPTH: usize = 2500;
+    let mut xml = String::with_capacity(DEPTH * 10);
+    for i in 0..DEPTH {
+        xml.push_str(&format!("<L{}>", i));
+    }
+    xml.push_str("inner");
+    for i in (0..DEPTH).rev() {
+        xml.push_str(&format!("</L{}>", i));
+    }
+
+    // Primary contract: no panic, no stack overflow — Result::Ok or an
+    // explicit Err with typed `XmlParseError` is acceptable. We do NOT
+    // assert on the warnings vec because tree-sitter-xml may clamp the AST
+    // depth internally, producing a shallower tree that our walker never
+    // needs to truncate.
+    let outcome = parse_xml_on_demand_with_warnings(&xml, "test.xml");
+    assert!(
+        outcome.is_ok(),
+        "Deeply nested XML must never cause a hard error; got {:?}",
+        outcome.err()
+    );
+
+    // Secondary contract: IF a depth warning is present, its message must be
+    // well-formed (contains the sentinel text the caller surfaces to users).
+    // This protects against silent regressions where the format string
+    // diverges from the one the handler matches on.
+    let result = outcome.unwrap();
+    for w in &result.warnings {
+        if w.contains("nesting exceeded") {
+            assert!(
+                w.contains("truncated"),
+                "Depth warning must mention truncation: {}",
+                w
+            );
+        }
+    }
+}
+
+// --- Extended extension set (Phase 2) ----------------------------------
+
+#[test]
+fn test_xml_extension_vcxproj() {
+    assert!(is_xml_extension("vcxproj"));
+}
+
+#[test]
+fn test_xml_extension_vbproj_fsproj() {
+    assert!(is_xml_extension("vbproj"));
+    assert!(is_xml_extension("fsproj"));
+}
+
+#[test]
+fn test_xml_extension_nuspec() {
+    assert!(is_xml_extension("nuspec"));
+}
+
+#[test]
+fn test_xml_extension_vsixmanifest() {
+    assert!(is_xml_extension("vsixmanifest"));
+}
+
+#[test]
+fn test_xml_extension_appxmanifest() {
+    assert!(is_xml_extension("appxmanifest"));
 }
