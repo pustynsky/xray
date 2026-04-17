@@ -122,7 +122,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
                     dir: dir.clone(),
                     max_age_hours: 24,
                     hidden: false,
-                    no_ignore: false, respect_git_exclude: false,
+                    no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
                     threads: 0,
                 }) {
                     Ok(idx) => idx,
@@ -143,7 +143,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
                 dir: server_dir.clone(),
                 max_age_hours: 24,
                 hidden: false,
-                no_ignore: false, respect_git_exclude: false,
+                no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
                 threads: 0,
             }) {
                 Ok(idx) => idx,

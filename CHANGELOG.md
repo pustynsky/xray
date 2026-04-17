@@ -1,5 +1,13 @@
 # Changelog
 
+### Bug Fixes
+
+- **`--respect-git-exclude` silently dropped on index rebuild** — The `--respect-git-exclude` flag on `xray serve` was only honored during the initial content-index build. Any subsequent rebuild path silently reverted to `respect_git_exclude=false`, meaning files listed in `.git/info/exclude` leaked back into the index after `xray_reindex`, workspace switch (via `roots/list` or manual `xray_reindex dir=new`), the MCP file-list auto-rebuild, or the CLI stale-index auto-rebuild for `xray fast` / `xray grep`. The flag is now propagated end-to-end:
+  - `HandlerContext` gained a `respect_git_exclude: bool` field, populated from `ServeArgs.respect_git_exclude` at server start. All 5 MCP rebuild call-sites (`mod.rs` reindex × 2, workspace switch background build, `fast.rs` auto-rebuild × 2) now read from `ctx.respect_git_exclude` instead of hardcoded `false`.
+  - `FastArgs` and `GrepArgs` gained `--respect-git-exclude` flags (default `false`, matching `IndexArgs` / `ContentIndexArgs` / `ServeArgs`). All 4 CLI auto-rebuild call-sites in `cmd_fast` and `load_grep_index` now read from `args.respect_git_exclude`.
+  - The only remaining hardcoded `false` is in the hidden test helper `cmd_test_create_stale_index` (E2E test utility), with an explicit comment documenting the intent.
+  - 8 new regression tests: CLI parser tests for `FastArgs`, `GrepArgs`, `ServeArgs` (default + flag set) and `HandlerContext::default()` / field-settable tests. All 1781 unit tests pass.
+
 ### Features
 
 - **Symlink support and `.git/info/exclude` handling** — Three changes to improve indexing of symlinked directories and locally-excluded files:
@@ -7,7 +15,7 @@
   2. **`.git/info/exclude` not respected by default** — `git_exclude(false)` is now the default for all walkers. Files listed in `.git/info/exclude` (personal notes, local configs) are indexed. `.gitignore` is still respected (node_modules, bin, obj are excluded). Rationale: `.gitignore` contains project-level build artifacts; `.git/info/exclude` contains user's local files they want to search.
   3. **`--respect-git-exclude` CLI flag** — New opt-in flag for `IndexArgs`, `ContentIndexArgs`, and `ServeArgs`. When set, restores the old behavior of respecting `.git/info/exclude`. Default: `false`.
   - Circular symlinks are safe — the `ignore` crate handles cycle detection via inode tracking.
-  - Known limitation: `--respect-git-exclude` is not propagated to watcher/reconciler or MCP reindex handler (hardcoded to `false`). Tracked in `docs/todo_approved_2026-04-16_args-default-refactor.md`.
+  - Propagation through all rebuild paths (MCP reindex, workspace switch, CLI auto-rebuild) was added in the 2026-04-17 Bug Fix entry above.
   - 2 new symlink unit tests. All 1773 unit tests + 68 E2E tests pass.
 
 - **Improved `phrase` parameter discoverability in `xray_grep`** — Updated tool schema description and `xray_help` tips to explicitly document that `phrase=true` performs literal string matching on raw file content, including XML tags, angle brackets, and other punctuation without escaping. Added XML example (`<MaxRetries>3</MaxRetries>`). This prevents LLMs from falling back to built-in search tools when searching XML/config content. Bumped `XRAY_HELP_MIN_RESPONSE_BYTES` from 32KB to 48KB to prevent response truncation with longer descriptions. New test: `test_phrase_postfilter_xml_full_tag`.

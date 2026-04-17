@@ -139,6 +139,9 @@ pub fn run() {
 fn cmd_test_create_stale_index(args: TestCreateStaleIndexArgs) -> Result<(), SearchError> {
     let idx_base = index_dir();
     // Build a real content index first
+    // respect_git_exclude: false is intentional — this is a test-only utility
+    // used by E2E tests to simulate stale indexes. Production paths propagate
+    // the flag from ServeArgs / CLI args; this helper does not expose it.
     let mut idx = build_content_index(&ContentIndexArgs {
         dir: args.dir.clone(),
         ext: args.ext.clone(),
@@ -262,7 +265,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
                 eprintln!("Index is stale, rebuilding...");
                 let new_index = build_index(&IndexArgs {
                     dir: args.dir.clone(), max_age_hours: idx.max_age_secs / 3600,
-                    hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
+                    hidden: false, no_ignore: false, respect_git_exclude: args.respect_git_exclude, threads: 0,
                 })?;
                 if let Err(e) = save_index(&new_index, &idx_base) {
                     eprintln!("Warning: failed to save updated index: {}", e);
@@ -279,7 +282,7 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
             eprintln!("No index found for '{}'. Building one now...", args.dir);
             let new_index = build_index(&IndexArgs {
                 dir: args.dir.clone(), max_age_hours: 24,
-                hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
+                hidden: false, no_ignore: false, respect_git_exclude: args.respect_git_exclude, threads: 0,
             })?;
             if let Err(e) = save_index(&new_index, &idx_base) {
                 eprintln!("Warning: failed to save index: {}", e);
@@ -397,6 +400,7 @@ fn load_grep_index(
     dir: &str,
     ext: &Option<String>,
     auto_reindex: bool,
+    respect_git_exclude: bool,
 ) -> Result<(ContentIndex, Duration), SearchError> {
     let start = Instant::now();
     let idx_base = index_dir();
@@ -409,7 +413,7 @@ fn load_grep_index(
                 let ext_str = idx.extensions.join(",");
                 let new_idx = build_content_index(&ContentIndexArgs {
                     dir: dir.to_string(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
-                    hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                    hidden: false, no_ignore: false, respect_git_exclude, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 })?;
                 let _ = save_content_index(&new_idx, &idx_base);
                 new_idx
@@ -431,7 +435,7 @@ fn load_grep_index(
                 eprintln!("Auto-rebuilding content index for '{}' (ext={})...", dir, rebuild_ext);
                 match build_content_index(&ContentIndexArgs {
                     dir: dir.to_string(), ext: rebuild_ext,
-                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false,
+                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
                     threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 }) {
                     Ok(new_idx) => {
@@ -718,7 +722,7 @@ fn score_grep_results(
 
 fn cmd_grep(args: GrepArgs) -> Result<(), SearchError> {
     let start = Instant::now();
-    let (index, load_elapsed) = load_grep_index(&args.dir, &args.ext, args.auto_reindex)?;
+    let (index, load_elapsed) = load_grep_index(&args.dir, &args.ext, args.auto_reindex, args.respect_git_exclude)?;
     let search_start = Instant::now();
 
     // Default: substring search (like MCP). Disabled by --exact, --regex, or --phrase.

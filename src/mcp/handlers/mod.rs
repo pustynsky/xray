@@ -745,6 +745,10 @@ pub struct HandlerContext {
     pub watch_enabled: bool,
     /// Debounce milliseconds for the file watcher.
     pub watch_debounce_ms: u64,
+    /// Whether to respect .git/info/exclude when rebuilding content / file-list
+    /// indexes via MCP (xray_reindex, workspace switch, file-list auto-rebuild).
+    /// Initialized from `ServeArgs.respect_git_exclude` at server startup.
+    pub respect_git_exclude: bool,
 }
 
 impl HandlerContext {
@@ -784,6 +788,7 @@ impl Default for HandlerContext {
             watcher_generation: Arc::new(AtomicU64::new(0)),
             watch_enabled: false,
             watch_debounce_ms: 500,
+            respect_git_exclude: false,
         }
     }
 }
@@ -1217,7 +1222,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
             ext: ext.clone(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: false, respect_git_exclude: false,
+            no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
             threads: 0,
             min_token_len: DEFAULT_MIN_TOKEN_LEN,
         }) {
@@ -1254,7 +1259,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
                 warn!(error = %e, "Failed to reload content index from disk after reindex, rebuilding");
                 match build_content_index(&ContentIndexArgs {
                     dir: dir.to_string(), ext: ext.clone(),
-                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false,
+                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
                     threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 }) {
                     Ok(idx) => idx,
@@ -1669,6 +1674,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
             let bg_ready = Arc::clone(&ctx.content_ready);
             let bg_building = Arc::clone(&ctx.content_building);
             let bg_file_dirty = Arc::clone(&ctx.file_index_dirty);
+            let bg_respect_git_exclude = ctx.respect_git_exclude;
             std::thread::spawn(move || {
                 if bg_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
                     return;
@@ -1676,7 +1682,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
                 info!(dir = %bg_dir, "Building content index in background (workspace switch)");
                 match build_content_index(&ContentIndexArgs {
                     dir: bg_dir.clone(), ext: bg_ext.clone(),
-                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false,
+                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: bg_respect_git_exclude,
                     threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 }) {
                     Ok(idx) => {

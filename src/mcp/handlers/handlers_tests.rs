@@ -95,8 +95,25 @@ fn test_handler_context_field_count_guard() {
         watcher_generation: Arc::new(AtomicU64::new(0)),
         watch_enabled: false,
         watch_debounce_ms: 500,
+        respect_git_exclude: false,
     };
     drop(_guard);
+}
+
+#[test]
+fn test_handler_context_default_respect_git_exclude_false() {
+    let ctx = HandlerContext::default();
+    assert!(!ctx.respect_git_exclude,
+        "HandlerContext::default() must set respect_git_exclude to false to match CLI/MCP defaults");
+}
+
+#[test]
+fn test_handler_context_respect_git_exclude_settable() {
+    // Ensures the field is publicly settable so serve.rs can initialize it
+    // from ServeArgs.respect_git_exclude (guards against accidental private visibility).
+    let mut ctx = HandlerContext::default();
+    ctx.respect_git_exclude = true;
+    assert!(ctx.respect_git_exclude);
 }
 
 /// Verify that Default creates correct values for test-critical fields.
