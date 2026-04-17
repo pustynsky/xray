@@ -1,9 +1,20 @@
 //! CLI argument structs for all subcommands.
+//!
+//! Every *Args struct with user-facing CLI flags provides an `impl Default`
+//! that mirrors clap `default_value` attributes. This enables
+//! `..Default::default()` in tests (reduces boilerplate when adding new
+//! fields). A drift-test in `args_defaults_tests` ensures every manual
+//! `impl Default` stays in sync with clap defaults — if you change a
+//! `default_value` attribute, update `impl Default` or the drift test will
+//! fail.
+//!
+//! Note: `..Default::default()` is only used in **tests**. Production code
+//! should continue to list all fields explicitly for readability.
 
 use clap::Parser;
 
 
-#[derive(Parser, Debug)]
+#[derive(Parser, Debug, PartialEq)]
 pub struct IndexArgs {
     /// Directory to index
     #[arg(short, long, default_value = ".")]
@@ -30,7 +41,20 @@ pub struct IndexArgs {
     pub threads: usize,
 }
 
-#[derive(Parser, Debug)]
+impl Default for IndexArgs {
+    fn default() -> Self {
+        Self {
+            dir: ".".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            respect_git_exclude: false,
+            threads: 0,
+        }
+    }
+}
+
+#[derive(Parser, Debug, PartialEq)]
 pub struct FastArgs {
     /// Search pattern (substring or regex with --regex)
     pub pattern: String,
@@ -81,7 +105,26 @@ pub struct FastArgs {
     pub respect_git_exclude: bool,
 }
 
-#[derive(Parser, Debug)]
+impl Default for FastArgs {
+    fn default() -> Self {
+        Self {
+            pattern: String::new(),
+            dir: ".".to_string(),
+            regex: false,
+            ignore_case: false,
+            count: false,
+            ext: None,
+            auto_reindex: true,
+            dirs_only: false,
+            files_only: false,
+            min_size: None,
+            max_size: None,
+            respect_git_exclude: false,
+        }
+    }
+}
+
+#[derive(Parser, Debug, PartialEq)]
 pub struct ContentIndexArgs {
     /// Directory to index
     #[arg(short, long, default_value = ".")]
@@ -114,6 +157,21 @@ pub struct ContentIndexArgs {
     /// Minimum token length to index (default: 2)
     #[arg(long, default_value = "2")]
     pub min_token_len: usize,
+}
+
+impl Default for ContentIndexArgs {
+    fn default() -> Self {
+        Self {
+            dir: ".".to_string(),
+            ext: "cs".to_string(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            respect_git_exclude: false,
+            threads: 0,
+            min_token_len: 2,
+        }
+    }
 }
 
 #[derive(Parser, Debug)]
@@ -200,6 +258,7 @@ HOW IT WORKS:
   5. With --watch: file changes update both indexes incrementally (<1s/file)
   6. Logging goes to stderr (never pollutes JSON-RPC on stdout)
 "#)]
+#[derive(PartialEq)]
 pub struct ServeArgs {
     /// Directory to index and serve.
     #[arg(short, long, default_value = ".")]
@@ -248,7 +307,24 @@ pub struct ServeArgs {
     pub respect_git_exclude: bool,
 }
 
-#[derive(Parser, Debug)]
+impl Default for ServeArgs {
+    fn default() -> Self {
+        Self {
+            dir: ".".to_string(),
+            ext: vec!["cs".to_string()],
+            watch: false,
+            debounce_ms: 500,
+            log_level: "info".to_string(),
+            definitions: false,
+            metrics: false,
+            max_response_kb: 16,
+            debug_log: false,
+            respect_git_exclude: false,
+        }
+    }
+}
+
+#[derive(Parser, Debug, PartialEq)]
 #[command(after_long_help = r#"EXAMPLES:
   Single term:     xray grep "HttpClient" -d C:\Projects -e cs
   Multi-term OR:   xray grep "HttpClient,ILogger,Task" -d C:\Projects -e cs
@@ -345,4 +421,75 @@ pub struct GrepArgs {
     /// (by default xray ignores it so local-excluded files are indexed)
     #[arg(long)]
     pub respect_git_exclude: bool,
+}
+
+impl Default for GrepArgs {
+    fn default() -> Self {
+        Self {
+            pattern: String::new(),
+            dir: ".".to_string(),
+            count: false,
+            show_lines: false,
+            auto_reindex: true,
+            ext: None,
+            max_results: 50,
+            all: false,
+            regex: false,
+            exclude_dir: Vec::new(),
+            exclude: Vec::new(),
+            context: 0,
+            before: 0,
+            after: 0,
+            phrase: false,
+            exact: false,
+            respect_git_exclude: false,
+        }
+    }
+}
+
+#[cfg(test)]
+mod args_defaults_tests {
+    //! Drift-tests: ensure manual `impl Default` stays in sync with clap
+    //! `default_value` attributes. If you change a clap default, update
+    //! the matching `impl Default` or these tests will fail.
+    use super::*;
+    use clap::Parser;
+
+    #[test]
+    fn index_args_default_matches_clap() {
+        let parsed = IndexArgs::parse_from(["xray"]);
+        assert_eq!(IndexArgs::default(), parsed);
+    }
+
+    #[test]
+    fn content_index_args_default_matches_clap() {
+        let parsed = ContentIndexArgs::parse_from(["xray"]);
+        assert_eq!(ContentIndexArgs::default(), parsed);
+    }
+
+    #[test]
+    fn serve_args_default_matches_clap() {
+        let parsed = ServeArgs::parse_from(["xray"]);
+        assert_eq!(ServeArgs::default(), parsed);
+    }
+
+    #[test]
+    fn fast_args_default_matches_clap() {
+        // FastArgs.pattern is a required positional — pass dummy and
+        // override pattern in Default for comparison.
+        let parsed = FastArgs::parse_from(["xray", "dummy"]);
+        let mut expected = FastArgs::default();
+        expected.pattern = "dummy".to_string();
+        assert_eq!(expected, parsed);
+    }
+
+    #[test]
+    fn grep_args_default_matches_clap() {
+        // GrepArgs.pattern is a required positional — pass dummy and
+        // override pattern in Default for comparison.
+        let parsed = GrepArgs::parse_from(["xray", "dummy"]);
+        let mut expected = GrepArgs::default();
+        expected.pattern = "dummy".to_string();
+        assert_eq!(expected, parsed);
+    }
 }

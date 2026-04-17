@@ -105,12 +105,8 @@
 
         let index = build_content_index(&ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: false, respect_git_exclude: false,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         }).unwrap();
 
         assert_eq!(index.files.len(), 2);
@@ -130,10 +126,8 @@
 
         let index = build_index(&IndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: false, respect_git_exclude: false,
             threads: 1,
+            ..Default::default()
         }).unwrap();
 
         assert!(index.entries.len() >= 2, "Should find at least 2 files");
@@ -165,10 +159,8 @@
 
         let index = build_index(&IndexArgs {
             dir: root.to_string_lossy().to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: false, respect_git_exclude: false,
             threads: 1,
+            ..Default::default()
         }).unwrap();
 
         let names: Vec<&str> = index.entries.iter()
@@ -197,11 +189,8 @@
         let index = build_content_index(&ContentIndexArgs {
             dir: root.to_string_lossy().to_string(),
             ext: "rs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: false, respect_git_exclude: false,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         }).unwrap();
 
         // The unique token should be found in the index
@@ -334,12 +323,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -380,12 +366,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -419,12 +402,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -454,12 +434,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -481,12 +458,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -524,12 +498,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -569,12 +540,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -673,15 +641,17 @@
 
         // Save a file index
         let file_idx = build_index(&IndexArgs {
-            dir: root_str.clone(), max_age_hours: 24,
-            hidden: false, no_ignore: false, respect_git_exclude: false, threads: 1,
+            dir: root_str.clone(),
+            threads: 1,
+            ..Default::default()
         }).unwrap();
         save_index(&file_idx, &idx_base).unwrap();
 
         // Save a content index
         let content_idx = build_content_index(&ContentIndexArgs {
-            dir: root_str.clone(), ext: "cs".to_string(), max_age_hours: 24,
-            hidden: false, no_ignore: false, respect_git_exclude: false, threads: 1, min_token_len: 2,
+            dir: root_str.clone(),
+            threads: 1,
+            ..Default::default()
         }).unwrap();
         save_content_index(&content_idx, &idx_base).unwrap();
 
@@ -723,14 +693,16 @@
 
         // Build indexes for both directories
         let idx_a = build_index(&IndexArgs {
-            dir: root_a.clone(), max_age_hours: 24,
-            hidden: false, no_ignore: false, respect_git_exclude: false, threads: 1,
+            dir: root_a.clone(),
+            threads: 1,
+            ..Default::default()
         }).unwrap();
         save_index(&idx_a, &idx_base).unwrap();
 
         let idx_b = build_index(&IndexArgs {
-            dir: root_b.clone(), max_age_hours: 24,
-            hidden: false, no_ignore: false, respect_git_exclude: false, threads: 1,
+            dir: root_b.clone(),
+            threads: 1,
+            ..Default::default()
         }).unwrap();
         save_index(&idx_b, &idx_base).unwrap();
 
@@ -768,12 +740,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -827,12 +796,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 
@@ -855,12 +821,9 @@
 
         let args = ContentIndexArgs {
             dir: dir.to_string_lossy().to_string(),
-            ext: "cs".to_string(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: true, respect_git_exclude: false,
+            no_ignore: true,
             threads: 1,
-            min_token_len: 2,
+            ..Default::default()
         };
         let index = build_content_index(&args).unwrap();
 

@@ -19,7 +19,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
         writeln!(f, "// {}", name).unwrap();
     }
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -115,7 +115,7 @@ fn test_xray_fast_dirs_only_and_files_only() {
     { let mut f = std::fs::File::create(&file_at_root).unwrap(); writeln!(f, "// helper").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -167,9 +167,7 @@ fn test_xray_fast_glob_ranking_uses_literal_prefix() {
         writeln!(f, "// {}", name).unwrap();
     }
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -235,9 +233,7 @@ fn test_xray_fast_multi_pattern_dirs_only_filecount() {
     }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -320,9 +316,7 @@ fn test_xray_fast_subdir_reuses_parent_index() {
 
     // Build and save a file-list index for the ROOT directory (server_dir)
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
 
@@ -385,7 +379,8 @@ fn test_xray_fast_outside_dir_still_builds_index() {
 
     // Build index for server_dir only
     let file_index = crate::build_index(&crate::IndexArgs {
-        dir: srv_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
+        dir: srv_str.clone(),
+        ..Default::default()
     }).unwrap();
     let idx_base = server_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
@@ -457,9 +452,7 @@ fn test_xray_fast_subdir_max_depth_relative_to_dir() {
 
     // Build index for ROOT
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
 
@@ -576,7 +569,7 @@ fn test_xray_fast_ranking_exact_stem_first() {
     }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -624,7 +617,7 @@ fn test_xray_fast_ranking_shorter_stem_first() {
     }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -700,7 +693,7 @@ fn test_xray_fast_wildcard_star_dirs_only() {
     { let mut f = std::fs::File::create(&tmp_dir.join("RootFile.cs")).unwrap(); writeln!(f, "// root").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -739,7 +732,7 @@ fn test_xray_fast_empty_pattern_with_dir() {
     { let mut f = std::fs::File::create(&sub.join("Inner.cs")).unwrap(); writeln!(f, "// inner").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -785,7 +778,7 @@ fn test_xray_fast_dirs_only_ignores_ext_filter() {
     { let mut f = std::fs::File::create(&file_in_sub).unwrap(); writeln!(f, "// svc").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -824,7 +817,7 @@ fn test_xray_fast_dirs_only_without_ext() {
     { let mut f = std::fs::File::create(&file_in_sub).unwrap(); writeln!(f, "// ctrl").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -856,7 +849,7 @@ fn test_xray_fast_files_only_with_ext_still_filters() {
     { let mut f = std::fs::File::create(&tmp_dir.join("Report.txt")).unwrap(); writeln!(f, "// txt").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -918,9 +911,7 @@ fn test_xray_fast_dirsonly_wildcard_filecount() {
     }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -996,9 +987,7 @@ fn test_xray_fast_dirsonly_non_wildcard_has_filecount() {
     { let mut f = std::fs::File::create(sub.join("Svc.cs")).unwrap(); writeln!(f, "// svc").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -1048,9 +1037,7 @@ fn test_xray_fast_max_depth() {
     { let mut f = std::fs::File::create(deep.join("inner.rs")).unwrap(); writeln!(f, "// inner").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["rs".to_string()], ..Default::default() };
@@ -1113,9 +1100,7 @@ fn test_xray_fast_dirsonly_truncation_hint() {
     }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -1169,9 +1154,7 @@ fn test_xray_fast_max_depth_server_dir_mismatch() {
     { let mut f = std::fs::File::create(sub.join("b.rs")).unwrap(); writeln!(f, "// b").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["rs".to_string()], ..Default::default() };
@@ -1242,9 +1225,7 @@ fn test_xray_fast_filecount_with_subdir() {
     }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -1331,9 +1312,7 @@ fn test_xray_fast_filecount_with_absolute_dir() {
     }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -1396,7 +1375,8 @@ fn test_xray_fast_filecount_when_dir_equals_root() {
     // Build index specifically for the src/ subdirectory (simulates load_index("src"))
     let src_str = src.to_string_lossy().to_string();
     let file_index = crate::build_index(&crate::IndexArgs {
-        dir: src_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
+        dir: src_str.clone(),
+        ..Default::default()
     }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
@@ -1470,9 +1450,7 @@ fn test_xray_fast_max_results_truncation() {
     }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs {
-        dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0,
-    }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = crate::ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -1546,7 +1524,7 @@ fn test_xray_fast_relative_dir_subdir_search() {
     { let mut f = std::fs::File::create(tmp_dir.join("README.md")).unwrap(); writeln!(f, "# README").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
@@ -1590,7 +1568,7 @@ fn test_xray_fast_relative_dir_pattern_search() {
     { let mut f = std::fs::File::create(models_dir.join("UserModel.cs")).unwrap(); writeln!(f, "// UserModel").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
-    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: false, threads: 0 }).unwrap();
+    let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
     let idx_base = tmp_dir.join(".index");
     let _ = crate::save_index(&file_index, &idx_base);
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
