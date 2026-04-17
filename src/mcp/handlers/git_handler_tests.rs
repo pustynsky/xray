@@ -186,10 +186,40 @@ fn test_git_history_cli_nonexistent_file_has_warning() {
     );
     let warning = output["warning"].as_str().unwrap();
     assert!(
-        warning.contains("File not found in git"),
-        "Warning should mention 'File not found in git', got: {}",
+        warning.contains("File never tracked in git"),
+        "Warning should mention 'File never tracked in git' (post-2026-04-17 wording), got: {}",
         warning
     );
+}
+
+#[test]
+fn test_annotate_empty_git_result_writes_warning_at_top_level() {
+    // Regression: pin JSON contract -- `warning` and `info` are TOP-LEVEL fields,
+    // NOT nested under `summary`. Documented in docs/mcp-guide.md, docs/e2e/git-tests.md,
+    // and src/tips.rs. Moving them under `summary` would silently break LLM consumers
+    // that rely on documented field placement.
+    let ctx = make_git_test_ctx();
+    let args = json!({
+        "repo": ".",
+        "file": "nonexistent_file_xyz_abc_123.rs"
+    });
+    let result = handle_git_history(&ctx, &args, false);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(
+        output.get("warning").is_some(),
+        "`warning` MUST be at top level of the response, got: {}",
+        serde_json::to_string_pretty(&output).unwrap()
+    );
+    if let Some(summary) = output.get("summary") {
+        assert!(
+            summary.get("warning").is_none(),
+            "`warning` MUST NOT be nested under `summary` (top-level placement is the documented contract)"
+        );
+        assert!(
+            summary.get("info").is_none(),
+            "`info` MUST NOT be nested under `summary` (top-level placement is the documented contract)"
+        );
+    }
 }
 
 #[test]
@@ -389,8 +419,8 @@ fn test_git_authors_nonexistent_file_has_warning() {
     );
     let warning = output["warning"].as_str().unwrap();
     assert!(
-        warning.contains("File not found in git"),
-        "Warning should mention 'File not found in git', got: {}",
+        warning.contains("File never tracked in git"),
+        "Warning should mention 'File never tracked in git' (post-2026-04-17 wording), got: {}",
         warning
     );
 }
@@ -432,8 +462,8 @@ fn test_git_activity_nonexistent_path_has_warning() {
     );
     let warning = output["warning"].as_str().unwrap();
     assert!(
-        warning.contains("File not found in git"),
-        "Warning should mention 'File not found in git', got: {}",
+        warning.contains("File never tracked in git"),
+        "Warning should mention 'File never tracked in git' (post-2026-04-17 wording), got: {}",
         warning
     );
 }

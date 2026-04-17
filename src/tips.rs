@@ -236,6 +236,11 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
             example: "Percentile() imported via 'using static PercentileHelper' -> xray_definitions name='Percentile' (without parent) or parent='PercentileHelper'".into(),
         },
         Tip {
+            rule: "Deleted files: xray_git_* tools cover them fully".into(),
+            why: "xray_git_history auto-falls back from --follow when a file is deleted; xray_git_activity supports includeDeleted=true. Empty results carry warning ('never existed') vs info ('deleted') -- both are definitive. Raw `git log --all --diff-filter=D` is a policy violation.".into(),
+            example: "xray_git_history file='src/old/Legacy.cs' returns full history incl. deletion commit; xray_git_activity from='2024-01-01' includeDeleted=true lists removals.".into(),
+        },
+        Tip {
             rule: "Trivial task != trivial policy check -- ALWAYS pause before built-in".into(),
             why: "The most common policy violation is on tasks that FEEL trivial (quick validation, simple fact-check, one-line read). LLM skips MANDATORY PRE-FLIGHT CHECK because 'it's just a quick search'. But quick searches are EXACTLY where xray_grep shines (countOnly=true, <1ms). Habit-driven tool selection based on tool name matching intent keyword is the #1 policy break.".into(),
             example: "User asks 'validate that code has no X'. Reaching for search_files because intent contains 'search' -- VIOLATION. Correct: xray_grep terms='X' countOnly=true.".into(),
@@ -286,6 +291,18 @@ pub fn strategies() -> Vec<Strategy> {
             anti_patterns: &[
                 "Don't use read_file to manually scan for the method -- containsLine finds it instantly with proper class context",
                 "Don't guess the method name from the stack trace -- use containsLine for precise AST-based lookup",
+            ],
+        },
+        Strategy {
+            name: "Deleted File Archaeology",
+            when: "User asks 'when was this file deleted', 'who removed it', 'show history of a file that no longer exists', or 'what files were deleted in range X'",
+            steps: &[
+                "Step 1 - History of a deleted path: xray_git_history repo='.' file='<path>' (auto --follow fallback returns the deletion commit). warning='never existed' = wrong path, NOT a limitation",
+                "Step 2 - List deletions in a range: xray_git_activity repo='.' from='<date>' includeDeleted=true (one git ls-files spawn, no per-file overhead)",
+                "Step 3 (optional) - Owners: xray_git_authors repo='.' path='<path>'",
+            ],
+            anti_patterns: &[
+                "Don't run raw `git log --all --diff-filter=D` -- xray_git_history + includeDeleted already cover this. Empty results with warning/info are definitive answers.",
             ],
         },
         Strategy {
@@ -461,7 +478,8 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "maxResults": "50 (default). 0 = unlimited. Use with date filters for large repos",
             "author": "'john', 'john@example.com' (case-insensitive substring)",
             "message": "'fix bug', 'PR 12345', '[GI]' (case-insensitive substring)",
-            "noCache": "true -> bypass in-memory cache, query git CLI directly"
+            "noCache": "true -> bypass in-memory cache, query git CLI directly",
+            "deletedFiles": "Deleted files are FULLY supported -- auto --follow fallback returns full history. info='deleted from HEAD' = history available; warning='never existed' = wrong path. Do NOT run raw `git log --all --diff-filter=D`."
         },
         "xray_git_diff": {
             "note": "Same params as xray_git_history (except noCache — always uses CLI). Includes 'patch' field with diff lines per commit"
@@ -477,7 +495,8 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "path": "'src/controllers' — filter by directory. Aggregates across all files within. Omit for whole repo",
             "from": "'2025-01-01' — RECOMMENDED to narrow results. Without date filter, returns ALL repo activity",
             "author": "'alice' — filter by author",
-            "message": "'refactor' — filter by commit message"
+            "message": "'refactor' — filter by commit message",
+            "includeDeleted": "true -> filter to files deleted in the range (single `git ls-files` spawn + set diff). Use instead of raw `git log --all --diff-filter=D`."
         },
         "xray_git_blame": {
             "file": "'src/UserService.cs' — file path relative to repo root",
@@ -647,7 +666,10 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  \"create a new file\"                              -> xray_edit (auto-creates — Mode A with endLine:0)\n");
     out.push_str("  \"list files or subdirectories\"                   -> xray_fast pattern='*' dir='<path>' dirsOnly=true\n");
     out.push_str("  \"find a file by name\"                            -> xray_fast pattern='<name>'\n");
-    out.push_str("  \"git blame / history / authors\"                  -> xray_git_blame / xray_git_history / xray_git_authors\n\n");
+    out.push_str("  \"git blame / history / authors\"                  -> xray_git_blame / xray_git_history / xray_git_authors (works for BOTH existing AND deleted files)\n");
+    out.push_str("  \"history of a file that was DELETED/removed\"     -> xray_git_history repo='.' file='<path>' (auto-falls back from --follow; do NOT run raw git log --all --diff-filter=D)\n");
+    out.push_str("  \"who deleted a file / when was it removed\"       -> xray_git_history repo='.' file='<path>' (returns full history of deleted files including the deletion commit)\n");
+    out.push_str("  \"show activity including deleted files\"         -> xray_git_activity repo='.' from='YYYY-MM-DD' includeDeleted=true\n\n");
 
     // (TASK ROUTING removed — 100% duplicate of INTENT -> TOOL MAPPING above.
     //  All entries from TASK ROUTING are now implicit in the INTENT mapping.
@@ -723,7 +745,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("   2. If hint suggests another xray tool → use that tool immediately\n");
     out.push_str("   3. If hint suggests different parameters → retry with those parameters\n");
     out.push_str("   4. NEVER fall back to built-in tools (list_files, list_directory, directory_tree) as error recovery\n");
-    out.push_str("   5. Only use built-in tools if the file type is NOT indexed by xray\n\n");
+    out.push_str("   5. Only use built-in tools if the file type is NOT indexed by xray\n");
+    out.push_str("   6. GIT: warning ('never existed') / info ('deleted') ARE the answer — do NOT fall back to raw `git log --all --diff-filter=D`. xray_git_* covers deleted files via auto --follow.\n\n");
 
     // --- Top anti-patterns (extracted from strategy recipes) ---
     out.push_str("ANTI-PATTERNS (most common mistakes — each one wastes 3-5 extra tool calls):\n");

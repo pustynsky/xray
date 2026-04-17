@@ -141,12 +141,14 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 
 ## Empty Results Validation
 
-### T70: `xray_git_history` — File not in git
+### T70: `xray_git_history` — File never tracked in git
 
 **Expected:**
 
 - `totalCommits: 0`, `commits: []`
-- `warning` field: "File not found in git"
+- `warning` field starts with: "File never tracked in git: ..."
+- The warning advises to check the path spelling
+- Distinguishes 'never existed' from 'deleted' (deleted files now succeed via T-DELETED-* below)
 
 ---
 
@@ -220,6 +222,91 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 **Unit tests:** `test_git_history_no_cache_bypasses_cache`, `test_git_history_default_uses_cache`
 
 ---
+
+## Deleted Files Support (added 2026-04-17)
+
+The git tools fully support deleted files: history is preserved via an internal
+`--follow` → no-follow fallback in `file_history`, and `xray_git_activity`
+accepts `includeDeleted=true` to list files that were removed in the date range.
+
+No separate `git log --all --diff-filter=D` invocation is needed — these tools
+cover the case in a single call.
+
+### T-DELETED-01: `xray_git_history` returns full history for a deleted file
+
+**Setup:** repo with a file that was added in commit A, modified in commit B,
+deleted in commit C.
+
+**Call:** `xray_git_history repo='.' file='<deleted_path>'`
+
+**Expected:**
+
+- `totalCommits >= 3` (add + modify + delete commits all returned)
+- `commits` array contains the delete commit (message includes "delete" or similar)
+- `info` field present, mentioning "not in current HEAD" and "NOT an error"
+- `warning` field is ABSENT (this is not a wrong-path case)
+
+**Unit tests:** `git::tests::test_file_history_returns_commits_for_deleted_file`,
+`git::tests::test_file_ever_existed_in_git_accepts_deleted`
+
+---
+
+### T-DELETED-02: `xray_git_history` distinguishes 'never existed' from 'deleted'
+
+**Call:** `xray_git_history repo='.' file='never_committed.txt'`
+
+**Expected:**
+
+- `totalCommits: 0`, `commits: []`
+- `warning` present ("File never tracked in git: ...")
+- `info` ABSENT
+
+**Unit test:** `git::tests::test_file_history_returns_empty_for_never_existed_file`
+
+---
+
+### T-DELETED-03: `xray_git_activity` with `includeDeleted=true` filters to deleted files only
+
+**Call:** `xray_git_activity repo='.' from='2024-01-01' includeDeleted=true`
+
+**Expected:**
+
+- `summary.includeDeleted: true`
+- `summary.hint` mentions "NOT in current HEAD"
+- The activity list contains ONLY files that are not in current HEAD
+  (compared to the same call without `includeDeleted`, the count is strictly lower
+  when at least one returned file still exists)
+
+**Performance invariant:** the implementation MUST issue exactly ONE `git ls-files`
+spawn (single call to `git::list_tracked_files_under`), regardless of how many
+files are in the activity result. A per-file existence check would scale poorly
+for large repos.
+
+**Unit tests:**
+- `mcp::handlers::tests_git::test_git_activity_include_deleted_default_false`
+- `mcp::handlers::tests_git::test_git_activity_include_deleted_true_sets_field_and_hint`
+- `mcp::handlers::tests_git::test_git_activity_include_deleted_filters_existing_files_in_real_repo`
+- `git::tests::test_list_tracked_files_under_excludes_deleted`
+- `git::tests::test_list_tracked_files_under_bad_repo_returns_empty`
+
+---
+
+### T-DELETED-04: `file_exists_in_current_head` rejects deleted files
+
+**Setup:** temp repo where `legacy.txt` is added then deleted.
+
+**Expected:**
+
+- `file_exists_in_current_head(repo, "legacy.txt") == false`
+- `file_exists_in_current_head(repo, "survivor.txt") == true`
+- `file_ever_existed_in_git(repo, "legacy.txt") == true`
+- `file_ever_existed_in_git(repo, "never_added.txt") == false`
+
+**Unit tests:** `git::tests::test_file_exists_in_current_head_rejects_deleted`,
+`git::tests::test_file_ever_existed_in_git_accepts_deleted`
+
+---
+
 
 ## Git History Cache — Unit Tests
 

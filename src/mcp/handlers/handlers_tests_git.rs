@@ -243,3 +243,70 @@ fn test_git_history_cached_reversed_dates_returns_error() {
     assert!(result.content[0].text.contains("after"),
         "Error should mention 'after', got: {}", result.content[0].text);
 }
+
+
+// ─── includeDeleted parameter (cache path) ──────────────────────────
+// Verifies that includeDeleted=true is wired through the cache code path,
+// surfaces the includeDeleted field in summary, and updates the hint text.
+// The actual file-set filtering uses git::list_tracked_files_under under
+// the hood (single `git ls-files` spawn — see git_tests::test_list_tracked_files_under_*).
+
+#[test]
+fn test_git_activity_include_deleted_default_false() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "xray_git_activity", &json!({
+        "repo": "."
+    }));
+    assert!(!result.is_error, "xray_git_activity should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let include_deleted = output["summary"]["includeDeleted"].as_bool();
+    assert_eq!(include_deleted, Some(false), "includeDeleted must default to false, got {:?}", include_deleted);
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(!hint.contains("NOT in current HEAD"),
+        "default hint should NOT mention 'NOT in current HEAD', got: {}", hint);
+}
+
+#[test]
+fn test_git_activity_include_deleted_true_sets_field_and_hint() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "xray_git_activity", &json!({
+        "repo": ".",
+        "includeDeleted": true
+    }));
+    assert!(!result.is_error, "xray_git_activity should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let include_deleted = output["summary"]["includeDeleted"].as_bool();
+    assert_eq!(include_deleted, Some(true), "includeDeleted=true must round-trip into summary, got {:?}", include_deleted);
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("NOT in current HEAD"),
+        "hint should mention 'NOT in current HEAD' when includeDeleted=true, got: {}", hint);
+}
+
+#[test]
+fn test_git_activity_include_deleted_filters_existing_files_in_real_repo() {
+    // Mock cache references src/main.rs, Cargo.toml, src/lib.rs — all of which
+    // EXIST in the current xray repo. With includeDeleted=true the activity
+    // list MUST be filtered down (these files are not deleted).
+    let ctx = make_ctx_with_git_cache();
+    let baseline = dispatch_tool(&ctx, "xray_git_activity", &json!({
+        "repo": "."
+    }));
+    assert!(!baseline.is_error);
+    let baseline_out: Value = serde_json::from_str(&baseline.content[0].text).unwrap();
+    let baseline_count = baseline_out["activity"].as_array().unwrap().len();
+    assert!(baseline_count > 0, "baseline must have files");
+
+    let filtered = dispatch_tool(&ctx, "xray_git_activity", &json!({
+        "repo": ".",
+        "includeDeleted": true
+    }));
+    assert!(!filtered.is_error);
+    let filtered_out: Value = serde_json::from_str(&filtered.content[0].text).unwrap();
+    let filtered_count = filtered_out["activity"].as_array().unwrap().len();
+
+    // src/main.rs and Cargo.toml exist in HEAD -> filtered out by includeDeleted=true.
+    // src/lib.rs also exists. So filtered_count should be strictly less than baseline_count.
+    assert!(filtered_count < baseline_count,
+        "includeDeleted=true must filter out files that exist in current HEAD (baseline={}, filtered={})",
+        baseline_count, filtered_count);
+}

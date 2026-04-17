@@ -479,13 +479,13 @@ fn test_parse_date_filter_correct_order_is_ok() {
 #[test]
 fn test_file_exists_in_git_tracked_file() {
     // Cargo.toml is tracked in the search repo
-    assert!(file_exists_in_git(".", "Cargo.toml"), "Cargo.toml should be tracked in git");
+    assert!(file_exists_in_current_head(".", "Cargo.toml"), "Cargo.toml should be tracked in git");
 }
 
 #[test]
 fn test_file_exists_in_git_nonexistent_file() {
     assert!(
-        !file_exists_in_git(".", "nonexistent_file_xyz_abc_123.rs"),
+        !file_exists_in_current_head(".", "nonexistent_file_xyz_abc_123.rs"),
         "Nonexistent file should not be tracked in git"
     );
 }
@@ -493,7 +493,150 @@ fn test_file_exists_in_git_nonexistent_file() {
 #[test]
 fn test_file_exists_in_git_bad_repo() {
     assert!(
-        !file_exists_in_git("C:\\nonexistent\\repo\\path\\xyz", "file.rs"),
+        !file_exists_in_current_head("C:\\nonexistent\\repo\\path\\xyz", "file.rs"),
         "Bad repo should return false"
+    );
+}
+
+
+// ─── Deleted file support tests ──────────────────────────────────────
+// These tests create a temporary git repo with a file that is added,
+// modified, then deleted. They verify:
+//   * file_exists_in_current_head returns false for the deleted file
+//   * file_ever_existed_in_git returns true for the deleted file
+//   * file_history (with internal --follow fallback) returns all commits
+//   * list_tracked_files_under returns only files that currently exist in HEAD
+
+#[cfg(test)]
+fn run_git(repo: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "Test Author")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test Author")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("failed to run git");
+    assert!(status.success(), "git {:?} failed", args);
+}
+
+#[cfg(test)]
+fn setup_repo_with_deleted_file() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("create tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "test@example.com"]);
+    run_git(repo, &["config", "user.name", "Test Author"]);
+    // Create and commit a file that will survive.
+    std::fs::write(repo.join("survivor.txt"), "survivor v1\n").expect("write survivor.txt");
+    run_git(repo, &["add", "survivor.txt"]);
+    run_git(repo, &["commit", "-m", "add survivor", "--quiet"]);
+    // Create a file that will be deleted.
+    std::fs::write(repo.join("legacy.txt"), "legacy v1\n").expect("write legacy.txt");
+    run_git(repo, &["add", "legacy.txt"]);
+    run_git(repo, &["commit", "-m", "add legacy", "--quiet"]);
+    std::fs::write(repo.join("legacy.txt"), "legacy v2\n").expect("update legacy.txt");
+    run_git(repo, &["commit", "-am", "modify legacy", "--quiet"]);
+    // Delete the file.
+    std::fs::remove_file(repo.join("legacy.txt")).expect("remove legacy.txt");
+    run_git(repo, &["commit", "-am", "delete legacy", "--quiet"]);
+    dir
+}
+
+#[test]
+fn test_file_exists_in_current_head_rejects_deleted() {
+    let dir = setup_repo_with_deleted_file();
+    let repo = dir.path().to_str().expect("repo path utf-8");
+    assert!(
+        !file_exists_in_current_head(repo, "legacy.txt"),
+        "legacy.txt was deleted -- should not be in current HEAD"
+    );
+    assert!(
+        file_exists_in_current_head(repo, "survivor.txt"),
+        "survivor.txt is still in HEAD"
+    );
+}
+
+#[test]
+fn test_file_ever_existed_in_git_accepts_deleted() {
+    let dir = setup_repo_with_deleted_file();
+    let repo = dir.path().to_str().expect("repo path utf-8");
+    assert!(
+        file_ever_existed_in_git(repo, "legacy.txt"),
+        "legacy.txt was deleted but must still be recognised by file_ever_existed_in_git"
+    );
+    assert!(
+        file_ever_existed_in_git(repo, "survivor.txt"),
+        "survivor.txt exists in HEAD -- must also return true"
+    );
+    assert!(
+        !file_ever_existed_in_git(repo, "never_added.txt"),
+        "never_added.txt was never committed -- must return false"
+    );
+}
+
+#[test]
+fn test_file_history_returns_commits_for_deleted_file() {
+    // Critical scenario: deleted file must still yield history via --follow fallback.
+    let dir = setup_repo_with_deleted_file();
+    let repo = dir.path().to_str().expect("repo path utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (commits, _) = file_history(repo, "legacy.txt", &filter, false, 50, None, None)
+        .expect("file_history must succeed for deleted file");
+    // We expect 3 commits: add, modify, delete.
+    assert!(
+        commits.len() >= 3,
+        "deleted file must return full history (expected >= 3, got {})",
+        commits.len()
+    );
+    // The delete commit must be among them.
+    assert!(
+        commits.iter().any(|c| c.message.contains("delete legacy")),
+        "history for deleted file must include the delete commit. Got: {:?}",
+        commits.iter().map(|c| &c.message).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn test_file_history_returns_empty_for_never_existed_file() {
+    let dir = setup_repo_with_deleted_file();
+    let repo = dir.path().to_str().expect("repo path utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (commits, _) = file_history(repo, "never_here.txt", &filter, false, 50, None, None)
+        .expect("file_history succeeds but returns empty for never-existed file");
+    assert!(
+        commits.is_empty(),
+        "never-existed file must return empty history"
+    );
+}
+
+#[test]
+fn test_list_tracked_files_under_excludes_deleted() {
+    let dir = setup_repo_with_deleted_file();
+    let repo = dir.path().to_str().expect("repo path utf-8");
+    let tracked = list_tracked_files_under(repo, ".");
+    assert!(
+        tracked.contains("survivor.txt"),
+        "survivor.txt must be in tracked set, got {:?}",
+        tracked
+    );
+    assert!(
+        !tracked.contains("legacy.txt"),
+        "legacy.txt is deleted -- must NOT appear in tracked set, got {:?}",
+        tracked
+    );
+}
+
+#[test]
+fn test_list_tracked_files_under_bad_repo_returns_empty() {
+    let tracked = list_tracked_files_under("C:\\nonexistent\\repo\\path\\xyz", ".");
+    assert!(
+        tracked.is_empty(),
+        "bad repo must return empty set, got {:?}",
+        tracked
     );
 }

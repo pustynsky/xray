@@ -24,17 +24,51 @@ use crate::mcp::protocol::ToolCallResult;
 use super::HandlerContext;
 use super::utils::json_to_string;
 
+/// Emit a warning or info field on the response depending on the file's git history state.
+///
+/// - If the file was never tracked → warning (user likely typed wrong path).
+/// - If the file was tracked but is not in current HEAD → info (file was deleted; historical
+///   data may still be available from cache or CLI — this is NOT an error).
+/// - If the file IS in current HEAD but returned 0 results → nothing added (genuine empty
+///   result within the applied filters, e.g., date range).
+///
+/// Called from ALL 6 validation points across the three handlers (history, authors, activity)
+/// to give consistent messaging. See user story 2026-04-17_git-deleted-files-support.md.
+fn annotate_empty_git_result(output: &mut Value, repo: &str, path: &str, total_count_label: usize) {
+    if path.is_empty() {
+        return;
+    }
+    if git::file_exists_in_current_head(repo, path) {
+        // File is tracked right now; empty result is just a filter miss, not a path problem.
+        return;
+    }
+    if git::file_ever_existed_in_git(repo, path) {
+        output["info"] = json!(format!(
+            "File '{}' is not in current HEAD (deleted or moved). \
+             Showing {} historical commit(s). This is NOT an error — xray_git_* tools \
+             cover deleted files. Do NOT fall back to raw `git log --all --diff-filter=D`.",
+            path, total_count_label
+        ));
+    } else {
+        output["warning"] = json!(format!(
+            "File never tracked in git: '{}'. Check the path spelling. \
+             If the file was deleted long ago, the exact historical path may differ.",
+            path
+        ));
+    }
+}
+
 /// Return tool definitions for all git history tools.
 pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition> {
     vec![
         crate::mcp::protocol::ToolDefinition {
             name: "xray_git_history".to_string(),
-            description: "Get commit history for a specific file in a git repository. Returns a list of commits that modified the file, with hash, date, author, and message. Use date filters to narrow results. Uses in-memory cache for sub-millisecond responses when available, falls back to git CLI.".to_string(),
+            description: "Get commit history for a specific file in a git repository. Works for BOTH existing AND deleted files (cache covers full branch history; CLI fallback auto-retries without --follow for deleted files). Returns a list of commits that modified the file, with hash, date, author, and message. Use date filters to narrow results. Uses in-memory cache for sub-millisecond responses when available, falls back to git CLI. If the file was deleted from current HEAD, the response includes an 'info' field — this is NOT an error. NEVER fall back to raw `git log --all --diff-filter=D` — this tool covers deleted files directly.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string", "description": "Path to git repository" },
-                    "file": { "type": "string", "description": "File path relative to repo root" },
+                    "file": { "type": "string", "description": "File path relative to repo root. Works for both currently-tracked AND deleted files." },
                     "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive)" },
                     "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
                     "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
@@ -66,7 +100,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
         },
         crate::mcp::protocol::ToolDefinition {
             name: "xray_git_authors".to_string(),
-            description: "Get top authors/contributors for a file or directory, ranked by number of commits. Shows who changed this path the most, with commit count and date range. For directories, aggregates across all files within. If no path specified, returns ownership for the entire repo.".to_string(),
+            description: "Get top authors/contributors for a file or directory, ranked by number of commits. Works for BOTH existing AND deleted files/directories. Shows who changed this path the most, with commit count and date range. For directories, aggregates across all files within (including files that have since been deleted). If no path specified, returns ownership for the entire repo.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -98,18 +132,19 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
         },
         crate::mcp::protocol::ToolDefinition {
             name: "xray_git_activity".to_string(),
-            description: "Get activity across ALL files in a repository for a date range. Returns a map of changed files with their commits. Useful for answering 'what changed this week?' Date filters are recommended to keep results manageable.".to_string(),
+            description: "Get activity across files in a repository (or specific directory) for a date range. Returns a map of changed files with their commits. Useful for answering 'what changed this week?' Includes deleted files. Use includeDeleted=true to list ONLY files removed from current HEAD (great for 'what was removed from this module'). Date filters are recommended to keep results manageable.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "repo": { "type": "string", "description": "Path to git repository" },
-                    "path": { "type": "string", "description": "Filter by file or directory path. For directories, returns activity for all files within. If omitted, returns whole-repo activity." },
+                    "path": { "type": "string", "description": "Filter by file or directory path. For directories, returns activity for all files within (including files since deleted). If omitted, returns whole-repo activity." },
                     "from": { "type": "string", "description": "Start date (YYYY-MM-DD, inclusive). Recommended." },
                     "to": { "type": "string", "description": "End date (YYYY-MM-DD, inclusive)" },
                     "date": { "type": "string", "description": "Exact date (YYYY-MM-DD), overrides from/to" },
                     "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
                     "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
-                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" }
+                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" },
+                    "includeDeleted": { "type": "boolean", "description": "If true, restrict results to files that are NOT in current HEAD (i.e., files that were deleted). Useful for 'find deleted files in <dir>'. Uses a single `git ls-files` call for efficiency. Default: false." }
                 },
                 "required": ["repo"]
             }),
@@ -307,12 +342,13 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                     }
                 });
 
-                // Empty results validation: warn if file doesn't exist in git
+                // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
+                // Files deleted from HEAD may still be in the cache (build() uses --name-only which
+                // traverses delete commits) — in that case total_count > 0 here. If total_count == 0,
+                // check whether the file ever existed to emit info vs warning. See user story
+                // 2026-04-17_git-deleted-files-support.md.
                 if total_count == 0 {
-                    let has_entries = cache.file_commits.contains_key(&normalized);
-                    if !has_entries && !git::file_exists_in_git(repo, file) {
-                        output["warning"] = json!(format!("File not found in git: {}. Check the path.", file));
-                    }
+                    annotate_empty_git_result(&mut output, repo, file, 0);
                 }
 
                 return ToolCallResult::success(json_to_string(&output));
@@ -362,9 +398,11 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                 }
             });
 
-            // Empty results validation: warn if file doesn't exist in git
-            if total_count == 0 && !git::file_exists_in_git(repo, file) {
-                output["warning"] = json!(format!("File not found in git: {}. Check the path.", file));
+            // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
+            // The CLI path now auto-retries without --follow for deleted files, so total_count
+            // may be > 0 for deleted files — we still only annotate when total_count == 0.
+            if total_count == 0 {
+                annotate_empty_git_result(&mut output, repo, file, 0);
             }
 
             ToolCallResult::success(json_to_string(&output))
@@ -437,12 +475,9 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     }
                 });
 
-                // Empty results validation: warn if file/path doesn't exist in git
-                if total_authors == 0 && !query_path.is_empty() {
-                    let has_entries = cache.file_commits.contains_key(&normalized);
-                    if !has_entries && !git::file_exists_in_git(repo, query_path) {
-                        output["warning"] = json!(format!("File not found in git: {}. Check the path.", query_path));
-                    }
+                // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
+                if total_authors == 0 {
+                    annotate_empty_git_result(&mut output, repo, query_path, 0);
                 }
 
                 return ToolCallResult::success(json_to_string(&output));
@@ -483,9 +518,9 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 }
             });
 
-            // Empty results validation: warn if file/path doesn't exist in git
-            if total_authors == 0 && !query_path.is_empty() && !git::file_exists_in_git(repo, query_path) {
-                output["warning"] = json!(format!("File not found in git: {}. Check the path.", query_path));
+            // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
+            if total_authors == 0 {
+                annotate_empty_git_result(&mut output, repo, query_path, 0);
             }
 
             ToolCallResult::success(json_to_string(&output))
@@ -507,6 +542,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let author_filter = args.get("author").and_then(|v| v.as_str());
     let message_filter = args.get("message").and_then(|v| v.as_str());
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
+    let include_deleted = args.get("includeDeleted").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path ──
     if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
@@ -523,7 +559,18 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     Err(e) => return ToolCallResult::error(e),
                 };
 
-                let activities = cache.query_activity(&normalized, from_ts, to_ts, author_filter, message_filter);
+                let mut activities = cache.query_activity(&normalized, from_ts, to_ts, author_filter, message_filter);
+
+                // includeDeleted filter: keep only files NOT in current HEAD.
+                // MUST use single git ls-files call — see user story 2026-04-17 section on
+                // performance invariant. A per-file `file_exists_in_current_head` on a 5000-file
+                // directory in a 200K-file repo would take 75-225 seconds; the single ls-files
+                // call runs in 200-700ms even on huge repos (reads only .git/index).
+                if include_deleted {
+                    let tracked = git::list_tracked_files_under(repo, query_path);
+                    activities.retain(|a| !tracked.contains(&a.file_path));
+                }
+
                 let elapsed = start.elapsed();
 
                 let total_files = activities.len();
@@ -546,16 +593,18 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                         "totalEntries": total_entries,
                         "commitsProcessed": cache.commits.len(),
                         "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
-                        "hint": "(from cache)"
+                        "hint": if include_deleted {
+                            "(from cache, filtered to files NOT in current HEAD)"
+                        } else {
+                            "(from cache)"
+                        },
+                        "includeDeleted": include_deleted
                     }
                 });
 
-                // Empty results validation: warn if path doesn't exist in git
-                if total_files == 0 && !query_path.is_empty() {
-                    let has_entries = cache.file_commits.contains_key(&normalized);
-                    if !has_entries && !git::file_exists_in_git(repo, query_path) {
-                        output["warning"] = json!(format!("File not found in git: {}. Check the path.", query_path));
-                    }
+                // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
+                if total_files == 0 {
+                    annotate_empty_git_result(&mut output, repo, query_path, 0);
                 }
 
                 return ToolCallResult::success(json_to_string(&output));
@@ -575,8 +624,22 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Ok((file_map, commits_processed)) => {
             let elapsed = start.elapsed();
 
+            // includeDeleted filter (CLI path): same performance invariant as cache path —
+            // ONE git ls-files call, not N per-file checks. See user story 2026-04-17.
+            let tracked_set = if include_deleted {
+                Some(git::list_tracked_files_under(repo, activity_path.unwrap_or("")))
+            } else {
+                None
+            };
+
             // Convert to array format for truncation compatibility
-            let mut files_array: Vec<Value> = file_map.iter().map(|(path, commits)| {
+            let mut files_array: Vec<Value> = file_map.iter().filter_map(|(path, commits)| {
+                if let Some(ref tracked) = tracked_set
+                    && tracked.contains(path) {
+                        return None; // file is in current HEAD, skip when includeDeleted=true
+                    }
+                Some((path, commits))
+            }).map(|(path, commits)| {
                 let commits_json: Vec<Value> = commits.iter().map(|c| {
                     json!({
                         "hash": &c.hash[..12.min(c.hash.len())],
@@ -612,17 +675,20 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     "totalEntries": total_entries,
                     "commitsProcessed": commits_processed,
                     "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
-                    "hint": if from.is_none() && to.is_none() && date.is_none() {
+                    "hint": if include_deleted {
+                        "Filtered to files NOT in current HEAD (includeDeleted=true)."
+                    } else if from.is_none() && to.is_none() && date.is_none() {
                         "No date filter applied. Use from/to to narrow results for large repos."
                     } else {
                         ""
-                    }
+                    },
+                    "includeDeleted": include_deleted
                 }
             });
 
-            // Empty results validation: warn if path doesn't exist in git
-            if total_files == 0 && !activity_path_str.is_empty() && !git::file_exists_in_git(repo, activity_path_str) {
-                output["warning"] = json!(format!("File not found in git: {}. Check the path.", activity_path_str));
+            // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
+            if total_files == 0 {
+                annotate_empty_git_result(&mut output, repo, activity_path_str, 0);
             }
 
             ToolCallResult::success(json_to_string(&output))

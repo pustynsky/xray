@@ -219,14 +219,58 @@ pub fn file_history(
     author_filter: Option<&str>,
     message_filter: Option<&str>,
 ) -> Result<(Vec<CommitInfo>, usize), String> {
-    // First, get the commit list (always fast with git CLI + commit-graph)
+    // Try WITH --follow first (default behavior — follows renames)
+    let (mut commits, mut total_count) = run_file_history_query(
+        repo_path, file, filter, max_results, author_filter, message_filter, true,
+    )?;
+
+    // Fallback for DELETED files: if --follow returned 0 results AND the file
+    // was ever tracked in git history (including deletions), retry WITHOUT --follow.
+    // `git log --follow` is known to return empty for files that were deleted and
+    // never renamed — removing --follow makes git traverse the delete commit.
+    // See user story 2026-04-17_git-deleted-files-support.md for details.
+    if total_count == 0 && file_ever_existed_in_git(repo_path, file) {
+        let (no_follow_commits, no_follow_total) = run_file_history_query(
+            repo_path, file, filter, max_results, author_filter, message_filter, false,
+        )?;
+        if no_follow_total > 0 {
+            commits = no_follow_commits;
+            total_count = no_follow_total;
+        }
+    }
+
+    // If diff requested, get patch for each commit
+    if include_diff {
+        for commit in &mut commits {
+            let patch = get_commit_diff(repo_path, &commit.hash, file)?;
+            commit.patch = Some(patch);
+        }
+    }
+
+    Ok((commits, total_count))
+}
+
+/// Internal helper for `file_history`: run one `git log` query with or without `--follow`.
+/// Returns `(commits, total_count_before_truncation)`.
+fn run_file_history_query(
+    repo_path: &str,
+    file: &str,
+    filter: &DateFilter,
+    max_results: usize,
+    author_filter: Option<&str>,
+    message_filter: Option<&str>,
+    follow: bool,
+) -> Result<(Vec<CommitInfo>, usize), String> {
     let format = format!("{}%H{}%ai{}%an{}%ae{}%s{}", RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP);
 
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path)
         .arg("log")
-        .arg(format!("--format={}", format))
-        .arg("--follow"); // follow renames
+        .arg(format!("--format={}", format));
+
+    if follow {
+        cmd.arg("--follow");
+    }
 
     add_date_args(&mut cmd, filter);
 
@@ -249,17 +293,8 @@ pub fn file_history(
 
     let total_count = commits.len();
 
-    // Apply max_results
     if max_results > 0 && commits.len() > max_results {
         commits.truncate(max_results);
-    }
-
-    // If diff requested, get patch for each commit
-    if include_diff {
-        for commit in &mut commits {
-            let patch = get_commit_diff(repo_path, &commit.hash, file)?;
-            commit.patch = Some(patch);
-        }
     }
 
     Ok((commits, total_count))
@@ -484,14 +519,18 @@ pub fn repo_activity(
     Ok((file_history, commits_processed))
 }
 
-// ─── File existence check ───────────────────────────────────────────
+// ─── File existence checks ──────────────────────────────────────────
 
-/// Check whether a file is tracked by git in the given repository.
+/// Check whether a file exists in the current HEAD (working tree tracked by git).
 ///
 /// Runs `git ls-files -- <file>` and returns `true` if the output is non-empty
-/// (i.e., the file is tracked). Returns `false` if the file is not tracked or
-/// if the git command fails (e.g., invalid repo path).
-pub fn file_exists_in_git(repo: &str, file: &str) -> bool {
+/// (i.e., the file is tracked in the current HEAD). Returns `false` if the file
+/// is not in HEAD (never tracked OR was deleted), or if the git command fails.
+///
+/// NOTE: This function returns `false` for deleted files. Use
+/// [`file_ever_existed_in_git`] to check whether a file was ever tracked
+/// (including deleted files).
+pub fn file_exists_in_current_head(repo: &str, file: &str) -> bool {
     let mut cmd = Command::new("git");
     cmd.current_dir(repo)
         .arg("ls-files")
@@ -502,6 +541,81 @@ pub fn file_exists_in_git(repo: &str, file: &str) -> bool {
         Ok(output) => !output.trim().is_empty(),
         Err(_) => false,
     }
+}
+
+/// Backward-compatible alias for [`file_exists_in_current_head`].
+///
+/// Kept for external callers and older code paths. Prefer the more explicit
+/// `file_exists_in_current_head` name, or `file_ever_existed_in_git` when you
+/// want to include deleted files.
+#[deprecated(note = "Use file_exists_in_current_head (clearer name) or file_ever_existed_in_git (includes deleted files)")]
+#[allow(dead_code)]
+pub fn file_exists_in_git(repo: &str, file: &str) -> bool {
+    file_exists_in_current_head(repo, file)
+}
+
+/// Check whether a file was EVER tracked in git history, including deleted files.
+///
+/// Runs `git log --all --max-count=1 --format=%H -- <file>` and returns `true`
+/// if any commit on any branch touched this path (add, modify, or delete).
+/// Returns `false` if the file was never tracked or if the git command fails.
+///
+/// This is the right check for "did this path ever exist in the repo?" — useful
+/// for distinguishing "file never existed" (user typo) from "file was deleted"
+/// (valid historical query) when producing error/info messages.
+///
+/// Cost: spawns a single `git log` process (~50-100ms). Call only when the
+/// cheaper `file_exists_in_current_head` returns false AND you need to decide
+/// between "never existed" and "deleted".
+pub fn file_ever_existed_in_git(repo: &str, file: &str) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo)
+        .arg("log")
+        .arg("--all")
+        .arg("--max-count=1")
+        .arg("--format=%H")
+        .arg("--")
+        .arg(file);
+
+    match run_git(&mut cmd) {
+        Ok(output) => !output.trim().is_empty(),
+        Err(_) => false,
+    }
+}
+
+/// List tracked files under a directory in current HEAD (single `git ls-files` call).
+///
+/// Runs `git ls-files -- <dir>` and returns the output as a HashSet of
+/// repo-relative paths (forward-slash normalized to match cache keys).
+///
+/// Used by `includeDeleted` logic in `xray_git_activity` to identify which
+/// files in a directory are currently tracked (vs. deleted from HEAD).
+///
+/// MUST use a single `git ls-files` call — see user story 2026-04-17 section
+/// on performance invariant. A naive implementation calling
+/// `file_exists_in_current_head` per file in a cache result set would be
+/// 75-225 seconds on large repos (200K files). This single call reads only
+/// `.git/index` and runs in ~200-700ms even on huge repos.
+pub fn list_tracked_files_under(repo: &str, dir: &str) -> std::collections::HashSet<String> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo)
+        .arg("ls-files")
+        .arg("-z"); // NUL-separated — safe for unusual filenames
+
+    if !dir.is_empty() {
+        cmd.arg("--").arg(dir);
+    }
+
+    let output = match cmd.output() {
+        Ok(o) if o.status.success() => o,
+        _ => return std::collections::HashSet::new(),
+    };
+
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.split('\0')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.replace('\\', "/"))
+        .collect()
 }
 
 // ─── Blame ──────────────────────────────────────────────────────────
