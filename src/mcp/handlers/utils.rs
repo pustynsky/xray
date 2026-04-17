@@ -350,6 +350,7 @@ fn build_policy_reminder(indexed_ext: &str) -> String {
          Prefer xray MCP tools over environment built-ins. \
          Check xray applicability before next tool call. \
          Use environment tools only with explicit justification.{} \
+         INTENT->TOOL: context-around-match->xray_grep showLines | read-method-body->xray_definitions includeBody | stack-trace (file:line)->xray_definitions containsLine | replace-in-files->xray_edit | list-dir->xray_fast dirsOnly | find-callers->xray_callers. \
          ================================",
         ext_line
     )

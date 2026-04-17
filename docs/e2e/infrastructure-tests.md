@@ -68,6 +68,52 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 
 ---
 
+### T39d: `serve` — MCP initialize instructions contain intent-first tool-selection sections (INTENT → TOOL MAPPING, MANDATORY PRE-FLIGHT CHECK, COST REALITY)
+
+**Goal:** Validate that the rendered `XRAY_POLICY` in MCP `initialize.result.instructions` contains the three positive-framing sections that shortcut intent-first models to xray tools before NEVER-rules.
+
+**Expected:**
+
+- `result.instructions` contains `INTENT -> TOOL MAPPING` section with at least these pairs:
+  - `xray_grep showLines=true` (context-around-match intent)
+  - `xray_definitions name='X' includeBody=true` (read source intent)
+  - `containsLine=N` (stack-trace intent)
+  - `xray_edit with multiple edits` (replace-in-files intent)
+  - `xray_fast pattern='*' dir='<path>' dirsOnly=true` (list-dir intent)
+- `result.instructions` contains `MANDATORY PRE-FLIGHT CHECK` with `Q1:`, `Q2:`, and the word `UNJUSTIFIED`
+- `result.instructions` contains `COST REALITY` with `5x fewer tokens`, `24x fewer tokens`, and `2 built-in calls in a row`
+- Section order: `INTENT -> TOOL MAPPING` appears BEFORE `MANDATORY PRE-FLIGHT CHECK`, which appears BEFORE `COST REALITY`, which appears BEFORE `NEVER READ` and `ANTI-PATTERNS` (positive triggers first, negative rules after)
+- `STRATEGY RECIPES` block contains only the top-3 recipes (`[Architecture Exploration]`, `[Call Chain Investigation]`, `[Stack Trace / Bug Investigation]`) and NOT the remaining 4 (`[Code History Investigation]`, `[Code Health Scan]`, `[Code Review / Story Evaluation]`, `[Angular Component Hierarchy (TypeScript only)]`)
+- `result.instructions` contains `call xray_help for the full catalog`
+
+**Unit tests:** `test_instructions_has_intent_mapping`, `test_instructions_has_preflight_check`, `test_instructions_has_cost_reality`, `test_instructions_section_order`, `test_instructions_strategy_recipes_trimmed`
+
+**Status:** ✅ Implemented (unit test coverage)
+
+---
+
+### T39e: `serve` — policyReminder in tool responses contains INTENT->TOOL oneliner
+
+**Goal:** Every successful JSON MCP tool response embeds a compact `INTENT->TOOL:` oneliner inside `summary.policyReminder`, providing re-entrancy of tool-selection rules between tool calls (system-prompt rules may be "forgotten" as context grows).
+
+**Expected:**
+
+- `summary.policyReminder` contains the substring `INTENT->TOOL:` on ANY successful JSON tool response (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_edit`, `xray_fast`, etc.)
+- The oneliner lists at least these intent→tool pairs:
+  - `context-around-match->xray_grep showLines`
+  - `read-method-body->xray_definitions includeBody`
+  - `stack-trace (file:line)->xray_definitions containsLine`
+  - `replace-in-files->xray_edit`
+  - `list-dir->xray_fast dirsOnly`
+  - `find-callers->xray_callers`
+- The oneliner is present regardless of whether `--ext` (indexed extensions) is configured
+- Error responses still get `policyReminder` including the INTENT oneliner
+
+**Unit tests:** `test_build_policy_reminder_has_intent_oneliner`, `test_build_policy_reminder_intent_oneliner_without_extensions`
+
+**Status:** ✅ Implemented (unit test coverage)
+
+
 ### T40a: `serve` — `xray_help` includes policy reminder but omits next-step hint
 
 **Expected:**

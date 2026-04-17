@@ -44,10 +44,13 @@ The MCP server starts its event loop **immediately** and responds to `initialize
    > **Tip:** Include non-code file extensions like `csproj`, `xml`, `config`, `manifestxml` in `--ext` to search NuGet dependencies, project settings, connection strings, and other configuration files alongside your code.
 
 4. **Restart VS Code** — the MCP server starts automatically. Your MCP-compatible AI agent (Roo Code, Cline, etc.) now has access to all MCP tools. The server also sends an `instructions` field during MCP initialization with best practices for tool selection. The instructions include:
+   - **INTENT → TOOL MAPPING** — compact positive-framed lookup (`"see context around a match" → xray_grep showLines`, `"read source code" → xray_definitions includeBody`, etc.). Placed immediately after `CRITICAL OVERRIDE` so intent-first models see it before reaching NEVER-rules.
    - **TASK ROUTING table** — maps user tasks to recommended tools (auto-generated, context-aware based on indexed file extensions)
+   - **MANDATORY PRE-FLIGHT CHECK** — Q1/Q2/Q3 questions the model should answer in `<thinking>` before ANY built-in tool call (read_file, apply_diff, search_files, write_to_file, list_files, list_directory, directory_tree, search_and_replace, insert_content). Explicit "habit/familiarity → UNJUSTIFIED" rule.
+   - **COST REALITY** — measured token/round-trip ratios (5x, 24x, 3x fewer) for common built-in patterns vs the xray equivalent. Rule of thumb: 2 built-in calls in a row on the same file = you should have used xray.
    - **DECISION TRIGGERs** — hard prohibitions for file reading and editing that redirect LLM to xray tools
    - **Fallback rule** — guidance for uncertain file types
-   - **Strategy Recipes** — multi-step workflow patterns for common tasks
+   - **Strategy Recipes** — the top-3 most common multi-step workflow patterns (Architecture Exploration, Call Chain Investigation, Stack Trace / Bug Investigation). The remaining 4 recipes (Code History, Code Health Scan, Code Review, Angular Component Hierarchy) are available via `xray_help` to keep the system-prompt budget under control.
    - **Named policy anchor** — the instructions are wrapped in `=== XRAY_POLICY ===` / `================================` so the agent sees a stable, reusable policy name during MCP initialization
 
 5. **Verify** — ask the AI: _"Use xray_grep to find all files containing HttpClient"_
@@ -94,7 +97,7 @@ Successful **JSON** MCP tool responses may include guidance fields inside `summa
 
 | Field | When present | Description |
 |---|---|---|
-| `policyReminder` | Successful JSON responses | Compact re-materialization of `XRAY_POLICY`, reminding the agent to prefer xray MCP tools over environment built-ins on the next step. Dynamically includes the indexed file extensions (from `--ext`) so the LLM knows which file types are searchable |
+| `policyReminder` | Successful JSON responses | Compact re-materialization of `XRAY_POLICY`, reminding the agent to prefer xray MCP tools over environment built-ins on the next step. Dynamically includes the indexed file extensions (from `--ext`) so the LLM knows which file types are searchable. Also includes an `INTENT->TOOL:` oneliner with the most common intent→xray-tool pairs (`context-around-match→xray_grep showLines`, `read-method-body→xray_definitions includeBody`, `replace-in-files→xray_edit`, etc.) — this provides re-entrancy of the tool-selection rules between tool calls, since LLMs tend to "forget" system-prompt rules as context grows |
 | `nextStepHint` | Selected successful JSON responses | Fixed-dictionary hint suggesting the most likely next xray tool |
 
 Behavior rules:
@@ -126,7 +129,7 @@ Example:
 {
   "summary": {
     "tool": "xray_grep",
-    "policyReminder": "=== XRAY_POLICY === Prefer xray MCP tools over environment built-ins. Check xray applicability before next tool call. Use environment tools only with explicit justification. Indexed extensions: cs, ts, tsx. For other file types, use read_file or environment tools. ================================",
+    "policyReminder": "=== XRAY_POLICY === Prefer xray MCP tools over environment built-ins. Check xray applicability before next tool call. Use environment tools only with explicit justification. Indexed extensions: cs, ts, tsx. For other file types, use read_file or environment tools. INTENT->TOOL: context-around-match->xray_grep showLines | read-method-body->xray_definitions includeBody | stack-trace (file:line)->xray_definitions containsLine | replace-in-files->xray_edit | list-dir->xray_fast dirsOnly | find-callers->xray_callers. ================================",
     "nextStepHint": "Next: use xray_definitions for AST structure or xray_callers for call trees"
   }
 }
