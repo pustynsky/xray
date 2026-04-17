@@ -69,6 +69,26 @@
 
 ## Unreleased
 
+### Internal — Policy hardening (Part 4 of deleted-files story, 2026-04-17)
+
+- **`src/tips.rs` — prompt reinforcement against habit-driven built-in tool selection**
+  - INTENT → TOOL MAPPING gained 3 new entries for validation intents (`validate/fact-check`, `quick yes/no`, `confirm absence`) — all route to `xray_grep countOnly=true`.
+  - ANTI-PATTERNS block gained `EXAMPLE VIOLATION` block naming the most common failure mode (linguistic coincidence: `search_files` matching the word "search") with ROOT CAUSE + PREVENTION guidance.
+  - MANDATORY PRE-FLIGHT CHECK gained `PRE-CALL SELF-AUDIT` — a 3-question check BEFORE formulating a built-in call, complementing the existing post-call SELF-AUDIT HOOK.
+  - New tip "Trivial task != trivial policy check" — names the "trivial task trap" where LLMs skip pre-flight on seemingly-small tasks.
+  - Token budget test raised from <2800 to <3000 to accommodate the additions (~130 words, justified).
+  - Source: live session 2026-04-17 where the LLM writing the parent user story used `search_files` instead of `xray_grep` for a code-validation check — meta-observation turned into a policy reinforcement.
+
+- **`src/mcp/handlers/utils.rs` — imperative `policyReminder` rewrite** — `build_policy_reminder` now emits **enforcement-framed** wording instead of passive advice. Every MCP tool response now carries `=== XRAY_POLICY - ENFORCEMENT ===` with four imperative clauses:
+  - `REQUIRED:` (not "prefer") for xray_* tools on read/search/edit operations.
+  - `NO EXCEPTIONS for 'familiarity', 'habit', 'quick check', or 'just this once'` — explicitly closes the rationalization lanes observed in live sessions.
+  - `If about to call a built-in on an indexed file -> STOP` — action verb for pre-call self-audit.
+  - `Built-in calls when xray covers the case = protocol error` — frames violations as protocol errors, not style preferences.
+  - Per-response VIOLATION clause now names the required tools: `VIOLATION = calling built-in read_file/search_files/apply_diff on files with extensions [X, Y]. REQUIRED: xray_definitions (read), xray_grep (search), xray_edit (edit).`
+  - Motivation: during Part 4 authoring the LLM itself violated the policy multiple times despite the old `policyReminder` being present in every response. The old passive wording ("Prefer xray... Check applicability... Use environment tools with justification") was shown to tolerate built-in fallback via the "just this once / trivial task" rationalization lane. The new imperative framing is expected to give a measurable (not revolutionary) +5–15% compliance lift; physical enforcement (custom VS Code mode with fileRegex) remains available as a future Part 5 if needed.
+  - New test `test_build_policy_reminder_is_imperative` asserts the presence of `REQUIRED:`, `NO EXCEPTIONS`, `STOP`, `protocol error`, `ENFORCEMENT` AND the absence of the old passive phrasing (`Prefer xray`, `Check xray applicability`, `with explicit justification`) — prevents regression to passive wording.
+  - 4 existing `build_policy_reminder` tests updated to the new wording. 1833 unit tests pass (+1 new).
+
 ### Security
 
 - **XML on-demand: workspace sandbox for `file=` resolver** — `resolve_xml_file_path` in `src/mcp/handlers/definitions.rs` now resolves the `file=` parameter via `std::path::Path::canonicalize()` and rejects any path that does not start with the canonicalized `server_dir` prefix. Previously, a relative `file=` was joined to `server_dir` and a substring fallback scanned `index.files` for any entry whose path contained the filter, and as a final "last resort" the function returned the joined path even if the file didn't exist. Two attack/mishap paths were closed: (1) **path traversal via `..` segments** — `file='../../etc/passwd'` (or a Windows equivalent like `file='..\..\Windows\System32\drivers\etc\hosts'`) could resolve to a file outside the workspace and be parsed by the XML handler; (2) **substring-fallback collision** — `file='web.config'` could silently resolve to `webapp.config` (or any other file whose path contains `web.config` as a substring) when the exact path didn't exist under `server_dir`, returning structural data from an unrelated file without any hint to the LLM. Both the substring fallback and the "last resort" non-existent-path return are removed. Absolute paths are still accepted but must canonicalize inside `server_dir`. Returns `Result<String, String>` with precise error messages (`"XML file not found"`, `"XML file path is outside workspace: ..."`). 4 new unit tests in `src/mcp/handlers/definitions_tests.rs`: `test_xml_on_demand_rejects_path_traversal` (dotdot escape), `test_xml_on_demand_rejects_absolute_outside_workspace` (absolute path outside server_dir), `test_xml_on_demand_no_substring_fallback_collision` (`web.config` must not resolve to `webapp.config`), and `test_xml_on_demand_returns_error_for_missing_file` (non-existent path returns `Err`, not silent success).

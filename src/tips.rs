@@ -303,6 +303,11 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
             why: "xray_definitions searches AST definition names. Methods imported via C# 'using static' are defined in their original class. Searching parent='ConsumingClass' will return 0 results. Search without parent filter or with parent='DefiningClass' instead.".into(),
             example: "Percentile() imported via 'using static PercentileHelper' -> xray_definitions name='Percentile' (without parent) or parent='PercentileHelper'".into(),
         },
+        Tip {
+            rule: "Trivial task != trivial policy check -- ALWAYS pause before built-in".into(),
+            why: "The most common policy violation is on tasks that FEEL trivial (quick validation, simple fact-check, one-line read). LLM skips MANDATORY PRE-FLIGHT CHECK because 'it's just a quick search'. But quick searches are EXACTLY where xray_grep shines (countOnly=true, <1ms). Habit-driven tool selection based on tool name matching intent keyword is the #1 policy break.".into(),
+            example: "User asks 'validate that code has no X'. Reaching for search_files because intent contains 'search' -- VIOLATION. Correct: xray_grep terms='X' countOnly=true.".into(),
+        },
     ]
 }
 
@@ -711,6 +716,9 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     }
     out.push_str("  \"see a few lines of context around a match\"      -> xray_grep showLines=true contextLines=N\n");
     out.push_str("  \"search text across codebase\"                    -> xray_grep terms='...'\n");
+    out.push_str("  \"validate/fact-check whether a term exists in code\"  -> xray_grep terms='...' countOnly=true (<1ms, clean yes/no)\n");
+    out.push_str("  \"quick yes/no: does X appear anywhere\"           -> xray_grep countOnly=true\n");
+    out.push_str("  \"confirm absence of pattern before editing\"      -> xray_grep terms='...' countOnly=true\n");
     out.push_str("  \"replace similar patterns in one or more files\"  -> xray_edit with multiple edits (atomic, batch)\n");
     out.push_str("  \"rewrite entire file\"                            -> xray_edit Mode A [{startLine:1, endLine:<total>, content:<new>}]\n");
     out.push_str("  \"create a new file\"                              -> xray_edit (auto-creates — Mode A with endLine:0)\n");
@@ -746,7 +754,12 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("       If you cannot cite a valid reason from (a)-(e) -> the built-in call is a VIOLATION. Use xray instead.\n");
     out.push_str("  Without a clear valid reason, the built-in call is NOT allowed.\n");
     out.push_str("  ENFORCEMENT: omitting the <thinking> block before a built-in call is itself a violation — the policy requires a visible justification trace.\n");
-    out.push_str("  SELF-AUDIT HOOK: if you just called a built-in tool and realize (during subsequent reasoning) that an xray tool would have worked — STOP, acknowledge the misstep, and switch to xray for the next call. Do NOT continue the built-in-tool chain.\n\n");
+    out.push_str("  SELF-AUDIT HOOK: if you just called a built-in tool and realize (during subsequent reasoning) that an xray tool would have worked — STOP, acknowledge the misstep, and switch to xray for the next call. Do NOT continue the built-in-tool chain.\n");
+    out.push_str("  PRE-CALL SELF-AUDIT: before FORMULATING any built-in tool call, ask:\n");
+    out.push_str("       (a) \"What is my actual intent?\" (1-word answer)\n");
+    out.push_str("       (b) \"Is there an xray tool mapped to that intent in INTENT -> TOOL MAPPING?\"\n");
+    out.push_str("       (c) If yes -> STOP built-in call, switch to xray.\n");
+    out.push_str("       This takes 1 second per call. It prevents the most common violation class — 'mental shortcuts on seemingly-trivial tasks'.\n\n");
 
     // --- COST REALITY (measured numbers, not abstract prohibition) ---
     // Rationale: concrete cost comparisons turn NEVER-rules from dogma into an
@@ -815,6 +828,12 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  - NEVER call xray_fast dirsOnly=true to explore code modules — xray_definitions file='<dir>' auto-generates directory-grouped summary (autoSummary) when results are too many to list individually\n");
     out.push_str("  - NEVER choose a built-in edit tool based on file extension. xray_edit works on ALL text files — indexed or not. Extension-based tool choice is UNJUSTIFIED. Rule: editing existing text file -> xray_edit. Creating new file -> built-in whole-file-write tool (or xray_edit Mode A). Binary/byte-exact -> built-in tool with justification.\n");
     out.push_str("  - NEVER think 'this file is not .rs, xray doesn't apply here'. xray tools have different scopes: xray_definitions/xray_grep parse indexed extensions; xray_edit operates on bytes of ANY text file regardless of extension.\n");
+    out.push_str("  EXAMPLE VIOLATION — the most common policy break:\n");
+    out.push_str("  - User intent: \"validate/check/verify whether code has/doesn't have X\"\n");
+    out.push_str("  - WRONG reasoning: \"I need to search for X -> search_files\"\n");
+    out.push_str("  - RIGHT: xray_grep terms='X' countOnly=true (1 call, <1ms, clean yes/no)\n");
+    out.push_str("  - ROOT CAUSE: search_files is literally named the same as the intent \"search files\". This linguistic coincidence causes habit-driven selection, bypassing MANDATORY PRE-FLIGHT CHECK.\n");
+    out.push_str("  - PREVENTION: always pause 1 second before ANY built-in call: \"could xray_grep do this?\" Answer is YES ~100% of the time for indexed text searches.\n");
     if !def_extensions.is_empty() {
         let ext_dotted: Vec<String> = def_extensions.iter().map(|e| format!(".{}", e)).collect();
         out.push_str(&format!(

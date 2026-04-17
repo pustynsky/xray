@@ -357,7 +357,8 @@ fn test_inject_response_guidance_creates_summary() {
     assert!(output.get("summary").is_some());
     let reminder = output["summary"]["policyReminder"].as_str().unwrap();
     assert!(reminder.contains("XRAY_POLICY"), "should contain policy header");
-    assert!(reminder.contains("Indexed extensions: rs, md"), "should contain indexed extensions");
+    assert!(reminder.contains("[rs, md]"), "should list indexed extensions in VIOLATION clause");
+    assert!(reminder.contains("REQUIRED:"), "should use imperative REQUIRED directive");
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
 }
 
@@ -383,21 +384,41 @@ fn test_inject_response_guidance_empty_ext() {
 #[test]
 fn test_build_policy_reminder_with_extensions() {
     let reminder = build_policy_reminder("rs, md");
-    assert!(reminder.contains("Indexed extensions: rs, md"));
-    assert!(reminder.contains("For other file types"));
+    // New imperative framing: VIOLATION = calling built-in on indexed extensions
+    assert!(reminder.contains("VIOLATION = calling built-in"),
+        "policyReminder should frame built-in calls as VIOLATION");
+    assert!(reminder.contains("[rs, md]"),
+        "policyReminder should list the indexed extensions in VIOLATION clause");
+    assert!(reminder.contains("REQUIRED:"),
+        "policyReminder should use REQUIRED (imperative), not 'prefer'");
+    assert!(reminder.contains("xray_definitions (read)"),
+        "policyReminder should name the required read tool");
+    assert!(reminder.contains("xray_grep (search)"),
+        "policyReminder should name the required search tool");
+    assert!(reminder.contains("xray_edit (edit)"),
+        "policyReminder should name the required edit tool");
+    assert!(reminder.contains("NO EXCEPTIONS"),
+        "policyReminder should close rationalization lanes with NO EXCEPTIONS");
+    assert!(reminder.contains("protocol error"),
+        "policyReminder should frame violations as protocol errors");
 }
 
 #[test]
 fn test_build_policy_reminder_empty_ext() {
     let reminder = build_policy_reminder("");
-    assert!(!reminder.contains("Indexed extensions"));
+    // Empty ext -> no VIOLATION line (no indexed extensions to protect)
+    assert!(!reminder.contains("VIOLATION"), "empty ext should not emit VIOLATION line");
     assert!(reminder.contains("XRAY_POLICY"));
+    assert!(reminder.contains("ENFORCEMENT"), "policyReminder should use ENFORCEMENT framing");
 }
 
 #[test]
 fn test_build_policy_reminder_whitespace_only_ext() {
     let reminder = build_policy_reminder("  ");
-    assert!(!reminder.contains("Indexed extensions"));
+    // Whitespace-only ext is treated as empty -> no VIOLATION line
+    assert!(!reminder.contains("VIOLATION"),
+        "whitespace-only ext should not emit VIOLATION line");
+    assert!(reminder.contains("XRAY_POLICY"));
 }
 
 /// The policyReminder embedded in every successful MCP response must contain
@@ -428,6 +449,35 @@ fn test_build_policy_reminder_intent_oneliner_without_extensions() {
     let reminder = build_policy_reminder("");
     assert!(reminder.contains("INTENT->TOOL"),
         "policyReminder should contain INTENT->TOOL even when no indexed extensions are configured");
+}
+
+#[test]
+fn test_build_policy_reminder_is_imperative() {
+    // Part 4 (2026-04-17): policyReminder must use imperative enforcement framing,
+    // not passive wording. This test guards against regression to 'Prefer xray...'
+    // style that was shown (by meta-analysis during Part 4 authoring) to tolerate
+    // built-in tool fallback.
+    let reminder = build_policy_reminder("rs,md,ps1");
+
+    // Must contain imperative directives
+    assert!(reminder.contains("REQUIRED:"),
+        "policyReminder must use REQUIRED (imperative), not 'prefer' (passive)");
+    assert!(reminder.contains("NO EXCEPTIONS"),
+        "policyReminder must close rationalization lanes with NO EXCEPTIONS");
+    assert!(reminder.contains("STOP"),
+        "policyReminder must contain STOP action verb for pre-call self-audit");
+    assert!(reminder.contains("protocol error"),
+        "policyReminder must frame violations as protocol errors");
+    assert!(reminder.contains("ENFORCEMENT"),
+        "policyReminder header must use ENFORCEMENT framing");
+
+    // Must NOT contain the old passive wording that was replaced
+    assert!(!reminder.contains("Prefer xray"),
+        "policyReminder must not revert to passive 'Prefer xray' wording");
+    assert!(!reminder.contains("Check xray applicability"),
+        "policyReminder must not revert to passive 'Check applicability' wording");
+    assert!(!reminder.contains("with explicit justification"),
+        "policyReminder must not revert to the rationalization-friendly 'with explicit justification' clause");
 }
 
 

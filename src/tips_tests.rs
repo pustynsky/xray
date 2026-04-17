@@ -356,10 +356,12 @@ fn test_instructions_token_budget() {
     // v3 additions (2026-04-17): TERMS block (~80) + expanded PRE-FLIGHT Q1/Q2/Q3 with ENFORCEMENT + SELF-AUDIT HOOK (~120)
     // + operation-based edit rule with MISCONCEPTION ALERT + 3 EXCEPTIONS (~100) + extension-agnostic COST REALITY example (~40)
     // + 2 new extension-agnostic ANTI-PATTERNS (~60). All justified — prevent LLM fallback to built-in tools on non-.rs files.
+    // Part 4 additions (2026-04-17): 3 validation-intent mappings (~30) + EXAMPLE VIOLATION block in ANTI-PATTERNS (~60)
+    // + PRE-CALL SELF-AUDIT clause (~40). Total ~130 words. Prevents habit-driven built-in search_files selection.
     assert!(
-        approx_tokens < 2800,
+        approx_tokens < 3000,
         "Instructions exceed token budget: ~{} tokens ({} words). \
-         Target: <2800 (v3 policy symmetry). Remove redundant sections if growth continues.",
+         Target: <3000 (Part 4 policy reinforcement). Remove redundant sections if growth continues.",
         approx_tokens, word_count
     );
 }
@@ -1059,4 +1061,75 @@ fn test_instructions_habit_clause_is_coherent() {
         !text.contains("Just habit / familiarity -> UNJUSTIFIED"),
         "Old broken fragment 'Just habit / familiarity -> UNJUSTIFIED' must not appear — it was a dangling list suffix"
     );
+}
+
+// ============================================================================
+// Part 4 tests (meta-observation from 2026-04-17 session):
+// Prompt improvements to prevent habit-driven selection of built-in search tools
+// when xray_grep countOnly=true would be the correct choice for validation intents.
+// ============================================================================
+
+/// 4.1: New validation-intent entries in INTENT -> TOOL MAPPING.
+#[test]
+fn test_instructions_has_validation_intent_mappings() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("validate/fact-check whether a term exists"),
+        "INTENT -> TOOL MAPPING should have validate/fact-check entry");
+    assert!(text.contains("quick yes/no: does X appear"),
+        "INTENT -> TOOL MAPPING should have quick yes/no entry");
+    assert!(text.contains("confirm absence of pattern before editing"),
+        "INTENT -> TOOL MAPPING should have confirm absence entry");
+    // All three must route to xray_grep countOnly=true
+    assert!(text.contains("countOnly=true"),
+        "Validation intents should route to xray_grep countOnly=true");
+}
+
+/// 4.2: EXAMPLE VIOLATION block in ANTI-PATTERNS.
+#[test]
+fn test_instructions_has_example_violation_block() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("EXAMPLE VIOLATION"),
+        "ANTI-PATTERNS should have EXAMPLE VIOLATION block");
+    assert!(text.contains("ROOT CAUSE"),
+        "EXAMPLE VIOLATION should explain ROOT CAUSE");
+    assert!(text.contains("PREVENTION"),
+        "EXAMPLE VIOLATION should have PREVENTION guidance");
+    assert!(text.contains("linguistic coincidence"),
+        "EXAMPLE VIOLATION should call out the linguistic coincidence root cause");
+}
+
+/// 4.3: PRE-CALL SELF-AUDIT in addition to post-call SELF-AUDIT HOOK.
+#[test]
+fn test_instructions_has_pre_call_self_audit() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("PRE-CALL SELF-AUDIT"),
+        "instructions should have PRE-CALL SELF-AUDIT (not only post-call SELF-AUDIT HOOK)");
+    assert!(text.contains("What is my actual intent?"),
+        "PRE-CALL SELF-AUDIT should include the 1-word intent question");
+    assert!(text.contains("mental shortcuts on seemingly-trivial tasks"),
+        "PRE-CALL SELF-AUDIT should name the violation class it prevents");
+    // Post-call hook must still be present (both hooks coexist)
+    assert!(text.contains("SELF-AUDIT HOOK"),
+        "post-call SELF-AUDIT HOOK must remain alongside PRE-CALL SELF-AUDIT");
+}
+
+/// 4.4: "Trivial task trap" tip is present in tips().
+#[test]
+fn test_tips_contains_trivial_task_trap() {
+    let all_tips = tips(&[]);
+    let has_trivial = all_tips.iter().any(|t|
+        t.rule.contains("Trivial task") && t.rule.contains("trivial policy check")
+    );
+    assert!(has_trivial, "tips() should contain the 'Trivial task != trivial policy check' tip");
+}
+
+/// 4.4: Tip also surfaces in JSON output (xray_help).
+#[test]
+fn test_render_json_contains_trivial_task_trap() {
+    let json = render_json(&[]);
+    let practices = json["bestPractices"].as_array().unwrap();
+    let has_trivial = practices.iter().any(|p| {
+        p["rule"].as_str().unwrap_or("").contains("Trivial task")
+    });
+    assert!(has_trivial, "JSON output should contain the 'Trivial task' tip");
 }
