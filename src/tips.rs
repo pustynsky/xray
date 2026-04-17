@@ -683,6 +683,25 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  REASON: xray tools use pre-built indexes (<1ms) and return richer data than built-in tools.\n");
     out.push_str("  DECISION TRIGGER: before using ANY built-in tool, STOP and check if a xray tool can do it instead.\n\n");
 
+    // --- INTENT -> TOOL MAPPING (positive triggers, intent-first) ---
+    // Rationale: intent-first models (Claude 4.7+) select tools by matching the user's
+    // underlying intent, not by scanning NEVER-lists. This compact map shortcuts the
+    // selection to xray before built-in habits kick in.
+    out.push_str("INTENT -> TOOL MAPPING (consult BEFORE choosing any tool):\n");
+    if !def_extensions.is_empty() {
+        out.push_str("  \"read the source code of a method/class\"         -> xray_definitions name='X' includeBody=true maxBodyLines=0\n");
+        out.push_str("  \"find which method is at file:line N\"            -> xray_definitions file='X' containsLine=N includeBody=true\n");
+        out.push_str("  \"find who calls/implements method X\"             -> xray_callers method='X' class='Y' direction='up'\n");
+    }
+    out.push_str("  \"see a few lines of context around a match\"      -> xray_grep showLines=true contextLines=N\n");
+    out.push_str("  \"search text across codebase\"                    -> xray_grep terms='...'\n");
+    out.push_str("  \"replace similar patterns in one or more files\"  -> xray_edit with multiple edits (atomic, batch)\n");
+    out.push_str("  \"rewrite entire file\"                            -> xray_edit Mode A [{startLine:1, endLine:<total>, content:<new>}]\n");
+    out.push_str("  \"create a new file\"                              -> xray_edit (auto-creates — Mode A with endLine:0)\n");
+    out.push_str("  \"list files or subdirectories\"                   -> xray_fast pattern='*' dir='<path>' dirsOnly=true\n");
+    out.push_str("  \"find a file by name\"                            -> xray_fast pattern='<name>'\n");
+    out.push_str("  \"git blame / history / authors\"                  -> xray_git_blame / xray_git_history / xray_git_authors\n\n");
+
     // --- TASK ROUTING TABLE (replaces CRITICAL block + Quick Reference + Tool Priority) ---
     out.push_str("TASK ROUTING (check BEFORE using any built-in tool):\n");
     for tr in task_routings() {
@@ -693,6 +712,27 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     }
     out.push_str("Use built-in equivalents only when the requested file type or task is not supported by this server.\n");
     out.push_str("If uncertain whether a file type is supported, use xray_info or xray_grep first. Do not default to raw file reading.\n\n");
+
+    // --- MANDATORY PRE-FLIGHT CHECK (procedural friction before built-in) ---
+    // Rationale: even with INTENT mapping, habits can bypass the map. A 3-question
+    // pre-flight in <thinking> forces a conscious justification before a built-in call.
+    out.push_str("MANDATORY PRE-FLIGHT CHECK (for ANY built-in tool call — read_file, search_files, apply_diff, search_and_replace, insert_content, write_to_file, list_files, list_directory, directory_tree):\n");
+    out.push_str("  Before calling, answer in <thinking>:\n");
+    out.push_str("  Q1: Does INTENT -> TOOL MAPPING above match my intent? -> If yes, use the mapped xray tool.\n");
+    out.push_str("  Q2: If no match — is it because the file type is NOT indexed (check xray_info), or because I need pixel-perfect byte preservation that xray_edit can't give?\n");
+    out.push_str("       (a) Not indexed -> built-in OK.\n");
+    out.push_str("       (b) Pixel-perfect formatting -> built-in OK (rare).\n");
+    out.push_str("       (c) Just habit / familiarity -> UNJUSTIFIED — use xray.\n");
+    out.push_str("  Without a clear (a) or (b), the built-in call is NOT allowed.\n\n");
+
+    // --- COST REALITY (measured numbers, not abstract prohibition) ---
+    // Rationale: concrete cost comparisons turn NEVER-rules from dogma into an
+    // economic argument — models optimize more reliably when they see the ratio.
+    out.push_str("COST REALITY (measured, not theoretical):\n");
+    out.push_str("  - 5x read_file(20 lines) = ~15 KB + 5 round-trips vs 1x xray_grep showLines contextLines=5 = ~3 KB + 1 call -> 5x fewer tokens\n");
+    out.push_str("  - write_to_file(600 lines) = ~24 KB in+out vs xray_edit(10 edits) = ~1 KB -> 24x fewer tokens\n");
+    out.push_str("  - apply_diff(3 blocks) = 3 calls, whitespace-fragile vs xray_edit(3 edits) = 1 atomic call -> 3x fewer round-trips, zero whitespace risk\n");
+    out.push_str("  Rule of thumb: 2 built-in calls in a row on the same file = you should have used xray.\n\n");
 
     // --- FILE READING DECISION TRIGGER (shortened, only if def_extensions non-empty) ---
     // Rationale: the dominant observed failure mode is LLM defaulting to built-in
@@ -738,11 +778,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     // --- Top anti-patterns (extracted from strategy recipes) ---
     out.push_str("ANTI-PATTERNS (most common mistakes — each one wastes 3-5 extra tool calls):\n");
     out.push_str("  - NEVER list or browse directories to explore code — xray_definitions file='<dir>' returns ALL classes/methods/interfaces in ONE call\n");
-    out.push_str("  - NEVER read indexed source files directly — use xray_definitions file='X' includeBody=true maxBodyLines=0 (returns source code inline)\n");
     out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — use kind='class,interface,enum' for multi-kind OR, or omit kind filter to get everything at once\n");
     out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n");
-    out.push_str("  - NEVER use list_files, list_directory, or directory_tree for ANY purpose when xray is connected — even for simple directory listing. Use xray_fast pattern='*' dir='<path>' dirsOnly=true for directory listing, or xray_definitions file='<dir>' for code structure\n");
-    out.push_str("  - NEVER use apply_diff, search_and_replace, or insert_content for ANY file edit — xray_edit is atomic, handles whitespace correctly, supports multi-file batch, and costs fewer tokens. xray_edit also auto-creates new files (use Mode A operations for new file content)\n");
     out.push_str("  - NEVER use search_files (built-in regex/text search) — use xray_grep instead (<1ms vs seconds, pre-built inverted index)\n");
     out.push_str("  - NEVER call xray_fast dirsOnly=true to explore code modules — xray_definitions file='<dir>' auto-generates directory-grouped summary (autoSummary) when results are too many to list individually\n");
     if !def_extensions.is_empty() {
@@ -755,9 +792,9 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     }
     out.push_str("\n");
 
-    // --- Strategy recipes (kept unchanged -- highest-value content) ---
-    out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task):\n");
-    for strat in strategies() {
+    // --- Strategy recipes (top 3 only — remaining recipes available via xray_help) ---
+    out.push_str("STRATEGY RECIPES (aim for <=3 search calls per task; call xray_help for the full catalog):\n");
+    for strat in strategies().into_iter().take(3) {
         out.push_str(&format!("  [{}] {}\n", strat.name, strat.when));
         for step in strat.steps {
             out.push_str(&format!("    - {}\n", step));

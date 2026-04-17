@@ -400,6 +400,37 @@ fn test_build_policy_reminder_whitespace_only_ext() {
     assert!(!reminder.contains("Indexed extensions"));
 }
 
+/// The policyReminder embedded in every successful MCP response must contain
+/// a compact INTENT -> TOOL mapping. This provides re-entrancy of the tool
+/// selection rules between tool calls (vs only the system-prompt instructions,
+/// which the model may "forget" as context grows).
+#[test]
+fn test_build_policy_reminder_has_intent_oneliner() {
+    let reminder = build_policy_reminder("rs,md,ps1");
+    assert!(reminder.contains("INTENT->TOOL"),
+        "policyReminder should contain INTENT->TOOL oneliner. Got: {}", reminder);
+    assert!(reminder.contains("context-around-match->xray_grep showLines"),
+        "INTENT->TOOL oneliner should map context-around-match to xray_grep showLines");
+    assert!(reminder.contains("read-method-body->xray_definitions includeBody"),
+        "INTENT->TOOL oneliner should map read-method-body to xray_definitions includeBody");
+    assert!(reminder.contains("replace-in-files->xray_edit"),
+        "INTENT->TOOL oneliner should map replace-in-files to xray_edit");
+    assert!(reminder.contains("list-dir->xray_fast dirsOnly"),
+        "INTENT->TOOL oneliner should map list-dir to xray_fast dirsOnly");
+    assert!(reminder.contains("stack-trace (file:line)->xray_definitions containsLine"),
+        "INTENT->TOOL oneliner should map stack-trace to xray_definitions containsLine");
+}
+
+/// The INTENT->TOOL oneliner should be present regardless of whether
+/// indexed extensions are configured (it references tool names, not extensions).
+#[test]
+fn test_build_policy_reminder_intent_oneliner_without_extensions() {
+    let reminder = build_policy_reminder("");
+    assert!(reminder.contains("INTENT->TOOL"),
+        "policyReminder should contain INTENT->TOOL even when no indexed extensions are configured");
+}
+
+
 #[test]
 fn test_truncate_definitions_array() {
     // Build a xray_definitions-style response with many definitions — way over budget

@@ -92,13 +92,14 @@ fn test_render_instructions_contains_key_terms() {
     // Error recovery rule
     assert!(text.contains("ERROR RECOVERY"), "instructions should have ERROR RECOVERY rule");
     assert!(text.contains("NEVER fall back to built-in tools"), "ERROR RECOVERY should prohibit fallback");
-    // Anti-patterns should explicitly mention built-in tools to prohibit them
-    assert!(text.contains("list_files"), "ANTI-PATTERNS should mention list_files as prohibited");
-    assert!(text.contains("list_directory"), "ANTI-PATTERNS should mention list_directory as prohibited");
-    assert!(text.contains("directory_tree"), "ANTI-PATTERNS should mention directory_tree as prohibited");
-    assert!(text.contains("NEVER use apply_diff"), "ANTI-PATTERNS should mention apply_diff as prohibited");
-    assert!(text.contains("search_and_replace"), "ANTI-PATTERNS should mention search_and_replace as prohibited");
-    assert!(text.contains("insert_content"), "ANTI-PATTERNS should mention insert_content as prohibited");
+    // Built-in tools should be explicitly mentioned as prohibited somewhere in the instructions
+    // (MANDATORY PRE-FLIGHT CHECK block lists all of them; NEVER USE blocks repeat the ban).
+    assert!(text.contains("list_files"), "instructions should mention list_files as prohibited");
+    assert!(text.contains("list_directory"), "instructions should mention list_directory as prohibited");
+    assert!(text.contains("directory_tree"), "instructions should mention directory_tree as prohibited");
+    assert!(text.contains("apply_diff"), "instructions should mention apply_diff as prohibited");
+    assert!(text.contains("search_and_replace"), "instructions should mention search_and_replace as prohibited");
+    assert!(text.contains("insert_content"), "instructions should mention insert_content as prohibited");
     // Task routing should include directory listing
     assert!(text.contains("List files or subdirectories"), "TASK ROUTING should include directory listing");
     // Removed sections should NOT be present
@@ -112,8 +113,10 @@ fn test_render_instructions_contains_key_terms() {
     // No emoji in machine-targeted text
     assert!(!text.contains('⚠'), "instructions should not contain emoji (machine-targeted text)");
     assert!(!text.contains('⚡'), "instructions should not contain emoji (machine-targeted text)");
-    // No Roo-specific tool names in non-prohibition context
-    assert!(!text.contains("read_file"), "instructions should not reference Roo-specific read_file");
+    // No Roo-specific tool names in non-prohibition context.
+    // NOTE: read_file/apply_diff/list_files/etc. ARE mentioned in MANDATORY PRE-FLIGHT CHECK
+    // and NEVER-USE blocks as explicitly prohibited — that's the whole point.
+    // list_code_definition_names has no xray counterpart and should not be referenced.
     assert!(!text.contains("list_code_definition_names"), "instructions should not reference Roo-specific list_code_definition_names");
 }
 
@@ -702,6 +705,111 @@ fn test_render_instructions_multiple_extensions() {
     assert!(text.contains(".sql"), "should mention .sql");
     assert!(text.contains("NEVER READ"), "should have NEVER READ");
 }
+
+/// INTENT -> TOOL MAPPING section must exist and list the most common intents
+/// mapped to xray tools (positive triggers, intent-first).
+#[test]
+fn test_instructions_has_intent_mapping() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("INTENT -> TOOL MAPPING"),
+        "instructions should have INTENT -> TOOL MAPPING section");
+    // Core intent->tool pairs that cover the most common tool-selection failures
+    assert!(text.contains("xray_grep showLines=true"),
+        "INTENT -> TOOL MAPPING should map 'context around a match' to xray_grep showLines");
+    assert!(text.contains("xray_definitions name='X' includeBody=true"),
+        "INTENT -> TOOL MAPPING should map 'read source code' to xray_definitions includeBody");
+    assert!(text.contains("containsLine=N"),
+        "INTENT -> TOOL MAPPING should map 'method at file:line N' to xray_definitions containsLine");
+    assert!(text.contains("xray_edit with multiple edits"),
+        "INTENT -> TOOL MAPPING should map 'replace in files' to xray_edit batch");
+    assert!(text.contains("xray_fast pattern='*' dir='<path>' dirsOnly=true"),
+        "INTENT -> TOOL MAPPING should map 'list files/dirs' to xray_fast dirsOnly");
+}
+
+/// MANDATORY PRE-FLIGHT CHECK forces a conscious justification in <thinking>
+/// before any built-in tool call.
+#[test]
+fn test_instructions_has_preflight_check() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("MANDATORY PRE-FLIGHT CHECK"),
+        "instructions should have MANDATORY PRE-FLIGHT CHECK section");
+    assert!(text.contains("Q1:") && text.contains("Q2:"),
+        "PRE-FLIGHT CHECK should include Q1 and Q2 questions");
+    assert!(text.contains("Just habit / familiarity"),
+        "PRE-FLIGHT CHECK should explicitly call out habit/familiarity as UNJUSTIFIED");
+    assert!(text.contains("UNJUSTIFIED"),
+        "PRE-FLIGHT CHECK should use the word UNJUSTIFIED for habit-based calls");
+}
+
+/// COST REALITY section must give concrete ratios so the model sees the
+/// measurable cost of built-in tool misuse (not abstract dogma).
+#[test]
+fn test_instructions_has_cost_reality() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("COST REALITY"),
+        "instructions should have COST REALITY section");
+    assert!(text.contains("5x fewer tokens"),
+        "COST REALITY should include the 5x fewer tokens figure");
+    assert!(text.contains("24x fewer tokens"),
+        "COST REALITY should include the 24x fewer tokens figure for write_to_file");
+    assert!(text.contains("atomic"),
+        "COST REALITY should mention atomic semantic of xray_edit");
+    assert!(text.contains("2 built-in calls in a row on the same file"),
+        "COST REALITY should include rule-of-thumb about repeated built-in calls");
+}
+
+/// Ordering guarantee: positive intent-mapping must appear BEFORE NEVER-rules
+/// and ANTI-PATTERNS so that intent-first models see it first.
+#[test]
+fn test_instructions_section_order() {
+    let text = render_instructions(&["rs"]);
+    let intent_idx = text.find("INTENT -> TOOL MAPPING")
+        .expect("INTENT -> TOOL MAPPING section missing");
+    let preflight_idx = text.find("MANDATORY PRE-FLIGHT CHECK")
+        .expect("MANDATORY PRE-FLIGHT CHECK section missing");
+    let cost_idx = text.find("COST REALITY")
+        .expect("COST REALITY section missing");
+    let never_read_idx = text.find("NEVER READ")
+        .expect("NEVER READ section missing");
+    let anti_idx = text.find("ANTI-PATTERNS")
+        .expect("ANTI-PATTERNS section missing");
+    assert!(intent_idx < preflight_idx,
+        "INTENT -> TOOL MAPPING must come before MANDATORY PRE-FLIGHT CHECK");
+    assert!(preflight_idx < cost_idx,
+        "MANDATORY PRE-FLIGHT CHECK must come before COST REALITY");
+    assert!(cost_idx < never_read_idx,
+        "COST REALITY must come before NEVER READ (positive triggers first)");
+    assert!(intent_idx < anti_idx,
+        "INTENT -> TOOL MAPPING must come before ANTI-PATTERNS");
+}
+
+/// STRATEGY RECIPES in instructions should be trimmed to the top-3 most common
+/// scenarios; the rest live in xray_help.
+#[test]
+fn test_instructions_strategy_recipes_trimmed() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("[Architecture Exploration]"),
+        "top-3 recipes should include Architecture Exploration");
+    assert!(text.contains("[Call Chain Investigation]"),
+        "top-3 recipes should include Call Chain Investigation");
+    assert!(text.contains("[Stack Trace / Bug Investigation]"),
+        "top-3 recipes should include Stack Trace / Bug Investigation");
+    // The remaining four recipes should NOT be inlined in instructions — they
+    // are available via xray_help to keep the system-prompt budget under control.
+    assert!(!text.contains("[Code History Investigation]"),
+        "Code History Investigation should be removed from instructions (available via xray_help)");
+    assert!(!text.contains("[Code Health Scan]"),
+        "Code Health Scan should be removed from instructions (available via xray_help)");
+    assert!(!text.contains("[Code Review / Story Evaluation]"),
+        "Code Review / Story Evaluation should be removed from instructions (available via xray_help)");
+    assert!(text.contains("call xray_help for the full catalog"),
+        "STRATEGY RECIPES header should point at xray_help for the full catalog");
+    // strategies() itself must still return the full catalog for xray_help.
+    let all = strategies();
+    assert!(all.len() >= 7,
+        "strategies() should still contain all 7 recipes (for xray_help), got {}", all.len());
+}
+
 
 #[test]
 fn test_tool_definitions_reindex_defs_dynamic() {
