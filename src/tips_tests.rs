@@ -55,23 +55,30 @@ fn test_render_json_has_strategy_recipes() {
 #[test]
 fn test_render_instructions_contains_key_terms() {
     let text = render_instructions(crate::definitions::definition_extensions());
-    // Core tools mentioned (via TASK ROUTING table)
+    // Core tools mentioned (via INTENT -> TOOL MAPPING and CRITICAL OVERRIDE)
     assert!(text.contains("xray_fast"), "instructions should mention xray_fast");
     assert!(text.contains("xray_callers"), "instructions should mention xray_callers");
     assert!(text.contains("xray_definitions"), "instructions should mention xray_definitions");
     assert!(text.contains("xray_grep"), "instructions should mention xray_grep");
     assert!(text.contains("xray_edit"), "instructions should mention xray_edit");
-    // TASK ROUTING table present
-    assert!(text.contains("TASK ROUTING"), "instructions should have TASK ROUTING table");
-    assert!(text.contains("check BEFORE using any built-in tool"), "TASK ROUTING should have routing directive");
+    // INTENT -> TOOL MAPPING replaces the older TASK ROUTING table
+    assert!(text.contains("INTENT -> TOOL MAPPING"),
+        "instructions should have INTENT -> TOOL MAPPING (replaces TASK ROUTING)");
+    assert!(text.contains("consult BEFORE choosing any tool"),
+        "INTENT -> TOOL MAPPING should have the directive telling the LLM to consult it first");
+    assert!(!text.contains("TASK ROUTING"),
+        "instructions should NOT have TASK ROUTING header (removed as duplicate of INTENT -> TOOL MAPPING)");
     // Key features mentioned in strategy recipes / DECISION TRIGGERs
     assert!(text.contains("includeBody"), "instructions should mention includeBody");
     // xray_help reference (soft, not urgent)
     assert!(text.contains("xray_help"), "instructions should mention xray_help");
     assert!(!text.contains("IMPORTANT: Call xray_help first"), "instructions should NOT have urgent xray_help prompt");
-    // Strategy recipes and query budget
-    assert!(text.contains("STRATEGY RECIPES"), "instructions should include strategy recipes");
-    assert!(text.contains("Architecture Exploration"), "instructions should include arch exploration recipe");
+    // Strategy recipes trimmed: reference + query budget are inlined, detailed
+    // recipe bodies live only in xray_help.
+    assert!(text.contains("STRATEGY RECIPES"),
+        "instructions should keep the STRATEGY RECIPES reference line");
+    assert!(!text.contains("[Architecture Exploration]"),
+        "Architecture Exploration recipe body should be xray_help-only");
     assert!(text.contains("<=3 search calls"), "instructions should mention query budget");
     // Dynamic extension list: verify all definition extensions appear in the NEVER READ rule
     for ext in crate::definitions::definition_extensions() {
@@ -100,11 +107,12 @@ fn test_render_instructions_contains_key_terms() {
     assert!(text.contains("apply_diff"), "instructions should mention apply_diff as prohibited");
     assert!(text.contains("search_and_replace"), "instructions should mention search_and_replace as prohibited");
     assert!(text.contains("insert_content"), "instructions should mention insert_content as prohibited");
-    // Task routing should include directory listing
-    assert!(text.contains("List files or subdirectories"), "TASK ROUTING should include directory listing");
+    // INTENT -> TOOL MAPPING must include directory-listing routing
+    assert!(text.contains("list files or subdirectories"),
+        "INTENT -> TOOL MAPPING should include directory-listing intent");
     // Removed sections should NOT be present
-    assert!(!text.contains("Quick Reference"), "instructions should NOT have Quick Reference (replaced by TASK ROUTING)");
-    assert!(!text.contains("TOOL PRIORITY"), "instructions should NOT have TOOL PRIORITY (replaced by TASK ROUTING)");
+    assert!(!text.contains("Quick Reference"), "instructions should NOT have Quick Reference (replaced by INTENT -> TOOL MAPPING)");
+    assert!(!text.contains("TOOL PRIORITY"), "instructions should NOT have TOOL PRIORITY (replaced by INTENT -> TOOL MAPPING)");
     assert!(!text.contains("CRITICAL: ALWAYS use xray tools"), "instructions should NOT have old CRITICAL block");
     assert!(!text.contains("BATCH SPLIT"), "instructions should NOT have BATCH SPLIT (removed)");
     assert!(!text.contains("TRAP"), "instructions should NOT have TRAP (removed)");
@@ -181,25 +189,34 @@ fn test_render_instructions_empty_extensions() {
     // Should NOT contain NEVER READ (no definition-supported extensions)
     assert!(!text.contains("NEVER READ"),
         "Empty def_extensions should not produce NEVER READ block");
-    // The file-reading DECISION TRIGGER must NOT appear (no indexed extensions).
-    // But the critical override, file-editing, and zero-result hints DECISION TRIGGERs SHOULD appear (always present).
-    // Count occurrences: should be exactly 3 (critical override + editing + zero-result hints, not reading).
+    // With empty def_extensions, the file-reading DECISION TRIGGER is absent.
+    // The DECISION TRIGGERs that MUST appear (always present, independent of indexed extensions):
+    //   1. CRITICAL OVERRIDE     — "before using ANY built-in tool, STOP and check..."
+    //   2. FILE EDITING          — "before calling ANY built-in edit tool ... STOP"
+    //   3. FILE SEARCH           — "before calling search_files — STOP"
+    //   4. RESPONSE HINTS route  — "if the response hint says 'Use xray_grep...'"
     let dt_count = text.matches("DECISION TRIGGER").count();
     assert_eq!(dt_count, 4,
-        "Empty def_extensions should have 4 DECISION TRIGGERs (critical override + editing + search_files + zero-result hints), not {} (reading trigger should be absent)", dt_count);
+        "Empty def_extensions should have 4 DECISION TRIGGERs (critical override + editing + search_files + response hints), got {}", dt_count);
     // Should contain fallback note
     assert!(text.contains("xray_definitions is not available"),
         "Empty def_extensions should have fallback note about xray_definitions");
-    // TASK ROUTING should be present but WITHOUT definition-dependent tools
-    assert!(text.contains("TASK ROUTING"), "should have TASK ROUTING even with empty extensions");
+    // INTENT -> TOOL MAPPING replaces TASK ROUTING and must be present regardless of extensions
+    assert!(text.contains("INTENT -> TOOL MAPPING"),
+        "should have INTENT -> TOOL MAPPING even with empty extensions");
     assert!(text.contains("xray_grep"), "should still mention xray_grep");
     assert!(text.contains("xray_fast"), "should still mention xray_fast");
     assert!(text.contains("xray_edit"), "should still mention xray_edit");
-    assert!(!text.contains("Read/explore source code"),
-        "should NOT have definition-dependent task routing when def_extensions is empty");
-    assert!(!text.contains("Find callers"),
-        "should NOT have callers routing when def_extensions is empty");
-    assert!(text.contains("STRATEGY RECIPES"), "should still include strategy recipes");
+    // Definition-dependent intents must NOT appear in the mapping when def_extensions is empty
+    assert!(!text.contains("read the source code of a method/class"),
+        "should NOT have definition-dependent reading intent when def_extensions is empty");
+    assert!(!text.contains("find who calls/implements method X"),
+        "should NOT have caller-lookup intent when def_extensions is empty");
+    // STRATEGY RECIPES reference line is always present (detailed bodies are xray_help-only)
+    assert!(text.contains("STRATEGY RECIPES"),
+        "should still include the STRATEGY RECIPES reference line");
+    assert!(!text.contains("[Architecture Exploration]"),
+        "Architecture Exploration recipe body should be xray_help-only even for empty extensions");
 }
 
 /// Single extension: NEVER READ should mention only that extension.
@@ -233,43 +250,58 @@ fn test_render_json_contains_using_static_tip() {
     assert!(has_using_static, "JSON output should contain 'using static' tip");
 }
 
-// ─── New tests for Task Routing ─────────────────────────────────────
-
-#[test]
-fn test_task_routings_not_empty() {
-    assert!(!task_routings().is_empty(), "task_routings() should not be empty");
-}
+// ─── Task Routing tests removed (2026-04-17 Part 4 audit) ───────────
+// TASK ROUTING section was removed from render_instructions as a 1:1 duplicate
+// of INTENT -> TOOL MAPPING; task_routings() function and its tests deleted.
 
 #[test]
 fn test_task_routing_with_definitions() {
+    // TASK ROUTING was removed as a 100% duplicate of INTENT -> TOOL MAPPING.
+    // This test now verifies that INTENT -> TOOL MAPPING plays the same role
+    // for both definition-dependent and universal operations.
     let text = render_instructions(&["cs", "ts"]);
-    assert!(text.contains("TASK ROUTING"), "should have TASK ROUTING");
-    // Definition-dependent routes should be present
-    assert!(text.contains("Read/explore source code"), "should have source code exploration route");
-    assert!(text.contains("Find callers or callees"), "should have callers route");
-    assert!(text.contains("Code complexity"), "should have code health route");
-    // Universal routes always present
-    assert!(text.contains("Search file contents"), "should have grep route");
-    assert!(text.contains("Find a file by name"), "should have fast route");
-    assert!(text.contains("List files or subdirectories"), "should have directory listing route");
-    assert!(text.contains("Edit a file"), "should have edit route");
-    assert!(text.contains("Git blame"), "should have git route");
+    assert!(text.contains("INTENT -> TOOL MAPPING"),
+        "should have INTENT -> TOOL MAPPING (replaces TASK ROUTING)");
+    // Definition-dependent intents should be present
+    assert!(text.contains("read the source code of a method/class"),
+        "should route source-code reading to xray_definitions");
+    assert!(text.contains("find who calls/implements method X"),
+        "should route caller lookup to xray_callers");
+    // Universal intents always present
+    assert!(text.contains("search text across codebase"),
+        "should route text search to xray_grep");
+    assert!(text.contains("find a file by name"),
+        "should route file lookup to xray_fast");
+    assert!(text.contains("list files or subdirectories"),
+        "should route directory listing to xray_fast dirsOnly");
+    assert!(text.contains("replace similar patterns in one or more files"),
+        "should route edits to xray_edit");
+    assert!(text.contains("git blame / history / authors"),
+        "should route git operations to xray_git_*");
 }
 
 #[test]
 fn test_task_routing_without_definitions() {
+    // TASK ROUTING was replaced by INTENT -> TOOL MAPPING. This test verifies the
+    // same gating: definition-dependent routes disappear when there are no indexed
+    // extensions, but universal routes remain.
     let text = render_instructions(&[]);
-    assert!(text.contains("TASK ROUTING"), "should have TASK ROUTING even without defs");
-    // Definition-dependent task descriptions should NOT be in routing table
-    assert!(!text.contains("Read/explore source code"), "should NOT have definition-dependent routing");
-    assert!(!text.contains("Find callers or callees"), "should NOT have callers routing");
-    assert!(!text.contains("Code complexity"), "should NOT have code health routing");
+    assert!(text.contains("INTENT -> TOOL MAPPING"),
+        "should have INTENT -> TOOL MAPPING even without indexed extensions");
+    // Definition-dependent intents should NOT be in the mapping when def_extensions is empty
+    assert!(!text.contains("read the source code of a method/class"),
+        "should NOT have definition-dependent reading intent");
+    assert!(!text.contains("find who calls/implements method X"),
+        "should NOT have caller-lookup intent");
+    assert!(!text.contains("find which method is at file:line"),
+        "should NOT have stack-trace intent");
     // Universal routes always present
     assert!(text.contains("xray_grep"), "should mention xray_grep");
     assert!(text.contains("xray_fast"), "should mention xray_fast");
     assert!(text.contains("xray_edit"), "should mention xray_edit");
     assert!(text.contains("xray_git_blame"), "should mention git tools");
-    assert!(text.contains("List files or subdirectories"), "should have directory listing route even without defs");
+    assert!(text.contains("list files or subdirectories"),
+        "should have directory listing intent even without defs");
 }
 
 #[test]
@@ -282,25 +314,8 @@ fn test_task_routing_always_has_universal_tools() {
     }
 }
 
-/// Validate that all tool names referenced in task_routings() actually exist
-/// in tool_definitions(). Prevents routing drift when tools are renamed.
-#[test]
-fn test_routing_tool_names_exist_in_definitions() {
-    use crate::mcp::handlers::tool_definitions;
-    let tool_names: Vec<String> = tool_definitions(&vec!["cs".to_string()]).iter().map(|t| t.name.clone()).collect();
-    for tr in task_routings() {
-        // Tool field may contain multiple tools separated by " / "
-        for tool_name in tr.tool.split(" / ") {
-            let tool_name = tool_name.trim();
-            assert!(
-                tool_names.contains(&tool_name.to_string()),
-                "TaskRouting references tool '{}' (task: '{}') which does not exist in tool_definitions(). \
-                 Available tools: {:?}",
-                tool_name, tr.task, tool_names
-            );
-        }
-    }
-}
+// test_routing_tool_names_exist_in_definitions: removed (2026-04-17) — covered
+// implicitly by INTENT -> TOOL MAPPING assertions in test_instructions_has_intent_mapping.
 
 /// xray_edit description must START with "ALWAYS USE THIS" override.
 /// This is the strongest lever for preventing LLM fallback to apply_diff.
@@ -352,14 +367,23 @@ fn test_instructions_token_budget() {
     let text = render_instructions(&["cs", "ts", "tsx", "sql", "rs"]);
     let word_count = text.split_whitespace().count();
     let approx_tokens = (word_count as f64 / 0.75) as usize;
-    // Budget: CRITICAL OVERRIDE (~100) + ERROR RECOVERY (~100) + ANTI-PATTERNS (~60) + WORKSPACE DISCOVERY (~30)
-    // v3 additions (2026-04-17): TERMS block (~80) + expanded PRE-FLIGHT Q1/Q2/Q3 with ENFORCEMENT + SELF-AUDIT HOOK (~120)
-    // + operation-based edit rule with MISCONCEPTION ALERT + 3 EXCEPTIONS (~100) + extension-agnostic COST REALITY example (~40)
-    // + 2 new extension-agnostic ANTI-PATTERNS (~60). All justified — prevent LLM fallback to built-in tools on non-.rs files.
+    // Budget history:
+    //   v1 (pre-Part 4):            <2500  — baseline render_instructions.
+    //   v2 (Part 4 additions):      <3000  — +TERMS, +PRE-FLIGHT Q1/Q2/Q3, +MISCONCEPTION ALERT,
+    //                                        +EXAMPLE VIOLATION, +PRE-CALL SELF-AUDIT. Peaked ~2800.
+    //   v3 (Part 4 slimming cuts):  <2250  — 6 cuts applied to remove duplication:
+    //     Cut 1 — TASK ROUTING table removed (100% dup of INTENT -> TOOL MAPPING).
+    //     Cut 2 — COST REALITY reduced from 6 detail lines to 1 rule-of-thumb.
+    //     Cut 3 — STRATEGY RECIPES inlined bodies removed; reference line points at xray_help.
+    //     Cut 4 — 2 duplicate ANTI-PATTERNS removed (search_files dup, extension-based edit dup).
+    //     Cut 5 — TERMS block condensed from 8 lines to 3.
+    //     Cut 6 — PRE-FLIGHT Q2 consolidated from 3 lines (READ/SEARCH/EDIT) to 1.
+    //   Measured after cuts: ~2100 tokens. Budget set to 2250 with ~150-token headroom.
     assert!(
-        approx_tokens < 2800,
+        approx_tokens < 2250,
         "Instructions exceed token budget: ~{} tokens ({} words). \
-         Target: <2800 (v3 policy symmetry). Remove redundant sections if growth continues.",
+         Target: <2250 (Part 4 slimming baseline). If a legitimate addition is needed, \
+         first look for redundancy to cut; only raise the budget as a last resort.",
         approx_tokens, word_count
     );
 }
@@ -607,32 +631,35 @@ fn test_tool_definitions_cs_rs_sql() {
 
 // ─── Tests for Hint E prompt changes (B + C) ────────────────────────
 
-#[test]
-fn test_task_routing_has_non_code_files_entry() {
-    let routings = task_routings();
-    let non_code = routings.iter().find(|r| r.task.contains("non-code"));
-    assert!(non_code.is_some(), "task_routings should have entry for non-code files");
-    let entry = non_code.unwrap();
-    assert_eq!(entry.tool, "xray_grep", "non-code files should route to xray_grep");
-    assert!(!entry.requires_definitions, "non-code files routing should not require definitions");
-}
+// test_task_routing_has_non_code_files_entry: removed (2026-04-17) —
+// obsolete after TASK ROUTING removal.
 
 #[test]
 fn test_instructions_non_code_routing_in_output() {
+    // After TASK ROUTING removal, explicit "non-code files" phrasing is dropped.
+    // The routing for non-code files is now implicit via:
+    //   - CRITICAL OVERRIDE: "Search file contents -> xray_grep"
+    //   - INTENT -> TOOL MAPPING: "search text across codebase -> xray_grep"
+    //   - ANTI-PATTERNS: "NEVER use xray_definitions for non-<ext> files (JSON, YAML, MD)"
     let text = render_instructions(&["cs"]);
-    assert!(text.contains("non-code files"),
-        "Instructions should mention non-code files routing");
-    assert!(text.contains("XML"),
-        "Non-code files routing should mention XML");
+    assert!(text.contains("xray_grep"),
+        "Instructions should route content search to xray_grep (covers non-code files)");
+    assert!(text.contains("JSON, YAML, MD"),
+        "ANTI-PATTERNS should cite non-code file examples (JSON/YAML/MD) that require xray_grep");
 }
 
 #[test]
 fn test_instructions_anti_pattern_unsupported_defs() {
+    // The ANTI-PATTERN names representative non-indexed file types. The
+    // previous version listed XML explicitly, but XML has since become
+    // xray_definitions-addressable via on-demand parsing, so it was removed
+    // from the list. The current examples are JSON/YAML/MD (genuinely
+    // content-only for xray, routed to xray_grep).
     let text = render_instructions(&["cs", "rs"]);
     assert!(text.contains("NEVER use xray_definitions for non-"),
         "Instructions should have anti-pattern for unsupported definition extensions. Got:\n{}", text);
-    assert!(text.contains("XML"),
-        "Anti-pattern should mention XML as unsupported for xray_definitions");
+    assert!(text.contains("JSON, YAML, MD"),
+        "Anti-pattern should cite concrete non-indexed file types (JSON/YAML/MD) routed to xray_grep");
     assert!(text.contains("xray_grep instead"),
         "Anti-pattern should suggest xray_grep as alternative");
 }
@@ -748,17 +775,19 @@ fn test_instructions_has_preflight_check() {
 /// measurable cost of built-in tool misuse (not abstract dogma).
 #[test]
 fn test_instructions_has_cost_reality() {
+    // COST REALITY was slimmed from a 6-line example block to a single
+    // rule-of-thumb line. Detailed measured ratios (5x/24x/8x, atomic
+    // rollback, etc.) now live in xray_help to stay under the system-prompt
+    // token budget. This test verifies the slim version is still present.
     let text = render_instructions(&["rs"]);
     assert!(text.contains("COST REALITY"),
-        "instructions should have COST REALITY section");
-    assert!(text.contains("5x fewer tokens"),
-        "COST REALITY should include the 5x fewer tokens figure");
-    assert!(text.contains("24x fewer tokens"),
-        "COST REALITY should include the 24x fewer tokens figure for write_to_file");
-    assert!(text.contains("atomic"),
-        "COST REALITY should mention atomic semantic of xray_edit");
+        "instructions should keep the COST REALITY header");
+    assert!(text.contains("3-24x cheaper"),
+        "COST REALITY should summarize the token/round-trip savings range");
     assert!(text.contains("2 built-in calls in a row on the same file"),
-        "COST REALITY should include rule-of-thumb about repeated built-in calls");
+        "COST REALITY should keep the 'two built-ins in a row' rule of thumb");
+    assert!(text.contains("xray_help"),
+        "COST REALITY should point at xray_help for detailed measured ratios");
 }
 
 /// Ordering guarantee: positive intent-mapping must appear BEFORE NEVER-rules
@@ -790,23 +819,32 @@ fn test_instructions_section_order() {
 /// scenarios; the rest live in xray_help.
 #[test]
 fn test_instructions_strategy_recipes_trimmed() {
+    // STRATEGY RECIPES was previously inlined in render_instructions with the
+    // top-3 recipes expanded (Architecture Exploration / Call Chain / Stack
+    // Trace). To stay under the system-prompt token budget, the section is
+    // now a single reference line pointing at xray_help, and the full
+    // 7-recipe catalog is delivered only on-demand via xray_help.
     let text = render_instructions(&["rs"]);
-    assert!(text.contains("[Architecture Exploration]"),
-        "top-3 recipes should include Architecture Exploration");
-    assert!(text.contains("[Call Chain Investigation]"),
-        "top-3 recipes should include Call Chain Investigation");
-    assert!(text.contains("[Stack Trace / Bug Investigation]"),
-        "top-3 recipes should include Stack Trace / Bug Investigation");
-    // The remaining four recipes should NOT be inlined in instructions — they
-    // are available via xray_help to keep the system-prompt budget under control.
+    // Header and on-demand reference must still be present.
+    assert!(text.contains("STRATEGY RECIPES"),
+        "instructions should keep a short STRATEGY RECIPES reference line");
+    assert!(text.contains("<=3 search calls"),
+        "STRATEGY RECIPES line should keep the query-budget rule of thumb");
+    assert!(text.contains("xray_help for the full catalog"),
+        "STRATEGY RECIPES line should point at xray_help for the full catalog");
+    // NONE of the individual recipe bracket-labels should be inlined anymore.
+    assert!(!text.contains("[Architecture Exploration]"),
+        "Architecture Exploration recipe body should NOT be inlined in instructions");
+    assert!(!text.contains("[Call Chain Investigation]"),
+        "Call Chain Investigation recipe body should NOT be inlined in instructions");
+    assert!(!text.contains("[Stack Trace / Bug Investigation]"),
+        "Stack Trace recipe body should NOT be inlined in instructions");
     assert!(!text.contains("[Code History Investigation]"),
-        "Code History Investigation should be removed from instructions (available via xray_help)");
+        "Code History Investigation should remain xray_help-only");
     assert!(!text.contains("[Code Health Scan]"),
-        "Code Health Scan should be removed from instructions (available via xray_help)");
+        "Code Health Scan should remain xray_help-only");
     assert!(!text.contains("[Code Review / Story Evaluation]"),
-        "Code Review / Story Evaluation should be removed from instructions (available via xray_help)");
-    assert!(text.contains("call xray_help for the full catalog"),
-        "STRATEGY RECIPES header should point at xray_help for the full catalog");
+        "Code Review / Story Evaluation should remain xray_help-only");
     // strategies() itself must still return the full catalog for xray_help.
     let all = strategies();
     assert!(all.len() >= 7,
@@ -842,15 +880,20 @@ fn test_tool_definitions_reindex_defs_dynamic() {
 
 #[test]
 fn test_instructions_has_terms_block() {
+    // The TERMS block was condensed from 8 lines to 3 to stay under the
+    // token budget. It now names both classes of tools and tells the LLM
+    // to route by operation type rather than by tool name.
     let text = render_instructions(&["rs"]);
     assert!(text.contains("=== TERMS ==="),
         "instructions should have a TERMS definitions block at the top");
     assert!(text.contains("\"xray tools\""),
         "TERMS block should define 'xray tools'");
-    assert!(text.contains("\"your built-in tools\""),
-        "TERMS block should define 'your built-in tools'");
-    assert!(text.contains("Exact names differ per"),
-        "TERMS should explain that built-in tool names differ per LLM host");
+    assert!(text.contains("\"built-in tools\""),
+        "TERMS block should define 'built-in tools'");
+    assert!(text.contains("names vary per host"),
+        "TERMS should note that built-in tool names vary across LLM hosts");
+    assert!(text.contains("OPERATION TYPE"),
+        "TERMS should instruct the LLM to map by OPERATION TYPE, not by name");
 }
 
 #[test]
@@ -925,43 +968,61 @@ fn test_instructions_preflight_has_q3_justification() {
 
 #[test]
 fn test_instructions_preflight_q1_q2_q3_symmetric() {
+    // PRE-FLIGHT Q2 was consolidated from three separate READ/SEARCH/EDIT
+    // lines into a single line to reclaim token budget. The consolidated
+    // line still names all three operation types with their xray mappings.
     let text = render_instructions(&["rs"]);
-    // All three questions must reference read/search/edit symmetrically
     let preflight_start = text.find("MANDATORY PRE-FLIGHT CHECK").unwrap();
     let cost_start = text.find("COST REALITY").unwrap();
     let preflight = &text[preflight_start..cost_start];
-    assert!(preflight.contains("READ operation"),
-        "PRE-FLIGHT Q2 should explicitly address READ operation");
-    assert!(preflight.contains("SEARCH operation"),
-        "PRE-FLIGHT Q2 should explicitly address SEARCH operation");
-    assert!(preflight.contains("EDIT operation"),
-        "PRE-FLIGHT Q2 should explicitly address EDIT operation");
+    assert!(preflight.contains("READ"),
+        "PRE-FLIGHT Q2 should still mention READ scope");
+    assert!(preflight.contains("SEARCH"),
+        "PRE-FLIGHT Q2 should still mention SEARCH scope");
+    assert!(preflight.contains("EDIT"),
+        "PRE-FLIGHT Q2 should still mention EDIT scope");
+    assert!(preflight.contains("xray_definitions"),
+        "PRE-FLIGHT Q2 should map READ to xray_definitions");
+    assert!(preflight.contains("xray_grep"),
+        "PRE-FLIGHT Q2 should map SEARCH to xray_grep");
+    assert!(preflight.contains("xray_edit"),
+        "PRE-FLIGHT Q2 should map EDIT to xray_edit");
     assert!(preflight.contains("UNJUSTIFIED"),
         "PRE-FLIGHT should call out 'habit/familiarity' as UNJUSTIFIED");
 }
 
 #[test]
 fn test_instructions_anti_pattern_extension_based_edit() {
+    // The "NEVER choose a built-in edit tool based on file extension" bullet
+    // was removed from ANTI-PATTERNS as a duplicate — the same guidance is
+    // carried more forcefully by FILE EDITING DECISION TRIGGER (NEVER USE
+    // your built-in edit tools for EDITING existing text files ... regardless
+    // of file extension) and by the MISCONCEPTION ALERT immediately below it.
     let text = render_instructions(&["rs"]);
-    assert!(text.contains("NEVER choose a built-in edit tool based on file extension"),
-        "ANTI-PATTERNS should have the extension-based edit-tool choice entry");
-    assert!(text.contains("xray tools have different scopes"),
-        "ANTI-PATTERNS should explain that xray tools have different scopes");
+    assert!(text.contains("regardless of file extension"),
+        "FILE EDITING DECISION TRIGGER should say xray_edit applies regardless of extension");
+    assert!(text.contains("MISCONCEPTION ALERT"),
+        "FILE EDITING DECISION TRIGGER should keep the MISCONCEPTION ALERT callout");
+    assert!(text.contains("NO extension filter"),
+        "MISCONCEPTION ALERT should state xray_edit has NO extension filter");
 }
 
 #[test]
 fn test_instructions_cost_reality_has_multiblock_example() {
+    // The multi-block patch/diff example ("8 SEARCH/REPLACE blocks", "8x fewer
+    // round-trips", "atomic rollback", "xray_edit does NOT care about --ext
+    // for editing") was slimmed out of render_instructions to stay under the
+    // system-prompt token budget. The equivalent guidance is now delivered via:
+    //   - FILE EDITING DECISION TRIGGER — asserts xray_edit works on ANY text file
+    //     regardless of indexed extensions ("xray_edit has NO extension filter")
+    //   - xray_help — carries the detailed measured example on-demand.
     let text = render_instructions(&["rs"]);
-    // Extension-agnostic cost example covering indexed + non-indexed
-    assert!(text.contains("8 SEARCH/REPLACE blocks"),
-        "COST REALITY should include the 8-block patch/diff example");
-    assert!(text.contains("8x fewer round-trips"),
-        "COST REALITY should cite the 8x reduction factor");
-    assert!(text.contains("atomic rollback"),
-        "COST REALITY should mention atomic rollback");
-    // Must explicitly say xray_edit does not care about --ext for editing
-    assert!(text.contains("xray_edit does NOT care about --ext for editing") || text.contains("does NOT care about --ext"),
-        "COST REALITY should explicitly say xray_edit ignores --ext for editing");
+    assert!(text.contains("NO extension filter"),
+        "FILE EDITING DECISION TRIGGER should explicitly say xray_edit has no extension filter");
+    assert!(text.contains("xray_edit works on ALL text files"),
+        "FILE EDITING DECISION TRIGGER should state xray_edit works on ALL text files");
+    assert!(text.contains("atomic"),
+        "FILE EDITING DECISION TRIGGER should mention atomic semantics");
 }
 
 #[test]
@@ -1059,4 +1120,75 @@ fn test_instructions_habit_clause_is_coherent() {
         !text.contains("Just habit / familiarity -> UNJUSTIFIED"),
         "Old broken fragment 'Just habit / familiarity -> UNJUSTIFIED' must not appear — it was a dangling list suffix"
     );
+}
+
+// ============================================================================
+// Part 4 tests (meta-observation from 2026-04-17 session):
+// Prompt improvements to prevent habit-driven selection of built-in search tools
+// when xray_grep countOnly=true would be the correct choice for validation intents.
+// ============================================================================
+
+/// 4.1: New validation-intent entries in INTENT -> TOOL MAPPING.
+#[test]
+fn test_instructions_has_validation_intent_mappings() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("validate/fact-check whether a term exists"),
+        "INTENT -> TOOL MAPPING should have validate/fact-check entry");
+    assert!(text.contains("quick yes/no: does X appear"),
+        "INTENT -> TOOL MAPPING should have quick yes/no entry");
+    assert!(text.contains("confirm absence of pattern before editing"),
+        "INTENT -> TOOL MAPPING should have confirm absence entry");
+    // All three must route to xray_grep countOnly=true
+    assert!(text.contains("countOnly=true"),
+        "Validation intents should route to xray_grep countOnly=true");
+}
+
+/// 4.2: EXAMPLE VIOLATION block in ANTI-PATTERNS.
+#[test]
+fn test_instructions_has_example_violation_block() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("EXAMPLE VIOLATION"),
+        "ANTI-PATTERNS should have EXAMPLE VIOLATION block");
+    assert!(text.contains("ROOT CAUSE"),
+        "EXAMPLE VIOLATION should explain ROOT CAUSE");
+    assert!(text.contains("PREVENTION"),
+        "EXAMPLE VIOLATION should have PREVENTION guidance");
+    assert!(text.contains("linguistic coincidence"),
+        "EXAMPLE VIOLATION should call out the linguistic coincidence root cause");
+}
+
+/// 4.3: PRE-CALL SELF-AUDIT in addition to post-call SELF-AUDIT HOOK.
+#[test]
+fn test_instructions_has_pre_call_self_audit() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("PRE-CALL SELF-AUDIT"),
+        "instructions should have PRE-CALL SELF-AUDIT (not only post-call SELF-AUDIT HOOK)");
+    assert!(text.contains("What is my actual intent?"),
+        "PRE-CALL SELF-AUDIT should include the 1-word intent question");
+    assert!(text.contains("mental shortcuts on seemingly-trivial tasks"),
+        "PRE-CALL SELF-AUDIT should name the violation class it prevents");
+    // Post-call hook must still be present (both hooks coexist)
+    assert!(text.contains("SELF-AUDIT HOOK"),
+        "post-call SELF-AUDIT HOOK must remain alongside PRE-CALL SELF-AUDIT");
+}
+
+/// 4.4: "Trivial task trap" tip is present in tips().
+#[test]
+fn test_tips_contains_trivial_task_trap() {
+    let all_tips = tips(&[]);
+    let has_trivial = all_tips.iter().any(|t|
+        t.rule.contains("Trivial task") && t.rule.contains("trivial policy check")
+    );
+    assert!(has_trivial, "tips() should contain the 'Trivial task != trivial policy check' tip");
+}
+
+/// 4.4: Tip also surfaces in JSON output (xray_help).
+#[test]
+fn test_render_json_contains_trivial_task_trap() {
+    let json = render_json(&[]);
+    let practices = json["bestPractices"].as_array().unwrap();
+    let has_trivial = practices.iter().any(|p| {
+        p["rule"].as_str().unwrap_or("").contains("Trivial task")
+    });
+    assert!(has_trivial, "JSON output should contain the 'Trivial task' tip");
 }
