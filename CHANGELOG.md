@@ -1,5 +1,9 @@
 # Changelog
 
+### Internal
+
+- **Phase 2: Default-refactor for CLI Args structs** — Added `#[derive(PartialEq)]` and `impl Default` to all 5 CLI Args structs (`IndexArgs`, `ContentIndexArgs`, `ServeArgs`, `FastArgs`, `GrepArgs`) in `src/cli/args.rs`. The `Default` impls mirror the clap `default_value` attributes, locked in by 5 new drift-tests in `args_defaults_tests` module comparing `T::default()` to `T::parse_from([...])` (catches future drift between `Default` and clap defaults). Test code across `src/main_tests.rs`, `src/index_tests.rs`, `src/mcp/handlers/handlers_tests_fast.rs`, `src/mcp/handlers/handlers_tests_grep.rs`, `src/mcp/handlers/definitions_tests.rs` replaced ~60 struct literals with `..Default::default()` — reduces future field-addition churn from ~60 sites to 1 site per struct. Production code (`serve.rs`, `handlers/mod.rs`, `handlers/fast.rs`, non-test code in `cli/mod.rs`) retains explicit field literals for compiler-enforced conscious field assignment. All 1786 unit tests (was 1781 — +5 drift tests) + 68 E2E tests pass.
+
 ### Bug Fixes
 
 - **`--respect-git-exclude` silently dropped on index rebuild** — The `--respect-git-exclude` flag on `xray serve` was only honored during the initial content-index build. Any subsequent rebuild path silently reverted to `respect_git_exclude=false`, meaning files listed in `.git/info/exclude` leaked back into the index after `xray_reindex`, workspace switch (via `roots/list` or manual `xray_reindex dir=new`), the MCP file-list auto-rebuild, or the CLI stale-index auto-rebuild for `xray fast` / `xray grep`. The flag is now propagated end-to-end:

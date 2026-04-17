@@ -522,10 +522,7 @@ fn test_save_compressed_atomic_preserves_old_on_new_save() {
 fn test_build_index_nonexistent_dir_returns_error() {
     let result = crate::index::build_index(&crate::IndexArgs {
         dir: "/nonexistent/path/that/does/not/exist".to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
-        threads: 0,
+        ..Default::default()
     });
     assert!(result.is_err(), "build_index should return Err for nonexistent directory");
     let err_msg = result.unwrap_err().to_string();
@@ -536,12 +533,7 @@ fn test_build_index_nonexistent_dir_returns_error() {
 fn test_build_content_index_nonexistent_dir_returns_error() {
     let result = crate::index::build_content_index(&crate::ContentIndexArgs {
         dir: "/nonexistent/path/that/does/not/exist".to_string(),
-        ext: "cs".to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
-        threads: 0,
-        min_token_len: 2,
+        ..Default::default()
     });
     assert!(result.is_err(), "build_content_index should return Err for nonexistent directory");
     let err_msg = result.unwrap_err().to_string();
@@ -554,10 +546,8 @@ fn test_build_index_valid_dir_returns_ok() {
     std::fs::write(tmp.path().join("file.txt"), "hello").unwrap();
     let result = crate::index::build_index(&crate::IndexArgs {
         dir: tmp.path().to_string_lossy().to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
         threads: 1,
+        ..Default::default()
     });
     assert!(result.is_ok(), "build_index should succeed for valid directory");
     let index = result.unwrap();
@@ -570,12 +560,8 @@ fn test_build_content_index_valid_dir_returns_ok() {
     std::fs::write(tmp.path().join("file.cs"), "class Foo {}").unwrap();
     let result = crate::index::build_content_index(&crate::ContentIndexArgs {
         dir: tmp.path().to_string_lossy().to_string(),
-        ext: "cs".to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
         threads: 1,
-        min_token_len: 2,
+        ..Default::default()
     });
     assert!(result.is_ok(), "build_content_index should succeed for valid directory");
     let index = result.unwrap();
@@ -667,11 +653,8 @@ fn test_build_content_index_sets_format_version() {
     let result = crate::index::build_content_index(&crate::ContentIndexArgs {
         dir: tmp.path().to_string_lossy().to_string(),
         ext: "rs".to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
         threads: 1,
-        min_token_len: 2,
+        ..Default::default()
     });
     assert!(result.is_ok());
     assert_eq!(result.unwrap().format_version, code_xray::CONTENT_INDEX_VERSION,
@@ -990,12 +973,8 @@ fn test_chunked_content_build_multiple_files_correct_file_ids() {
 
     let result = crate::index::build_content_index(&crate::ContentIndexArgs {
         dir: tmp.path().to_string_lossy().to_string(),
-        ext: "cs".to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
         threads: 4, // Multi-threaded to exercise sub-chunking
-        min_token_len: 2,
+        ..Default::default()
     });
     assert!(result.is_ok(), "build_content_index should succeed");
     let index = result.unwrap();
@@ -1041,12 +1020,8 @@ fn test_chunked_content_build_file_id_to_path_consistency() {
 
     let result = crate::index::build_content_index(&crate::ContentIndexArgs {
         dir: tmp.path().to_string_lossy().to_string(),
-        ext: "cs".to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
         threads: 2,
-        min_token_len: 2,
+        ..Default::default()
     });
     let index = result.unwrap();
 
@@ -1082,22 +1057,14 @@ fn test_chunked_content_build_single_vs_multi_thread() {
 
     let idx_single = crate::index::build_content_index(&crate::ContentIndexArgs {
         dir: tmp.path().to_string_lossy().to_string(),
-        ext: "cs".to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
         threads: 1,
-        min_token_len: 2,
+        ..Default::default()
     }).unwrap();
 
     let idx_multi = crate::index::build_content_index(&crate::ContentIndexArgs {
         dir: tmp.path().to_string_lossy().to_string(),
-        ext: "cs".to_string(),
-        max_age_hours: 24,
-        hidden: false,
-        no_ignore: false, respect_git_exclude: false,
         threads: 4,
-        min_token_len: 2,
+        ..Default::default()
     }).unwrap();
 
     assert_eq!(idx_single.files.len(), idx_multi.files.len(),
