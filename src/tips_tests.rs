@@ -1192,3 +1192,97 @@ fn test_render_json_contains_trivial_task_trap() {
     });
     assert!(has_trivial, "JSON output should contain the 'Trivial task' tip");
 }
+
+
+// ─── Deleted file support documentation tests (2026-04-17) ──────────
+// These tests guard the policy/tips updates for the deleted-file feature
+// added in user story todo_approved_2026-04-17_git-deleted-files-support.md.
+
+#[test]
+fn test_tips_includes_deleted_files_tip() {
+    let tip_rules: Vec<String> = tips(&["rs".to_string()])
+        .iter()
+        .map(|t| t.rule.to_string())
+        .collect();
+    assert!(
+        tip_rules.iter().any(|r| r.contains("Deleted files: xray_git_*")),
+        "tips() must include the Deleted-Files tip after 2026-04-17 update. Got rules: {:?}",
+        tip_rules
+    );
+}
+
+#[test]
+fn test_strategies_includes_deleted_file_archaeology() {
+    let strategy_names: Vec<&'static str> = strategies().iter().map(|s| s.name).collect();
+    assert!(
+        strategy_names.contains(&"Deleted File Archaeology"),
+        "strategies() must include the 'Deleted File Archaeology' recipe. Got: {:?}",
+        strategy_names
+    );
+}
+
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+#[test]
+fn test_render_instructions_mentions_deleted_files_intent() {
+    let text = render_instructions(crate::definitions::definition_extensions());
+    assert!(
+        text.contains("history of a file that was DELETED/removed"),
+        "INTENT -> TOOL MAPPING must include the deleted-file intent line"
+    );
+    assert!(
+        text.contains("show activity including deleted files"),
+        "INTENT -> TOOL MAPPING must include the activity-with-deletions intent line"
+    );
+    assert!(
+        text.contains("BOTH existing AND deleted files"),
+        "the git blame/history/authors INTENT line must clarify deleted-file coverage"
+    );
+}
+
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+#[test]
+fn test_render_instructions_anti_pattern_against_raw_git() {
+    let text = render_instructions(crate::definitions::definition_extensions());
+    assert!(
+        text.contains("--diff-filter=D"),
+        "ANTI-PATTERNS must explicitly call out raw `git log --all --diff-filter=D` as a violation"
+    );
+    assert!(
+        text.contains("auto --follow"),
+        "INTENT/ERROR-RECOVERY must explain WHY raw git is wrong (auto --follow fallback exists). Slim wording in render_instructions: 'xray_git_* covers deleted files via auto --follow.'"
+    );
+}
+
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+#[test]
+fn test_render_instructions_error_recovery_mentions_git_specific_rule() {
+    let text = render_instructions(crate::definitions::definition_extensions());
+    assert!(
+        text.contains("6. GIT:"),
+        "ERROR RECOVERY pt 6 must include the git-specific fallback prohibition (slim wording)"
+    );
+    assert!(
+        text.contains("ARE the answer"),
+        "ERROR RECOVERY pt 6 must explain that 'never existed' / 'deleted' annotations ARE the answer"
+    );
+}
+
+#[test]
+fn test_parameter_examples_includes_deleted_file_docs() {
+    let examples = parameter_examples(&["rs".to_string()]);
+    let history = &examples["xray_git_history"];
+    assert!(
+        history.get("deletedFiles").is_some(),
+        "xray_git_history parameter_examples must include 'deletedFiles' explanation"
+    );
+    let activity = &examples["xray_git_activity"];
+    assert!(
+        activity.get("includeDeleted").is_some(),
+        "xray_git_activity parameter_examples must include 'includeDeleted' explanation"
+    );
+    let include_deleted_str = activity["includeDeleted"].as_str().unwrap_or("");
+    assert!(
+        include_deleted_str.contains("git ls-files"),
+        "includeDeleted documentation must mention the single `git ls-files` performance invariant"
+    );
+}

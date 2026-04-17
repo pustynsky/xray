@@ -1123,6 +1123,7 @@ Cache responses include a `"(from cache)"` hint in the `summary` field so the AI
 | `author`     | string | — | Filter by author name or email (case-insensitive substring match). Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity` |
 | `message`    | string | — | Filter by commit message (case-insensitive substring match). Available on `xray_git_history`, `xray_git_diff`, `xray_git_activity`, `xray_git_authors` |
 | `noCache`    | boolean | — | If true, bypass the in-memory git history cache and query git CLI directly. Useful when cache may be stale. Available on `xray_git_history`, `xray_git_authors`, `xray_git_activity` |
+| `includeDeleted` | boolean | — | If true, restrict `xray_git_activity` results to files that are NOT in the current HEAD (i.e. deleted files). The activity list itself is unchanged — only the post-filter differs. Implementation uses a single `git ls-files` spawn (HashSet lookup), so it scales O(1) per result regardless of repo size. Available on `xray_git_activity`. |
 
 ### Cache behavior
 
@@ -1301,9 +1302,14 @@ Shows whether you're on the right branch before investigating production bugs. R
 
 ---
 
-## File Not Found Warning
+## File Not Found Warning vs Deleted File Info
 
-When `xray_git_history`, `xray_git_authors`, or `xray_git_activity` return 0 results and the specified file doesn't exist in git, the response includes a `"warning"` field:
+The git tools distinguish two distinct cases when a file path returns 0 results:
+
+1. **Never tracked** — the file path was never committed to git. Returns `warning` ("File never tracked in git: ..."). Likely a typo or wrong path.
+2. **Deleted** — the file existed in git history but is no longer in current HEAD. Returns full history (`xray_git_history` succeeds via internal `--follow` fallback) and `info` ("... is not in current HEAD. This is NOT an error"). No `warning` is set.
+
+When `xray_git_history`, `xray_git_authors`, or `xray_git_activity` return 0 results and the file was never tracked in git, the response includes a `"warning"` field:
 
 ```json
 {
@@ -1336,6 +1342,37 @@ This warning is **absent** when:
 - The `git rev-parse` command fails (e.g., git not installed)
 
 The branch is detected **once at server startup** via `git rev-parse --abbrev-ref HEAD`. Git tools (`xray_git_history`, `xray_git_diff`, etc.) do **not** include this warning because they query the git repository directly and are not affected by which branch the index was built on.
+
+---
+
+## Deleted Files Support
+
+All three high-level git tools (`xray_git_history`, `xray_git_authors`, `xray_git_activity`) handle deleted files natively — no separate `git log --all --diff-filter=D` call is required from the LLM.
+
+### `xray_git_history` for a deleted file
+
+If a file was deleted at any point, `xray_git_history` still returns its full history. Internally it tries `git log --follow <path>` first; if that returns nothing AND the file ever existed in git, it falls back to `git log -- <path>` (which works for deleted files even when `--follow` would resolve to the wrong inode).
+
+The response includes `info` to make it explicit that the empty current-HEAD presence is intentional and not an error.
+
+### `xray_git_activity includeDeleted=true`
+
+Use the `includeDeleted` parameter to filter activity results down to files that are not in current HEAD. Useful for answering "what was deleted in the last sprint?".
+
+```json
+{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":".","from":"2025-01-01","to":"2025-01-31","includeDeleted":true}}}
+```
+
+Response includes:
+- `summary.includeDeleted: true` (echo)
+- `summary.hint`: "Filtered to deleted files only (NOT in current HEAD)"
+- The activity list contains only files that no longer exist in HEAD
+
+**Performance:** the filter uses a single `git ls-files` spawn (O(N) once) and a HashSet lookup (O(1) per file), so it does not scale linearly with the result count.
+
+### Why no separate "deleted files" tool?
+
+Deleted-file queries are a parameter on existing tools, not a new tool. This keeps the tool count low and removes one decision point for the LLM. See `docs/user-stories/todo_approved_2026-04-17_git-deleted-files-support.md` for the design rationale.
 
 ---
 

@@ -708,7 +708,7 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
-# T-GIT-FILE-NOT-FOUND: nonexistent file returns warning, not error
+# T-GIT-FILE-NOT-FOUND: never-tracked file returns warning, not error (and warning text says "never tracked")
 $testBlocks += , {
     param($Bin, $Dir, $Ext)
     $name = "T-GIT-FILE-NOT-FOUND git-history-file-warning"
@@ -717,8 +717,22 @@ $testBlocks += , {
         $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}',('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":"' + $repoPath + '","file":"DOES_NOT_EXIST_12345.txt"}}}')) -join "`n"
         $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
-        if ($jsonLine -and $jsonLine -match 'warning' -and $jsonLine -notmatch '"isError"\s*:\s*true') { return @{ Name = $name; Passed = $true; Output = "OK" } }
-        else { return @{ Name = $name; Passed = $false; Output = "FAILED (expected warning, no isError)" } }
+        if ($jsonLine -and $jsonLine -match 'never tracked' -and $jsonLine -notmatch '"isError"\s*:\s*true') { return @{ Name = $name; Passed = $true; Output = "OK" } }
+        else { return @{ Name = $name; Passed = $false; Output = "FAILED (expected 'never tracked' warning, no isError)" } }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
+}
+
+# T-GIT-INCLUDE-DELETED: xray_git_activity includeDeleted=true echoes the flag and adds hint about deleted files
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-GIT-INCLUDE-DELETED git-activity-include-deleted-flag"
+    try {
+        $repoPath = $Dir -replace '\\', '/'
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}',('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_git_activity","arguments":{"repo":"' + $repoPath + '","from":"2024-01-01","includeDeleted":true}}}')) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if ($jsonLine -and $jsonLine -match 'includeDeleted' -and $jsonLine -notmatch '"isError"\s*:\s*true') { return @{ Name = $name; Passed = $true; Output = "OK" } }
+        else { return @{ Name = $name; Passed = $false; Output = "FAILED (expected includeDeleted echo, no isError)" } }
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
