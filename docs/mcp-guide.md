@@ -882,6 +882,8 @@ Shows all existing indexes with their status, sizes, age, and memory usage. No p
 
 Force rebuild the content index and reload it into the server's in-memory cache. Useful after many file changes or when `--watch` is not enabled.
 
+> **`--respect-git-exclude` propagation:** the `--respect-git-exclude` flag passed to `xray serve` at startup is stored in `HandlerContext` and honored by every rebuild path — `xray_reindex` (including `dir=` workspace switch), the background build after a `roots/list` workspace switch, and the MCP file-list auto-rebuild. You do not need to restart the server to keep `.git/info/exclude` respected across reindexes.
+
 ### Parameters
 
 | Parameter | Type   | Default          | Description                       |

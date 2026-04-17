@@ -74,6 +74,11 @@ pub struct FastArgs {
     /// Maximum file size in bytes
     #[arg(long)]
     pub max_size: Option<u64>,
+
+    /// Respect .git/info/exclude when auto-rebuilding the file-list index
+    /// (by default xray ignores it so local-excluded files are indexed)
+    #[arg(long)]
+    pub respect_git_exclude: bool,
 }
 
 #[derive(Parser, Debug)]
@@ -335,4 +340,9 @@ pub struct GrepArgs {
     /// Use --exact to search for exact tokens only.
     #[arg(long)]
     pub exact: bool,
+
+    /// Respect .git/info/exclude when auto-rebuilding the content index
+    /// (by default xray ignores it so local-excluded files are indexed)
+    #[arg(long)]
+    pub respect_git_exclude: bool,
 }

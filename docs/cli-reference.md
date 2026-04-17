@@ -119,6 +119,7 @@ If no index exists for the directory, it will be built automatically on first us
 | `--files-only`       | Show only files                                |
 | `--min-size <BYTES>` | Minimum file size filter                       |
 | `--max-size <BYTES>` | Maximum file size filter                       |
+| `--respect-git-exclude` | Respect `.git/info/exclude` during auto-rebuild (default: false) |
 
 ---
 
@@ -234,6 +235,7 @@ xray grep "HttpClient" -d C:\Projects -e cs
 | `-c, --count`       | Show match count only                                                                                                                                                                                                      |
 | `--show-lines`      | Display actual line content from files                                                                                                                                                                                     |
 | `--auto-reindex`    | Auto-rebuild if stale (default: true)                                                                                                                                                                                      |
+| `--respect-git-exclude` | Respect `.git/info/exclude` during auto-rebuild (default: false)                                                                                                                                                        |
 | `-e, --ext <EXT>`   | Filter results by extension                                                                                                                                                                                                |
 | `--max-results <N>` | Limit number of results (0 = unlimited)                                                                                                                                                                                    |
 | `--all`             | AND mode: file must contain ALL terms (default: OR)                                                                                                                                                                        |

@@ -603,3 +603,53 @@ fn test_score_grep_results_nonexistent_term() {
     let results = score_grep_results(&index, &terms, &None, &[], &[], false, 1);
     assert!(results.is_empty());
 }
+
+// ─── respect_git_exclude propagation (Phase 1 regression tests) ──────────
+//
+// These tests ensure the --respect-git-exclude CLI flag is accepted by the
+// FastArgs and GrepArgs parsers and that the parsed value lands on the struct
+// field. Propagation into build_index / build_content_index is covered by
+// existing tests in index_tests.rs; here we only guard the CLI surface.
+
+#[test]
+fn test_fast_args_respect_git_exclude_default_false() {
+    use clap::Parser;
+    let args = super::args::FastArgs::try_parse_from(["xray", "pattern"]).unwrap();
+    assert!(!args.respect_git_exclude, "respect_git_exclude should default to false");
+}
+
+#[test]
+fn test_fast_args_respect_git_exclude_flag_set() {
+    use clap::Parser;
+    let args = super::args::FastArgs::try_parse_from(["xray", "pattern", "--respect-git-exclude"]).unwrap();
+    assert!(args.respect_git_exclude, "--respect-git-exclude should set the flag to true");
+}
+
+#[test]
+fn test_grep_args_respect_git_exclude_default_false() {
+    use clap::Parser;
+    let args = super::args::GrepArgs::try_parse_from(["xray", "pattern"]).unwrap();
+    assert!(!args.respect_git_exclude, "respect_git_exclude should default to false");
+}
+
+#[test]
+fn test_grep_args_respect_git_exclude_flag_set() {
+    use clap::Parser;
+    let args = super::args::GrepArgs::try_parse_from(["xray", "pattern", "--respect-git-exclude"]).unwrap();
+    assert!(args.respect_git_exclude, "--respect-git-exclude should set the flag to true");
+}
+
+#[test]
+fn test_serve_args_respect_git_exclude_default_false() {
+    use clap::Parser;
+    let args = super::args::ServeArgs::try_parse_from(["xray"]).unwrap();
+    assert!(!args.respect_git_exclude, "respect_git_exclude should default to false");
+}
+
+#[test]
+fn test_serve_args_respect_git_exclude_flag_set() {
+    use clap::Parser;
+    let args = super::args::ServeArgs::try_parse_from(["xray", "--respect-git-exclude"]).unwrap();
+    assert!(args.respect_git_exclude, "--respect-git-exclude should set the flag to true");
+}
+
