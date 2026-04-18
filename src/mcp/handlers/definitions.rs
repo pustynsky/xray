@@ -290,11 +290,10 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
     let total_results = results.len();
 
     // 6a. Auto-correction: if 0 results, try kind/name correction before generating hints
-    if total_results == 0 {
-        if let Some(corrected_result) = attempt_auto_correction(&index, &parsed, search_start, ctx) {
+    if total_results == 0
+        && let Some(corrected_result) = attempt_auto_correction(&index, &parsed, search_start, ctx) {
             return corrected_result;
         }
-    }
 
     // 7. Compute term breakdown (before truncation)
     let term_breakdown = compute_term_breakdown(&results, &def_to_term, &parsed);
@@ -462,8 +461,8 @@ fn handle_contains_line_mode(
     }
 
     // Cross-index enrichment: add usageCount from content index
-    if args.include_usage_count {
-        if let Ok(content_idx) = ctx.index.read() {
+    if args.include_usage_count
+        && let Ok(content_idx) = ctx.index.read() {
             for obj in &mut containing_defs {
                 if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
                     let name_lower = name.to_lowercase();
@@ -474,7 +473,6 @@ fn handle_contains_line_mode(
                 }
             }
         }
-    }
 
     let search_elapsed = search_start.elapsed();
     let mut summary = json!({
@@ -931,8 +929,8 @@ fn format_search_output(
     }).collect();
 
     // Cross-index enrichment: add usageCount from content index
-    if args.include_usage_count {
-        if let Ok(content_idx) = ctx.index.read() {
+    if args.include_usage_count
+        && let Ok(content_idx) = ctx.index.read() {
             for obj in &mut defs_json {
                 if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
                     let name_lower = name.to_lowercase();
@@ -943,7 +941,6 @@ fn format_search_output(
                 }
             }
         }
-    }
 
     let summary = build_search_summary(
         index, &defs_json, args, total_results,
@@ -1090,7 +1087,6 @@ fn build_search_summary(
             || kind_str.eq_ignore_ascii_case("field")
             || kind_str.eq_ignore_ascii_case("constructor");
         if is_member_kind
-            && args.name_filter.is_some()
             && total_results > 0
             && summary.get("hint").is_none()
         {
@@ -1100,8 +1096,7 @@ fn build_search_summary(
                     matches!(k, "class" | "interface" | "struct" | "enum" | "record")
                 }).unwrap_or(false)
             });
-            if all_type_level {
-                let name_val = args.name_filter.as_ref().unwrap();
+            if let (true, Some(name_val)) = (all_type_level, args.name_filter.as_ref()) {
                 let first_kind = defs_json.first()
                     .and_then(|d| d.get("kind").and_then(|k| k.as_str()))
                     .unwrap_or("class");
@@ -1344,22 +1339,18 @@ fn attempt_auto_correction(
     ctx: &HandlerContext,
 ) -> Option<ToolCallResult> {
     // A. Kind mismatch: kind filter is set + name/file filter exists
-    if let Some(ref original_kind) = original_args.kind_filter {
-        if original_args.name_filter.is_some() || original_args.file_filter.is_some() {
-            if let Some(result) = try_kind_correction(index, original_args, original_kind, search_start, ctx) {
+    if let Some(ref original_kind) = original_args.kind_filter
+        && (original_args.name_filter.is_some() || original_args.file_filter.is_some())
+            && let Some(result) = try_kind_correction(index, original_args, original_kind, search_start, ctx) {
                 return Some(result);
             }
-        }
-    }
 
     // B. Nearest name match (≥85% similarity)
-    if let Some(ref original_name) = original_args.name_filter {
-        if !original_args.use_regex {
-            if let Some(result) = try_name_correction(index, original_args, original_name, search_start, ctx) {
+    if let Some(ref original_name) = original_args.name_filter
+        && !original_args.use_regex
+            && let Some(result) = try_name_correction(index, original_args, original_name, search_start, ctx) {
                 return Some(result);
             }
-        }
-    }
 
     None
 }
@@ -1429,7 +1420,7 @@ fn try_name_correction(
     let mut best_name: Option<String> = None;
     let mut best_score: f64 = 0.0;
 
-    for (index_name, _) in &index.name_index {
+    for index_name in index.name_index.keys() {
         let score = name_similarity(&search_lower, index_name);
         if score >= AUTO_CORRECT_NAME_THRESHOLD && score > best_score {
             // Guard: reject corrections where query and match differ too much in length.
@@ -1497,14 +1488,13 @@ fn run_corrected_search(
     );
 
     // Inject autoCorrection into the response summary
-    if let Some(content) = tool_result.content.first() {
-        if let Ok(mut output) = serde_json::from_str::<Value>(&content.text) {
+    if let Some(content) = tool_result.content.first()
+        && let Ok(mut output) = serde_json::from_str::<Value>(&content.text) {
             if let Some(summary) = output.get_mut("summary") {
                 summary["autoCorrection"] = auto_correction;
             }
             return Some(ToolCallResult::success(json_to_string(&output)));
         }
-    }
 
     Some(tool_result)
 }
@@ -1600,11 +1590,10 @@ fn hint_wrong_kind(
             if terms.iter().any(|t| n.contains(t.as_str())) {
                 for &idx in indices {
                     if let Some(def) = index.definitions.get(idx as usize) {
-                        if let Some(ref ff) = args.file_filter {
-                            if !file_matches_filter(index, def.file_id, ff) {
+                        if let Some(ref ff) = args.file_filter
+                            && !file_matches_filter(index, def.file_id, ff) {
                                 continue;
                             }
-                        }
                         *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
                     }
                 }
@@ -1682,15 +1671,14 @@ fn hint_file_has_defs_but_filters_narrow(
                 for &def_idx in def_indices {
                     if let Some(def) = index.definitions.get(def_idx as usize) {
                         // Skip definitions that ARE in the file filter (already counted above)
-                        if !file_matches_filter(index, def.file_id, ff) {
-                            if let Some(path) = index.files.get(def.file_id as usize) {
+                        if !file_matches_filter(index, def.file_id, ff)
+                            && let Some(path) = index.files.get(def.file_id as usize) {
                                 // Extract just the filename for readability
                                 let short = path.rsplit(['/', '\\']).next().unwrap_or(path);
                                 if !cross_file_paths.contains(&short.to_string()) {
                                     cross_file_paths.push(short.to_string());
                                 }
                             }
-                        }
                     }
                 }
             }
@@ -1721,7 +1709,7 @@ fn hint_file_fuzzy_match(
 ) -> Option<String> {
     let ff = args.file_filter.as_ref()?;
     let normalize = |s: &str| -> String {
-        s.replace('\\', "").replace('/', "").replace('-', "").replace('_', "").to_lowercase()
+        s.replace(['\\', '/', '-', '_'], "").to_lowercase()
     };
     let ff_normalized = normalize(ff);
     if ff_normalized.is_empty() {
@@ -1735,8 +1723,8 @@ fn hint_file_fuzzy_match(
         if let Some(file_path) = index.files.get(*file_id as usize) {
             let path_lower = file_path.replace('\\', "/").to_lowercase();
             let path_normalized = normalize(&path_lower);
-            if path_normalized.contains(&ff_normalized) {
-                if seen_paths.insert(path_lower.clone()) {
+            if path_normalized.contains(&ff_normalized)
+                && seen_paths.insert(path_lower.clone()) {
                     let segments: Vec<&str> = path_lower.split('/').collect();
                     for window_size in 1..=segments.len() {
                         for start in 0..=(segments.len() - window_size) {
@@ -1756,7 +1744,6 @@ fn hint_file_fuzzy_match(
                         }
                     }
                 }
-            }
         }
     }
 

@@ -680,6 +680,29 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
+# T-INFO-NO-DEGRADED: verify xray_info does NOT report workerPanics/degraded on a clean index
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-INFO-NO-DEGRADED xray-info-no-degraded-on-clean-index"
+    try {
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no JSON-RPC response)" } }
+        $errors = @()
+        if ($jsonLine -match '"workerPanics"') { $errors += "unexpected workerPanics field present" }
+        if ($jsonLine -match '"degraded"\s*:\s*true') { $errors += "unexpected degraded=true" }
+        if ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK" }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
+}
+
+
 # T-SERVE-HELP-TOOLS: verify serve --help lists key tools
 $testBlocks += , {
     param($Bin, $Dir, $Ext)

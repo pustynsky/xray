@@ -693,11 +693,10 @@ fn handle_multi_method_callers(
             }
 
             // Nearest-match hint when callTree is empty
-            if tree.is_empty() {
-                if let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
+            if tree.is_empty()
+                && let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
                     method_result["hint"] = json!(h);
                 }
-            }
 
             if impact_analysis && !tests_found.is_empty() {
                 // Dedup tests
@@ -739,11 +738,10 @@ fn handle_multi_method_callers(
             }
 
             // Nearest-match hint when callTree is empty
-            if tree.is_empty() {
-                if let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
+            if tree.is_empty()
+                && let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
                     method_result["hint"] = json!(h);
                 }
-            }
         }
 
         // Add per-method ambiguity warning
@@ -852,7 +850,6 @@ fn check_method_ambiguity(
 /// Generate a nearest-match hint when callTree is empty.
 /// Checks both method name and class name for typos using Jaro-Winkler similarity.
 /// Falls back to a generic hint if both names exist but no call sites were found.
-
 fn generate_callers_hint(
     method_name: &str,
     class_filter: Option<&str>,
@@ -1209,6 +1206,7 @@ fn resolve_parent_file_ids(
 /// Expand caller tree via interface implementations (direction = "up", depth == 0 only).
 /// Finds related interfaces for the target class, then recursively searches for callers
 /// of the method through interface implementations.
+#[allow(clippy::too_many_arguments)]
 fn expand_interface_callers(
     method_name: &str,
     method_lower: &str,
@@ -1540,6 +1538,7 @@ fn verify_call_site_target(
 
 /// Build a JSON object describing the root method (the method being searched for).
 /// Includes body if includeBody is true. Returns None if the method is not found in the definition index.
+#[allow(clippy::too_many_arguments)]
 fn build_root_method_info(
     method_lower: &str,
     class_filter: Option<&str>,
@@ -1565,16 +1564,12 @@ fn build_root_method_info(
             continue;
         }
         // Apply class filter if provided
-        if let Some(cls) = class_filter {
-            if !def.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
+        if let Some(cls) = class_filter
+            && !def.parent.as_deref().is_some_and(|p| p.eq_ignore_ascii_case(cls)) {
                 continue;
             }
-        }
 
-        let file_path = match def_idx.files.get(def.file_id as usize) {
-            Some(fp) => fp,
-            None => return None, // invalid file_id — can't build rootMethod
-        };
+        let file_path = def_idx.files.get(def.file_id as usize)?;
         let mut node = json!({
             "method": def.name,
             "line": def.line_start,
@@ -1642,20 +1637,15 @@ fn collect_definition_locations(
     let mut locations: HashSet<(u32, u32)> = HashSet::new();
     if let Some(name_indices) = def_idx.name_index.get(method_lower) {
         for &di in name_indices {
-            if let Some(def) = def_idx.definitions.get(di as usize) {
-                if matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
+            if let Some(def) = def_idx.definitions.get(di as usize)
+                && matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor | DefinitionKind::Function
                     | DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction) {
                     locations.insert((def.file_id, def.line_start));
                 }
-            }
         }
     }
     locations
 }
-
-/// Check if a file path matches the extension filter and does not match any exclusion patterns.
-/// Returns `true` if the file passes all filters.
-
 
 /// Build a JSON node for a single caller in the call tree.
 /// Includes method name, definition line, call site line(s), optional class, optional file name,
@@ -1696,6 +1686,7 @@ fn build_caller_node(
 /// we pass the parent class of the method being searched so that we only find
 /// callers that actually reference that specific class (not any unrelated class
 /// with a method of the same name).
+#[allow(clippy::too_many_arguments)]
 fn build_caller_tree(
     method_name: &str,
     parent_class: Option<&str>,
@@ -1767,9 +1758,8 @@ fn build_caller_tree(
         if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
         // If we have a parent class context, skip files that don't reference that class
-        if let Some(ref pids) = parent_file_ids {
-            if !pids.contains(&posting.file_id) { continue; }
-        }
+        if let Some(ref pids) = parent_file_ids
+            && !pids.contains(&posting.file_id) { continue; }
 
         let file_path = match ctx.content_index.files.get(posting.file_id as usize) {
             Some(p) => p,
@@ -2136,6 +2126,7 @@ fn find_template_parents(
 
 /// Build a callee tree (direction = "down"): find what methods are called by this method.
 /// Uses pre-computed call graph from AST analysis (method_calls in DefinitionIndex).
+#[allow(clippy::too_many_arguments)]
 fn build_callee_tree(
     method_name: &str,
     class_filter: Option<&str>,

@@ -476,11 +476,10 @@ pub fn repo_activity(
     }
 
     // Add path filter via git log's -- <pathspec> syntax
-    if let Some(path) = path_filter {
-        if !path.is_empty() {
+    if let Some(path) = path_filter
+        && !path.is_empty() {
             cmd.arg("--").arg(path);
         }
-    }
 
     let output = run_git(&mut cmd)?;
 

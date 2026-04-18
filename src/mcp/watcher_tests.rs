@@ -937,6 +937,62 @@ fn test_periodic_autosave_saves_both_indexes() {
     assert!(def_path.exists(), "Definition index should be saved to disk: {:?}", def_path);
 }
 
+// ─── should_invalidate_file_index tests (P0-2 regression) ───────────────────
+
+#[test]
+fn test_should_invalidate_file_index_create() {
+    use notify::EventKind;
+    use notify::event::CreateKind;
+    use crate::mcp::watcher::should_invalidate_file_index;
+    assert!(should_invalidate_file_index(&EventKind::Create(CreateKind::Any)));
+    assert!(should_invalidate_file_index(&EventKind::Create(CreateKind::File)));
+}
+
+#[test]
+fn test_should_invalidate_file_index_remove() {
+    use notify::EventKind;
+    use notify::event::RemoveKind;
+    use crate::mcp::watcher::should_invalidate_file_index;
+    assert!(should_invalidate_file_index(&EventKind::Remove(RemoveKind::Any)));
+    assert!(should_invalidate_file_index(&EventKind::Remove(RemoveKind::File)));
+}
+
+#[test]
+fn test_should_invalidate_file_index_rename_triggers_rebuild() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, RenameMode};
+    use crate::mcp::watcher::should_invalidate_file_index;
+    // Regression test for P0-2: rename events must trigger file index rebuild
+    assert!(should_invalidate_file_index(&EventKind::Modify(ModifyKind::Name(RenameMode::Any))));
+    assert!(should_invalidate_file_index(&EventKind::Modify(ModifyKind::Name(RenameMode::From))));
+    assert!(should_invalidate_file_index(&EventKind::Modify(ModifyKind::Name(RenameMode::To))));
+}
+
+#[test]
+fn test_should_invalidate_file_index_modify_any() {
+    use notify::EventKind;
+    use notify::event::ModifyKind;
+    use crate::mcp::watcher::should_invalidate_file_index;
+    assert!(should_invalidate_file_index(&EventKind::Modify(ModifyKind::Any)));
+}
+
+#[test]
+fn test_should_invalidate_file_index_data_change_does_not_invalidate() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, DataChange};
+    use crate::mcp::watcher::should_invalidate_file_index;
+    // Data-only changes (file content) should NOT trigger file index rebuild
+    assert!(!should_invalidate_file_index(&EventKind::Modify(ModifyKind::Data(DataChange::Content))));
+}
+
+#[test]
+fn test_should_invalidate_file_index_access_does_not_invalidate() {
+    use notify::EventKind;
+    use crate::mcp::watcher::should_invalidate_file_index;
+    assert!(!should_invalidate_file_index(&EventKind::Access(notify::event::AccessKind::Any)));
+}
+
+
 #[test]
 fn test_periodic_autosave_skips_empty_indexes() {
     let tmp = tempfile::tempdir().unwrap();

@@ -648,10 +648,9 @@ pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, la
     let compressed_size = std::fs::metadata(&tmp_path)?.len();
 
     // Rename over the target — if process dies before this, old file survives
-    std::fs::rename(&tmp_path, path).map_err(|e| {
+    std::fs::rename(&tmp_path, path).inspect_err(|_e| {
         // Clean up tmp file on rename failure
         let _ = std::fs::remove_file(&tmp_path);
-        e
     })?;
 
     let elapsed = start.elapsed();
@@ -835,7 +834,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
 
     for entry in fs::read_dir(index_base).ok()?.flatten() {
         let path = entry.path();
-        if !path.extension().is_some_and(|e| e == "word-search") {
+        if path.extension().is_none_or(|e| e != "word-search") {
             continue;
         }
 
@@ -878,11 +877,10 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
         }
 
         // ── Fallback: no .meta sidecar — try lightweight root + version check ──
-        if let Some(root) = read_root_from_index_file(&path) {
-            if root != clean {
+        if let Some(root) = read_root_from_index_file(&path)
+            && root != clean {
                 continue; // root doesn't match — skip without loading
             }
-        }
         // Check version before full deserialization
         match read_format_version_from_index_file(&path) {
             Some(v) if v != CONTENT_INDEX_VERSION => {
@@ -1012,7 +1010,7 @@ pub fn cleanup_stale_same_root_indexes(
         let path = entry.path();
 
         // Only check files with the same extension (e.g., "word-search")
-        if !path.extension().is_some_and(|e| e == extension) {
+        if path.extension().is_none_or(|e| e != extension) {
             continue;
         }
 
@@ -1028,8 +1026,8 @@ pub fn cleanup_stale_same_root_indexes(
             read_root_from_index_file(&path)
         };
 
-        if let Some(ref file_root) = file_root {
-            if file_root == root {
+        if let Some(ref file_root) = file_root
+            && file_root == root {
                 // Same root, different hash → stale index
                 if fs::remove_file(&path).is_ok() {
                     eprintln!("[cleanup] Removed stale {} index: {} (same root, different extensions)",
@@ -1038,7 +1036,6 @@ pub fn cleanup_stale_same_root_indexes(
                     let _ = fs::remove_file(meta_path_for(&path));
                 }
             }
-        }
     }
 }
 
@@ -1234,6 +1231,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     let file_data: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
     let read_errors = std::sync::atomic::AtomicUsize::new(0);
     let lossy_file_count = std::sync::atomic::AtomicUsize::new(0);
+    let worker_panic_count = std::sync::atomic::AtomicUsize::new(0);
 
     builder.build_parallel().run(|| {
         let extensions = Arc::clone(&extensions);
@@ -1276,6 +1274,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     let file_count = file_data.len();
     let read_errors = read_errors.load(std::sync::atomic::Ordering::Relaxed);
     let lossy_file_count = lossy_file_count.load(std::sync::atomic::Ordering::Relaxed);
+    let worker_panics = worker_panic_count.load(std::sync::atomic::Ordering::Relaxed);
     let min_len = args.min_token_len;
     log_memory(&format!("content-build: after file walk ({} files)", file_count));
 
@@ -1353,6 +1352,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
 
             handles.into_iter().map(|h| h.join().unwrap_or_else(|_| {
                 eprintln!("[WARN] Worker thread panicked during content index building");
+                worker_panic_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 (Vec::new(), Vec::new(), HashMap::new(), 0u64)
             })).collect()
         });
@@ -1417,6 +1417,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
         path_to_id: None,
         read_errors,
         lossy_file_count,
+        worker_panics,
     })
 }
 

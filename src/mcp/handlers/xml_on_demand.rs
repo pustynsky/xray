@@ -27,7 +27,7 @@
 //! modules never depend on it at the type level — they only see the feature
 //! flag at the call site in `handle_xray_definitions`.
 
-#![cfg(feature = "lang-xml")]
+// cfg(feature = "lang-xml") is set at the module level in mod.rs
 
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -145,8 +145,7 @@ pub(crate) fn try_intercept(
             search_start,
             &warnings,
         ))
-    } else if let Some(ref name) = args.name_filter {
-        Some(handle_name_filter(
+    } else { args.name_filter.as_ref().map(|name| handle_name_filter(
             &xml_defs,
             &source,
             &file_path,
@@ -154,10 +153,7 @@ pub(crate) fn try_intercept(
             args,
             search_start,
             &warnings,
-        ))
-    } else {
-        None
-    }
+        )) }
 }
 
 // ---------------------------------------------------------------------------
@@ -238,7 +234,7 @@ pub(crate) fn resolve_xml_file_path(
 /// users intuitively mean when they mix a substring filter with a concrete file.
 pub(crate) fn extract_file_extension(file_filter: &str) -> Option<String> {
     // Take the last term in comma-separated filter (most specific)
-    let last_term = file_filter.split(',').last()?.trim();
+    let last_term = file_filter.split(',').next_back()?.trim();
     let dot_pos = last_term.rfind('.')?;
     let ext = &last_term[dot_pos + 1..];
     if ext.is_empty() {
@@ -446,14 +442,13 @@ fn classify_matches(xml_defs: &[XmlDefinition], name: &str) -> Vec<XmlMatch> {
             matches.push(XmlMatch { def_index: idx, is_text_content: false });
             continue;
         }
-        if !long_terms.is_empty() {
-            if let Some(ref tc) = def.text_content {
+        if !long_terms.is_empty()
+            && let Some(ref tc) = def.text_content {
                 let tc_lower = tc.to_lowercase();
                 if long_terms.iter().any(|t| tc_lower.contains(t)) {
                     matches.push(XmlMatch { def_index: idx, is_text_content: true });
                 }
             }
-        }
     }
     matches
 }

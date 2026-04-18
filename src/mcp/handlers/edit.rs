@@ -168,14 +168,13 @@ fn apply_edits_to_content(
             let lines: Vec<&str> = normalized.split('\n').collect();
 
             // expectedLineCount check
-            if let Some(expected) = expected_line_count {
-                if lines.len() != expected {
+            if let Some(expected) = expected_line_count
+                && lines.len() != expected {
                     return Err(format!(
                         "Expected {} lines, file has {}. File may have changed.",
                         expected, lines.len()
                     ));
                 }
-            }
 
             let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
             (new_lines.join("\n"), applied_count, 0, Vec::new(), Vec::new())
@@ -276,11 +275,10 @@ fn handle_single_file_edit(
     };
 
     // Write file (unless dryRun)
-    if !dry_run {
-        if let Err(e) = write_file_with_endings(&resolved, &edit_result.modified_content, line_ending) {
+    if !dry_run
+        && let Err(e) = write_file_with_endings(&resolved, &edit_result.modified_content, line_ending) {
             return ToolCallResult::error(e);
         }
-    }
 
     // Build response
     let mut response = json!({
@@ -409,8 +407,7 @@ fn handle_multi_file_edit(
         }
 
         // Phase 3b: Rename temp files to targets (fast, unlikely to fail)
-        let mut renamed: usize = 0;
-        for (path_str, resolved, temp) in &temp_files {
+        for (renamed, (path_str, resolved, temp)) in temp_files.iter().enumerate() {
             if let Err(e) = rename_replace(temp, resolved) {
                 // Best-effort cleanup of remaining temp files
                 for (_, _, tp) in &temp_files[renamed..] {
@@ -422,7 +419,6 @@ fn handle_multi_file_edit(
                     path_str, renamed, temp_files.len(), e
                 ));
             }
-            renamed += 1;
         }
     }
 
@@ -928,9 +924,9 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
             }
 
             // Step 4: Flex-space matching (collapse whitespace to regex)
-            if matches.is_empty() {
-                if let Some(pattern) = search_to_flex_pattern(anchor) {
-                    if let Ok(re) = Regex::new(&pattern) {
+            if matches.is_empty()
+                && let Some(pattern) = search_to_flex_pattern(anchor)
+                    && let Ok(re) = Regex::new(&pattern) {
                         let flex_results: Vec<(usize, usize)> = re.find_iter(&result)
                             .map(|m| (m.start(), m.end() - m.start()))
                             .collect();
@@ -943,8 +939,6 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                             flex_match_lens = Some(flex_results.iter().map(|&(_, l)| l).collect());
                         }
                     }
-                }
-            }
 
             if matches.is_empty() {
                 if edit.skip_if_not_found {
@@ -1035,11 +1029,10 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                 }
 
                 // Check expectedContext on first match
-                if let Some(ref ctx_text) = edit.expected_context {
-                    if let Some(m) = re.find(&result) {
+                if let Some(ref ctx_text) = edit.expected_context
+                    && let Some(m) = re.find(&result) {
                         check_expected_context(&result, m.start(), m.len(), ctx_text)?;
                     }
-                }
 
                 match edit.occurrence {
                     0 => {
@@ -1111,9 +1104,9 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                 }
 
                 // Step 4: Flex-space matching (collapse whitespace to regex)
-                if effective_count == 0 {
-                    if let Some(pattern) = search_to_flex_pattern(search) {
-                        if let Ok(re) = Regex::new(&pattern) {
+                if effective_count == 0
+                    && let Some(pattern) = search_to_flex_pattern(search)
+                        && let Ok(re) = Regex::new(&pattern) {
                             let fc = re.find_iter(&result).count();
                             if fc > 0 {
                                 warnings.push(format!(
@@ -1124,8 +1117,6 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
                                 flex_re = Some(re);
                             }
                         }
-                    }
-                }
 
                 if effective_count == 0 {
                     if edit.skip_if_not_found {

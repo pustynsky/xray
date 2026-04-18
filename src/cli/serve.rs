@@ -90,6 +90,7 @@ pub fn cmd_serve(args: ServeArgs) {
         path_to_id: if args.watch { Some(HashMap::new()) } else { None },
         read_errors: 0,
         lossy_file_count: 0,
+        worker_panics: 0,
     };
     let index = Arc::new(RwLock::new(empty_index));
 
@@ -300,6 +301,7 @@ pub fn cmd_serve(args: ServeArgs) {
             code_stats: HashMap::new(),
             parse_errors: 0,
             lossy_file_count: 0,
+            worker_panics: 0,
             empty_file_ids: Vec::new(),
             extension_methods: HashMap::new(),
             selector_index: HashMap::new(),

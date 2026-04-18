@@ -47,7 +47,7 @@ fn maybe_glob_to_regex(pattern: &str) -> Option<String> {
 /// `best_match_tier` which does literal `contains`/`starts_with` checks).
 /// For non-glob patterns returns the full string unchanged.
 fn extract_glob_literal(pattern: &str) -> &str {
-    let end = pattern.find(|c: char| c == '*' || c == '?').unwrap_or(pattern.len());
+    let end = pattern.find(['*', '?']).unwrap_or(pattern.len());
     &pattern[..end]
 }
 

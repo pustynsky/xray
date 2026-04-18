@@ -662,3 +662,55 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 **E2E tests:** `T-RECONCILE` (watcher-startup-reconciliation), `T-BATCH-WATCHER` (batch-watcher-multi-file-update)
 
 ---
+
+### T-WORKER-PANICS: worker_panics observability in xray_info (P0-1, 2026-04-18)
+
+**What changed:** `ContentIndex` and `DefinitionIndex` now track `worker_panics: usize` — incremented when a worker thread panics during parallel index build. `xray_info` exposes `workerPanics` and `degraded: true` for any index with panics > 0.
+
+**Manual test scenario:**
+1. Start xray server normally
+2. Call `xray_info` — verify `workerPanics` field is absent (or 0) and `degraded` is absent
+3. (Inject panic via unit test) verify `workerPanics=N` and `degraded=true` appear in content index entry
+4. Save/load index round-trip — verify `worker_panics` value is preserved
+
+**Unit tests:** `test_worker_panics_preserved_in_serialization_roundtrip`, `test_worker_panics_default_is_zero`, `test_xray_info_worker_panics_shows_degraded`, `test_xray_info_no_degraded_when_no_panics`
+
+---
+
+### T-RENAME-INVALIDATION: File rename triggers file index rebuild (P0-2, 2026-04-18)
+
+**What changed:** `should_invalidate_file_index()` helper in `watcher.rs` now correctly matches `Modify(Name(_))` (cross-platform rename event) in addition to `Create`, `Remove`, and `Modify(Any)`. Previously only `Modify(Any)` was matched, so rename events on Linux/inotify were silently dropped.
+
+**Manual test scenario:**
+1. Start xray server in watch mode: `xray serve --dir <dir> --watch`
+2. Rename a file: `mv old.rs new.rs`
+3. Call `xray_fast pattern='new'` — verify `new.rs` appears in results
+4. Call `xray_fast pattern='old'` — verify `old.rs` no longer appears
+
+**Unit tests:** `test_should_invalidate_file_index_create`, `test_should_invalidate_file_index_remove`, `test_should_invalidate_file_index_rename_triggers_rebuild`, `test_should_invalidate_file_index_modify_any`, `test_should_invalidate_file_index_data_change_does_not_invalidate`, `test_should_invalidate_file_index_access_does_not_invalidate`
+
+---
+
+### T-REINDEX-ROLLBACK: Workspace state rollback on failed reindex (P0-3, 2026-04-18)
+
+**What changed:** `handle_xray_reindex_inner()` now calls `rollback_workspace_state()` on both error paths (first build failure and reload→rebuild failure). Previously a failed reindex left the server bound to the new (invalid) directory with a corrupt index.
+
+**Manual test scenario:**
+1. Start xray server bound to `dir_A`
+2. Call `xray_reindex dir=<nonexistent_path>` — expect error response
+3. Verify server is still bound to `dir_A` (call `xray_info` and check `directory` field)
+4. Verify subsequent `xray_grep` still returns results from `dir_A`
+
+**Unit tests:** `test_xray_reindex_invalid_directory`
+
+---
+
+### T-CLIPPY-GATE: CI clippy gate (P0-4, 2026-04-18)
+
+**What changed:** `.github/workflows/clippy.yml` added — runs `cargo clippy --workspace -- -D warnings` on every push and PR. Also fixed all existing clippy warnings: empty doc comment lines, unnecessary_unwrap, explicit_counter_loop, manual_unwrap_or_default, too_many_arguments.
+
+**Verification:** Push any branch — GitHub Actions runs clippy job. Any new warning fails the build.
+
+**Unit tests:** N/A (CI gate)
+
+---

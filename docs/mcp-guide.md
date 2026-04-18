@@ -938,6 +938,19 @@ Search pre-built file name index for instant file lookup (~35ms vs ~3s for live 
 
 Shows all existing indexes with their status, sizes, age, and memory usage. No parameters.
 
+### Response fields (per index entry)
+
+| Field | Description |
+|-------|-------------|
+| `type` | `"content"`, `"definition"`, `"file-list"`, or `"git-history"` |
+| `root` | Directory the index was built from |
+| `files` | Number of indexed files |
+| `sizeMb` | Index size on disk (MB) |
+| `ageHours` | How old the index is |
+| `inMemory` | Whether the index is currently loaded in memory |
+| `workerPanics` | Number of worker thread panics during the last index build. Present only when > 0 |
+| `degraded` | `true` when `workerPanics > 0` — the index may be incomplete. Re-run `xray_reindex` or `xray_reindex_definitions` to rebuild |
+
 ### Response
 
 ```json
@@ -953,7 +966,8 @@ Shows all existing indexes with their status, sizes, age, and memory usage. No p
       "extensions": ["cs", "sql"],
       "sizeMb": 242.7,
       "ageHours": 0.5,
-      "inMemory": true
+      "inMemory": true,
+      "workerPanics": 0
     },
     {
       "type": "definition",
@@ -964,7 +978,8 @@ Shows all existing indexes with their status, sizes, age, and memory usage. No p
       "extensions": ["cs"],
       "sizeMb": 324.0,
       "ageHours": 0.5,
-      "inMemory": true
+      "inMemory": true,
+      "workerPanics": 0
     },
     {
       "type": "file-list",

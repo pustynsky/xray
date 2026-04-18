@@ -797,6 +797,49 @@ fn test_contains_line_sql_stored_procedure() {
         "Definition kind should be storedProcedure");
 }
 
+#[test]
+fn test_xray_info_worker_panics_shows_degraded() {
+    // Regression test for P0-1: xray_info must expose workerPanics and degraded=true
+    use super::handlers_test_utils::make_empty_ctx;
+    use std::sync::atomic::Ordering;
+    let ctx = make_empty_ctx();
+    // Inject a fake file + worker_panics so handle_xray_info includes the content index
+    {
+        let mut idx = ctx.index.write().unwrap();
+        idx.files.push("fake.rs".to_string());
+        idx.worker_panics = 2;
+    }
+    ctx.content_ready.store(true, Ordering::Release);
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let indexes = output["indexes"].as_array().unwrap();
+    let content_idx = indexes.iter().find(|i| i["type"] == "content");
+    assert!(content_idx.is_some(), "content index must appear in xray_info");
+    let ci = content_idx.unwrap();
+    assert_eq!(ci["workerPanics"], 2, "workerPanics must be reported");
+    assert_eq!(ci["degraded"], true, "degraded must be true when workerPanics > 0");
+}
+
+#[test]
+fn test_xray_info_no_degraded_when_no_panics() {
+    use super::handlers_test_utils::make_empty_ctx;
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let indexes = output["indexes"].as_array().unwrap();
+    let content_idx = indexes.iter().find(|i| i["type"] == "content");
+    if let Some(ci) = content_idx {
+        // When workerPanics == 0, degraded field should be absent or false
+        assert!(
+            ci["degraded"].is_null() || ci["degraded"] == false,
+            "degraded must be absent or false when workerPanics == 0"
+        );
+    }
+}
+
+
 
 // ─── Workspace Discovery tests ─────────────────────────────────
 
