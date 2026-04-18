@@ -866,6 +866,345 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
 /// Explains that previous edits may have changed the content, reducing occurrence counts.
 const SEQUENTIAL_EDIT_HINT: &str = ". Note: edits are applied sequentially — previous edits in the same request may have modified the content, reducing the occurrence count";
 
+/// Result of the auto-retry anchor/search cascade (exact → strip WS → trim blanks → flex-space).
+struct RetrySearchResult {
+    /// Start positions of all matches found.
+    positions: Vec<usize>,
+    /// Match length for non-flex matches (same for all positions).
+    match_len: usize,
+    /// Per-match lengths when flex-space matching was used (lengths may differ).
+    flex_match_lens: Option<Vec<usize>>,
+    /// The search text that actually matched (may differ from original after trimming).
+    effective_search: String,
+    /// Compiled flex regex, if flex-space matching was used.
+    flex_re: Option<Regex>,
+    /// Warnings generated during the retry cascade.
+    warnings: Vec<String>,
+}
+
+/// 4-step auto-retry cascade: exact → strip trailing WS → trim blank lines → flex-space.
+/// Used by both insert-anchor and literal search/replace modes.
+fn find_with_retry(content: &str, search_text: &str, edit_index: usize, label: &str) -> RetrySearchResult {
+    let mut warnings = Vec::new();
+
+    // Step 1: Exact match
+    let mut positions = find_all_occurrences(content, search_text);
+    let mut match_len = search_text.len();
+    let mut effective_search = search_text.to_string();
+    let mut flex_match_lens: Option<Vec<usize>> = None;
+    let mut flex_re: Option<Regex> = None;
+
+    // Step 2: Strip trailing whitespace
+    if positions.is_empty() {
+        let trimmed = strip_trailing_whitespace_per_line(search_text);
+        if trimmed != search_text && !trimmed.is_empty() {
+            let m = find_all_occurrences(content, &trimmed);
+            if !m.is_empty() {
+                warnings.push(format!(
+                    "edits[{}]: {} matched after trimming trailing whitespace",
+                    edit_index, label
+                ));
+                match_len = trimmed.len();
+                effective_search = trimmed;
+                positions = m;
+            }
+        }
+    }
+
+    // Step 3: Trim leading/trailing blank lines (+ strip trailing WS)
+    if positions.is_empty() {
+        let line_trimmed = strip_trailing_whitespace_per_line(&trim_blank_lines(search_text));
+        if line_trimmed != search_text && !line_trimmed.is_empty() {
+            let m = find_all_occurrences(content, &line_trimmed);
+            if !m.is_empty() {
+                warnings.push(format!(
+                    "edits[{}]: {} matched after trimming leading/trailing blank lines",
+                    edit_index, label
+                ));
+                match_len = line_trimmed.len();
+                effective_search = line_trimmed;
+                positions = m;
+            }
+        }
+    }
+
+    // Step 4: Flex-space matching (collapse whitespace to regex)
+    if positions.is_empty()
+        && let Some(pattern) = search_to_flex_pattern(search_text)
+            && let Ok(re) = Regex::new(&pattern) {
+                let flex_results: Vec<(usize, usize)> = re.find_iter(content)
+                    .map(|m| (m.start(), m.end() - m.start()))
+                    .collect();
+                if !flex_results.is_empty() {
+                    warnings.push(format!(
+                        "edits[{}]: {} matched with flexible whitespace (spaces collapsed)",
+                        edit_index, label
+                    ));
+                    positions = flex_results.iter().map(|&(s, _)| s).collect();
+                    flex_match_lens = Some(flex_results.iter().map(|&(_, l)| l).collect());
+                    flex_re = Some(re);
+                }
+            }
+
+    RetrySearchResult {
+        positions,
+        match_len,
+        flex_match_lens,
+        effective_search,
+        flex_re,
+        warnings,
+    }
+}
+
+/// Apply an insert-after or insert-before edit.
+fn apply_insert(
+    result: &mut String,
+    edit: &TextEdit,
+    edit_index: usize,
+) -> Result<(usize, Option<SkippedEditDetail>, Vec<String>), String> {
+    let anchor = edit.insert_after.as_deref()
+        .or(edit.insert_before.as_deref())
+        .unwrap();
+    let insert_content = edit.content.as_deref().unwrap(); // validated in parse
+    let is_after = edit.insert_after.is_some();
+
+    let search_result = find_with_retry(result, anchor, edit_index, "anchor");
+    let warnings = search_result.warnings;
+
+    if search_result.positions.is_empty() {
+        if edit.skip_if_not_found {
+            return Ok((0, Some(SkippedEditDetail {
+                edit_index,
+                search_text: truncate_for_display(anchor),
+                reason: "anchor text not found".to_string(),
+            }), warnings));
+        }
+        let hint = nearest_match_hint(result, anchor);
+        return Err(format!("Anchor text not found: \"{}\"{}", truncate_for_display(anchor), hint));
+    }
+
+    // Determine which occurrence to use
+    let target_pos = match edit.occurrence {
+        0 => search_result.positions[0],
+        n => {
+            if n > search_result.positions.len() {
+                let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
+                return Err(format!(
+                    "Occurrence {} requested but anchor \"{}\" found only {} time(s){}",
+                    n, search_result.effective_search, search_result.positions.len(), hint
+                ));
+            }
+            search_result.positions[n - 1]
+        }
+    };
+
+    // Compute actual match length for this occurrence (may differ with flex-space)
+    let selected_idx = match edit.occurrence { 0 => 0, n => n - 1 };
+    let selected_match_len = if let Some(ref lens) = search_result.flex_match_lens {
+        lens[selected_idx]
+    } else {
+        search_result.match_len
+    };
+
+    // Check expectedContext if present
+    if let Some(ref ctx_text) = edit.expected_context {
+        check_expected_context(result, target_pos, selected_match_len, ctx_text)?;
+    }
+
+    let anchor_end = target_pos + selected_match_len;
+
+    if is_after {
+        // Insert after: find end of the line containing the anchor, insert on next line
+        let line_end = result[anchor_end..].find('\n')
+            .map(|p| anchor_end + p)
+            .unwrap_or(result.len());
+        let insert_text = format!("\n{}", insert_content);
+        result.insert_str(line_end, &insert_text);
+    } else {
+        // Insert before: find start of the line containing the anchor, insert before it
+        let line_start = result[..target_pos].rfind('\n')
+            .map(|p| p + 1)
+            .unwrap_or(0);
+        let insert_text = format!("{}\n", insert_content);
+        result.insert_str(line_start, &insert_text);
+    }
+
+    Ok((1, None, warnings))
+}
+
+/// Apply a regex-based search/replace edit.
+fn apply_regex_replace(
+    result: &mut String,
+    edit: &TextEdit,
+    edit_index: usize,
+) -> Result<(usize, Option<SkippedEditDetail>, Vec<String>), String> {
+    let search = edit.search.as_deref().unwrap();
+    let replace = edit.replace.as_deref().unwrap();
+
+    let re = Regex::new(search)
+        .map_err(|e| format!("Invalid regex '{}': {}", search, e))?;
+    let count = re.find_iter(result.as_str()).count();
+
+    if count == 0 {
+        if edit.skip_if_not_found {
+            return Ok((0, Some(SkippedEditDetail {
+                edit_index,
+                search_text: truncate_for_display(search),
+                reason: "regex pattern not found".to_string(),
+            }), Vec::new()));
+        }
+        let hint = nearest_match_hint(result, search);
+        return Err(format!("Pattern not found: \"{}\"{}", truncate_for_display(search), hint));
+    }
+
+    // Check expectedContext on first match
+    if let Some(ref ctx_text) = edit.expected_context
+        && let Some(m) = re.find(result.as_str()) {
+            check_expected_context(result, m.start(), m.len(), ctx_text)?;
+        }
+
+    let replacements = match edit.occurrence {
+        0 => {
+            let new_content = re.replace_all(result.as_str(), replace).to_string();
+            *result = new_content;
+            count
+        }
+        n => {
+            if n > count {
+                let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
+                return Err(format!(
+                    "Occurrence {} requested but pattern \"{}\" found only {} time(s){}",
+                    n, search, count, hint
+                ));
+            }
+            let mut current = 0usize;
+            let replace_str = replace.to_string();
+            let new_content = re.replace_all(result.as_str(), |caps: &regex::Captures| {
+                current += 1;
+                if current == n {
+                    // Use caps.expand() to avoid cascade bug where
+                    // $0 expansion containing "$1" gets double-substituted
+                    let mut out = String::new();
+                    caps.expand(&replace_str, &mut out);
+                    out
+                } else {
+                    caps[0].to_string()
+                }
+            }).to_string();
+            *result = new_content;
+            1
+        }
+    };
+
+    Ok((replacements, None, Vec::new()))
+}
+
+/// Apply a literal (non-regex) search/replace edit with auto-retry cascade.
+fn apply_literal_replace(
+    result: &mut String,
+    edit: &TextEdit,
+    edit_index: usize,
+) -> Result<(usize, Option<SkippedEditDetail>, Vec<String>), String> {
+    let search = edit.search.as_deref().unwrap();
+    let replace = edit.replace.as_deref().unwrap();
+
+    let search_result = find_with_retry(result, search, edit_index, "text");
+    let warnings = search_result.warnings;
+    let count = search_result.positions.len();
+
+    if count == 0 {
+        if edit.skip_if_not_found {
+            return Ok((0, Some(SkippedEditDetail {
+                edit_index,
+                search_text: truncate_for_display(search),
+                reason: "text not found".to_string(),
+            }), warnings));
+        }
+        let hint = nearest_match_hint(result, search);
+        return Err(format!("Text not found: \"{}\"{}", truncate_for_display(search), hint));
+    }
+
+    // Check expectedContext on first match
+    if let Some(ref ctx_text) = edit.expected_context {
+        let first_len = if let Some(ref lens) = search_result.flex_match_lens {
+            lens[0]
+        } else {
+            search_result.match_len
+        };
+        check_expected_context(result, search_result.positions[0], first_len, ctx_text)?;
+    }
+
+    // Apply replacement
+    let replacements = if let Some(ref re) = search_result.flex_re {
+        // Flex-space: use regex replacement with NoExpand (literal replacement)
+        match edit.occurrence {
+            0 => {
+                let new_content = re.replace_all(result.as_str(), regex::NoExpand(replace)).to_string();
+                *result = new_content;
+                count
+            }
+            n => {
+                if n > count {
+                    let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
+                    return Err(format!(
+                        "Occurrence {} requested but text \"{}\" found only {} time(s){}",
+                        n, search, count, hint
+                    ));
+                }
+                let mut current = 0usize;
+                let replace_owned = replace.to_string();
+                let new_content = re.replace_all(result.as_str(), |caps: &regex::Captures| {
+                    current += 1;
+                    if current == n {
+                        replace_owned.clone()
+                    } else {
+                        caps[0].to_string()
+                    }
+                }).to_string();
+                *result = new_content;
+                1
+            }
+        }
+    } else {
+        // Literal replacement (steps 1-3)
+        let effective_search = &search_result.effective_search;
+        match edit.occurrence {
+            0 => {
+                let new_content = result.replace(effective_search.as_str(), replace);
+                *result = new_content;
+                count
+            }
+            n => {
+                if n > count {
+                    let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
+                    return Err(format!(
+                        "Occurrence {} requested but text \"{}\" found only {} time(s){}",
+                        n, effective_search, count, hint
+                    ));
+                }
+                let mut current = 0usize;
+                let mut new_result = String::new();
+                let mut remaining = result.as_str();
+                while let Some(pos) = remaining.find(effective_search.as_str()) {
+                    current += 1;
+                    new_result.push_str(&remaining[..pos]);
+                    if current == n {
+                        new_result.push_str(replace);
+                    } else {
+                        new_result.push_str(effective_search);
+                    }
+                    remaining = &remaining[pos + effective_search.len()..];
+                }
+                new_result.push_str(remaining);
+                *result = new_result;
+                1
+            }
+        }
+    };
+
+    Ok((replacements, None, warnings))
+}
+
 /// Apply text edits sequentially. Returns (new_content, total_replacements, skipped_details, warnings).
 fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, Vec<SkippedEditDetail>, Vec<String>), String> {
     let mut result = content.to_string();
@@ -874,341 +1213,19 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
     let mut warnings: Vec<String> = Vec::new();
 
     for (edit_index, edit) in edits.iter().enumerate() {
-        if edit.insert_after.is_some() || edit.insert_before.is_some() {
-            // Insert after/before mode
-            let anchor = edit.insert_after.as_deref()
-                .or(edit.insert_before.as_deref())
-                .unwrap();
-            let insert_content = edit.content.as_deref().unwrap(); // validated in parse
-            let is_after = edit.insert_after.is_some();
-
-            // Find the anchor text (with auto-retry cascade)
-            // Step 1: Exact match
-            let mut matches = find_all_occurrences(&result, anchor);
-            let mut actual_match_len = anchor.len();
-            let mut effective_anchor_owned: Option<String> = None;
-            let mut flex_match_lens: Option<Vec<usize>> = None;
-
-            // Step 2: Strip trailing whitespace
-            if matches.is_empty() {
-                let trimmed = strip_trailing_whitespace_per_line(anchor);
-                if trimmed != anchor && !trimmed.is_empty() {
-                    let m = find_all_occurrences(&result, &trimmed);
-                    if !m.is_empty() {
-                        warnings.push(format!(
-                            "edits[{}]: anchor matched after trimming trailing whitespace",
-                            edit_index
-                        ));
-                        actual_match_len = trimmed.len();
-                        effective_anchor_owned = Some(trimmed);
-                        matches = m;
-                    }
-                }
-            }
-
-            // Step 3: Trim leading/trailing blank lines (+ strip trailing WS)
-            if matches.is_empty() {
-                let line_trimmed = strip_trailing_whitespace_per_line(&trim_blank_lines(anchor));
-                if line_trimmed != anchor && !line_trimmed.is_empty() {
-                    let m = find_all_occurrences(&result, &line_trimmed);
-                    if !m.is_empty() {
-                        warnings.push(format!(
-                            "edits[{}]: anchor matched after trimming leading/trailing blank lines",
-                            edit_index
-                        ));
-                        actual_match_len = line_trimmed.len();
-                        effective_anchor_owned = Some(line_trimmed);
-                        matches = m;
-                    }
-                }
-            }
-
-            // Step 4: Flex-space matching (collapse whitespace to regex)
-            if matches.is_empty()
-                && let Some(pattern) = search_to_flex_pattern(anchor)
-                    && let Ok(re) = Regex::new(&pattern) {
-                        let flex_results: Vec<(usize, usize)> = re.find_iter(&result)
-                            .map(|m| (m.start(), m.end() - m.start()))
-                            .collect();
-                        if !flex_results.is_empty() {
-                            warnings.push(format!(
-                                "edits[{}]: anchor matched with flexible whitespace (spaces collapsed)",
-                                edit_index
-                            ));
-                            matches = flex_results.iter().map(|&(s, _)| s).collect();
-                            flex_match_lens = Some(flex_results.iter().map(|&(_, l)| l).collect());
-                        }
-                    }
-
-            if matches.is_empty() {
-                if edit.skip_if_not_found {
-                    skipped_details.push(SkippedEditDetail {
-                        edit_index,
-                        search_text: truncate_for_display(anchor),
-                        reason: "anchor text not found".to_string(),
-                    });
-                    continue;
-                }
-                let hint = nearest_match_hint(&result, anchor);
-                return Err(format!("Anchor text not found: \"{}\"{}", truncate_for_display(anchor), hint));
-            }
-
-            let effective_anchor = effective_anchor_owned.as_deref().unwrap_or(anchor);
-
-            // Determine which occurrence to use
-            let target_pos = match edit.occurrence {
-                0 => {
-                    // Default: use first occurrence for insert
-                    matches[0]
-                }
-                n => {
-                    if n > matches.len() {
-                        let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
-                        return Err(format!(
-                            "Occurrence {} requested but anchor \"{}\" found only {} time(s){}",
-                            n, effective_anchor, matches.len(), hint
-                        ));
-                    }
-                    matches[n - 1]
-                }
-            };
-
-            // Compute actual match length for this occurrence (may differ with flex-space)
-            let selected_idx = match edit.occurrence { 0 => 0, n => n - 1 };
-            let selected_match_len = if let Some(ref lens) = flex_match_lens {
-                lens[selected_idx]
-            } else {
-                actual_match_len
-            };
-
-            // Check expectedContext if present
-            if let Some(ref ctx_text) = edit.expected_context {
-                check_expected_context(&result, target_pos, selected_match_len, ctx_text)?;
-            }
-
-            // Find the line containing the anchor
-            let anchor_end = target_pos + selected_match_len;
-
-            if is_after {
-                // Insert after: find end of the line containing the anchor, insert on next line
-                let line_end = result[anchor_end..].find('\n')
-                    .map(|p| anchor_end + p)
-                    .unwrap_or(result.len());
-                let insert_text = format!("\n{}", insert_content);
-                result.insert_str(line_end, &insert_text);
-            } else {
-                // Insert before: find start of the line containing the anchor, insert before it
-                let line_start = result[..target_pos].rfind('\n')
-                    .map(|p| p + 1)
-                    .unwrap_or(0);
-                let insert_text = format!("{}\n", insert_content);
-                result.insert_str(line_start, &insert_text);
-            }
-
-            total_replacements += 1;
+        let (reps, skipped, mut edit_warnings) = if edit.insert_after.is_some() || edit.insert_before.is_some() {
+            apply_insert(&mut result, edit, edit_index)?
+        } else if is_regex {
+            apply_regex_replace(&mut result, edit, edit_index)?
         } else {
-            // Search/replace mode
-            let search = edit.search.as_deref().unwrap();
-            let replace = edit.replace.as_deref().unwrap();
+            apply_literal_replace(&mut result, edit, edit_index)?
+        };
 
-            if is_regex {
-                let re = Regex::new(search)
-                    .map_err(|e| format!("Invalid regex '{}': {}", search, e))?;
-                let count = re.find_iter(&result).count();
-                if count == 0 {
-                    if edit.skip_if_not_found {
-                        skipped_details.push(SkippedEditDetail {
-                            edit_index,
-                            search_text: truncate_for_display(search),
-                            reason: "regex pattern not found".to_string(),
-                        });
-                        continue;
-                    }
-                    let hint = nearest_match_hint(&result, search);
-                    return Err(format!("Pattern not found: \"{}\"{}", truncate_for_display(search), hint));
-                }
-
-                // Check expectedContext on first match
-                if let Some(ref ctx_text) = edit.expected_context
-                    && let Some(m) = re.find(&result) {
-                        check_expected_context(&result, m.start(), m.len(), ctx_text)?;
-                    }
-
-                match edit.occurrence {
-                    0 => {
-                        result = re.replace_all(&result, replace).to_string();
-                        total_replacements += count;
-                    }
-                    n => {
-                        if n > count {
-                            let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
-                            return Err(format!(
-                                "Occurrence {} requested but pattern \"{}\" found only {} time(s){}",
-                                n, search, count, hint
-                            ));
-                        }
-                        let mut current = 0usize;
-                        let replace_str = replace.to_string();
-                        result = re.replace_all(&result, |caps: &regex::Captures| {
-                            current += 1;
-                            if current == n {
-                                // Use caps.expand() to avoid cascade bug where
-                                // $0 expansion containing "$1" gets double-substituted
-                                let mut out = String::new();
-                                caps.expand(&replace_str, &mut out);
-                                out
-                            } else {
-                                caps[0].to_string()
-                            }
-                        }).to_string();
-                        total_replacements += 1;
-                    }
-                }
-            } else {
-                // Literal search (with auto-retry cascade)
-                // Step 1: Exact match
-                let mut effective_count = result.matches(search).count();
-                let mut effective_search_owned: Option<String> = None;
-                let mut flex_re: Option<Regex> = None;
-
-                // Step 2: Strip trailing whitespace
-                if effective_count == 0 {
-                    let trimmed = strip_trailing_whitespace_per_line(search);
-                    if trimmed != search && !trimmed.is_empty() {
-                        let tc = result.matches(trimmed.as_str()).count();
-                        if tc > 0 {
-                            warnings.push(format!(
-                                "edits[{}]: text matched after trimming trailing whitespace",
-                                edit_index
-                            ));
-                            effective_search_owned = Some(trimmed);
-                            effective_count = tc;
-                        }
-                    }
-                }
-
-                // Step 3: Trim leading/trailing blank lines (+ strip trailing WS)
-                if effective_count == 0 {
-                    let line_trimmed = strip_trailing_whitespace_per_line(&trim_blank_lines(search));
-                    if line_trimmed != search && !line_trimmed.is_empty() {
-                        let tc = result.matches(line_trimmed.as_str()).count();
-                        if tc > 0 {
-                            warnings.push(format!(
-                                "edits[{}]: text matched after trimming leading/trailing blank lines",
-                                edit_index
-                            ));
-                            effective_search_owned = Some(line_trimmed);
-                            effective_count = tc;
-                        }
-                    }
-                }
-
-                // Step 4: Flex-space matching (collapse whitespace to regex)
-                if effective_count == 0
-                    && let Some(pattern) = search_to_flex_pattern(search)
-                        && let Ok(re) = Regex::new(&pattern) {
-                            let fc = re.find_iter(&result).count();
-                            if fc > 0 {
-                                warnings.push(format!(
-                                    "edits[{}]: text matched with flexible whitespace (spaces collapsed)",
-                                    edit_index
-                                ));
-                                effective_count = fc;
-                                flex_re = Some(re);
-                            }
-                        }
-
-                if effective_count == 0 {
-                    if edit.skip_if_not_found {
-                        skipped_details.push(SkippedEditDetail {
-                            edit_index,
-                            search_text: truncate_for_display(search),
-                            reason: "text not found".to_string(),
-                        });
-                        continue;
-                    }
-                    let hint = nearest_match_hint(&result, search);
-                    return Err(format!("Text not found: \"{}\"{}", truncate_for_display(search), hint));
-                }
-
-                let effective_search = effective_search_owned.as_deref().unwrap_or(search);
-
-                // Check expectedContext on first match
-                if let Some(ref ctx_text) = edit.expected_context {
-                    if let Some(ref re) = flex_re {
-                        if let Some(m) = re.find(&result) {
-                            check_expected_context(&result, m.start(), m.len(), ctx_text)?;
-                        }
-                    } else if let Some(pos) = result.find(effective_search) {
-                        check_expected_context(&result, pos, effective_search.len(), ctx_text)?;
-                    }
-                }
-
-                // Apply replacement
-                if let Some(ref re) = flex_re {
-                    // Flex-space: use regex replacement with NoExpand (literal replacement)
-                    match edit.occurrence {
-                        0 => {
-                            result = re.replace_all(&result, regex::NoExpand(replace)).to_string();
-                            total_replacements += effective_count;
-                        }
-                        n => {
-                            if n > effective_count {
-                                let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
-                                return Err(format!(
-                                    "Occurrence {} requested but text \"{}\" found only {} time(s){}",
-                                    n, search, effective_count, hint
-                                ));
-                            }
-                            let mut current = 0usize;
-                            let replace_owned = replace.to_string();
-                            result = re.replace_all(&result, |caps: &regex::Captures| {
-                                current += 1;
-                                if current == n {
-                                    replace_owned.clone()
-                                } else {
-                                    caps[0].to_string()
-                                }
-                            }).to_string();
-                            total_replacements += 1;
-                        }
-                    }
-                } else {
-                    // Literal replacement (steps 1-3)
-                    match edit.occurrence {
-                        0 => {
-                            result = result.replace(effective_search, replace);
-                            total_replacements += effective_count;
-                        }
-                        n => {
-                            if n > effective_count {
-                                let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
-                                return Err(format!(
-                                    "Occurrence {} requested but text \"{}\" found only {} time(s){}",
-                                    n, effective_search, effective_count, hint
-                                ));
-                            }
-                            let mut current = 0usize;
-                            let mut new_result = String::new();
-                            let mut remaining = result.as_str();
-                            while let Some(pos) = remaining.find(effective_search) {
-                                current += 1;
-                                new_result.push_str(&remaining[..pos]);
-                                if current == n {
-                                    new_result.push_str(replace);
-                                } else {
-                                    new_result.push_str(effective_search);
-                                }
-                                remaining = &remaining[pos + effective_search.len()..];
-                            }
-                            new_result.push_str(remaining);
-                            result = new_result;
-                            total_replacements += 1;
-                        }
-                    }
-                }
-            }
+        total_replacements += reps;
+        if let Some(s) = skipped {
+            skipped_details.push(s);
         }
+        warnings.append(&mut edit_warnings);
     }
 
     Ok((result, total_replacements, skipped_details, warnings))
