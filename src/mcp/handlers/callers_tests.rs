@@ -464,19 +464,18 @@ fn test_prefilter_does_not_expand_by_base_types() {
         resolve_interfaces: false,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
-    let mut file_cache = HashMap::new();
-    let mut total_body_lines = 0usize;
-    let mut tests_found = Vec::new();
-    let callers = build_caller_tree(
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited,
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+    };
+    let callers = builder.build(
         "Dispose",
         Some("ResourceManager"),
-        3,
         0,
-        &caller_ctx,
-        &mut visited,
-        &mut file_cache,
-        &mut total_body_lines,
-        &mut tests_found,
         &[],
     );
 
@@ -562,9 +561,14 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
         ext_filter_list: super::utils::prepare_ext_filter("ts"),
         ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count, &impact_truncated)
     };
-    let mut file_cache = HashMap::new();
-    let mut total_body_lines = 0usize;
-    let callees = build_callee_tree("process", Some("ClassA"), 3, 0, &caller_ctx, &mut visited, &mut file_cache, &mut total_body_lines);
+    let mut callee_builder = CalleeTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited,
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+    };
+    let callees = callee_builder.build("process", Some("ClassA"), 0);
 
     assert_eq!(callees.len(), 2, "Should have 2 callees, got {:?}", callees);
     let callee_names: Vec<(&str, &str)> = callees.iter()
@@ -1470,19 +1474,18 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         resolve_interfaces: false,
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
-    let mut file_cache = HashMap::new();
-    let mut total_body_lines = 0usize;
-    let mut tests_found = Vec::new();
-    let callers = build_caller_tree(
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited,
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+    };
+    let callers = builder.build(
         "Process",
         Some("ClassA"),
-        3,  // depth 3: should find ClassB.Handle (depth 0) → ClassC.Run (depth 1)
-        0,
-        &caller_ctx,
-        &mut visited,
-        &mut file_cache,
-        &mut total_body_lines,
-        &mut tests_found,
+        0,  // depth 3: should find ClassB.Handle (depth 0) → ClassC.Run (depth 1)
         &[],
     );
 
@@ -1871,9 +1874,14 @@ fn test_sql_callee_tree_exec_dependencies() {
         ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count, &impact_truncated)
     };
 
-    let mut file_cache = HashMap::new();
-    let mut total_body_lines = 0usize;
-    let callees = build_callee_tree("usp_ProcessBatch", Some("dbo"), 3, 0, &caller_ctx, &mut visited, &mut file_cache, &mut total_body_lines);
+    let mut callee_builder = CalleeTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited,
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+    };
+    let callees = callee_builder.build("usp_ProcessBatch", Some("dbo"), 0);
 
     // Should find 2 SP callees (usp_ValidateOrder and usp_ReserveStock)
     // Should NOT find Orders (Table kind excluded)
@@ -1981,19 +1989,18 @@ fn test_sql_caller_tree_who_calls_sp() {
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
 
-    let mut file_cache = HashMap::new();
-    let mut total_body_lines = 0usize;
-    let mut tests_found = Vec::new();
-    let callers = build_caller_tree(
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited,
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+    };
+    let callers = builder.build(
         "usp_ValidateOrder",
         Some("Sales"),
-        3,
         0,
-        &caller_ctx,
-        &mut visited,
-        &mut file_cache,
-        &mut total_body_lines,
-        &mut tests_found,
         &[],
     );
 
@@ -2522,17 +2529,19 @@ fn test_impact_analysis_finds_test_methods() {
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
 
-    let mut visited = HashSet::new();
-    let mut file_cache = HashMap::new();
-    let mut total_body_lines = 0usize;
-    let mut tests_found = Vec::new();
-
     let initial_chain = vec!["process".to_string()];
-    let callers = build_caller_tree(
-        "process", Some("OrderService"), 5, 0,
-        &caller_ctx, &mut visited, &mut file_cache,
-        &mut total_body_lines, &mut tests_found, &initial_chain,
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 5,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+    };
+    let callers = builder.build(
+        "process", Some("OrderService"), 0, &initial_chain,
     );
+    let tests_found = builder.tests_found;
 
     // Should find the test method
     assert_eq!(callers.len(), 1, "Should find 1 caller");
@@ -2654,17 +2663,19 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
 
-    let mut visited = HashSet::new();
-    let mut file_cache = HashMap::new();
-    let mut total_body_lines = 0usize;
-    let mut tests_found = Vec::new();
-
     let initial_chain = vec!["process".to_string()];
-    let callers = build_caller_tree(
-        "process", Some("OrderService"), 5, 0,
-        &caller_ctx, &mut visited, &mut file_cache,
-        &mut total_body_lines, &mut tests_found, &initial_chain,
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 5,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+    };
+    let callers = builder.build(
+        "process", Some("OrderService"), 0, &initial_chain,
     );
+    let tests_found = builder.tests_found;
 
     // Depth 0: Controller.handle (NOT a test) → should have sub-callers
     assert_eq!(callers.len(), 1);
