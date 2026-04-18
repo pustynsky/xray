@@ -299,7 +299,7 @@ fn test_prefilter_does_not_expand_by_base_types() {
     // only the file with the actual call is in the results.
 
     use crate::{ContentIndex, Posting};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::path::PathBuf;
 
     // --- Definition Index ---
@@ -458,9 +458,11 @@ fn test_prefilter_does_not_expand_by_base_types() {
     };
     let node_count = AtomicUsize::new(0);
 
+    let impact_truncated = AtomicBool::new(false);
+
     let caller_ctx = CallerTreeContext {
         resolve_interfaces: false,
-        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -523,7 +525,7 @@ fn test_resolve_call_site_scopes_by_caller_parent() {
 
 #[test]
 fn test_callee_tree_depth2_no_cross_class_pollution() {
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     let definitions = vec![
         DefinitionEntry { file_id: 0, name: "ClassA".to_string(), kind: DefinitionKind::Class, line_start: 1, line_end: 50, parent: None, signature: None, modifiers: vec![], attributes: vec![], base_types: vec![] },
@@ -552,12 +554,13 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
     let node_count = AtomicUsize::new(0);
 
     let empty_ci = crate::ContentIndex::default();
+    let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
         content_index: &empty_ci,
         ext_filter: "ts",
         resolve_interfaces: false,
         ext_filter_list: super::utils::prepare_ext_filter("ts"),
-        ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count)
+        ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -1340,7 +1343,7 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
     // "ClassB" (the caller's parent), so ClassD.Execute() is correctly excluded.
 
     use crate::{ContentIndex, Posting};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::path::PathBuf;
 
     // --- Definition Index ---
@@ -1461,9 +1464,11 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
 
+    let impact_truncated = AtomicBool::new(false);
+
     let caller_ctx = CallerTreeContext {
         resolve_interfaces: false,
-        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
     let mut file_cache = HashMap::new();
     let mut total_body_lines = 0usize;
@@ -1797,7 +1802,7 @@ fn test_find_containing_method_sql_sp() {
 
 #[test]
 fn test_sql_callee_tree_exec_dependencies() {
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     // usp_ProcessBatch (dbo) calls:
     //   EXEC [Sales].[usp_ValidateOrder]
@@ -1857,12 +1862,13 @@ fn test_sql_callee_tree_exec_dependencies() {
     let node_count = AtomicUsize::new(0);
 
     let empty_ci = crate::ContentIndex::default();
+    let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
         content_index: &empty_ci,
         ext_filter: "sql",
         resolve_interfaces: false,
         ext_filter_list: super::utils::prepare_ext_filter("sql"),
-        ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count)
+        ..CallerTreeContext::test_default(&empty_ci, &def_idx, &limits, &node_count, &impact_truncated)
     };
 
     let mut file_cache = HashMap::new();
@@ -1886,7 +1892,7 @@ fn test_sql_callee_tree_exec_dependencies() {
 #[test]
 fn test_sql_caller_tree_who_calls_sp() {
     use crate::{ContentIndex, Posting};
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
     use std::path::PathBuf;
 
     // usp_ProcessBatch (dbo) calls EXEC [Sales].[usp_ValidateOrder]
@@ -1966,11 +1972,13 @@ fn test_sql_caller_tree_who_calls_sp() {
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
 
+    let impact_truncated = AtomicBool::new(false);
+
     let caller_ctx = CallerTreeContext {
         ext_filter: "sql",
         resolve_interfaces: false,
         ext_filter_list: super::utils::prepare_ext_filter("sql"),
-        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
 
     let mut file_cache = HashMap::new();
@@ -2432,7 +2440,7 @@ fn test_impact_analysis_false_no_tests_covering() {
 fn test_impact_analysis_finds_test_methods() {
     use crate::{ContentIndex, Posting};
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     // OrderService.process() is called by OrderTests.testProcess() which has [Test] attribute
     let definitions = vec![
@@ -2507,10 +2515,11 @@ fn test_impact_analysis_finds_test_methods() {
     // Test via build_caller_tree directly
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
         resolve_interfaces: false,
         impact_analysis: true,
-        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
 
     let mut visited = HashSet::new();
@@ -2552,7 +2561,7 @@ fn test_impact_analysis_finds_test_methods() {
 fn test_impact_analysis_non_test_method_recurses_normally() {
     use crate::{ContentIndex, Posting};
     use std::path::PathBuf;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
 
     // OrderService.process() → Controller.handle() → TestController.testHandle()
     // At depth 0: Controller.handle() is NOT a test → should recurse
@@ -2638,10 +2647,11 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
 
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
     let caller_ctx = CallerTreeContext {
         resolve_interfaces: false,
         impact_analysis: true,
-        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count)
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
     };
 
     let mut visited = HashSet::new();

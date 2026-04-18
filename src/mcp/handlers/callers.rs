@@ -2,7 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::time::Instant;
 
 use serde_json::{json, Value};
@@ -268,6 +268,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
     let limits = CallerLimits { max_callers_per_level, max_total_nodes };
     let node_count = AtomicUsize::new(0);
+    let impact_analysis_truncated = AtomicBool::new(false);
 
     // Check for ambiguous method names and generate warning
     let method_lower = method_name.to_lowercase();
@@ -328,6 +329,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         max_body_lines,
         max_total_body_lines,
         impact_analysis,
+        impact_analysis_truncated: &impact_analysis_truncated,
         exclude_patterns,
         exclude_file_lower,
         ext_filter_list,
@@ -409,6 +411,12 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
         // Impact analysis: add testsCovering section
         if impact_analysis {
+            if impact_analysis_truncated.load(std::sync::atomic::Ordering::Relaxed) {
+                summary["impactAnalysisTruncated"] = json!(true);
+                summary["impactAnalysisTruncatedNote"] = json!(
+                    "Impact analysis collection was capped to prevent latency blow-up. Some test methods may not be listed. Narrow with class= filter for complete results."
+                );
+            }
             // Dedup by method+class+file
             tests_found.sort_by(|a, b| {
                 let key = |v: &Value| format!("{}.{}.{}",
@@ -615,6 +623,8 @@ fn handle_multi_method_callers(
     let exclude_file_lower: Vec<String> = exclude_file.iter().map(|s| s.to_lowercase()).collect();
     let ext_filter_list = super::utils::prepare_ext_filter(&ext_filter);
 
+    let impact_analysis_truncated = AtomicBool::new(false);
+
     for method_name in methods {
         // Each method gets its OWN node_count and visited set (per-method budget)
         let node_count = AtomicUsize::new(0);
@@ -632,6 +642,7 @@ fn handle_multi_method_callers(
             max_body_lines,
             max_total_body_lines,
             impact_analysis,
+            impact_analysis_truncated: &impact_analysis_truncated,
             exclude_patterns: exclude_patterns.clone(),
             exclude_file_lower: exclude_file_lower.clone(),
             ext_filter_list: ext_filter_list.clone(),
@@ -795,6 +806,12 @@ fn handle_multi_method_callers(
     }
     if impact_analysis {
         output["query"]["impactAnalysis"] = json!(true);
+        if impact_analysis_truncated.load(std::sync::atomic::Ordering::Relaxed) {
+            output["summary"]["impactAnalysisTruncated"] = json!(true);
+            output["summary"]["impactAnalysisTruncatedNote"] = json!(
+                "Impact analysis collection was capped to prevent latency blow-up. Some test methods may not be listed. Narrow with class= filter for complete results."
+            );
+        }
     }
 
     ToolCallResult::success(json_to_string(&output))
@@ -1059,6 +1076,8 @@ struct CallerTreeContext<'a> {
     max_body_lines: usize,
     max_total_body_lines: usize,
     impact_analysis: bool,
+    /// Set to true when impact_analysis collection was truncated due to cap
+    impact_analysis_truncated: &'a AtomicBool,
     /// Pre-computed exclude dir patterns (avoids per-file allocations)
     exclude_patterns: super::utils::ExcludePatterns,
     /// Pre-lowercased exclude file substrings
@@ -1077,6 +1096,7 @@ impl CallerTreeContext<'_> {
         def_idx: &'a DefinitionIndex,
         limits: &'a CallerLimits,
         node_count: &'a AtomicUsize,
+        impact_truncated: &'a AtomicBool,
     ) -> CallerTreeContext<'a> {
         CallerTreeContext {
             content_index,
@@ -1090,6 +1110,7 @@ impl CallerTreeContext<'_> {
             max_body_lines: 0,
             max_total_body_lines: 0,
             impact_analysis: false,
+            impact_analysis_truncated: impact_truncated,
             exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
             exclude_file_lower: vec![],
             ext_filter_list: super::utils::prepare_ext_filter("cs"),
@@ -1747,14 +1768,17 @@ fn build_caller_tree(
 
     // Safety cap: collect more callers than needed so we can sort test vs non-test
     // before truncating. This avoids scanning ALL postings for popular tokens.
+    // Impact analysis uses a higher but still bounded limit to prevent latency
+    // blow-up on popular method names in large indexes.
     let collection_limit = if ctx.impact_analysis {
-        usize::MAX  // don't cap when searching for tests
+        (ctx.limits.max_callers_per_level * 20).min(5000)
     } else {
         ctx.limits.max_callers_per_level * 3
     };
 
+    let mut collection_capped = false;
     for posting in postings {
-        if caller_map.len() >= collection_limit { break; }
+        if caller_map.len() >= collection_limit { collection_capped = true; break; }
         if ctx.node_count.load(std::sync::atomic::Ordering::Relaxed) >= ctx.limits.max_total_nodes { break; }
 
         // If we have a parent class context, skip files that don't reference that class
@@ -1818,6 +1842,10 @@ fn build_caller_tree(
                 });
             }
         }
+    }
+
+    if collection_capped && ctx.impact_analysis {
+        ctx.impact_analysis_truncated.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Phase 1.5: Sort callers — non-test first (primary), popularity DESC (secondary)
