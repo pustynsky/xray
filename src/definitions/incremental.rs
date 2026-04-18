@@ -702,11 +702,10 @@ pub fn reconcile_definition_index_nonblocking(
         // Clean up files that were in to_update but didn't produce a ParsedFileResult
         // (e.g., read error). Without this, stale definitions remain for unreadable files.
         for path in &to_update_set {
-            if !applied_paths.contains(path) {
-                if let Some(&file_id) = idx.path_to_id.get(path) {
+            if !applied_paths.contains(path)
+                && let Some(&file_id) = idx.path_to_id.get(path) {
                     remove_file_definitions(&mut idx, file_id);
                 }
-            }
         }
 
         // Update created_at if anything changed (use walk_start, not now(), to avoid race condition)

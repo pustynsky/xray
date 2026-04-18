@@ -184,7 +184,7 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 1;
+pub const DEFINITION_INDEX_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[derive(Default)]
@@ -253,6 +253,10 @@ pub struct DefinitionIndex {
     /// Extension method name → Vec of static class names containing the extension.
     #[serde(default)]
     pub extension_methods: HashMap<String, Vec<String>>,
+    /// Number of worker threads that panicked during index building.
+    /// Zero for a clean build. Non-zero indicates partial/degraded index.
+    #[serde(default)]
+    pub worker_panics: usize,
 }
 
 impl DefinitionIndex {

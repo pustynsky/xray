@@ -1008,6 +1008,7 @@ fn test_definition_index_field_count_guard() {
         path_to_id: HashMap::new(),
         parse_errors: 0,
         lossy_file_count: 0,
+        worker_panics: 0,
         empty_file_ids: Vec::new(),
         extension_methods: HashMap::new(),
     };

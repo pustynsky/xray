@@ -650,8 +650,7 @@ impl WorkspaceBinding {
     }
 }
 
-/// Context for tool handlers -- shared state
-
+// Context for tool handlers -- shared state
 /// Quick check: does a directory contain any files with the given extensions?
 /// Uses a shallow walk (max_depth levels) with early exit on first match.
 /// Returns `true` if at least one matching file is found.
@@ -664,15 +663,12 @@ pub fn has_source_files(dir: &str, extensions: &[String], max_depth: usize) -> b
         .hidden(false)
         .build();
     for entry in walker {
-        if let Ok(entry) = entry {
-            if entry.file_type().is_some_and(|ft| ft.is_file()) {
-                if let Some(ext) = entry.path().extension().and_then(|e| e.to_str()) {
-                    if extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
+        if let Ok(entry) = entry
+            && entry.file_type().is_some_and(|ft| ft.is_file())
+                && let Some(ext) = entry.path().extension().and_then(|e| e.to_str())
+                    && extensions.iter().any(|e| e.eq_ignore_ascii_case(ext)) {
                         return true;
                     }
-                }
-            }
-        }
     }
     false
 }
@@ -1014,7 +1010,7 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
                     .as_secs()
                     .saturating_sub(idx.created_at);
 
-                indexes.push(json!({
+                let mut content_info = json!({
                     "type": "content",
                     "root": idx.root,
                     "files": idx.files.len(),
@@ -1024,7 +1020,12 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
                     "sizeMb": size_mb,
                     "ageHours": (age_secs as f64 / 3600.0 * 10.0).round() / 10.0,
                     "inMemory": true,
-                }));
+                });
+                if idx.worker_panics > 0 {
+                    content_info["workerPanics"] = json!(idx.worker_panics);
+                    content_info["degraded"] = json!(true);
+                }
+                indexes.push(content_info);
             }
             memory_estimate["contentIndex"] = crate::index::estimate_content_index_memory(&idx);
         }
@@ -1071,6 +1072,10 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
                     }
                     if idx.lossy_file_count > 0 {
                         def_info["lossyUtf8Files"] = json!(idx.lossy_file_count);
+                    }
+                    if idx.worker_panics > 0 {
+                        def_info["workerPanics"] = json!(idx.worker_panics);
+                        def_info["degraded"] = json!(true);
                     }
                     indexes.push(def_info);
                 }
@@ -1165,6 +1170,21 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     result
 }
 
+/// Rolls back workspace state to pre-switch values after a failed reindex.
+/// Call this in every error branch when `workspace_changed` is true.
+fn rollback_workspace_state(
+    ctx: &HandlerContext,
+    previous_dir: &str,
+    old_mode: WorkspaceBindingMode,
+    old_generation: u64,
+) {
+    let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+    ws.set_dir(previous_dir.to_string());
+    ws.mode = old_mode;
+    ws.generation = old_generation;
+    ws.status = WorkspaceStatus::Resolved;
+}
+
 fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let current_dir = ctx.server_dir();
     let dir = args.get("dir").and_then(|v| v.as_str())
@@ -1236,11 +1256,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
             Err(e) => {
                 // Full rollback on failure
                 if workspace_changed {
-                    let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
-                    ws.set_dir(previous_dir.clone());
-                    ws.mode = old_mode;
-                    ws.generation = old_generation;
-                    ws.status = WorkspaceStatus::Resolved;
+                    rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation);
                 }
                 return ToolCallResult::error(format!("Failed to build content index: {}", e));
             }
@@ -1269,7 +1285,12 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
                     threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 }) {
                     Ok(idx) => idx,
-                    Err(e2) => return ToolCallResult::error(format!("Failed to rebuild content index: {}", e2)),
+                    Err(e2) => {
+                        if workspace_changed {
+                            rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation);
+                        }
+                        return ToolCallResult::error(format!("Failed to rebuild content index: {}", e2));
+                    }
                 }
             }
         };

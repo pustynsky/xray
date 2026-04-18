@@ -76,7 +76,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
 
     for entry in entries.flatten() {
         let path = entry.path();
-        if !path.extension().is_some_and(|e| e == "code-structure") {
+        if path.extension().is_none_or(|e| e != "code-structure") {
             continue;
         }
 

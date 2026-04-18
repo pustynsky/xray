@@ -1,6 +1,6 @@
-# Code Review - Rust Code Analysis Prompt V1.5
+# Code Review - Rust Code Analysis Prompt V1.6
 
-**Version:** 1.5 | **Last Updated:** 2026-04-17
+**Version:** 1.6 | **Last Updated:** 2026-04-17
 
 ## Overview
 
@@ -127,6 +127,7 @@ When reviewing a branch with tool assistance, **prefer xray tools over raw `git`
 | Line-level authorship | `xray_git_blame repo=<path> file=<path> startLine=N endLine=M` | `git blame` |
 | Activity across multiple files in a date range | `xray_git_activity repo=<path> from=... to=...` | `git log --name-only` |
 | Authors/contributors of a path | `xray_git_authors repo=<path> path=<path>` | `git shortlog -sn` |
+| Find files by name or wildcard | `xray_fast pattern='<name>'` | `find` / `ls` |
 
 Step-by-step:
 
@@ -135,7 +136,8 @@ Step-by-step:
 3. List changed files vs base branch: fetch with `git fetch origin <base> <target>`, then `git diff --name-status origin/<base>...origin/<branch>` (no xray equivalent for diff-name-status yet — this is a justified `git` CLI call).
 4. Read modified source files:
    - **`.rs` files: ALWAYS use `xray_definitions file='<filename>' includeBody=true maxBodyLines=0`. NEVER use `read_file` on `.rs` files — it wastes tokens and bypasses the pre-built AST index.**
-   - Other text files (`.toml`, `.md`, `.json`, `.yaml`): `xray_grep terms='<search>' ext='<ext>' showLines=true` or `read_file` if you need the whole document.
+   - **Directory exploration:** Use `xray_fast pattern='*'` or `xray_definitions file='<dir>'`. NEVER use built-in `list_directory` or `directory_tree`.
+   - Other text files (`.toml`, `.md`, `.json`, `.yaml`): `xray_grep terms='<search>' ext='<ext>' showLines=true` or `xray_edit` / `read_file` if needed.
 5. Get per-file diff/patch: `xray_git_diff repo=<repo> file=<path>` (preferred) or `git diff origin/<base>...origin/<branch> -- <file>` (fallback for range-diffs not scoped to a single commit).
 
 > **⚠️ Hard rule:** do not call `read_file` on `.rs` files for any reason (exploration, validation, fact-checking). Use `xray_definitions includeBody=true` instead. The only exception: you need exact line numbers for `xray_edit` — but even then `xray_definitions` returns line numbers.
@@ -244,9 +246,9 @@ Any `unsafe` block requires **all** of the following:
 - [ ] No invalid `Send`/`Sync` assumptions — manual impls justified
 - [ ] Drop order / ownership invariants preserved
 - [ ] `repr(C)` / layout assumptions explicit for FFI
-- [ ] Pointer dereference preconditions documented
+- [ ] Pointer dereference preconditions documented (non-null, aligned, dereferenceable)
 - [ ] No UB hidden behind "works on current platform" — must be sound per Rust spec
-- [ ] `std::mem::transmute` — exhaustive justification required
+- [ ] `std::mem::transmute` — exhaustive justification required; prefer safe casts or `bytemuck` if applicable
 
 ### Concurrency
 
@@ -277,6 +279,7 @@ Any `unsafe` block requires **all** of the following:
 ### Memory & Performance
 
 - Hot path allocations? `Vec::with_capacity`? `String` vs `&str`?
+- Integer arithmetic: Unchecked math (`+`, `-`, `*`) that could overflow? Prefer `checked_*` or `saturating_*` in critical logic.
 - `collect()` into `Vec` when iterator composition suffices?
 - Unnecessary `Box`/`Arc` where stack or references suffice?
 - `format!()` allocations in hot paths?
@@ -664,14 +667,14 @@ Recommendation: <what to change>
 
 ---
 
-## 4.5. Nits (NIT) — optional, ≤ 3 items
+## 5. Nits (NIT) — optional, ≤ 3 items
 
 [Omit this section entirely if any BLOCKER or MAJOR exists — reviewer attention must stay on critical issues.
 Otherwise, list up to 3 style/readability suggestions. Brief one-liner per item.]
 
 ---
 
-## 5. Notable Rust Findings
+## 6. Notable Rust Findings
 
 [Include only aspects with actual findings — do NOT list N/A items. Format:]
 
@@ -684,7 +687,7 @@ Architecture, Data Modeling, Trait Design
 
 ---
 
-## 6. Conditional Sections
+## 7. Conditional Sections
 
 [Include only the sections relevant to this PR]
 
@@ -704,14 +707,14 @@ Architecture, Data Modeling, Trait Design
 
 ---
 
-## 7. Architectural Assessment (non-trivial PRs only)
+## 8. Architectural Assessment (non-trivial PRs only)
 
 [Abstraction quality, module cohesion, coupling, complexity budget, dependency direction.
 "No architectural concerns" if clean. Skip for small/trivial PRs.]
 
 ---
 
-## 8. Open Questions & Uncertainty
+## 9. Open Questions & Uncertainty
 
 [Genuinely uncertain items — not findings, but areas where more context would change
 the assessment. Items the reviewer cannot resolve from available evidence.
@@ -719,7 +722,7 @@ the assessment. Items the reviewer cannot resolve from available evidence.
 
 ---
 
-## 9. Final Recommendations
+## 10. Final Recommendations
 
 ### Top Risks
 1.
@@ -741,6 +744,15 @@ _Review completed [DATE]_
 ---
 
 ## Changelog
+
+### V1.6 (2026-04-17) — Strictness polish, tool alignment, formatting fixes
+
+Based on request to improve strictness, align with latest Xray MCP capabilities, and clean up structure.
+
+**Must-fix:**
+1. **Tool Alignment:** Added explicit instructions to use `xray_fast` and `xray_definitions` for directory exploration over built-ins.
+2. **Output Template Restructured (Part 9):** Renumbered sections (converted 4.5 to 5, shifted the rest to 10) for cleaner output formatting.
+3. **Safety & Math Checks (Part 4):** Added explicit checks for unchecked arithmetic / overflow risks and stricter transmutation/pointer checks in Unsafe section.
 
 ### V1.5 (2026-04-17) — xray tool integration, test presence gate, async Send-bound, NIT output slot
 

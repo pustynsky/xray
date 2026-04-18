@@ -155,11 +155,10 @@ pub(crate) fn parse_xml_on_demand_with_warnings(
     // by taking the value out first (MINOR-2: drops the extra `Vec<Option<usize>>`
     // clone the previous implementation used).
     for i in 0..ctx.defs.len() {
-        if let Some(p) = ctx.defs[i].parent_index {
-            if p < ctx.defs.len() {
+        if let Some(p) = ctx.defs[i].parent_index
+            && p < ctx.defs.len() {
                 ctx.defs[p].has_child_elements = true;
             }
-        }
     }
 
     Ok(ParseResult {
@@ -457,11 +456,10 @@ fn build_element_signature_name(
 
     for key_attr in &key_attrs {
         for attr in &attrs {
-            if let Some((attr_name, attr_value)) = attr.split_once('=') {
-                if attr_name.eq_ignore_ascii_case(key_attr) {
+            if let Some((attr_name, attr_value)) = attr.split_once('=')
+                && attr_name.eq_ignore_ascii_case(key_attr) {
                     return format!("{}[@{}={}]", element_name, attr_name, attr_value);
                 }
-            }
         }
     }
 

@@ -204,10 +204,10 @@ pub(crate) fn matches_ext_filter(file_path: &str, ext_filter: &str) -> bool {
         })
 }
 
-/// Check if a file path matches any of the exclude directory filters.
-/// Uses segment-based matching: `excludeDir=["test"]` excludes `src/test/file.rs`
-/// but NOT `src/contest/file.rs`. Normalizes backslashes to forward slashes.
-/// This is the canonical implementation — all tools (grep, definitions, callers)
+// Check if a file path matches any of the exclude directory filters.
+// Uses segment-based matching: `excludeDir=["test"]` excludes `src/test/file.rs`
+// but NOT `src/contest/file.rs`. Normalizes backslashes to forward slashes.
+// This is the canonical implementation — all tools (grep, definitions, callers)
 
 // ─── Set operations ─────────────────────────────────────────────────
 
@@ -515,15 +515,14 @@ fn phase_strip_body_fields(output: &mut Value, reasons: &mut Vec<String>) {
             for result_entry in results_arr.iter_mut() {
                 if let Some(result_obj) = result_entry.as_object_mut() {
                     // Strip rootMethod body
-                    if let Some(root_method) = result_obj.get_mut("rootMethod") {
-                        if let Some(rm_obj) = root_method.as_object_mut() {
+                    if let Some(root_method) = result_obj.get_mut("rootMethod")
+                        && let Some(rm_obj) = root_method.as_object_mut() {
                             for field in body_fields {
                                 if rm_obj.remove(*field).is_some() {
                                     stripped = true;
                                 }
                             }
                         }
-                    }
                     // Strip bodies from callTree entries
                     if let Some(call_tree) = result_obj.get_mut("callTree").and_then(|v| v.as_array_mut()) {
                         for entry in call_tree.iter_mut() {

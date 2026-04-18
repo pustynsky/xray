@@ -5,6 +5,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::event::ModifyKind;
 use tracing::{error, info, warn};
 
 use crate::{clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
@@ -13,6 +14,20 @@ use crate::definitions::{self, DefinitionIndex};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// Start a file watcher thread that incrementally updates the in-memory index
+/// Returns `true` if the given event kind should invalidate the file-list index.
+/// Covers create, remove, and rename (cross-platform: Linux/inotify emits
+/// `Modify(Name(_))` for renames, Windows emits Remove+Create pairs).
+pub(crate) fn should_invalidate_file_index(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_)
+            | EventKind::Remove(_)
+            | EventKind::Modify(ModifyKind::Name(_))
+            | EventKind::Modify(ModifyKind::Any)
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn start_watcher(
     index: Arc<RwLock<ContentIndex>>,
     def_index: Option<Arc<RwLock<DefinitionIndex>>>,
@@ -80,11 +95,8 @@ pub fn start_watcher(
                         // BEFORE the extension filter. FileIndex indexes ALL files
                         // (not just --ext), so changes to .json, .yaml, etc. must
                         // also trigger a rebuild.
-                        match event.kind {
-                            EventKind::Create(_) | EventKind::Remove(_) => {
-                                file_index_dirty.store(true, Ordering::Relaxed);
-                            }
-                            _ => {}
+                        if should_invalidate_file_index(&event.kind) {
+                            file_index_dirty.store(true, Ordering::Relaxed);
                         }
                         if !matches_extensions(path, &extensions) {
                             continue;
@@ -108,15 +120,14 @@ pub fn start_watcher(
                         }
                     }
                     // Force flush if accumulating too long (prevents debounce starvation)
-                    if let Some(start) = batch_start {
-                        if start.elapsed() >= MAX_ACCUMULATE {
+                    if let Some(start) = batch_start
+                        && start.elapsed() >= MAX_ACCUMULATE {
                             if !process_batch(&index, &def_index, &mut dirty_files, &mut removed_files) {
                                 error!("RwLock poisoned, watcher thread exiting");
                                 break;
                             }
                             batch_start = None;
                         }
-                    }
                 }
                 Ok(Err(e)) => {
                     warn!(error = %e, "File watcher error");
@@ -341,11 +352,10 @@ fn update_definition_index(
             // Clean up dirty files that didn't produce a ParsedFileResult
             // (e.g., read error, unsupported extension). Remove stale definitions.
             for path in dirty_clean {
-                if !parsed_paths.contains(path) {
-                    if let Some(&fid) = idx.path_to_id.get(path) {
+                if !parsed_paths.contains(path)
+                    && let Some(&fid) = idx.path_to_id.get(path) {
                         definitions::remove_file_definitions(&mut idx, fid);
                     }
-                }
             }
 
             // Update created_at — watcher detects subsequent changes via fsnotify, so now() is safe

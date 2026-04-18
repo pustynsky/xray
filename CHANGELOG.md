@@ -69,6 +69,13 @@
 
 ## Unreleased
 
+### Features / Bug Fixes — Runtime Correctness & Clippy Gate (2026-04-18)
+
+- **P0-1: Worker panic observability** — `ContentIndex` and `DefinitionIndex` now track `worker_panics: usize`, incremented on each worker thread panic during parallel index builds. `xray_info` exposes `workerPanics` and `degraded: true` for any index with panics > 0. Both index versions bumped (`CONTENT_INDEX_VERSION=2`, `DEFINITION_INDEX_VERSION=2`) to force rebuild of old on-disk indexes.
+- **P0-2: File rename triggers file-list index rebuild** — `should_invalidate_file_index()` helper in `watcher.rs` now matches `Modify(Name(_))` (inotify rename events on Linux) in addition to `Create`, `Remove`, and `Modify(Any)`. Previously renames were silently dropped.
+- **P0-3: Workspace rollback on failed reindex** — `handle_xray_reindex_inner()` now calls `rollback_workspace_state()` on both error paths. Previously a failed `xray_reindex dir=<bad>` left the server bound to the new (invalid) directory.
+- **P0-4: Clippy cleanup + CI gate** — Fixed all clippy warnings (`empty_line_after_doc_comments`, `unnecessary_unwrap`, `explicit_counter_loop`, `manual_unwrap_or_default`, `too_many_arguments`). Added `.github/workflows/clippy.yml` — runs `cargo clippy --workspace -- -D warnings` on every push and PR.
+
 ### Bug Fixes — Deleted Files in Git Tools (Parts 1–2, 2026-04-17)
 
 - **`xray_git_history` returned 0 commits for deleted files** — `file_history()` used `git log --follow <path>` which silently returns nothing if `<path>` is not present in the working tree. Files that were ever deleted (even if recreated later under a different inode) lost their history. Fix: split `file_history()` into a `--follow` first-attempt + a no-follow fallback (`run_file_history_query`). The fallback runs only when the first attempt returns 0 commits AND `file_ever_existed_in_git()` confirms the path is known to git, so it doesn't degrade behavior for typo paths. Modified `src/git/mod.rs`. New tests in `src/git/git_tests.rs`: `test_file_history_returns_commits_for_deleted_file`, `test_file_history_returns_empty_for_never_existed_file`.

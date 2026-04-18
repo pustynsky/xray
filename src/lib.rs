@@ -300,7 +300,7 @@ pub fn generate_trigrams(token: &str) -> Vec<String> {
 /// to the files and line numbers where it appears.
 /// Format version for ContentIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const CONTENT_INDEX_VERSION: u32 = 1;
+pub const CONTENT_INDEX_VERSION: u32 = 2;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ContentIndex {
@@ -337,6 +337,10 @@ pub struct ContentIndex {
     /// Number of files that required lossy UTF-8 conversion (contained non-UTF8 bytes)
     #[serde(default)]
     pub lossy_file_count: usize,
+    /// Number of worker threads that panicked during index building.
+    /// Zero for a clean build. Non-zero indicates partial/degraded index.
+    #[serde(default)]
+    pub worker_panics: usize,
 }
 
 impl ContentIndex {
@@ -434,6 +438,7 @@ impl Default for ContentIndex {
             path_to_id: None,
             read_errors: 0,
             lossy_file_count: 0,
+            worker_panics: 0,
         }
     }
 }

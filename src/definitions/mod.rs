@@ -442,6 +442,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                 let (chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods) =
                     handle.join().unwrap_or_else(|_| {
                         eprintln!("[WARN] Worker thread panicked during definition index building");
+                        index.worker_panics += 1;
                         (Vec::new(), 0, Vec::new(), Vec::new(), HashMap::new())
                     });
 

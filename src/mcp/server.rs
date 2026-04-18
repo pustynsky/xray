@@ -68,15 +68,15 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
     let id = raw.get("id").and_then(|v| v.as_u64());
 
     // Check if this is the roots/list response
-    if let Some(pending_id) = state.pending_roots_request_id {
-        if id == Some(pending_id) {
+    if let Some(pending_id) = state.pending_roots_request_id
+        && id == Some(pending_id) {
             state.pending_roots_request_id = None;
 
             if let Some(result) = raw.get("result") {
                 if let Some(roots) = result.get("roots").and_then(|r| r.as_array()) {
-                    if let Some(first_root) = roots.first() {
-                        if let Some(uri) = first_root.get("uri").and_then(|u| u.as_str()) {
-                            if let Some(path) = uri_to_path(uri) {
+                    if let Some(first_root) = roots.first()
+                        && let Some(uri) = first_root.get("uri").and_then(|u| u.as_str())
+                            && let Some(path) = uri_to_path(uri) {
                                 let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
                                 let old_dir = ws.dir.clone();
                                 if !path.eq_ignore_ascii_case(&old_dir) {
@@ -101,8 +101,6 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
                                     info!(dir = %path, "Workspace confirmed by roots/list (same dir)");
                                 }
                             }
-                        }
-                    }
                     if roots.len() > 1 {
                         warn!(count = roots.len(), "Multiple roots received, using first one");
                     }
@@ -112,7 +110,6 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
             }
             return;
         }
-    }
 
     debug!(id = ?id, "Received response to unknown server request");
 }
@@ -250,8 +247,8 @@ pub fn run_server(ctx: HandlerContext) {
                     let id = request.id.unwrap();
 
                     // Special handling for initialize — parse client capabilities
-                    if request.method == "initialize" {
-                        if let Some(ref params) = request.params {
+                    if request.method == "initialize"
+                        && let Some(ref params) = request.params {
                             let has_roots = params
                                 .pointer("/capabilities/roots")
                                 .is_some();
@@ -264,7 +261,6 @@ pub fn run_server(ctx: HandlerContext) {
                             info!(roots = has_roots, list_changed = has_list_changed,
                                 "Client capabilities parsed");
                         }
-                    }
 
                     // After initialized notification handling is not needed here —
                     // it's handled above in the notification branch.

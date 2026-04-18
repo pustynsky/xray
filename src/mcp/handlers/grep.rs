@@ -58,6 +58,7 @@ pub(crate) struct PhraseFileMatch {
 
 /// Build the common grep summary JSON with readErrors, lossyUtf8Files, and branchWarning.
 /// When `include_index_stats` is true, adds indexFiles, indexTokens, searchTimeMs, indexLoadTimeMs.
+#[allow(clippy::too_many_arguments)]
 fn build_grep_base_summary(
     total_files: usize,
     total_occurrences: usize,
@@ -271,11 +272,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
                             dir, parent, filename
                         ));
                         // Re-validate the parent dir against server_dir scope.
-                        match validate_search_dir(&parent, server_dir) {
-                            Ok(reparent) => reparent,
-                            // If the parent is outside server_dir, fall back to server_dir + file filter.
-                            Err(_) => None,
-                        }
+                        validate_search_dir(&parent, server_dir).unwrap_or_default()
                     } else {
                         filter
                     }
@@ -415,6 +412,7 @@ fn score_normal_token_search(
 }
 
 /// Build the final JSON response for grep results (normal and substring modes).
+#[allow(clippy::too_many_arguments)]
 fn build_grep_response(
     results: &[FileScoreEntry],
     terms: &[String],
@@ -468,7 +466,7 @@ fn build_grep_response(
             std::path::Path::new(&r.file_path)
                 .extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|e| is_xml_extension(e))
+                .is_some_and(is_xml_extension)
         });
         if has_xml {
             summary["xmlHint"] = json!(
@@ -639,8 +637,8 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     );
 
     // Warn when regex=true and terms contain spaces (tokens never have spaces)
-    if parsed.use_regex && parsed.terms_str.contains(' ') {
-        if let Some(text) = result.content.first_mut().map(|c| &mut c.text)
+    if parsed.use_regex && parsed.terms_str.contains(' ')
+        && let Some(text) = result.content.first_mut().map(|c| &mut c.text)
             && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
                 if let Some(summary) = output.get_mut("summary") {
                     summary["searchModeNote"] = serde_json::Value::String(
@@ -651,7 +649,6 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
                 }
                 *text = json_to_string(&output);
             }
-    }
 
     inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
 
@@ -780,6 +777,7 @@ fn find_matching_tokens_for_term(
 
 /// Score matched tokens against the main inverted index for a single term.
 /// Applies file filters, computes TF-IDF, and accumulates into shared structures.
+#[allow(clippy::too_many_arguments)]
 fn score_token_postings(
     matched_tokens: &[String],
     term_idx: usize,
@@ -842,6 +840,7 @@ fn score_token_postings(
 }
 
 /// Build the final substring search response (JSON with files, summary, warnings, matchedTokens).
+#[allow(clippy::too_many_arguments)]
 fn build_substring_response(
     results: &[FileScoreEntry],
     raw_terms: &[String],

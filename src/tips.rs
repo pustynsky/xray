@@ -100,9 +100,6 @@ pub struct Strategy {
 // TaskRouting struct and task_routings() function were removed as part of
 // the 2026-04-17 prompt slimming (Part 4 audit). TASK ROUTING was a 1:1 duplicate
 // of INTENT -> TOOL MAPPING in render_instructions — merged into the mapping.
-
-// ─── Single source of truth ─────────────────────────────────────────
-
 pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
     let lang_list = format_supported_languages(def_extensions);
     vec![
@@ -768,7 +765,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
             ext_dotted.join("/"), ext_dotted.join("/")
         ));
     }
-    out.push_str("\n");
+    out.push('\n');
 
     // (STRATEGY RECIPES removed from system-prompt rendering — available on-demand
     //  via xray_help. Inline reference kept:)
