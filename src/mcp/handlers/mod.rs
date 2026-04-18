@@ -1185,6 +1185,201 @@ fn rollback_workspace_state(
     ws.status = WorkspaceStatus::Resolved;
 }
 
+/// Build or load a content index for the given directory.
+/// Returns (index, action_str) on success, or error message on failure.
+fn build_or_load_content_index(
+    dir: &str,
+    ext: &str,
+    index_base: &std::path::Path,
+    respect_git_exclude: bool,
+) -> Result<(ContentIndex, &'static str), String> {
+    let extensions: Vec<String> = ext.split(',').map(|s| s.trim().to_string()).collect();
+    let loaded = load_content_index(dir, ext, index_base)
+        .ok()
+        .or_else(|| find_content_index_for_dir(dir, index_base, &extensions));
+
+    if let Some(idx) = loaded {
+        return Ok((idx, "loaded_cache"));
+    }
+
+    // Build from scratch
+    let idx = build_content_index(&ContentIndexArgs {
+        dir: dir.to_string(),
+        ext: ext.to_string(),
+        max_age_hours: 24,
+        hidden: false,
+        no_ignore: false, respect_git_exclude,
+        threads: 0,
+        min_token_len: DEFAULT_MIN_TOKEN_LEN,
+    }).map_err(|e| format!("Failed to build content index: {}", e))?;
+
+    // Save to disk
+    if let Err(e) = save_content_index(&idx, index_base) {
+        warn!(error = %e, "Failed to save reindexed content to disk");
+    }
+
+    // Drop build result and reload from disk for compact memory layout
+    drop(idx);
+    crate::index::force_mimalloc_collect();
+    crate::index::log_memory("reindex: after drop+mi_collect (content)");
+
+    let reloaded = match load_content_index(dir, ext, index_base) {
+        Ok(idx) => idx,
+        Err(e) => {
+            warn!(error = %e, "Failed to reload content index from disk after reindex, rebuilding");
+            build_content_index(&ContentIndexArgs {
+                dir: dir.to_string(), ext: ext.to_string(),
+                max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
+                threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+            }).map_err(|e2| format!("Failed to rebuild content index: {}", e2))?
+        }
+    };
+    Ok((reloaded, "rebuilt"))
+}
+
+/// Cross-load definition index on workspace switch.
+/// Returns the action taken: "loaded_cache", "background_build", or None.
+fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
+    let def_arc = ctx.def_index.as_ref()?;
+    let def_ext_str = ctx.def_extensions.join(",");
+    let def_ext_vec: Vec<String> = ctx.def_extensions.clone();
+
+    // Try cache load
+    let def_loaded = crate::definitions::load_definition_index(dir, &def_ext_str, &ctx.index_base).ok()
+        .or_else(|| crate::definitions::find_definition_index_for_dir(dir, &ctx.index_base, &def_ext_vec));
+
+    if let Some(mut idx) = def_loaded {
+        idx.shrink_maps();
+        *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
+        ctx.def_ready.store(true, Ordering::Release);
+        info!(dir = %dir, "Definition index cross-loaded from cache on workspace switch");
+        return Some("loaded_cache");
+    }
+
+    // No cache — start background build
+    ctx.def_ready.store(false, Ordering::Release);
+    let bg_def = Arc::clone(def_arc);
+    let bg_dir = dir.to_string();
+    let bg_ext = def_ext_str;
+    let bg_idx_base = ctx.index_base.clone();
+    let bg_ready = Arc::clone(&ctx.def_ready);
+    let bg_building = Arc::clone(&ctx.def_building);
+    std::thread::spawn(move || {
+        if bg_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+            return; // another build already running
+        }
+        info!(dir = %bg_dir, "Building definition index in background (workspace switch)");
+        let new_idx = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+            dir: bg_dir.clone(), ext: bg_ext.clone(), threads: 0,
+        });
+        if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
+            warn!(error = %e, "Failed to save definition index to disk");
+        }
+        // Drop + reload pattern for compact memory
+        drop(new_idx);
+        crate::index::force_mimalloc_collect();
+        let new_idx = crate::definitions::load_definition_index(&bg_dir, &bg_ext, &bg_idx_base)
+            .unwrap_or_else(|e| {
+                warn!(error = %e, "Failed to reload def index, rebuilding");
+                crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+                    dir: bg_dir, ext: bg_ext, threads: 0,
+                })
+            });
+        *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
+        bg_building.store(false, Ordering::Release);
+        bg_ready.store(true, Ordering::Release);
+        crate::index::log_memory("reindex: def cross-build complete");
+    });
+    info!(dir = %dir, "Definition index background build started (no cache)");
+    Some("background_build")
+}
+
+/// Restart file watcher for a new workspace directory.
+fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
+    // Increment watcher generation — old watcher will detect the mismatch and exit.
+    // This supports unlimited sequential workspace switches (generation counter, not boolean).
+    let new_gen = ctx.watcher_generation.fetch_add(1, Ordering::Release) + 1;
+    // Start new watcher for new directory.
+    let watch_dir = std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| std::path::PathBuf::from(dir));
+    let ext_vec: Vec<String> = ctx.server_ext.split(',').map(|s| s.trim().to_string()).collect();
+    if let Err(e) = crate::mcp::watcher::start_watcher(
+        Arc::clone(&ctx.index),
+        ctx.def_index.as_ref().map(Arc::clone),
+        watch_dir,
+        ext_vec,
+        ctx.watch_debounce_ms,
+        ctx.index_base.clone(),
+        Arc::clone(&ctx.content_ready),
+        Arc::clone(&ctx.def_ready),
+        Arc::clone(&ctx.file_index_dirty),
+        Arc::clone(&ctx.watcher_generation),
+        new_gen,
+    ) {
+        warn!(error = %e, "Failed to restart file watcher for new workspace");
+    } else {
+        info!(dir = %dir, generation = new_gen, "File watcher restarted for new workspace");
+    }
+}
+
+/// Rebuild git history cache for a new workspace directory (background thread).
+fn rebuild_git_cache_for_workspace(ctx: &HandlerContext, dir: &str) {
+    // Clear stale cache for old workspace
+    if let Ok(mut cache) = ctx.git_cache.write() {
+        *cache = None;
+    }
+    ctx.git_cache_ready.store(false, Ordering::Release);
+
+    // Start background rebuild
+    let bg_git_cache = Arc::clone(&ctx.git_cache);
+    let bg_git_ready = Arc::clone(&ctx.git_cache_ready);
+    let bg_dir = dir.to_string();
+    let bg_idx_base = ctx.index_base.clone();
+    std::thread::spawn(move || {
+        let repo_path = std::path::PathBuf::from(&bg_dir);
+        let git_dir = repo_path.join(".git");
+        if !git_dir.exists() {
+            info!(dir = %bg_dir, "No .git directory in new workspace, skipping git cache");
+            bg_git_ready.store(true, Ordering::Release);
+            return;
+        }
+        let branch = match GitHistoryCache::detect_default_branch(&repo_path) {
+            Ok(b) => b,
+            Err(e) => {
+                warn!(error = %e, "Failed to detect default branch for new workspace");
+                bg_git_ready.store(true, Ordering::Release);
+                return;
+            }
+        };
+        let cache_path = GitHistoryCache::cache_path_for(&bg_dir, &bg_idx_base);
+        // Try load from disk first
+        let cache = if cache_path.exists() {
+            GitHistoryCache::load_from_disk(&cache_path).ok()
+        } else {
+            None
+        };
+        let cache = match cache {
+            Some(c) => c,
+            None => {
+                match GitHistoryCache::build(&repo_path, &branch) {
+                    Ok(c) => {
+                        let _ = c.save_to_disk(&cache_path);
+                        c
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "Failed to build git cache for new workspace");
+                        bg_git_ready.store(true, Ordering::Release);
+                        return;
+                    }
+                }
+            }
+        };
+        info!(dir = %bg_dir, commits = cache.commits.len(), "Git cache rebuilt for new workspace");
+        *bg_git_cache.write().unwrap_or_else(|e| e.into_inner()) = Some(cache);
+        bg_git_ready.store(true, Ordering::Release);
+    });
+}
+
 fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let current_dir = ctx.server_dir();
     let dir = args.get("dir").and_then(|v| v.as_str())
@@ -1233,69 +1428,17 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     info!(dir = %dir, ext = %ext, "Rebuilding content index");
     let start = Instant::now();
 
-    // Load-first: try cached index from disk (~1-2s), fall back to build (~30s)
-    let extensions: Vec<String> = ext.split(',').map(|s| s.trim().to_string()).collect();
-    let loaded = load_content_index(&dir, &ext, &ctx.index_base)
-        .ok()
-        .or_else(|| find_content_index_for_dir(&dir, &ctx.index_base, &extensions));
-
-    let (new_index, index_action) = if let Some(idx) = loaded {
-        (idx, "loaded_cache")
-    } else {
-        // Build from scratch
-        let idx = match build_content_index(&ContentIndexArgs {
-            dir: dir.to_string(),
-            ext: ext.clone(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
-            threads: 0,
-            min_token_len: DEFAULT_MIN_TOKEN_LEN,
-        }) {
-            Ok(idx) => idx,
-            Err(e) => {
-                // Full rollback on failure
-                if workspace_changed {
-                    rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation);
-                }
-                return ToolCallResult::error(format!("Failed to build content index: {}", e));
+    // Phase 1: Build or load content index
+    let (new_index, index_action) = match build_or_load_content_index(
+        &dir, &ext, &ctx.index_base, ctx.respect_git_exclude,
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            if workspace_changed {
+                rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation);
             }
-        };
-
-        // Save to disk
-        if let Err(e) = save_content_index(&idx, &ctx.index_base) {
-            warn!(error = %e, "Failed to save reindexed content to disk");
+            return ToolCallResult::error(e);
         }
-
-        let file_count = idx.files.len();
-        let token_count = idx.index.len();
-
-        // Drop build result and reload from disk for compact memory layout
-        drop(idx);
-        crate::index::force_mimalloc_collect();
-        crate::index::log_memory("reindex: after drop+mi_collect (content)");
-
-        let reloaded = match load_content_index(&dir, &ext, &ctx.index_base) {
-            Ok(idx) => idx,
-            Err(e) => {
-                warn!(error = %e, "Failed to reload content index from disk after reindex, rebuilding");
-                match build_content_index(&ContentIndexArgs {
-                    dir: dir.to_string(), ext: ext.clone(),
-                    max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
-                    threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-                }) {
-                    Ok(idx) => idx,
-                    Err(e2) => {
-                        if workspace_changed {
-                            rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation);
-                        }
-                        return ToolCallResult::error(format!("Failed to rebuild content index: {}", e2));
-                    }
-                }
-            }
-        };
-        let _ = (file_count, token_count); // suppress unused warnings
-        (reloaded, "rebuilt")
     };
 
     let file_count = new_index.files.len();
@@ -1346,153 +1489,21 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     crate::index::force_mimalloc_collect();
     crate::index::log_memory("reindex: after replace+mi_collect (content)");
 
-    // ─── Cross-load definition index on workspace switch ───
-    // When workspace changes, the old def index is for the wrong directory.
-    // Try to load from cache; if unavailable, start a background build.
+    // Phase 2: Cross-load definition index on workspace switch
     let def_index_action = if workspace_changed {
-        if let Some(ref def_arc) = ctx.def_index {
-            let def_ext_str = ctx.def_extensions.join(",");
-            let def_ext_vec: Vec<String> = ctx.def_extensions.clone();
-
-            // Try cache load
-            let def_loaded = crate::definitions::load_definition_index(&dir, &def_ext_str, &ctx.index_base).ok()
-                .or_else(|| crate::definitions::find_definition_index_for_dir(&dir, &ctx.index_base, &def_ext_vec));
-
-            if let Some(mut idx) = def_loaded {
-                idx.shrink_maps();
-                *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
-                ctx.def_ready.store(true, Ordering::Release);
-                info!(dir = %dir, "Definition index cross-loaded from cache on workspace switch");
-                Some("loaded_cache")
-            } else {
-                // No cache — start background build
-                ctx.def_ready.store(false, Ordering::Release);
-                let bg_def = Arc::clone(def_arc);
-                let bg_dir = dir.clone();
-                let bg_ext = def_ext_str.clone();
-                let bg_idx_base = ctx.index_base.clone();
-                let bg_ready = Arc::clone(&ctx.def_ready);
-                let bg_building = Arc::clone(&ctx.def_building);
-                std::thread::spawn(move || {
-                    if bg_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
-                        return; // another build already running
-                    }
-                    info!(dir = %bg_dir, "Building definition index in background (workspace switch)");
-                    let new_idx = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
-                        dir: bg_dir.clone(), ext: bg_ext.clone(), threads: 0,
-                    });
-                    if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
-                        warn!(error = %e, "Failed to save definition index to disk");
-                    }
-                    // Drop + reload pattern for compact memory
-                    drop(new_idx);
-                    crate::index::force_mimalloc_collect();
-                    let new_idx = crate::definitions::load_definition_index(&bg_dir, &bg_ext, &bg_idx_base)
-                        .unwrap_or_else(|e| {
-                            warn!(error = %e, "Failed to reload def index, rebuilding");
-                            crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
-                                dir: bg_dir, ext: bg_ext, threads: 0,
-                            })
-                        });
-                    *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
-                    bg_building.store(false, Ordering::Release);
-                    bg_ready.store(true, Ordering::Release);
-                    crate::index::log_memory("reindex: def cross-build complete");
-                });
-                info!(dir = %dir, "Definition index background build started (no cache)");
-                Some("background_build")
-            }
-        } else {
-            None
-        }
+        cross_load_definition_index(ctx, &dir)
     } else {
         None
     };
 
-    // ─── Restart watcher for new workspace ───
+    // Phase 3: Restart watcher for new workspace
     if workspace_changed && ctx.watch_enabled {
-        // Increment watcher generation — old watcher will detect the mismatch and exit.
-        // This supports unlimited sequential workspace switches (generation counter, not boolean).
-        let new_gen = ctx.watcher_generation.fetch_add(1, Ordering::Release) + 1;
-        // Start new watcher for new directory.
-        let watch_dir = std::fs::canonicalize(&dir)
-            .unwrap_or_else(|_| std::path::PathBuf::from(&dir));
-        let ext_vec: Vec<String> = ctx.server_ext.split(',').map(|s| s.trim().to_string()).collect();
-        if let Err(e) = crate::mcp::watcher::start_watcher(
-            Arc::clone(&ctx.index),
-            ctx.def_index.as_ref().map(Arc::clone),
-            watch_dir,
-            ext_vec,
-            ctx.watch_debounce_ms,
-            ctx.index_base.clone(),
-            Arc::clone(&ctx.content_ready),
-            Arc::clone(&ctx.def_ready),
-            Arc::clone(&ctx.file_index_dirty),
-            Arc::clone(&ctx.watcher_generation),
-            new_gen,
-        ) {
-            warn!(error = %e, "Failed to restart file watcher for new workspace");
-        } else {
-            info!(dir = %dir, generation = new_gen, "File watcher restarted for new workspace");
-        }
+        restart_watcher_for_workspace(ctx, &dir);
     }
 
-    // ─── Rebuild git cache for new workspace ───
+    // Phase 4: Rebuild git cache for new workspace
     if workspace_changed {
-        // Clear stale cache for old workspace
-        if let Ok(mut cache) = ctx.git_cache.write() {
-            *cache = None;
-        }
-        ctx.git_cache_ready.store(false, Ordering::Release);
-
-        // Start background rebuild
-        let bg_git_cache = Arc::clone(&ctx.git_cache);
-        let bg_git_ready = Arc::clone(&ctx.git_cache_ready);
-        let bg_dir = dir.clone();
-        let bg_idx_base = ctx.index_base.clone();
-        std::thread::spawn(move || {
-            let repo_path = std::path::PathBuf::from(&bg_dir);
-            let git_dir = repo_path.join(".git");
-            if !git_dir.exists() {
-                info!(dir = %bg_dir, "No .git directory in new workspace, skipping git cache");
-                bg_git_ready.store(true, Ordering::Release);
-                return;
-            }
-            let branch = match GitHistoryCache::detect_default_branch(&repo_path) {
-                Ok(b) => b,
-                Err(e) => {
-                    warn!(error = %e, "Failed to detect default branch for new workspace");
-                    bg_git_ready.store(true, Ordering::Release);
-                    return;
-                }
-            };
-            let cache_path = GitHistoryCache::cache_path_for(&bg_dir, &bg_idx_base);
-            // Try load from disk first
-            let cache = if cache_path.exists() {
-                GitHistoryCache::load_from_disk(&cache_path).ok()
-            } else {
-                None
-            };
-            let cache = match cache {
-                Some(c) => c,
-                None => {
-                    match GitHistoryCache::build(&repo_path, &branch) {
-                        Ok(c) => {
-                            let _ = c.save_to_disk(&cache_path);
-                            c
-                        }
-                        Err(e) => {
-                            warn!(error = %e, "Failed to build git cache for new workspace");
-                            bg_git_ready.store(true, Ordering::Release);
-                            return;
-                        }
-                    }
-                }
-            };
-            info!(dir = %bg_dir, commits = cache.commits.len(), "Git cache rebuilt for new workspace");
-            *bg_git_cache.write().unwrap_or_else(|e| e.into_inner()) = Some(cache);
-            bg_git_ready.store(true, Ordering::Release);
-        });
+        rebuild_git_cache_for_workspace(ctx, &dir);
     }
 
     let elapsed = start.elapsed();
