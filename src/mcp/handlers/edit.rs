@@ -112,15 +112,22 @@ struct EditResult {
 }
 
 /// Read and validate a file, returning its content and line ending style.
-fn read_and_validate_file(server_dir: &str, path_str: &str) -> Result<(PathBuf, String, &'static str), String> {
+/// Returns `(resolved_path, normalized_content, line_ending, file_existed_before_edit)`.
+///
+/// `file_existed_before_edit` is computed BEFORE any directory creation or write —
+/// this lets the caller distinguish "edited an existing file" from "created a new file"
+/// reliably (without relying on `normalized.is_empty()` which is also true for
+/// existing-but-empty files).
+fn read_and_validate_file(server_dir: &str, path_str: &str) -> Result<(PathBuf, String, &'static str, bool), String> {
     let resolved = resolve_path(server_dir, path_str);
-    if !resolved.exists() {
+    let file_existed = resolved.exists();
+    if !file_existed {
         // File doesn't exist — treat as empty (allows creation via insert operations)
         if let Some(parent) = resolved.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directories for '{}': {}", path_str, e))?;
         }
-        return Ok((resolved, String::new(), "\n"));
+        return Ok((resolved, String::new(), "\n", false));
     }
     if resolved.is_dir() {
         return Err(format!("Path is a directory, not a file: {}", path_str));
@@ -149,7 +156,43 @@ fn read_and_validate_file(server_dir: &str, path_str: &str) -> Result<(PathBuf, 
         content
     };
 
-    Ok((resolved, normalized, line_ending))
+    Ok((resolved, normalized, line_ending, true))
+}
+
+/// Sync-reindex eligibility check used after a successful edit/write.
+///
+/// Returns `Some("<reason>")` if the file should NOT be sync-reindexed, with a
+/// human-readable reason that becomes `skippedReason` in the response. Returns
+/// `None` if the file is eligible for sync reindex.
+///
+/// Decision logic (mirrors what the FS watcher does):
+///   1. Outside server `--dir` → skip (not in our index scope).
+///   2. Extension not in server `--ext` → skip (matches watcher filter).
+///   3. Inside any `.git/` directory → skip (matches watcher filter).
+fn classify_for_sync_reindex(
+    canonical_server_dir: &str,
+    server_extensions: &[String],
+    resolved: &Path,
+) -> Option<&'static str> {
+    // 1. Outside server_dir — most common skip reason for cross-project edits.
+    let canonical_resolved = std::fs::canonicalize(resolved)
+        .unwrap_or_else(|_| resolved.to_path_buf());
+    let canonical_resolved_str = crate::clean_path(&canonical_resolved.to_string_lossy());
+    let canonical_root = crate::clean_path(canonical_server_dir);
+    if !canonical_root.is_empty()
+        && !canonical_resolved_str.starts_with(&canonical_root)
+    {
+        return Some("outsideServerDir");
+    }
+    // 2. Extension filter — server only indexes a subset of extensions.
+    if !crate::mcp::watcher::matches_extensions(resolved, server_extensions) {
+        return Some("extensionNotIndexed");
+    }
+    // 3. .git internals — never indexed.
+    if crate::mcp::watcher::is_inside_git_dir(resolved) {
+        return Some("insideGitDir");
+    }
+    None
 }
 
 /// Apply edits/operations to file content and return results.
@@ -261,12 +304,13 @@ fn handle_single_file_edit(
     dry_run: bool,
     expected_line_count: Option<usize>,
 ) -> ToolCallResult {
-    // Read and validate
-    let (resolved, normalized, line_ending) = match read_and_validate_file(&ctx.server_dir(), path_str) {
+    // Read and validate. `file_existed` is captured BEFORE the write so we can
+    // accurately set `fileCreated` and `fileListInvalidated` in the response.
+    let (resolved, normalized, line_ending, file_existed) = match read_and_validate_file(&ctx.server_dir(), path_str) {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
-    let file_created = normalized.is_empty() && !resolved.exists();
+    let file_created = !file_existed;
 
     // Apply edits
     let edit_result = match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count) {
@@ -319,6 +363,48 @@ fn handle_single_file_edit(
         response["fileCreated"] = json!(true);
     }
 
+    // ── Synchronous reindex (only on real writes, never on dryRun) ──
+    // Eliminates the 500ms FS-watcher debounce window so a follow-up xray_grep
+    // or xray_definitions sees the new content immediately.
+    if !dry_run {
+        let server_extensions: Vec<String> = ctx.server_ext.split(',')
+            .map(|s| s.trim().to_lowercase())
+            .filter(|s| !s.is_empty())
+            .collect();
+        match classify_for_sync_reindex(&ctx.canonical_server_dir(), &server_extensions, &resolved) {
+            Some(reason) => {
+                response["contentIndexUpdated"] = json!(false);
+                response["defIndexUpdated"] = json!(false);
+                response["fileListInvalidated"] = json!(false);
+                response["skippedReason"] = json!(reason);
+            }
+            None => {
+                let stats = crate::mcp::watcher::reindex_paths_sync(
+                    &ctx.index,
+                    &ctx.def_index,
+                    &[resolved.clone()],
+                    &[],
+                    &server_extensions,
+                );
+                response["contentIndexUpdated"] = json!(stats.content_updated > 0);
+                response["defIndexUpdated"] = json!(stats.def_updated > 0);
+                response["reindexElapsedMs"] = json!(format!("{:.2}", stats.elapsed_ms));
+                if stats.content_lock_poisoned || stats.def_lock_poisoned {
+                    response["reindexWarning"] = json!(
+                        "Index lock was poisoned — sync reindex partially failed; FS watcher will reconcile within 500ms."
+                    );
+                }
+                // New file → invalidate file-list cache (xray_fast).
+                if file_created {
+                    ctx.file_index_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                    response["fileListInvalidated"] = json!(true);
+                } else {
+                    response["fileListInvalidated"] = json!(false);
+                }
+            }
+        }
+    }
+
     ToolCallResult::success(json_to_string(&response))
 }
 
@@ -351,40 +437,42 @@ fn handle_multi_file_edit(
         Err(e) => return ToolCallResult::error(e),
     };
 
-    // Phase 1: Read all files (with duplicate path detection)
-    let mut file_data: Vec<(&str, PathBuf, String, &'static str)> = Vec::with_capacity(path_strings.len());
+    // Phase 1: Read all files (with duplicate path detection).
+    // We carry `file_existed` through the pipeline so each per-file response
+    // can correctly report `fileCreated` and `fileListInvalidated`.
+    let mut file_data: Vec<(&str, PathBuf, String, &'static str, bool)> = Vec::with_capacity(path_strings.len());
     let mut seen_paths: HashSet<PathBuf> = HashSet::with_capacity(path_strings.len());
     for path_str in &path_strings {
         match read_and_validate_file(&ctx.server_dir(), path_str) {
-            Ok((resolved, normalized, line_ending)) => {
+            Ok((resolved, normalized, line_ending, file_existed)) => {
                 // Normalize path to handle ./file.txt vs file.txt
                 let normalized_path: PathBuf = resolved.components().collect();
                 if !seen_paths.insert(normalized_path.clone()) {
                     // Find the original path string that resolved to the same file
                     let original = file_data.iter()
-                        .find(|(_, r, _, _)| {
+                        .find(|(_, r, _, _, _)| {
                             let nr: PathBuf = r.components().collect();
                             nr == normalized_path
                         })
-                        .map(|(p, _, _, _)| *p)
+                        .map(|(p, _, _, _, _)| *p)
                         .unwrap_or("?");
                     return ToolCallResult::error(format!(
                         "Duplicate path: '{}' and '{}' resolve to the same file",
                         original, path_str
                     ));
                 }
-                file_data.push((path_str, resolved, normalized, line_ending));
+                file_data.push((path_str, resolved, normalized, line_ending, file_existed));
             }
             Err(e) => return ToolCallResult::error(format!("File '{}': {}", path_str, e)),
         }
     }
 
     // Phase 2: Apply edits to all (in memory)
-    let mut edit_results: Vec<(&str, PathBuf, EditResult, &'static str)> = Vec::with_capacity(file_data.len());
-    for (path_str, resolved, normalized, line_ending) in file_data {
+    let mut edit_results: Vec<(&str, PathBuf, EditResult, &'static str, bool)> = Vec::with_capacity(file_data.len());
+    for (path_str, resolved, normalized, line_ending, file_existed) in file_data {
         match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count) {
             Ok(result) => {
-                edit_results.push((path_str, resolved, result, line_ending));
+                edit_results.push((path_str, resolved, result, line_ending, file_existed));
             }
             Err(e) => return ToolCallResult::error(format!("File '{}': {}", path_str, e)),
         }
@@ -394,7 +482,7 @@ fn handle_multi_file_edit(
     if !dry_run {
         // Phase 3a: Write to temp files (validates I/O before touching originals)
         let mut temp_files: Vec<(&str, PathBuf, PathBuf)> = Vec::with_capacity(edit_results.len());
-        for (path_str, resolved, result, line_ending) in &edit_results {
+        for (path_str, resolved, result, line_ending, _file_existed) in &edit_results {
             let temp = temp_path_for(resolved);
             if let Err(e) = write_file_with_endings(&temp, &result.modified_content, line_ending) {
                 // Clean up temp files already written
@@ -422,10 +510,49 @@ fn handle_multi_file_edit(
         }
     }
 
+    // Phase 3c: Sync reindex of all written files (only on real writes).
+    // Batched into ONE call so the inverted-index write lock is held for ~1ms
+    // for the whole batch, not N times. Outside-server-dir / wrong-ext / .git
+    // files are filtered per-file and reported via per-file `skippedReason`.
+    let server_extensions: Vec<String> = ctx.server_ext.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let canonical_root = ctx.canonical_server_dir();
+    let mut per_file_skip: Vec<Option<&'static str>> = Vec::with_capacity(edit_results.len());
+    let mut eligible_paths: Vec<PathBuf> = Vec::new();
+    let mut any_file_created_eligible = false;
+    if !dry_run {
+        for (_, resolved, _, _, file_existed) in &edit_results {
+            let skip = classify_for_sync_reindex(&canonical_root, &server_extensions, resolved);
+            if skip.is_none() {
+                eligible_paths.push(resolved.clone());
+                if !*file_existed { any_file_created_eligible = true; }
+            }
+            per_file_skip.push(skip);
+        }
+    } else {
+        for _ in &edit_results { per_file_skip.push(None); }
+    }
+    let batch_stats = if !dry_run && !eligible_paths.is_empty() {
+        Some(crate::mcp::watcher::reindex_paths_sync(
+            &ctx.index,
+            &ctx.def_index,
+            &eligible_paths,
+            &[],
+            &server_extensions,
+        ))
+    } else {
+        None
+    };
+    if !dry_run && any_file_created_eligible {
+        ctx.file_index_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+
     // Phase 4: Build response with per-file results
     let mut total_applied: usize = 0;
     let mut results_array = Vec::new();
-    for (path_str, _, result, _) in &edit_results {
+    for (i, (path_str, _, result, _, file_existed)) in edit_results.iter().enumerate() {
         total_applied += result.applied;
         let mut file_result = json!({
             "path": path_str,
@@ -455,16 +582,48 @@ fn handle_multi_file_edit(
         } else {
             file_result["diff"] = json!("(no changes)");
         }
+        if !*file_existed {
+            file_result["fileCreated"] = json!(true);
+        }
+        // Per-file sync-reindex outcome.
+        if !dry_run {
+            match per_file_skip[i] {
+                Some(reason) => {
+                    file_result["contentIndexUpdated"] = json!(false);
+                    file_result["defIndexUpdated"] = json!(false);
+                    file_result["fileListInvalidated"] = json!(false);
+                    file_result["skippedReason"] = json!(reason);
+                }
+                None => {
+                    file_result["contentIndexUpdated"] = json!(true);
+                    file_result["defIndexUpdated"] = json!(
+                        ctx.def_index.is_some()
+                            && batch_stats.as_ref().is_some_and(|s| s.def_updated > 0)
+                    );
+                    file_result["fileListInvalidated"] = json!(!*file_existed);
+                }
+            }
+        }
         results_array.push(file_result);
+    }
+
+    let mut summary = json!({
+        "filesEdited": edit_results.len(),
+        "totalApplied": total_applied,
+        "dryRun": dry_run,
+    });
+    if let Some(stats) = batch_stats {
+        summary["reindexElapsedMs"] = json!(format!("{:.2}", stats.elapsed_ms));
+        if stats.content_lock_poisoned || stats.def_lock_poisoned {
+            summary["reindexWarning"] = json!(
+                "Index lock was poisoned — sync reindex partially failed; FS watcher will reconcile within 500ms."
+            );
+        }
     }
 
     let response = json!({
         "results": results_array,
-        "summary": {
-            "filesEdited": edit_results.len(),
-            "totalApplied": total_applied,
-            "dryRun": dry_run,
-        }
+        "summary": summary,
     });
 
     ToolCallResult::success(json_to_string(&response))

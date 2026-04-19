@@ -510,3 +510,98 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 **Status:** ✅ Covered by 5 unit tests + 4 builder-state tests in `callers_tests_additional.rs::builder_state_tests` (P1 set, 9 tests total) + 7 P2 plumbing tests (fast/workspace/serve)
 
 ---
+
+
+## T-SYNC-* — Synchronous Reindex After `xray_edit`
+
+**Context:** `xray_edit` was extended (2026-04-19, user story `todo_approved_2026-04-19_xray-edit-sync-reindex.md`) to perform an in-process reindex of the written file(s) immediately after a successful real write. Before this change, a follow-up `xray_grep` / `xray_definitions` call could miss content for up to ~500ms (FS-watcher debounce window). These E2E tests verify the new behavior end-to-end over MCP JSON-RPC.
+
+### T-SYNC-GREP: edit-then-grep sees new content with no wait
+
+**Setup:** Server running with `--ext rs --definitions`. Pre-existing fixture file `e2e/fixtures/sync_reindex_target.rs` containing `pub fn placeholder_marker_alpha() {}`.
+
+**Steps:**
+1. Send MCP `xray_grep` with `terms='placeholder_marker_zeta_42'` (a unique token NOT yet in the file). Expect `totalOccurrences: 0`.
+2. Send MCP `xray_edit` with `path='e2e/fixtures/sync_reindex_target.rs'`, `edits=[{search:'placeholder_marker_alpha', replace:'placeholder_marker_zeta_42'}]`.
+   - Verify response contains `contentIndexUpdated: true`, `defIndexUpdated: true`, `reindexElapsedMs` is a string parseable as float, `fileListInvalidated: false` (existing file).
+3. **Immediately** (no sleep) send MCP `xray_grep` with `terms='placeholder_marker_zeta_42'`. Expect `totalOccurrences: 1` and the new file path in `files`.
+
+**Status:** ✅ Required.
+
+### T-SYNC-DEFS: edit-then-definitions sees new symbol with no wait
+
+**Steps:**
+1. `xray_definitions` with `name='ImaginaryStruct_X'` → expect 0 results.
+2. `xray_edit` with `path='e2e/fixtures/sync_reindex_target.rs'`, `edits=[{search:'placeholder_marker_zeta_42', replace:'pub struct ImaginaryStruct_X {}\n// placeholder_marker_zeta_42'}]`.
+   - Verify response: `contentIndexUpdated: true`, `defIndexUpdated: true`.
+3. **Immediately** `xray_definitions` with `name='ImaginaryStruct_X'` → expect exactly 1 result with `kind: "struct"`.
+
+**Status:** ✅ Required.
+
+### T-SYNC-MULTI: multi-file edit batches a single reindex with summary metric
+
+**Steps:**
+1. `xray_edit` with `paths=['e2e/fixtures/sync_a.rs', 'e2e/fixtures/sync_b.rs']`, `edits=[{search:'BatchTokenOld', replace:'BatchTokenNew_$RANDOM', skipIfNotFound:true}, {search:'BTwoOld', replace:'BTwoNew_$RANDOM', skipIfNotFound:true}]`.
+   - Verify per-file `contentIndexUpdated: true` for each in-scope file in `results[]`.
+   - Verify `summary.reindexElapsedMs` is present (single batched reindex call).
+2. Immediately `xray_grep terms='BatchTokenNew_$RANDOM,BTwoNew_$RANDOM' mode=or` → expect both tokens found.
+
+**Status:** ✅ Required.
+
+### T-SYNC-FAST: file-creation invalidates the file-list cache
+
+**Steps:**
+1. `xray_fast pattern='brand_new_sync_file'` → expect 0 results (file does not exist yet).
+2. `xray_edit path='e2e/fixtures/brand_new_sync_file_$RANDOM.rs' operations=[{startLine:1, endLine:0, content:'fn newly_created() {}\n'}]`.
+   - Verify response: `fileCreated: true`, `fileListInvalidated: true`, `contentIndexUpdated: true`.
+3. Immediately `xray_fast pattern='brand_new_sync_file_$RANDOM'` → expect exactly 1 result. (The `xray_fast` cache rebuild is triggered lazily by the dirty flag set in step 2.)
+
+**Status:** ✅ Required.
+
+### T-SYNC-DRYRUN: `dryRun` omits ALL reindex fields
+
+**Steps:**
+1. `xray_edit path='e2e/fixtures/sync_reindex_target.rs' dryRun=true edits=[{search:'pub fn',replace:'pub fn dryrun_marker'}]`.
+2. Verify response JSON does NOT contain ANY of: `contentIndexUpdated`, `defIndexUpdated`, `fileListInvalidated`, `reindexElapsedMs`, `skippedReason`, `reindexWarning`, `fileCreated`.
+3. Verify the file on disk is unchanged.
+4. `xray_grep terms='dryrun_marker'` → 0 results (dryRun didn't pollute the index).
+
+**Status:** ✅ Required.
+
+### T-SYNC-OUTSIDE-DIR: edit to file outside `--dir` is skipped (file written, index untouched)
+
+**Setup:** create a temp file OUTSIDE the server's `--dir` (e.g., `$env:TEMP\xray_sync_outside.rs`).
+
+**Steps:**
+1. `xray_edit path='<absolute path outside server dir>' edits=[{search:'fn',replace:'pub fn outside_marker_$RANDOM'}]`.
+2. Verify response: `contentIndexUpdated: false`, `skippedReason: "outsideServerDir"`.
+3. Verify the OUTSIDE file ON DISK was actually edited (file write must succeed even when reindex is skipped).
+4. `xray_grep terms='outside_marker_$RANDOM'` against the server → 0 results (server's index correctly excluded the foreign file).
+
+**Status:** ✅ Required.
+
+### T-SYNC-EXT-NOT-INDEXED: edit to wrong-extension file is skipped (file written, index untouched)
+
+**Setup:** Server started with `--ext rs`. Target file `e2e/fixtures/notes.txt` (not in `--ext`).
+
+**Steps:**
+1. `xray_edit path='e2e/fixtures/notes.txt' edits=[{search:'PLAIN', replace:'TXT_TOKEN_$RANDOM'}]`.
+2. Verify response: `contentIndexUpdated: false`, `skippedReason: "extensionNotIndexed"`.
+3. Verify `notes.txt` on disk WAS modified (write succeeds).
+4. `xray_grep terms='TXT_TOKEN_$RANDOM'` → 0 results (the .txt file was never in scope).
+
+**Status:** ✅ Required.
+
+### T-SYNC-RECONCILE-PRESERVED: FS-watcher reconciliation still works for external edits
+
+**Setup:** Server running. Edit a tracked .rs file via OS-level write (NOT through `xray_edit`) — e.g., PowerShell `Add-Content` or `notepad.exe save`.
+
+**Steps:**
+1. Pre-condition: `xray_grep terms='ExternalReconcileToken'` → 0 results.
+2. Use OS write (PowerShell `Set-Content`) to add `// ExternalReconcileToken` to a tracked .rs file in the server's --dir.
+3. **Wait 1 second** (cover the 500ms watcher debounce).
+4. `xray_grep terms='ExternalReconcileToken'` → 1 result (proves the FS watcher path is NOT broken by the new sync-reindex code; both paths coexist).
+
+**Status:** ✅ Required — guards against regression where the new sync-reindex accidentally disables or interferes with the watcher.
+
+---

@@ -2942,3 +2942,315 @@ mod retry_cascade_tests {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Synchronous-reindex tests (xray_edit → xray_grep race elimination).
+// Verifies the integration of `reindex_paths_sync` from watcher into edit handlers.
+// See `docs/user-stories/todo_approved_2026-04-19_xray-edit-sync-reindex.md`.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Helper: make a HandlerContext bound to `dir` with `server_ext` set so
+/// `classify_for_sync_reindex` does NOT auto-skip files. Also seeds an empty
+/// ContentIndex with `path_to_id: Some(...)` so sync reindex can perform purges.
+fn make_ctx_with_ext(dir: &std::path::Path, ext: &str) -> HandlerContext {
+    use std::collections::HashMap;
+    use crate::ContentIndex;
+    let extensions: Vec<String> = ext.split(',')
+        .map(|s| s.trim().to_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let content = ContentIndex {
+        root: dir.to_string_lossy().to_string(),
+        extensions: extensions.clone(),
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    };
+    HandlerContext {
+        index: Arc::new(RwLock::new(content)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir.to_string_lossy().to_string()))),
+        server_ext: ext.to_string(),
+        ..HandlerContext::default()
+    }
+}
+
+#[test]
+fn test_sync_reindex_response_includes_fields_on_real_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("file.cs");
+    std::fs::write(&path, "class A {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "file.cs",
+        "edits": [{"search": "class A", "replace": "class BeauChanZ"}],
+    }));
+    assert!(!result.is_error, "edit should succeed: {}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(v["contentIndexUpdated"], json!(true),
+        "contentIndexUpdated must be true after a real write to an in-scope file");
+    assert_eq!(v["defIndexUpdated"], json!(false),
+        "defIndexUpdated must be false when ctx has no def_index");
+    assert!(v["reindexElapsedMs"].is_string(),
+        "reindexElapsedMs must be present (string with 2 decimals)");
+    // Verify the index actually contains the new token.
+    let idx = ctx.index.read().unwrap();
+    assert!(idx.index.contains_key("beauchanz"),
+        "sync reindex must populate inverted index with new tokens");
+}
+
+#[test]
+fn test_sync_reindex_dry_run_omits_reindex_fields() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("file.cs");
+    std::fs::write(&path, "class DryRunFoo {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "file.cs",
+        "dryRun": true,
+        "edits": [{"search": "DryRunFoo", "replace": "DryRunBar"}],
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert!(v.get("contentIndexUpdated").is_none(),
+        "dryRun must NOT add contentIndexUpdated");
+    assert!(v.get("defIndexUpdated").is_none(),
+        "dryRun must NOT add defIndexUpdated");
+    assert!(v.get("fileListInvalidated").is_none(),
+        "dryRun must NOT add fileListInvalidated");
+    assert!(v.get("reindexElapsedMs").is_none(),
+        "dryRun must NOT add reindexElapsedMs");
+    assert!(v.get("skippedReason").is_none(),
+        "dryRun must NOT add skippedReason");
+    // And the file must not have been modified.
+    let actual = std::fs::read_to_string(&path).unwrap();
+    assert!(actual.contains("DryRunFoo"), "dryRun must not write to disk");
+}
+
+#[test]
+fn test_sync_reindex_file_created_invalidates_file_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+
+    // HandlerContext::default() initializes file_index_dirty=true (means "needs initial scan").
+    // Reset to false so we can observe whether the edit handler explicitly sets it back to true.
+    ctx.file_index_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // Edit a non-existent file — handler treats this as create.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new_file.cs",
+        "operations": [{"startLine": 1, "endLine": 0, "content": "class CreatedZ {}\n"}],
+    }));
+    assert!(!result.is_error, "create-via-edit should succeed: {}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(v["fileCreated"], json!(true), "fileCreated must be true for new files");
+    assert_eq!(v["fileListInvalidated"], json!(true),
+        "fileListInvalidated must be true when a new file is created");
+    assert!(ctx.file_index_dirty.load(std::sync::atomic::Ordering::Relaxed),
+        "file_index_dirty atomic flag must be set to true");
+}
+
+#[test]
+fn test_sync_reindex_existing_file_does_not_invalidate_file_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("existing.cs");
+    std::fs::write(&path, "class ExistingY {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    // Reset to false — see comment in test_sync_reindex_file_created_invalidates_file_list.
+    ctx.file_index_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "existing.cs",
+        "edits": [{"search": "ExistingY", "replace": "ChangedY"}],
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert!(v.get("fileCreated").is_none(),
+        "fileCreated must NOT be present for existing files");
+    assert_eq!(v["fileListInvalidated"], json!(false),
+        "fileListInvalidated must be false when only existing files are modified");
+    assert!(!ctx.file_index_dirty.load(std::sync::atomic::Ordering::Relaxed),
+        "file_index_dirty must NOT be set for pure-edit (no creation)");
+}
+
+#[test]
+fn test_sync_reindex_extension_not_indexed_is_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("notes.txt");
+    std::fs::write(&path, "plain text\n").unwrap();
+
+    // server_ext=cs but we're editing a .txt file — must skip with extensionNotIndexed.
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "notes.txt",
+        "edits": [{"search": "plain", "replace": "updated"}],
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(v["contentIndexUpdated"], json!(false));
+    assert_eq!(v["defIndexUpdated"], json!(false));
+    assert_eq!(v["skippedReason"], json!("extensionNotIndexed"));
+    // And the index must remain empty (no token leakage from out-of-scope files).
+    let idx = ctx.index.read().unwrap();
+    assert!(idx.index.is_empty(), "index must remain empty for extensionNotIndexed file");
+    // But the file MUST still be written (edit should succeed).
+    let actual = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(actual, "updated text\n", "the edit itself must still apply");
+}
+
+#[test]
+fn test_sync_reindex_outside_server_dir_is_skipped() {
+    let server_root = tempfile::tempdir().unwrap();
+    let outside_root = tempfile::tempdir().unwrap();
+    let outside_path = outside_root.path().join("alien.cs");
+    std::fs::write(&outside_path, "class AlienZ {}\n").unwrap();
+
+    // server_ext matches BUT file lives outside server_dir — must skip with outsideServerDir.
+    let ctx = make_ctx_with_ext(server_root.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": outside_path.to_string_lossy(),
+        "edits": [{"search": "AlienZ", "replace": "NeighborZ"}],
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(v["contentIndexUpdated"], json!(false));
+    assert_eq!(v["skippedReason"], json!("outsideServerDir"),
+        "files outside server --dir must NOT be sync-indexed (would pollute scope)");
+    let idx = ctx.index.read().unwrap();
+    assert!(idx.index.is_empty(), "server index must remain empty for outside-server-dir edits");
+}
+
+#[test]
+fn test_sync_reindex_multi_file_summary_has_reindex_elapsed_ms() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p1 = tmp.path().join("a.cs");
+    let p2 = tmp.path().join("b.cs");
+    std::fs::write(&p1, "class MultiA {}\n").unwrap();
+    std::fs::write(&p2, "class MultiB {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["a.cs", "b.cs"],
+        "edits": [{"search": "Multi", "replace": "Renamed"}],
+    }));
+    assert!(!result.is_error, "multi-edit should succeed: {}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert!(v["summary"]["reindexElapsedMs"].is_string(),
+        "summary.reindexElapsedMs must be present after a real multi-file write");
+    let results = v["results"].as_array().expect("results must be array");
+    assert_eq!(results.len(), 2);
+    for r in results {
+        assert_eq!(r["contentIndexUpdated"], json!(true),
+            "each in-scope file must have contentIndexUpdated=true");
+        assert_eq!(r["fileListInvalidated"], json!(false),
+            "existing files don't invalidate the file list");
+    }
+    let idx = ctx.index.read().unwrap();
+    assert!(idx.index.contains_key("renameda") || idx.index.contains_key("renamedb"),
+        "multi-file sync reindex must add new tokens from BOTH files");
+}
+
+#[test]
+fn test_sync_reindex_multi_file_mixed_skipped_reasons() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cs_file = tmp.path().join("good.cs");
+    let txt_file = tmp.path().join("bad.txt");
+    std::fs::write(&cs_file, "class GoodA {}\n").unwrap();
+    std::fs::write(&txt_file, "plain\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["good.cs", "bad.txt"],
+        // Both edits MUST have skipIfNotFound: each edit is applied to BOTH files in the batch,
+        // so 'GoodA' isn't in bad.txt and 'plain' isn't in good.cs.
+        "edits": [{"search": "GoodA", "replace": "BetterA", "skipIfNotFound": true}, {"search": "plain", "replace": "fancy", "skipIfNotFound": true}],
+    }));
+    assert!(!result.is_error, "mixed edit should succeed: {}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = v["results"].as_array().expect("results must be array");
+    assert_eq!(results.len(), 2);
+
+    // Find each file by path and check its outcome
+    let good = results.iter().find(|r| r["path"] == "good.cs").expect("good.cs in results");
+    let bad  = results.iter().find(|r| r["path"] == "bad.txt").expect("bad.txt in results");
+    assert_eq!(good["contentIndexUpdated"], json!(true),
+        "in-scope .cs file must be sync-indexed");
+    assert_eq!(bad["contentIndexUpdated"], json!(false),
+        "out-of-scope .txt file must NOT be sync-indexed");
+    assert_eq!(bad["skippedReason"], json!("extensionNotIndexed"));
+}
+
+#[test]
+fn test_sync_reindex_concurrent_edit_and_grep_no_deadlock() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::thread;
+    use std::time::Duration;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("hot.cs");
+    std::fs::write(&path, "class HotZeroX {}\n").unwrap();
+
+    let ctx = Arc::new(make_ctx_with_ext(tmp.path(), "cs"));
+
+    // First call to populate the index.
+    let warmup = handle_xray_edit(&ctx, &json!({
+        "path": "hot.cs",
+        "edits": [{"search": "HotZeroX", "replace": "HotOneX"}],
+    }));
+    assert!(!warmup.is_error);
+
+    let edits_done = Arc::new(AtomicUsize::new(0));
+    let reads_done = Arc::new(AtomicUsize::new(0));
+    const ROUNDS: usize = 20;
+
+    // Thread A: hammer xray_edit (writes + sync reindex).
+    let ctx_a = Arc::clone(&ctx);
+    let edits_a = Arc::clone(&edits_done);
+    let edit_thread = thread::spawn(move || {
+        for i in 0..ROUNDS {
+            let needle = format!("HotIter{}X", i);
+            let replacement = format!("HotIter{}X", i + 1);
+            let r = handle_xray_edit(&ctx_a, &json!({
+                "path": "hot.cs",
+                "edits": [{"search": "HotOneX", "replace": &needle, "skipIfNotFound": true},
+                          {"search": &needle, "replace": &replacement, "skipIfNotFound": true}],
+            }));
+            assert!(!r.is_error, "edit iter {} should not error: {}", i, r.content[0].text);
+            edits_a.fetch_add(1, Ordering::Relaxed);
+        }
+    });
+
+    // Thread B: hammer xray_grep (reads index repeatedly while A is writing).
+    let ctx_b = Arc::clone(&ctx);
+    let reads_b = Arc::clone(&reads_done);
+    let grep_thread = thread::spawn(move || {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < deadline {
+            // We don't care what comes back — only that the lock isn't deadlocked.
+            let _ = crate::mcp::handlers::grep::handle_xray_grep(&ctx_b, &json!({
+                "terms": "HotOneX",
+                "countOnly": true,
+            }));
+            reads_b.fetch_add(1, Ordering::Relaxed);
+            if reads_b.load(Ordering::Relaxed) > 200 { break; }
+            thread::sleep(Duration::from_millis(1));
+        }
+    });
+
+    // 5-second hard deadline — if we deadlock, this hangs and the test runner kills it.
+    let edit_join = edit_thread.join();
+    let grep_join = grep_thread.join();
+    assert!(edit_join.is_ok(), "edit thread panicked");
+    assert!(grep_join.is_ok(), "grep thread panicked");
+    assert_eq!(edits_done.load(Ordering::Relaxed), ROUNDS,
+        "all {} edits must complete (no deadlock)", ROUNDS);
+    assert!(reads_done.load(Ordering::Relaxed) > 0,
+        "grep thread must have made at least one read (no deadlock)");
+}
+

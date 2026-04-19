@@ -1238,3 +1238,300 @@ fn test_nonblocking_update_content_index_remove_tokens_consistent() {
         "total_tokens ({}) should equal sum of file_token_counts ({}) after removal",
         idx.total_tokens, sum);
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Tests for `reindex_paths_sync` — synchronous reindexing used by xray_edit
+// to eliminate the 500ms watcher debounce race window.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Helper: create a minimal ContentIndex with `path_to_id` populated for the
+/// given files, so `update_content_index` can find purge targets.
+fn make_indexed_content(files: &[(&Path, &str)], extensions: Vec<String>) -> ContentIndex {
+    let mut path_to_id = HashMap::new();
+    let mut file_strs = Vec::new();
+    let mut file_token_counts = Vec::new();
+    for (i, (path, _content)) in files.iter().enumerate() {
+        let clean = crate::clean_path(&path.to_string_lossy());
+        path_to_id.insert(PathBuf::from(&clean), i as u32);
+        file_strs.push(clean);
+        file_token_counts.push(0);
+    }
+    ContentIndex {
+        root: ".".to_string(),
+        files: file_strs,
+        index: HashMap::new(),
+        total_tokens: 0,
+        extensions,
+        file_token_counts,
+        path_to_id: Some(path_to_id),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_sync_reindex_existing_file_updates_content() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("a.cs");
+    std::fs::write(&file, "class OldThingX { OldFieldQ stuff; }").unwrap();
+
+    let index = Arc::new(RwLock::new(make_indexed_content(
+        &[(&file, "")],
+        vec!["cs".to_string()],
+    )));
+
+    // Seed the inverted index with stale tokens (simulating a prior parse).
+    {
+        let mut idx = index.write().unwrap();
+        idx.index.insert("oldthingx".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        idx.index.insert("oldfieldq".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        idx.file_token_counts[0] = 2;
+        idx.total_tokens = 2;
+    }
+
+    // Modify the file on disk and call sync reindex.
+    std::fs::write(&file, "class NewThingZ { NewFieldP stuff; }").unwrap();
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        &[file.clone()],
+        &[],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 1, "one file should be content-indexed");
+    assert_eq!(stats.def_updated, 0, "no def index → def_updated=0");
+    assert_eq!(stats.skipped_filtered, 0, "matching extension → not filtered");
+    assert!(!stats.content_lock_poisoned, "lock should not be poisoned");
+
+    let idx = index.read().unwrap();
+    assert!(!idx.index.contains_key("oldthingx"), "stale token oldthingx should be purged");
+    assert!(!idx.index.contains_key("oldfieldq"), "stale token oldfieldq should be purged");
+    assert!(idx.index.contains_key("newthingz"), "new token newthingz should be present");
+    assert!(idx.index.contains_key("newfieldp"), "new token newfieldp should be present");
+}
+
+#[test]
+fn test_sync_reindex_new_file_adds_to_content_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("brand_new.cs");
+    std::fs::write(&file, "class FreshlyCreatedZ {}").unwrap();
+
+    // Index starts empty (no path_to_id entry for this file).
+    let index = Arc::new(RwLock::new(ContentIndex {
+        root: ".".to_string(),
+        files: Vec::new(),
+        index: HashMap::new(),
+        total_tokens: 0,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: Vec::new(),
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        &[file.clone()],
+        &[],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 1);
+    assert_eq!(stats.skipped_filtered, 0);
+    let idx = index.read().unwrap();
+    assert!(idx.index.contains_key("freshlycreatedz"),
+        "new file's tokens should be added to the index");
+}
+
+#[test]
+fn test_sync_reindex_skips_outside_extensions() {
+    let tmp = tempfile::tempdir().unwrap();
+    let txt_file = tmp.path().join("notes.txt");
+    std::fs::write(&txt_file, "irrelevant text").unwrap();
+
+    let index = Arc::new(RwLock::new(ContentIndex {
+        extensions: vec!["cs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        &[txt_file],
+        &[],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 0, "wrong-ext file must NOT be content-indexed");
+    assert_eq!(stats.skipped_filtered, 1, "txt file with cs-only filter → 1 skipped");
+    let idx = index.read().unwrap();
+    assert!(idx.index.is_empty(), "index must remain empty");
+}
+
+#[test]
+fn test_sync_reindex_skips_git_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let git_dir = tmp.path().join(".git");
+    std::fs::create_dir_all(&git_dir).unwrap();
+    let inside_git = git_dir.join("config.cs"); // matching ext but inside .git
+    std::fs::write(&inside_git, "class GitInternalX {}").unwrap();
+
+    let index = Arc::new(RwLock::new(ContentIndex {
+        extensions: vec!["cs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        &[inside_git],
+        &[],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 0, ".git/* must NOT be content-indexed");
+    assert_eq!(stats.skipped_filtered, 1, "file inside .git/ → 1 skipped");
+}
+
+#[test]
+fn test_sync_reindex_idempotent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("idem.cs");
+    std::fs::write(&file, "class IdemContentY {}").unwrap();
+
+    let index = Arc::new(RwLock::new(ContentIndex {
+        extensions: vec!["cs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+
+    // First call: populate.
+    let stats1 = reindex_paths_sync(&index, &None, &[file.clone()], &[], &["cs".to_string()]);
+    assert_eq!(stats1.content_updated, 1);
+    let (keys1, tokens1, counts1) = {
+        let idx = index.read().unwrap();
+        let mut keys: Vec<String> = idx.index.keys().cloned().collect();
+        keys.sort();
+        (keys, idx.total_tokens, idx.file_token_counts.clone())
+    };
+
+    // Second call: same file unchanged. Watcher race scenario — sync ran first,
+    // then the FS watcher fires for the same change. Index state must be identical.
+    let stats2 = reindex_paths_sync(&index, &None, &[file.clone()], &[], &["cs".to_string()]);
+    assert_eq!(stats2.content_updated, 1);
+    let (keys2, tokens2, counts2) = {
+        let idx = index.read().unwrap();
+        let mut keys: Vec<String> = idx.index.keys().cloned().collect();
+        keys.sort();
+        (keys, idx.total_tokens, idx.file_token_counts.clone())
+    };
+
+    assert_eq!(keys1, keys2, "inverted-index keys must be identical after re-run");
+    assert_eq!(tokens1, tokens2, "total_tokens must be identical");
+    assert_eq!(counts1, counts2, "file_token_counts must be identical");
+}
+
+#[test]
+fn test_sync_reindex_no_def_index_works() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("nodef.cs");
+    std::fs::write(&file, "class NoDefIndexW {}").unwrap();
+
+    let index = Arc::new(RwLock::new(ContentIndex {
+        extensions: vec!["cs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+
+    // def_index = None — must NOT panic, def_updated must be 0.
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        &[file],
+        &[],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 1);
+    assert_eq!(stats.def_updated, 0, "no def_index → def_updated must be 0");
+    assert!(!stats.def_lock_poisoned);
+}
+
+#[test]
+fn test_sync_reindex_with_def_index_updates_both() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("dual.rs");
+    std::fs::write(&file, "pub fn def_index_fn_q() {}").unwrap();
+
+    let content = Arc::new(RwLock::new(ContentIndex {
+        extensions: vec!["rs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+    let def = Some(Arc::new(RwLock::new(crate::definitions::DefinitionIndex::default())));
+
+    let stats = reindex_paths_sync(
+        &content,
+        &def,
+        &[file],
+        &[],
+        &["rs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 1, "content index updated");
+    assert_eq!(stats.def_updated, 1, "def index updated when present");
+    assert!(!stats.content_lock_poisoned);
+    assert!(!stats.def_lock_poisoned);
+}
+
+#[test]
+fn test_sync_reindex_empty_input_is_noop() {
+    let index = Arc::new(RwLock::new(ContentIndex {
+        extensions: vec!["cs".to_string()],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+    let stats = reindex_paths_sync(&index, &None, &[], &[], &["cs".to_string()]);
+    assert_eq!(stats.content_updated, 0);
+    assert_eq!(stats.def_updated, 0);
+    assert_eq!(stats.skipped_filtered, 0);
+    assert!(!stats.content_lock_poisoned);
+}
+
+#[test]
+fn test_sync_reindex_removed_file_purges_tokens() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("doomed.cs");
+    std::fs::write(&file, "class DoomedClassP {}").unwrap();
+
+    // Pre-populate index with this file.
+    let index = Arc::new(RwLock::new(make_indexed_content(
+        &[(&file, "")],
+        vec!["cs".to_string()],
+    )));
+    {
+        let mut idx = index.write().unwrap();
+        idx.index.insert("doomedclassp".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+        idx.file_token_counts[0] = 1;
+        idx.total_tokens = 1;
+    }
+
+    // Delete on disk and sync-reindex with the path in `removed`.
+    std::fs::remove_file(&file).unwrap();
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        &[],
+        &[file],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 0, "no dirty files");
+    assert_eq!(stats.skipped_filtered, 0);
+
+    let idx = index.read().unwrap();
+    assert!(!idx.index.contains_key("doomedclassp"),
+        "removed file's tokens must be purged from the inverted index");
+}

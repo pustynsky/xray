@@ -1624,6 +1624,305 @@ $testBlocks += , {
 }
 
 
+# === T-SYNC-* : synchronous reindex after xray_edit (added 2026-04-19) ===
+
+# T-SYNC-GREP: edit-then-grep sees new content with NO wait (sync reindex)
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-GREP sync-reindex-grep-zero-wait"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sync_grep_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "src.rs") -Value "fn old_token() {}"
+        $filePath = ($tmpDir -replace '\\', '/') + '/src.rs'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $filePath + '","edits":[{"search":"old_token","replace":"freshtoken_zzy"}]}}}'),
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"freshtoken_zzy"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
+        $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $grepLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*6' } | Select-Object -Last 1
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $editLine) { $errors += "no edit response" }
+        if ($editLine -notmatch 'contentIndexUpdated') { $errors += "missing contentIndexUpdated" }
+        if ($editLine -notmatch 'reindexElapsedMs') { $errors += "missing reindexElapsedMs" }
+        if (-not $grepLine) { $errors += "no grep response" }
+        if ($grepLine -notmatch 'freshtoken_zzy') { $errors += "new token not found by grep (sync reindex failed)" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (edit -> grep sees new content immediately)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-SYNC-DEFS: edit-then-definitions sees new symbol with NO wait
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-DEFS sync-reindex-definitions-zero-wait"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sync_defs_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "lib.rs") -Value "fn placeholder() {}"
+        $filePath = ($tmpDir -replace '\\', '/') + '/lib.rs'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $filePath + '","edits":[{"search":"placeholder","replace":"sync_added_fn"}]}}}'),
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"sync_added_fn"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs --definitions 2>$null) | Out-String
+        $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $defLine  = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*6' } | Select-Object -Last 1
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $editLine) { $errors += "no edit response" }
+        if ($editLine -notmatch 'defIndexUpdated') { $errors += "missing defIndexUpdated" }
+        if ($editLine -notmatch 'reindexElapsedMs') { $errors += "missing reindexElapsedMs" }
+        if (-not $defLine) { $errors += "no definitions response" }
+        if ($defLine -notmatch 'sync_added_fn') { $errors += "new symbol not found by xray_definitions (def sync reindex failed)" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (edit -> definitions sees new symbol immediately)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-SYNC-MULTI: multi-file edit batches a single reindex (summary.reindexElapsedMs once)
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-MULTI sync-reindex-multi-file-batched"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sync_multi_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "a.rs") -Value "fn alpha_old() {}"
+        Set-Content -Path (Join-Path $tmpDir "b.rs") -Value "fn alpha_old() {}"
+        $pathA = ($tmpDir -replace '\\', '/') + '/a.rs'
+        $pathB = ($tmpDir -replace '\\', '/') + '/b.rs'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"paths":["' + $pathA + '","' + $pathB + '"],"edits":[{"search":"alpha_old","replace":"alpha_new_batched"}]}}}'),
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"alpha_new_batched"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
+        $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $grepLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*6' } | Select-Object -Last 1
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $editLine) { $errors += "no edit response" }
+        if ($editLine -notmatch 'reindexElapsedMs') { $errors += "missing summary.reindexElapsedMs" }
+        if ($editLine -notmatch 'filesEdited') { $errors += "missing filesEdited" }
+        if (-not $grepLine -or $grepLine -notmatch 'alpha_new_batched') { $errors += "new token not found in either file after batched reindex" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (multi-file edit batches single reindex)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-SYNC-FAST: file creation invalidates file-list cache; xray_fast finds new file
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-FAST sync-reindex-file-create-invalidates-cache"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sync_fast_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "existing.rs") -Value "fn marker() {}"
+        $newPath = ($tmpDir -replace '\\', '/') + '/created_via_edit.rs'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $newPath + '","operations":[{"startLine":1,"endLine":0,"content":"fn fresh_create_marker() {}"}]}}}'),
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":"created_via_edit"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
+        $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $fastLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*6' } | Select-Object -Last 1
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $editLine) { $errors += "no edit response" }
+        if ($editLine -notmatch 'fileCreated') { $errors += "missing fileCreated" }
+        if ($editLine -notmatch 'fileListInvalidated') { $errors += "missing fileListInvalidated" }
+        if (-not $fastLine -or $fastLine -notmatch 'created_via_edit') { $errors += "new file not found by xray_fast (cache not invalidated)" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (file creation invalidates file-list cache)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-SYNC-DRYRUN: dryRun=true OMITS all 7 sync-reindex fields
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-DRYRUN sync-reindex-dryrun-omits-fields"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sync_dryrun_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "src.rs") -Value "fn keep() {}"
+        $filePath = ($tmpDir -replace '\\', '/') + '/src.rs'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $filePath + '","edits":[{"search":"keep","replace":"changed"}],"dryRun":true}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
+        $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $diskContent = Get-Content -Path (Join-Path $tmpDir "src.rs") -Raw
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $editLine) { $errors += "no edit response" }
+        # File on disk MUST be unchanged
+        if ($diskContent -match 'changed') { $errors += "dryRun modified the file" }
+        # NONE of the 7 sync-reindex fields should appear
+        $forbidden = @('contentIndexUpdated', 'defIndexUpdated', 'fileListInvalidated', 'reindexElapsedMs', 'skippedReason', 'reindexWarning', 'fileCreated')
+        foreach ($f in $forbidden) {
+            if ($editLine -match $f) { $errors += "dryRun should NOT emit $f" }
+        }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (dryRun omits all 7 sync-reindex fields)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-SYNC-OUTSIDE-DIR: edit OUTSIDE --dir returns skippedReason=outsideServerDir, file STILL written
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-OUTSIDE-DIR sync-reindex-skip-outside-server-dir"
+    try {
+        $serverDir  = Join-Path $env:TEMP "search_par_sync_outside_srv_$PID"
+        $outsideDir = Join-Path $env:TEMP "search_par_sync_outside_tgt_$PID"
+        foreach ($d in @($serverDir, $outsideDir)) {
+            if (Test-Path $d) { Remove-Item -Recurse -Force $d }
+            New-Item -ItemType Directory -Path $d | Out-Null
+        }
+        Set-Content -Path (Join-Path $serverDir "anchor.rs") -Value "fn a() {}"
+        Set-Content -Path (Join-Path $outsideDir "target.rs") -Value "fn old_outside() {}"
+        $outsideFile = ($outsideDir -replace '\\', '/') + '/target.rs'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $outsideFile + '","edits":[{"search":"old_outside","replace":"new_outside"}]}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $serverDir --ext rs 2>$null) | Out-String
+        $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $diskContent = Get-Content -Path (Join-Path $outsideDir "target.rs") -Raw
+        Remove-Item -Recurse -Force $serverDir, $outsideDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $editLine) { $errors += "no edit response" }
+        if ($editLine -notmatch 'outsideServerDir') { $errors += "missing skippedReason=outsideServerDir" }
+        if ($diskContent -notmatch 'new_outside') { $errors += "file should still be written even when reindex skipped" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (skipped reindex but committed write)" }
+    } catch {
+        Remove-Item -Recurse -Force $serverDir, $outsideDir -ErrorAction SilentlyContinue
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-SYNC-EXT-NOT-INDEXED: edit .txt with --ext rs returns skippedReason=extensionNotIndexed, file STILL written
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-EXT-NOT-INDEXED sync-reindex-skip-extension-not-indexed"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sync_ext_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "anchor.rs") -Value "fn a() {}"
+        Set-Content -Path (Join-Path $tmpDir "notes.txt") -Value "original notes"
+        $txtPath = ($tmpDir -replace '\\', '/') + '/notes.txt'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $txtPath + '","edits":[{"search":"original","replace":"updated"}]}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
+        $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $diskContent = Get-Content -Path (Join-Path $tmpDir "notes.txt") -Raw
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $editLine) { $errors += "no edit response" }
+        if ($editLine -notmatch 'extensionNotIndexed') { $errors += "missing skippedReason=extensionNotIndexed" }
+        if ($diskContent -notmatch 'updated') { $errors += "file should still be written for non-indexed extension" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (skipped reindex for .txt under --ext rs, but write committed)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-SYNC-RECONCILE-PRESERVED: external OS-write still triggers FS watcher (regression guard)
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-RECONCILE-PRESERVED watcher-still-fires-on-external-write"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sync_recon_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "file.rs") -Value "fn before_external() {}"
+        & $Bin content-index -d $tmpDir -e rs 2>&1 | Out-Null
+
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Bin
+        $psi.Arguments = "serve --dir `"$tmpDir`" --ext rs --watch"
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        $stdoutBuilder = New-Object System.Text.StringBuilder
+        $outHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+        $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outHandler -MessageData $stdoutBuilder
+        $proc.Start() | Out-Null
+        $proc.BeginOutputReadLine()
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}')
+        Start-Sleep -Seconds 2
+        # External write — bypasses xray_edit entirely
+        Set-Content -Path (Join-Path $tmpDir "file.rs") -Value "fn after_external_marker_xyz() {}"
+        Start-Sleep -Seconds 2  # Watcher debounce 500ms + reindex
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"after_external_marker_xyz"}}}')
+        Start-Sleep -Milliseconds 800
+        $proc.StandardInput.Close()
+        if (-not $proc.WaitForExit(8000)) { $proc.Kill(); $proc.WaitForExit(3000) | Out-Null }
+        Start-Sleep -Milliseconds 200
+        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+        $stdoutContent = $stdoutBuilder.ToString()
+        if (!$proc.HasExited) { $proc.Kill() }
+        $proc.Dispose()
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        if ($stdoutContent -match 'after_external_marker_xyz') {
+            return @{ Name = $name; Passed = $true; Output = "OK (FS watcher reconciles external write)" }
+        } else {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (external write not picked up by watcher; sync-reindex code may have broken FS pathway)" }
+        }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        if ($proc -and !$proc.HasExited) { $proc.Kill() }
+        if ($proc) { $proc.Dispose() }
+        if ($outEvent) { Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+
 $parallelJobs = @()
 foreach ($block in $testBlocks) {
     $parallelJobs += Start-Job -ScriptBlock $block -ArgumentList $searchBinAbs, $projectDirAbs, $TestExt

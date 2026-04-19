@@ -164,6 +164,92 @@ pub fn start_watcher(
     Ok(())
 }
 
+/// Statistics returned by `reindex_paths_sync` describing the work done.
+/// All counts are post-filter (after `--ext` and `.git/` exclusions).
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ReindexStats {
+    /// Number of dirty files that passed filters and were content-indexed.
+    pub content_updated: usize,
+    /// Number of dirty files that passed filters and were def-indexed (0 if def_index is None).
+    pub def_updated: usize,
+    /// Number of dirty files skipped due to filters (`--ext` mismatch or inside `.git/`).
+    pub skipped_filtered: usize,
+    /// Wall-clock time of the sync reindex in milliseconds.
+    pub elapsed_ms: f64,
+    /// True iff content index lock was poisoned — caller should report a warning.
+    pub content_lock_poisoned: bool,
+    /// True iff def index lock was poisoned — caller should report a warning.
+    pub def_lock_poisoned: bool,
+}
+
+/// Synchronously reindex a small set of paths (typically 1–20 files), bypassing
+/// the FS watcher debounce window. Used by `xray_edit` to ensure subsequent
+/// `xray_grep`/`xray_definitions` queries see the new content immediately.
+///
+/// Applies the SAME filters as the watcher (`matches_extensions`, `is_inside_git_dir`)
+/// for symmetry — files outside `--ext` or inside `.git/` are skipped (counted in
+/// `skipped_filtered`).
+///
+/// Reuses the watcher's non-blocking implementation (`update_content_index` +
+/// `update_definition_index`): tokenize/parse OUTSIDE the lock, apply INSIDE.
+/// Write-lock window is < 1 ms per file.
+///
+/// Idempotent — safe to call concurrently with the watcher (which may pick up
+/// the FS event later); double-update produces an identical index state.
+pub(crate) fn reindex_paths_sync(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    dirty: &[PathBuf],
+    removed: &[PathBuf],
+    extensions: &[String],
+) -> ReindexStats {
+    let start = std::time::Instant::now();
+    let mut stats = ReindexStats::default();
+
+    // Apply the SAME filters as the watcher event loop ([watcher.rs:91-103]):
+    //   1. Skip paths inside .git/ (git operations generate massive event floods).
+    //   2. Skip paths whose extension is not in `--ext`.
+    let mut dirty_clean: Vec<PathBuf> = Vec::with_capacity(dirty.len());
+    for path in dirty {
+        if is_inside_git_dir(path) || !matches_extensions(path, extensions) {
+            stats.skipped_filtered += 1;
+            continue;
+        }
+        dirty_clean.push(PathBuf::from(clean_path(&path.to_string_lossy())));
+    }
+    let mut removed_clean: Vec<PathBuf> = Vec::with_capacity(removed.len());
+    for path in removed {
+        if is_inside_git_dir(path) || !matches_extensions(path, extensions) {
+            stats.skipped_filtered += 1;
+            continue;
+        }
+        removed_clean.push(PathBuf::from(clean_path(&path.to_string_lossy())));
+    }
+
+    if dirty_clean.is_empty() && removed_clean.is_empty() {
+        stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+        return stats;
+    }
+
+    // Apply via the same non-blocking helpers used by the watcher.
+    if !update_content_index(index, &removed_clean, &dirty_clean) {
+        stats.content_lock_poisoned = true;
+    } else {
+        stats.content_updated = dirty_clean.len();
+    }
+
+    if def_index.is_some() {
+        if !update_definition_index(def_index, &removed_clean, &dirty_clean) {
+            stats.def_lock_poisoned = true;
+        } else {
+            stats.def_updated = dirty_clean.len();
+        }
+    }
+
+    stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    stats
+}
+
 /// Process a batch of dirty (modified/created) and removed files by updating
 /// the content index and definition index.
 ///
@@ -508,11 +594,11 @@ fn periodic_autosave(
 /// Check if a path is inside a `.git` directory.
 /// Filters out git internal files that would otherwise match extension filters
 /// (e.g., `.git/config` matches "config" extension).
-fn is_inside_git_dir(path: &Path) -> bool {
+pub(crate) fn is_inside_git_dir(path: &Path) -> bool {
     path.components().any(|c| c.as_os_str() == ".git")
 }
 
-fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
+pub(crate) fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
     path.extension()
         .and_then(|e| e.to_str())
         .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))

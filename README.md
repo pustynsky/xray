@@ -60,6 +60,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
 - **MCP Server** — native Model Context Protocol server for AI agents (Roo Code, Cline, or any MCP-compatible client) with async startup, named `XRAY_POLICY` initialization guidance, and per-response policy reminders to reduce tool-selection drift
+- **Synchronous reindex after `xray_edit`** — file-edit responses now refresh the in-memory inverted-content and definition indexes before returning, so a follow-up `xray_grep` / `xray_definitions` / `xray_callers` / `xray_fast` call sees the new content with zero latency (no 500ms FS-watcher debounce wait)
 - **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*, regex-based parsing for *SQL* (.sql files: stored procedures, tables, views, functions, types, indexes, columns, and call sites from SP bodies). Angular components enriched with template metadata (selector, child components from HTML templates)
 - **Code complexity metrics** — 7 metrics computed during AST indexing: cyclomatic complexity, cognitive complexity (SonarSource), max nesting depth, parameter count, return/throw count, call count, lambda count. Query with `includeCodeStats`, sort by any metric, filter with `min*` thresholds
 - **Parallel tokenization** — content index tokenization parallelized across all CPU cores

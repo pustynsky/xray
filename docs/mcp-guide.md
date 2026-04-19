@@ -1114,6 +1114,38 @@ When `skipIfNotFound=true` is used and edits are skipped, the response includes 
 
 Possible `reason` values: `"text not found"`, `"regex pattern not found"`, `"anchor text not found"`.
 
+### Synchronous Reindex (added 2026-04-19)
+
+After a successful real write (NOT `dryRun`), `xray_edit` refreshes the inverted-content index and (when `--definitions` is enabled) the definition index in-process before the response returns. A follow-up `xray_grep` / `xray_definitions` / `xray_callers` / `xray_fast` call sees the new content with **zero latency** — the historical 500ms FS-watcher debounce window is eliminated for edits that go through `xray_edit`.
+
+**Response fields added on real writes only** (all of these are absent when `dryRun: true`):
+
+| Field | Type | When present | Description |
+|---|---|---|---|
+| `contentIndexUpdated` | `bool` | Always (single-file) / per-file (multi-file) | `true` when the inverted index was refreshed for this file. `false` when the file was skipped (see `skippedReason`) or when the index lock was poisoned (see `reindexWarning`) |
+| `defIndexUpdated` | `bool` | Always (single-file) / per-file (multi-file) | `true` when the definition index was refreshed. Always `false` when the server is started without `--definitions`, or when the file was skipped |
+| `fileListInvalidated` | `bool` | Always (single-file) / per-file (multi-file) | `true` only when a NEW file is created — the `xray_fast` file-list cache is marked dirty (`ctx.file_index_dirty.store(true)`) and rebuilt lazily on the next `xray_fast` call. `false` for edits to existing files (the file-list cache is unaffected) |
+| `reindexElapsedMs` | `string` | Single-file / `summary` for multi-file | Wall-clock cost of the reindex, formatted with 2 decimals (e.g. `"0.42"`). Multi-file edits report this once at `summary.reindexElapsedMs` because all eligible files are reindexed in ONE batched call (write-lock held ~1ms total, not N times) |
+| `skippedReason` | `string` | Per-file, only when reindex was skipped | One of `"outsideServerDir"` / `"extensionNotIndexed"` / `"insideGitDir"`. The file is still **written to disk** — only the index update is skipped because the file is out of the server's indexing scope |
+| `reindexWarning` | `string` | Only on lock poisoning | Set when one of the index `RwLock`s is poisoned during reindex. Message reassures the caller that the FS watcher will reconcile within 500ms — the write itself always succeeds |
+| `fileCreated` | `true` | Only on new files | Per-file response sets this to `true` when the file did not exist before the edit |
+
+**Skip semantics — the file is ALWAYS written, only the index is skipped.** This is intentional: `xray_edit` accepts edits to ANY text file (the `--ext` filter governs `xray_grep`/`xray_definitions` indexing only — `xray_edit` operates on bytes). When you edit a file that the server cannot index, you still want the disk-write to succeed; the response simply reports `skippedReason` so you know not to expect the next `xray_grep` to find it.
+
+**Why a file is skipped:**
+
+| `skippedReason` | When | Rationale |
+|---|---|---|
+| `"outsideServerDir"` | The resolved (canonicalized) path does not start with the server's canonical `--dir` | Indexing a file outside the configured scope would pollute results and inflate the index; cross-project edits remain explicitly out of scope |
+| `"extensionNotIndexed"` | The file's extension is not in `--ext` (case-insensitive) | The server only indexes the configured extensions; reindexing a `.txt` file when `--ext rs` is configured would create orphan tokens that no other tool would surface |
+| `"insideGitDir"` | The path contains a `.git/` segment | `.git/` internals are never indexed (git operations generate massive event floods that would overwhelm the watcher and the inverted index) |
+
+**`dryRun: true` invariant:** when `dryRun: true`, the response contains NONE of the reindex fields above (no `contentIndexUpdated`, no `defIndexUpdated`, no `fileListInvalidated`, no `reindexElapsedMs`, no `skippedReason`, no `reindexWarning`, no `fileCreated`). This preserves the contract that `dryRun` has zero side effects, both on disk and on the in-memory indexes.
+
+**Multi-file batching:** `handle_multi_file_edit` collects all eligible files (those for which `classify_for_sync_reindex` returns `None`) and calls `reindex_paths_sync` exactly once after the Phase 3b rename step. This means the inverted-index write lock is held for ~1ms for the whole batch instead of N times — important for multi-file refactors against a busy server.
+
+**Concurrent safety:** `reindex_paths_sync` reuses the watcher's non-blocking `RwLock` pattern (parse outside the lock, swap under the write lock). A dedicated stress test (`test_sync_reindex_concurrent_edit_and_grep_no_deadlock` in `src/mcp/handlers/edit_tests.rs`) verifies that 20 parallel `xray_edit` calls do not deadlock against continuous `xray_grep` reads on the same file (5-second deadline).
+
 For full parameter documentation, see `xray_help` → `parameterExamples` → `xray_edit`.
 
 ---
