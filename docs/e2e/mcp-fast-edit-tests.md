@@ -491,4 +491,22 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 
 **Status:** ✅ Covered by 4 integration tests + unit test extensions
 
+### T-EDIT-23: Retry cascade refactoring — regression coverage
+
+**Context:** `apply_text_edits` was refactored to reduce its cognitive complexity (247 → split into smaller helpers). The 4-stage retry cascade (exact → strip-trailing-WS → trim-blank-lines → flex-space) was extracted into `find_with_retry`. This test set guards against regressions during further refactoring.
+
+**Expected:**
+
+- **Stage 2 disabled** → search text with trailing whitespace fails to match without producing a "trailing-whitespace stripped" warning. With Stage 2 enabled, the same edit succeeds and emits the warning.
+- **Stage 3 disabled** → search text padded with leading/trailing blank lines returns "Text not found" error. With Stage 3 enabled, the blank lines are trimmed and the edit applies.
+- **Stage 4 disabled** → search text containing differently-spaced runs vs the file (e.g., padded markdown table) fails. With Stage 4 enabled, the flex-space regex matches.
+- **Overflow wording**: when occurrence=N is requested but only M<N occurrences exist, the error message must say `"Occurrence N requested but text X found only M time(s)"` — exact phrasing required so the LLM/UI can parse it.
+- **Warning emission**: every successful retry stage past Stage 1 must add a hint string in the response, never silently mutate.
+
+**Unit tests:** `test_a1_stage2_strip_trailing_ws_emits_warning`, `test_a2_stage3_trim_blank_lines_required_for_match`, `test_a3_stage4_flex_regex_required_for_padded_table`, `test_a4_overflow_wording_exact_phrase`, `test_a5_flex_pattern_anchor_insertion` (in `src/mcp/handlers/edit_tests.rs::retry_cascade_tests`)
+
+**Verification protocol:** each of the 5 tests was verified to FAIL when the corresponding stage was disabled in `find_with_retry` (e.g., `if false && stripped != original { ... }`), and to PASS once the disable was reverted. This proves the tests cover real behavior, not just code shape.
+
+**Status:** ✅ Covered by 5 unit tests + 4 builder-state tests in `callers_tests_additional.rs::builder_state_tests` (P1 set, 9 tests total) + 7 P2 plumbing tests (fast/workspace/serve)
+
 ---

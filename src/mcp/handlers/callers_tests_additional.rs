@@ -912,3 +912,873 @@ fn test_callers_only_tests_no_production() {
     }
 }
 
+
+
+// ─── P1 Group B: CallerTreeBuilder state tests ─────────────────────
+// These tests verify that the Builder correctly accumulates mutable state
+// (tests_found, visited, file_cache, total_body_lines_emitted) across
+// recursive build_caller_tree / build_callee_tree invocations.
+// Refactoring risk: the Builder pattern was introduced to reduce CC of these
+// functions from 48 → ~10. Regression risk: state could be lost or duplicated
+// across recursion levels.
+
+#[cfg(test)]
+mod builder_state_tests {
+    use super::*;
+    use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind};
+    use crate::mcp::handlers::{dispatch_tool, HandlerContext, WorkspaceBinding};
+    use crate::{ContentIndex, Posting};
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+    use std::sync::{Arc, RwLock};
+
+    /// Atomic counter for unique tempdir names in this module.
+    fn unique_tmp_dir(tag: &str) -> PathBuf {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!(
+            "xray_builder_test_{}_{}_{}",
+            tag,
+            std::process::id(),
+            id
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
+    }
+
+    /// Build (name_index, kind_index, file_index) maps from a flat definitions vec.
+    fn build_indexes(
+        definitions: &[DefinitionEntry],
+    ) -> (
+        HashMap<String, Vec<u32>>,
+        HashMap<DefinitionKind, Vec<u32>>,
+        HashMap<u32, Vec<u32>>,
+    ) {
+        let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+        let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+        let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+        for (i, def) in definitions.iter().enumerate() {
+            let idx = i as u32;
+            name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+            kind_index.entry(def.kind).or_default().push(idx);
+            file_index.entry(def.file_id).or_default().push(idx);
+        }
+        (name_index, kind_index, file_index)
+    }
+
+    // ─── B1: tests_found accumulates across multiple branches ─────────
+    //
+    // Graph (direction=up from target_method):
+    //
+    //   target_method (file0)
+    //     ├─ branch_b (file0)  ← test_branch_b (file1, #[test])
+    //     └─ branch_c (file0)  ← test_branch_c (file1, #[test])
+    //
+    // With impactAnalysis=true, both test_branch_b and test_branch_c MUST appear
+    // in testsCovering[]. Regression risk: if Builder creates a fresh tests_found
+    // per recursion branch instead of accumulating into &mut self, only the LAST
+    // branch's tests would survive.
+    #[test]
+    fn test_builder_accumulates_tests_across_branches() {
+        let mut content_idx = HashMap::new();
+        // target_method: defined at file0:10, called at file0:25 (branch_b), file0:55 (branch_c)
+        content_idx.insert(
+            "target_method".to_string(),
+            vec![Posting {
+                file_id: 0,
+                lines: vec![10, 25, 55],
+            }],
+        );
+        // branch_b: defined at file0:20, called at file1:15 (test_branch_b)
+        content_idx.insert(
+            "branch_b".to_string(),
+            vec![
+                Posting { file_id: 0, lines: vec![20] },
+                Posting { file_id: 1, lines: vec![15] },
+            ],
+        );
+        // branch_c: defined at file0:50, called at file1:35 (test_branch_c)
+        content_idx.insert(
+            "branch_c".to_string(),
+            vec![
+                Posting { file_id: 0, lines: vec![50] },
+                Posting { file_id: 1, lines: vec![35] },
+            ],
+        );
+        // test methods: each just defined once
+        content_idx.insert(
+            "test_branch_b".to_string(),
+            vec![Posting { file_id: 1, lines: vec![10] }],
+        );
+        content_idx.insert(
+            "test_branch_c".to_string(),
+            vec![Posting { file_id: 1, lines: vec![30] }],
+        );
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            files: vec![
+                "C:/src/UserService.rs".to_string(),
+                "C:/src/user_service_tests.rs".to_string(),
+            ],
+            index: content_idx,
+            total_tokens: 100,
+            extensions: vec!["rs".to_string()],
+            file_token_counts: vec![50, 50],
+            ..Default::default()
+        };
+
+        let definitions = vec![
+            // di=0: target_method (production, file0)
+            DefinitionEntry {
+                file_id: 0,
+                name: "target_method".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 10,
+                line_end: 15,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            // di=1: branch_b (production, file0) — contains call at line 25
+            DefinitionEntry {
+                file_id: 0,
+                name: "branch_b".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 20,
+                line_end: 30,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            // di=2: branch_c (production, file0) — contains call at line 55
+            DefinitionEntry {
+                file_id: 0,
+                name: "branch_c".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 50,
+                line_end: 60,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            // di=3: test_branch_b (test, file1, #[test])
+            DefinitionEntry {
+                file_id: 1,
+                name: "test_branch_b".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 10,
+                line_end: 20,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec!["test".to_string()],
+                base_types: vec![],
+            },
+            // di=4: test_branch_c (test, file1, #[test])
+            DefinitionEntry {
+                file_id: 1,
+                name: "test_branch_c".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 30,
+                line_end: 40,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec!["test".to_string()],
+                base_types: vec![],
+            },
+        ];
+
+        let (name_index, kind_index, file_index) = build_indexes(&definitions);
+        let mut path_to_id = HashMap::new();
+        path_to_id.insert(PathBuf::from("C:/src/UserService.rs"), 0);
+        path_to_id.insert(PathBuf::from("C:/src/user_service_tests.rs"), 1);
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["rs".to_string()],
+            files: vec![
+                "C:/src/UserService.rs".to_string(),
+                "C:/src/user_service_tests.rs".to_string(),
+            ],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            ..Default::default()
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            server_ext: "rs".to_string(),
+            ..Default::default()
+        };
+
+        let result = dispatch_tool(
+            &ctx,
+            "xray_callers",
+            &json!({
+                "method": "target_method",
+                "depth": 3,
+                "maxCallersPerLevel": 10,
+                "impactAnalysis": true,
+                "resolveInterfaces": false
+            }),
+        );
+        assert!(
+            !result.is_error,
+            "Should not error: {}",
+            result.content[0].text
+        );
+        let output: serde_json::Value =
+            serde_json::from_str(&result.content[0].text).unwrap();
+
+        // Direct callers should be branch_b + branch_c
+        let tree = output["callTree"].as_array().unwrap();
+        let direct_caller_names: Vec<&str> = tree
+            .iter()
+            .map(|n| n["method"].as_str().unwrap())
+            .collect();
+        assert!(
+            direct_caller_names.contains(&"branch_b"),
+            "branch_b should be a direct caller, got: {:?}",
+            direct_caller_names
+        );
+        assert!(
+            direct_caller_names.contains(&"branch_c"),
+            "branch_c should be a direct caller, got: {:?}",
+            direct_caller_names
+        );
+
+        // testsCovering must contain BOTH test methods (one per branch).
+        // This is the regression check: if Builder.tests_found were reset
+        // between branches, only one would survive.
+        let tests_covering = output["testsCovering"]
+            .as_array()
+            .expect("testsCovering should be present with impactAnalysis=true");
+        let test_names: Vec<&str> = tests_covering
+            .iter()
+            .map(|t| t["method"].as_str().unwrap())
+            .collect();
+        assert!(
+            test_names.contains(&"test_branch_b"),
+            "tests_found must accumulate test_branch_b across branches; got: {:?}",
+            test_names
+        );
+        assert!(
+            test_names.contains(&"test_branch_c"),
+            "tests_found must accumulate test_branch_c across branches; got: {:?}",
+            test_names
+        );
+        assert_eq!(
+            tests_covering.len(),
+            2,
+            "Exactly 2 tests should be reported across both branches, got: {:?}",
+            test_names
+        );
+    }
+
+    // ─── B2: visited prevents infinite recursion on cycles ───────────
+    //
+    // Mutual recursion: method_a ↔ method_b. The Builder.visited set must
+    // prevent revisiting an already-explored node, so the call returns in
+    // bounded time even with depth=10.
+    //
+    // Regression risk: if the Builder created a fresh visited per recursion
+    // level (instead of sharing &mut self.visited), the call would loop until
+    // depth limit AND emit duplicate nodes.
+    #[test]
+    fn test_builder_visited_prevents_cycle() {
+        let mut content_idx = HashMap::new();
+        // method_a: defined at file0:10, called from file0:35 (inside method_b body)
+        content_idx.insert(
+            "method_a".to_string(),
+            vec![Posting {
+                file_id: 0,
+                lines: vec![10, 35],
+            }],
+        );
+        // method_b: defined at file0:30, called from file0:15 (inside method_a body)
+        content_idx.insert(
+            "method_b".to_string(),
+            vec![Posting {
+                file_id: 0,
+                lines: vec![30, 15],
+            }],
+        );
+
+        let content_index = ContentIndex {
+            root: ".".to_string(),
+            files: vec!["C:/src/MutualRecursion.rs".to_string()],
+            index: content_idx,
+            total_tokens: 50,
+            extensions: vec!["rs".to_string()],
+            file_token_counts: vec![50],
+            ..Default::default()
+        };
+
+        let definitions = vec![
+            // di=0: method_a (calls method_b inside body)
+            DefinitionEntry {
+                file_id: 0,
+                name: "method_a".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 10,
+                line_end: 20,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            // di=1: method_b (calls method_a inside body)
+            DefinitionEntry {
+                file_id: 0,
+                name: "method_b".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 30,
+                line_end: 40,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+        ];
+
+        let (name_index, kind_index, file_index) = build_indexes(&definitions);
+        let mut path_to_id = HashMap::new();
+        path_to_id.insert(PathBuf::from("C:/src/MutualRecursion.rs"), 0);
+
+        let def_index = DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["rs".to_string()],
+            files: vec!["C:/src/MutualRecursion.rs".to_string()],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            ..Default::default()
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            server_ext: "rs".to_string(),
+            ..Default::default()
+        };
+
+        // Run with high depth — visited must terminate the cycle.
+        let start = std::time::Instant::now();
+        let result = dispatch_tool(
+            &ctx,
+            "xray_callers",
+            &json!({
+                "method": "method_a",
+                "depth": 10,
+                "maxCallersPerLevel": 10,
+                "resolveInterfaces": false
+            }),
+        );
+        let elapsed = start.elapsed();
+
+        assert!(
+            !result.is_error,
+            "Should not error on cycle: {}",
+            result.content[0].text
+        );
+        // Tight upper bound — cycle detection should finish in milliseconds.
+        // If visited is broken, this would explode (exponential nodes) and
+        // either hit maxTotalNodes guard slowly OR hang. 5s is generous.
+        assert!(
+            elapsed.as_secs() < 5,
+            "Cycle detection took too long: {:?} (visited may be broken)",
+            elapsed
+        );
+
+        let output: serde_json::Value =
+            serde_json::from_str(&result.content[0].text).unwrap();
+        let tree = output["callTree"].as_array().unwrap();
+
+        // visited semantics: when a node is revisited, it's NOT recursed into,
+        // but the node itself can still appear as a leaf in the tree.
+        //
+        // With visited working, depth=10 should produce a finite tree where:
+        //   - method_b appears ONCE as direct caller of root method_a
+        //   - method_a appears at most ONCE as caller of method_b (as a leaf,
+        //     because visited.insert("method_a.10") returns false → empty callers)
+        //
+        // With visited broken, the tree explodes: method_a → method_b → method_a
+        // → method_b → ... up to depth=10, so each method appears ~5 times.
+        fn count_method(nodes: &[serde_json::Value], target: &str) -> usize {
+            let mut count = 0;
+            for n in nodes {
+                if n["method"].as_str() == Some(target) {
+                    count += 1;
+                }
+                if let Some(callers) = n.get("callers").and_then(|c| c.as_array()) {
+                    count += count_method(callers, target);
+                }
+            }
+            count
+        }
+        let method_a_count = count_method(tree, "method_a");
+        let method_b_count = count_method(tree, "method_b");
+        assert!(
+            method_a_count <= 1,
+            "visited must prevent re-recursion: method_a should appear at most once \
+             (as leaf caller of method_b); got {} occurrences. tree: {}",
+            method_a_count,
+            serde_json::to_string_pretty(tree).unwrap()
+        );
+        assert_eq!(
+            method_b_count, 1,
+            "method_b should appear exactly once (direct caller of method_a); \
+             got {} occurrences. tree: {}",
+            method_b_count,
+            serde_json::to_string_pretty(tree).unwrap()
+        );
+    }
+
+    // ─── B3: total body lines budget enforced across recursion ───────
+    //
+    // Real-file fixture: a single .rs file with 10 functions chained
+    // a1 → a2 → ... → a10. With includeBody=true, maxBodyLines=10,
+    // maxTotalBodyLines=30, only the first ~3 callers should get body;
+    // the rest must show `bodyOmitted = "total body lines budget exceeded"`.
+    //
+    // Regression risk: if Builder.total_body_lines_emitted were reset between
+    // recursion levels, the budget would be ignored and ALL nodes would get
+    // bodies, potentially blowing up response size.
+    #[test]
+    fn test_builder_total_body_lines_budget_across_recursion() {
+        let tmp_dir = unique_tmp_dir("budget");
+        let file_path = tmp_dir.join("chain.rs");
+
+        // Build a 10-function chain. Each function spans ~10 lines.
+        // Function ai is defined at lines [base, base+9], and its body
+        // contains a single call to a(i+1).
+        // Layout:
+        //   a1: lines 1..10 (body line 5 calls a2)
+        //   a2: lines 11..20 (body line 15 calls a3)
+        //   ...
+        //   a10: lines 91..100
+        let mut content = String::new();
+        for i in 1..=10 {
+            content.push_str(&format!("// {} header\n", i));     // line base+0
+            content.push_str(&format!("fn a{}() {{\n", i));      // line base+1
+            content.push_str("    // padding\n");                // line base+2
+            content.push_str("    // padding\n");                // line base+3
+            content.push_str("    // padding\n");                // line base+4
+            if i < 10 {
+                content.push_str(&format!("    a{}();\n", i + 1)); // line base+5
+            } else {
+                content.push_str("    // terminal\n");
+            }
+            content.push_str("    // padding\n");                // line base+6
+            content.push_str("    // padding\n");                // line base+7
+            content.push_str("}\n");                              // line base+8
+            content.push_str("\n");                               // line base+9
+        }
+        std::fs::write(&file_path, &content).expect("failed to write fixture");
+        let file_path_str = file_path.to_string_lossy().to_string();
+
+        // Build content index: each ai appears at its own definition line
+        // and at the call site in a(i-1).
+        let mut content_idx = HashMap::new();
+        for i in 1..=10 {
+            let def_line = (i - 1) * 10 + 2; // "fn ai()" line
+            let mut postings = vec![def_line];
+            if i > 1 {
+                let call_line = (i - 2) * 10 + 6; // "    ai();" line in a(i-1)
+                postings.push(call_line);
+            }
+            content_idx.insert(
+                format!("a{}", i),
+                vec![Posting {
+                    file_id: 0,
+                    lines: postings.into_iter().map(|n| n as u32).collect(),
+                }],
+            );
+        }
+
+        let content_index = ContentIndex {
+            root: tmp_dir.to_string_lossy().to_string(),
+            files: vec![file_path_str.clone()],
+            index: content_idx,
+            total_tokens: 100,
+            extensions: vec!["rs".to_string()],
+            file_token_counts: vec![100],
+            ..Default::default()
+        };
+
+        // Build definitions: 10 functions in file0.
+        let mut definitions = Vec::new();
+        for i in 1u32..=10 {
+            let line_start = (i - 1) * 10 + 2;
+            let line_end = line_start + 7;
+            definitions.push(DefinitionEntry {
+                file_id: 0,
+                name: format!("a{}", i),
+                kind: DefinitionKind::Function,
+                line_start,
+                line_end,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            });
+        }
+
+        let (name_index, kind_index, file_index) = build_indexes(&definitions);
+        let mut path_to_id = HashMap::new();
+        path_to_id.insert(PathBuf::from(&file_path_str), 0);
+
+        let def_index = DefinitionIndex {
+            root: tmp_dir.to_string_lossy().to_string(),
+            created_at: 0,
+            extensions: vec!["rs".to_string()],
+            files: vec![file_path_str.clone()],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            ..Default::default()
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+                tmp_dir.to_string_lossy().to_string(),
+            ))),
+            server_ext: "rs".to_string(),
+            ..Default::default()
+        };
+
+        // Find callers of a10 — should walk up the chain a9 ← a8 ← ... ← a1.
+        let result = dispatch_tool(
+            &ctx,
+            "xray_callers",
+            &json!({
+                "method": "a10",
+                "depth": 10,
+                "maxCallersPerLevel": 5,
+                "includeBody": true,
+                "maxBodyLines": 10,
+                "maxTotalBodyLines": 30,
+                "resolveInterfaces": false
+            }),
+        );
+        assert!(
+            !result.is_error,
+            "Should not error: {}",
+            result.content[0].text
+        );
+        let output: serde_json::Value =
+            serde_json::from_str(&result.content[0].text).unwrap();
+
+        // Walk the tree, count: nodes with body, nodes with bodyOmitted-budget.
+        fn collect(
+            nodes: &[serde_json::Value],
+            with_body: &mut usize,
+            budget_omitted: &mut usize,
+            other_omitted: &mut usize,
+        ) {
+            for n in nodes {
+                if n.get("body").and_then(|b| b.as_array()).is_some_and(|a| !a.is_empty()) {
+                    *with_body += 1;
+                } else if let Some(reason) = n.get("bodyOmitted").and_then(|b| b.as_str()) {
+                    if reason.contains("budget") {
+                        *budget_omitted += 1;
+                    } else {
+                        *other_omitted += 1;
+                    }
+                }
+                if let Some(callers) = n.get("callers").and_then(|c| c.as_array()) {
+                    collect(callers, with_body, budget_omitted, other_omitted);
+                }
+            }
+        }
+        let mut with_body = 0;
+        let mut budget_omitted = 0;
+        let mut other_omitted = 0;
+        let tree = output["callTree"].as_array().unwrap();
+        collect(tree, &mut with_body, &mut budget_omitted, &mut other_omitted);
+
+        // Budget = 30 lines, each body ≈ 8 lines clamped at 10 → ~3-4 nodes
+        // get bodies before budget is exhausted.
+        assert!(
+            with_body > 0,
+            "At least one node should have body (budget=30 > one body)"
+        );
+        assert!(
+            with_body <= 5,
+            "Budget=30 should limit bodies to at most ~5; got {}",
+            with_body
+        );
+        assert!(
+            budget_omitted > 0,
+            "At least one node must hit the total-body-lines budget; got with_body={}, budget_omitted={}, other_omitted={}",
+            with_body,
+            budget_omitted,
+            other_omitted
+        );
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    // ─── B4: file_cache reused for multiple callers in same file ─────
+    //
+    // Three callers all live in the same file. With includeBody=true, all 3
+    // bodies must be filled correctly. This guards against a regression where
+    // Builder.file_cache might be re-created per recursion level (in which
+    // case the body content would still load via fs::read but we'd lose the
+    // optimization). The semantic check: all bodies non-empty AND content is
+    // the *correct* slice for each definition (not aliased / not duplicated).
+    #[test]
+    fn test_builder_file_cache_reused_same_file() {
+        let tmp_dir = unique_tmp_dir("filecache");
+        let file_path = tmp_dir.join("orders.rs");
+
+        // 3 callers (process_a, process_b, process_c) all in one file,
+        // each calls target_fn. Plus target_fn defined at top.
+        // Layout (1-based):
+        //   line 1:  fn target_fn() { ... }
+        //   line 5:  fn process_a() { target_fn(); /*MARK_A*/ }
+        //   line 15: fn process_b() { target_fn(); /*MARK_B*/ }
+        //   line 25: fn process_c() { target_fn(); /*MARK_C*/ }
+        let mut content = String::new();
+        content.push_str("fn target_fn() { /*TARGET*/ }\n"); // line 1
+        for _ in 2..5 {
+            content.push_str("// pad\n");
+        }
+        content.push_str("fn process_a() {\n");                 // line 5
+        content.push_str("    target_fn();\n");                 // line 6
+        content.push_str("    // MARK_A\n");                    // line 7
+        content.push_str("}\n");                                 // line 8
+        for _ in 9..15 {
+            content.push_str("// pad\n");
+        }
+        content.push_str("fn process_b() {\n");                 // line 15
+        content.push_str("    target_fn();\n");                 // line 16
+        content.push_str("    // MARK_B\n");                    // line 17
+        content.push_str("}\n");                                 // line 18
+        for _ in 19..25 {
+            content.push_str("// pad\n");
+        }
+        content.push_str("fn process_c() {\n");                 // line 25
+        content.push_str("    target_fn();\n");                 // line 26
+        content.push_str("    // MARK_C\n");                    // line 27
+        content.push_str("}\n");                                 // line 28
+
+        std::fs::write(&file_path, &content).expect("failed to write fixture");
+        let file_path_str = file_path.to_string_lossy().to_string();
+
+        let mut content_idx = HashMap::new();
+        content_idx.insert(
+            "target_fn".to_string(),
+            vec![Posting {
+                file_id: 0,
+                lines: vec![1, 6, 16, 26],
+            }],
+        );
+        content_idx.insert(
+            "process_a".to_string(),
+            vec![Posting { file_id: 0, lines: vec![5] }],
+        );
+        content_idx.insert(
+            "process_b".to_string(),
+            vec![Posting { file_id: 0, lines: vec![15] }],
+        );
+        content_idx.insert(
+            "process_c".to_string(),
+            vec![Posting { file_id: 0, lines: vec![25] }],
+        );
+
+        let content_index = ContentIndex {
+            root: tmp_dir.to_string_lossy().to_string(),
+            files: vec![file_path_str.clone()],
+            index: content_idx,
+            total_tokens: 100,
+            extensions: vec!["rs".to_string()],
+            file_token_counts: vec![100],
+            ..Default::default()
+        };
+
+        let definitions = vec![
+            DefinitionEntry {
+                file_id: 0,
+                name: "target_fn".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 1,
+                line_end: 1,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 0,
+                name: "process_a".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 5,
+                line_end: 8,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 0,
+                name: "process_b".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 15,
+                line_end: 18,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+            DefinitionEntry {
+                file_id: 0,
+                name: "process_c".to_string(),
+                kind: DefinitionKind::Function,
+                line_start: 25,
+                line_end: 28,
+                parent: None,
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: vec![],
+            },
+        ];
+
+        let (name_index, kind_index, file_index) = build_indexes(&definitions);
+        let mut path_to_id = HashMap::new();
+        path_to_id.insert(PathBuf::from(&file_path_str), 0);
+
+        let def_index = DefinitionIndex {
+            root: tmp_dir.to_string_lossy().to_string(),
+            created_at: 0,
+            extensions: vec!["rs".to_string()],
+            files: vec![file_path_str.clone()],
+            definitions,
+            name_index,
+            kind_index,
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index,
+            path_to_id,
+            ..Default::default()
+        };
+
+        let ctx = HandlerContext {
+            index: Arc::new(RwLock::new(content_index)),
+            def_index: Some(Arc::new(RwLock::new(def_index))),
+            workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+                tmp_dir.to_string_lossy().to_string(),
+            ))),
+            server_ext: "rs".to_string(),
+            ..Default::default()
+        };
+
+        let result = dispatch_tool(
+            &ctx,
+            "xray_callers",
+            &json!({
+                "method": "target_fn",
+                "depth": 1,
+                "maxCallersPerLevel": 10,
+                "includeBody": true,
+                "maxBodyLines": 10,
+                "maxTotalBodyLines": 100,
+                "resolveInterfaces": false
+            }),
+        );
+        assert!(
+            !result.is_error,
+            "Should not error: {}",
+            result.content[0].text
+        );
+        let output: serde_json::Value =
+            serde_json::from_str(&result.content[0].text).unwrap();
+        let tree = output["callTree"].as_array().unwrap();
+
+        // All 3 callers must be present and have correctly-sliced bodies
+        // (containing their own MARK_X comment). This proves file_cache
+        // returned correct content per-definition, not aliased to one slice.
+        let mut found_a = false;
+        let mut found_b = false;
+        let mut found_c = false;
+        for node in tree {
+            let name = node["method"].as_str().unwrap();
+            let body = node["body"]
+                .as_array()
+                .unwrap_or_else(|| panic!("body must be present for caller {}", name));
+            let body_text = body
+                .iter()
+                .map(|line| line.as_str().unwrap_or(""))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert!(
+                !body_text.is_empty(),
+                "Body for {} must be non-empty",
+                name
+            );
+            match name {
+                "process_a" => {
+                    assert!(
+                        body_text.contains("MARK_A"),
+                        "process_a body must contain its own marker, got: {:?}",
+                        body_text
+                    );
+                    found_a = true;
+                }
+                "process_b" => {
+                    assert!(
+                        body_text.contains("MARK_B"),
+                        "process_b body must contain its own marker, got: {:?}",
+                        body_text
+                    );
+                    found_b = true;
+                }
+                "process_c" => {
+                    assert!(
+                        body_text.contains("MARK_C"),
+                        "process_c body must contain its own marker, got: {:?}",
+                        body_text
+                    );
+                    found_c = true;
+                }
+                _ => panic!("unexpected caller: {}", name),
+            }
+        }
+        assert!(found_a && found_b && found_c, "All 3 callers must be present");
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+}

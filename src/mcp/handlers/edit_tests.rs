@@ -2687,3 +2687,258 @@ mod audit_regression_tests {
         assert!(text.contains("inserted\r\nline"), "Should contain inserted content");
     }
 }
+
+/// Regression tests for the apply_text_edits retry-cascade refactoring.
+///
+/// Cascade stages (find_with_retry):
+///   1. Exact literal match
+///   2. Strip trailing whitespace per line
+///   3. Trim leading/trailing blank lines (+ strip trailing WS)
+///   4. Flex-space regex (collapse whitespace)
+///
+/// Each test isolates a single stage and asserts that:
+///   - The match is found at the right offset.
+///   - effective_search / matched bytes are correct (so occurrence math, error
+///     messages, and expectedContext keep working).
+///   - The literal replacement is byte-for-byte preserved (file ends up correct).
+#[cfg(test)]
+mod retry_cascade_tests {
+    use super::*;
+    use std::sync::{Arc, RwLock};
+    use crate::mcp::handlers::WorkspaceBinding;
+    use serde_json::json;
+
+    fn make_ctx(dir: &std::path::Path) -> super::HandlerContext {
+        super::HandlerContext {
+            workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir.to_string_lossy().to_string()))),
+            ..super::HandlerContext::default()
+        }
+    }
+
+    // ─── A1: Step 2 — strip trailing whitespace ──────────────────────────
+    //
+    // search has trailing spaces. File has the same line WITHOUT trailing spaces.
+    // Step 1 (exact) fails; step 2 strips trailing WS from search and matches.
+    // Critical: effective_search becomes the trimmed form, so the literal
+    // replacement targets exactly what's in the file (no over-write of context).
+    #[test]
+    fn test_retry_cascade_strip_trailing_ws() {
+        let tmp = tempfile::tempdir().unwrap();
+        let filename = "a1.txt";
+        let path = tmp.path().join(filename);
+        // File has NO trailing whitespace on "foo"
+        std::fs::write(&path, "foo\nbar\n").unwrap();
+
+        let ctx = make_ctx(tmp.path());
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": filename,
+            "edits": [
+                // search HAS trailing whitespace — only step 2 will match
+                { "search": "foo   ", "replace": "FOO" }
+            ]
+        }));
+
+        assert!(!result.is_error,
+            "strip-trailing-ws cascade should succeed: {}", result.content[0].text);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, "FOO\nbar\n",
+            "After step-2 match, replacement must target the trimmed form (no extra chars eaten)");
+
+        // Surface the warning so a future regression that silently skips warnings is caught.
+        let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let warnings = parsed["warnings"].as_array().expect("response must include warnings array");
+        assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("trimming trailing whitespace")),
+            "Step 2 must record a warning. Got warnings: {:?}", warnings);
+    }
+
+    // ─── A2: Step 3 — trim leading/trailing blank lines ──────────────────
+    //
+    // search has leading and trailing blank lines. File has the same content
+    // packed without those blank lines. Step 1 (exact) fails, step 2 (strip
+    // trailing WS) doesn't help, step 3 trims blank lines and matches.
+    #[test]
+    fn test_retry_cascade_trim_blank_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        let filename = "a2.txt";
+        let path = tmp.path().join(filename);
+        // File: "prefix\nfoo\nbar\nsuffix\n" — no blank lines around foo/bar
+        std::fs::write(&path, "prefix\nfoo\nbar\nsuffix\n").unwrap();
+
+        let ctx = make_ctx(tmp.path());
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": filename,
+            "edits": [
+                // search HAS leading/trailing blank lines
+                { "search": "\n\nfoo\nbar\n\n", "replace": "FOO_BAR" }
+            ]
+        }));
+
+        assert!(!result.is_error,
+            "trim-blank-lines cascade should succeed: {}", result.content[0].text);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Replacement targets trimmed form "foo\nbar" — "prefix\n" and "\nsuffix\n" must remain.
+        assert_eq!(content, "prefix\nFOO_BAR\nsuffix\n",
+            "After step-3 match, replacement must target the trimmed form");
+
+        let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let warnings = parsed["warnings"].as_array().expect("response must include warnings array");
+        assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("blank lines")),
+            "Step 3 must record a blank-lines warning. Got: {:?}", warnings);
+    }
+
+    // ─── A3: Step 4 — flex-space regex ⚠️ HIGHEST RISK ───────────────────
+    //
+    // search has single spaces between tokens. File has tabs and multiple
+    // spaces. Only step 4 (flex regex) matches. Critical guarantees:
+    //   - flex_re is set, so apply_literal_replace uses regex::NoExpand path
+    //     (NOT effective_search-based String::replace).
+    //   - matched bytes preserved verbatim except for the surgical replacement.
+    //   - effective_search remains the ORIGINAL search (so error messages and
+    //     occurrence math reference what the LLM actually sent).
+    #[test]
+    fn test_retry_cascade_flex_regex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let filename = "a3.txt";
+        let path = tmp.path().join(filename);
+        // "foo" + 2 spaces + tab + 2 spaces + "bar" — neither exact nor strip-ws
+        // nor blank-line trim will match. Only flex regex with [ \t]+ between
+        // tokens succeeds.
+        std::fs::write(&path, "foo  \t  bar\n").unwrap();
+
+        let ctx = make_ctx(tmp.path());
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": filename,
+            "edits": [
+                { "search": "foo bar", "replace": "FOO_BAR" }
+            ]
+        }));
+
+        assert!(!result.is_error,
+            "flex-regex cascade should succeed: {}", result.content[0].text);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Whole "foo  \t  bar" run is collapsed by NoExpand replacement.
+        assert_eq!(content, "FOO_BAR\n",
+            "flex-regex must replace the entire matched run, not just \"foo bar\" substring");
+
+        let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let warnings = parsed["warnings"].as_array().expect("response must include warnings array");
+        assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("flexible whitespace")),
+            "Step 4 must record a flex-whitespace warning. Got: {:?}", warnings);
+    }
+
+    // ─── A4: Error message format per cascade branch ────────────────────
+    //
+    // Documents the CURRENT contract:
+    //   - When NO branch finds the search text, the error mentions the
+    //     original search (truncated). This is what nearest_match_hint and
+    //     the user see.
+    //   - When step-2/3 find a match but occurrence overflows, the error
+    //     mentions effective_search (the trimmed form).
+    //
+    // If we change either branch's wording, this test will fail and force a
+    // conscious decision rather than a silent contract drift.
+    #[test]
+    fn test_error_message_literal_vs_flex() {
+        let tmp = tempfile::tempdir().unwrap();
+        let filename = "a4.txt";
+        let path = tmp.path().join(filename);
+        std::fs::write(&path, "alpha\nbeta\n").unwrap();
+
+        let ctx = make_ctx(tmp.path());
+
+        // Scenario 1: search not found anywhere — error references the
+        // ORIGINAL search (truncated form), not any cascade-internal trimming.
+        let r_not_found = handle_xray_edit(&ctx, &json!({
+            "path": filename,
+            "edits": [
+                { "search": "nonexistent_token_xyz", "replace": "Z" }
+            ]
+        }));
+        assert!(r_not_found.is_error, "missing search should error");
+        let err1 = &r_not_found.content[0].text;
+        assert!(err1.contains("nonexistent_token_xyz"),
+            "error must echo the original search. Got: {}", err1);
+
+        // Scenario 2: search matches via step 2 (strip trailing WS) but
+        // occurrence overflows. Error must mention the trimmed form because
+        // that's what's being counted in the file.
+        let r_overflow = handle_xray_edit(&ctx, &json!({
+            "path": filename,
+            "edits": [
+                {
+                    "search": "alpha   ",   // step 2 trims to "alpha", which appears 1×
+                    "replace": "A",
+                    "occurrence": 5         // requested 5 — only 1 found
+                }
+            ]
+        }));
+        assert!(r_overflow.is_error, "occurrence overflow should error");
+        let err2 = &r_overflow.content[0].text;
+        assert!(err2.contains("Occurrence 5"),
+            "error must include requested occurrence. Got: {}", err2);
+        assert!(err2.contains("only 1 time"),
+            "error must show actual count. Got: {}", err2);
+    }
+
+    // ─── A5: expectedContext after a flex-cascade match ─────────────────
+    //
+    // expectedContext validates against ±5 lines around the matched
+    // POSITION (not against the search string). After a flex match,
+    // search_result.positions[0] points to the actual byte in the file —
+    // expectedContext should still find context that lives near that byte.
+    #[test]
+    fn test_expected_context_after_flex_match() {
+        let tmp = tempfile::tempdir().unwrap();
+        let filename = "a5.txt";
+        let path = tmp.path().join(filename);
+        // "foo  bar" matches via flex regex. "// MARKER" is on the same line
+        // and within ±5 lines of the match position.
+        std::fs::write(&path, "line0\nfoo  bar // MARKER\nline2\n").unwrap();
+
+        let ctx = make_ctx(tmp.path());
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": filename,
+            "edits": [
+                {
+                    "search": "foo bar",       // single space — needs flex
+                    "replace": "FOO_BAR",
+                    "expectedContext": "MARKER"
+                }
+            ]
+        }));
+
+        assert!(!result.is_error,
+            "expectedContext should validate against the matched POSITION, not the search string. Error: {}",
+            result.content[0].text);
+
+        let content = std::fs::read_to_string(&path).unwrap();
+        // Note: flex pattern is `[ \t]*foo[ \t]+bar[ \t]*`, so trailing space
+        // before "// MARKER" is part of the match and gets consumed by the
+        // replacement. // MARKER itself is preserved.
+        assert_eq!(content, "line0\nFOO_BAR// MARKER\nline2\n",
+            "flex match + expectedContext must replace the (greedy) run while preserving // MARKER");
+
+        // Negative half: a wrong context must still reject the edit even on
+        // the flex branch (regression guard).
+        std::fs::write(&path, "line0\nfoo  bar // MARKER\nline2\n").unwrap();
+        let bad = handle_xray_edit(&ctx, &json!({
+            "path": filename,
+            "edits": [
+                {
+                    "search": "foo bar",
+                    "replace": "FOO_BAR",
+                    "expectedContext": "NOT_PRESENT_TOKEN"
+                }
+            ]
+        }));
+        assert!(bad.is_error,
+            "flex match must still respect expectedContext. Result: {}", bad.content[0].text);
+        let unchanged = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(unchanged, "line0\nfoo  bar // MARKER\nline2\n",
+            "file must NOT be modified when expectedContext fails on the flex branch");
+    }
+}
+

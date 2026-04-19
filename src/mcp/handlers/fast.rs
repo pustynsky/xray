@@ -525,4 +525,102 @@ mod fast_unit_tests {
         assert_eq!(extract_glob_literal("Order*.cs"), "Order");
         assert_eq!(extract_glob_literal("Config*Helper?"), "Config");
     }
+
+    // ─── P2 Group C: SearchContext / is_wildcard plumbing tests ───
+    // Regression tests for the SearchContext refactoring that introduced
+    // is_wildcard as an explicit field instead of inferring at every call site.
+
+    use super::{parse_fast_args, compile_search_patterns, format_and_sort_results,
+                FastParams, SearchContext};
+    use super::super::HandlerContext;
+    use crate::FileEntry;
+    use serde_json::json;
+
+    /// C1: pattern='*' + dirsOnly=true must propagate is_wildcard through the
+    /// FastParams → SearchContext pipeline. A regression here would re-introduce
+    /// per-call-site wildcard detection (the very bug the SearchContext refactor
+    /// was meant to eliminate).
+    #[test]
+    fn test_dirs_only_with_wildcard_via_context() {
+        let server_dir = std::env::temp_dir().to_string_lossy().to_string();
+        let args = json!({"pattern": "*", "dirsOnly": true, "dir": server_dir.clone()});
+        let params = parse_fast_args(&args, &server_dir).expect("parse_fast_args should accept pattern='*'");
+        assert!(params.is_wildcard, "FastParams.is_wildcard must be true for pattern='*'");
+        assert!(params.dirs_only, "FastParams.dirs_only must be true");
+
+        let search = compile_search_patterns(&params).expect("compile_search_patterns should succeed");
+        assert!(search.is_wildcard,
+            "SearchContext.is_wildcard must be true (plumbed from FastParams). \
+             Regression: format_and_sort_results would attempt relevance ranking on '*' results.");
+        assert!(search.re_list.is_none(),
+            "Wildcard pattern must skip regex compilation (no terms to match)");
+    }
+
+    /// C2: Mutual exclusion of dirsOnly and filesOnly must be enforced at
+    /// parse_fast_args entry. Regression of the B1 fix (added in this branch)
+    /// would let both flags through and produce ambiguous results.
+    #[test]
+    fn test_dirs_only_and_files_only_mutually_exclusive() {
+        let server_dir = std::env::temp_dir().to_string_lossy().to_string();
+        let args = json!({"pattern": "x", "dirsOnly": true, "filesOnly": true});
+        let result = parse_fast_args(&args, &server_dir);
+        let err = match result {
+            Ok(_) => panic!("dirsOnly + filesOnly must be rejected, got Ok"),
+            Err(e) => e,
+        };
+        assert!(err.contains("mutually exclusive"),
+            "Error must mention mutual exclusion; got: {}", err);
+        assert!(err.contains("filesOnly") && err.contains("dirsOnly"),
+            "Error must reference BOTH flag names so the LLM can self-correct; got: {}", err);
+    }
+
+    /// C3: maxResults=0 means unlimited. format_and_sort_results must NOT
+    /// truncate when params.max_results == 0, and the response must NOT
+    /// carry a "truncated" flag in summary.
+    #[test]
+    fn test_format_and_sort_results_max_results_zero_unlimited() {
+        let params = FastParams {
+            pattern: "x".to_string(),
+            is_wildcard: false,
+            dir: ".".to_string(),
+            ext: None,
+            use_regex: false,
+            ignore_case: false,
+            dirs_only: false,
+            files_only: false,
+            count_only: false,
+            max_depth: None,
+            max_results: 0, // unlimited
+        };
+        let search = SearchContext {
+            search_terms: vec!["x".to_string()],
+            ranking_terms: vec!["x".to_string()],
+            re_list: None,
+            is_wildcard: false,
+        };
+        let results: Vec<serde_json::Value> = (0..100)
+            .map(|i| json!({"path": format!("file{}.rs", i), "size": 100u64, "isDir": false}))
+            .collect();
+        let entries: Vec<FileEntry> = (0..100)
+            .map(|i| FileEntry {
+                path: format!("file{}.rs", i),
+                size: 100,
+                modified: 0,
+                is_dir: false,
+            })
+            .collect();
+        let ctx = HandlerContext::default();
+        let output = format_and_sort_results(
+            results, 100, &params, &search, &entries,
+            std::time::Duration::from_millis(1), &ctx,
+        );
+        let files = output["files"].as_array().expect("output must contain files array");
+        assert_eq!(files.len(), 100,
+            "maxResults=0 must return ALL results without truncation; got {}", files.len());
+        assert!(output["summary"].get("truncated").is_none(),
+            "summary.truncated must be absent when nothing was truncated; got: {:?}",
+            output["summary"]);
+        assert!(output["summary"].get("maxResults").is_none(),
+            "summary.maxResults must be absent when truncation did not happen");
+    }
 }

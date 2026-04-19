@@ -721,3 +721,54 @@ fn format_cache_age(created_at: u64) -> String {
         }
     }
 }
+
+
+#[cfg(test)]
+mod serve_format_cache_age_tests {
+    use super::format_cache_age;
+
+    /// Helper: convert a desired age (seconds) into a fake `created_at`
+    /// timestamp such that `format_cache_age(ts)` will report exactly that age.
+    fn ts_for_age(age_secs: u64) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        now.saturating_sub(age_secs)
+    }
+
+    /// E1 — `format_cache_age` must produce the expected human-readable string
+    /// at every boundary of the seconds → minutes → hours → days transitions.
+    /// Regression: refactoring the if/else ladder into separate fns risks
+    /// off-by-one at boundaries (e.g., `<=` vs `<`, or returning "60s" instead
+    /// of "1m" at exactly 60 seconds).
+    #[test]
+    fn test_format_cache_age_boundaries() {
+        // Sub-minute: returns Ns
+        assert_eq!(format_cache_age(ts_for_age(0)),  "0s",  "0 seconds → '0s'");
+        assert_eq!(format_cache_age(ts_for_age(1)),  "1s",  "1 second → '1s'");
+        assert_eq!(format_cache_age(ts_for_age(59)), "59s", "59 seconds → '59s' (just under minute boundary)");
+
+        // Minute boundary: 60s → '1m', NOT '60s'
+        assert_eq!(format_cache_age(ts_for_age(60)),   "1m",  "60 seconds → '1m' (minute boundary)");
+        assert_eq!(format_cache_age(ts_for_age(61)),   "1m",  "61 seconds → '1m' (truncates seconds)");
+        assert_eq!(format_cache_age(ts_for_age(120)),  "2m",  "120 seconds → '2m'");
+        assert_eq!(format_cache_age(ts_for_age(3599)), "59m", "3599 seconds → '59m' (just under hour boundary)");
+
+        // Hour boundary: 3600s → '1h', NOT '60m'
+        assert_eq!(format_cache_age(ts_for_age(3600)), "1h",      "3600 seconds → '1h' (hour boundary, no minutes)");
+        assert_eq!(format_cache_age(ts_for_age(3660)), "1h 1m",   "3660 seconds → '1h 1m' (hour + remainder minutes)");
+        assert_eq!(format_cache_age(ts_for_age(7320)), "2h 2m",   "7320 seconds → '2h 2m'");
+        assert_eq!(format_cache_age(ts_for_age(86_399)), "23h 59m", "86399 seconds → '23h 59m' (just under day boundary)");
+
+        // Day boundary: 86400s → '1d', NOT '24h'
+        assert_eq!(format_cache_age(ts_for_age(86_400)),  "1d",     "86400 seconds → '1d' (day boundary, no hours)");
+        assert_eq!(format_cache_age(ts_for_age(90_000)),  "1d 1h",  "90000 seconds → '1d 1h' (day + remainder hours)");
+        assert_eq!(format_cache_age(ts_for_age(176_400)), "2d 1h",  "176400 seconds → '2d 1h'");
+
+        // Far future: created_at in the future yields age=0 via saturating_sub
+        let future_ts = ts_for_age(0).saturating_add(10_000);
+        assert_eq!(format_cache_age(future_ts), "0s",
+            "Future timestamps must clamp to '0s' (regression: integer underflow on now - future)");
+    }
+}

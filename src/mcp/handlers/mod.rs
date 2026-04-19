@@ -1817,3 +1817,7 @@ mod tests_typescript;
 #[cfg(feature = "lang-rust")]
 #[path = "handlers_tests_rust.rs"]
 mod tests_rust;
+
+#[cfg(test)]
+#[path = "handlers_tests_workspace.rs"]
+mod tests_workspace;

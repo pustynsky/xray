@@ -69,6 +69,18 @@
 
 ## Unreleased
 
+### Internal — Regression Tests for Complexity Refactoring (2026-04-19)
+
+- **Added 16 regression tests** for the cyclomatic/cognitive complexity refactoring on branch `tech-debt-fixes` (refactor of `apply_text_edits`, `build_caller_tree`/`build_callee_tree`, `handle_xray_fast`, `cmd_serve`, `handle_xray_reindex_inner`).
+  - **P1 (9 tests)** — Each verified to FAIL on a deliberately-broken version of the code under test, then to PASS once the bug is reverted (true regression coverage, not just code-shape coverage):
+    - `src/mcp/handlers/edit_tests.rs::retry_cascade_tests` (5): `apply_text_edits` 4-stage retry cascade — Step 2 (strip trailing WS), Step 3 (trim blank lines), Step 4 (flex regex), warning emission, and overflow wording.
+    - `src/mcp/handlers/callers_tests_additional.rs::builder_state_tests` (4): `CallerTreeBuilder` invariants — `tests_found.push` for impact analysis, `visited` set deduplication, body-budget early-return, and absolute-line marker indexing.
+  - **P2 (7 tests)** — Plumbing/unit-level coverage for the remaining refactored helpers:
+    - `src/mcp/handlers/fast.rs::fast_unit_tests` (3): `SearchContext` `is_wildcard` propagation, `dirsOnly`/`filesOnly` mutual-exclusion guard, `format_and_sort_results` `maxResults=0` (unlimited) behavior.
+    - `src/mcp/handlers/handlers_tests_workspace.rs` (3, new file): `rollback_workspace_state` restores all four mutable `WorkspaceBinding` fields, `cross_load_definition_index` no-op when `def_index = None`, `handle_xray_reindex_inner` rejects switches in `PinnedCli` mode without mutating state.
+    - `src/cli/serve.rs::serve_format_cache_age_tests` (1): `format_cache_age` boundary correctness at 0/59/60/3599/3600/86399/86400/90000 seconds plus future-timestamp clamping.
+- **Test count: 1855 → 1871** (+16). All passing. No production code changes — pure test-only addition.
+
 ### Internal — Reindex Handler Symmetry Cleanup (2026-04-19)
 
 - **Extracted `cross_load_content_index` helper** in `src/mcp/handlers/mod.rs` to mirror the existing `cross_load_definition_index`. Previously `handle_xray_reindex_definitions_inner` cross-loaded the content index inline (~70 lines), while `handle_xray_reindex_inner` already used a helper for definition cross-load. Both handlers are now symmetric.
