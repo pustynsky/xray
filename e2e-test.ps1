@@ -1586,6 +1586,44 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
+# T-LINE-REGEX-MD: lineRegex finds markdown level-2 headings via line-anchored regex
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-LINE-REGEX-MD grep-line-regex-markdown-headings"
+    try {
+        $tmpDir = Join-Path $env:TEMP "xray_e2e_line_regex_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        $mdContent = "# Title`n`n## First Section`n`nSome text with ## inline mention`n`n## Second Section`n`n### Subsection`n`nMore text.`n"
+        Set-Content -Path (Join-Path $tmpDir "guide.md") -Value $mdContent -NoNewline
+        & $Bin content-index -d $tmpDir -e md 2>&1 | Out-Null
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"^## ","lineRegex":true,"showLines":true}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext md 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no JSON-RPC response)" } }
+        $errors = @()
+        # Should find guide.md
+        if ($jsonLine -notmatch 'guide\.md') { $errors += "missing guide.md in results" }
+        # Should report exactly 2 matched lines (## First Section, ## Second Section)
+        # — NOT 4 (would include ### Subsection if regex were token-based or trim-stripped trailing space)
+        # — NOT 3 (would include `## inline` if regex weren't line-anchored)
+        # JSON is double-encoded inside JSON-RPC `text` field, so quotes appear as \" — match either form.
+        if ($jsonLine -notmatch 'totalOccurrences\\?":\s*2') { $errors += "expected totalOccurrences=2, response: $jsonLine" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (^## matches exactly 2 level-2 headings, no false positives)" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+
 $parallelJobs = @()
 foreach ($block in $testBlocks) {
     $parallelJobs += Start-Job -ScriptBlock $block -ArgumentList $searchBinAbs, $projectDirAbs, $TestExt

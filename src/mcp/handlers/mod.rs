@@ -74,6 +74,10 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                         "type": "boolean",
                         "description": "Exact phrase match on raw file content (default: false). Matches literal strings including XML tags, angle brackets, slashes — no escaping needed. Example: terms='<MaxRetries>3</MaxRetries>', phrase=true finds the exact XML tag. Comma-separated phrases are searched independently with OR/AND semantics."
                     },
+                    "lineRegex": {
+                        "type": "boolean",
+                        "description": "Line-anchored regex search (default: false). Auto-enables regex=true and disables substring. Unlike default regex (which matches against tokenized index entries — alphanumeric+underscore only), lineRegex applies the pattern to each line of file content with `multi_line=true`, so `^` and `$` anchor to line boundaries and patterns may contain spaces, punctuation, brackets, etc. Required for: markdown headings (`^## `), C# attributes (`^\\s*\\[Test\\]`), function signatures (`^pub fn`), end-of-line braces (`\\}$`). Comma-separated patterns supported (OR/AND via mode). Whitespace inside patterns is significant — patterns are NOT trimmed. File scope MUST be narrowed via ext/dir/file filters; otherwise every indexed file is read from disk (slower than token regex). Mutually exclusive with phrase=true."
+                    },
                     "showLines": {
                         "type": "boolean",
                         "description": "Include matching source lines in results (default: false)"
@@ -1784,6 +1788,10 @@ mod tests;
 #[cfg(test)]
 #[path = "handlers_tests_grep.rs"]
 mod tests_grep;
+
+#[cfg(test)]
+#[path = "handlers_tests_line_regex.rs"]
+mod tests_line_regex;
 
 #[cfg(test)]
 #[path = "handlers_tests_fast.rs"]

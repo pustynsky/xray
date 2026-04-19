@@ -440,3 +440,28 @@ Progressive truncation to stay within ~32KB:
 **Unit test:** `test_xray_grep_phrase_sort_by_occurrences`
 
 **Status:** ✅ Implemented
+
+## Line-Anchored Regex (`lineRegex`)
+
+### T-LINE-REGEX-MD: `serve` — xray_grep `lineRegex=true` finds markdown headings via line-anchored regex
+
+**Setup:** Temp dir with `guide.md` containing `# Title`, `## First Section`, an inline `## inline` mention mid-line, `## Second Section`, and `### Subsection`.
+
+**Input:** `terms='^## ', lineRegex=true, showLines=true`
+
+**Expected output:**
+- 1 file (guide.md)
+- `totalOccurrences = 2` (matches exactly `## First Section` and `## Second Section`)
+- Does NOT match `### Subsection` (trailing space in `## ` is preserved — patterns are NOT trimmed)
+- Does NOT match the inline `## inline mention` (regex is line-anchored, not token-based)
+
+**Validates:**
+- `^` and `$` anchor to line boundaries (regex compiled with `multi_line=true`)
+- Significant whitespace inside patterns is preserved (no `.trim()`)
+- File pre-filter via `ext='md'` works in lineRegex path
+- Auto-enables `regex=true` and disables `substring`
+
+**Unit tests:** `line_regex_caret_anchor_finds_markdown_headings`, `line_regex_dollar_anchor_finds_lines_ending_with_brace`, `line_regex_multi_pattern_or`, `line_regex_multi_pattern_and`, `line_regex_ext_filter_scopes_search`, `line_regex_dir_filter_scopes_search`, `line_regex_file_filter_scopes_search`, `line_regex_no_matches_returns_zero`, `line_regex_count_only_omits_files`, `line_regex_show_lines_emits_line_content`, `line_regex_mutex_with_phrase`, `line_regex_auto_enables_regex`, `line_regex_invalid_pattern_returns_error`
+
+**E2E test:** `T-LINE-REGEX-MD grep-line-regex-markdown-headings` in `e2e-test.ps1`
+

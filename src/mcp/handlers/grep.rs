@@ -219,6 +219,12 @@ struct ParsedGrepArgs {
     use_regex: bool,
     use_phrase: bool,
     use_substring: bool,
+    /// Line-based regex mode. When true, applies the user-supplied regex
+    /// pattern to each line of candidate files (slower than token-based
+    /// regex, but supports line anchors `^`/`$`, whitespace, and arbitrary
+    /// non-token characters). Mutually exclusive with `phrase`. Implies
+    /// `regex=true` (validated in `parse_grep_args`). Auto-disables `substring`.
+    use_line_regex: bool,
     context_lines: usize,
     show_lines: bool,
     max_results: usize,
@@ -288,15 +294,30 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
 
     let ext_filter = args.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string());
     let mode_and = args.get("mode").and_then(|v| v.as_str()) == Some("and");
-    let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
+    let mut use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_phrase = args.get("phrase").and_then(|v| v.as_bool()).unwrap_or(false);
+    let use_line_regex = args.get("lineRegex").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // Validate lineRegex compatibility:
+    // - lineRegex implies regex=true (auto-promoted with a note: explicit error
+    //   would be hostile to LLMs that forget the implication).
+    // - lineRegex is mutually exclusive with phrase=true (different semantics).
+    if use_line_regex {
+        if use_phrase {
+            return Err(ToolCallResult::error(
+                "lineRegex is mutually exclusive with phrase. Use one or the other.".to_string(),
+            ));
+        }
+        // Auto-enable regex when lineRegex is requested.
+        use_regex = true;
+    }
 
     // Default to substring=true so compound C# identifiers are always found.
-    // Auto-disable when regex/phrase is used.
-    let use_substring = if use_regex || use_phrase {
+    // Auto-disable when regex/phrase/lineRegex is used.
+    let use_substring = if use_regex || use_phrase || use_line_regex {
         if args.get("substring").and_then(|v| v.as_bool()) == Some(true) {
             return Err(ToolCallResult::error(
-                "substring is mutually exclusive with regex and phrase".to_string(),
+                "substring is mutually exclusive with regex, phrase, and lineRegex".to_string(),
             ));
         }
         false
@@ -328,6 +349,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         use_regex,
         use_phrase,
         use_substring,
+        use_line_regex,
         context_lines,
         show_lines,
         max_results,
@@ -599,6 +621,13 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         return result;
     }
 
+    // --- Line-based regex mode (supports `^`, `$`, whitespace, non-token chars)
+    if parsed.use_line_regex {
+        let mut result = handle_line_regex_search(ctx, &index, &parsed.terms_str, &grep_params);
+        inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+        return result;
+    }
+
     // --- Normal token search
     let raw_terms: Vec<String> = parsed.terms_str
         .split(',')
@@ -636,16 +665,28 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         search_mode, &index, ctx, &grep_params,
     );
 
-    // Warn when regex=true and terms contain spaces (tokens never have spaces)
-    if parsed.use_regex && parsed.terms_str.contains(' ')
+    // Warn when regex=true and pattern uses constructs incompatible with token-based regex.
+    // Token regex matches against individual index tokens (alphanumeric+underscore, no whitespace),
+    // so anchors `^`/`$` (anchored to token boundaries, not lines) and spaces never match.
+    let pattern_has_spaces = parsed.terms_str.contains(' ');
+    let pattern_has_anchors = parsed.terms_str.contains('^') || parsed.terms_str.contains('$');
+    if parsed.use_regex && (pattern_has_spaces || pattern_has_anchors)
         && let Some(text) = result.content.first_mut().map(|c| &mut c.text)
             && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
                 if let Some(summary) = output.get_mut("summary") {
-                    summary["searchModeNote"] = serde_json::Value::String(
-                        "Regex operates on individual index tokens which never contain spaces. \
-                         Multi-word regex patterns like 'private.*double' will not match across tokens. \
-                         For multi-word search use phrase=true, or search individual terms separately with regex=true.".to_string(),
-                    );
+                    let reason = match (pattern_has_spaces, pattern_has_anchors) {
+                        (true, true) => "Pattern contains spaces and line anchors (`^`/`$`)",
+                        (true, false) => "Pattern contains spaces",
+                        (false, true) => "Pattern contains line anchors (`^`/`$`)",
+                        _ => unreachable!(),
+                    };
+                    summary["searchModeNote"] = serde_json::Value::String(format!(
+                        "{} — token-based regex cannot match these (operates on alphanumeric+underscore tokens, not whole lines). \
+                         For line-based regex with anchor/whitespace support, set lineRegex=true (slower but accurate). \
+                         For multi-word substring search without regex, use phrase=true. \
+                         Example: terms='^## ' regex=true lineRegex=true file='X.md' — finds markdown headings.",
+                        reason
+                    ));
                 }
                 *text = json_to_string(&output);
             }
@@ -1233,6 +1274,191 @@ fn handle_multi_phrase_search(
 
     let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!(searched_terms), search_mode,
+        index, search_elapsed, ctx, true,
+    );
+    apply_dir_auto_converted_note(&mut summary, params);
+    let output = json!({
+        "files": files_json,
+        "summary": summary
+    });
+
+    ToolCallResult::success(json_to_string(&output))
+}
+
+/// Line-based regex search: applies the user-supplied regex to each line of
+/// candidate files. Supports line anchors `^`/`$`, whitespace, and arbitrary
+/// non-token characters that token-based regex cannot match.
+///
+/// Performance: this mode is intentionally slower than token-based regex
+/// (~10-100× depending on candidate file count and file sizes). Use file
+/// scope filters (`ext`, `dir`, `file`) to keep the candidate set small.
+/// Without filters, it scans every indexed file — still fast enough for
+/// typical projects (<10K files), but pay attention to scope.
+///
+/// Multi-pattern support: comma-separated patterns are searched independently
+/// with OR semantics (a file matches if ANY pattern hits at least one line).
+/// `mode=and` switches to AND (file must contain at least one match for EVERY
+/// pattern). Each pattern is compiled once and applied to every line of every
+/// candidate file.
+fn handle_line_regex_search(
+    ctx: &HandlerContext,
+    index: &ContentIndex,
+    terms_str: &str,
+    params: &GrepSearchParams,
+) -> ToolCallResult {
+    // Parse comma-separated patterns. Unlike token regex, we do NOT lowercase —
+    // user-supplied regex flags (e.g., `(?i)`) control case sensitivity. We also
+    // do NOT trim each pattern, because whitespace inside a regex is significant
+    // (e.g., `^## ` matches markdown level-2 headings only, NOT `^##` which would
+    // also match `^### `). Users wanting comma-with-padding (`a, b`) should not
+    // include leading spaces — or should escape them via `\s`/`[ ]`.
+    let patterns: Vec<String> = terms_str
+        .split(',')
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    if patterns.is_empty() {
+        return ToolCallResult::error("No search patterns provided".to_string());
+    }
+
+    // Compile all patterns up-front with multi_line=true so `^` and `$` anchor
+    // to line boundaries (not input boundaries). Without this, `^foo` would only
+    // match at the very start of the file content, breaking any anchor-based
+    // search on multi-line files. user-supplied flags like `(?m)`/`(?s)` still
+    // override our defaults.
+    let mut compiled: Vec<regex::Regex> = Vec::with_capacity(patterns.len());
+    for pat in &patterns {
+        match regex::RegexBuilder::new(pat).multi_line(true).build() {
+            Ok(re) => compiled.push(re),
+            Err(e) => return ToolCallResult::error(format!("Invalid regex '{}': {}", pat, e)),
+        }
+    }
+
+    // Iterate ALL indexed files, apply file/ext/dir filters, then run line regex.
+    // No token pre-filter: regex with anchors/whitespace cannot be reduced to a
+    // safe literal substring without a regex AST analyzer (would risk false
+    // negatives). Filters keep the candidate set manageable in practice.
+    let mut per_pattern_matches: Vec<HashMap<String, Vec<u32>>> = vec![HashMap::new(); patterns.len()];
+    let mut content_cache: HashMap<String, String> = HashMap::new();
+
+    for file_path in &index.files {
+        if !passes_file_filters(file_path, params) {
+            continue;
+        }
+
+        // Read file once per candidate; cache for show_lines reuse.
+        let content = match read_file_lossy(std::path::Path::new(file_path)) {
+            Ok((c, _lossy)) => c,
+            Err(_) => continue,
+        };
+
+        // Pre-check: does ANY pattern match anywhere in the file?
+        // This is a fast-rejection optimization for files that don't match any pattern.
+        let any_pattern_matches = compiled.iter().any(|re| re.is_match(&content));
+        if !any_pattern_matches {
+            continue;
+        }
+
+        let mut matched_any_pattern = false;
+        for (pat_idx, re) in compiled.iter().enumerate() {
+            let mut matching_lines: Vec<u32> = Vec::new();
+            for (line_num, line) in content.lines().enumerate() {
+                if re.is_match(line) {
+                    matching_lines.push((line_num + 1) as u32);
+                }
+            }
+            if !matching_lines.is_empty() {
+                per_pattern_matches[pat_idx].insert(file_path.clone(), matching_lines);
+                matched_any_pattern = true;
+            }
+        }
+
+        if matched_any_pattern && params.show_lines {
+            content_cache.insert(file_path.clone(), content);
+        }
+    }
+
+    // Merge per-pattern matches with OR or AND semantics.
+    let merged_files: HashMap<String, Vec<u32>> = if params.mode_and {
+        // Files appearing in ALL pattern result sets.
+        let mut common: Option<HashSet<String>> = None;
+        for pm in &per_pattern_matches {
+            let files: HashSet<String> = pm.keys().cloned().collect();
+            common = Some(match common {
+                None => files,
+                Some(prev) => prev.intersection(&files).cloned().collect(),
+            });
+        }
+        let common = common.unwrap_or_default();
+        let mut merged: HashMap<String, Vec<u32>> = HashMap::new();
+        for pm in &per_pattern_matches {
+            for (path, lines) in pm {
+                if common.contains(path) {
+                    merged.entry(path.clone()).or_default().extend_from_slice(lines);
+                }
+            }
+        }
+        merged
+    } else {
+        // OR: union of all files.
+        let mut merged: HashMap<String, Vec<u32>> = HashMap::new();
+        for pm in &per_pattern_matches {
+            for (path, lines) in pm {
+                merged.entry(path.clone()).or_default().extend_from_slice(lines);
+            }
+        }
+        merged
+    };
+
+    // Sort/dedup line numbers per file.
+    let mut results: Vec<PhraseFileMatch> = merged_files.into_iter()
+        .map(|(file_path, mut lines)| {
+            lines.sort();
+            lines.dedup();
+            let content = content_cache.remove(&file_path);
+            PhraseFileMatch { file_path, lines, content }
+        })
+        .collect();
+
+    let total_files = results.len();
+    let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();
+
+    // Sort by occurrences descending (most matches first), like phrase search.
+    results.sort_by(|a, b| b.lines.len().cmp(&a.lines.len()));
+
+    if params.max_results > 0 {
+        results.truncate(params.max_results);
+    }
+
+    let search_elapsed = params.search_start.elapsed();
+    let search_mode = if params.mode_and { "lineRegex-and" } else { "lineRegex" };
+
+    if params.count_only {
+        let mut summary = build_grep_base_summary(
+            total_files, total_occurrences, &json!(patterns), search_mode,
+            index, search_elapsed, ctx, true,
+        );
+        apply_dir_auto_converted_note(&mut summary, params);
+        let output = json!({ "summary": summary });
+        return ToolCallResult::success(json_to_string(&output));
+    }
+
+    let files_json: Vec<Value> = results.iter().map(|r| {
+        let mut file_obj = json!({
+            "path": r.file_path,
+            "occurrences": r.lines.len(),
+            "lines": r.lines,
+        });
+        if params.show_lines
+            && let Some(ref content) = r.content {
+                file_obj["lineContent"] = build_line_content_from_matches(content, &r.lines, params.context_lines);
+            }
+        file_obj
+    }).collect();
+
+    let mut summary = build_grep_base_summary(
+        total_files, total_occurrences, &json!(patterns), search_mode,
         index, search_elapsed, ctx, true,
     );
     apply_dir_auto_converted_note(&mut summary, params);

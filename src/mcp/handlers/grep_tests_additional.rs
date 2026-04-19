@@ -480,8 +480,13 @@ fn test_regex_with_spaces_produces_search_mode_note() {
     assert!(summary.get("searchModeNote").is_some(),
         "regex=true with spaces in terms should produce searchModeNote");
     let note = summary["searchModeNote"].as_str().unwrap();
-    assert!(note.contains("tokens which never contain spaces"),
-        "searchModeNote should explain the issue");
+    // The hint was updated when `lineRegex` was added — it now mentions alphanumeric+underscore
+    // tokens (more accurate than the old "tokens which never contain spaces" wording) AND points
+    // to the lineRegex=true escape hatch as the actionable fix.
+    assert!(note.contains("alphanumeric+underscore tokens"),
+        "searchModeNote should explain the token-vs-line mismatch. Got: {}", note);
+    assert!(note.contains("lineRegex=true"),
+        "searchModeNote should suggest lineRegex=true as the actionable fix. Got: {}", note);
 }
 
 #[test]
