@@ -69,6 +69,13 @@
 
 ## Unreleased
 
+### Internal — Reindex Handler Symmetry Cleanup (2026-04-19)
+
+- **Extracted `cross_load_content_index` helper** in `src/mcp/handlers/mod.rs` to mirror the existing `cross_load_definition_index`. Previously `handle_xray_reindex_definitions_inner` cross-loaded the content index inline (~70 lines), while `handle_xray_reindex_inner` already used a helper for definition cross-load. Both handlers are now symmetric.
+- **Unified rollback in second error path** of both `handle_xray_reindex_inner` and `handle_xray_reindex_definitions_inner`. The in-memory write failure branch previously inlined the rollback logic; now both branches call `rollback_workspace_state(ctx, &previous_dir, old_mode, old_generation)` consistently with the first error path.
+- **No behavior change** — pure refactoring for code symmetry and reduced duplication. All 1855 unit tests + 70 E2E tests pass.
+
+
 ### Features / Bug Fixes — Runtime Correctness & Clippy Gate (2026-04-18)
 
 - **P0-1: Worker panic observability** — `ContentIndex` and `DefinitionIndex` now track `worker_panics: usize`, incremented on each worker thread panic during parallel index builds. `xray_info` exposes `workerPanics` and `degraded: true` for any index with panics > 0. Both index versions bumped (`CONTENT_INDEX_VERSION=2`, `DEFINITION_INDEX_VERSION=2`) to force rebuild of old on-disk indexes.
