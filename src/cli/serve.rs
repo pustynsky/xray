@@ -1,6 +1,7 @@
 //! MCP server startup and configuration.
 
-use std::path::PathBuf;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -27,6 +28,109 @@ pub fn cmd_serve(args: ServeArgs) {
         .collect();
     let exts_for_load = extensions.join(",");
 
+    let idx_base = index_dir();
+    init_logging(&args, &dir_str, &exts_for_load, &idx_base);
+
+    // ─── Workspace binding: determine BEFORE index building ───
+    let extensions_vec: Vec<String> = exts_for_load.split(',').map(|s| s.to_string()).collect();
+    let ws_binding = mcp::handlers::determine_initial_binding(&dir_str, &extensions_vec);
+    let is_unresolved = ws_binding.status == mcp::handlers::WorkspaceStatus::Unresolved;
+    if is_unresolved {
+        eprintln!("[startup] Workspace UNRESOLVED (no source files in '{}'), skipping index build", ws_binding.dir);
+    }
+
+    // ─── Async startup flags ───
+    let content_ready = Arc::new(AtomicBool::new(false));
+    let def_ready = Arc::new(AtomicBool::new(false));
+    let file_index_dirty = Arc::new(AtomicBool::new(true));
+    let content_building = Arc::new(AtomicBool::new(false));
+    let def_building = Arc::new(AtomicBool::new(false));
+
+    // ─── Content index: load from disk or build in background ───
+    let index = load_or_build_content_index(
+        &dir_str, &exts_for_load, &extensions, &idx_base,
+        is_unresolved, args.watch, args.respect_git_exclude,
+        &content_ready, &content_building,
+    );
+
+    // ─── Definition index: same async pattern ───
+    let (def_index, def_extensions_vec) = load_or_build_definition_index(
+        &dir_str, &extensions, &idx_base, &exts_for_load,
+        is_unresolved, args.definitions,
+        &def_ready, &def_building,
+    );
+
+    // ─── File watcher ───
+    let watcher_generation = Arc::new(AtomicU64::new(0));
+    if args.watch && !is_unresolved {
+        let watch_dir = std::fs::canonicalize(&dir_str)
+            .unwrap_or_else(|_| PathBuf::from(&dir_str));
+        crate::index::log_memory("serve: starting watcher");
+        if let Err(e) = mcp::watcher::start_watcher(
+            Arc::clone(&index),
+            def_index.as_ref().map(Arc::clone),
+            watch_dir,
+            extensions,
+            args.debounce_ms,
+            idx_base.clone(),
+            Arc::clone(&content_ready),
+            Arc::clone(&def_ready),
+            Arc::clone(&file_index_dirty),
+            Arc::clone(&watcher_generation),
+            0, // initial generation
+        ) {
+            warn!(error = %e, "Failed to start file watcher");
+        }
+    }
+
+    // ─── Git history cache: background build ───
+    let (git_cache, git_cache_ready) = build_git_cache_background(&dir_str, &idx_base, is_unresolved);
+
+    // ─── Detect current branch ───
+    let current_branch = std::process::Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&dir_str)
+        .output()
+        .ok()
+        .and_then(|o| if o.status.success() {
+            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
+        } else { None });
+
+    if let Some(ref branch) = current_branch {
+        info!(branch = %branch, "Detected current branch");
+    }
+
+    let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
+    let file_index = Arc::new(RwLock::new(None));
+
+    let ctx = mcp::handlers::HandlerContext {
+        index,
+        def_index,
+        workspace: Arc::new(RwLock::new(ws_binding)),
+        server_ext: exts_for_load,
+        metrics: args.metrics,
+        index_base: idx_base,
+        max_response_bytes,
+        content_ready,
+        def_ready,
+        git_cache,
+        git_cache_ready,
+        current_branch,
+        def_extensions: def_extensions_vec,
+        file_index,
+        file_index_dirty: Arc::clone(&file_index_dirty),
+        content_building,
+        def_building,
+        watcher_generation,
+        watch_enabled: args.watch,
+        watch_debounce_ms: args.debounce_ms,
+        respect_git_exclude: args.respect_git_exclude,
+    };
+    mcp::server::run_server(ctx);
+    crate::index::log_memory("serve: event loop exited");
+}
+
+fn init_logging(args: &ServeArgs, dir_str: &str, exts_for_load: &str, idx_base: &Path) {
     let log_level = match args.log_level.as_str() {
         "error" => tracing::Level::ERROR,
         "warn" => tracing::Level::WARN,
@@ -42,52 +146,44 @@ pub fn cmd_serve(args: ServeArgs) {
 
     info!(dir = %dir_str, ext = %exts_for_load, "Starting MCP server");
 
-    let idx_base = index_dir();
-
     // Enable debug logging if --debug-log was passed
     if args.debug_log {
-        crate::index::enable_debug_log(&idx_base, &dir_str);
+        crate::index::enable_debug_log(idx_base, dir_str);
     }
     crate::index::log_memory("serve: startup");
 
     // Log CWD and canonical dir for debugging dir-agnostic mode
     let cwd = std::env::current_dir().map(|p| crate::clean_path(&p.to_string_lossy())).unwrap_or_else(|_| "<unknown>".to_string());
-    let canonical_dir = std::fs::canonicalize(&dir_str).map(|p| crate::clean_path(&p.to_string_lossy())).unwrap_or_else(|_| dir_str.clone());
+    let canonical_dir = std::fs::canonicalize(dir_str).map(|p| crate::clean_path(&p.to_string_lossy())).unwrap_or_else(|_| dir_str.to_string());
     eprintln!("[startup] dir={:?}, cwd={}, canonical={}", dir_str, cwd, canonical_dir);
+}
 
+#[allow(clippy::too_many_arguments)]
+fn load_or_build_content_index(
+    dir_str: &str,
+    exts_for_load: &str,
+    extensions: &[String],
+    idx_base: &Path,
+    is_unresolved: bool,
+    watch: bool,
+    respect_git_exclude: bool,
+    content_ready: &Arc<AtomicBool>,
+    content_building: &Arc<AtomicBool>,
+) -> Arc<RwLock<ContentIndex>> {
     // ─── Async startup: create empty indexes, start event loop immediately ───
-    use std::collections::HashMap;
-
-    let content_ready = Arc::new(AtomicBool::new(false));
-    let def_ready = Arc::new(AtomicBool::new(false));
-    let file_index_dirty = Arc::new(AtomicBool::new(true));
-    let content_building = Arc::new(AtomicBool::new(false));
-    let def_building = Arc::new(AtomicBool::new(false));
-
-    // ─── Workspace binding: determine BEFORE index building ───
-    // This prevents building indexes for wrong directory (e.g., VS Code install dir)
-    // when server starts with --dir . and CWD has no source files.
-    let extensions_vec: Vec<String> = exts_for_load.split(',').map(|s| s.to_string()).collect();
-    let ws_binding = mcp::handlers::determine_initial_binding(&dir_str, &extensions_vec);
-    let is_unresolved = ws_binding.status == mcp::handlers::WorkspaceStatus::Unresolved;
-    if is_unresolved {
-        eprintln!("[startup] Workspace UNRESOLVED (no source files in '{}'), skipping index build", ws_binding.dir);
-    }
-
-    // Create an empty ContentIndex so the event loop can start immediately
     let empty_index = ContentIndex {
-        root: dir_str.clone(),
+        root: dir_str.to_string(),
         format_version: 0,
         created_at: 0,
         max_age_secs: 86400,
         files: Vec::new(),
         index: HashMap::new(),
         total_tokens: 0,
-        extensions: extensions.clone(),
+        extensions: extensions.to_vec(),
         file_token_counts: Vec::new(),
         trigram: TrigramIndex::default(),
         trigram_dirty: false,
-        path_to_id: if args.watch { Some(HashMap::new()) } else { None },
+        path_to_id: if watch { Some(HashMap::new()) } else { None },
         read_errors: 0,
         lossy_file_count: 0,
         worker_panics: 0,
@@ -98,7 +194,7 @@ pub fn cmd_serve(args: ServeArgs) {
     // Skip if workspace is Unresolved — no point loading/building indexes for wrong directory.
     let start = Instant::now();
     let direct_load = if is_unresolved { None } else {
-        load_content_index(&dir_str, &exts_for_load, &idx_base).ok()
+        load_content_index(dir_str, exts_for_load, idx_base).ok()
     };
     let load_method;
     let loaded = if direct_load.is_some() {
@@ -106,7 +202,7 @@ pub fn cmd_serve(args: ServeArgs) {
         direct_load
     } else {
         load_method = "fallback";
-        if is_unresolved { None } else { find_content_index_for_dir(&dir_str, &idx_base, &extensions) }
+        if is_unresolved { None } else { find_content_index_for_dir(dir_str, idx_base, extensions) }
     };
 
     if let Some(idx) = loaded {
@@ -124,7 +220,7 @@ pub fn cmd_serve(args: ServeArgs) {
             load_method, idx.files.len(), idx.index.len(),
             idx.trigram.trigram_map.len(), cache_age
         ));
-        let mut idx = if args.watch {
+        let mut idx = if watch {
             mcp::watcher::build_watch_index_from(idx)
         } else {
             idx
@@ -148,13 +244,12 @@ pub fn cmd_serve(args: ServeArgs) {
         });
     } else if !is_unresolved {
         // Build in background — don't block the event loop
-        let bg_index: Arc<RwLock<ContentIndex>> = Arc::clone(&index);
-        let bg_ready = Arc::clone(&content_ready);
-        let bg_building = Arc::clone(&content_building);
-        let bg_dir = dir_str.clone();
-        let bg_ext = exts_for_load.clone();
-        let bg_idx_base = idx_base.clone();
-        let bg_watch = args.watch;
+        let bg_index = Arc::clone(&index);
+        let bg_ready = Arc::clone(content_ready);
+        let bg_building = Arc::clone(content_building);
+        let bg_dir = dir_str.to_string();
+        let bg_ext = exts_for_load.to_string();
+        let bg_idx_base = idx_base.to_path_buf();
 
         std::thread::spawn(move || {
             bg_building.store(true, Ordering::Release);
@@ -166,7 +261,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 ext: bg_ext.clone(),
                 max_age_hours: 24,
                 hidden: false,
-                no_ignore: false, respect_git_exclude: args.respect_git_exclude,
+                no_ignore: false, respect_git_exclude,
                 threads: 0,
                 min_token_len: DEFAULT_MIN_TOKEN_LEN,
             }) {
@@ -203,7 +298,7 @@ pub fn cmd_serve(args: ServeArgs) {
                     warn!(error = %e, "Failed to reload content index from disk, rebuilding");
                     match build_content_index(&ContentIndexArgs {
                         dir: bg_dir, ext: bg_ext,
-                        max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude: args.respect_git_exclude,
+                        max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
                         threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                     }) {
                         Ok(idx) => idx,
@@ -218,7 +313,7 @@ pub fn cmd_serve(args: ServeArgs) {
             };
 
             crate::index::log_memory("serve: after reload content from disk");
-            let mut new_idx = if bg_watch {
+            let mut new_idx = if watch {
                 mcp::watcher::build_watch_index_from(new_idx)
             } else {
                 new_idx
@@ -247,7 +342,20 @@ pub fn cmd_serve(args: ServeArgs) {
         });
     }
 
-    // ─── Definition index: same async pattern ───
+    index
+}
+
+#[allow(clippy::too_many_arguments)]
+fn load_or_build_definition_index(
+    dir_str: &str,
+    extensions: &[String],
+    idx_base: &Path,
+    exts_for_load: &str,
+    is_unresolved: bool,
+    definitions_enabled: bool,
+    def_ready: &Arc<AtomicBool>,
+    def_building: &Arc<AtomicBool>,
+) -> (Option<Arc<RwLock<definitions::DefinitionIndex>>>, Vec<String>) {
     // Use compile-time definition extensions based on enabled Cargo features
     let supported_def_langs = definitions::definition_extensions();
     let def_exts = supported_def_langs.iter()
@@ -257,7 +365,7 @@ pub fn cmd_serve(args: ServeArgs) {
         .join(",");
 
     // Warn about unsupported extensions requested via --ext
-    for ext in &extensions {
+    for ext in extensions {
         let has_parser = supported_def_langs.iter().any(|lang| lang.eq_ignore_ascii_case(ext));
         if !has_parser && ["cs", "ts", "tsx", "sql"].iter().any(|known| known.eq_ignore_ascii_case(ext)) {
             warn!(
@@ -282,10 +390,28 @@ pub fn cmd_serve(args: ServeArgs) {
         def_exts
     };
 
-    let def_index = if args.definitions {
+    // Compute def_extensions for dynamic tool descriptions.
+    // IMPORTANT: use the RAW intersection of --ext and definition_extensions(),
+    // NOT the post-fallback def_exts. The fallback ("cs" when no overlap) is
+    // for index building, but tool descriptions must reflect actual languages.
+    // This matches what server.rs does for render_instructions in initialize.
+    let server_exts_for_desc: Vec<&str> = exts_for_load.split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let def_extensions_vec: Vec<String> = if definitions_enabled {
+        supported_def_langs.iter()
+            .filter(|lang| server_exts_for_desc.iter().any(|e| e.eq_ignore_ascii_case(lang)))
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let def_index = if definitions_enabled {
         // Create an empty DefinitionIndex placeholder
         let empty_def = definitions::DefinitionIndex {
-            root: dir_str.clone(),
+            root: dir_str.to_string(),
             format_version: 0,
             created_at: 0,
             extensions: def_exts.split(',').map(|s| s.to_string()).collect(),
@@ -313,7 +439,7 @@ pub fn cmd_serve(args: ServeArgs) {
         let def_start = Instant::now();
         let def_ext_vec: Vec<String> = def_exts.split(',').map(|s| s.to_string()).collect();
         let def_direct = if is_unresolved { None } else {
-            definitions::load_definition_index(&dir_str, &def_exts, &idx_base).ok()
+            definitions::load_definition_index(dir_str, &def_exts, idx_base).ok()
         };
         let def_load_method;
         let def_loaded = if def_direct.is_some() {
@@ -321,7 +447,7 @@ pub fn cmd_serve(args: ServeArgs) {
             def_direct
         } else {
             def_load_method = "fallback";
-            if is_unresolved { None } else { definitions::find_definition_index_for_dir(&dir_str, &idx_base, &def_ext_vec) }
+            if is_unresolved { None } else { definitions::find_definition_index_for_dir(dir_str, idx_base, &def_ext_vec) }
         };
 
         if let Some(idx) = def_loaded {
@@ -348,11 +474,11 @@ pub fn cmd_serve(args: ServeArgs) {
         } else if !is_unresolved {
             // Build in background
             let bg_def = Arc::clone(&def_arc);
-            let bg_def_ready = Arc::clone(&def_ready);
-            let bg_def_building = Arc::clone(&def_building);
-            let bg_dir = dir_str.clone();
+            let bg_def_ready = Arc::clone(def_ready);
+            let bg_def_building = Arc::clone(def_building);
+            let bg_dir = dir_str.to_string();
             let bg_def_exts = def_exts.clone();
-            let bg_idx_base = idx_base.clone();
+            let bg_idx_base = idx_base.to_path_buf();
 
             std::thread::spawn(move || {
                 bg_def_building.store(true, Ordering::Release);
@@ -413,39 +539,22 @@ pub fn cmd_serve(args: ServeArgs) {
         None
     };
 
-    // Start file watcher if --watch (only after content index is available)
-    // Watcher works fine with an empty index — it will update it as files change.
-    let watcher_generation = Arc::new(AtomicU64::new(0));
-    if args.watch && !is_unresolved {
-        let watch_dir = std::fs::canonicalize(&dir_str)
-            .unwrap_or_else(|_| PathBuf::from(&dir_str));
-        crate::index::log_memory("serve: starting watcher");
-        if let Err(e) = mcp::watcher::start_watcher(
-            Arc::clone(&index),
-            def_index.as_ref().map(Arc::clone),
-            watch_dir,
-            extensions,
-            args.debounce_ms,
-            idx_base.clone(),
-            Arc::clone(&content_ready),
-            Arc::clone(&def_ready),
-            Arc::clone(&file_index_dirty),
-            Arc::clone(&watcher_generation),
-            0, // initial generation
-        ) {
-            warn!(error = %e, "Failed to start file watcher");
-        }
-    }
+    (def_index, def_extensions_vec)
+}
 
-    // ─── Git history cache: background build ───
+fn build_git_cache_background(
+    dir_str: &str,
+    idx_base: &Path,
+    is_unresolved: bool,
+) -> (Arc<RwLock<Option<GitHistoryCache>>>, Arc<AtomicBool>) {
     let git_cache: Arc<RwLock<Option<GitHistoryCache>>> = Arc::new(RwLock::new(None));
     let git_cache_ready = Arc::new(AtomicBool::new(false));
 
     if !is_unresolved {
         let bg_git_cache = Arc::clone(&git_cache);
         let bg_git_ready = Arc::clone(&git_cache_ready);
-        let bg_dir = dir_str.clone();
-        let bg_idx_base = idx_base.clone();
+        let bg_dir = dir_str.to_string();
+        let bg_idx_base = idx_base.to_path_buf();
 
         std::thread::spawn(move || {
             let start = Instant::now();
@@ -578,68 +687,7 @@ pub fn cmd_serve(args: ServeArgs) {
         });
     }
 
-    // ─── Detect current branch ───
-    let current_branch = std::process::Command::new("git")
-        .args(["rev-parse", "--abbrev-ref", "HEAD"])
-        .current_dir(&dir_str)
-        .output()
-        .ok()
-        .and_then(|o| if o.status.success() {
-            String::from_utf8(o.stdout).ok().map(|s| s.trim().to_string())
-        } else { None });
-
-    if let Some(ref branch) = current_branch {
-        info!(branch = %branch, "Detected current branch");
-    }
-
-    let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
-    // Compute def_extensions for dynamic tool descriptions.
-    // IMPORTANT: use the RAW intersection of --ext and definition_extensions(),
-    // NOT the post-fallback def_exts. The fallback ("cs" when no overlap) is
-    // for index building, but tool descriptions must reflect actual languages.
-    // This matches what server.rs does for render_instructions in initialize.
-    // Parse server ext from exts_for_load (String) since extensions (Vec<String>)
-    // was moved into start_watcher above.
-    let server_exts_for_desc: Vec<&str> = exts_for_load.split(',')
-        .map(|s| s.trim())
-        .filter(|s| !s.is_empty())
-        .collect();
-    let def_extensions_vec: Vec<String> = if args.definitions {
-        supported_def_langs.iter()
-            .filter(|lang| server_exts_for_desc.iter().any(|e| e.eq_ignore_ascii_case(lang)))
-            .map(|s| s.to_string())
-            .collect()
-    } else {
-        Vec::new()
-    };
-
-    let file_index = Arc::new(RwLock::new(None));
-
-    let ctx = mcp::handlers::HandlerContext {
-        index,
-        def_index,
-        workspace: Arc::new(RwLock::new(ws_binding)),
-        server_ext: exts_for_load,
-        metrics: args.metrics,
-        index_base: idx_base,
-        max_response_bytes,
-        content_ready,
-        def_ready,
-        git_cache,
-        git_cache_ready,
-        current_branch,
-        def_extensions: def_extensions_vec,
-        file_index,
-        file_index_dirty: Arc::clone(&file_index_dirty),
-        content_building,
-        def_building,
-        watcher_generation,
-        watch_enabled: args.watch,
-        watch_debounce_ms: args.debounce_ms,
-        respect_git_exclude: args.respect_git_exclude,
-    };
-    mcp::server::run_server(ctx);
-    crate::index::log_memory("serve: event loop exited");
+    (git_cache, git_cache_ready)
 }
 
 /// Format a cache age as a human-readable string (e.g., "2h 15m", "5m", "3d 1h").
@@ -671,5 +719,56 @@ fn format_cache_age(created_at: u64) -> String {
         } else {
             format!("{}d", days)
         }
+    }
+}
+
+
+#[cfg(test)]
+mod serve_format_cache_age_tests {
+    use super::format_cache_age;
+
+    /// Helper: convert a desired age (seconds) into a fake `created_at`
+    /// timestamp such that `format_cache_age(ts)` will report exactly that age.
+    fn ts_for_age(age_secs: u64) -> u64 {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        now.saturating_sub(age_secs)
+    }
+
+    /// E1 — `format_cache_age` must produce the expected human-readable string
+    /// at every boundary of the seconds → minutes → hours → days transitions.
+    /// Regression: refactoring the if/else ladder into separate fns risks
+    /// off-by-one at boundaries (e.g., `<=` vs `<`, or returning "60s" instead
+    /// of "1m" at exactly 60 seconds).
+    #[test]
+    fn test_format_cache_age_boundaries() {
+        // Sub-minute: returns Ns
+        assert_eq!(format_cache_age(ts_for_age(0)),  "0s",  "0 seconds → '0s'");
+        assert_eq!(format_cache_age(ts_for_age(1)),  "1s",  "1 second → '1s'");
+        assert_eq!(format_cache_age(ts_for_age(59)), "59s", "59 seconds → '59s' (just under minute boundary)");
+
+        // Minute boundary: 60s → '1m', NOT '60s'
+        assert_eq!(format_cache_age(ts_for_age(60)),   "1m",  "60 seconds → '1m' (minute boundary)");
+        assert_eq!(format_cache_age(ts_for_age(61)),   "1m",  "61 seconds → '1m' (truncates seconds)");
+        assert_eq!(format_cache_age(ts_for_age(120)),  "2m",  "120 seconds → '2m'");
+        assert_eq!(format_cache_age(ts_for_age(3599)), "59m", "3599 seconds → '59m' (just under hour boundary)");
+
+        // Hour boundary: 3600s → '1h', NOT '60m'
+        assert_eq!(format_cache_age(ts_for_age(3600)), "1h",      "3600 seconds → '1h' (hour boundary, no minutes)");
+        assert_eq!(format_cache_age(ts_for_age(3660)), "1h 1m",   "3660 seconds → '1h 1m' (hour + remainder minutes)");
+        assert_eq!(format_cache_age(ts_for_age(7320)), "2h 2m",   "7320 seconds → '2h 2m'");
+        assert_eq!(format_cache_age(ts_for_age(86_399)), "23h 59m", "86399 seconds → '23h 59m' (just under day boundary)");
+
+        // Day boundary: 86400s → '1d', NOT '24h'
+        assert_eq!(format_cache_age(ts_for_age(86_400)),  "1d",     "86400 seconds → '1d' (day boundary, no hours)");
+        assert_eq!(format_cache_age(ts_for_age(90_000)),  "1d 1h",  "90000 seconds → '1d 1h' (day + remainder hours)");
+        assert_eq!(format_cache_age(ts_for_age(176_400)), "2d 1h",  "176400 seconds → '2d 1h'");
+
+        // Far future: created_at in the future yields age=0 via saturating_sub
+        let future_ts = ts_for_age(0).saturating_add(10_000);
+        assert_eq!(format_cache_age(future_ts), "0s",
+            "Future timestamps must clamp to '0s' (regression: integer underflow on now - future)");
     }
 }

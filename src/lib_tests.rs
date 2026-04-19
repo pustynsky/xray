@@ -768,22 +768,6 @@ fn test_decode_utf16be_empty() {
 
 
 #[test]
-fn test_worker_panics_preserved_in_serialization_roundtrip() {
-    // Regression test for P0-1: worker_panics must survive bincode round-trip
-    let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path().to_string_lossy().to_string();
-    let mut index = ContentIndex::default();
-    index.root = dir.clone();
-    index.format_version = crate::CONTENT_INDEX_VERSION;
-    index.worker_panics = 3;
-
-    let idx_base = tmp.path().to_string_lossy().to_string();
-    crate::save_content_index(&index, &idx_base).expect("save failed");
-    let loaded = crate::load_content_index(&dir, "", &idx_base).expect("load failed");
-    assert_eq!(loaded.worker_panics, 3, "worker_panics must survive save/load round-trip");
-}
-
-#[test]
 fn test_worker_panics_default_is_zero() {
     let index = ContentIndex::default();
     assert_eq!(index.worker_panics, 0);

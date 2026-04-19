@@ -1290,3 +1290,19 @@ fn test_cleanup_stale_same_root_does_not_clean_other_roots() {
     // Should still have 2 indexes: new project_a + untouched project_b
     assert_eq!(count_ws(), 2, "Should still have 2 content indexes (cleanup only affects same root)");
 }
+
+#[test]
+fn test_worker_panics_preserved_in_serialization_roundtrip() {
+    // Regression test for P0-1: worker_panics must survive bincode round-trip
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().to_string_lossy().to_string();
+    let mut index = code_xray::ContentIndex::default();
+    index.root = dir.clone();
+    index.format_version = code_xray::CONTENT_INDEX_VERSION;
+    index.worker_panics = 3;
+
+    let idx_base = tmp.path();
+    crate::save_content_index(&index, idx_base).expect("save failed");
+    let loaded = crate::load_content_index(&dir, "", idx_base).expect("load failed");
+    assert_eq!(loaded.worker_panics, 3, "worker_panics must survive save/load round-trip");
+}
