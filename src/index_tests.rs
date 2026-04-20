@@ -1423,3 +1423,100 @@ fn test_cleanup_stale_same_root_case_insensitive_on_windows() {
             "On Unix, different-case root means different logical dir — must NOT be removed");
     }
 }
+
+// ─── Bincode field-order contract: roundtrip tests for header readers ─────
+//
+// Resolves MAJOR-5 from the 2026-04-20 full-snapshot review: the readers
+// `read_root_from_index_file` and `read_format_version_from_index_file`
+// rely on a non-obvious contract — `root: String` MUST be the first bincode
+// field, and `format_version: u32` MUST be the second. Reordering fields in
+// `FileIndex` / `ContentIndex` / `DefinitionIndex` would silently break the
+// fast version-check path (returns garbled values) without any compile-time
+// or test-time signal. These tests fail loudly if anyone reorders fields,
+// encoding the contract executably.
+
+#[test]
+fn test_read_root_from_file_index_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("sample.file-list");
+
+    let idx = code_xray::FileIndex {
+        root: "C:/Repos/SomeProject".to_string(),
+        created_at: 1_700_000_000,
+        max_age_secs: 86_400,
+        entries: Vec::new(),
+    };
+
+    crate::index::save_compressed(&path, &idx, "test-file-index")
+        .expect("save_compressed must succeed");
+
+    let read_root = crate::index::read_root_from_index_file_pub(&path);
+    assert_eq!(read_root.as_deref(), Some("C:/Repos/SomeProject"),
+        "FileIndex.root must be the first bincode field — reorder = broken header reader");
+}
+
+#[test]
+fn test_read_root_and_version_from_content_index_roundtrip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("sample.word-search");
+
+    let mut idx = code_xray::ContentIndex::default();
+    idx.root = "D:/some/workspace".to_string();
+    idx.format_version = code_xray::CONTENT_INDEX_VERSION;
+    idx.max_age_secs = 86_400;
+
+    crate::index::save_compressed(&path, &idx, "test-content-index")
+        .expect("save_compressed must succeed");
+
+    let read_root = crate::index::read_root_from_index_file_pub(&path);
+    assert_eq!(read_root.as_deref(), Some("D:/some/workspace"),
+        "ContentIndex.root must be the first bincode field");
+
+    let read_version = crate::index::read_format_version_from_index_file(&path);
+    assert_eq!(read_version, Some(code_xray::CONTENT_INDEX_VERSION),
+        "ContentIndex.format_version must be the second bincode field (immediately after root) — reorder = silently broken stale-index detection");
+}
+
+#[test]
+fn test_read_root_and_version_from_definition_index_roundtrip() {
+    use crate::definitions::DefinitionIndex;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("sample.code-structure");
+
+    let mut idx = DefinitionIndex::default();
+    idx.root = "E:/code/proj".to_string();
+    idx.format_version = crate::definitions::DEFINITION_INDEX_VERSION;
+
+    crate::index::save_compressed(&path, &idx, "test-definition-index")
+        .expect("save_compressed must succeed");
+
+    let read_root = crate::index::read_root_from_index_file_pub(&path);
+    assert_eq!(read_root.as_deref(), Some("E:/code/proj"),
+        "DefinitionIndex.root must be the first bincode field");
+
+    let read_version = crate::index::read_format_version_from_index_file(&path);
+    assert_eq!(read_version, Some(crate::definitions::DEFINITION_INDEX_VERSION),
+        "DefinitionIndex.format_version must be the second bincode field");
+}
+
+/// Sanity check: round-tripping a non-default version value confirms the
+/// reader picks up the actual stored bytes, not a constant. If the version
+/// field were repositioned, this test would either return None or read
+/// garbage from neighbouring fields.
+#[test]
+fn test_read_format_version_picks_up_stored_value_not_constant() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("sample.word-search");
+
+    let mut idx = code_xray::ContentIndex::default();
+    idx.root = "X".to_string();
+    idx.format_version = 0xDEAD_BEEF; // distinct sentinel, NOT the live constant
+
+    crate::index::save_compressed(&path, &idx, "sentinel")
+        .expect("save_compressed must succeed");
+
+    let read_version = crate::index::read_format_version_from_index_file(&path);
+    assert_eq!(read_version, Some(0xDEAD_BEEFu32),
+        "version reader must return the actually-stored u32, not a constant or stale read");
+}
