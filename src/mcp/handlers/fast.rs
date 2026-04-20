@@ -305,42 +305,29 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // Load file index from in-memory cache (with dirty-flag invalidation).
     // If dirty or not yet built → rebuild from filesystem (~35ms for 100K files).
     // Otherwise use cached in-memory index (~0ms).
-    //
-    // Special case: when dir is outside server_dir, build a one-off index
-    // for that directory (not cached in memory).
     let server_dir = ctx.server_dir();
-    // `dir_is_outside` decides whether to reuse the cached in-memory file index
-    // (when `dir` is inside server_dir) or to build a one-off index for an external
-    // directory. We use `code_xray::is_path_within` so that symlinked subdirectories
-    // (e.g., `docs/personal` → `D:\Personal\…`) are correctly recognised as
-    // *inside* the workspace — otherwise plain `canonicalize()` would resolve the
-    // symlink to its target and falsely classify the request as cross-project,
-    // forcing a slow disk-index rebuild on every call.
-    let dir_is_outside = !code_xray::is_path_within(&params.dir, &ctx.canonical_server_dir());
+    // Workspace-boundary security gate (MAJOR-14): reject any `dir` that points
+    // outside the server's `--dir`. Without this check, `xray_fast` was the only
+    // MCP tool that *built and saved* a fresh file-list index for any directory
+    // the caller asked for — letting an agent enumerate arbitrary host paths
+    // (e.g. `xray_fast { dir: "C:\\Users\\victim" }`) and persist the listing
+    // to `%LOCALAPPDATA%\\xray`. All other tools (`xray_grep`, `xray_definitions`,
+    // `xray_callers`) reject outside-dir requests via `validate_search_dir`;
+    // this brings `xray_fast` to the same boundary.
+    //
+    // `code_xray::is_path_within` performs a logical-first comparison (matching
+    // the indexer's `WalkBuilder::follow_links` view) and falls back to canonical
+    // comparison when the input contains `..` segments — so symlinked
+    // subdirectories inside the workspace (e.g. `docs/personal -> D:\\Personal\\…`)
+    // remain searchable while genuine escapes are rejected.
+    if !code_xray::is_path_within(&params.dir, &ctx.canonical_server_dir()) {
+        return ToolCallResult::error(format!(
+            "Server started with --dir {}. For other directories, start another server instance or use CLI.",
+            server_dir
+        ));
+    }
 
-    let index = if dir_is_outside {
-        // Outside server_dir: try loading from disk, fall back to build+save.
-        // Not cached in memory (it's for a different directory), but saved to disk
-        // so repeated calls to the same outside dir are fast.
-        match crate::load_index(&params.dir, &ctx.index_base) {
-            Ok(idx) => idx,
-            Err(_) => {
-                info!(dir = %params.dir, "Building file-list index for outside directory");
-                let new_index = match crate::build_index(&crate::IndexArgs {
-                    dir: params.dir.clone(),
-                    max_age_hours: 24,
-                    hidden: false,
-                    no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
-                    threads: 0,
-                }) {
-                    Ok(idx) => idx,
-                    Err(e) => return ToolCallResult::error(format!("Failed to build file index: {}", e)),
-                };
-                let _ = crate::save_index(&new_index, &ctx.index_base);
-                new_index
-            }
-        }
-    } else {
+    let index = {
         // Inside server_dir (or same): use in-memory cache
         let needs_rebuild = ctx.file_index_dirty.load(Ordering::Relaxed)
             || ctx.file_index.read().map(|fi| fi.is_none()).unwrap_or(true);

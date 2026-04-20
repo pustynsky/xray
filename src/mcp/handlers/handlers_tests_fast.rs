@@ -362,7 +362,7 @@ fn test_xray_fast_subdir_reuses_parent_index() {
 /// Verify that xray_fast still auto-builds an index when dir is genuinely
 /// outside the server_dir (not a subdirectory).
 #[test]
-fn test_xray_fast_outside_dir_still_builds_index() {
+fn test_xray_fast_outside_dir_is_rejected() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -395,23 +395,27 @@ fn test_xray_fast_outside_dir_still_builds_index() {
         ..Default::default()
     };
 
-    // Call xray_fast with dir pointing OUTSIDE server_dir
+    // Call xray_fast with dir pointing OUTSIDE server_dir — since MAJOR-14 fix,
+    // this MUST be rejected (no silent disk-index build for arbitrary paths).
     let result = handle_xray_fast(&ctx, &json!({
         "pattern": "*",
         "dir": other_str
     }));
-    assert!(!result.is_error, "xray_fast with outside dir should succeed: {}", result.content[0].text);
-    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
-        "Should find files in the outside directory");
+    assert!(result.is_error,
+        "xray_fast must reject outside-server_dir requests, got success: {}", result.content[0].text);
+    let body = &result.content[0].text;
+    assert!(
+        body.contains("Server started with --dir"),
+        "error message should mention server --dir boundary, got: {}", body
+    );
 
-    // Outside-dir index is saved to disk (for fast repeated access).
+    // No outside-dir index should have been persisted to disk.
     let file_list_count: usize = std::fs::read_dir(&idx_base).unwrap()
         .filter(|e| e.as_ref().unwrap().path().extension()
             .is_some_and(|ext| ext == "file-list"))
         .count();
-    assert_eq!(file_list_count, 2,
-        "Should have 2 file-list indexes (server_dir + other_dir), got {}", file_list_count);
+    assert_eq!(file_list_count, 1,
+        "only the server_dir file-list should exist (no outside-dir leak), got {}", file_list_count);
 
     cleanup_tmp(&server_dir);
     cleanup_tmp(&other_dir);
@@ -1998,4 +2002,31 @@ fn test_xray_fast_subdir_filter_through_symlinked_subdir() {
     );
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+// ─── Security: workspace boundary enforcement (MAJOR-14) ────────────────────
+
+#[test]
+fn test_xray_fast_rejects_outside_server_dir() {
+    // Server bound to one workspace; ask `xray_fast` to enumerate an unrelated
+    // directory. Without the boundary check, this would build and persist a
+    // fresh file-list index for the outside path (MAJOR-14 information disclosure).
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_dir = outside.path().to_string_lossy().to_string();
+
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": outside_dir,
+    }));
+
+    assert!(result.is_error, "Outside dir must be rejected, got success: {}", result.content[0].text);
+    let body = &result.content[0].text;
+    assert!(
+        body.contains("Server started with --dir"),
+        "Error should mention server --dir boundary, got: {}",
+        body
+    );
+
+    cleanup_tmp(&tmp);
 }
