@@ -51,69 +51,79 @@ pub(crate) fn normalize_path_sep(p: &str) -> String {
     p.replace('\\', "/")
 }
 
-/// Validate that `requested_dir` is the server dir or a subdirectory of it.
-/// Returns `Ok(None)` if exact match (no filtering needed),
-/// `Ok(Some(canonical_subdir))` if it's a proper subdirectory (use as filter),
-/// or `Err(message)` if outside the server dir.
-/// Resolve a potentially relative directory path to absolute, using server_dir as base.
-/// Absolute paths pass through unchanged. Relative paths are joined with server_dir.
-/// Uses canonicalize when possible to resolve symlinks and normalize the path.
+/// Resolve `dir` to a logical absolute path under `server_dir`, mirroring the
+/// indexer's `WalkBuilder::follow_links(true)` view: a file reached via
+/// `<server_dir>/<symlinked_subdir>/foo` keeps that logical path even when the
+/// underlying directory is a symlink to somewhere outside the workspace.
+///
+/// Behavior:
+/// - Absolute input → cleaned path-as-given (separator normalization only).
+/// - `"."` → `clean_path(server_dir)`.
+/// - Relative input → `<clean_path(server_dir)>/<input>` (joined as text).
+///
+/// **Never calls `canonicalize`**, so it is safe for security-critical
+/// comparisons that must remain consistent with what the indexer recorded
+/// (e.g. boundary checks via [`code_xray::is_path_within`], path-prefix filters
+/// on cached index entries). Symlink resolution would silently break those
+/// comparisons because the indexer keeps logical paths but `canonicalize`
+/// returns the symlink target.
 pub(crate) fn resolve_dir_to_absolute(dir: &str, server_dir: &str) -> String {
     let normalized = dir.replace('\\', "/");
     if std::path::Path::new(dir).is_absolute() {
-        // Already absolute — just canonicalize for normalization
-        std::fs::canonicalize(dir)
-            .map(|p| clean_path(&p.to_string_lossy()))
-            .unwrap_or_else(|_| normalized)
+        clean_path(&normalized)
     } else if dir == "." {
-        // Dot path = server_dir itself
-        server_dir.to_string()
+        clean_path(server_dir)
     } else {
-        // Relative path — resolve against server_dir
-        let full = format!(
+        format!(
             "{}/{}",
-            server_dir.replace('\\', "/").trim_end_matches('/'),
-            normalized.trim_matches('/')
-        );
-        std::fs::canonicalize(&full)
-            .map(|p| clean_path(&p.to_string_lossy()))
-            .unwrap_or(full)
+            clean_path(server_dir).trim_end_matches('/'),
+            normalized.trim_matches('/'),
+        )
     }
 }
 
+/// Validate that `requested_dir` is inside the workspace and decide whether the
+/// caller needs a subdirectory filter on the cached index entries.
+///
+/// Returns:
+/// - `Ok(None)` — request targets the workspace root itself; no filter needed.
+/// - `Ok(Some(logical_abs))` — request targets a subdirectory; downstream uses
+///   the returned LOGICAL absolute path as a path-prefix filter on indexed
+///   entries (so it correctly matches files reached via symlinked subdirs).
+/// - `Err(message)` — request targets a path outside the workspace.
 pub(crate) fn validate_search_dir(requested_dir: &str, server_dir: &str) -> Result<Option<String>, String> {
-    // Pre-resolve relative paths against server_dir before canonicalize
-    let requested_dir = resolve_dir_to_absolute(requested_dir, server_dir);
-    let requested = std::fs::canonicalize(&requested_dir)
-        .map(|p| clean_path(&p.to_string_lossy()))
-        .unwrap_or_else(|_| requested_dir.to_string());
-    // Note: server_dir is already canonical when coming from HandlerContext::server_dir().
-    // The canonicalize here is a safety fallback for direct callers.
-    let server = std::fs::canonicalize(server_dir)
-        .map(|p| clean_path(&p.to_string_lossy()))
-        .unwrap_or_else(|_| server_dir.to_string());
+    // Step 1: Build a *logical* absolute form of the requested path — i.e. the
+    // path as the indexer would see it via `WalkBuilder::follow_links`, NOT the
+    // symlink target. We do not call `canonicalize` here, otherwise a symlinked
+    // subdirectory like `docs/personal` would be resolved to its real target
+    // (e.g. `D:\Personal\…`) and:
+    //   (a) the validation below would reject it as outside the workspace, and
+    //   (b) any returned subdir filter would no longer match the indexed entries.
+    let logical_abs = resolve_dir_to_absolute(requested_dir, server_dir);
 
-    let req_norm = normalize_path_sep(&requested).to_lowercase();
-    let srv_norm = normalize_path_sep(&server).to_lowercase();
-
-    if req_norm == srv_norm {
-        Ok(None)
-    } else if req_norm.starts_with(&srv_norm) {
-        // Verify it's a true subdirectory (next char must be '/')
-        let next_char = req_norm.as_bytes().get(srv_norm.len());
-        if next_char == Some(&b'/') {
-            Ok(Some(requested))
-        } else {
-            Err(format!(
-                "Server started with --dir {}. For other directories, start another server instance or use CLI.",
-                server_dir
-            ))
-        }
-    } else {
-        Err(format!(
+    // Step 2: Workspace boundary check via `code_xray::is_path_within`, which
+    // performs logical-path comparison first (matching the indexer) and falls
+    // back to canonicalize-based comparison only when needed (8.3 short names,
+    // path-traversal validation for inputs containing `..`).
+    if !code_xray::is_path_within(&logical_abs, server_dir) {
+        return Err(format!(
             "Server started with --dir {}. For other directories, start another server instance or use CLI.",
             server_dir
-        ))
+        ));
+    }
+
+    // Step 3: Decide whether the request targets the workspace root itself
+    // (return `None` — no subdir filter needed) or a subdirectory (return
+    // `Some(logical_abs)` — downstream uses it as a path-prefix filter).
+    let req_norm = normalize_path_sep(&logical_abs).to_lowercase();
+    let srv_norm = normalize_path_sep(server_dir).to_lowercase();
+    let req_trim = req_norm.trim_end_matches('/');
+    let srv_trim = srv_norm.trim_end_matches('/');
+
+    if req_trim == srv_trim {
+        Ok(None)
+    } else {
+        Ok(Some(logical_abs))
     }
 }
 

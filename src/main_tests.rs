@@ -838,3 +838,111 @@
             "Case-insensitive phrase match should work"
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // Tests for `code_xray::is_path_within` — symlink-aware workspace
+    // boundary check used by xray_edit (sync reindex), xray_fast (cache reuse),
+    // and xray_grep (validate_search_dir).
+    //
+    // Regression: previously each call site canonicalized the input path,
+    // which resolved symlinked subdirectories like `docs/personal` to their
+    // real target (e.g. `D:\Personal`) and falsely classified them as outside
+    // the workspace. `is_path_within` does a logical comparison first to match
+    // what the indexer (`WalkBuilder::follow_links`) actually sees on disk.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_is_path_within_through_symlinked_subdir() {
+        // Setup: <tmp>/root + <tmp>/external/file.md, then root/personal -> external.
+        // A file accessed via root/personal/file.md must be classified as
+        // belonging to root (the indexer sees it under the logical path).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let external = tmp.path().join("external");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&external).unwrap();
+        fs::write(external.join("file.md"), "# external doc").unwrap();
+
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(&external, root.join("personal")).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&external, root.join("personal")).unwrap();
+
+        let logical_path = root.join("personal").join("file.md");
+        let logical_str = logical_path.to_string_lossy().to_string();
+        let root_str = root.to_string_lossy().to_string();
+
+        assert!(
+            code_xray::is_path_within(&logical_str, &root_str),
+            "File reached via symlinked subdir must be inside workspace. \
+             logical_path={}, root={}",
+            logical_str, root_str
+        );
+    }
+
+    #[test]
+    fn test_is_path_within_genuine_outside_rejected() {
+        // Two real sibling directories — one is NOT a subdirectory of the other.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let outside = tmp.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("file.md"), "x").unwrap();
+
+        let outside_file = outside.join("file.md").to_string_lossy().to_string();
+        let root_str = root.to_string_lossy().to_string();
+
+        assert!(
+            !code_xray::is_path_within(&outside_file, &root_str),
+            "Sibling-directory file must NOT be classified inside workspace. \
+             outside_file={}, root={}",
+            outside_file, root_str
+        );
+    }
+
+    #[test]
+    fn test_is_path_within_traversal_rejected() {
+        // Path containing `..` segments that escape the workspace must be
+        // rejected even when the textual prefix happens to match (the helper
+        // forces a canonical fallback whenever `..` is present).
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        let sub = root.join("sub");
+        fs::create_dir_all(&sub).unwrap();
+        // Real file outside root that the traversal resolves to.
+        fs::write(tmp.path().join("escape.txt"), "x").unwrap();
+
+        let traversal = sub.join("..").join("..").join("escape.txt");
+        let traversal_str = traversal.to_string_lossy().to_string();
+        let root_str = root.to_string_lossy().to_string();
+
+        assert!(
+            !code_xray::is_path_within(&traversal_str, &root_str),
+            "Path traversal escaping workspace must be rejected. \
+             traversal={}, root={}",
+            traversal_str, root_str
+        );
+    }
+
+    #[test]
+    fn test_is_path_within_exact_root_accepted() {
+        // The workspace root itself is considered "within" the workspace.
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("root");
+        fs::create_dir_all(&root).unwrap();
+        let root_str = root.to_string_lossy().to_string();
+
+        assert!(
+            code_xray::is_path_within(&root_str, &root_str),
+            "Workspace root itself must be inside the workspace. root={}",
+            root_str
+        );
+        // Also accept root with trailing slash.
+        let with_slash = format!("{}/", root_str);
+        assert!(
+            code_xray::is_path_within(&with_slash, &root_str),
+            "Workspace root with trailing slash must be inside the workspace."
+        );
+    }
+

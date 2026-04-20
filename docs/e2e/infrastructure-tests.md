@@ -714,3 +714,26 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 **Unit tests:** N/A (CI gate)
 
 ---
+
+### T-SYMLINK-SUBDIR: Symlinked subdirectory operations across MCP path checks (2026-04-20)
+
+**What changed:** Five MCP-tool path checks (`classify_for_sync_reindex` in `edit.rs`, `dir_is_outside` in `fast.rs`, `validate_search_dir` + `resolve_dir_to_absolute` in `utils.rs`, `subdir_entry_filter` in `fast.rs`) previously called `std::fs::canonicalize()` for path comparison. Since the indexer uses logical paths via `WalkBuilder::follow_links(true)`, canonicalize-based checks falsely rejected symlinked subdirectories (the canonical real path lies outside the workspace root). All five sites now use logical-first comparison via the new `code_xray::is_path_within` helper (with canonical fallback only for 8.3 short names and `..` traversal protection). `subdir_entry_filter` builds its prefix from logical `clean_path`, with a canonical-equivalence fallback only for the boolean "is dir ≡ root?" decision.
+
+**Manual test scenario:**
+1. Create a symlinked subdirectory under the workspace root:
+   ```powershell
+   # As Administrator (or with developer mode enabled)
+   New-Item -ItemType SymbolicLink -Path C:\Repos\Xray\docs\personal -Target D:\Personal\xray-notes
+   ```
+2. Add a `.md` file inside the symlink target.
+3. With xray serving `C:\Repos\Xray`, run from an MCP client:
+   - `xray_edit path='docs/personal/note.md' operations=[...]` — must succeed (no `skippedReason: outsideServerDir`); response includes `contentIndexUpdated: true`.
+   - `xray_fast pattern='*' dir='docs/personal'` — must return the file (no `dir_is_outside`).
+   - `xray_grep terms='...' dir='docs/personal'` — must search the symlinked tree (no `directory is outside workspace`).
+
+**Expected:** All three calls succeed against the symlinked subdir, mirroring behavior on regular subdirectories. The `xray_edit` real-write path also performs sync reindex (response includes `contentIndexUpdated: true`).
+
+**Unit tests:** `test_is_path_within_logical_match`, `test_is_path_within_through_symlink`, `test_is_path_within_traversal_protection`, `test_classify_for_sync_reindex_through_symlinked_subdir`, `test_dir_is_outside_through_symlinked_subdir`, `test_validate_search_dir_through_symlinked_subdir`, `test_resolve_dir_to_absolute_through_symlinked_subdir`, `test_xray_fast_subdir_filter_through_symlinked_subdir` (9 total, gated on `#[cfg(windows)]` where they create real symlinks via `std::os::windows::fs::symlink_dir`).
+
+---
+
