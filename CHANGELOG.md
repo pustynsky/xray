@@ -74,6 +74,22 @@
 
 ## Unreleased
 
+### Bug Fixes — Symlinked subdirectory support across MCP path checks (2026-04-20)
+
+- **Symptom** — `xray_edit`, `xray_fast`, and `xray_grep` invoked against a symlinked subdirectory under the workspace root (e.g., `docs/personal` → `D:\Personal\…`) returned `skippedReason: "outsideServerDir"`, `dir_is_outside`, `"directory is outside workspace"`, or empty result sets — even though the indexer correctly walked the symlinked tree and stored entries under their logical paths.
+- **Root cause** — Asymmetry between indexer and downstream MCP-tool path checks. The indexer uses `WalkBuilder::follow_links(true)`, which traverses symlinks but reports **logical** paths under the workspace root. Five downstream sites called `std::fs::canonicalize()` for comparison, which on Windows resolves symlink targets (and adds `\\?\` UNC prefix). The canonical real path of a symlinked subdir lies outside the workspace root → false rejection / mismatched filter prefix.
+- **Fix** — Logical-first comparison everywhere, with canonical fallback only for genuine edge cases (8.3 short names, `..` traversal validation, root equality):
+  - **New helper `code_xray::is_path_within(path, root)`** (`src/lib.rs`) — does logical (clean_path-based, case-insensitive) prefix comparison first, falls back to canonicalization only when the logical check fails. Includes `..` traversal protection.
+  - **`classify_for_sync_reindex`** (`src/mcp/handlers/edit.rs`) — uses `is_path_within` instead of `canonicalize` + prefix-check. Fixes `xray_edit` returning `outsideServerDir` for symlinked targets.
+  - **`dir_is_outside`** (`src/mcp/handlers/fast.rs`) — uses `is_path_within`. Fixes `xray_fast` rejecting symlinked subdirs.
+  - **`validate_search_dir`** (`src/mcp/handlers/utils.rs`) — uses `is_path_within`. Fixes `xray_grep` and other tools that share the search-dir validator.
+  - **`resolve_dir_to_absolute`** (`src/mcp/handlers/utils.rs`) — refactored to logical-only resolution (no canonicalize). Eliminated the previous `build_logical_absolute_path` near-duplicate. This fix was necessary because the function ran *before* `is_path_within`, so a canonicalized output would have rendered the fast.rs / utils.rs fixes ineffective.
+  - **`subdir_entry_filter`** (`src/mcp/handlers/fast.rs`) — refactored to build the prefix filter from `code_xray::clean_path` (logical) instead of `canonicalize`. A canonical-equivalence check is preserved **only** for the boolean "is `dir` ≡ workspace root?" decision (so `dir="."` against an absolute `index.root` still resolves to "no filter"); the filter prefix itself remains logical, so symlinked subdirs (whose canonical paths differ from the root) correctly fall through to a logical prefix filter that matches indexed entries.
+- **Tests** — 9 new regression tests using `#[cfg(windows)] std::os::windows::fs::symlink_dir`:
+  - 7 in Phase 1 (`is_path_within` + the 3 site fixes).
+  - 2 in Phase 2 (`test_resolve_dir_to_absolute_through_symlinked_subdir` in `utils_tests.rs`, `test_xray_fast_subdir_filter_through_symlinked_subdir` in `handlers_tests_fast.rs`).
+- **Verification** — Full unit suite: **1911 passed, 0 failed**. E2E (`pwsh -File .\e2e-test.ps1`): **79 passed, 0 failed**. Existing test `test_xray_fast_max_depth_server_dir_mismatch` was preserved by the canonical-equivalence fallback in `subdir_entry_filter`.
+
 ### Internal — Regression Tests for Complexity Refactoring (2026-04-19)
 
 - **Added 16 regression tests** for the cyclomatic/cognitive complexity refactoring on branch `tech-debt-fixes` (refactor of `apply_text_edits`, `build_caller_tree`/`build_callee_tree`, `handle_xray_fast`, `cmd_serve`, `handle_xray_reindex_inner`).

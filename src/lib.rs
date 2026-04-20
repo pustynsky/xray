@@ -47,6 +47,83 @@ pub fn clean_path(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).replace('\\', "/")
 }
 
+/// Check if `path` is logically inside `root` (workspace / server --dir),
+/// correctly handling **symlinked subdirectories** (e.g., `docs/personal` →
+/// `D:\Personal\…`) that the indexer reaches via `WalkBuilder::follow_links`.
+///
+/// Logic:
+/// 1. **Logical-path comparison first** (no `canonicalize`). This matches what
+///    the indexer sees: a file under `<root>/<symlink_dir>/foo.md` is indexed
+///    by its logical path, not by the symlink target.
+/// 2. **Canonical-path fallback** for two cases where logical comparison fails:
+///    - 8.3 short names on Windows (`PROGRA~1\App` vs `Program Files\App`).
+///    - Mixed-separator inputs that don't share a textual prefix with `root`.
+/// 3. **Path-traversal protection**: if `path` contains a `..` segment, the
+///    canonical form is **required** even if the logical comparison succeeded
+///    — otherwise `<root>/sub/../../../etc/passwd` would be accepted as
+///    "inside root" by string prefix.
+///
+/// Both `path` and `root` should be absolute. Comparison is case-insensitive
+/// (Windows-safe). Returns `true` if `path == root` or `path` lives below `root`.
+///
+/// # Examples
+/// - `path="C:/Repos/X/src/main.rs"`, `root="C:/Repos/X"` → `true` (logical match)
+/// - `path="C:/Repos/X/docs/personal/foo.md"` (where `personal` is a symlink to
+///   `D:/Personal/...`), `root="C:/Repos/X"` → `true` (logical match — file
+///   is reached via the workspace path tree, exactly as the indexer sees it).
+/// - `path="D:/Personal/foo.md"` (the symlink target itself), `root="C:/Repos/X"`
+///   → `false` (the input is outside the workspace tree; pass the logical
+///   `<root>/<symlink>/...` form if you want it accepted).
+/// - `path="C:/Repos/X/src/../../../etc/passwd"`, `root="C:/Repos/X"` → `false`
+///   (path traversal escapes via canonical fallback).
+#[must_use]
+pub fn is_path_within(path: &str, root: &str) -> bool {
+    let root_norm = clean_path(root).to_lowercase();
+    if root_norm.is_empty() {
+        return true; // empty root = no boundary, accept everything
+    }
+    let root_trimmed = root_norm.trim_end_matches('/');
+    let root_with_sep = format!("{}/", root_trimmed);
+
+    // `inside` checks an already-normalized lowercase candidate against root.
+    let inside = |candidate: &str| -> bool {
+        let c = candidate.trim_end_matches('/');
+        c == root_trimmed || c.starts_with(&root_with_sep)
+    };
+
+    // Detect path traversal segments (`..`) so we can force canonical validation
+    // even when the textual prefix happens to match.
+    let has_traversal = path
+        .split(|ch| ch == '/' || ch == '\\')
+        .any(|seg| seg == "..");
+
+    // Logical-path comparison first (matches `WalkBuilder::follow_links`).
+    if !has_traversal {
+        let logical = clean_path(path).to_lowercase();
+        if inside(&logical) {
+            return true;
+        }
+    }
+
+    // Canonical fallback: handles 8.3 short names, traversal validation,
+    // and arbitrary input shapes that don't share a textual prefix with root.
+    if let Ok(canonical_path) = std::fs::canonicalize(path) {
+        let canon = clean_path(&canonical_path.to_string_lossy()).to_lowercase();
+        if let Ok(canonical_root) = std::fs::canonicalize(root) {
+            let croot = clean_path(&canonical_root.to_string_lossy()).to_lowercase();
+            let croot_trimmed = croot.trim_end_matches('/');
+            let croot_with_sep = format!("{}/", croot_trimmed);
+            let c = canon.trim_end_matches('/');
+            return c == croot_trimmed || c.starts_with(&croot_with_sep);
+        }
+        // Root failed to canonicalize — compare canonical path against logical root.
+        return inside(&canon);
+    }
+
+    false
+}
+
+
 // ─── Index file naming ───────────────────────────────────────────────
 
 /// Windows reserved device names that cannot be used as filenames.

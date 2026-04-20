@@ -175,13 +175,13 @@ fn classify_for_sync_reindex(
     resolved: &Path,
 ) -> Option<&'static str> {
     // 1. Outside server_dir — most common skip reason for cross-project edits.
-    let canonical_resolved = std::fs::canonicalize(resolved)
-        .unwrap_or_else(|_| resolved.to_path_buf());
-    let canonical_resolved_str = crate::clean_path(&canonical_resolved.to_string_lossy());
-    let canonical_root = crate::clean_path(canonical_server_dir);
-    if !canonical_root.is_empty()
-        && !canonical_resolved_str.starts_with(&canonical_root)
-    {
+    //    Uses `code_xray::is_path_within`, which performs a logical-path comparison
+    //    first (matching what the indexer sees via `WalkBuilder::follow_links`).
+    //    Without this, files in a symlinked subdirectory like `docs/personal`
+    //    (target outside the workspace) would be wrongly classified as
+    //    `outsideServerDir`, because plain `canonicalize()` resolves the symlink.
+    let resolved_str = resolved.to_string_lossy();
+    if !crate::is_path_within(&resolved_str, canonical_server_dir) {
         return Some("outsideServerDir");
     }
     // 2. Extension filter — server only indexes a subset of extensions.

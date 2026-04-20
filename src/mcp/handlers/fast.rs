@@ -309,15 +309,14 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // Special case: when dir is outside server_dir, build a one-off index
     // for that directory (not cached in memory).
     let server_dir = ctx.server_dir();
-    let dir_is_outside = {
-        let dir_canon = std::fs::canonicalize(&params.dir)
-            .map(|p| code_xray::clean_path(&p.to_string_lossy()).to_lowercase())
-            .unwrap_or_else(|_| params.dir.replace('\\', "/").to_lowercase());
-        // Use cached canonical server_dir (avoids ~1-5ms syscall per request)
-        let srv_canon = ctx.canonical_server_dir().to_lowercase();
-        let srv_prefix = format!("{}/", srv_canon.trim_end_matches('/'));
-        dir_canon != srv_canon && !dir_canon.starts_with(&srv_prefix)
-    };
+    // `dir_is_outside` decides whether to reuse the cached in-memory file index
+    // (when `dir` is inside server_dir) or to build a one-off index for an external
+    // directory. We use `code_xray::is_path_within` so that symlinked subdirectories
+    // (e.g., `docs/personal` → `D:\Personal\…`) are correctly recognised as
+    // *inside* the workspace — otherwise plain `canonicalize()` would resolve the
+    // symlink to its target and falsely classify the request as cross-project,
+    // forcing a slow disk-index rebuild on every call.
+    let dir_is_outside = !code_xray::is_path_within(&params.dir, &ctx.canonical_server_dir());
 
     let index = if dir_is_outside {
         // Outside server_dir: try loading from disk, fall back to build+save.
@@ -382,18 +381,29 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // to filter entries. Without this, wildcard searches would return ALL entries in
     // the parent index, not just those under the requested dir.
     let subdir_entry_filter: Option<String> = {
-        let root_norm = index.root.replace('\\', "/");
-        // dir is already absolute (resolved by resolve_dir_to_absolute at the top).
-        // Canonicalize to normalize path separators and resolve symlinks.
-        let dir_abs = std::fs::canonicalize(&params.dir)
-            .map(|p| code_xray::clean_path(&p.to_string_lossy()))
-            .unwrap_or_else(|_| params.dir.replace('\\', "/"));
-        let root_abs = std::fs::canonicalize(&index.root)
-            .map(|p| code_xray::clean_path(&p.to_string_lossy()))
-            .unwrap_or(root_norm);
+        // Use LOGICAL paths (clean_path only, no canonicalize) so that symlinked
+        // subdirectories like `docs/personal` → `D:\Personal\…` keep matching the
+        // indexer's entries — which are recorded under `<server_dir>/personal/…`,
+        // NOT under the symlink target. `params.dir` is already a logical absolute
+        // path produced by `resolve_dir_to_absolute` (also symlink-safe).
+        let dir_abs = code_xray::clean_path(&params.dir);
+        let root_abs = code_xray::clean_path(&index.root);
         let dir_lower = dir_abs.to_lowercase();
         let root_lower = root_abs.to_lowercase();
-        if dir_lower.trim_end_matches('/') == root_lower.trim_end_matches('/') {
+        // Determine if the request targets the workspace root itself (no subdir
+        // filter needed). First try logical equality. Then fall back to canonical
+        // equality — only for the equivalence check, never for the filter prefix
+        // — to handle the case where `dir` is expressed as `.` or a relative path
+        // while `index.root` is an absolute path. Symlinked subdirectories still
+        // fall through to the `else` branch (canonical paths differ) and use the
+        // LOGICAL `dir_lower` as the filter, which is what matches indexed entries.
+        let same_as_root = dir_lower.trim_end_matches('/') == root_lower.trim_end_matches('/')
+            || {
+                let dir_canon = std::fs::canonicalize(&params.dir).ok();
+                let root_canon = std::fs::canonicalize(&index.root).ok();
+                matches!((dir_canon, root_canon), (Some(d), Some(r)) if d == r)
+            };
+        if same_as_root {
             None // dir == root, no filtering needed
         } else {
             Some(format!("{}/", dir_lower.trim_end_matches('/')))

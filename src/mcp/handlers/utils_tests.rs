@@ -1620,7 +1620,7 @@ fn test_resolve_dir_to_absolute_absolute_path_passthrough() {
     // Should contain the original path components
     let result_norm = result.replace('\\', "/").to_lowercase();
     let abs_norm = abs_path.replace('\\', "/").to_lowercase();
-    assert!(result_norm.contains(&abs_norm.trim_start_matches("\\\\?\\").to_string()) 
+    assert!(result_norm.contains(&abs_norm.trim_start_matches("\\\\?\\").to_string())
         || result_norm == abs_norm,
         "Result '{}' should match input '{}'", result, abs_path);
 }
@@ -1693,4 +1693,125 @@ fn test_validate_search_dir_relative_nonexistent_accepted_as_subdir() {
     let result = validate_search_dir("nonexistent/dir", &base_str);
     assert!(result.is_ok(), "Relative path within server_dir should be accepted: {:?}", result);
     assert!(result.unwrap().is_some(), "Should return Some(subdir_filter)");
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// Symlink-aware regression test for `validate_search_dir`.
+//
+// Bug: validate_search_dir used to canonicalize the requested dir before
+// comparing against server_dir. For a symlinked subdirectory like
+// `<root>/personal -> D:\Personal`, canonicalize resolved `personal` to
+// `D:\Personal`, which does NOT start with `<root>`, so the validator
+// returned an error refusing the search request. After the fix, the helper
+// uses logical-path comparison (matching what the indexer sees via
+// `WalkBuilder::follow_links`) and accepts the request.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_validate_search_dir_through_symlinked_subdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let external = tmp.path().join("external");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("note.md"), "x").unwrap();
+
+    // root/personal -> external (the docs/personal pattern)
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&external, root.join("personal")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&external, root.join("personal")).unwrap();
+
+    let symlinked_subdir = root.join("personal").to_string_lossy().to_string();
+    let root_str = root.to_string_lossy().to_string();
+
+    let result = validate_search_dir(&symlinked_subdir, &root_str);
+    assert!(
+        result.is_ok(),
+        "Symlinked subdir must be accepted (regression for `docs/personal` use case). \
+         Got error: {:?}",
+        result
+    );
+    let filter = result.unwrap();
+    assert!(
+        filter.is_some(),
+        "Symlinked subdir should produce a Some(subdir_filter), not None."
+    );
+    // The returned filter must reflect the LOGICAL path (under root), not the
+    // canonicalized symlink target — otherwise downstream filters would not
+    // match indexed entries.
+    let filter_str = filter.unwrap().to_lowercase().replace('\\', "/");
+    let expected = symlinked_subdir.to_lowercase().replace('\\', "/");
+    assert_eq!(
+        filter_str.trim_end_matches('/'),
+        expected.trim_end_matches('/'),
+        "Returned subdir filter must be the logical path, not the symlink target."
+    );
+}
+
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 2 regression: `resolve_dir_to_absolute` must NEVER call canonicalize.
+// Symlinked subdirectories (e.g. docs/personal -> D:\Personal\…) must
+// resolve to the LOGICAL path under server_dir, not to the symlink target.
+// Pre-fix the function called `std::fs::canonicalize`, returning the
+// external target — which then mismatched indexed entries (recorded by
+// `WalkBuilder::follow_links` as logical paths under server_dir) and
+// downstream filters/validations silently produced wrong results.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn test_resolve_dir_to_absolute_through_symlinked_subdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let external = tmp.path().join("external");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("note.md"), "x").unwrap();
+
+    // root/personal -> external (the docs/personal pattern)
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&external, root.join("personal")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&external, root.join("personal")).unwrap();
+
+    let symlinked_subdir = root.join("personal").to_string_lossy().to_string();
+    let root_str = root.to_string_lossy().to_string();
+    let external_str = external.to_string_lossy().to_string();
+
+    // Call as ABSOLUTE input — exercises the absolute-path branch which
+    // previously canonicalized to the symlink target.
+    let resolved_abs = resolve_dir_to_absolute(&symlinked_subdir, &root_str);
+
+    let resolved_norm = resolved_abs.to_lowercase().replace('\\', "/");
+    let expected_norm = symlinked_subdir.to_lowercase().replace('\\', "/");
+    let external_norm = external_str.to_lowercase().replace('\\', "/");
+
+    assert_eq!(
+        resolved_norm.trim_end_matches('/'),
+        expected_norm.trim_end_matches('/'),
+        "resolve_dir_to_absolute MUST return the LOGICAL path under server_dir, \
+         not the symlink target. Got '{}', expected '{}'.",
+        resolved_abs, symlinked_subdir
+    );
+    assert!(
+        !resolved_norm.contains(external_norm.trim_end_matches('/').trim_start_matches("/")),
+        "Returned path must NOT contain the symlink target ('{}'). Got: '{}'",
+        external_str, resolved_abs
+    );
+
+    // Call as RELATIVE input — exercises the relative-path branch which
+    // previously canonicalized the joined path to the symlink target.
+    let resolved_rel = resolve_dir_to_absolute("personal", &root_str);
+    let rel_norm = resolved_rel.to_lowercase().replace('\\', "/");
+    let expected_rel_norm = format!(
+        "{}/personal",
+        root_str.to_lowercase().replace('\\', "/").trim_end_matches('/')
+    );
+    assert_eq!(
+        rel_norm.trim_end_matches('/'),
+        expected_rel_norm.trim_end_matches('/'),
+        "Relative input must be joined to server_dir as logical text — got '{}', expected '{}'.",
+        resolved_rel, expected_rel_norm
+    );
 }

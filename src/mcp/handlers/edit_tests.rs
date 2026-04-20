@@ -3254,3 +3254,70 @@ fn test_sync_reindex_concurrent_edit_and_grep_no_deadlock() {
         "grep thread must have made at least one read (no deadlock)");
 }
 
+
+// ─────────────────────────────────────────────────────────────────────
+// Symlink-aware regression test for `classify_for_sync_reindex`.
+//
+// Bug: classify_for_sync_reindex used to canonicalize the file path before
+// comparing it against canonical_server_dir. For a symlinked subdirectory
+// like `<root>/personal -> D:\Personal`, canonicalize resolved the file's
+// path to `D:\Personal\foo.md`, which does NOT start with `<root>`, so the
+// helper returned `Some("outsideServerDir")` and the sync-reindex was
+// silently skipped — leaving xray_grep stale until the FS-watcher caught up.
+// After the fix, the helper uses `is_path_within`, which performs a logical
+// comparison first (matching `WalkBuilder::follow_links`), and the file is
+// correctly recognized as belonging to the workspace.
+// ─────────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_classify_for_sync_reindex_through_symlinked_subdir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let external = tmp.path().join("external");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("foo.md"), "# external").unwrap();
+
+    // root/personal -> external
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&external, root.join("personal")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&external, root.join("personal")).unwrap();
+
+    let canonical_server_dir = root.to_string_lossy().to_string();
+    let extensions: Vec<String> = vec!["md".to_string()];
+    let resolved = root.join("personal").join("foo.md");
+
+    let skip = classify_for_sync_reindex(&canonical_server_dir, &extensions, &resolved);
+    assert!(
+        skip.is_none(),
+        "File in symlinked subdir must NOT be classified as outsideServerDir. \
+         Got skipReason: {:?}, resolved={}, server_dir={}",
+        skip, resolved.display(), canonical_server_dir
+    );
+}
+
+#[test]
+fn test_classify_for_sync_reindex_genuine_outside_still_rejected() {
+    // Sanity check: real outside-workspace files must still be rejected.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().join("root");
+    let outside = tmp.path().join("outside");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("bar.md"), "x").unwrap();
+
+    let canonical_server_dir = root.to_string_lossy().to_string();
+    let extensions: Vec<String> = vec!["md".to_string()];
+    let resolved = outside.join("bar.md");
+
+    let skip = classify_for_sync_reindex(&canonical_server_dir, &extensions, &resolved);
+    assert_eq!(
+        skip,
+        Some("outsideServerDir"),
+        "Genuine outside-workspace file must be classified as outsideServerDir. \
+         resolved={}, server_dir={}",
+        resolved.display(), canonical_server_dir
+    );
+}
+

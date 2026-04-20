@@ -1877,3 +1877,125 @@ fn test_xray_fast_invalidate_via_none() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+
+// ─────────────────────────────────────────────────────────────────────
+// Phase 2 regression: `subdir_entry_filter` in `handle_xray_fast` must use
+// the LOGICAL path (matching `WalkBuilder::follow_links`) when the request
+// targets a SYMLINKED subdirectory.
+//
+// Before the fix, the filter was built via `std::fs::canonicalize(&params.dir)`
+// → returned the symlink target (e.g. external dir). The indexer, however,
+// records entries under the LOGICAL path `<workspace>/<symlink>/…`, so the
+// filter prefix `<external>/` never matched any indexed entry — the response
+// silently became empty for queries through any symlinked subdirectory
+// (e.g. `docs/personal` pointing to `D:\Personal\…`).
+//
+// After the fix, both `params.dir` and `index.root` are normalized via
+// `code_xray::clean_path` only (no canonicalize), so the filter prefix
+// matches indexed entries and `bar.cs` is returned.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+fn test_xray_fast_subdir_filter_through_symlinked_subdir() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fast_symlink_{}_{}", std::process::id(), id));
+    let _ = std::fs::create_dir_all(&tmp_dir);
+
+    // Workspace root with a real file under `inner/`.
+    let workspace = tmp_dir.join("workspace");
+    let inner = workspace.join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    {
+        let mut f = std::fs::File::create(inner.join("foo.cs")).unwrap();
+        writeln!(f, "// foo").unwrap();
+    }
+
+    // External target dir with a real file `bar.cs` — NOT under workspace.
+    let external = tmp_dir.join("external");
+    std::fs::create_dir_all(&external).unwrap();
+    {
+        let mut f = std::fs::File::create(external.join("bar.cs")).unwrap();
+        writeln!(f, "// bar").unwrap();
+    }
+
+    // Symlink workspace/personal -> external (the docs/personal pattern).
+    // Skip the test if symlink creation fails (Windows requires Developer
+    // Mode or admin; CI environments often grant it but we don't want a
+    // permission failure to misclassify the regression).
+    let symlink_path = workspace.join("personal");
+    #[cfg(windows)]
+    let symlink_result = std::os::windows::fs::symlink_dir(&external, &symlink_path);
+    #[cfg(unix)]
+    let symlink_result = std::os::unix::fs::symlink(&external, &symlink_path);
+    if symlink_result.is_err() {
+        eprintln!("Skipping symlink test: cannot create symlink ({:?})", symlink_result);
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        return;
+    }
+
+    let workspace_str = workspace.to_string_lossy().to_string();
+    let symlink_dir = symlink_path.to_string_lossy().to_string();
+
+    // Build HandlerContext — file_index defaults to None, so handle_xray_fast
+    // will rebuild it via `crate::build_index` (which uses
+    // `WalkBuilder::follow_links(true)` and records the entry as
+    // `<workspace>/personal/bar.cs`, NOT `<external>/bar.cs`).
+    let idx_base = tmp_dir.join(".index");
+    let _ = std::fs::create_dir_all(&idx_base);
+    let content_index = ContentIndex {
+        root: workspace_str.clone(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(workspace_str.clone()))),
+        index_base: idx_base,
+        ..Default::default()
+    };
+
+    // Query: list all files under the symlinked subdir.
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": symlink_dir,
+        "filesOnly": true,
+    }));
+
+    assert!(
+        !result.is_error,
+        "handle_xray_fast should not return an error: {}",
+        result.content[0].text
+    );
+    let payload: serde_json::Value = serde_json::from_str(&result.content[0].text)
+        .expect("response should be valid JSON");
+
+    // The response MUST contain bar.cs (reached via the symlink) listed under
+    // the LOGICAL path `<workspace>/personal/bar.cs`, NOT the external target.
+    let payload_str = payload.to_string();
+    let payload_lower = payload_str.to_lowercase().replace('\\', "/");
+    let symlink_lower = symlink_dir.to_lowercase().replace('\\', "/");
+
+    assert!(
+        payload_lower.contains("bar.cs"),
+        "Expected `bar.cs` in response — symlinked-subdir filter regressed. \
+         dir=`{}`, payload=`{}`",
+        symlink_dir, payload_str
+    );
+    assert!(
+        payload_lower.contains(symlink_lower.trim_end_matches('/')),
+        "Returned entry path must contain the LOGICAL symlinked dir `{}`, \
+         not the external target. Payload=`{}`",
+        symlink_dir, payload_str
+    );
+    // foo.cs is under `inner/`, not under the symlinked subdir — must NOT
+    // appear (otherwise the subdir filter is too loose).
+    assert!(
+        !payload_lower.contains("foo.cs"),
+        "Subdir filter must EXCLUDE `inner/foo.cs` when dir=`{}`. Payload=`{}`",
+        symlink_dir, payload_str
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
