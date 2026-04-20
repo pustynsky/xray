@@ -94,7 +94,7 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
     // Detect path traversal segments (`..`) so we can force canonical validation
     // even when the textual prefix happens to match.
     let has_traversal = path
-        .split(|ch| ch == '/' || ch == '\\')
+        .split(['/', '\\'])
         .any(|seg| seg == "..");
 
     // Logical-path comparison first (matches `WalkBuilder::follow_links`).

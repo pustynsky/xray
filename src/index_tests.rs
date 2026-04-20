@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use std::collections::HashMap;
 use std::io::Write;
 use code_xray::Posting;
@@ -45,7 +46,7 @@ fn test_build_trigram_index_sorted_posting_lists() {
     let ti = build_trigram_index(&inverted);
 
     // All posting lists should be sorted
-    for (_, list) in &ti.trigram_map {
+    for list in ti.trigram_map.values() {
         for window in list.windows(2) {
             assert!(window[0] <= window[1], "Posting list not sorted");
         }
@@ -163,8 +164,8 @@ fn test_enable_debug_log_creates_file() {
     let log_path = tmp.path().join("debug.log");
     {
         let mut f = std::fs::File::create(&log_path).unwrap();
-        writeln!(f, "{:>8} | {:>8} | {:>8} | {:>8} | {}",
-            "elapsed", "WS_MB", "Peak_MB", "Commit_MB", "label").unwrap();
+        writeln!(f, "{:>8} | {:>8} | {:>8} | {:>8} | label",
+            "elapsed", "WS_MB", "Peak_MB", "Commit_MB").unwrap();
         writeln!(f, "{}", "-".repeat(70)).unwrap();
     }
     assert!(log_path.exists());
@@ -227,9 +228,9 @@ fn test_log_response_format() {
     let year: u32 = ts[0..4].parse().unwrap();
     let month: u32 = ts[5..7].parse().unwrap();
     let day: u32 = ts[8..10].parse().unwrap();
-    assert!(year >= 2020 && year <= 2100, "Year out of range: {}", year);
-    assert!(month >= 1 && month <= 12, "Month out of range: {}", month);
-    assert!(day >= 1 && day <= 31, "Day out of range: {}", day);
+    assert!((2020..=2100).contains(&year), "Year out of range: {}", year);
+    assert!((1..=12).contains(&month), "Month out of range: {}", month);
+    assert!((1..=31).contains(&day), "Day out of range: {}", day);
 }
 
 #[test]

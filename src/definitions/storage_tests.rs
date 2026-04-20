@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
 use crate::definitions::DefinitionIndex;
 

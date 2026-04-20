@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -159,8 +160,8 @@ fn test_score_token_postings_filters_applied() {
 
     // Only file1.cs should pass (ext filter = cs)
     assert_eq!(file_scores.len(), 1);
-    assert!(file_scores.get(&0).is_some());
-    assert!(file_scores.get(&1).is_none());
+    assert!(file_scores.contains_key(&0));
+    assert!(!file_scores.contains_key(&1));
 }
 
 #[test]
@@ -304,7 +305,7 @@ fn test_score_normal_token_search_with_ext_filter() {
     let terms = vec!["hello".to_string()];
     let scores = score_normal_token_search(&terms, &index, &params);
     assert_eq!(scores.len(), 1, "Only .cs file should pass filter");
-    assert!(scores.get(&0).is_some());
+    assert!(scores.contains_key(&0));
 }
 
 // ─── merge_phrase_results_or tests ──────────────────────────────────

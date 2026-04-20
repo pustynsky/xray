@@ -71,12 +71,11 @@ fn test_error_response_has_guidance() {
     // Error response should still have guidance injected
     let text = &result.content[0].text;
     // inject_response_guidance works on JSON — if the error is JSON, it should have summary
-    if let Ok(output) = serde_json::from_str::<Value>(text) {
-        if let Some(summary) = output.get("summary") {
+    if let Ok(output) = serde_json::from_str::<Value>(text)
+        && let Some(summary) = output.get("summary") {
             assert!(summary.get("policyReminder").is_some(),
                 "Error JSON response should have policyReminder in summary");
         }
-    }
     // The key assertion: is_error must be preserved
     assert!(result.is_error, "is_error flag must be preserved after guidance injection");
 }
@@ -946,21 +945,21 @@ fn test_has_source_files_nonexistent_ext() {
 
 #[test]
 fn test_determine_initial_binding_explicit_path() {
-    let ws = determine_initial_binding("C:/Projects/MyApp", &vec!["rs".to_string()]);
+    let ws = determine_initial_binding("C:/Projects/MyApp", &["rs".to_string()]);
     assert_eq!(ws.mode, WorkspaceBindingMode::PinnedCli);
     assert_eq!(ws.dir, "C:/Projects/MyApp");
 }
 
 #[test]
 fn test_determine_initial_binding_dot_with_sources() {
-    let ws = determine_initial_binding(".", &vec!["rs".to_string()]);
+    let ws = determine_initial_binding(".", &["rs".to_string()]);
     assert_eq!(ws.mode, WorkspaceBindingMode::DotBootstrap);
     assert_eq!(ws.status, WorkspaceStatus::Resolved);
 }
 
 #[test]
 fn test_determine_initial_binding_dot_without_sources() {
-    let ws = determine_initial_binding(".", &vec!["zzznotreal".to_string()]);
+    let ws = determine_initial_binding(".", &["zzznotreal".to_string()]);
     assert_eq!(ws.mode, WorkspaceBindingMode::Unresolved);
     assert_eq!(ws.status, WorkspaceStatus::Unresolved);
 }

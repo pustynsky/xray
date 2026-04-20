@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::{node_text, find_child_by_kind, find_descendant_by_kind, find_child_by_field};
 
 /// Helper: parse a C# snippet and return the root node + source bytes.

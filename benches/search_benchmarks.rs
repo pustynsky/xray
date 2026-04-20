@@ -277,6 +277,9 @@ fn bench_tfidf_scoring(c: &mut Criterion) {
 fn bench_regex_scan(c: &mut Criterion) {
     let mut group = c.benchmark_group("regex_token_scan");
 
+    let re_prefix = regex::Regex::new("(?i)^token_4.*$").unwrap();
+    let re_exact = regex::Regex::new("(?i)^class$").unwrap();
+
     for &num_files in &[1_000, 10_000, 50_000] {
         let index = build_synthetic_index(num_files, 200);
 
@@ -284,10 +287,9 @@ fn bench_regex_scan(c: &mut Criterion) {
             BenchmarkId::new("scan_all_keys", num_files),
             &index,
             |b, index| {
-                let re = regex::Regex::new("(?i)^token_4.*$").unwrap();
                 b.iter(|| {
                     let matches: Vec<&String> =
-                        index.index.keys().filter(|k| re.is_match(k)).collect();
+                        index.index.keys().filter(|k| re_prefix.is_match(k)).collect();
                     black_box(matches);
                 })
             },
@@ -297,10 +299,9 @@ fn bench_regex_scan(c: &mut Criterion) {
             BenchmarkId::new("scan_prefix_pattern", num_files),
             &index,
             |b, index| {
-                let re = regex::Regex::new("(?i)^class$").unwrap();
                 b.iter(|| {
                     let matches: Vec<&String> =
-                        index.index.keys().filter(|k| re.is_match(k)).collect();
+                        index.index.keys().filter(|k| re_exact.is_match(k)).collect();
                     black_box(matches);
                 })
             },
@@ -357,7 +358,7 @@ fn bench_serialization(c: &mut Criterion) {
     });
 
     group.bench_function(
-        &format!("serialize_size_bytes_{}", encoded_len),
+        format!("serialize_size_bytes_{}", encoded_len),
         |b| {
             b.iter(|| black_box(encoded_len))
         },

@@ -507,7 +507,7 @@
         assert_eq!(index.files.len(), 3, "Should index 3 files");
 
         // Simulate exclude_dir filtering (using unique name to avoid matching temp path)
-        let exclude_dirs = vec!["zzztests".to_string()];
+        let exclude_dirs = ["zzztests".to_string()];
         let postings = index.index.get("httpclient").unwrap();
         let filtered: Vec<_> = postings.iter()
             .filter(|p| {
@@ -549,7 +549,7 @@
         let postings = index.index.get("httpclient").unwrap();
 
         // Exclude Mock and Tests
-        let excludes = vec!["mock".to_string(), "tests".to_string()];
+        let excludes = ["mock".to_string(), "tests".to_string()];
         let filtered: Vec<_> = postings.iter()
             .filter(|p| {
                 let path = &index.files[p.file_id as usize];
@@ -766,17 +766,16 @@
         }
         let candidates = candidate_ids.unwrap_or_default();
         // Both files 1 and 2 have "new" and "httpclient" (but not as adjacent phrase in file 2)
-        assert!(candidates.len() >= 1, "Should find at least 1 candidate");
+        assert!(!candidates.is_empty(), "Should find at least 1 candidate");
 
         // Verify: only file 1 has the exact phrase
         let mut verified = Vec::new();
         for &fid in &candidates {
             let path = &index.files[fid as usize];
-            if let Ok(content) = fs::read_to_string(path) {
-                if content.to_lowercase().contains(&phrase_lower) {
+            if let Ok(content) = fs::read_to_string(path)
+                && content.to_lowercase().contains(&phrase_lower) {
                     verified.push(fid);
                 }
-            }
         }
 
         assert_eq!(verified.len(), 1, "Only 1 file should contain exact phrase 'new HttpClient'");

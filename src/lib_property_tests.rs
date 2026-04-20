@@ -128,7 +128,7 @@ proptest! {
         }
 
         // Invariant: every file_id in postings is < files.len()
-        for (_token, postings) in &index {
+        for postings in index.values() {
             for posting in postings {
                 prop_assert!((posting.file_id as usize) < files.len(),
                     "file_id {} >= files.len() {}", posting.file_id, files.len());

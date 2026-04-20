@@ -694,7 +694,7 @@ fn test_xray_fast_wildcard_star_dirs_only() {
         let f_path = tmp_dir.join(sub).join("dummy.cs");
         { let mut f = std::fs::File::create(&f_path).unwrap(); writeln!(f, "// dummy").unwrap(); }
     }
-    { let mut f = std::fs::File::create(&tmp_dir.join("RootFile.cs")).unwrap(); writeln!(f, "// root").unwrap(); }
+    { let mut f = std::fs::File::create(tmp_dir.join("RootFile.cs")).unwrap(); writeln!(f, "// root").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
     let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
@@ -728,12 +728,12 @@ fn test_xray_fast_empty_pattern_with_dir() {
 
     // Create some files
     for name in &["Alpha.cs", "Beta.cs", "Gamma.txt"] {
-        let mut f = std::fs::File::create(&tmp_dir.join(name)).unwrap();
+        let mut f = std::fs::File::create(tmp_dir.join(name)).unwrap();
         writeln!(f, "// {}", name).unwrap();
     }
     let sub = tmp_dir.join("SubDir");
     let _ = std::fs::create_dir_all(&sub);
-    { let mut f = std::fs::File::create(&sub.join("Inner.cs")).unwrap(); writeln!(f, "// inner").unwrap(); }
+    { let mut f = std::fs::File::create(sub.join("Inner.cs")).unwrap(); writeln!(f, "// inner").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
     let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();
@@ -849,8 +849,8 @@ fn test_xray_fast_files_only_with_ext_still_filters() {
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_filesext_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
 
-    { let mut f = std::fs::File::create(&tmp_dir.join("Report.cs")).unwrap(); writeln!(f, "// cs").unwrap(); }
-    { let mut f = std::fs::File::create(&tmp_dir.join("Report.txt")).unwrap(); writeln!(f, "// txt").unwrap(); }
+    { let mut f = std::fs::File::create(tmp_dir.join("Report.cs")).unwrap(); writeln!(f, "// cs").unwrap(); }
+    { let mut f = std::fs::File::create(tmp_dir.join("Report.txt")).unwrap(); writeln!(f, "// txt").unwrap(); }
 
     let dir_str = tmp_dir.to_string_lossy().to_string();
     let file_index = crate::build_index(&crate::IndexArgs { dir: dir_str.clone(), ..Default::default() }).unwrap();

@@ -214,24 +214,24 @@ namespace MyApp
     assert_eq!(class_defs.len(), 1);
     assert_eq!(class_defs[0].name, "MyService");
     assert!(!class_defs[0].attributes.is_empty());
-    assert!(class_defs[0].base_types.len() >= 1);
+    assert!(!class_defs[0].base_types.is_empty());
 
     let iface_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Interface).collect();
     assert_eq!(iface_defs.len(), 1);
     assert_eq!(iface_defs[0].name, "IMyService");
 
     let method_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Method).collect();
-    assert!(method_defs.len() >= 1);
+    assert!(!method_defs.is_empty());
     let do_work = method_defs.iter().find(|d| d.name == "DoWork");
     assert!(do_work.is_some());
     assert_eq!(do_work.unwrap().parent, Some("MyService".to_string()));
 
     let prop_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Property).collect();
-    assert!(prop_defs.len() >= 1);
+    assert!(!prop_defs.is_empty());
     assert_eq!(prop_defs[0].name, "Name");
 
     let field_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Field).collect();
-    assert!(field_defs.len() >= 1);
+    assert!(!field_defs.is_empty());
 
     let ctor_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Constructor).collect();
     assert_eq!(ctor_defs.len(), 1);

@@ -37,7 +37,7 @@ fn test_parse_ts_abstract_class() {
     assert!(class_defs[0].modifiers.contains(&"abstract".to_string()));
 
     let method_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Method).collect();
-    assert!(method_defs.len() >= 1);
+    assert!(!method_defs.is_empty());
     assert_eq!(method_defs[0].name, "handle");
     assert!(method_defs[0].modifiers.contains(&"abstract".to_string()));
 }
@@ -58,7 +58,7 @@ fn test_parse_ts_interface() {
 
     // Interface should have a property child for the method signature
     let prop_defs: Vec<_> = defs.iter().filter(|d| d.kind == DefinitionKind::Property).collect();
-    assert!(prop_defs.len() >= 1);
+    assert!(!prop_defs.is_empty());
 }
 
 #[test]

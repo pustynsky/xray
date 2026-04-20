@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
 use std::time::{Duration, Instant};
 
@@ -423,8 +424,8 @@ fn test_score_normal_token_search_basic() {
     let terms = vec!["hello".to_string()];
     let scores = score_normal_token_search(&terms, &index, &params);
     assert_eq!(scores.len(), 2);
-    assert!(scores.get(&0).is_some());
-    assert!(scores.get(&1).is_some());
+    assert!(scores.contains_key(&0));
+    assert!(scores.contains_key(&1));
     assert_eq!(scores[&0].occurrences, 2);
     assert_eq!(scores[&1].occurrences, 1);
 }
