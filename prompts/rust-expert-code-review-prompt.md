@@ -1,155 +1,126 @@
-# Code Review - Rust Code Analysis Prompt V1.6
+---
+version: 2.0
+applies_to: rust-cli-single-crate
+project: code-xray
+profile: sync, single-crate, lib+bin, unpublished, no-FFI
+last_updated: 2026-04-20
+changelog: ./rust-expert-code-review-prompt.CHANGELOG.md
+---
 
-**Version:** 1.6 | **Last Updated:** 2026-04-17
+# Code Review — Rust Code Analysis Prompt V2.0
 
 ## Overview
 
-A tool-assisted framework for reviewing Rust code changes, combining:
-
-- **xray MCP tools** for workspace-wide caller/callee analysis
-- **Strict senior-level review criteria** for Rust applications, libraries, and CLI tools
-- **Evidence-based assessment** focused on real risks, not style nitpicks
+Tool-assisted, evidence-based code-review prompt **calibrated for the `code-xray` Rust project** (single crate, sync, lib + bin, unpublished, edition 2024). Tool selection is governed by the workspace `XRAY_POLICY` and is not duplicated here.
 
 ---
 
 ## Part 0: Core Philosophy — Stability First
 
-> **"First, do no harm."**
->
-> The primary goal of code review is to **protect the production system from regressions, instability, and unintended side effects** — not to approve new features.
+> **"First, do no harm."** Code review protects production from regressions. It does not approve features.
 
-### Non-Negotiable Priorities (in order)
+### Non-Negotiable Priorities
 
-1. **No Regressions** — New code must not break existing functionality. A feature that works but breaks something else is NOT acceptable.
-2. **Holistic Context** — Every change must be understood in the context of the **entire system**. Ask: "What else depends on this? What will this break?"
-3. **Stability Over Speed** — When in doubt, REQUEST CHANGES with explicit missing evidence rather than approve.
-4. **Explicit Over Implicit** — Silent behavioral changes are a BLOCKER. Any change in contract (return values, error types, side effects) must be explicitly documented and justified.
+1. **No Regressions** — a feature that works but breaks something else is unacceptable.
+2. **Holistic Context** — every change is understood in entire-system context.
+3. **Stability Over Speed** — when in doubt, REQUEST CHANGES with explicit missing evidence.
+4. **Explicit Over Implicit** — silent contract changes are BLOCKER.
 
-### Mandatory Context Analysis
+### Quality Bar
 
-Before approving ANY change, analyze in **both directions**:
+A finding is valuable only if it identifies a concrete production risk, correctness bug, regression path, or compounding architectural flaw. **If a finding would not change the merge decision or production behavior, omit it.**
 
-| Check | Direction | Action |
-|---|---|---|
-| **All callers identified** | ⬆️ Upstream | Search for all usages of modified functions/types/traits across the **entire workspace** — not just files in the diff |
-| **Caller compatibility verified** | ⬆️ Upstream | For each caller: verify it handles the new contract (return type, error variants, side effects) |
-| **Downstream calls traced** | ⬇️ Downstream | Read the full body of every modified function. Trace data flow: arguments passed, side effects produced (DB writes, file I/O, channel sends, network calls) |
-| **Downstream effects assessed** | ⬇️ Downstream | For each downstream call: does the change alter what's passed? Does it change when/whether the call happens? |
-| **Contract preserved** | Both | Function returns same types, propagates same errors, has same side effects |
-| **Edge cases covered** | Both | Empty inputs, `None`, concurrency, retries behave the same |
-
-> **⚠️ Known coverage gaps.** Workspace-wide search may not cover: trait object dispatch (dynamic dispatch), macro-generated call sites, proc-macro output, FFI callbacks, plugin systems, config-driven wiring, `build.rs`-generated code. If modified code participates in any of these patterns, explicitly note the coverage limitation.
-
-### Regression Risk Categories
-
-| Risk Level | Criteria | Review Action |
-|---|---|---|
-| **HIGH** | Public API, shared crates, data schemas, core logic, hot paths, irreversible operations | Require integration tests + explicit caller analysis |
-| **MEDIUM** | Internal module changes with multiple callers, logging/metrics format | Require unit tests + spot-check callers |
-| **LOW** | Isolated changes, single caller, new code with no existing consumers | Standard review |
-
-**Also consider:** hot path throughput, data-plane vs control-plane, blast radius (prod incident cost), rollback difficulty (published crates).
-
-**Discipline rule:** Reviewer must explicitly state which criterion triggered the assigned risk level.
-
-### Context Priority by Crate Type
-
-| Crate Type | Priority Focus |
-|---|---|
-| **Library / shared crate** | Semver, public API stability, typed errors, trait object safety, auto-trait preservation, `#[derive]` stability |
-| **Async service** | Cancellation safety, backpressure, retries/idempotency, observability, resource leaks, shutdown |
-| **CLI tool** | Exit code compatibility, stdout/stderr contract, machine-readable output, flag/env precedence |
-| **Internal app / binary** | Operational defaults, rollout/rollback, config safety, failure mode visibility |
+> **Calibration:** in a clean PR, expect **0 findings**. Output "None — no concerns at the appropriate severity" rather than inventing items to look thorough.
 
 ---
 
-## Part 1: Review Role, Scope & Input
+## Part 0.5: Project Profile Calibration (REQUIRED first step)
+
+Before reading the diff, declare the active profile. For **code-xray** the profile is fixed:
+
+```
+crate_layout:    single crate (lib + bin)
+runtime:         SYNC (no tokio, no async/await in production code)
+edition:         2024
+published:       NO (no crates.io publication; no downstream crates)
+ffi:             NONE (no extern "C", no #[no_mangle])
+unsafe:          minimal (only via dependencies)
+data_plane:      on-disk indexes (.word-search / .file-list / .meta) via bincode 1
+features:        lang-csharp, lang-typescript, lang-sql, lang-rust, lang-xml
+```
+
+### Sections SKIPPED for this profile (do not include in output)
+
+| Section | Reason |
+|---|---|
+| Async / `.await` hazards | sync project — no tokio |
+| `tokio::spawn` Send-bound | sync project |
+| Cross-crate / semver / publish ordering | single unpublished crate |
+| FFI safety (`extern "C"`, `repr(C)`) | not used |
+| Event/Message processing (queues, dual-write, outbox) | not applicable |
+| Idempotency for retried operations | not applicable |
+| Operational readiness (graceful shutdown, health checks) | CLI tool, not a service |
+
+If a future PR introduces async / new crates / FFI / IPC — re-evaluate the profile and re-enable those sections explicitly.
+
+---
+
+## Part 1: Role, Input, Prerequisites
 
 ### Your Role
 
-You are a **strict senior-level reviewer** (staff/principal level). Find **real risks, performance issues, architectural violations, and hidden side effects** — NOT style nitpicks.
+Strict staff/principal-level reviewer. Find real risks, performance issues, architectural violations, hidden side effects — not style nitpicks.
 
-**Quality bar:** A finding is valuable only if it identifies a concrete production risk, a correctness bug, a regression path, or an architectural flaw that will compound over time. If a finding would not change a merge decision or the code's production behavior, omit it.
+### Diff Input
 
-**Every finding must be specific and verifiable.**
+Code arrives as a git diff, file content, or PR URL. If absent — ask. Do not review without seeing the actual changes.
 
-### How You Receive the Diff
+### Prerequisites (must pass before manual review)
 
-The code changes arrive as git diff, file-by-file content, or PR description + diffs. If not provided, ask for it. Do not review without seeing actual code changes.
-
-### Prerequisites
-
-Verify these pass before manual review. If not run, note as a process gap:
 - `cargo clippy --workspace -- -D warnings`
 - `cargo test --workspace`
 - `cargo deny check` / `cargo audit` (if configured)
 
-For workspace projects, always use `--workspace` — cross-crate breakage is invisible to single-crate builds.
+If not run — note as a process gap.
 
-### Prioritization for Large Diffs (>20 files or >1000 lines)
+### Tool Selection
 
-1. **Public API changes** (signatures, traits, error types, public structs)
-2. **`unsafe` code** — any new or modified `unsafe` blocks
-3. **Error handling changes** — new error variants, changed propagation
-4. **Cross-crate impact** — shared library changes
-5. **Concurrency/async changes** — locks, channels, spawned tasks
-6. **Everything else** — internal logic, tests, documentation
+Governed by the workspace `XRAY_POLICY`. Do not duplicate or override here.
 
 ---
 
 ## Part 2: Review Execution Pipeline
 
-Execute review steps **in this order**. Do not produce conclusions before gathering evidence.
+| Step | Action |
+|---|---|
+| 0 | Acquire diff (per XRAY_POLICY git tools) |
+| 1 | **Apply Project Profile (Part 0.5)** — disable inapplicable sections |
+| 2 | Fast-path check — skip to verdict if matches |
+| 3 | Parse diff: list modified surface (functions, types, traits, on-disk formats) |
+| 4 | Assign preliminary risk level |
+| 5 | Search callers for every modified item |
+| 6 | Read full bodies of modified functions |
+| 7 | Trace downstream calls and side effects |
+| 8 | Apply Part 4 (Rust-specific) and Part 4.X (Project-specific) checks |
+| 9 | Apply Test Coverage decision tree (Part 4) to every behavioral change |
+| 10 | Assess evidence coverage (Part 3) |
+| 11 | Produce verdict |
 
-| Step | Action | Tool |
-|---|---|---|
-| 0 | **Acquire diff** — fetch branch, diff against base, list changed files (see Diff Acquisition below) | git CLI |
-| 1 | **Fast-path check** — if diff qualifies for fast path, skip to verdict | Judgment |
-| 2 | **Parse diff** — identify all modified public/private surface (functions, types, traits, impls) | Diff analysis |
-| 3 | **Assign preliminary risk level** — based on what was modified (Part 0 categories) | Judgment |
-| 4 | **Search callers** — for every modified public/shared item, search entire workspace | `xray_callers` / `xray_grep` |
-| 5 | **Read full bodies** — of all modified functions (not just changed lines) | `xray_definitions includeBody=true` |
-| 6 | **Trace downstream** — identify every function/method called from modified code, assess data flow changes | `xray_callers direction=down` |
-| 7 | **Check Rust-specific concerns** — async, unsafe, ownership, errors, API, performance, invariants (Part 4) | Code analysis |
-| 8 | **Review tests** — adequacy, quality, missing coverage | Code analysis |
-| 9 | **Assess evidence coverage** — what was verified vs inferred vs unverified (Part 3) | Self-assessment |
-| 10 | **Produce verdict** — with confidence level and evidence-backed findings | Output |
+### Fast Path (skip pipeline)
 
-### Diff Acquisition Workflow
+- **Docs-only** (`*.md`, comments) — verify no `doc(hidden)` / `cfg(doc)` changes.
+- **Test-only additions** — review test quality only.
+- **Formatting / clippy auto-fixes** — no logic changes.
+- **Dependency version bumps** in `Cargo.toml` only — `cargo audit` + dep changelog scan.
 
-When reviewing a branch with tool assistance, **prefer xray tools over raw `git` CLI**. Use the mapping below; fall back to `git` CLI only when xray does not cover the scenario.
+### Diff Budget Rule (large PRs)
 
-| Task | Preferred xray tool | Fallback |
-|---|---|---|
-| Current branch / ahead-behind / dirty state | `xray_branch_status repo=<path>` | `git status`, `git rev-parse` |
-| Commit history of a file | `xray_git_history repo=<path> file=<path>` | `git log -- <file>` |
-| Diff/patch content per commit | `xray_git_diff repo=<path> file=<path>` | `git log -p -- <file>` |
-| Line-level authorship | `xray_git_blame repo=<path> file=<path> startLine=N endLine=M` | `git blame` |
-| Activity across multiple files in a date range | `xray_git_activity repo=<path> from=... to=...` | `git log --name-only` |
-| Authors/contributors of a path | `xray_git_authors repo=<path> path=<path>` | `git shortlog -sn` |
-| Find files by name or wildcard | `xray_fast pattern='<name>'` | `find` / `ls` |
+If diff > **1500 changed lines OR > 30 files**:
 
-Step-by-step:
-
-1. Get the branch name from user (or PR URL).
-2. Check branch state: `xray_branch_status repo=<repo>` (ahead/behind/dirty).
-3. List changed files vs base branch: fetch with `git fetch origin <base> <target>`, then `git diff --name-status origin/<base>...origin/<branch>` (no xray equivalent for diff-name-status yet — this is a justified `git` CLI call).
-4. Read modified source files:
-   - **`.rs` files: ALWAYS use `xray_definitions file='<filename>' includeBody=true maxBodyLines=0`. NEVER use `read_file` on `.rs` files — it wastes tokens and bypasses the pre-built AST index.**
-   - **Directory exploration:** Use `xray_fast pattern='*'` or `xray_definitions file='<dir>'`. NEVER use built-in `list_directory` or `directory_tree`.
-   - Other text files (`.toml`, `.md`, `.json`, `.yaml`): `xray_grep terms='<search>' ext='<ext>' showLines=true` or `xray_edit` / `read_file` if needed.
-5. Get per-file diff/patch: `xray_git_diff repo=<repo> file=<path>` (preferred) or `git diff origin/<base>...origin/<branch> -- <file>` (fallback for range-diffs not scoped to a single commit).
-
-> **⚠️ Hard rule:** do not call `read_file` on `.rs` files for any reason (exploration, validation, fact-checking). Use `xray_definitions includeBody=true` instead. The only exception: you need exact line numbers for `xray_edit` — but even then `xray_definitions` returns line numbers.
-
-### Fast Path
-
-Skip the full pipeline and go directly to verdict for:
-
-- **Documentation-only changes** (`*.md`, comments, doc-comments, `README`) — verify no `doc(hidden)` or `cfg(doc)` changes
-- **Test-only additions** (new tests, no production code changes) — verify test quality only
-- **Formatting / clippy fixes** (no logic changes) — verify `cargo fmt` / `cargo clippy` clean
-- **Dependency version bumps** (`Cargo.toml` only, no code changes) — check `cargo audit`, review changelog of updated deps for breaking changes
+1. Read in priority order: public API → on-disk format/serialization → core logic → feature gates → tests → docs.
+2. Read until token budget hits **~60%**.
+3. Then declare scope explicitly: *"Reviewed N of M files, sampled by priority X. Files not read: [...]."*
+4. Never silently truncate. Never speculate about unread files.
 
 ---
 
@@ -157,449 +128,397 @@ Skip the full pipeline and go directly to verdict for:
 
 ### Evidence Tiers
 
-Every claim in the review must be classified:
-
-| Tier | Meaning | Example |
-|---|---|---|
-| **Verified** | Confirmed by tool results or code inspection | "Caller search found 3 consumers, all handle the new error variant" |
-| **Inferred** | Likely based on code patterns, but not exhaustively confirmed | "Based on naming convention, this appears to be called only from tests" |
-| **Unverified** | Cannot confirm from available context | "Dynamic dispatch through `dyn Trait` — callers not traceable by static analysis" |
+| Tier | Meaning |
+|---|---|
+| **Verified** | Confirmed by tool result or direct code inspection |
+| **Inferred** | Pattern-based reasoning, not exhaustively confirmed |
+| **Unverified** | Cannot confirm from available context (note explicitly) |
 
 ### Rules
 
-- **Never claim repo-wide safety without repo-wide evidence.** If caller search was not performed, say so.
-- **Never claim caller compatibility without search results.** "No callers found" must come from an actual search, not an assumption.
-- **Mark assumptions explicitly.** Use "Assumption:" prefix.
-- **If tool coverage is incomplete** (timeout, partial index, dynamic dispatch), list uncovered items in Coverage Gaps.
-- **Validation Delegation Check:** Before flagging "missing validation" on a function, search ALL callers. If every caller validates the input before calling, the function's lack of validation is by design, not a bug. Only flag if at least one caller passes unvalidated input.
-
-### Tool Usage Patterns
-
-```
-# Find all callers of a function
-xray_callers method='fn_name' class='StructName' depth=2 includeBody=true
-
-# Find all references (text-based, catches dynamic usage)
-xray_grep terms='fn_name' ext='rs' showLines=true
-
-# Read full function body
-xray_definitions name='fn_name' includeBody=true maxBodyLines=0
-
-# Trace downstream calls
-xray_callers method='fn_name' direction='down' depth=2
-
-# Find struct/enum consumers
-xray_grep terms='StructName' ext='rs' mode='and' showLines=true
-```
-
-> **⚠️ `xray_callers` false-negative trap.** AST-based caller search does NOT detect calls through local variables (`let x = service.foo(); x.bar()`), closures captured by value, function pointers stored in fields, or calls through `Box<dyn Trait>` where the concrete type is erased. **Never conclude "no callers → safe to remove" from `xray_callers` alone.** Always cross-check with `xray_grep terms='method_name' ext='rs' showLines=true` to catch text-level references. If `xray_grep` finds references that `xray_callers` missed — note this in Coverage Gaps and manually inspect.
+- Never claim repo-wide safety without repo-wide evidence.
+- "No callers found" must come from an actual search.
+- Mark assumptions explicitly: `Assumption: ...`.
+- List uncovered items in **Coverage Gaps**.
+- **Validation Delegation:** before flagging "missing validation", check ALL callers. If every caller validates the input, the function's lack of validation is by design — not a finding.
+- **`xray_callers` false-negative trap:** AST search misses local-variable calls (`let x = svc.foo(); x.bar()`), closure captures, and calls through `Box<dyn Trait>` with erased concrete type. Always cross-check with `xray_grep` text search before concluding "no callers → safe to remove".
 
 ### Verdict Format
 
 ```
-Overall Assessment: APPROVE / APPROVE WITH CHANGES / REQUEST CHANGES
-Confidence: HIGH / MEDIUM / LOW
-Evidence Coverage: FULL WORKSPACE / PARTIAL / DIFF-ONLY
-Reason: [1-2 sentences]
+Overall Assessment: APPROVE | APPROVE WITH CHANGES | REQUEST CHANGES
+Confidence:         HIGH | MEDIUM | LOW
+Evidence Coverage:  FULL WORKSPACE | PARTIAL | DIFF-ONLY
+Reason:             <1–2 sentences>
 ```
 
-- **HIGH confidence** = all callers searched, full bodies read, tests reviewed, no unverified gaps
-- **MEDIUM confidence** = most analysis done, some inferred items, minor gaps noted
-- **LOW confidence** = significant gaps in evidence, dynamic dispatch paths, partial diff
+- **HIGH:** callers searched, full bodies read, tests reviewed, no unverified gaps.
+- **MEDIUM:** most analysis done, minor gaps noted.
+- **LOW:** significant gaps, dynamic dispatch paths, partial diff.
 
 ---
 
 ## Part 4: Rust-Specific Assessment
 
-Answer explicitly for each applicable aspect. Skip with "N/A" only if genuinely not present in the diff.
+Apply only relevant aspects (Part 0.5 disables some sections).
 
 ### Ownership & Borrowing
 
-- Unnecessary `.clone()` / `to_string()` / `to_owned()` — especially in hot paths or loops?
-- Could references, `Cow<'_, T>`, or borrowing eliminate allocations?
-- Lifetime issues? Overly restrictive or unsound lifetimes?
-- `'static` overuse? APIs requiring `'static` bounds when shorter lifetimes would work — reduces composability.
-- Self-referential struct attempts? These are unsound without `Pin` + unsafe — flag any `&self` field pointing to another field.
-- Lifetime elision hiding complexity? Explicit lifetimes needed for clarity in public APIs with multiple references?
-- Closure capture issues? References captured by closures creating subtle lifetime problems?
+- Unnecessary `.clone()` / `.to_string()` in hot paths or loops?
+- Could `&T` / `Cow<'_, T>` eliminate allocations?
+- Lifetime issues — overly restrictive, unsound, or `'static` overuse?
+- Self-referential structs without `Pin` + unsafe (unsound)?
+- Closure captures creating subtle lifetime issues?
 
 ### Error Handling
 
-- `.unwrap()` / `.expect()` in production paths? (test code is OK)
-- Proper `?` propagation?
-- Typed errors (`thiserror`) vs `anyhow` — appropriate for context?
-- Error variants renamed/removed → silent contract break for `match` consumers?
-- Consistent contract: similar functions should fail similarly
-- New error variants added to non-`#[non_exhaustive]` enum? (breaking for external matchers)
+- `.unwrap()` / `.expect()` on recoverable paths (test code OK)?
+- `?` propagation correct?
+- `thiserror` (typed) vs `anyhow` — appropriate for context?
+- Error variant renamed/removed → silent contract break for `match` consumers?
+- New variants in non-`#[non_exhaustive]` enum?
 
 ### Unsafe Code
 
-Any `unsafe` block requires **all** of the following:
+> `code-xray` itself contains no `unsafe`. Any new `unsafe` is a red flag and requires ALL of the following.
 
-- [ ] Minimal scope — `unsafe` block as small as possible
-- [ ] Safety comment — `// SAFETY:` explaining why this is sound
-- [ ] Aliasing rules preserved — no `&T` and `&mut T` to same data simultaneously
-- [ ] Initialization validity — all values fully initialized before use
-- [ ] `MaybeUninit::assume_init` correctness — every field/byte actually written before the call; no partial initialization reads
-- [ ] Provenance assumptions sound — pointer provenance not fabricated
-- [ ] Lifetime extension not fabricated — `transmute` to longer lifetime forbidden without proof
-- [ ] No invalid `Send`/`Sync` assumptions — manual impls justified
+- [ ] Minimal scope
+- [ ] `// SAFETY:` comment justifying soundness
+- [ ] Aliasing rules preserved
+- [ ] Initialization validity (incl. `MaybeUninit::assume_init` — every byte written before call)
+- [ ] Provenance assumptions sound
+- [ ] No fabricated lifetime extension via `transmute`
+- [ ] Manual `Send`/`Sync` impls justified
 - [ ] Drop order / ownership invariants preserved
-- [ ] `repr(C)` / layout assumptions explicit for FFI
-- [ ] Pointer dereference preconditions documented (non-null, aligned, dereferenceable)
-- [ ] No UB hidden behind "works on current platform" — must be sound per Rust spec
-- [ ] `std::mem::transmute` — exhaustive justification required; prefer safe casts or `bytemuck` if applicable
+- [ ] Pointer preconditions documented (non-null, aligned, dereferenceable)
+- [ ] Sound per Rust spec — not "works on current platform"
+- [ ] `transmute` exhaustively justified — prefer safe casts or `bytemuck`
 
-### Concurrency
+### Concurrency (sync project — std primitives only)
 
-- `Mutex`/`RwLock`/atomics correct?
-- **Atomic ordering:** `Relaxed` only for independent counters/flags. `Acquire`/`Release` for producer-consumer synchronization. `SeqCst` only when total ordering across all threads is required. Using `Relaxed` where `Acquire`/`Release` is needed → data race. Using `SeqCst` everywhere → unnecessary performance cost. Verify ordering matches the synchronization intent.
-- `Send`/`Sync` bounds preserved on public types?
+- `Mutex` / `RwLock` correctness?
+- **Atomic ordering:** `Relaxed` for independent counters; `Acquire`/`Release` for producer-consumer; `SeqCst` only when total ordering across threads is required.
 - Deadlock risk? Lock ordering documented?
 - Lock poisoning handled?
-- Race conditions in concurrent code?
-- `Rc<T>` / `Cell<T>` added to previously `Send + Sync` type? (auto-trait breaking change)
-
-### Async
-
-**Critical .await hazards:**
-
-- [ ] No `Mutex`/`RwLock` guard held across `.await` — use `tokio::sync::Mutex` or restructure
-- [ ] No DB transaction / file handle / semaphore permit held across `.await`
-- [ ] No blocking I/O or CPU work on async executor — use `spawn_blocking`
-- [ ] Cancellation safety — `select!` branch cancellation doesn't leave partial state
-- [ ] No lost `JoinHandle` — dropped handle means detached task with no error propagation
-- [ ] Backpressure present — bounded channels/semaphores prevent unbounded work
-- [ ] No accidental sequentialization — `join!` / `FuturesUnordered` where concurrent intended
-- [ ] No unbounded task spawning — semaphore or queue limits concurrent tasks
-- [ ] Timeout includes cleanup/compensation — not just `tokio::time::timeout` wrapper
-- [ ] `Pin`/`Unpin` correct if manual `Future` impl
-- [ ] **`Send` bound preserved on futures** — if the future is spawned via `tokio::spawn`, all values held across `.await` must be `Send`. Adding `Rc<T>`, `RefCell<T>`, or raw pointers into a struct stored across `.await` silently breaks `Send` and every `tokio::spawn` site at compile time. Verify with an explicit `fn assert_send<T: Send>(_: T) {}` test or `tokio::spawn(async move { ... })` in tests.
+- `Rc<T>` / `Cell<T>` added to a previously `Send + Sync` type?
 
 ### Memory & Performance
 
-- Hot path allocations? `Vec::with_capacity`? `String` vs `&str`?
-- Integer arithmetic: Unchecked math (`+`, `-`, `*`) that could overflow? Prefer `checked_*` or `saturating_*` in critical logic.
-- `collect()` into `Vec` when iterator composition suffices?
-- Unnecessary `Box`/`Arc` where stack or references suffice?
-- `format!()` allocations in hot paths?
+- Hot-path allocations — `Vec::with_capacity`, `String` vs `&str`?
+- Unchecked arithmetic in critical logic — prefer `checked_*` / `saturating_*`?
+- `collect()` to `Vec` when iterator chain suffices?
+- Unnecessary `Box`/`Arc` where stack/refs work?
+- `format!()` in hot paths?
 - Unbounded collections without size limits?
 
-**Algorithmic complexity regressions:**
+**Algorithmic regressions:**
 
-- [ ] No asymptotic regression: O(n) → O(n²), O(log n) → O(n)
-- [ ] No hidden heap allocation on hot path
-- [ ] Hash-map vs BTree-map tradeoff unchanged without justification
+- [ ] No O(n) → O(n²) or O(log n) → O(n)
+- [ ] No new hidden heap allocation on hot path
+- [ ] HashMap vs BTreeMap tradeoff unchanged or justified
 - [ ] No clone-heavy ownership causing memory pressure
-- [ ] No lock contention amplification
 - [ ] No loss of streaming/incremental processing
-- [ ] No unnecessary serialization/deserialization cycles
-- [ ] No false sharing / atomics overuse in concurrent hot path
 
-**When to request benchmarks:**
-
-- Hot path performance affected (>1000 calls/sec)
-- Algorithm complexity changes (e.g., O(n) → O(n²))
-- New allocation patterns in tight loops
-- Data structure changes affecting cache locality
-- PR claims performance improvement (require proof)
+**Benchmarks required when:** hot path > 1000 calls/sec; complexity changes; new tight-loop allocations; cache-locality changes; PR claims a perf improvement.
 
 ### Invariant Preservation
 
-For each modified function/type, ask:
+For each modified type/function:
 
-1. **What invariants existed before this change?** (type-level, value-level, documented, implicit)
-2. **Which invariants are being strengthened, weakened, or moved?**
-3. **Are invariants encoded in types / tests / assertions / docs?**
-4. **Can invalid states now be constructed more easily?**
-
-> In Rust, types often encode invariants (newtypes, enums, `NonZero*`, private fields with constructors). A PR can silently erode type-level guarantees. Flag any change that makes invalid state representable.
+1. What invariants existed before?
+2. Which are strengthened, weakened, or moved?
+3. Where are they encoded — types, tests, asserts, docs?
+4. Can invalid states now be constructed more easily?
 
 ### Data Modeling & Type Safety
 
-- **Invalid states representable?** Two booleans that can't both be true → should be an enum. Struct fields with implicit mutual constraints → encode in types.
-- **Domain constraints implicit or type-encoded?** `NonZero<u32>`, newtype wrappers with validated constructors, `PhantomData` for type-level tags.
-- **`String` where an enum or newtype would prevent invalid values?** E.g., status codes, identifiers, file paths — use dedicated types.
-- **`Option` where a type-state pattern would be clearer?** Builder pattern with `Option<T>` fields vs separate `Configured` / `Unconfigured` types.
-- **Boolean parameters?** `fn process(data: &[u8], validate: bool, compress: bool)` → use enum or builder to prevent invalid combinations and improve callsite readability.
+- Invalid states representable (booleans where enums fit)?
+- Domain constraints encoded in types (`NonZero`, validated newtypes)?
+- `String` where enum/newtype prevents invalid values?
+- Boolean parameters where enums or builders would be safer at callsite?
 
-### Architecture & Design
+### API Design
 
-For non-trivial changes (>3 functions or new modules), assess:
-
-- **Abstraction coherence:** Does each module/trait have a single, clear responsibility? Or is it a grab-bag of loosely related functions?
-- **Dependency direction:** Do dependencies flow toward domain/core, or does core depend on infrastructure/IO? Inverted dependencies are an architectural smell.
-- **Encapsulation:** Are invariants protected by module boundaries (`pub(crate)`, private fields)? Can external code construct invalid states by directly accessing fields?
-- **Coupling:** Would changing this module force cascade changes in unrelated modules? Tight coupling = change amplification.
-- **Complexity budget:** Is the abstraction complexity proportional to the problem complexity? Over-engineering is a defect — a trait with one implementor, generic over types never instantiated, or a plugin system for 2 variants.
-- **Extension:** Can the design accommodate likely future requirements without rewrite? Or does the current structure create change friction?
-- **Leaky abstractions:** Does the public API expose implementation details (internal types, specific error sources, storage format)?
-- **God-modules:** Single module with >500 lines doing unrelated things → needs decomposition.
-- **Feature-envy:** Module A heavily uses Module B's internals → logic may belong in B.
-- **Circular dependencies:** `mod a` uses `mod b` and `mod b` uses `mod a` → restructure with shared traits or third module.
-
-> Architecture review is not optional for non-trivial PRs. A change that passes all correctness checks but introduces mis-abstracted boundaries, god-modules, or inverted dependencies is a technical debt multiplier.
-
-### API Design & Semver
-
-- Semver stability? Breaking change → major version bump?
-- `#[must_use]` on important return values? Removed `#[must_use]`?
+- `#[must_use]` on important return values? Removed?
 - `#[non_exhaustive]` on public enums/structs?
-- **Visibility changes:** `pub` → `pub(crate)` is breaking for external consumers. `pub(crate)` → `pub` — intentional new API or accidental exposure?
-- **`#[derive]` changes on public types:** Removing `Clone`, `Debug`, `PartialEq`, `Serialize`/`Deserialize` is a breaking change. Adding `Copy` constrains future field additions. Adding `Serialize` introduces serde dependency.
-- **Generic bound changes:** Bounds tightened (`T` → `T: Send + Sync`)? Callers with non-Send types break. Bounds loosened? May expose unsoundness if bounds were safety-critical.
-- **`dyn Trait` vs `impl Trait`:** Switching return type changes heap allocation, object safety, and API contract. `impl Trait` in public API — callers can't name the return type.
+- `pub` ↔ `pub(crate)` visibility changes intentional?
+- `#[derive]` removal on public types (`Clone`, `Debug`, `PartialEq`, `Serialize`) — breaking?
+- Generic bound tightened/loosened?
+- `dyn Trait` ↔ `impl Trait` return-type changes?
 
 ### Panic Safety
 
-- `panic!()` / `todo!()` / `unreachable!()` in library code on recoverable paths?
-- `catch_unwind` boundaries where needed?
-- Panic in `Drop` impl?
+- `panic!` / `todo!` / `unreachable!` in library code on recoverable paths?
+- Panic in `Drop`?
 
 ### Resource Management
 
-- `Drop` correctly implemented? Handles/connections/files closed?
-- RAII patterns used for cleanup?
+- `Drop` correctly implemented? Files / handles closed?
+- RAII for cleanup?
 
-### Serialization
+### Serialization (HIGH-RISK in this project — see Part 4.X)
 
-- serde compatibility preserved? `#[serde(default)]` for new fields?
+- serde compat preserved? `#[serde(default)]` for new fields?
 - Backward-compatible with existing serialized data?
-- Renamed/retyped fields break deserialization of old data?
 
 ### Trait Correctness & Auto-traits
 
-- New methods break `dyn Trait`? (generic methods, `Self` in return position)
-- New fields break `Send`/`Sync`? (`Rc<T>`, `Cell<T>`, raw pointers)
-- `Hash` consistent with `PartialEq`? `Eq` without `PartialEq`?
-- `PartialOrd` consistent with `Ord`? Inconsistency causes UB-adjacent bugs in sorted collections.
-- `Deref`/`AsRef`/`From`/`Into` impls added or removed? Changes implicit conversion paths and method resolution.
-- Custom `Iterator` impl: fuse guarantees preserved? No items returned after `None`?
+- New methods break `dyn Trait`?
+- New fields break `Send`/`Sync`?
+- `Hash` consistent with `PartialEq`? `PartialOrd` consistent with `Ord`?
+- Custom `Iterator` — fuse guarantees? No items after `None`?
 
 ### Trait & Generics Design
 
-- **Over-generic APIs?** Generic over `T` with only one concrete instantiation → remove generic, use concrete type. Generics are justified only by multiple concrete uses or public API extensibility.
-- **Monomorphization cost?** Complex generic function called with many type combinations in hot path → large binary, instruction cache misses. Consider trait objects or `#[inline(never)]` for cold paths.
-- **Blanket impl conflicts?** New `impl<T: Foo> Bar for T` may conflict with downstream crates' impls. Use more specific bounds or seal the trait.
-- **`where` clause complexity?** `where T: A + B + C + D, U: E + F<T>` — is the complexity justified by the API benefit? Can bounds be simplified with supertraits or helper traits?
-- **Coherence / orphan rules:** New trait impls that may conflict with upstream crate additions? Defensive strategy with newtypes?
-- **Type-state pattern opportunities?** Runtime checks (`if state == Ready`) where compile-time state machines would prevent entire bug classes?
+- Generic over `T` with one concrete instantiation → make concrete.
+- Monomorphization cost in hot path?
+- Blanket impl conflicts with downstream?
+- `where`-clause complexity justified?
 
-### Test Presence Check (mandatory)
+### Test Coverage — Decision Tree
 
-For every modified **public** function or behaviorally-changed private function, verify:
+For each modified function in the diff:
 
-- [ ] A new or updated test is included **in the same PR** covering the new/changed behavior
-- [ ] Bug fixes have a regression test reproducing the original failure
-- [ ] Behavioral changes to existing functions have updated tests (old test passing on new behavior is suspicious — likely asserts-too-little)
+```
+1. Did observable behavior change?
+   NO  → no finding. (Pure refactor / rename / extract — no test required.)
+   YES → step 2.
 
-If a modified public function has **no test delta** in the diff, flag as **MAJOR** unless the change is one of:
-- Pure refactor with no semantic change (renaming, extracting, reformatting) — explicitly justified
-- Deleted code path with no behavior
-- Trivial one-liner where the existing test suite demonstrably exercises the new branch
+2. Does an existing test demonstrably exercise the new branch / output?
+   YES → no finding.
+   NO  → step 3.
 
-"Existing tests still pass" is NOT sufficient evidence of coverage for new behavior.
+3. Is the change a bug fix?
+   YES → MAJOR: regression test reproducing the original failure is required.
+   NO  → MAJOR: missing test for scenario X.
+         The finding must name the concrete uncovered scenario,
+         not just "no test added".
+```
+
+> "Existing tests still pass" is sufficient ONLY when an existing test demonstrably exercises the new behavior. If the existing test is unchanged AND the new behavior would not have been caught — flag it.
 
 ### `[CONDITIONAL]` Additional Checks
 
 Include only when relevant:
 
-- **Clippy:** No suppressed warnings without justification (`#[allow(...)]`). No weakening of `#![forbid(unsafe_code)]` or `#![deny(warnings)]`.
-- **MSRV / Edition:** Does the change require newer Rust version or edition features? (e.g., Rust 2024 `gen` keyword, async closures)
-- **Dependencies:** New crate justified? Audited? License compatible? Minimal features? No `*` versions?
-- **Cargo features:** New feature added to `Cargo.toml`? Verify: (1) additive — enabling does not remove functionality; (2) compatible with `default-features = false` consumers; (3) does not accidentally pull a heavy transitive dep into default build; (4) workspace feature unification does not enable unwanted code in sibling crates; (5) `resolver = "2"` implications understood if workspace. Removing or renaming a feature is a **breaking change** for downstream.
-- **Dependency update PRs:** Check advisory database (`cargo audit`), review changelog of updated deps for breaking changes, verify MSRV compatibility.
-- **FFI safety:** `extern "C"` / `#[no_mangle]` — all invariants documented? `repr(C)` explicit?
-- **`#[cfg]` / Conditional compilation:** New `#[cfg()]` gates tested on all target platforms? Feature combinations additive? No `#[cfg(not(feature = "..."))]` hiding unsoundness?
-- **`build.rs` / proc-macro:** Non-determinism? Network access? Platform-specific failures? Proc-macro output invisible to static analysis — note coverage gap.
-- **`const fn` changes:** Changes to `const fn` can introduce compile-time errors for downstream crates that evaluated them at compile time.
-- **Macro hygiene:** Proc-macro / `macro_rules!` — edge cases handled? Error messages clear?
-- **Observability:** `tracing` spans/events? Cardinality bounded? No PII in logs?
-- **CLI compatibility:** Breaking changes to flags, output format, or exit codes?
-- **`#[inline]` / `#[cold]` / `#[track_caller]` attribute changes** — performance or error reporting impact?
-- **Revert PRs:** Verify the revert is clean (no partial revert leaving inconsistent state). Check if the original change's tests should also be reverted.
-- **Security:** Hardcoded credentials/secrets, unvalidated external input, untrusted deserialization without validation, missing authorization checks, PII/secrets in logs.
-- **Architecture:** Code duplication (DRY violations), tight coupling between modules, business logic in handler functions instead of domain modules.
-- **Configuration:** Hardcoded environment-specific values, missing defaults for new config keys (backward compatibility), `Cargo.toml` version bumps and feature changes.
-- **Operational readiness (services / long-running binaries):** Graceful shutdown (all resources released? in-flight work completed or cancelled?). Config validation at startup (invalid config → fast fail or silent misbehavior?). Degraded mode (partial failure → total failure, or graceful degradation?). Timeout/retry (present? bounded? idempotent?). Resource cleanup on panic (destructors run? state corrupted?). Health check endpoints if applicable.
+- **Clippy:** `#[allow(...)]` without justification; weakening `#![deny(warnings)]` / `#![forbid(unsafe_code)]`.
+- **MSRV / Edition:** new Rust version or edition feature required?
+- **Dependencies:** new crate justified, audited, license-compatible, minimal features, no `*` versions.
+- **Cargo features:** additive; `default-features = false` compatible; no heavy transitive deps; workspace unification effects; feature removal/rename = breaking.
+- **`build.rs` / proc-macro:** non-determinism, network access, platform failures, invisibility to static analysis.
+- **`const fn`:** changes can break downstream compile-time evaluation.
+- **Macro hygiene:** edge cases, error message clarity.
+- **Observability:** `tracing` spans/events, bounded cardinality, no PII.
+- **CLI compatibility:** breaking flag/output/exit-code changes.
+- **Security:** hardcoded secrets, unvalidated input, untrusted deserialization, missing authz, PII in logs.
+- **Configuration:** hardcoded env-specific values, missing defaults for new keys.
+- **Revert PRs:** revert is clean; original tests reverted too if appropriate.
+- **`#[inline]` / `#[cold]` / `#[track_caller]` attribute changes** — perf or error-reporting impact.
+
+### Architecture & Design (non-trivial PRs only)
+
+A PR is **non-trivial** if: > 5 files changed AND (introduces new module OR changes public API OR alters on-disk format).
+
+- Abstraction coherence — single clear responsibility per module/trait?
+- Dependency direction — domain/core not depending on infrastructure?
+- Encapsulation — invariants protected by `pub(crate)` + private fields?
+- Coupling — does a change in module A force cascades elsewhere?
+- Complexity budget proportional to problem? Over-engineering = defect.
+- Leaky abstractions exposing implementation details?
+- God-modules (>500 lines, mixed responsibilities)?
+- Feature-envy (module A uses B's internals heavily)?
+- Circular dependencies?
+- Code duplication / DRY violations across modules?
+
+> Architecture review is mandatory for non-trivial PRs. A change that passes correctness checks but introduces god-modules, inverted dependencies, or mis-abstracted boundaries is a technical-debt multiplier.
 
 ---
 
-## Part 5: Severity Model & Escalation Triggers
+## Part 4.X: Project-Specific Hazards (code-xray)
 
-### Severity Definitions
+These are the failure modes that historically bite this project. Apply on every relevant PR.
+
+### On-Disk Index Format Stability (CRITICAL)
+
+The project persists indexes via `bincode 1` (`*.word-search`, `*.file-list`, `.meta` files).
+
+- [ ] **`bincode 1` is positional** — adding/removing/reordering fields in any `Serialize/Deserialize` struct stored on disk silently corrupts existing indexes on prod.
+- [ ] If an on-disk struct changes — version bump in `.meta`, migration path, OR rebuild-on-mismatch logic documented.
+- [ ] LZ4 framing (`lz4_flex`) preserved.
+- [ ] `Hash` / `Eq` for keyed entries unchanged (changes shift hash buckets and corrupt lookups).
+
+**Severity:** silent index corruption on user upgrade = **BLOCKER**.
+
+### Cross-Platform Path Handling (CRITICAL)
+
+> The current branch fixes a class of bugs in this area. Treat path code as high-risk.
+
+- [ ] No string-level path comparison (`==`, `starts_with`) without normalization.
+- [ ] Symlink resolution: `canonicalize` vs `read_link` chosen consciously; symlink loops handled.
+- [ ] Windows-specific: `\` vs `/`, drive letters, case-insensitive FS, UNC paths (`\\?\`), long paths (>260 chars).
+- [ ] No assumption that `Path` round-trips through `String` (non-UTF-8 paths exist).
+- [ ] `relative_path.join(absolute)` semantics understood (absolute wins on Unix; drive-relative on Windows).
+
+### tree-sitter Grammar / ABI Compatibility
+
+- [ ] Grammar version pinned (`=x.y.z` or `~x.y`) — see the T-SQL incompatibility comment in `Cargo.toml`.
+- [ ] If updating `tree-sitter` core: verify all enabled `tree-sitter-*` grammars support the new ABI.
+- [ ] New grammar requires updating `Cargo.toml` features AND code paths gating it.
+
+### Feature Flag Combinations (`lang-*`)
+
+- [ ] Builds with `--no-default-features` succeed.
+- [ ] Builds with each individual `lang-*` feature in isolation succeed.
+- [ ] No code path assumes a non-default feature is enabled.
+- [ ] New language added: feature flag + dep + parser registration + tests gated by `#[cfg(feature = "lang-X")]`.
+
+### File-System Watcher Races (`notify`)
+
+- [ ] No race between watcher event and re-index (delete-during-read, write-during-parse).
+- [ ] Bounded event queue — bursts of saves don't OOM the process.
+- [ ] Watcher restart behavior after error documented.
+
+### `mimalloc` Global Allocator
+
+- [ ] No assumption about allocator behavior (zero-init, deterministic addresses).
+- [ ] Tests don't measure allocation patterns that mimalloc changes vs system allocator.
+
+### `build.rs` Determinism
+
+- [ ] No network access at build time.
+- [ ] No reliance on environment variables that vary across machines.
+- [ ] Output deterministic (no timestamps, no random).
+- [ ] Cache invalidation correct (proper `cargo:rerun-if-changed`).
+
+### CLI Output Contract
+
+- [ ] Stdout reserved for machine-readable output; logs go to stderr.
+- [ ] Exit codes: 0 success, non-zero failure; new exit codes documented.
+- [ ] JSON schema additions backward-compatible (additive).
+
+### MCP Protocol Compliance
+
+- [ ] JSON-RPC envelope unchanged.
+- [ ] Tool schema additions backward-compatible (no required new fields).
+- [ ] Response size limits respected (LLM context budgets).
+
+---
+
+## Part 5: Severity Model
 
 | Level | Definition | Merge Impact |
 |---|---|---|
-| **BLOCKER** | Soundness hole, data corruption, security vulnerability, silent data loss, undefined behavior. Code cannot ship with this issue. | Cannot merge. |
-| **MAJOR** | Correctness bug, contract violation, regression risk, missing critical test, breaking change without version bump. | Must fix before merge. |
-| **MINOR** | Suboptimal but safe. Performance in non-hot path, missing edge-case test, weak error message, minor API ergonomics improvement. | Should fix; does not block merge. |
-| **NIT** | Style, naming, minor readability. Include ≤ 3 per review. Do not include if there are BLOCKER/MAJOR issues — focus reviewer attention on what matters. | Optional. |
+| **BLOCKER** | Soundness hole, data corruption (incl. on-disk index), security vulnerability, silent data loss, UB | Cannot merge |
+| **MAJOR** | Correctness bug, contract violation, regression risk, missing test for changed behavior, breaking change without migration note | Must fix before merge |
+| **MINOR** | Suboptimal but safe — non-hot-path perf, missing edge-case test, weak error message | Should fix |
+| **NIT** | Style, naming, readability. Max 3 per review. **Omit entirely when any BLOCKER/MAJOR exists.** | Optional |
 
-**Rule:** Every BLOCKER/MAJOR must name the **concrete failure mode** and **affected scope**. "Could be a problem" is not a valid justification.
+**Rule:** every BLOCKER/MAJOR must name the **concrete failure mode** and **affected scope**. "Could be a problem" is not a justification.
 
-### Severity Escalation Triggers
-
-> **⚠️ Severity escalation rule.** Do NOT escalate by pattern alone. Escalate only if you can explain the **concrete failure mode**, **affected scope**, and **why existing invariants/tests do not already make it safe**. Pattern presence is a signal to investigate, not an automatic severity level.
-
-Patterns that warrant investigation (raise to MAJOR/BLOCKER **with evidence**):
-
-- `unsafe` without `// SAFETY:` comment
-- `.unwrap()` in library code on recoverable paths
-- Blocking I/O in async runtime (use `spawn_blocking`)
-- `panic!()` / `todo!()` in library code
-- `std::mem::transmute` without exhaustive justification
-- Silent fallback (`Ok(default)`) masking misconfiguration — no log, metric, or error
-- Inconsistent contract between similar functions
-- Unbounded fan-out (`join_all` without semaphore)
-- Non-idempotent message/event handler
-- Tests with no assertions (always pass, test nothing)
-- Modified public API without cross-crate caller search
-- Adding `Rc<T>` / `Cell<T>` field to a previously `Send + Sync` type
-- Removing `#[must_use]` from function that returns important values
-- Removing `#[derive(Clone)]` / `#[derive(Debug)]` from public type
-- Weakening crate-level `#![forbid(...)]` / `#![deny(...)]` attributes
-- Lock guard held across `.await`
-- Removing generic bounds that may have been safety-critical
-- `pub` → `pub(crate)` on item used by external crates
+**Anti-inflation rule:** do not escalate by pattern alone. Pattern presence is a signal to investigate, not an automatic severity. Escalate only if you can explain (a) concrete failure mode, (b) affected scope, (c) why existing invariants/tests don't already prevent it.
 
 ---
 
 ## Part 6: Deep-Dive Patterns
 
-### 6.1: Idempotency Breaking Change
+### 6.1 Idempotency Breaking Change
 
-**Detect when:** Operation changes from "success on duplicate" to "error on duplicate."
-**Risk (MAJOR):** Clients with retry logic fail on retry.
-**Action:** Require "Breaking Changes" in PR description. Verify all callers' retry logic.
+Operation goes from "success on duplicate" to "error on duplicate". **MAJOR** — any client with retry logic fails on retry. Require "Breaking Changes" in PR description.
 
-### 6.2: Error Type/Contract Stability
+### 6.2 Error Type / Contract Stability
 
-**Detect when:** Error enum variants are renamed, removed, or restructured.
-**Risk (MAJOR):** Consumers matching on `ServiceError::NotFound` break silently.
-**Action:** Prefer adding variants over renaming. Use `#[non_exhaustive]`. Document in "Breaking Changes."
+Error enum variants renamed/removed/restructured. **MAJOR** — `match` consumers break silently. Prefer adding variants; use `#[non_exhaustive]`.
 
-### 6.3: Fallback/Default Behavior Contract
-
-**Detect when:** Code returns `Ok(empty)` instead of `Err` on misconfiguration.
+### 6.3 Fallback / Default Behavior Contract
 
 | Scenario | Severity |
 |---|---|
-| Silent empty return with **no signal** masking misconfig | **MAJOR** |
-| Empty return with throttled warning, only if empty is valid | **MINOR** |
-| Fallback is expected mode with metric (`fallback_used` counter) | **OK** |
+| Silent empty return masking misconfig (no log/metric) | MAJOR |
+| Empty return with throttled warning, when empty is valid | MINOR |
+| Fallback is expected mode with `fallback_used` metric | OK |
 
-**Key criterion:** Can operators distinguish "no data" from "misconfiguration"?
+Key criterion: can operators distinguish "no data" from "misconfiguration"?
 
-### 6.4: Behavioral Change Impact on Callers
+### 6.4 Behavioral Change Impact on Callers
 
-**Detect when:** Function changes return cardinality (empty→non-empty OR non-empty→empty).
-**Risk (MAJOR):** Callers with `if result.is_empty()` logic silently change behavior.
-**Action:** Find all callers. Check empty-handling patterns. Document behavioral change.
+Function changes return cardinality (empty ↔ non-empty). **MAJOR** — callers with `is_empty()` branches silently change behavior. Find all callers; verify empty-handling.
 
-### 6.5: `[CONDITIONAL]` Event/Message Processing
-
-Include only when PR involves channel/queue/event processing.
-
-- **Non-idempotent handler** (MAJOR/BLOCKER): No dedup key or upsert
-- **Missing error channel** (MAJOR): Poison message blocks entire channel
-- **Schema breaking change** (MAJOR): Producer-consumer version skew without `#[serde(default)]`
-- **Dual-write** (MAJOR): DB write + message send without transactional outbox
-
-### 6.6: Test Code Quality
+### 6.5 Test Code Quality
 
 | Issue | Severity |
 |---|---|
-| Test with NO assertions / meaningless asserts | **MAJOR** |
-| Tests that always pass (mask regressions) | **MAJOR** |
-| Flaky patterns (time-dependent, shared state, sleep) | **MAJOR** |
-| Tests removed without justification | **MAJOR** |
-| Missing edge case / error path coverage | **MINOR** |
-
-Bug fixes must have regression test. Prefer `tokio::time::pause()` over `sleep` in async tests.
+| No assertions / meaningless asserts | MAJOR |
+| Always-pass tests masking regressions | MAJOR |
+| Flaky patterns (sleep, time, shared state) | MAJOR |
+| Tests removed without justification | MAJOR |
+| Missing edge-case / error-path coverage | MINOR |
 
 **Expected test types by change category:**
 
-| Change Type | Expected Tests |
+| Change | Expected |
 |---|---|
-| Parser / serialization / codec | Property-based tests (`proptest` / `quickcheck`), round-trip tests, malformed input tests |
-| Async / concurrent code | Stress tests with `tokio::test(flavor = "multi_thread")`, cancellation tests, backpressure tests |
-| Public API changes | Integration tests exercising the API from consumer perspective |
-| Bug fixes | Regression test reproducing the exact bug scenario |
-| Performance changes | Benchmarks (`criterion`) proving the improvement |
-| Error handling changes | Tests for each error variant, tests for error propagation chain |
-| CLI changes | Integration tests with actual process invocation, stdout/stderr/exit code verification |
+| Parser / serialization / codec | Property tests (`proptest`), round-trip, malformed input |
+| Public API change | Integration test from consumer perspective |
+| Bug fix | Regression test reproducing the bug |
+| Performance change | `criterion` bench proving the improvement |
+| Error handling change | Test per error variant + propagation chain |
+| CLI change | Integration test invoking actual process; verify stdout/stderr/exit code |
+| On-disk format change | Round-trip test + backward-compat test against fixture file |
 
-### 6.7: `[CONDITIONAL]` Cross-Crate Caller Impact
+### 6.6 Downstream Contract Change
 
-Include only when modified `pub` surface exists.
-
-**Triggers:** Modified `pub` function signature/behavior, trait definition, public struct/enum, error enum variants, removed `#[derive]` traits, visibility changes, generic bound changes.
-
-**Procedure:**
-1. List modified public surface from the diff
-2. Search entire workspace for all consumers
-3. Assess each consumer: signature compatible? behavior compatible? error handling compatible?
-4. Document findings in consumer impact table
-
-**Semver (for published crates):** Breaking change → major bump. New API → minor bump. Verify `Cargo.toml` version constraints and publish ordering.
-
-### 6.8: Downstream Function Contract Change
-
-**Detect when:** Implementation of a function changes what it calls downstream (different functions, different arguments, different order).
-**Risk (MAJOR):** Callers assume specific side effects that no longer occur.
-**Action:** For each changed downstream call: does any caller depend on the old behavior? Use `xray_callers direction='down'` to map the call tree before and after.
+Implementation of a function calls different downstream functions / arguments / order. **MAJOR** — callers may depend on specific side effects. Use `xray_callers direction='down'` to map the call tree before vs after.
 
 ---
 
-## Part 7: Rules & Constraints
+## Part 7: Review Discipline
 
 ### DO
 
-- Be specific and verifiable in every finding
-- Mark assumptions explicitly
-- Cite tool results as evidence
-- Prioritize by severity and production impact
-- Read full function bodies for ownership/lifetime/contract analysis
+- Be specific and verifiable.
+- Cite tool results as evidence.
+- Mark assumptions explicitly.
+- Read full bodies for ownership/lifetime/contract analysis.
+- Prioritize by severity and production impact.
 
 ### DON'T
 
-- Suggest cosmetic changes without clear justification
-- Duplicate the same issue across severity levels
-- Use vague language ("might be", "generally okay") — state explicit assumptions
-- Claim repo-wide safety without repo-wide evidence
-- Escalate severity by pattern match alone — require concrete failure mode
-- Add filler text — state "none found" if clean
+- Suggest cosmetic changes without justification.
+- Duplicate the same issue across severity levels.
+- Use vague language ("might", "generally OK").
+- Claim repo-wide safety without repo-wide evidence.
+- Escalate severity by pattern alone.
+- Add filler — say "none found" if clean.
+- Invent findings to look thorough.
 
 ### DISTINGUISH
 
-- **Defect** — code that is incorrect, unsound, or violates a documented invariant. Always report.
-- **Trade-off** — design choice with known drawbacks, where the alternative also has drawbacks. Note as trade-off only if the current choice is clearly suboptimal for the context. Do not flag as defect.
-- **Preference** — a different but equally valid way to write correct, safe, performant code. Do NOT include in the review.
+- **Defect** — incorrect / unsound / violates documented invariant. Always report.
+- **Trade-off** — design choice with known drawbacks; the alternative also has drawbacks. Note as trade-off only if the current choice is clearly suboptimal here. Do not flag as defect.
+- **Preference** — a different but equally valid way. Do NOT include.
 
 ### PERMIT (justified deviations)
 
-- `.clone()` that avoids worse lifetime complexity or architectural coupling — note as trade-off, not defect
-- `.expect("invariant: ...")` where the invariant is type-guaranteed, tested, or provably maintained by construction
-- `unwrap()` in `main()`, CLI startup, or test code
-- Deviation from common patterns when the rationale is documented and the alternative is worse for this specific context
-- Simpler code over "more correct" code when the difference has no production impact
+- `.clone()` avoiding worse lifetime / architectural complexity — note as trade-off, not defect.
+- `.expect("invariant: ...")` where the invariant is type-guaranteed or test-covered.
+- `unwrap()` in `main()`, CLI startup, or test code.
+- Documented deviation when the alternative is worse for this specific case.
+- Simpler over "more correct" when the difference has no production impact.
 
-> **Anti-dogmatism rule:** Do not apply rules mechanically. For each finding, ask: "Does the rationale behind this rule actually apply to this specific case?" If not, the rule does not apply.
+> **Anti-dogmatism rule:** for each finding ask "Does the rationale behind this rule actually apply here?" If not — the rule does not apply.
 
 ---
 
 ## Part 8: Pre-Completion Checklist
 
-Before completing the review, verify these items:
-
-- [ ] **Invariant preservation checked** — for each modified type/function
-- [ ] **No severity inflation** — every MAJOR/BLOCKER has concrete failure mode + scope
-- [ ] **Cross-crate callers searched** if public surface modified
-- [ ] **Tests adequate** — or missing coverage explicitly noted (see Test Presence Check in Part 4)
-- [ ] **BLOCKER/MAJOR issues include** Evidence + Snippet + Recommendation
-- [ ] **PR description audit** — if breaking changes detected (error variants, signatures, derive removal, visibility narrowing, feature removal, behavioral contract change), PR description must contain a "Breaking Changes" / "Migration notes" section. Missing → MAJOR.
-- [ ] **`xray_callers` cross-checked with `xray_grep`** for every method with claimed-empty caller set
+- [ ] Project Profile applied (Part 0.5) — irrelevant sections explicitly skipped
+- [ ] Project-Specific Hazards (Part 4.X) checked when applicable
+- [ ] Invariant preservation checked for each modified type/function
+- [ ] Every BLOCKER/MAJOR has concrete failure mode + affected scope
+- [ ] Callers searched (incl. `xray_callers` ↔ `xray_grep` cross-check) when public/shared surface modified
+- [ ] Test Coverage decision tree applied to every behavioral change
+- [ ] PR description audit — if breaking changes detected (error variants, signatures, derive removal, visibility narrowing, feature removal, behavioral contract change, on-disk format change), PR description must contain a "Breaking Changes" / "Migration notes" section. Missing → MAJOR.
+- [ ] Each finding has the mandatory fields from Part 9 Finding Format
 
 ---
 
@@ -607,256 +526,77 @@ Before completing the review, verify these items:
 
 ### Output Scaling
 
-- **Small PR** (<5 files, <200 lines): Verdict + Critical/Major issues + 1-2 sentence summary. Skip sections 5-6 if empty.
-- **Medium PR** (5-20 files): Full template, skip conditional sections if N/A.
-- **Large PR** (>20 files): Full template + explicit scope declaration ("reviewed X of Y files, prioritized by...").
+- **Small** (<5 files, <200 lines): Verdict + Findings only. Skip sections 3–4.
+- **Medium** (5–20 files): full template; skip sections marked N/A.
+- **Large** (>20 files OR >1500 lines): full template + explicit scope statement (Diff Budget Rule, Part 2).
+
+### Finding Format (mandatory fields)
+
+```
+[BLOCKER|MAJOR|MINOR|NIT] <short title>
+Where:                    <file:line(s)>
+Concrete failure mode:    <what breaks, in 1 sentence>
+Affected scope:           <function | module | public API | on-disk index | CLI contract | ...>
+Evidence tier:            Verified | Inferred | Unverified
+Evidence:                 <tool result citation or 1–10 lines of code>
+Why existing invariants/tests don't already prevent this:
+                          <1 sentence>
+Recommendation:           <what to change>
+```
 
 ### Template
 
 ```markdown
-# Code Review: [BRANCH/PR NAME]
+# Code Review: <BRANCH/PR>
 
-**Review Date:** [DATE]
-**Files Changed:** [X]
-**Risk Level:** HIGH / MEDIUM / LOW — [which criterion triggered this level]
+**Date:** <YYYY-MM-DD>
+**Profile:** code-xray (sync, single-crate, lib+bin, unpublished)
+**Files Changed:** <N>  |  **Lines:** <±X / ±Y>
+**Risk Level:** HIGH | MEDIUM | LOW — <criterion that triggered it>
+**Scope:** Reviewed all changed files | Sampled per Diff Budget Rule (N of M, by priority X)
 
 ---
 
 ## 1. Verdict
 
-**Overall Assessment:** APPROVE / APPROVE WITH CHANGES / REQUEST CHANGES
-**Confidence:** HIGH / MEDIUM / LOW
-**Evidence Coverage:** FULL WORKSPACE / PARTIAL / DIFF-ONLY
-**Reason:** [1-2 sentences]
+**Assessment:** APPROVE | APPROVE WITH CHANGES | REQUEST CHANGES
+**Confidence:** HIGH | MEDIUM | LOW
+**Evidence Coverage:** FULL | PARTIAL | DIFF-ONLY
+**Reason:** <1–2 sentences>
 
 ### Coverage Gaps
-
-[List any gaps in analysis — dynamic dispatch paths, macro-generated code,
-proc-macro output, build.rs-generated code, untraceable callers, partial index coverage.
-"None" if full coverage achieved.]
+<dynamic dispatch / macro-generated / proc-macro / build.rs / unread files — or "None">
 
 ### Questions to Author
-
-[If REQUEST CHANGES or assumptions made — specific data/evidence needed]
-
----
-
-## 2. Critical Issues (BLOCKER)
-
-[None found / List using format:]
-
-[BLOCKER] <short title>
-Where: <file / function / type>
-Issue: <what exactly is wrong>
-Risk: <specific production consequence>
-Evidence: <mechanism — verified by tool / inferred>
-Snippet: <1-3 lines of code>
-Recommendation: <what to change>
+<specific evidence requested — or "None">
 
 ---
 
-## 3. Major Issues (MAJOR)
+## 2. Findings
 
-[None found / List — same format]
+### BLOCKER
+<list using Finding Format above — or "None">
 
----
+### MAJOR
+<list — or "None">
 
-## 4. Minor Issues (MINOR)
+### MINOR
+<brief one-line per item — or "None">
 
-[None found / Brief format]
-
----
-
-## 5. Nits (NIT) — optional, ≤ 3 items
-
-[Omit this section entirely if any BLOCKER or MAJOR exists — reviewer attention must stay on critical issues.
-Otherwise, list up to 3 style/readability suggestions. Brief one-liner per item.]
+### NIT  *(omit this subsection entirely when any BLOCKER/MAJOR exists; max 3 items)*
+<brief one-liner per item>
 
 ---
 
-## 6. Notable Rust Findings
-
-[Include only aspects with actual findings — do NOT list N/A items. Format:]
-
-- **[Category]:** Finding description — `file:line` — recommendation
-  Evidence: [verified/inferred]
-
-Categories: Ownership, Lifetimes, Async, Unsafe, Invariants, Performance,
-API Design, Error Handling, Concurrency, Serialization, Derive/Auto-traits,
-Architecture, Data Modeling, Trait Design
+## 3. Architectural Note  *(non-trivial PRs only — see Part 4 criteria; otherwise omit)*
+<2–4 sentences on cohesion / coupling / dependency direction>
 
 ---
 
-## 7. Conditional Sections
-
-[Include only the sections relevant to this PR]
-
-### Cross-Crate Impact (if public API changed)
-
-| Consumer | File | Impact | Status |
-|---|---|---|---|
-| | | | ✅ OK / ⚠️ MAJOR / ❌ BLOCKER |
-
-### Event/Message Processing (if channel/queue code changed)
-
-[Idempotency, error channel, schema compat, dual-write assessment]
-
-### Test Quality (if test code changed)
-
-[Assertions meaningful? Coverage adequate? Flaky patterns?]
-
----
-
-## 8. Architectural Assessment (non-trivial PRs only)
-
-[Abstraction quality, module cohesion, coupling, complexity budget, dependency direction.
-"No architectural concerns" if clean. Skip for small/trivial PRs.]
-
----
-
-## 9. Open Questions & Uncertainty
-
-[Genuinely uncertain items — not findings, but areas where more context would change
-the assessment. Items the reviewer cannot resolve from available evidence.
-"None — full confidence in assessment" if no uncertainty.]
-
----
-
-## 10. Final Recommendations
-
-### Top Risks
-1.
-2.
-3.
-
-### Testing Needed
-- [Unit / Integration / Benchmark / Stress — only list what's missing]
-
----
-
-_Review completed [DATE]_
+## 4. Open Questions  *(only if genuinely uncertain; otherwise omit)*
+<items that would change the assessment if resolved>
 ```
 
 ---
 
-> **LLM context note:** The Changelog section below is for human reference and version tracking. When using this prompt with an LLM, the Changelog may be omitted to save context window budget (~70 lines).
-
----
-
-## Changelog
-
-### V1.6 (2026-04-17) — Strictness polish, tool alignment, formatting fixes
-
-Based on request to improve strictness, align with latest Xray MCP capabilities, and clean up structure.
-
-**Must-fix:**
-1. **Tool Alignment:** Added explicit instructions to use `xray_fast` and `xray_definitions` for directory exploration over built-ins.
-2. **Output Template Restructured (Part 9):** Renumbered sections (converted 4.5 to 5, shifted the rest to 10) for cleaner output formatting.
-3. **Safety & Math Checks (Part 4):** Added explicit checks for unchecked arithmetic / overflow risks and stricter transmutation/pointer checks in Unsafe section.
-
-### V1.5 (2026-04-17) — xray tool integration, test presence gate, async Send-bound, NIT output slot
-
-Based on alignment review against the project's XRAY_POLICY and repeated gaps observed during code reviews.
-
-**Must-fix:**
-1. **Diff Acquisition Workflow rewritten** (Part 2) — xray git tools (`xray_branch_status`, `xray_git_diff`, `xray_git_blame`, `xray_git_history`, `xray_git_activity`, `xray_git_authors`) are now the primary tools; `git` CLI is fallback only. Added hard rule: **never use `read_file` on `.rs` files** — always `xray_definitions includeBody=true`.
-2. **`xray_callers` false-negative trap** (Part 3) — explicit warning that AST caller search misses local-variable calls, closure captures, `Box<dyn Trait>` with erased concrete type. Mandatory cross-check with `xray_grep` before concluding "no callers".
-3. **Test Presence Check** (Part 4, mandatory) — every modified public function must have a test in the same PR. Absence → MAJOR unless explicitly justified (pure refactor / deleted path / trivial branch covered by existing test).
-
-**Should-fix:**
-4. **`Send`-bound async check** (Part 4 Async) — explicit item: adding non-`Send` types (`Rc`, `RefCell`, raw pointers) into values held across `.await` silently breaks every `tokio::spawn` site. Verify with `assert_send` helper or spawn in tests.
-5. **`MaybeUninit::assume_init` correctness** (Part 4 Unsafe) — added explicit checklist item for partial-initialization UB.
-6. **Cargo features** (Part 4 `[CONDITIONAL]`) — additive, `default-features = false` compatibility, workspace unification, `resolver = "2"`, feature removal = breaking.
-7. **PR description audit** (Part 8) — Pre-Completion Checklist now enforces presence of "Breaking Changes" section when breaking changes detected.
-8. **NIT section in Output Template** (Part 9 section 4.5) — explicit slot for nits, with rule to omit entirely when BLOCKER/MAJOR exists.
-
-**Nice-to-have:**
-9. Fixed V1.3 changelog date (was duplicated with V1.4 as 2026-03-13, corrected to 2026-03-08).
-
-### V1.4 (2026-03-13) — Architecture, severity model, review philosophy, Rust depth
-
-Based on Technical Fellow-level meta-review identifying architectural review gap, missing severity definitions, weak review philosophy, and narrow trait/generics/data modeling coverage.
-
-**Must-fix (3 changes):**
-1. **Severity Definitions table** (Part 5) — explicit BLOCKER/MAJOR/MINOR/NIT definitions with merge impact. Eliminates subjective severity assignment.
-2. **Architecture & Design section** (Part 4) — abstraction coherence, dependency direction, encapsulation, coupling, complexity budget, leaky abstractions, god-modules, feature-envy, circular dependencies. Architecture review is now mandatory for non-trivial PRs.
-3. **DISTINGUISH / PERMIT / Anti-dogmatism rule** (Part 7) — defect vs trade-off vs preference distinction. Permits justified `.clone()`, `.expect()`, pattern deviations. Prevents dogmatic review behavior.
-
-**Should-fix (5 changes):**
-4. **Data Modeling & Type Safety section** (Part 4) — invalid states, enum vs boolean, newtype patterns, type-state, boolean parameters.
-5. **Trait & Generics Design section** (Part 4) — over-generic APIs, monomorphization cost, blanket impl conflicts, `where` clause complexity, coherence/orphan rules, type-state opportunities.
-6. **Operational Readiness** (Part 4 `[CONDITIONAL]`) — graceful shutdown, config validation, degraded mode, timeout/retry, resource cleanup on panic.
-7. **Architectural Assessment + Open Questions sections** (Part 9 output template) — mirrors new Architecture section; provides space for genuine uncertainty.
-8. **Renamed** "Trait Object Safety & Auto-traits" → "Trait Correctness & Auto-traits" — section covers PartialOrd, Deref, Iterator, not just object safety.
-
-**Nice-to-have (4 changes):**
-9. **Atomic memory ordering guidance** (Part 4 Concurrency) — Relaxed vs Acquire/Release vs SeqCst with synchronization intent mapping.
-10. **Lifetime design guidance** (Part 4 Ownership) — `'static` overuse, self-referential struct anti-patterns, lifetime elision in public APIs.
-11. **Expected test types table** (Part 6 section 6.6) — property tests for parsers, stress tests for async, integration tests for public APIs, benchmarks for perf claims.
-12. **Quality bar definition** (Part 1) — explicit statement of what makes a finding valuable.
-13. **LLM context note** — Changelog section marked as omittable for LLM use (~70 lines saved).
-
-### V1.3 (2026-03-08) — Redundancy elimination, missing Rust checks, workflow improvements
-
-Based on systematic review of V1.2 identifying structural redundancy (Part 4 vs Part 5), missing Rust-specific concerns, and practical usability gaps.
-
-**Structural changes:**
-1. **Eliminated Part 5 "Quick-Scan Checklists"** — was ~60% redundant with Part 4 (`.unwrap()`, `.clone()`, race conditions, blocking I/O, `panic!`, breaking API all appeared in both). Unique content redistributed: Red Flags → new Part 5 "Severity Escalation Triggers"; Security/Architecture/Configuration items → Part 4 `[CONDITIONAL]`.
-2. **Added Diff Acquisition Workflow** (Part 2) — explicit git fetch + diff + tool-read steps for tool-assisted review. Prevents LLM from asking user to manually provide diffs.
-3. **Added Fast Path** (Part 2) — docs-only, test-only, formatting, and dependency bump changes skip the full 10-step pipeline.
-4. **Added Output Scaling** (Part 9) — small/medium/large PR sizing guidance so small PRs don't get 7-section reviews.
-5. **Moved Benchmarking Expectations** from Part 7 "Rules" into Part 4 "Memory & Performance" where they logically belong.
-6. **Compressed Pre-Completion Checklist** (Part 8) from 8 to 5 items — removed items already mandated by Part 3 Evidence Protocol.
-
-**New Rust-specific checks (Part 4):**
-7. **`#[cfg]` / Conditional compilation** — platform/feature gating concerns (Part 4 `[CONDITIONAL]`)
-8. **Validation Delegation Check** — "before flagging missing validation, check if all callers already validate" (Part 3 Rules)
-9. **`#[derive]` impact analysis** — removing derive traits from public types is breaking; adding `Copy`/`Serialize` has constraints (Part 4 API Design)
-10. **Visibility change tracking** — `pub` ↔ `pub(crate)` tracking (Part 4 API Design)
-11. **Generic bound changes** — tightening/loosening bounds is semver-significant (Part 4 API Design)
-12. **`dyn Trait` vs `impl Trait` return type changes** — heap allocation and naming implications (Part 4 API Design)
-13. **Workspace-level verification** — `--workspace` flag for clippy/test/check (Part 1 Prerequisites)
-14. **`PartialOrd`/`Ord` consistency** — inconsistency causes bugs in sorted collections (Part 4 Trait Object Safety)
-15. **`Deref`/`AsRef`/`From`/`Into` impl changes** — affects method resolution (Part 4 Trait Object Safety)
-16. **Custom `Iterator` fuse guarantees** (Part 4 Trait Object Safety)
-17. **Closure capture / borrow checker concerns** (Part 4 Ownership)
-18. **`build.rs` / proc-macro** concerns (Part 4 `[CONDITIONAL]`)
-19. **`const fn` changes** (Part 4 `[CONDITIONAL]`)
-20. **Dependency update PR criteria** (Part 4 `[CONDITIONAL]`)
-21. **Revert PR criteria** (Part 4 `[CONDITIONAL]`)
-22. **`#[inline]`/`#[cold]`/`#[track_caller]` attribute changes** (Part 4 `[CONDITIONAL]`)
-
-**Other improvements:**
-23. **Tool usage examples** added to Part 3 — concrete `xray_callers`, `xray_grep`, `xray_definitions` call patterns
-24. **New deep-dive pattern 6.8** — Downstream Function Contract Change
-25. **Expanded 6.7 triggers** — now includes derive removal, visibility changes, generic bound changes
-26. **Coverage gaps note** expanded — added `build.rs`-generated code
-27. **Notable Rust Findings** in output template — structured format with category, file:line, evidence tier
-28. **Severity escalation triggers** expanded — added derive removal, generic bound removal, visibility narrowing
-
-### V1.2 (2026-03-08) — Tool-aware, evidence-based rewrite
-
-Based on expert review of V1.1 identifying redundancy, missing Rust-specific checks, and lack of evidence discipline.
-
-**What was added:**
-1. **Evidence & Confidence Protocol** (Part 3) — three evidence tiers (verified/inferred/unverified), confidence level in verdict, explicit coverage gap reporting
-2. **Review Execution Pipeline** (Part 2) — ordered pipeline for tool-assisted review, preventing conclusions before evidence gathering
-3. **Async .await hazards** — 10-item checklist covering lock-across-await, cancellation safety, backpressure, unbounded spawning, JoinHandle discipline
-4. **Unsafe invariant checklist** — 12-item checklist covering aliasing, provenance, initialization, lifetime, Send/Sync, drop order, repr(C), pointer preconditions
-5. **Algorithmic complexity regressions** — 8-item checklist
-6. **Invariant preservation** — 4 mandatory questions about type-level and value-level invariants
-7. **Anti-severity-inflation rule**
-8. **Context priority by crate type** — library/service/CLI/binary priority table
-9. **Tool result discipline** — rules for citing tool evidence, acknowledging gaps
-10. **Known coverage gaps** — dynamic dispatch, macros, FFI, proc-macro limitations
-
-**What was compressed/removed:**
-- "Bigger Picture Rule" — folded into Mandatory Context Analysis
-- Output template Rust Assessment table → "Notable Rust Findings" free-form list
-- Conditional sections marked `[CONDITIONAL]`
-- Pre-Completion Checklist reduced to non-redundant items
-- Log spam pattern section removed — covered by fallback contract section
-- Redundant caller/contract statements consolidated
-
-### V1.1 (2026-02-27) — Initial version
-- Core philosophy, Rust-specific assessment, deep-dive patterns, output template
+_Changelog moved to [`rust-expert-code-review-prompt.CHANGELOG.md`](./rust-expert-code-review-prompt.CHANGELOG.md). When using this prompt with an LLM, the changelog file does not need to be loaded._
