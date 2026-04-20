@@ -338,12 +338,25 @@ pub struct FileEntry {
     pub is_dir: bool,
 }
 
+/// Format version for FileIndex. Bump when changing the on-disk struct layout.
+/// Loading an index with a different version triggers a full rebuild via the
+/// fast `read_format_version_from_index_file` header check.
+pub const FILE_INDEX_VERSION: u32 = 1;
+
 /// File index: a flat list of all files/directories under a root.
 ///
 /// Used for fast file-name search without filesystem walk.
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct FileIndex {
     pub root: String,
+    /// Format version — used to detect stale indexes after schema changes.
+    /// Placed after `root` so that `read_root_from_index_file()` can still
+    /// read root as the first bincode field, and
+    /// `read_format_version_from_index_file()` can read the version as the
+    /// second field. Reordering these two fields breaks the header readers
+    /// (see `test_file_index_field_order_guard` in `main_tests.rs`).
+    #[serde(default)]
+    pub format_version: u32,
     pub created_at: u64,
     pub max_age_secs: u64,
     pub entries: Vec<FileEntry>,

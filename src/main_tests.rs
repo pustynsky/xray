@@ -48,6 +48,7 @@
             .as_secs();
         let index = FileIndex {
             root: ".".to_string(),
+            format_version: FILE_INDEX_VERSION,
             created_at: now,
             max_age_secs: 3600,
             entries: vec![],
@@ -59,6 +60,7 @@
     fn test_file_index_stale() {
         let index = FileIndex {
             root: ".".to_string(),
+            format_version: FILE_INDEX_VERSION,
             created_at: 0, // epoch = definitely stale
             max_age_secs: 3600,
             entries: vec![],
@@ -207,6 +209,7 @@
     fn test_file_index_serialization_roundtrip() {
         let index = FileIndex {
             root: "C:\\test".to_string(),
+            format_version: FILE_INDEX_VERSION,
             created_at: 1000000,
             max_age_secs: 3600,
             entries: vec![
@@ -945,3 +948,88 @@
         );
     }
 
+    // ─── FileIndex.format_version migration & field-order tests ───────────────
+    //
+    // Resolves MAJOR-2 from the 2026-04-20 full-snapshot review:
+    // FileIndex previously had no format_version, leaving its on-disk
+    // layout undetectably stale after schema changes. The field is now
+    // serialized immediately after `root` so the existing fast header
+    // readers (`read_root_from_index_file` / `read_format_version_from_index_file`)
+    // work without modification.
+
+    /// Compile-time guard: every field must be listed in this constructor.
+    /// Adding a new FileIndex field forces the test author to think about
+    /// where it goes relative to `root` / `format_version` (which MUST stay
+    /// in slots 0 and 1 to preserve the bincode header-reader contract).
+    #[test]
+    fn test_file_index_field_count_guard() {
+        let _guard = FileIndex {
+            // ── Slot 0: root — MUST be first (read_root_from_index_file).
+            root: String::new(),
+            // ── Slot 1: format_version — MUST be second (read_format_version_from_index_file).
+            format_version: 0,
+            // ── Remaining fields: order is internal, but adding new fields
+            //    BEFORE root or BETWEEN root and format_version breaks both readers.
+            created_at: 0,
+            max_age_secs: 0,
+            entries: Vec::new(),
+        };
+        drop(_guard);
+    }
+
+    /// Migration regression: `load_index` must reject an on-disk index whose
+    /// `format_version` does not match the current `FILE_INDEX_VERSION`. The
+    /// caller (`cli/mod.rs`, `mcp/handlers/definitions.rs`) treats `Err(_)`
+    /// as "no usable index" and rebuilds, matching the existing pattern for
+    /// ContentIndex and DefinitionIndex.
+    #[test]
+    fn test_load_index_rejects_format_version_mismatch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_base = tmp.path();
+
+        let dir = tmp.path().join("project");
+        fs::create_dir_all(&dir).unwrap();
+        let dir_str = clean_path(&dir.to_string_lossy());
+
+        // Save a FileIndex stamped with a deliberately-wrong format_version.
+        let stale = FileIndex {
+            root: dir_str.clone(),
+            format_version: FILE_INDEX_VERSION.wrapping_add(99), // != current
+            created_at: 0,
+            max_age_secs: 86_400,
+            entries: Vec::new(),
+        };
+        crate::index::save_index(&stale, index_base).unwrap();
+
+        // load_index must NOT return Ok for a stale-version file.
+        let result = crate::index::load_index(&dir_str, index_base);
+        assert!(
+            result.is_err(),
+            "load_index must reject FileIndex with format_version mismatch (got Ok = silent corruption risk)"
+        );
+    }
+    /// Round-trip sanity: a freshly-built FileIndex written by `save_index`
+    /// stamps the current `FILE_INDEX_VERSION` and is loaded back successfully.
+    #[test]
+    fn test_load_index_accepts_current_format_version() {
+        let tmp = tempfile::tempdir().unwrap();
+        let index_base = tmp.path();
+
+        let dir = tmp.path().join("project");
+        fs::create_dir_all(&dir).unwrap();
+        let dir_str = clean_path(&dir.to_string_lossy());
+
+        let idx = FileIndex {
+            root: dir_str.clone(),
+            format_version: FILE_INDEX_VERSION,
+            created_at: 1_700_000_000,
+            max_age_secs: 86_400,
+            entries: Vec::new(),
+        };
+        crate::index::save_index(&idx, index_base).unwrap();
+
+        let loaded = crate::index::load_index(&dir_str, index_base)
+            .expect("current-version FileIndex must load successfully");
+        assert_eq!(loaded.format_version, FILE_INDEX_VERSION);
+        assert_eq!(loaded.root, dir_str);
+    }

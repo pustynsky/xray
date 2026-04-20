@@ -1442,6 +1442,7 @@ fn test_read_root_from_file_index_roundtrip() {
 
     let idx = code_xray::FileIndex {
         root: "C:/Repos/SomeProject".to_string(),
+        format_version: code_xray::FILE_INDEX_VERSION,
         created_at: 1_700_000_000,
         max_age_secs: 86_400,
         entries: Vec::new(),
@@ -1453,6 +1454,10 @@ fn test_read_root_from_file_index_roundtrip() {
     let read_root = crate::index::read_root_from_index_file_pub(&path);
     assert_eq!(read_root.as_deref(), Some("C:/Repos/SomeProject"),
         "FileIndex.root must be the first bincode field — reorder = broken header reader");
+
+    let read_version = crate::index::read_format_version_from_index_file(&path);
+    assert_eq!(read_version, Some(code_xray::FILE_INDEX_VERSION),
+        "FileIndex.format_version must be the second bincode field (immediately after root) — reorder = silently broken stale-index detection");
 }
 
 #[test]
