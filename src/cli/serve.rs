@@ -36,7 +36,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let ws_binding = mcp::handlers::determine_initial_binding(&dir_str, &extensions_vec);
     let is_unresolved = ws_binding.status == mcp::handlers::WorkspaceStatus::Unresolved;
     if is_unresolved {
-        eprintln!("[startup] Workspace UNRESOLVED (no source files in '{}'), skipping index build", ws_binding.dir);
+        warn!(target: "xray::startup", dir = %ws_binding.dir, "workspace UNRESOLVED (no source files), skipping index build");
     }
 
     // ─── Async startup flags ───
@@ -155,7 +155,7 @@ fn init_logging(args: &ServeArgs, dir_str: &str, exts_for_load: &str, idx_base: 
     // Log CWD and canonical dir for debugging dir-agnostic mode
     let cwd = std::env::current_dir().map(|p| crate::clean_path(&p.to_string_lossy())).unwrap_or_else(|_| "<unknown>".to_string());
     let canonical_dir = std::fs::canonicalize(dir_str).map(|p| crate::clean_path(&p.to_string_lossy())).unwrap_or_else(|_| dir_str.to_string());
-    eprintln!("[startup] dir={:?}, cwd={}, canonical={}", dir_str, cwd, canonical_dir);
+    info!(target: "xray::startup", dir = ?dir_str, cwd = %cwd, canonical = %canonical_dir, "server starting");
 }
 
 #[allow(clippy::too_many_arguments)]
