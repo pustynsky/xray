@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use code_xray::{clean_path, extract_semantic_prefix, generate_trigrams, path_eq, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION};
+use code_xray::{clean_path, extract_semantic_prefix, generate_trigrams, path_eq, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION, FILE_INDEX_VERSION};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -762,6 +762,31 @@ pub fn save_index(index: &FileIndex, index_base: &std::path::Path) -> Result<(),
 
 pub fn load_index(dir: &str, index_base: &std::path::Path) -> Result<FileIndex, SearchError> {
     let path = index_path_for(dir, index_base);
+
+    // Fast version check BEFORE full deserialization — reads ~100 bytes via LZ4
+    // streaming decompression. Prevents OOM/abort from old indexes whose
+    // shifted binary layout would cause garbled Vec lengths.
+    match read_format_version_from_index_file(&path) {
+        Some(v) if v != FILE_INDEX_VERSION => {
+            eprintln!(
+                "[file-index] Format version mismatch (found {}, expected {}), index outdated",
+                v, FILE_INDEX_VERSION
+            );
+            return Err(SearchError::IndexLoad {
+                path: path.display().to_string(),
+                message: format!("format version mismatch: found {}, expected {}", v, FILE_INDEX_VERSION),
+            });
+        }
+        None => {
+            eprintln!("[file-index] Cannot read format version from {}, index outdated", path.display());
+            return Err(SearchError::IndexLoad {
+                path: path.display().to_string(),
+                message: "cannot read format version (legacy or corrupt index)".to_string(),
+            });
+        }
+        Some(_) => {} // version matches, proceed to full load
+    }
+
     load_compressed(&path, "file-index")
 }
 
@@ -1181,6 +1206,7 @@ pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
 
     let index = FileIndex {
         root: root_str,
+        format_version: FILE_INDEX_VERSION,
         created_at: now,
         max_age_secs: args.max_age_hours * 3600,
         entries,
