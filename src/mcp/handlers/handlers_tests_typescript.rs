@@ -266,7 +266,7 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         writeln!(f, "    return user;").unwrap();                     // line 9
         writeln!(f, "  }}").unwrap();                                 // line 10
         writeln!(f, "}}").unwrap();                                   // line 11
-        writeln!(f, "").unwrap();                                     // line 12
+        writeln!(f).unwrap();                                     // line 12
         writeln!(f, "export interface IUserService {{").unwrap();     // line 13
         writeln!(f, "  id: number;").unwrap();                       // line 14
         writeln!(f, "}}").unwrap();                                   // line 15
@@ -571,7 +571,7 @@ fn test_ts_xray_definitions_include_body() {
     let defs = output["definitions"].as_array().unwrap();
     assert_eq!(defs.len(), 1);
     let body = defs[0]["body"].as_array().unwrap();
-    assert!(body.len() > 0, "Body should have content lines");
+    assert!(!body.is_empty(), "Body should have content lines");
     assert_eq!(defs[0]["bodyStartLine"], 6);
     cleanup_tmp(&tmp);
 }

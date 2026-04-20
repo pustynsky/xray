@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
 use std::collections::HashMap;
 
@@ -1293,7 +1294,7 @@ fn test_sync_reindex_existing_file_updates_content() {
     let stats = reindex_paths_sync(
         &index,
         &None,
-        &[file.clone()],
+        std::slice::from_ref(&file),
         &[],
         &["cs".to_string()],
     );
@@ -1331,7 +1332,7 @@ fn test_sync_reindex_new_file_adds_to_content_index() {
     let stats = reindex_paths_sync(
         &index,
         &None,
-        &[file.clone()],
+        std::slice::from_ref(&file),
         &[],
         &["cs".to_string()],
     );
@@ -1408,7 +1409,7 @@ fn test_sync_reindex_idempotent() {
     }));
 
     // First call: populate.
-    let stats1 = reindex_paths_sync(&index, &None, &[file.clone()], &[], &["cs".to_string()]);
+    let stats1 = reindex_paths_sync(&index, &None, std::slice::from_ref(&file), &[], &["cs".to_string()]);
     assert_eq!(stats1.content_updated, 1);
     let (keys1, tokens1, counts1) = {
         let idx = index.read().unwrap();
@@ -1419,7 +1420,7 @@ fn test_sync_reindex_idempotent() {
 
     // Second call: same file unchanged. Watcher race scenario — sync ran first,
     // then the FS watcher fires for the same change. Index state must be identical.
-    let stats2 = reindex_paths_sync(&index, &None, &[file.clone()], &[], &["cs".to_string()]);
+    let stats2 = reindex_paths_sync(&index, &None, std::slice::from_ref(&file), &[], &["cs".to_string()]);
     assert_eq!(stats2.content_updated, 1);
     let (keys2, tokens2, counts2) = {
         let idx = index.read().unwrap();

@@ -382,7 +382,7 @@ fn handle_single_file_edit(
                 let stats = crate::mcp::watcher::reindex_paths_sync(
                     &ctx.index,
                     &ctx.def_index,
-                    &[resolved.clone()],
+                    std::slice::from_ref(&resolved),
                     &[],
                     &server_extensions,
                 );

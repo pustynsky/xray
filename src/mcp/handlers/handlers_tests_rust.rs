@@ -22,7 +22,7 @@ fn make_rs_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         writeln!(f, "pub struct OrderService {{").unwrap();     // line 1
         writeln!(f, "    repo: String,").unwrap();               // line 2
         writeln!(f, "}}").unwrap();                               // line 3
-        writeln!(f, "").unwrap();                                 // line 4
+        writeln!(f).unwrap();                                 // line 4
         writeln!(f, "impl OrderService {{").unwrap();            // line 5
         writeln!(f, "    pub fn new() -> Self {{").unwrap();     // line 6
         writeln!(f, "        OrderService {{ repo: String::new() }}").unwrap(); // line 7
@@ -135,7 +135,7 @@ fn test_rust_include_body() {
     assert_eq!(defs.len(), 1);
     let body = defs[0]["body"].as_array();
     assert!(body.is_some(), "Should have body when includeBody=true");
-    assert!(body.unwrap().len() > 0, "Body should have content");
+    assert!(!body.unwrap().is_empty(), "Body should have content");
     cleanup_tmp(&tmp);
 }
 

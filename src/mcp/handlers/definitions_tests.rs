@@ -275,9 +275,9 @@ fn test_parent_filter_comma_separated_matches_multiple_classes() {
     let parents: Vec<&str> = defs.iter()
         .map(|d| d["parent"].as_str().unwrap())
         .collect();
-    assert!(parents.iter().any(|p| *p == "ResilientClient"),
+    assert!(parents.contains(&"ResilientClient"),
         "should include ResilientClient methods");
-    assert!(parents.iter().any(|p| *p == "ProxyClient"),
+    assert!(parents.contains(&"ProxyClient"),
         "should include ProxyClient methods");
 }
 
@@ -2359,7 +2359,7 @@ fn test_auto_correct_kind_with_file_filter() {
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = v["definitions"].as_array().unwrap();
-    assert!(defs.len() > 0, "Should return corrected results after kind auto-correction");
+    assert!(!defs.is_empty(), "Should return corrected results after kind auto-correction");
 
     let auto = &v["summary"]["autoCorrection"];
     assert!(auto.is_object(), "Should have autoCorrection");
@@ -2391,7 +2391,7 @@ fn test_auto_correct_name_typo() {
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = v["definitions"].as_array().unwrap();
-    assert!(defs.len() > 0, "Should return auto-corrected results for typo 'GetUsr'");
+    assert!(!defs.is_empty(), "Should return auto-corrected results for typo 'GetUsr'");
     assert!(defs.iter().any(|d| d["name"].as_str().unwrap() == "GetUser"),
         "Should find GetUser after name correction");
 
@@ -2460,7 +2460,7 @@ fn test_auto_correct_no_correction_when_results_found() {
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    assert!(v["definitions"].as_array().unwrap().len() > 0);
+    assert!(!v["definitions"].as_array().unwrap().is_empty());
     assert!(v["summary"].get("autoCorrection").is_none(),
         "No autoCorrection when results are found normally");
 }
@@ -3485,7 +3485,7 @@ fn test_hint_cross_file_max_three_files() {
         .copied()
         .collect();
     assert!(file_mentions.len() <= 3, "Should mention at most 3 files, got {}: {}", file_mentions.len(), hint);
-    assert!(file_mentions.len() >= 1, "Should mention at least 1 file: {}", hint);
+    assert!(!file_mentions.is_empty(), "Should mention at least 1 file: {}", hint);
 }
 
 #[test]

@@ -676,7 +676,7 @@ fn test_xray_definitions_enum_member_kind() {
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let containing = output["containingDefinitions"].as_array().unwrap();
     // Should find DoWork (innermost) and MyService (parent class)
-    assert!(containing.len() >= 1, "Should find definitions containing line 5, got {}", containing.len());
+    assert!(!containing.is_empty(), "Should find definitions containing line 5, got {}", containing.len());
     // The innermost definition (DoWork, lines 3-8) body should be filtered to lines 5-7
     let dowork = &containing[0];
     assert_eq!(dowork["name"].as_str(), Some("DoWork"));
@@ -712,7 +712,7 @@ fn test_xray_definitions_enum_member_kind() {
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["containingDefinitions"].as_array().unwrap();
     assert_eq!(defs[0]["name"], "DoWork");
-    assert!(defs[0]["body"].as_array().unwrap().len() > 0);
+    assert!(!defs[0]["body"].as_array().unwrap().is_empty());
     cleanup_tmp(&tmp);
 }
 
@@ -735,7 +735,7 @@ fn test_xray_definitions_enum_member_kind() {
     // First (innermost) = DoWork — should have body
     assert_eq!(defs[0]["name"], "DoWork");
     assert!(defs[0]["body"].is_array(), "Innermost should have body array");
-    assert!(defs[0]["body"].as_array().unwrap().len() > 0, "Innermost body should not be empty");
+    assert!(!defs[0]["body"].as_array().unwrap().is_empty(), "Innermost body should not be empty");
     assert!(defs[0].get("bodyOmitted").is_none(), "Innermost should NOT have bodyOmitted");
 
     // Second (parent) = MyService — should have bodyOmitted, no body
@@ -792,7 +792,7 @@ fn test_xray_definitions_enum_member_kind() {
     assert_eq!(defs[0]["name"], "BigClass");
     // Single match is innermost (i=0) — should have body
     assert!(defs[0]["body"].is_array(), "Single match should have body");
-    assert!(defs[0]["body"].as_array().unwrap().len() > 0);
+    assert!(!defs[0]["body"].as_array().unwrap().is_empty());
     assert!(defs[0].get("bodyOmitted").is_none(), "Single match should NOT have bodyOmitted");
     cleanup_tmp(&tmp);
 }

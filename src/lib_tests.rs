@@ -708,7 +708,7 @@ fn test_read_file_lossy_utf16le_bom_only() {
     // File with just a UTF-16LE BOM and no content
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("bom_only.cs");
-    std::fs::write(&path, &[0xFF, 0xFE]).unwrap();
+    std::fs::write(&path, [0xFF, 0xFE]).unwrap();
 
     let (result, was_lossy) = read_file_lossy(&path).unwrap();
     assert!(!was_lossy);
@@ -720,7 +720,7 @@ fn test_read_file_lossy_single_byte_file() {
     // File too short for BOM detection
     let tmp = tempfile::tempdir().unwrap();
     let path = tmp.path().join("single.cs");
-    std::fs::write(&path, &[0x41]).unwrap(); // 'A'
+    std::fs::write(&path, [0x41]).unwrap(); // 'A'
 
     let (result, was_lossy) = read_file_lossy(&path).unwrap();
     assert!(!was_lossy);

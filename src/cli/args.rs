@@ -474,6 +474,7 @@ mod args_defaults_tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn fast_args_default_matches_clap() {
         // FastArgs.pattern is a required positional — pass dummy and
         // override pattern in Default for comparison.
@@ -484,6 +485,7 @@ mod args_defaults_tests {
     }
 
     #[test]
+    #[allow(clippy::field_reassign_with_default)]
     fn grep_args_default_matches_clap() {
         // GrepArgs.pattern is a required positional — pass dummy and
         // override pattern in Default for comparison.

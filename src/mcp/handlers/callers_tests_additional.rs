@@ -1,3 +1,4 @@
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
 use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind};
 use std::collections::HashMap;
@@ -718,9 +719,9 @@ fn test_callers_deprioritize_tests_production_first() {
     assert!(!second.starts_with("test_"), "Second caller should be production, got: {}", second);
 
     // Remaining should be test callers
-    for i in 2..10 {
-        let name = tree[i]["method"].as_str().unwrap();
-        assert!(name.starts_with("test_"), "Caller at index {} should be test, got: {}", i, name);
+    for entry in tree.iter().take(10).skip(2) {
+        let name = entry["method"].as_str().unwrap();
+        assert!(name.starts_with("test_"), "Caller should be test, got: {}", name);
     }
 }
 
@@ -947,6 +948,7 @@ mod builder_state_tests {
     }
 
     /// Build (name_index, kind_index, file_index) maps from a flat definitions vec.
+    #[allow(clippy::type_complexity)]
     fn build_indexes(
         definitions: &[DefinitionEntry],
     ) -> (
@@ -1394,7 +1396,7 @@ mod builder_state_tests {
             content.push_str("    // padding\n");                // line base+6
             content.push_str("    // padding\n");                // line base+7
             content.push_str("}\n");                              // line base+8
-            content.push_str("\n");                               // line base+9
+            content.push('\n');                               // line base+9
         }
         std::fs::write(&file_path, &content).expect("failed to write fixture");
         let file_path_str = file_path.to_string_lossy().to_string();

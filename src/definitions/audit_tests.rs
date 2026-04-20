@@ -12,6 +12,9 @@
 //! 4. Call chain completeness: verify both precision (no false positives)
 //!    and recall (no missed callers/callees)
 
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
+#![allow(clippy::type_complexity)] // test helpers return tuple-of-vecs by design
+
 use super::*;
 use super::parser_csharp::parse_csharp_definitions;
 use super::parser_typescript::parse_typescript_definitions;

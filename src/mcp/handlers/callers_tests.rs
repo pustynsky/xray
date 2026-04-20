@@ -451,7 +451,7 @@ fn test_prefilter_does_not_expand_by_base_types() {
     };
 
     // --- Run build_caller_tree ---
-    let mut visited = HashSet::new();
+    let visited = HashSet::new();
     let limits = CallerLimits {
         max_callers_per_level: 50,
         max_total_nodes: 200,
@@ -548,7 +548,7 @@ fn test_callee_tree_depth2_no_cross_class_pollution() {
     ]);
 
     let def_idx = make_def_index(definitions, method_calls);
-    let mut visited = HashSet::new();
+    let visited = HashSet::new();
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
 
@@ -1464,7 +1464,7 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
     };
 
     // --- Run build_caller_tree with depth=3 ---
-    let mut visited = HashSet::new();
+    let visited = HashSet::new();
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
 
@@ -1860,7 +1860,7 @@ fn test_sql_callee_tree_exec_dependencies() {
         ..Default::default()
     };
 
-    let mut visited = HashSet::new();
+    let visited = HashSet::new();
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
 
@@ -1976,7 +1976,7 @@ fn test_sql_caller_tree_who_calls_sp() {
         ..Default::default()
     };
 
-    let mut visited = HashSet::new();
+    let visited = HashSet::new();
     let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
     let node_count = AtomicUsize::new(0);
 

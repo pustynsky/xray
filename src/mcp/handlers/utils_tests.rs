@@ -180,7 +180,7 @@ fn test_context_lines_calculation() {
 fn test_context_lines_at_file_boundaries() {
     let content = "line1\nline2\nline3";
     let match_lines = vec![1u32];
-    let result = build_line_content_from_matches(&content, &match_lines, 5);
+    let result = build_line_content_from_matches(content, &match_lines, 5);
     let groups = result.as_array().unwrap();
     assert_eq!(groups.len(), 1);
     let lines = groups[0]["lines"].as_array().unwrap();
@@ -1324,7 +1324,7 @@ fn test_phase_reduce_file_count() {
     let result_files = output["files"].as_array().unwrap();
     assert!(result_files.len() < 100,
         "File count should be reduced from 100, got {}", result_files.len());
-    assert!(result_files.len() >= 1, "Should keep at least 1 file");
+    assert!(!result_files.is_empty(), "Should keep at least 1 file");
     assert!(!reasons.is_empty());
 }
 

@@ -28,6 +28,7 @@ fn test_index_not_found_display() {
 
 #[test]
 fn test_invalid_regex_display() {
+    #[allow(clippy::invalid_regex)] // intentional invalid regex for error-path test
     let regex_err = regex::Regex::new("[invalid").unwrap_err();
     let err = SearchError::InvalidRegex {
         pattern: "[invalid".to_string(),

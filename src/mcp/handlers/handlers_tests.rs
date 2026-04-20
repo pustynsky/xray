@@ -2,6 +2,8 @@
 //! Grep/fast/find/git/misc tests are in separate handlers_tests_*.rs files.
 //! C#-specific tests are in handlers_tests_csharp.rs.
 
+#![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
+
 use super::*;
 use super::handlers_test_utils::make_ctx_with_defs;
 use crate::Posting;
@@ -10,13 +12,13 @@ use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 #[test]
 fn test_tool_definitions_count() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     assert_eq!(tools.len(), 15);
 }
 
 #[test]
 fn test_tool_definitions_names() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     let names: Vec<&str> = tools.iter().map(|t| t.name.as_str()).collect();
     assert!(names.contains(&"xray_grep"));
     assert!(names.contains(&"xray_fast"));
@@ -31,7 +33,7 @@ fn test_tool_definitions_names() {
 
 #[test]
 fn test_tool_definitions_have_schemas() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     for tool in &tools {
         assert!(tool.input_schema.is_object(), "Tool {} should have an object schema", tool.name);
         assert_eq!(tool.input_schema["type"], "object");
@@ -40,7 +42,7 @@ fn test_tool_definitions_have_schemas() {
 
 #[test]
 fn test_all_tools_have_required_field() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     for tool in &tools {
         assert!(
             tool.input_schema.get("required").is_some(),
@@ -61,7 +63,7 @@ fn test_all_tools_have_required_field() {
 
 #[test]
 fn test_xray_grep_required_fields() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     let grep = tools.iter().find(|t| t.name == "xray_grep").unwrap();
     let required = grep.input_schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 1);
@@ -214,7 +216,7 @@ fn test_reindex_definitions_no_def_index() {
 
 #[test]
 fn test_reindex_definitions_has_schema() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     let tool = tools.iter().find(|t| t.name == "xray_reindex_definitions").unwrap();
     let props = tool.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("dir"), "Should have dir parameter");
@@ -237,7 +239,7 @@ fn test_contains_line_requires_file() {
 
 #[test]
 fn test_xray_callers_has_required_params() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     let callers = tools.iter().find(|t| t.name == "xray_callers").unwrap();
     let required = callers.input_schema["required"].as_array().unwrap();
     assert_eq!(required.len(), 1);
@@ -246,7 +248,7 @@ fn test_xray_callers_has_required_params() {
 
 #[test]
 fn test_xray_callers_has_limit_params() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     let callers = tools.iter().find(|t| t.name == "xray_callers").unwrap();
     let props = callers.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("maxCallersPerLevel"), "Should have maxCallersPerLevel");
@@ -255,7 +257,7 @@ fn test_xray_callers_has_limit_params() {
 
 #[test]
 fn test_xray_definitions_has_contains_line() {
-    let tools = tool_definitions(&vec!["cs".to_string()]);
+    let tools = tool_definitions(&["cs".to_string()]);
     let defs = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     let props = defs.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("containsLine"), "Should have containsLine parameter");

@@ -132,7 +132,7 @@ fn test_render_instructions_contains_key_terms() {
 /// Windows cmd.exe (CP437/CP866) cannot display these characters correctly.
 #[test]
 fn test_render_cli_is_ascii_safe() {
-    let output = render_cli(&vec!["rs".to_string()]);
+    let output = render_cli(&["rs".to_string()]);
     for (i, ch) in output.chars().enumerate() {
         assert!(
             ch.is_ascii() || ch == '\n' || ch == '\r',
@@ -145,7 +145,7 @@ fn test_render_cli_is_ascii_safe() {
 
 #[test]
 fn test_render_json_has_parameter_examples() {
-    let json = render_json(&vec!["rs".to_string()]);
+    let json = render_json(&["rs".to_string()]);
     let examples = &json["parameterExamples"];
     assert!(examples.is_object(), "parameterExamples should be an object");
     // Key tools should have examples
@@ -166,7 +166,7 @@ fn test_render_json_has_parameter_examples() {
 #[test]
 fn test_tool_definitions_token_budget() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec!["cs".to_string(), "ts".to_string(), "tsx".to_string()]);
+    let tools = tool_definitions(&["cs".to_string(), "ts".to_string(), "tsx".to_string()]);
     let json = serde_json::to_string(&tools).unwrap();
     let word_count = json.split_whitespace().count();
     let approx_tokens = (word_count as f64 / 0.75) as usize;
@@ -322,7 +322,7 @@ fn test_task_routing_always_has_universal_tools() {
 #[test]
 fn test_xray_edit_description_starts_with_override() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec!["rs".to_string()]);
+    let tools = tool_definitions(&["rs".to_string()]);
     let edit_tool = tools.iter().find(|t| t.name == "xray_edit")
         .expect("xray_edit tool not found");
     assert!(
@@ -337,7 +337,7 @@ fn test_xray_edit_description_starts_with_override() {
 #[test]
 fn test_routing_critical_tools_have_hints() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec!["cs".to_string(), "ts".to_string(), "tsx".to_string()]);
+    let tools = tool_definitions(&["cs".to_string(), "ts".to_string(), "tsx".to_string()]);
     let routing_critical = ["xray_definitions", "xray_grep", "xray_fast", "xray_edit"];
     for tool_name in routing_critical {
         let tool = tools.iter().find(|t| t.name == tool_name)
@@ -534,7 +534,7 @@ fn test_format_supported_languages_duplicate_ext() {
 #[test]
 fn test_tool_definitions_rust_only() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec!["rs".to_string()]);
+    let tools = tool_definitions(&["rs".to_string()]);
     let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("Rust"),
         "xray_definitions description should contain 'Rust' when ext=rs. Got: {}", def_tool.description);
@@ -549,7 +549,7 @@ fn test_tool_definitions_rust_only() {
 #[test]
 fn test_tool_definitions_empty_extensions() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec![]);
+    let tools = tool_definitions(&[]);
     let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("not available"),
         "xray_definitions should say 'not available' when no extensions");
@@ -562,7 +562,7 @@ fn test_tool_definitions_empty_extensions() {
 #[test]
 fn test_tool_definitions_cs_ts_tsx() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec!["cs".to_string(), "ts".to_string(), "tsx".to_string()]);
+    let tools = tool_definitions(&["cs".to_string(), "ts".to_string(), "tsx".to_string()]);
     let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("C# and TypeScript/TSX"),
         "xray_definitions should contain 'C# and TypeScript/TSX'. Got: {}", def_tool.description);
@@ -591,7 +591,7 @@ fn test_render_instructions_example_line_uses_first_ext() {
 #[test]
 fn test_tool_definitions_with_sql_only() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec!["sql".to_string()]);
+    let tools = tool_definitions(&["sql".to_string()]);
     let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     assert!(def_tool.description.contains("SQL (regex-based parser)"),
         "xray_definitions should contain 'SQL (regex-based parser)' for sql-only. Got: {}", def_tool.description);
@@ -605,7 +605,7 @@ fn test_tool_definitions_with_sql_only() {
 #[test]
 fn test_tool_definitions_cs_rs_sql() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec!["cs".to_string(), "rs".to_string(), "sql".to_string()]);
+    let tools = tool_definitions(&["cs".to_string(), "rs".to_string(), "sql".to_string()]);
 
     // xray_definitions
     let def_tool = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
@@ -707,7 +707,7 @@ fn test_tips_no_hardcoded_language_lists() {
 #[test]
 fn test_tool_definitions_all_three_say_not_available_when_empty() {
     use crate::mcp::handlers::tool_definitions;
-    let tools = tool_definitions(&vec![]);
+    let tools = tool_definitions(&[]);
     for tool_name in ["xray_definitions", "xray_callers", "xray_reindex_definitions"] {
         let tool = tools.iter().find(|t| t.name == tool_name).unwrap();
         assert!(tool.description.contains("not available") || tool.description.contains("Not available"),
@@ -856,7 +856,7 @@ fn test_instructions_strategy_recipes_trimmed() {
 fn test_tool_definitions_reindex_defs_dynamic() {
     use crate::mcp::handlers::tool_definitions;
     // С расширениями — описание содержит языки
-    let tools = tool_definitions(&vec!["rs".to_string()]);
+    let tools = tool_definitions(&["rs".to_string()]);
     let reindex = tools.iter().find(|t| t.name == "xray_reindex_definitions").unwrap();
     assert!(reindex.description.contains("Rust"),
         "xray_reindex_definitions should mention 'Rust'. Got: {}", reindex.description);
@@ -864,7 +864,7 @@ fn test_tool_definitions_reindex_defs_dynamic() {
         "xray_reindex_definitions should NOT hardcode 'tree-sitter'");
 
     // Без расширений — "not available"
-    let tools_empty = tool_definitions(&vec![]);
+    let tools_empty = tool_definitions(&[]);
     let reindex_empty = tools_empty.iter().find(|t| t.name == "xray_reindex_definitions").unwrap();
     assert!(reindex_empty.description.contains("not available"),
         "xray_reindex_definitions should say 'not available' when empty");
