@@ -51,6 +51,31 @@ fn test_clean_path_unc_prefix_with_normalization() {
     assert_eq!(clean_path(r"\\?\C:\Projects\src\file.cs"), "C:/Projects/src/file.cs");
 }
 
+// ─── path_eq tests ──────────────────────────────────────────
+
+#[test]
+fn test_path_eq_identical() {
+    assert!(path_eq("C:/Repos/Xray", "C:/Repos/Xray"));
+}
+
+#[test]
+fn test_path_eq_different_paths() {
+    assert!(!path_eq("C:/Repos/Xray", "C:/Repos/Other"));
+}
+
+#[cfg(windows)]
+#[test]
+fn test_path_eq_case_insensitive_on_windows() {
+    assert!(path_eq("C:/Repos/Xray", "c:/repos/xray"));
+    assert!(path_eq("C:/Repos/Xray/Sub", "C:/REPOS/XRAY/SUB"));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn test_path_eq_case_sensitive_on_unix() {
+    assert!(!path_eq("/repos/Xray", "/repos/xray"));
+}
+
 // ─── stable_hash tests ──────────────────────────────────────
 
 #[test]

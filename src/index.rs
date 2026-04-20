@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 
 use crate::error::SearchError;
-use code_xray::{clean_path, extract_semantic_prefix, generate_trigrams, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION};
+use code_xray::{clean_path, extract_semantic_prefix, generate_trigrams, path_eq, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -840,7 +840,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
 
         // ── Fast filter via .meta sidecar (~200 bytes, no full deserialization) ──
         if let Some(meta) = load_index_meta(&path) {
-            if meta.root != clean {
+            if !path_eq(&meta.root, &clean) {
                 continue; // root doesn't match — skip without loading
             }
             // Check extension superset from metadata
@@ -878,7 +878,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
 
         // ── Fallback: no .meta sidecar — try lightweight root + version check ──
         if let Some(root) = read_root_from_index_file(&path)
-            && root != clean {
+            && !path_eq(&root, &clean) {
                 continue; // root doesn't match — skip without loading
             }
         // Check version before full deserialization
@@ -897,7 +897,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
         // Root + version OK — load full index
         match load_compressed::<ContentIndex>(&path, "content-index") {
             Ok(index) => {
-                if index.root == clean {
+                if path_eq(&index.root, &clean) {
                     // Validate that cached index has ALL expected extensions
                     if !expected_exts.is_empty() {
                         let has_all = expected_exts.iter().all(|ext|
@@ -1027,7 +1027,7 @@ pub fn cleanup_stale_same_root_indexes(
         };
 
         if let Some(ref file_root) = file_root
-            && file_root == root {
+            && path_eq(file_root, root) {
                 // Same root, different hash → stale index
                 if fs::remove_file(&path).is_ok() {
                     eprintln!("[cleanup] Removed stale {} index: {} (same root, different extensions)",
@@ -1097,7 +1097,7 @@ pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize
                 let root_canonical = std::fs::canonicalize(&root)
                     .map(|p| clean_path(&p.to_string_lossy()))
                     .unwrap_or_else(|_| clean_path(&root));
-                if root_canonical.eq_ignore_ascii_case(&target)
+                if path_eq(&root_canonical, &target)
                     && std::fs::remove_file(&path).is_ok() {
                         removed += 1;
                         eprintln!("  Removed index for dir '{}': {} ({})",

@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::clean_path;
+use crate::{clean_path, path_eq};
 
 use super::types::DefinitionIndex;
 
@@ -86,7 +86,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
             let meta_root = std::fs::canonicalize(&meta.root)
                 .map(|p| clean_path(&p.to_string_lossy()))
                 .unwrap_or_else(|_| meta.root.clone());
-            if !meta_root.eq_ignore_ascii_case(&dir_str) {
+            if !path_eq(&meta_root, &dir_str) {
                 continue; // root doesn't match — skip without loading
             }
             // Check extension superset from metadata
@@ -127,7 +127,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
             let root_canonical = std::fs::canonicalize(&root)
                 .map(|p| clean_path(&p.to_string_lossy()))
                 .unwrap_or_else(|_| clean_path(&root));
-            if !root_canonical.eq_ignore_ascii_case(&dir_str) {
+            if !path_eq(&root_canonical, &dir_str) {
                 continue; // root doesn't match — skip without loading
             }
         }
@@ -150,7 +150,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
                 let idx_root = std::fs::canonicalize(&index.root)
                     .map(|p| clean_path(&p.to_string_lossy()))
                     .unwrap_or_else(|_| index.root.clone());
-                if idx_root.eq_ignore_ascii_case(&dir_str) {
+                if path_eq(&idx_root, &dir_str) {
                     // Validate that cached index has ALL expected extensions
                     if !expected_exts.is_empty() {
                         let has_all = expected_exts.iter().all(|ext|

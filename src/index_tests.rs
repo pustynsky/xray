@@ -1307,3 +1307,119 @@ fn test_worker_panics_preserved_in_serialization_roundtrip() {
     let loaded = crate::load_content_index(&dir, "", idx_base).expect("load failed");
     assert_eq!(loaded.worker_panics, 3, "worker_panics must survive save/load round-trip");
 }
+
+// ─── Case-insensitive path comparison on Windows (regression: path_eq) ─────
+
+/// Save a content index with one casing, look up with a different casing.
+/// On Windows must succeed (NTFS is case-insensitive); on Unix must fail
+/// (filesystem is case-sensitive). Regression for MAJOR-3 from the
+/// 2026-04-20 full-snapshot review: orphan caches accumulated under
+/// `%LOCALAPPDATA%\xray` because `meta.root != clean` was case-sensitive
+/// while `find_definition_index_for_dir` already used `eq_ignore_ascii_case`.
+#[test]
+fn test_find_content_index_case_insensitive_lookup_on_windows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    // Use a non-existent path so canonicalize falls back to the literal —
+    // lets us drive both casings deterministically.
+    let saved_root = "C:/Repos/UPPER/Project".to_string();
+    let lookup_root = "c:/repos/upper/project".to_string();
+
+    let idx = code_xray::ContentIndex {
+        root: saved_root.clone(),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx, index_base).unwrap();
+
+    let result = crate::index::find_content_index_for_dir(&lookup_root, index_base, &[]);
+    if cfg!(windows) {
+        assert!(result.is_some(),
+            "On Windows, lookup with different casing must find the saved index (path_eq)");
+        assert_eq!(result.unwrap().root, saved_root,
+            "Returned index must be the one saved under uppercase root");
+    } else {
+        assert!(result.is_none(),
+            "On Unix, lookup with different casing must NOT find the saved index");
+    }
+}
+
+/// Same as above, but exercises the meta-less fallback path — verifies
+/// the `read_root_from_index_file` branch also uses `path_eq`.
+#[test]
+fn test_find_content_index_case_insensitive_lookup_without_meta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let saved_root = "C:/Repos/UPPER/Project".to_string();
+    let lookup_root = "c:/repos/upper/project".to_string();
+
+    let idx = code_xray::ContentIndex {
+        root: saved_root.clone(),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx, index_base).unwrap();
+
+    // Drop the .meta sidecar to force the fallback branch.
+    for entry in std::fs::read_dir(index_base).unwrap().flatten() {
+        let path = entry.path();
+        if path.to_string_lossy().ends_with(".meta") {
+            std::fs::remove_file(&path).unwrap();
+        }
+    }
+
+    let result = crate::index::find_content_index_for_dir(&lookup_root, index_base, &[]);
+    if cfg!(windows) {
+        assert!(result.is_some(),
+            "Fallback (no .meta) lookup with different casing must find the saved index on Windows");
+    } else {
+        assert!(result.is_none(),
+            "Fallback (no .meta) lookup with different casing must NOT match on Unix");
+    }
+}
+
+/// Verify cleanup_stale_same_root_indexes also uses path_eq — without it,
+/// stale indexes with different-case root strings would never be removed,
+/// silently accumulating in `%LOCALAPPDATA%\xray`.
+#[test]
+fn test_cleanup_stale_same_root_case_insensitive_on_windows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let saved_root = "C:/Repos/UPPER/Project".to_string();
+    let cleanup_root = "c:/repos/upper/project".to_string();
+
+    let idx_old = code_xray::ContentIndex {
+        root: saved_root.clone(),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        max_age_secs: 86400,
+        extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    crate::save_content_index(&idx_old, index_base).unwrap();
+
+    // Pretend we just saved a NEW index for the same logical dir but with
+    // different casing. The newly_saved_path points at a hash that does not
+    // match the old one (different exts), so the old one should be cleaned.
+    let new_path = crate::content_index_path_for(&cleanup_root, "rs,md", index_base);
+    crate::index::cleanup_stale_same_root_indexes(index_base, &new_path, &cleanup_root, "word-search");
+
+    let count_ws = std::fs::read_dir(index_base).unwrap()
+        .flatten()
+        .filter(|e| e.path().extension().is_some_and(|ext| ext == "word-search"))
+        .count();
+
+    if cfg!(windows) {
+        assert_eq!(count_ws, 0,
+            "On Windows, stale index with different-case root must be removed");
+    } else {
+        assert_eq!(count_ws, 1,
+            "On Unix, different-case root means different logical dir — must NOT be removed");
+    }
+}
