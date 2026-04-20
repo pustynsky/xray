@@ -47,6 +47,28 @@ pub fn clean_path(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).replace('\\', "/")
 }
 
+/// Compare two path strings using platform-appropriate case sensitivity.
+///
+/// On Windows the comparison is case-insensitive (ASCII), matching the
+/// behaviour of NTFS / ReFS for the common code-path identifiers we deal
+/// with (drive letters, ASCII directory names). On Unix the comparison is
+/// strictly case-sensitive, matching the underlying filesystem semantics.
+///
+/// Use this helper for any equality check between two cleaned/canonicalized
+/// path strings (e.g. cache `root` lookups). Mixing raw `==` and
+/// `eq_ignore_ascii_case` across the codebase has produced cross-platform
+/// bugs where indexes saved under one casing could not be found again
+/// (orphan caches under `%LOCALAPPDATA%\xray`).
+#[must_use]
+#[inline]
+pub fn path_eq(a: &str, b: &str) -> bool {
+    if cfg!(windows) {
+        a.eq_ignore_ascii_case(b)
+    } else {
+        a == b
+    }
+}
+
 /// Check if `path` is logically inside `root` (workspace / server --dir),
 /// correctly handling **symlinked subdirectories** (e.g., `docs/personal` →
 /// `D:\Personal\…`) that the indexer reaches via `WalkBuilder::follow_links`.
