@@ -14,6 +14,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - name: Run clippy
-        run: cargo clippy --workspace -- -D warnings
+      - name: Run clippy (all targets)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Verify test target compiles
+        run: cargo test --workspace --no-run --locked
 
