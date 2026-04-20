@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 use tracing::{info, warn};
 
-use crate::{clean_path, read_file_lossy};
+use crate::{canonicalize_or_warn, clean_path, read_file_lossy};
 use super::{index_file_defs, types::*};
 #[cfg(feature = "lang-csharp")]
 use super::parser_csharp::parse_csharp_definitions;
@@ -411,7 +411,7 @@ pub fn reconcile_definition_index(
         .unwrap_or(std::time::Duration::ZERO)
         .as_secs();
 
-    let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+    let dir_path = canonicalize_or_warn(dir);
 
     // Threshold: files modified after (created_at - 2s) are considered potentially stale
     let threshold = UNIX_EPOCH + Duration::from_secs(index.created_at.saturating_sub(2));
@@ -531,7 +531,7 @@ pub fn reconcile_definition_index_nonblocking(
         .unwrap_or(std::time::Duration::ZERO)
         .as_secs();
 
-    let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+    let dir_path = canonicalize_or_warn(dir);
 
     // ── Phase 1: Walk filesystem (NO lock needed) ──
     let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();

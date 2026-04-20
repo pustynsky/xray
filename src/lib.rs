@@ -69,6 +69,34 @@ pub fn path_eq(a: &str, b: &str) -> bool {
     }
 }
 
+/// Canonicalize a path, falling back to the raw input on failure.
+///
+/// Wraps `std::fs::canonicalize` with a `tracing::warn!` on error so the
+/// silent fallback (broken symlink, permission denied, drive disconnected)
+/// becomes visible in the structured log. The fallback itself is preserved
+/// — many call sites use this for cache-key derivation where any reasonable
+/// path is better than `panic!`, but the resulting orphan-index risk should
+/// at least be observable to operators.
+///
+/// Use this everywhere instead of the raw
+/// `fs::canonicalize(p).unwrap_or_else(|_| PathBuf::from(p))` pattern.
+#[must_use]
+pub fn canonicalize_or_warn(dir: &str) -> std::path::PathBuf {
+    match std::fs::canonicalize(dir) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                target: "xray::path",
+                dir = %dir,
+                error = %e,
+                "canonicalize failed; falling back to raw input \
+                 (cache key may diverge from canonical path)",
+            );
+            std::path::PathBuf::from(dir)
+        }
+    }
+}
+
 /// Check if `path` is logically inside `root` (workspace / server --dir),
 /// correctly handling **symlinked subdirectories** (e.g., `docs/personal` →
 /// `D:\Personal\…`) that the indexer reaches via `WalkBuilder::follow_links`.

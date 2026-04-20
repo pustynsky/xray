@@ -8,9 +8,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
+use tracing::{debug, info, warn};
 
 use crate::error::SearchError;
-use code_xray::{clean_path, extract_semantic_prefix, generate_trigrams, path_eq, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION, FILE_INDEX_VERSION};
+use code_xray::{canonicalize_or_warn, clean_path, extract_semantic_prefix, generate_trigrams, path_eq, read_file_lossy, stable_hash, tokenize, ContentIndex, FileEntry, FileIndex, Posting, TrigramIndex, CONTENT_INDEX_VERSION, FILE_INDEX_VERSION};
 
 use crate::{ContentIndexArgs, IndexArgs};
 
@@ -61,7 +62,7 @@ static DEBUG_LOG_START: OnceLock<Instant> = OnceLock::new();
 /// Compute the per-server debug log file path.
 /// Uses the same semantic prefix + hash naming as index files.
 pub fn debug_log_path_for(index_base: &std::path::Path, server_dir: &str) -> PathBuf {
-    let canonical = fs::canonicalize(server_dir).unwrap_or_else(|_| PathBuf::from(server_dir));
+    let canonical = canonicalize_or_warn(server_dir);
     let hash = stable_hash(&[canonical.to_string_lossy().as_bytes()]);
     let prefix = extract_semantic_prefix(&canonical);
     index_base.join(format!("{}_{:08x}.debug.log", prefix, hash as u32))
@@ -746,7 +747,7 @@ pub fn index_dir() -> PathBuf {
 }
 
 pub fn index_path_for(dir: &str, index_base: &std::path::Path) -> PathBuf {
-    let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+    let canonical = canonicalize_or_warn(dir);
     let hash = stable_hash(&[canonical.to_string_lossy().as_bytes()]);
     let prefix = extract_semantic_prefix(&canonical);
     index_base.join(format!("{}_{:08x}.file-list", prefix, hash as u32))
@@ -778,7 +779,7 @@ pub fn load_index(dir: &str, index_base: &std::path::Path) -> Result<FileIndex, 
             });
         }
         None => {
-            eprintln!("[file-index] Cannot read format version from {}, index outdated", path.display());
+            warn!(target: "xray::index", path = %path.display(), "file-index: cannot read format version, treating as outdated");
             return Err(SearchError::IndexLoad {
                 path: path.display().to_string(),
                 message: "cannot read format version (legacy or corrupt index)".to_string(),
@@ -791,7 +792,7 @@ pub fn load_index(dir: &str, index_base: &std::path::Path) -> Result<FileIndex, 
 }
 
 pub fn content_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
-    let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+    let canonical = canonicalize_or_warn(dir);
     let hash = stable_hash(&[canonical.to_string_lossy().as_bytes(), exts.as_bytes()]);
     let prefix = extract_semantic_prefix(&canonical);
     index_base.join(format!("{}_{:08x}.word-search", prefix, hash as u32))
@@ -824,7 +825,7 @@ pub fn load_content_index(dir: &str, exts: &str, index_base: &std::path::Path) -
             });
         }
         None => {
-            eprintln!("[content-index] Cannot read format version from {}, index outdated", path.display());
+            warn!(target: "xray::index", path = %path.display(), "content-index: cannot read format version, treating as outdated");
             return Err(SearchError::IndexLoad {
                 path: path.display().to_string(),
                 message: "cannot read format version (legacy or corrupt index)".to_string(),
@@ -854,7 +855,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
     if !index_base.exists() {
         return None;
     }
-    let canonical = fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+    let canonical = canonicalize_or_warn(dir);
     let clean = clean_path(&canonical.to_string_lossy());
 
     for entry in fs::read_dir(index_base).ok()?.flatten() {
@@ -874,20 +875,18 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
                     meta.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
                 );
                 if !has_all {
-                    eprintln!("[find_content_index] Skipping {} — extensions mismatch (cached: {:?}, expected: {:?})",
-                        path.display(), meta.extensions, expected_exts);
+                    debug!(target: "xray::index", path = %path.display(), cached = ?meta.extensions, expected = ?expected_exts, "find_content_index: skipping (extensions mismatch via meta)");
                     continue;
                 }
             }
             // Metadata matches — check version before full load
             match read_format_version_from_index_file(&path) {
                 Some(v) if v != CONTENT_INDEX_VERSION => {
-                    eprintln!("[find_content_index] Skipping {} — format version mismatch (found {}, expected {})",
-                        path.display(), v, CONTENT_INDEX_VERSION);
+                    debug!(target: "xray::index", path = %path.display(), found = v, expected = CONTENT_INDEX_VERSION, "find_content_index: skipping (format version mismatch)");
                     continue;
                 }
                 None => {
-                    eprintln!("[find_content_index] Cannot read version from {}, skipping", path.display());
+                    warn!(target: "xray::index", path = %path.display(), "find_content_index: cannot read version, skipping");
                     continue;
                 }
                 Some(_) => {}
@@ -895,7 +894,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
             match load_compressed::<ContentIndex>(&path, "content-index") {
                 Ok(index) => return Some(index),
                 Err(e) => {
-                    eprintln!("[find_content_index] Metadata matched but load failed for {}: {}", path.display(), e);
+                    warn!(target: "xray::index", path = %path.display(), error = %e, "find_content_index: metadata matched but load failed");
                     continue;
                 }
             }
@@ -909,12 +908,11 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
         // Check version before full deserialization
         match read_format_version_from_index_file(&path) {
             Some(v) if v != CONTENT_INDEX_VERSION => {
-                eprintln!("[find_content_index] Skipping {} — format version mismatch (found {}, expected {})",
-                    path.display(), v, CONTENT_INDEX_VERSION);
+                debug!(target: "xray::index", path = %path.display(), found = v, expected = CONTENT_INDEX_VERSION, "find_content_index: skipping (format version mismatch, fallback)");
                 continue;
             }
             None => {
-                eprintln!("[find_content_index] Cannot read version from {}, skipping", path.display());
+                warn!(target: "xray::index", path = %path.display(), "find_content_index: cannot read version, skipping (fallback)");
                 continue;
             }
             Some(_) => {}
@@ -929,8 +927,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
                             index.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
                         );
                         if !has_all {
-                            eprintln!("[find_content_index] Skipping {} — extensions mismatch (cached: {:?}, expected: {:?})",
-                                path.display(), index.extensions, expected_exts);
+                            debug!(target: "xray::index", path = %path.display(), cached = ?index.extensions, expected = ?expected_exts, "find_content_index: skipping (extensions mismatch via full load)");
                             continue;
                         }
                     }
@@ -938,7 +935,7 @@ pub fn find_content_index_for_dir(dir: &str, index_base: &std::path::Path, expec
                 }
             }
             Err(e) => {
-                eprintln!("[find_content_index] Skipping {}: {}", path.display(), e);
+                warn!(target: "xray::index", path = %path.display(), error = %e, "find_content_index: skipping (load error)");
             }
         }
     }
@@ -1055,8 +1052,7 @@ pub fn cleanup_stale_same_root_indexes(
             && path_eq(file_root, root) {
                 // Same root, different hash → stale index
                 if fs::remove_file(&path).is_ok() {
-                    eprintln!("[cleanup] Removed stale {} index: {} (same root, different extensions)",
-                        extension, path.display());
+                    info!(target: "xray::index", extension = extension, path = %path.display(), "cleanup: removed stale index (same root, different extensions)");
                     // Also remove sidecar .meta file
                     let _ = fs::remove_file(meta_path_for(&path));
                 }
@@ -1282,13 +1278,13 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
                     Ok((content, was_lossy)) => {
                         if was_lossy {
                             lossy_file_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            eprintln!("[content-index] WARNING: lossy UTF-8 conversion: {}", path);
+                            warn!(target: "xray::index", path = %path, "content-index: lossy UTF-8 conversion");
                         }
                         file_data.lock().unwrap_or_else(|e| e.into_inner()).push((path, content));
                     }
                     Err(e) => {
                         read_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        eprintln!("[content-index] WARNING: failed to read file: {} — {}", path, e);
+                        warn!(target: "xray::index", path = %path, error = %e, "content-index: failed to read file");
                     }
                 }
             }

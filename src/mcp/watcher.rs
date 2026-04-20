@@ -8,7 +8,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use notify::event::ModifyKind;
 use tracing::{error, info, warn};
 
-use crate::{clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
+use crate::{canonicalize_or_warn, clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -800,7 +800,7 @@ fn reconcile_content_index(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(std::time::Duration::ZERO)
         .as_secs();
-    let dir_path = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+    let dir_path = canonicalize_or_warn(dir);
 
     // ── Phase 1: Walk filesystem (NO LOCK) ──
     let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();

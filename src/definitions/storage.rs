@@ -2,12 +2,14 @@
 
 use std::path::PathBuf;
 
-use crate::{clean_path, path_eq};
+use tracing::{debug, warn};
+
+use crate::{canonicalize_or_warn, clean_path, path_eq};
 
 use super::types::DefinitionIndex;
 
 pub fn definition_index_path_for(dir: &str, exts: &str, index_base: &std::path::Path) -> PathBuf {
-    let canonical = std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir));
+    let canonical = canonicalize_or_warn(dir);
     let hash = code_xray::stable_hash(&[
         canonical.to_string_lossy().as_bytes(),
         exts.as_bytes(),
@@ -43,7 +45,7 @@ pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path
             });
         }
         None => {
-            eprintln!("[definition-index] Cannot read format version from {}, index outdated", path.display());
+            warn!(target: "xray::definitions", path = %path.display(), "definition-index: cannot read format version, treating as outdated");
             return Err(crate::SearchError::IndexLoad {
                 path: path.display().to_string(),
                 message: "cannot read format version (legacy or corrupt index)".to_string(),
@@ -95,20 +97,18 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
                     meta.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
                 );
                 if !has_all {
-                    eprintln!("[find_definition_index] Skipping {} — extensions mismatch (cached: {:?}, expected: {:?})",
-                        path.display(), meta.extensions, expected_exts);
+                    debug!(target: "xray::definitions", path = %path.display(), cached = ?meta.extensions, expected = ?expected_exts, "find_definition_index: skipping (extensions mismatch via meta)");
                     continue;
                 }
             }
             // Metadata matches — check version before full load (reads ~100 bytes, 1 LZ4 block)
             match crate::index::read_format_version_from_index_file(&path) {
                 Some(v) if v != super::types::DEFINITION_INDEX_VERSION => {
-                    eprintln!("[find_definition_index] Skipping {} — format version mismatch (found {}, expected {})",
-                        path.display(), v, super::types::DEFINITION_INDEX_VERSION);
+                    debug!(target: "xray::definitions", path = %path.display(), found = v, expected = super::types::DEFINITION_INDEX_VERSION, "find_definition_index: skipping (format version mismatch)");
                     continue;
                 }
                 None => {
-                    eprintln!("[find_definition_index] Cannot read version from {}, skipping", path.display());
+                    warn!(target: "xray::definitions", path = %path.display(), "find_definition_index: cannot read version, skipping");
                     continue;
                 }
                 Some(_) => {}
@@ -116,7 +116,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
             match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
                 Ok(index) => return Some(index),
                 Err(e) => {
-                    eprintln!("[find_definition_index] Metadata matched but load failed for {}: {}", path.display(), e);
+                    warn!(target: "xray::definitions", path = %path.display(), error = %e, "find_definition_index: metadata matched but load failed");
                     continue;
                 }
             }
@@ -134,12 +134,11 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
         // Check version before full deserialization (reads ~100 bytes, 1 LZ4 block)
         match crate::index::read_format_version_from_index_file(&path) {
             Some(v) if v != super::types::DEFINITION_INDEX_VERSION => {
-                eprintln!("[find_definition_index] Skipping {} — format version mismatch (found {}, expected {})",
-                    path.display(), v, super::types::DEFINITION_INDEX_VERSION);
+                debug!(target: "xray::definitions", path = %path.display(), found = v, expected = super::types::DEFINITION_INDEX_VERSION, "find_definition_index: skipping (format version mismatch, fallback)");
                 continue;
             }
             None => {
-                eprintln!("[find_definition_index] Cannot read version from {}, skipping", path.display());
+                warn!(target: "xray::definitions", path = %path.display(), "find_definition_index: cannot read version, skipping (fallback)");
                 continue;
             }
             Some(_) => {}
@@ -157,8 +156,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
                             index.extensions.iter().any(|e| e.eq_ignore_ascii_case(ext))
                         );
                         if !has_all {
-                            eprintln!("[find_definition_index] Skipping {} — extensions mismatch (cached: {:?}, expected: {:?})",
-                                path.display(), index.extensions, expected_exts);
+                            debug!(target: "xray::definitions", path = %path.display(), cached = ?index.extensions, expected = ?expected_exts, "find_definition_index: skipping (extensions mismatch via full load)");
                             continue;
                         }
                     }
@@ -166,7 +164,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
                 }
             }
             Err(e) => {
-                eprintln!("[find_definition_index] Skipping {}: {}", path.display(), e);
+                warn!(target: "xray::definitions", path = %path.display(), error = %e, "find_definition_index: skipping (load error)");
             }
         }
     }
