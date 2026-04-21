@@ -258,7 +258,6 @@ pub fn start_watcher(
                             EventKind::Remove(_) => {
                                 dirty_files.remove(path);
                                 removed_files.insert(path.clone());
-                    stats.events_errors.fetch_add(1, Ordering::Relaxed);
                                 if batch_start.is_none() {
                                     batch_start = Some(Instant::now());
                                 }
@@ -277,6 +276,7 @@ pub fn start_watcher(
                         }
                 }
                 Ok(Err(e)) => {
+                    stats.events_errors.fetch_add(1, Ordering::Relaxed);
                     warn!(error = %e, "File watcher error");
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
