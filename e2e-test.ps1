@@ -402,15 +402,33 @@ Write-Host "`n=== Parallel MCP tests (Start-Job) ===`n"
 
 $parallelTimer = [System.Diagnostics.Stopwatch]::StartNew()
 
-# Resolve search binary to absolute path (jobs run in different working directory)
-$searchBinAbs = (Get-Command xray.exe -ErrorAction SilentlyContinue).Source
+# Resolve search binary to absolute path (jobs run in a different working directory,
+# so relative paths from the caller's -Binary parameter cannot be used as-is).
+# Priority order:
+#   1. -Binary param from the caller (explicit override — always wins).
+#      `cargo run --` is treated as the default placeholder and skipped (it gets
+#      rewritten to .\target\debug\xray.exe earlier in the script).
+#   2. Local debug build (.\target\debug\xray.exe) — matches what sequential
+#      tests were already using above, keeps parallel vs sequential consistent.
+#   3. Globally installed xray.exe (%CARGO_HOME%\bin\xray.exe) — last-resort
+#      fallback for environments without a local build.
+# Previously the order was inverted (installed → debug) and -Binary was ignored
+# entirely by parallel jobs, which silently tested a stale installed binary.
+$searchBinAbs = $null
+if ($Binary -and $Binary -ne "cargo run --" -and (Test-Path $Binary)) {
+    $searchBinAbs = (Resolve-Path $Binary -ErrorAction SilentlyContinue).Path
+}
 if (-not $searchBinAbs) {
     $searchBinAbs = (Resolve-Path ".\target\debug\xray.exe" -ErrorAction SilentlyContinue).Path
 }
 if (-not $searchBinAbs) {
-    Write-Host "ERROR: xray.exe not found (not installed, no debug build)" -ForegroundColor Red
+    $searchBinAbs = (Get-Command xray.exe -ErrorAction SilentlyContinue).Source
+}
+if (-not $searchBinAbs) {
+    Write-Host "ERROR: xray.exe not found (no -Binary override, no debug build, not installed)" -ForegroundColor Red
     exit 1
 }
+Write-Host "  Parallel jobs using binary: $searchBinAbs"
 $projectDirAbs = (Resolve-Path $TestDir).Path
 
 # --- Define parallel test scriptblocks ---
