@@ -420,6 +420,46 @@ fn test_xray_help_response_structure() {
 // ─── xray_info response structure tests ────────────────────────────
 
 #[test]
+fn test_xray_info_exposes_watcher_stats_when_watch_enabled() {
+    // Phase 0 of periodic-rescan rollout: when --watch is on, xray_info
+    // must surface lock-free counters that operators use to diagnose
+    // missed fs events (notify backend drops).
+    let mut ctx = make_empty_ctx();
+    ctx.watch_enabled = true;
+    ctx.watcher_stats
+        .events_total
+        .store(7, std::sync::atomic::Ordering::Relaxed);
+    ctx.watcher_stats
+        .events_empty_paths
+        .store(2, std::sync::atomic::Ordering::Relaxed);
+    ctx.watcher_stats
+        .events_errors
+        .store(1, std::sync::atomic::Ordering::Relaxed);
+
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error, "xray_info should not error");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let watcher = output.get("watcher").expect("watcher block must be present when watch_enabled=true");
+    assert_eq!(watcher["eventsTotal"], json!(7));
+    assert_eq!(watcher["eventsEmptyPaths"], json!(2));
+    assert_eq!(watcher["eventsErrors"], json!(1));
+}
+
+#[test]
+fn test_xray_info_omits_watcher_stats_when_watch_disabled() {
+    // Symmetric guard: when --watch is off, the watcher block is omitted
+    // entirely so that consumers don't mistake "0 events" for "watcher
+    // running but never received anything" (a real bug signal).
+    let ctx = make_empty_ctx();
+    assert!(!ctx.watch_enabled, "precondition: default ctx has watch disabled");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output.get("watcher").is_none(),
+        "watcher block must be absent when watch_enabled=false");
+}
+
+#[test]
 fn test_xray_info_response_structure() {
     let ctx = make_empty_ctx();
     let result = dispatch_tool(&ctx, "xray_info", &json!({}));

@@ -765,6 +765,10 @@ pub struct HandlerContext {
     /// indexes via MCP (xray_reindex, workspace switch, file-list auto-rebuild).
     /// Initialized from `ServeArgs.respect_git_exclude` at server startup.
     pub respect_git_exclude: bool,
+    /// Lock-free counters describing what the file watcher has observed
+    /// since startup. Exposed via `xray_info` for diagnosing missed events
+    /// (see `docs/bug-reports/bug-2026-04-21-watcher-misses-new-files-both-indexes.md`).
+    pub watcher_stats: Arc<crate::mcp::watcher::WatcherStats>,
 }
 
 impl HandlerContext {
@@ -805,6 +809,7 @@ impl Default for HandlerContext {
             watch_enabled: false,
             watch_debounce_ms: 500,
             respect_git_exclude: false,
+            watcher_stats: Arc::new(crate::mcp::watcher::WatcherStats::new()),
         }
     }
 }
@@ -1164,6 +1169,19 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
         "indexes": indexes,
     });
 
+    // ── Watcher observability (Phase 0 of periodic-rescan rollout) ──
+    // Only emitted when --watch is enabled. Counters help diagnose missed
+    // events: a non-zero `eventsEmptyPaths` is a strong signal that the
+    // notify backend dropped path metadata; index drift between filesystem
+    // and indexes can occur silently in such cases.
+    if ctx.watch_enabled {
+        info["watcher"] = json!({
+            "eventsTotal": ctx.watcher_stats.events_total.load(Ordering::Relaxed),
+            "eventsEmptyPaths": ctx.watcher_stats.events_empty_paths.load(Ordering::Relaxed),
+            "eventsErrors": ctx.watcher_stats.events_errors.load(Ordering::Relaxed),
+        });
+    }
+
     if !memory_estimate.as_object().is_none_or(|m| m.is_empty()) {
         info["memoryEstimate"] = memory_estimate;
     }
@@ -1406,6 +1424,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
         Arc::clone(&ctx.file_index_dirty),
         Arc::clone(&ctx.watcher_generation),
         new_gen,
+        Arc::clone(&ctx.watcher_stats),
     ) {
         warn!(error = %e, "Failed to restart file watcher for new workspace");
     } else {
