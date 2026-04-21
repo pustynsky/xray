@@ -1931,3 +1931,70 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
         "file_index_dirty must be set so the next xray_fast rebuilds");
 }
 
+// ─── start_periodic_rescan thread ────────────────────────────────────
+//
+// Phase 3 of the periodic-rescan rollout: thread that ticks
+// `periodic_rescan_once` on a configurable interval. Tests cover the
+// shutdown and clamping contracts.
+
+#[test]
+fn periodic_rescan_min_interval_is_ten_seconds() {
+    // Guard against accidentally setting the floor too low and
+    // schedule-walking a large workspace every second.
+    assert_eq!(super::MIN_RESCAN_INTERVAL_SEC, 10);
+}
+
+#[test]
+fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change() {
+    let (tmp, index) = make_batch_test_setup();
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(None));
+    let generation = Arc::new(AtomicU64::new(0));
+
+    // Use the minimum interval so the test takes ≤ ~12 s instead of 5 min.
+    super::start_periodic_rescan(
+        Arc::clone(&index),
+        None,
+        Arc::clone(&file_index),
+        Arc::clone(&file_index_dirty),
+        tmp.path().to_path_buf(),
+        vec!["cs".to_string()],
+        super::MIN_RESCAN_INTERVAL_SEC,
+        Arc::clone(&generation),
+        0,
+        Arc::clone(&stats),
+    );
+
+    // Wait for the first tick (interval + small slack for thread scheduling).
+    let deadline = Instant::now()
+        + Duration::from_secs(super::MIN_RESCAN_INTERVAL_SEC + 5);
+    while Instant::now() < deadline
+        && stats.periodic_rescan_total.load(Ordering::Relaxed) == 0 {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    assert!(
+        stats.periodic_rescan_total.load(Ordering::Relaxed) >= 1,
+        "rescan thread must tick at least once within {} s",
+        super::MIN_RESCAN_INTERVAL_SEC + 5
+    );
+
+    // Bump generation — thread must exit within ~RESCAN_SHUTDOWN_POLL.
+    generation.fetch_add(1, Ordering::Release);
+    let exit_deadline = Instant::now() + Duration::from_secs(3);
+    let ticks_at_signal = stats.periodic_rescan_total.load(Ordering::Relaxed);
+    // Sleep one additional interval-floor — if the thread is still alive
+    // it would tick again; if it exited cleanly the counter stays put.
+    std::thread::sleep(Duration::from_secs(super::MIN_RESCAN_INTERVAL_SEC + 2));
+    assert!(
+        Instant::now() < exit_deadline.checked_add(Duration::from_secs(super::MIN_RESCAN_INTERVAL_SEC + 5)).unwrap(),
+        "test shouldn't have wandered past its own deadline"
+    );
+    let ticks_after_wait = stats.periodic_rescan_total.load(Ordering::Relaxed);
+    assert_eq!(
+        ticks_after_wait, ticks_at_signal,
+        "thread must stop ticking after generation change (ticks: {} → {})",
+        ticks_at_signal, ticks_after_wait
+    );
+}
+

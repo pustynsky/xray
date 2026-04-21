@@ -63,6 +63,7 @@ pub fn cmd_serve(args: ServeArgs) {
     // ─── File watcher ───
     let watcher_generation = Arc::new(AtomicU64::new(0));
     let watcher_stats = Arc::new(mcp::watcher::WatcherStats::new());
+    let file_index = Arc::new(RwLock::new(None));
     if args.watch && !is_unresolved {
         let watch_dir = std::fs::canonicalize(&dir_str)
             .unwrap_or_else(|_| PathBuf::from(&dir_str));
@@ -70,8 +71,8 @@ pub fn cmd_serve(args: ServeArgs) {
         if let Err(e) = mcp::watcher::start_watcher(
             Arc::clone(&index),
             def_index.as_ref().map(Arc::clone),
-            watch_dir,
-            extensions,
+            watch_dir.clone(),
+            extensions.clone(),
             args.debounce_ms,
             idx_base.clone(),
             Arc::clone(&content_ready),
@@ -82,6 +83,25 @@ pub fn cmd_serve(args: ServeArgs) {
             Arc::clone(&watcher_stats),
         ) {
             warn!(error = %e, "Failed to start file watcher");
+        }
+
+        // ─── Periodic rescan fail-safe (Phase 3) ───
+        // Catches filesystem events that the OS-level `notify` watcher
+        // dropped (best-effort on every platform — see
+        // `docs/bug-reports/bug-2026-04-21-watcher-misses-new-files-both-indexes.md`).
+        if !args.no_periodic_rescan {
+            mcp::watcher::start_periodic_rescan(
+                Arc::clone(&index),
+                def_index.as_ref().map(Arc::clone),
+                Arc::clone(&file_index),
+                Arc::clone(&file_index_dirty),
+                watch_dir,
+                extensions,
+                args.rescan_interval_sec,
+                Arc::clone(&watcher_generation),
+                0,
+                Arc::clone(&watcher_stats),
+            );
         }
     }
 
@@ -103,7 +123,6 @@ pub fn cmd_serve(args: ServeArgs) {
     }
 
     let max_response_bytes = if args.max_response_kb == 0 { 0 } else { args.max_response_kb * 1024 };
-    let file_index = Arc::new(RwLock::new(None));
 
     let ctx = mcp::handlers::HandlerContext {
         index,
