@@ -147,6 +147,8 @@ pub fn cmd_serve(args: ServeArgs) {
         watch_debounce_ms: args.debounce_ms,
         respect_git_exclude: args.respect_git_exclude,
         watcher_stats,
+        periodic_rescan_enabled: !args.no_periodic_rescan,
+        rescan_interval_sec: args.rescan_interval_sec,
     };
     mcp::server::run_server(ctx);
     crate::index::log_memory("serve: event loop exited");

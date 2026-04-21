@@ -431,7 +431,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "xray_edit".to_string(),
-            description: "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content for ANY file edit. Edit a file by line-range operations or text-match replacements. Auto-creates new files when they don't exist (treats as empty — use Mode A: operations [{startLine:1, endLine:0, content:'...'}] for new file content). Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing. Works on any text file (not limited to --dir). Accepts absolute or relative paths. Supports multi-file editing via 'paths' parameter (transactional: all-or-nothing). PREFERRED over apply_diff for all file edits — atomic, no whitespace issues, minimal token cost. IDEMPOTENCY: insertAfter/insertBefore detect if the would-be-inserted content already exists adjacent to the anchor and skip the edit (response: skippedDetails[].reason = \"alreadyApplied: ...\"). Safe to retry after partial/unknown success. APPLIED semantics: the `applied` field excludes edits that were skipped via skipIfNotFound or idempotency — it reports only edits that actually mutated the file. LINE ENDINGS: response includes lineEnding (\"LF\" | \"CRLF\"). The returned diff is always LF-based; on CRLF files the on-disk bytes are CRLF, so `git diff` of a CRLF file will not match tool diff character-for-character — use lineEnding to reconcile. POST-WRITE VERIFICATION: after every real write (not dryRun) the file is re-read and compared byte-for-byte to the computed post-state; any mismatch returns an error instead of a misleading success. SYNC REINDEX: after a successful real write (NOT dryRun), the inverted-index and definition-index are refreshed in-process before the response returns — a follow-up xray_grep / xray_definitions / xray_callers / xray_fast call sees the new content with zero latency (no 500ms FS-watcher debounce wait). Response includes new fields (real writes only): contentIndexUpdated (bool), defIndexUpdated (bool — true only when server has --definitions and parse succeeded), fileListInvalidated (bool — true when a new file is created → xray_fast cache will rebuild on next call), reindexElapsedMs (string, e.g. \"0.42\"), skippedReason (string — set to \"outsideServerDir\" / \"extensionNotIndexed\" / \"insideGitDir\" when the file is written but reindex is skipped because the file is out of the server's indexing scope; the file is still committed to disk). dryRun: true OMITS all reindex fields. Multi-file responses report per-file reindex outcome and a single summary.reindexElapsedMs. If an index lock is poisoned during reindex, the response includes reindexWarning explaining that the FS watcher will reconcile within 500ms — the write itself always succeeds.".to_string(),
+            description: "ALWAYS USE THIS instead of apply_diff, search_and_replace, or insert_content for ANY file edit. Edit a file by line-range operations or text-match replacements. Auto-creates new files when they don't exist (treats as empty — use Mode A: operations [{startLine:1, endLine:0, content:'...'}] for new file content). Mode A (operations): Replace/insert/delete lines by line number. Applied bottom-up to avoid offset cascade. Mode B (edits): Find and replace text or regex patterns, or insert content after/before anchor text. Applied sequentially. Returns unified diff. Use dryRun=true to preview without writing. Works on any text file (not limited to --dir). Accepts absolute or relative paths. Supports multi-file editing via 'paths' parameter (transactional: all-or-nothing). PREFERRED over apply_diff for all file edits — atomic, no whitespace issues, minimal token cost. FLEX-WHITESPACE FALLBACK: Mode B search/replace and insertAfter/insertBefore try exact match first, then strip-trailing-WS, then trim-blank-lines; the 4th step (regex-based whitespace-collapsing match) is opt-in and only runs when the edit carries an `expectedContext` — without `expectedContext` a failed match returns `Text not found` with a hint (no silent cross-block misfires). IDEMPOTENCY: insertAfter/insertBefore detect if the would-be-inserted content already exists adjacent to the anchor and skip the edit (response: skippedDetails[].reason = \"alreadyApplied: ...\"). Safe to retry after partial/unknown success. APPLIED semantics: the `applied` field excludes edits that were skipped via skipIfNotFound or idempotency — it reports only edits that actually mutated the file. LINE ENDINGS: response includes lineEnding (\"LF\" | \"CRLF\"). The returned diff is always LF-based; on CRLF files the on-disk bytes are CRLF, so `git diff` of a CRLF file will not match tool diff character-for-character — use lineEnding to reconcile. POST-WRITE VERIFICATION: after every real write (not dryRun) the file is re-read and compared byte-for-byte to the computed post-state; any mismatch returns an error instead of a misleading success. SYNC REINDEX: after a successful real write (NOT dryRun), the inverted-index and definition-index are refreshed in-process before the response returns — a follow-up xray_grep / xray_definitions / xray_callers / xray_fast call sees the new content with zero latency (no 500ms FS-watcher debounce wait). Response includes new fields (real writes only): contentIndexUpdated (bool), defIndexUpdated (bool — true only when server has --definitions and parse succeeded), fileListInvalidated (bool — true when a new file is created → xray_fast cache will rebuild on next call), reindexElapsedMs (string, e.g. \"0.42\"), skippedReason (string — set to \"outsideServerDir\" / \"extensionNotIndexed\" / \"insideGitDir\" when the file is written but reindex is skipped because the file is out of the server's indexing scope; the file is still committed to disk). dryRun: true OMITS all reindex fields. Multi-file responses report per-file reindex outcome and a single summary.reindexElapsedMs. If an index lock is poisoned during reindex, the response includes reindexWarning explaining that the FS watcher will reconcile within 500ms — the write itself always succeeds.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -769,6 +769,14 @@ pub struct HandlerContext {
     /// since startup. Exposed via `xray_info` for diagnosing missed events
     /// (see `docs/bug-reports/bug-2026-04-21-watcher-misses-new-files-both-indexes.md`).
     pub watcher_stats: Arc<crate::mcp::watcher::WatcherStats>,
+    /// Whether the periodic-rescan fail-safe is enabled. Needed so
+    /// `restart_watcher_for_workspace` can respawn the rescan thread
+    /// after a workspace switch — the thread self-exits on generation
+    /// change, and the original spawn site in `cmd_serve` only runs once.
+    pub periodic_rescan_enabled: bool,
+    /// Interval in seconds between periodic rescans. Clamped to
+    /// `MIN_RESCAN_INTERVAL_SEC` by `start_periodic_rescan`.
+    pub rescan_interval_sec: u64,
 }
 
 impl HandlerContext {
@@ -810,6 +818,8 @@ impl Default for HandlerContext {
             watch_debounce_ms: 500,
             respect_git_exclude: false,
             watcher_stats: Arc::new(crate::mcp::watcher::WatcherStats::new()),
+            periodic_rescan_enabled: false,
+            rescan_interval_sec: 300,
         }
     }
 }
@@ -1175,12 +1185,20 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
     // notify backend dropped path metadata; index drift between filesystem
     // and indexes can occur silently in such cases.
     if ctx.watch_enabled {
+        let effective_rescan = if ctx.periodic_rescan_enabled {
+            Some(ctx.rescan_interval_sec.max(crate::mcp::watcher::MIN_RESCAN_INTERVAL_SEC))
+        } else {
+            None
+        };
         info["watcher"] = json!({
             "eventsTotal": ctx.watcher_stats.events_total.load(Ordering::Relaxed),
             "eventsEmptyPaths": ctx.watcher_stats.events_empty_paths.load(Ordering::Relaxed),
             "eventsErrors": ctx.watcher_stats.events_errors.load(Ordering::Relaxed),
             "periodicRescanTotal": ctx.watcher_stats.periodic_rescan_total.load(Ordering::Relaxed),
             "periodicRescanDriftEvents": ctx.watcher_stats.periodic_rescan_drift_events.load(Ordering::Relaxed),
+            "periodicRescanEnabled": ctx.periodic_rescan_enabled,
+            // Effective value after clamp to MIN_RESCAN_INTERVAL_SEC; null when rescan is disabled.
+            "effectiveRescanIntervalSec": effective_rescan,
         });
     }
 
@@ -1431,6 +1449,28 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
         warn!(error = %e, "Failed to restart file watcher for new workspace");
     } else {
         info!(dir = %dir, generation = new_gen, "File watcher restarted for new workspace");
+    }
+
+    // ── Respawn the periodic-rescan fail-safe for the new workspace ──
+    // The previous rescan thread exits on generation change (see
+    // `start_periodic_rescan`), so without this call the Phase-3 fail-safe
+    // would be permanently disabled after any workspace switch.
+    if ctx.periodic_rescan_enabled {
+        let watch_dir_rescan = std::fs::canonicalize(dir)
+            .unwrap_or_else(|_| std::path::PathBuf::from(dir));
+        let ext_vec_rescan: Vec<String> = ctx.server_ext.split(',').map(|s| s.trim().to_string()).collect();
+        crate::mcp::watcher::start_periodic_rescan(
+            Arc::clone(&ctx.index),
+            ctx.def_index.as_ref().map(Arc::clone),
+            Arc::clone(&ctx.file_index),
+            Arc::clone(&ctx.file_index_dirty),
+            watch_dir_rescan,
+            ext_vec_rescan,
+            ctx.rescan_interval_sec,
+            Arc::clone(&ctx.watcher_generation),
+            new_gen,
+            Arc::clone(&ctx.watcher_stats),
+        );
     }
 }
 
