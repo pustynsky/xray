@@ -2032,7 +2032,7 @@ fn test_flex_space_table_padding() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "search": "| Bug 1 | 5 | Fix it |", "replace": "| Bug 2 | 10 | Done |" }
+            { "search": "| Bug 1 | 5 | Fix it |", "replace": "| Bug 2 | 10 | Done |", "expectedContext": "Bug 1" }
         ]
     }));
 
@@ -2055,7 +2055,7 @@ fn test_flex_space_multiline_table() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "search": "| A | B |\n|---|---|\n| 1 | 2 |", "replace": "| X | Y |\n|---|---|\n| 3 | 4 |" }
+            { "search": "| A | B |\n|---|---|\n| 1 | 2 |", "replace": "| X | Y |\n|---|---|\n| 3 | 4 |", "expectedContext": "| 1" }
         ]
     }));
 
@@ -2093,7 +2093,7 @@ fn test_flex_space_anchor_insert_after() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "insertAfter": "| Bug 1 | 5 |", "content": "| Bug 2 | 10 |" }
+            { "insertAfter": "| Bug 1 | 5 |", "content": "| Bug 2 | 10 |", "expectedContext": "Bug 1" }
         ]
     }));
 
@@ -2113,7 +2113,7 @@ fn test_flex_space_anchor_insert_before() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "insertBefore": "| Bug 1 | 5 |", "content": "| Bug 0 | 0 |" }
+            { "insertBefore": "| Bug 1 | 5 |", "content": "| Bug 0 | 0 |", "expectedContext": "Bug 1" }
         ]
     }));
 
@@ -2133,7 +2133,7 @@ fn test_flex_space_with_occurrence() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "search": "| A |", "replace": "| B |", "occurrence": 2 }
+            { "search": "| A |", "replace": "| B |", "occurrence": 2, "expectedContext": "| A" }
         ]
     }));
 
@@ -2176,7 +2176,7 @@ fn test_flex_space_replacement_dollar_sign_safety() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "search": "| Price |", "replace": "| $100 |" }
+            { "search": "| Price |", "replace": "| $100 |", "expectedContext": "Price" }
         ]
     }));
 
@@ -2198,7 +2198,7 @@ fn test_flex_space_markdown_separator_dash_count_mismatch() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "search": "| Cluster | Status |\n|---|---|\n| East | OK |", "replace": "| Cluster | Status |\n|---|---|\n| West | FAIL |" }
+            { "search": "| Cluster | Status |\n|---|---|\n| East | OK |", "replace": "| Cluster | Status |\n|---|---|\n| West | FAIL |", "expectedContext": "East" }
         ]
     }));
 
@@ -2222,7 +2222,7 @@ fn test_flex_space_markdown_separator_with_alignment() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "search": "| Name | Value |\n|---|---|\n| foo | 42 |", "replace": "| Name | Value |\n|---|---|\n| bar | 99 |" }
+            { "search": "| Name | Value |\n|---|---|\n| foo | 42 |", "replace": "| Name | Value |\n|---|---|\n| bar | 99 |", "expectedContext": "foo" }
         ]
     }));
 
@@ -2243,7 +2243,7 @@ fn test_flex_space_markdown_separator_anchor_insert() {
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "insertAfter": "|---|---|", "content": "| bar | 99 |" }
+            { "insertAfter": "|---|---|", "content": "| bar | 99 |", "expectedContext": "Name" }
         ]
     }));
 
@@ -2276,6 +2276,107 @@ fn test_expected_context_flex_space() {
     let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
     assert!(content.contains("HEADER"), "Edit should have been applied");
 }
+
+// ─── Step 6: Flex-space opt-in (requires expectedContext) ────────────
+
+#[test]
+fn test_flex_space_disabled_without_expected_context() {
+    // Without expectedContext, flex-space fallback is disabled — exact match
+    // fails, strip-ws/trim-blank fails, and regex step is skipped. Error
+    // should hint at passing expectedContext to enable the fallback.
+    let (tmp, filename, _) = create_temp_file(
+        "| Issue       | Count     |\n| Bug 1       | 5         |\n",
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "| Bug 1 | 5 |", "replace": "| Bug 2 | 10 |" }
+        ]
+    }));
+
+    assert!(result.is_error, "Flex-space must NOT match without expectedContext");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("Text not found"),
+        "Expected 'Text not found' error, got: {}",
+        text
+    );
+    assert!(
+        text.contains("expectedContext"),
+        "Error should hint at passing expectedContext to enable flex fallback, got: {}",
+        text
+    );
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("Bug 1"), "File must remain unchanged");
+}
+
+#[test]
+fn test_flex_space_enabled_with_expected_context_marker() {
+    // With expectedContext, flex-space fallback is enabled and the warning
+    // carries a stable [fallbackApplied:flexWhitespace] marker that clients
+    // can detect deterministically.
+    let (tmp, filename, _) = create_temp_file(
+        "header\n| Bug 1       | 5         |\nfooter\n",
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "| Bug 1 | 5 |",
+                "replace": "| Bug 2 | 10 |",
+                "expectedContext": "Bug 1"
+            }
+        ]
+    }));
+
+    assert!(
+        !result.is_error,
+        "Flex-space must match with expectedContext present. Error: {:?}",
+        result.content.first().map(|c| &c.text)
+    );
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("[fallbackApplied:flexWhitespace]"),
+        "Warning must include stable fallbackApplied marker, got: {}",
+        text
+    );
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("Bug 2"), "Replacement should have been applied");
+}
+
+#[test]
+fn test_flex_space_rejected_when_expected_context_mismatches() {
+    // Regression guard: flex-space match must still be rejected if
+    // expectedContext does not match near the flex-matched position.
+    // (i.e. order is flex-match -> check_expected_context, not the other way.)
+    let (tmp, filename, _) = create_temp_file(
+        "header\n| Bug 1       | 5         |\nfooter\n",
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "| Bug 1 | 5 |",
+                "replace": "| Bug 2 | 10 |",
+                "expectedContext": "this context does not exist anywhere"
+            }
+        ]
+    }));
+
+    assert!(
+        result.is_error,
+        "Flex match with wrong expectedContext must be rejected"
+    );
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert!(content.contains("Bug 1"), "File must remain unchanged");
+}
+
 
 #[test]
 fn test_expected_context_exact_match_still_works() {
@@ -2880,7 +2981,7 @@ mod retry_cascade_tests {
         let result = handle_xray_edit(&ctx, &json!({
             "path": filename,
             "edits": [
-                { "search": "foo bar", "replace": "FOO_BAR" }
+                { "search": "foo bar", "replace": "FOO_BAR", "expectedContext": "foo" }
             ]
         }));
 

@@ -1120,7 +1120,18 @@ struct RetrySearchResult {
 
 /// 4-step auto-retry cascade: exact → strip trailing WS → trim blank lines → flex-space.
 /// Used by both insert-anchor and literal search/replace modes.
-fn find_with_retry(content: &str, search_text: &str, edit_index: usize, label: &str) -> RetrySearchResult {
+///
+/// `allow_flex_whitespace`: when `false`, step 4 (regex-based whitespace-collapsing match)
+/// is skipped. Flex-space matching can silently match a semantically-different block
+/// elsewhere in the file, so it is opt-in: enabled only when the caller supplies an
+/// `expectedContext`, which validates ±5 lines around the match and rejects misfires.
+fn find_with_retry(
+    content: &str,
+    search_text: &str,
+    edit_index: usize,
+    label: &str,
+    allow_flex_whitespace: bool,
+) -> RetrySearchResult {
     let mut warnings = Vec::new();
 
     // Step 1: Exact match
@@ -1164,8 +1175,12 @@ fn find_with_retry(content: &str, search_text: &str, edit_index: usize, label: &
         }
     }
 
-    // Step 4: Flex-space matching (collapse whitespace to regex)
+    // Step 4: Flex-space matching (collapse whitespace to regex).
+    // Opt-in: only runs when caller passed allow_flex_whitespace=true (i.e. an
+    // expectedContext is present to validate the match). Without that guard, the
+    // regex can silently match a similar-looking block elsewhere in the file.
     if positions.is_empty()
+        && allow_flex_whitespace
         && let Some(pattern) = search_to_flex_pattern(search_text)
             && let Ok(re) = Regex::new(&pattern) {
                 let flex_results: Vec<(usize, usize)> = re.find_iter(content)
@@ -1173,7 +1188,7 @@ fn find_with_retry(content: &str, search_text: &str, edit_index: usize, label: &
                     .collect();
                 if !flex_results.is_empty() {
                     warnings.push(format!(
-                        "edits[{}]: {} matched with flexible whitespace (spaces collapsed)",
+                        "edits[{}]: {} matched with flexible whitespace (spaces collapsed) [fallbackApplied:flexWhitespace]",
                         edit_index, label
                     ));
                     positions = flex_results.iter().map(|&(s, _)| s).collect();
@@ -1204,7 +1219,8 @@ fn apply_insert(
     let insert_content = edit.content.as_deref().unwrap(); // validated in parse
     let is_after = edit.insert_after.is_some();
 
-    let search_result = find_with_retry(result, anchor, edit_index, "anchor");
+    let allow_flex = edit.expected_context.is_some();
+    let search_result = find_with_retry(result, anchor, edit_index, "anchor", allow_flex);
     let warnings = search_result.warnings;
 
     if search_result.positions.is_empty() {
@@ -1216,7 +1232,10 @@ fn apply_insert(
             }), warnings));
         }
         let hint = nearest_match_hint(result, anchor);
-        return Err(format!("Anchor text not found: \"{}\"{}", truncate_for_display(anchor), hint));
+        let flex_hint = if edit.expected_context.is_none() {
+            ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching"
+        } else { "" };
+        return Err(format!("Anchor text not found: \"{}\"{}{}", truncate_for_display(anchor), hint, flex_hint));
     }
 
     // Determine which occurrence to use
@@ -1364,7 +1383,8 @@ fn apply_literal_replace(
     let search = edit.search.as_deref().unwrap();
     let replace = edit.replace.as_deref().unwrap();
 
-    let search_result = find_with_retry(result, search, edit_index, "text");
+    let allow_flex = edit.expected_context.is_some();
+    let search_result = find_with_retry(result, search, edit_index, "text", allow_flex);
     let warnings = search_result.warnings;
     let count = search_result.positions.len();
 
@@ -1377,7 +1397,10 @@ fn apply_literal_replace(
             }), warnings));
         }
         let hint = nearest_match_hint(result, search);
-        return Err(format!("Text not found: \"{}\"{}", truncate_for_display(search), hint));
+        let flex_hint = if edit.expected_context.is_none() {
+            ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching"
+        } else { "" };
+        return Err(format!("Text not found: \"{}\"{}{}", truncate_for_display(search), hint, flex_hint));
     }
 
     // Check expectedContext on first match
