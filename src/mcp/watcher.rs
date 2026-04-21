@@ -109,6 +109,21 @@ pub(crate) fn wait_for_indexes_ready(
     }
 }
 
+/// Record a notify backend error on the shared stats handle.
+///
+/// Extracted from the `start_watcher` event loop so the error-counter
+/// path is unit-testable: an earlier regression left
+/// `events_errors.fetch_add` wired to the wrong counter for ~4 hours
+/// without any test catching it (see
+/// `docs/code-reviews/2026-04-21_audit-3day-hidden-bugs.md` P2 finding).
+/// The helper is tiny by design — its value is the assertion that the
+/// error arm still bumps `events_errors` and nothing else.
+pub(crate) fn record_watcher_event_error(stats: &WatcherStats, err: &notify::Error) {
+    stats.events_errors.fetch_add(1, Ordering::Relaxed);
+    warn!(error = %err, "File watcher error");
+}
+
+
 #[allow(clippy::too_many_arguments)]
 pub fn start_watcher(
     index: Arc<RwLock<ContentIndex>>,
@@ -276,8 +291,7 @@ pub fn start_watcher(
                         }
                 }
                 Ok(Err(e)) => {
-                    stats.events_errors.fetch_add(1, Ordering::Relaxed);
-                    warn!(error = %e, "File watcher error");
+                    record_watcher_event_error(&stats, &e);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Check generation on each timeout (watcher restart)
@@ -1081,11 +1095,22 @@ fn compute_content_drift(
 /// Compare the on-disk state in `state.all_files` against the in-memory
 /// `FileIndex` and return `(added, removed)` counts.
 ///
+/// `FileIndex.entries[].path` and `all_files` keys are both absolute,
+/// forward-slash `clean_path`-normalised strings (see `build_index`
+/// in `src/index.rs` and `scan_dir_state` in this file), so we compare
+/// them via direct set-difference in O(n) — no `ends_with` heuristic.
+///
+/// On Windows both sides are lowercased before comparison so that a
+/// drive-letter case mismatch (`C:/Repos/Xray` vs `c:/repos/xray`
+/// between `canonicalize_or_warn` and `build_index`) does not report
+/// every file as both added and removed on every tick.
+///
 /// If the `FileIndex` slot is `None` (lazy: not yet built — happens
 /// before the first `xray_fast` call), drift is reported as
-/// `(all_files.len(), 0)` so the rescan thread sets `file_index_dirty`
-/// and forces a build on the next request. This matches the watcher
-/// startup contract (`file_index_dirty = true` initially).
+/// `(0, 0)` because `file_index_dirty` is already set to `true` at
+/// watcher startup; counting "lazy init" as drift would inflate the
+/// `periodic_rescan_drift_events` metric whose semantics are
+/// "notify missed an event".
 fn compute_file_index_drift(
     file_index: &Arc<RwLock<Option<FileIndex>>>,
     all_files: &HashMap<PathBuf, SystemTime>,
@@ -1098,34 +1123,48 @@ fn compute_file_index_drift(
         }
     };
     let Some(ref fi) = *guard else {
-        // Not yet built — treat every disk file as "added" so the
-        // caller marks the index dirty.
-        return (all_files.len(), 0);
+        // Not yet built — do NOT count as drift. Lazy build is handled
+        // by the existing `file_index_dirty` flag set at watcher init.
+        return (0, 0);
     };
-    // FileIndex stores forward-slash relative paths inside `entries`,
-    // and `all_files` keys are absolute clean_path-normalised. Compare
-    // by suffix-matching `path` against the absolute key — robust to
-    // `root` prefix differences.
-    let in_index: HashSet<&str> = fi.entries.iter()
+
+    // Normalise once. On Windows lowercase to tolerate drive-letter
+    // case drift between `canonicalize_or_warn` output and the path
+    // stored by `build_index` (both are `clean_path`-normalised but
+    // Windows canonicalise sometimes yields uppercase `C:` while the
+    // user-supplied `--dir` may be `c:`).
+    #[cfg(windows)]
+    fn norm(s: &str) -> String { s.to_lowercase() }
+    #[cfg(not(windows))]
+    fn norm(s: &str) -> String { s.to_string() }
+
+    // `FileIndex.entries[].path` may be either absolute (production,
+    // built from an absolute `--dir`) or relative to `fi.root` (tests,
+    // and historical indexes). Normalise to absolute by joining with
+    // `fi.root` whenever the entry does not already contain the root
+    // prefix. `all_files` keys are always absolute and already
+    // `clean_path`-normalised.
+    let root_norm = norm(&clean_path(&fi.root));
+    let resolve = |p: &str| -> String {
+        let p_norm = norm(&clean_path(p));
+        if p_norm.starts_with(&root_norm) || p_norm.starts_with('/') || p_norm.chars().nth(1) == Some(':') {
+            p_norm
+        } else {
+            let sep = if root_norm.ends_with('/') { "" } else { "/" };
+            format!("{}{}{}", root_norm, sep, p_norm)
+        }
+    };
+
+    let in_index: HashSet<String> = fi.entries.iter()
         .filter(|e| !e.is_dir)
-        .map(|e| e.path.as_str())
+        .map(|e| resolve(&e.path))
+        .collect();
+    let on_disk_set: HashSet<String> = all_files.keys()
+        .map(|p| norm(&p.to_string_lossy()))
         .collect();
 
-    let mut added = 0usize;
-    let on_disk_set: HashSet<String> = all_files.keys()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect();
-    for disk in &on_disk_set {
-        if !in_index.iter().any(|idx_path| disk.ends_with(idx_path)) {
-            added += 1;
-        }
-    }
-    let mut removed = 0usize;
-    for idx_path in &in_index {
-        if !on_disk_set.iter().any(|disk| disk.ends_with(*idx_path)) {
-            removed += 1;
-        }
-    }
+    let added = on_disk_set.difference(&in_index).count();
+    let removed = in_index.difference(&on_disk_set).count();
     (added, removed)
 }
 
@@ -1171,7 +1210,13 @@ pub(crate) fn periodic_rescan_once(
     let file_drift = file_index_added + file_index_removed > 0;
     let drift_detected = content_drift || file_drift;
 
-    if file_drift {
+    // Any drift — content or file-list — means the file-list index
+    // is stale relative to disk. Setting the dirty flag is cheap and
+    // defensive: xray_fast's next call will rebuild. In particular,
+    // when `file_index` is `None` at rescan time (lazy init), a later
+    // build would miss files that were added without a notify event
+    // unless we force a rebuild here.
+    if drift_detected {
         file_index_dirty.store(true, Ordering::Relaxed);
     }
     if content_drift {
