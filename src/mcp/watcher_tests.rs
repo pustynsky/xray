@@ -1775,3 +1775,159 @@ fn scan_dir_state_path_keys_are_clean_path_normalised() {
     }
 }
 
+// ─── periodic_rescan_once ────────────────────────────────────────────
+//
+// Phase 2 of the periodic-rescan rollout: drive content + def + file
+// reconciliation off a single shared filesystem snapshot. The four
+// tests below cover the acceptance contract from
+// `docs/todo_approved_2026-04-21_watcher-periodic-rescan.md`:
+//   1. no-op (no drift, counter not bumped)
+//   2. file added directly to disk → drift detected, counter bumped,
+//      content index updated
+//   3. file removed directly from disk → drift detected, counter bumped,
+//      content index updated
+//   4. file_index drift sets file_index_dirty regardless of content state
+
+#[test]
+fn periodic_rescan_no_drift_does_not_bump_counter() {
+    let (tmp, index) = make_batch_test_setup();
+    // Mark index as fresh so the mtime threshold treats existing files
+    // as up-to-date (compute_content_drift uses created_at-2s margin).
+    {
+        let mut idx = index.write().unwrap();
+        idx.created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 5;
+    }
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    // Pre-populate file_index with the two existing files so file-index
+    // drift check is also clean.
+    let file_index = Arc::new(RwLock::new(Some(crate::FileIndex {
+        root: tmp.path().to_string_lossy().to_string(),
+        format_version: crate::FILE_INDEX_VERSION,
+        created_at: 0,
+        max_age_secs: 86400,
+        entries: vec![
+            crate::FileEntry { path: "a.cs".to_string(), size: 0, modified: 0, is_dir: false },
+            crate::FileEntry { path: "b.cs".to_string(), size: 0, modified: 0, is_dir: false },
+        ],
+    })));
+
+    let outcome = super::periodic_rescan_once(
+        &index, &None, &file_index, &file_index_dirty,
+        &tmp.path().to_string_lossy(),
+        &["cs".to_string()],
+        &stats,
+    );
+
+    assert!(!outcome.drift_detected, "no drift expected, got {:?}", outcome);
+    assert_eq!(stats.periodic_rescan_total.load(Ordering::Relaxed), 1);
+    assert_eq!(stats.periodic_rescan_drift_events.load(Ordering::Relaxed), 0,
+        "drift counter must NOT bump when state is clean");
+    assert!(!file_index_dirty.load(Ordering::Relaxed),
+        "file_index_dirty must stay false on clean rescan");
+}
+
+#[test]
+fn periodic_rescan_detects_added_file_and_reconciles_content() {
+    let (tmp, index) = make_batch_test_setup();
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(None)); // not built yet
+
+    // Simulate the bug: write a file directly to disk, BYPASSING the
+    // notify event stream entirely (no watcher running here).
+    let new_file = tmp.path().join("c_added.cs");
+    std::fs::write(&new_file, "class Gamma { Logger log; }").unwrap();
+
+    let outcome = super::periodic_rescan_once(
+        &index, &None, &file_index, &file_index_dirty,
+        &tmp.path().to_string_lossy(),
+        &["cs".to_string()],
+        &stats,
+    );
+
+    assert!(outcome.drift_detected, "added file must trigger drift");
+    assert_eq!(outcome.content_added, 1,
+        "exactly one new file should be flagged, got outcome={:?}", outcome);
+    assert_eq!(stats.periodic_rescan_drift_events.load(Ordering::Relaxed), 1,
+        "drift counter must bump once for the recovered event");
+
+    // Verify the reconciler actually inserted the file into path_to_id.
+    let clean_new = crate::clean_path(&new_file.to_string_lossy());
+    let idx = index.read().unwrap();
+    assert!(
+        idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_new)),
+        "reconcile_content_index must have indexed the new file"
+    );
+}
+
+#[test]
+fn periodic_rescan_detects_removed_file_and_reconciles_content() {
+    let (tmp, index) = make_batch_test_setup();
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(None));
+
+    // Delete b.cs directly from disk.
+    std::fs::remove_file(tmp.path().join("b.cs")).unwrap();
+
+    let outcome = super::periodic_rescan_once(
+        &index, &None, &file_index, &file_index_dirty,
+        &tmp.path().to_string_lossy(),
+        &["cs".to_string()],
+        &stats,
+    );
+
+    assert!(outcome.drift_detected);
+    assert_eq!(outcome.content_removed, 1);
+    assert_eq!(stats.periodic_rescan_drift_events.load(Ordering::Relaxed), 1);
+
+    let clean_b = crate::clean_path(&tmp.path().join("b.cs").to_string_lossy());
+    let idx = index.read().unwrap();
+    assert!(
+        !idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_b)),
+        "reconcile_content_index must have purged the deleted file"
+    );
+}
+
+#[test]
+fn periodic_rescan_file_index_drift_sets_dirty_flag() {
+    // FileIndex tracks ALL files (incl. extensions outside --ext).
+    // A new .json file added directly to disk must set
+    // file_index_dirty even though it doesn't touch the content index.
+    let (tmp, index) = make_batch_test_setup();
+    {
+        let mut idx = index.write().unwrap();
+        idx.created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 5;
+    }
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(Some(crate::FileIndex {
+        root: tmp.path().to_string_lossy().to_string(),
+        format_version: crate::FILE_INDEX_VERSION,
+        created_at: 0,
+        max_age_secs: 86400,
+        entries: vec![
+            crate::FileEntry { path: "a.cs".to_string(), size: 0, modified: 0, is_dir: false },
+            crate::FileEntry { path: "b.cs".to_string(), size: 0, modified: 0, is_dir: false },
+        ],
+    })));
+
+    std::fs::write(tmp.path().join("config.json"), "{}").unwrap();
+
+    let outcome = super::periodic_rescan_once(
+        &index, &None, &file_index, &file_index_dirty,
+        &tmp.path().to_string_lossy(),
+        &["cs".to_string()], // .json is OUTSIDE --ext on purpose
+        &stats,
+    );
+
+    assert!(outcome.drift_detected, "file-list drift must be detected");
+    assert_eq!(outcome.content_added, 0, ".json must NOT touch content index");
+    assert_eq!(outcome.file_index_added, 1);
+    assert!(file_index_dirty.load(Ordering::Relaxed),
+        "file_index_dirty must be set so the next xray_fast rebuilds");
+}
+
