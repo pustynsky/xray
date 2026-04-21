@@ -354,6 +354,75 @@ fn update_definition_index(def_index, removed_clean, dirty_clean) -> bool {
 2. Queries that use both indexes (xray_callers) will see slightly stale definition data, which at worst means a caller might be missing from the tree until the next update cycle
 3. True atomicity would require either a single lock for both indexes (reducing read concurrency) or a transaction log (complexity not justified)
 
+## Lock Ordering Contract
+
+The server holds four `RwLock`s that can appear on the same call stack.
+To eliminate the AB/BA deadlock class once and for all, **all code paths
+MUST acquire these locks in the following global order** and release
+them in reverse:
+
+```
+1. ctx.index       (Arc<RwLock<ContentIndex>>)
+2. ctx.def_index   (Arc<RwLock<DefinitionIndex>>)
+3. ctx.file_index  (Arc<RwLock<Option<FileIndex>>>)
+4. ctx.git_cache   (Arc<RwLock<Option<GitHistoryCache>>>)
+```
+
+### Rationale
+
+Rust's `std::sync::RwLock` gives pending writers priority over fresh
+readers on both Linux (glibc) and Windows (SRWLOCK). That means any
+inconsistent ordering between two read-heavy handlers can deadlock if a
+watcher write lands between the two acquisitions:
+
+1. Handler A holds `index.read()`, wants `def_index.read()`.
+2. Watcher wants `index.write()` — blocked behind A.
+3. Handler B holds `def_index.read()`, wants `index.read()` —
+   blocks behind the pending writer.
+4. A now wants `def_index.read()` — blocked behind B.
+5. Deadlock: A → writer → B → A.
+
+A fixed global order breaks cycle formation by construction.
+
+### Invariants
+
+- **Holding lock (N) without first acquiring lock (M < N) is
+  FORBIDDEN when both locks are needed on the same call stack.**
+  If a handler needs `def_index` and also reaches into `ContentIndex`
+  (e.g. `handle_contains_line_mode` resolving a file path), it MUST
+  acquire `ctx.index.read()` first and pass the guard down — not grab
+  it in the middle of a def-index critical section.
+- **Dropping out of order is fine.** The rule governs acquisition
+  order only; compilers can drop guards in any order without
+  reintroducing the cycle.
+- **Single-lock paths are unconstrained.** A handler that only touches
+  one of the four locks has no ordering obligation.
+- **Locks not in this list (e.g. `Mutex<Vec<FileEntry>>` inside the
+  parallel build) are local to one phase and do not interact with the
+  four shared locks above.**
+
+### Current conformance
+
+| Call path                                         | Order observed           | Status                    |
+| ------------------------------------------------- | ------------------------ | ------------------------- |
+| `handle_xray_callers` (callers.rs)                | content → def            | ✅ conforms               |
+| `handle_xray_definitions` + `containsLine` mode   | def → content (reversed) | ❌ MAJOR-9, fix planned    |
+| `unbind_workspace` (handlers/mod.rs)              | content → file_index     | ✅ conforms               |
+| `xray_fast` handler                               | file_index only          | ✅ single-lock, unconstrained |
+| `edit.rs` sync-reindex                            | content → def (+ file_index invalidate) | ✅ conforms |
+| git handlers                                      | git_cache only           | ✅ single-lock, unconstrained |
+
+### Enforcement plan
+
+The contract is documented here first so reviewers have a single source
+of truth. Code-level enforcement lands in the companion PR for MAJOR-8
+/ MAJOR-9 and will add either:
+
+- a thin RAII guard that wraps the two most-contended locks and
+  debug-asserts the order at acquisition, or
+- a `// LOCK ORDER:` comment header at the top of each handler file
+  that participates, mirroring the numbered list above.
+
 ## Thread Safety Guarantees
 
 | Data              | Owner                                       | Synchronization                             | Invariant                                                                                |
