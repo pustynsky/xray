@@ -15,7 +15,6 @@ use super::{index_file_defs, types::*};
 use super::parser_csharp::parse_csharp_definitions;
 #[cfg(feature = "lang-typescript")]
 use super::parser_typescript::parse_typescript_definitions;
-#[cfg(feature = "lang-sql")]
 use super::parser_sql::parse_sql_definitions;
 #[cfg(feature = "lang-rust")]
 use super::parser_rust::parse_rust_definitions;
@@ -37,6 +36,7 @@ pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFil
 
     let ext_lower = ext.to_lowercase();
 
+    #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
     let mut extension_methods = HashMap::new();
 
     let (defs, calls, stats) = match ext_lower.as_str() {
@@ -60,7 +60,6 @@ pub fn parse_file_standalone(path: &Path, temp_file_id: u32) -> Option<ParsedFil
             ts_parser.set_language(&ts_lang.into()).ok();
             parse_typescript_definitions(&mut ts_parser, &content, temp_file_id)
         }
-        #[cfg(feature = "lang-sql")]
         "sql" => {
             parse_sql_definitions(&content, temp_file_id)
         }
@@ -103,6 +102,7 @@ fn parse_file_with_parsers(
         .unwrap_or("");
 
     let ext_lower = ext.to_lowercase();
+    #[cfg_attr(not(feature = "lang-csharp"), allow(unused_mut))]
     let mut extension_methods = HashMap::new();
 
     let (defs, calls, stats) = match ext_lower.as_str() {
@@ -131,7 +131,6 @@ fn parse_file_with_parsers(
             });
             parse_typescript_definitions(parser, &content, temp_file_id)
         }
-        #[cfg(feature = "lang-sql")]
         "sql" => {
             parse_sql_definitions(&content, temp_file_id)
         }

@@ -57,7 +57,7 @@ fn test_definition_kind_roundtrip_all_variants() {
     }
 }
 
-#[cfg(all(feature = "lang-csharp", feature = "lang-sql"))]
+#[cfg(feature = "lang-csharp")]
 #[test]
 fn test_definition_index_build_and_search() {
     let tmp = tempfile::tempdir().unwrap();

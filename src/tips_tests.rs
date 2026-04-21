@@ -51,7 +51,7 @@ fn test_render_json_has_strategy_recipes() {
     }
 }
 
-#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript"))]
 #[test]
 fn test_render_instructions_contains_key_terms() {
     let text = render_instructions(crate::definitions::definition_extensions());
@@ -1221,7 +1221,7 @@ fn test_strategies_includes_deleted_file_archaeology() {
     );
 }
 
-#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript"))]
 #[test]
 fn test_render_instructions_mentions_deleted_files_intent() {
     let text = render_instructions(crate::definitions::definition_extensions());
@@ -1239,7 +1239,7 @@ fn test_render_instructions_mentions_deleted_files_intent() {
     );
 }
 
-#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript"))]
 #[test]
 fn test_render_instructions_anti_pattern_against_raw_git() {
     let text = render_instructions(crate::definitions::definition_extensions());
@@ -1253,7 +1253,7 @@ fn test_render_instructions_anti_pattern_against_raw_git() {
     );
 }
 
-#[cfg(all(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-sql"))]
+#[cfg(all(feature = "lang-csharp", feature = "lang-typescript"))]
 #[test]
 fn test_render_instructions_error_recovery_mentions_git_specific_rule() {
     let text = render_instructions(crate::definitions::definition_extensions());
