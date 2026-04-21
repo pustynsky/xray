@@ -294,6 +294,7 @@ impl DefinitionIndex {
 pub type ParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>);
 
 /// Result type for the C# parser, which also returns extension method mappings.
+#[cfg(feature = "lang-csharp")]
 pub type CsharpParseResult = (Vec<DefinitionEntry>, Vec<(usize, Vec<CallSite>)>, Vec<(usize, CodeStats)>, HashMap<String, Vec<String>>);
 
 /// Chunk type used during parallel definition index building.

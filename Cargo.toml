@@ -22,10 +22,9 @@ name = "xray"
 path = "src/main.rs"
 
 [features]
-default = ["lang-csharp", "lang-typescript", "lang-sql", "lang-rust", "lang-xml"]
+default = ["lang-csharp", "lang-typescript", "lang-rust", "lang-xml"]
 lang-csharp = ["dep:tree-sitter", "dep:tree-sitter-c-sharp"]
 lang-typescript = ["dep:tree-sitter", "dep:tree-sitter-typescript"]
-lang-sql = []
 lang-rust = ["dep:tree-sitter", "dep:tree-sitter-rust"]
 lang-xml = ["dep:tree-sitter", "dep:tree-sitter-xml"]
 

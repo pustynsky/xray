@@ -40,9 +40,32 @@ jobs:
       - name: cargo test --workspace --locked
         run: cargo test --workspace --locked
 
-  # Feature matrix (--no-default-features, --all-features, per-feature) is intentionally
-  # deferred until MAJOR-6 (no-default-features build) and MAJOR-7 (lang-sql isolation)
-  # land. Tracked in docs/code-reviews/2026-04-21_full-snapshot-main-part6.md.
+  feature-matrix:
+    name: Feature matrix (${{ matrix.features }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""
+          - "--all-features"
+          - "--no-default-features"
+          - "--no-default-features --features lang-csharp"
+          - "--no-default-features --features lang-typescript"
+          - "--no-default-features --features lang-rust"
+          - "--no-default-features --features lang-xml"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: feature-matrix
+      # `cargo check` instead of `cargo test` keeps the matrix fast enough for
+      # every push. Full test runs across the matrix are too slow (~N× the
+      # default test job); the base `test` job already covers functional
+      # correctness under default features.
+      - name: cargo check ${{ matrix.features }}
+        run: cargo check --workspace ${{ matrix.features }} --locked
 
   audit:
     name: cargo audit

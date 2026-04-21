@@ -1,8 +1,19 @@
+#![cfg(any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust"))]
+// Individual helpers and static configs are used only by the parser matching their
+// language. When a single-language feature set is active (e.g. only `lang-rust`),
+// the helpers/configs for the other languages become dead code. Allowing it here
+// keeps per-feature builds clean without scattering `#[cfg]` noise across every
+// helper.
+#![allow(dead_code)]
 //! Shared tree-sitter AST utility functions used by all language parsers.
 //!
 //! These functions are identical across C#, TypeScript, and Rust parsers.
 //! Centralizing them here eliminates 12 duplicate function definitions.
-
+//!
+//! Gated behind the tree-sitter-backed language features (csharp / typescript / rust):
+//! the entire module operates on `tree_sitter::Node`, so without any of these features
+//! the `tree-sitter` crate is not in the dependency graph and this module must not
+//! be compiled.
 /// Extract the UTF-8 text of a tree-sitter node from the source bytes.
 ///
 /// Returns an empty string if the node's byte range contains invalid UTF-8.

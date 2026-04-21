@@ -1,12 +1,16 @@
 //! Definition index: AST-based code structure extraction using tree-sitter.
 
 mod types;
+#[cfg(any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust"))]
 mod tree_sitter_utils;
 #[cfg(feature = "lang-csharp")]
 mod parser_csharp;
 #[cfg(feature = "lang-typescript")]
 mod parser_typescript;
-#[cfg(feature = "lang-sql")]
+// SQL parser is always compiled in — it is a pure regex-based parser with no
+// tree-sitter dependency, so there is no cost to keeping it unconditional.
+// The former `lang-sql` feature was removed because the T-SQL tree-sitter
+// grammar is incompatible with tree-sitter 0.24 (see Cargo.toml).
 mod parser_sql;
 #[cfg(feature = "lang-rust")]
 mod parser_rust;
@@ -46,7 +50,6 @@ pub fn definition_extensions() -> &'static [&'static str] {
         "ts",
         #[cfg(feature = "lang-typescript")]
         "tsx",
-        #[cfg(feature = "lang-sql")]
         "sql",
         #[cfg(feature = "lang-rust")]
         "rs",
@@ -405,7 +408,6 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                                 });
                                 parser_typescript::parse_typescript_definitions(parser, &content, *file_id)
                             }
-                            #[cfg(feature = "lang-sql")]
                             "sql" => {
                                 let (defs, calls, stats) = parser_sql::parse_sql_definitions(&content, *file_id);
                                 (defs, calls, stats)
@@ -561,7 +563,7 @@ mod tests_csharp;
 #[path = "definitions_tests_typescript.rs"]
 mod tests_typescript;
 
-#[cfg(all(test, feature = "lang-sql"))]
+#[cfg(test)]
 #[path = "definitions_tests_sql.rs"]
 mod tests_sql;
 
