@@ -250,42 +250,20 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
     //
     // A poisoned content lock is non-fatal here: the def-index handler
     // can still answer queries that do not need content enrichment.
-    lock_order::assert_can_acquire_content();
-    let content_guard = ctx.index.read().ok();
-    if content_guard.is_some() {
-        lock_order::mark_content_acquired();
-    }
+    // `content_read` / `def_read` are RAII-instrumented: drop auto-
+    // releases both the real RwLock guard and the lock-order counter.
+    let content_guard = lock_order::content_read(&ctx.index);
     let content_idx: Option<&ContentIndex> = content_guard.as_deref();
 
-    lock_order::assert_can_acquire_def();
-    let index = match def_index.read() {
-        Ok(idx) => {
-            lock_order::mark_def_acquired();
-            idx
-        }
+    let index = match lock_order::def_read(def_index) {
+        Ok(idx) => idx,
         Err(e) => {
-            if content_guard.is_some() {
-                lock_order::mark_content_released();
-            }
-            return ToolCallResult::error(format!("Failed to acquire definition index lock: {}", e));
+            return ToolCallResult::error(format!(
+                "Failed to acquire definition index lock: {}",
+                e
+            ));
         }
     };
-
-    // Scope guard that releases the lock-order tracker counters even on
-    // early `return` from the many match arms below. The real RwLock
-    // guards are released when `content_guard` / `index` go out of scope.
-    struct LockOrderReleaseGuard {
-        content_held: bool,
-    }
-    impl Drop for LockOrderReleaseGuard {
-        fn drop(&mut self) {
-            lock_order::mark_def_released();
-            if self.content_held {
-                lock_order::mark_content_released();
-            }
-        }
-    }
-    let _release = LockOrderReleaseGuard { content_held: content_guard.is_some() };
 
     let search_start = Instant::now();
 

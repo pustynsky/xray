@@ -1536,3 +1536,129 @@ fn test_sync_reindex_removed_file_purges_tokens() {
     assert!(!idx.index.contains_key("doomedclassp"),
         "removed file's tokens must be purged from the inverted index");
 }
+
+// ── Regression: `wait_for_indexes_ready` (MAJOR-8) ──────────────────────
+//
+// Tiny sub-millisecond poll / cap values so these tests run in well
+// under 100 ms each. We verify the three branches of the wait-loop:
+//   1. Fast path: both ready flags already true → Ready immediately.
+//   2. Ready arrives asynchronously from a helper thread.
+//   3. Generation change aborts the wait.
+//   4. Hard cap elapses with ready flags still false → TimedOut.
+
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::Arc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+#[test]
+fn wait_for_ready_returns_immediately_when_both_flags_already_true() {
+    let content_ready = AtomicBool::new(true);
+    let def_ready = AtomicBool::new(true);
+    let generation = AtomicU64::new(0);
+
+    let t0 = Instant::now();
+    let outcome = super::wait_for_indexes_ready(
+        &content_ready,
+        &def_ready,
+        &generation,
+        0,
+        Duration::from_millis(50),
+        Duration::from_secs(1),
+    );
+    let elapsed = t0.elapsed();
+
+    assert_eq!(outcome, super::WaitOutcome::Ready);
+    assert!(
+        elapsed < Duration::from_millis(20),
+        "fast path should not sleep, got {:?}",
+        elapsed
+    );
+}
+
+#[test]
+fn wait_for_ready_observes_async_flag_flip() {
+    let content_ready = Arc::new(AtomicBool::new(false));
+    let def_ready = Arc::new(AtomicBool::new(false));
+    let generation = Arc::new(AtomicU64::new(0));
+
+    // Flip both flags after a short delay — simulates a background index
+    // builder finishing its final swap while the watcher polls.
+    let cr = Arc::clone(&content_ready);
+    let dr = Arc::clone(&def_ready);
+    let flipper = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        cr.store(true, Ordering::Release);
+        dr.store(true, Ordering::Release);
+    });
+
+    let outcome = super::wait_for_indexes_ready(
+        &content_ready,
+        &def_ready,
+        &generation,
+        0,
+        Duration::from_millis(5),
+        Duration::from_secs(1),
+    );
+
+    flipper.join().unwrap();
+    assert_eq!(outcome, super::WaitOutcome::Ready);
+}
+
+#[test]
+fn wait_for_ready_aborts_on_generation_change() {
+    let content_ready = Arc::new(AtomicBool::new(false));
+    let def_ready = Arc::new(AtomicBool::new(false));
+    let generation = Arc::new(AtomicU64::new(0));
+
+    // Bump generation from another thread; the watcher must notice and
+    // return GenerationChanged instead of timing out.
+    let g = Arc::clone(&generation);
+    let bumper = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(30));
+        g.store(1, Ordering::Release);
+    });
+
+    let outcome = super::wait_for_indexes_ready(
+        &content_ready,
+        &def_ready,
+        &generation,
+        0, // my_generation = 0, flipped to 1 by bumper
+        Duration::from_millis(5),
+        Duration::from_secs(1),
+    );
+
+    bumper.join().unwrap();
+    assert_eq!(outcome, super::WaitOutcome::GenerationChanged);
+}
+
+#[test]
+fn wait_for_ready_times_out_when_flags_never_flip() {
+    let content_ready = AtomicBool::new(false);
+    let def_ready = AtomicBool::new(true); // one true, one false — still incomplete
+    let generation = AtomicU64::new(0);
+
+    let t0 = Instant::now();
+    let outcome = super::wait_for_indexes_ready(
+        &content_ready,
+        &def_ready,
+        &generation,
+        0,
+        Duration::from_millis(5),
+        Duration::from_millis(40),
+    );
+    let elapsed = t0.elapsed();
+
+    assert_eq!(outcome, super::WaitOutcome::TimedOut);
+    assert!(
+        elapsed >= Duration::from_millis(40),
+        "should wait at least the cap before timing out, got {:?}",
+        elapsed
+    );
+    assert!(
+        elapsed < Duration::from_millis(200),
+        "should not wait much longer than the cap, got {:?}",
+        elapsed
+    );
+}
+

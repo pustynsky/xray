@@ -27,6 +27,50 @@ pub(crate) fn should_invalidate_file_index(kind: &EventKind) -> bool {
     )
 }
 
+/// Outcome of [`wait_for_indexes_ready`]. Public to the crate so watcher
+/// thread and tests can share the same decision tree.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum WaitOutcome {
+    /// Both `content_ready` and `def_ready` observed `true` within the cap.
+    Ready,
+    /// `watcher_generation` changed away from `my_generation` — caller
+    /// should exit without reconciling.
+    GenerationChanged,
+    /// Hard cap reached before both flags flipped; caller should proceed
+    /// to reconciliation (partial index is safer than silently skipping).
+    TimedOut,
+}
+
+/// Wait for the initial index build to complete before reconciliation
+/// (MAJOR-8). Polls the two `AtomicBool` flags every `poll` until both
+/// are `true`, the generation counter changes, or `cap` elapses.
+///
+/// Extracted for testability — the watcher thread invokes it with a
+/// 50 ms poll / 300 s cap; tests drive it with sub-millisecond poll and
+/// cap values.
+pub(crate) fn wait_for_indexes_ready(
+    content_ready: &AtomicBool,
+    def_ready: &AtomicBool,
+    watcher_generation: &AtomicU64,
+    my_generation: u64,
+    poll: Duration,
+    cap: Duration,
+) -> WaitOutcome {
+    let start = Instant::now();
+    loop {
+        if content_ready.load(Ordering::Acquire) && def_ready.load(Ordering::Acquire) {
+            return WaitOutcome::Ready;
+        }
+        if watcher_generation.load(Ordering::Acquire) != my_generation {
+            return WaitOutcome::GenerationChanged;
+        }
+        if start.elapsed() >= cap {
+            return WaitOutcome::TimedOut;
+        }
+        std::thread::sleep(poll);
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn start_watcher(
     index: Arc<RwLock<ContentIndex>>,
@@ -68,37 +112,39 @@ pub fn start_watcher(
         // during the build window. Wait for both ready flags with a small
         // poll interval; respect generation changes and a hard cap so a
         // stuck builder cannot keep the watcher hung forever.
-        {
-            const READY_POLL_MS: u64 = 50;
-            // Hard cap well above a realistic cold-start build (~30s for
-            // large trees). After this, log and proceed: reconciliation on
-            // a partial index is still safer than silently skipping events.
-            const READY_WAIT_CAP: Duration = Duration::from_secs(300);
-            let wait_start = Instant::now();
-            loop {
-                if content_ready.load(Ordering::Acquire) && def_ready.load(Ordering::Acquire) {
-                    break;
-                }
-                if watcher_generation.load(Ordering::Acquire) != my_generation {
-                    info!(my_generation, "Watcher generation changed during startup wait, exiting");
-                    return;
-                }
-                if wait_start.elapsed() >= READY_WAIT_CAP {
-                    warn!(
-                        waited_s = wait_start.elapsed().as_secs(),
-                        content_ready = content_ready.load(Ordering::Acquire),
-                        def_ready = def_ready.load(Ordering::Acquire),
-                        "Watcher proceeded to reconciliation before initial index build completed (hard cap reached)"
+        const READY_POLL: Duration = Duration::from_millis(50);
+        // Hard cap well above a realistic cold-start build (~30s for
+        // large trees). After this, log and proceed: reconciliation on
+        // a partial index is still safer than silently skipping events.
+        const READY_WAIT_CAP: Duration = Duration::from_secs(300);
+        let wait_start = Instant::now();
+        match wait_for_indexes_ready(
+            &content_ready,
+            &def_ready,
+            &watcher_generation,
+            my_generation,
+            READY_POLL,
+            READY_WAIT_CAP,
+        ) {
+            WaitOutcome::Ready => {
+                let waited = wait_start.elapsed();
+                if waited > READY_POLL {
+                    info!(
+                        waited_ms = waited.as_millis() as u64,
+                        "Watcher waited for initial index build before reconciliation"
                     );
-                    break;
                 }
-                std::thread::sleep(Duration::from_millis(READY_POLL_MS));
             }
-            let waited = wait_start.elapsed();
-            if waited.as_millis() > READY_POLL_MS as u128 {
-                info!(
-                    waited_ms = waited.as_millis() as u64,
-                    "Watcher waited for initial index build before reconciliation"
+            WaitOutcome::GenerationChanged => {
+                info!(my_generation, "Watcher generation changed during startup wait, exiting");
+                return;
+            }
+            WaitOutcome::TimedOut => {
+                warn!(
+                    waited_s = wait_start.elapsed().as_secs(),
+                    content_ready = content_ready.load(Ordering::Acquire),
+                    def_ready = def_ready.load(Ordering::Acquire),
+                    "Watcher proceeded to reconciliation before initial index build completed (hard cap reached)"
                 );
             }
         }
