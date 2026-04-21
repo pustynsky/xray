@@ -926,6 +926,87 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
         }
 }
 
+/// Snapshot of the on-disk state of a workspace directory, captured by a
+/// single [`scan_dir_state`] walk. Two views over the same set of files:
+///
+/// * `all_files` — every regular file under `dir`, with `.git/` excluded
+///   (matches the file-list / `xray_fast` view).
+/// * `ext_matched` — strict subset of `all_files` whose extension is in
+///   `extensions` (matches the content / definition-index view).
+///
+/// Captured once so callers (`reconcile_content_index` today, the upcoming
+/// `periodic_rescan_once` in Phase 2) avoid two filesystem walks per
+/// reconciliation cycle.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct DirState {
+    // `all_files` is populated in Phase 1 but not yet consumed — it is
+    // wired here so Phase 2's `periodic_rescan_once` reuses the same
+    // single walk for FileIndex reconciliation. Kept on the struct to
+    // pin down the eventual API and make the test in
+    // `scan_dir_state_classifies_ext_matched_subset_of_all_files`
+    // meaningful.
+    #[allow(dead_code)]
+    pub all_files: HashMap<PathBuf, SystemTime>,
+    pub ext_matched: HashMap<PathBuf, SystemTime>,
+}
+
+/// Walk `dir` once and classify every regular file into the two
+/// [`DirState`] views.
+///
+/// Walker config is held centralised here so the watcher's
+/// reconciliation paths and the upcoming periodic rescan share a single
+/// source of truth: `follow_links(true).hidden(false).git_ignore(true)
+/// .git_exclude(false)`. `.git/` is excluded explicitly via
+/// [`is_inside_git_dir`] because `WalkBuilder` does not skip it by default.
+///
+/// Path keys are normalised through [`clean_path`] so they can be
+/// compared 1:1 against `path_to_id` keys (which use the same
+/// normalisation).
+///
+/// Errors from individual `WalkBuilder` entries are silently skipped to
+/// preserve the previous behaviour of `reconcile_content_index` —
+/// reconciliation must not abort on a single I/O glitch.
+pub(crate) fn scan_dir_state(dir: &str, extensions: &[String]) -> DirState {
+    let dir_path = canonicalize_or_warn(dir);
+
+    let mut walker = WalkBuilder::new(&dir_path);
+    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(false);
+
+    let mut all_files: HashMap<PathBuf, SystemTime> = HashMap::new();
+    let mut ext_matched: HashMap<PathBuf, SystemTime> = HashMap::new();
+
+    for entry in walker.build() {
+        let entry = match entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+            continue;
+        }
+        let path = entry.path();
+        if is_inside_git_dir(path) {
+            continue;
+        }
+
+        let mtime = entry.metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(UNIX_EPOCH);
+        let clean = PathBuf::from(clean_path(&path.to_string_lossy()));
+
+        let ext_match = path.extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
+
+        if ext_match {
+            ext_matched.insert(clean.clone(), mtime);
+        }
+        all_files.insert(clean, mtime);
+    }
+
+    DirState { all_files, ext_matched }
+}
+
 /// Reconcile content index with filesystem after loading from disk cache.
 ///
 /// Walks the filesystem and compares with the in-memory index to find:
@@ -952,36 +1033,14 @@ fn reconcile_content_index(
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(std::time::Duration::ZERO)
         .as_secs();
-    let dir_path = canonicalize_or_warn(dir);
 
     // ── Phase 1: Walk filesystem (NO LOCK) ──
-    let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
-
-    let mut walker = WalkBuilder::new(&dir_path);
-    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(false);
-
-    for entry in walker.build() {
-        let entry = match entry {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
-        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-            continue;
-        }
-        let path = entry.path();
-        let ext_match = path.extension()
-            .and_then(|e| e.to_str())
-            .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)));
-        if !ext_match {
-            continue;
-        }
-        let mtime = entry.metadata()
-            .ok()
-            .and_then(|m| m.modified().ok())
-            .unwrap_or(UNIX_EPOCH);
-        let clean = PathBuf::from(clean_path(&path.to_string_lossy()));
-        disk_files.insert(clean, mtime);
-    }
+    // Single shared walk — `disk_files` here is the ext-matched view.
+    // The full `all_files` view is intentionally unused at this call site
+    // (FileIndex is reconciled elsewhere); Phase 2 (`periodic_rescan_once`)
+    // will consume both views from the same `DirState` snapshot.
+    let dir_state = scan_dir_state(dir, extensions);
+    let disk_files = &dir_state.ext_matched;
 
     let scanned = disk_files.len();
 
@@ -998,7 +1057,7 @@ fn reconcile_content_index(
 
             if let Some(ref p2id) = idx.path_to_id {
                 // Check for new and modified files
-                for (path, mtime) in &disk_files {
+                for (path, mtime) in disk_files {
                     if let Some(&fid) = p2id.get(path) {
                         // Existing file — check if modified
                         if *mtime > threshold {
