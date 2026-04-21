@@ -1662,3 +1662,116 @@ fn wait_for_ready_times_out_when_flags_never_flip() {
     );
 }
 
+// ─── scan_dir_state ─────────────────────────────────────────────────
+//
+// Phase 1 of the periodic-rescan rollout: a single shared filesystem
+// walk that classifies every regular file into the two views consumed
+// by reconciliation (`ext_matched`) and FileIndex (`all_files`).
+
+#[test]
+fn scan_dir_state_classifies_ext_matched_subset_of_all_files() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("a.cs"), "class A {}").unwrap();
+    std::fs::write(dir.join("b.cs"), "class B {}").unwrap();
+    std::fs::write(dir.join("readme.md"), "# readme").unwrap();
+    std::fs::write(dir.join("data.json"), "{}").unwrap();
+
+    let state = super::scan_dir_state(
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+    );
+
+    assert_eq!(state.all_files.len(), 4, "all four regular files must appear in all_files");
+    assert_eq!(state.ext_matched.len(), 2, "only .cs files must appear in ext_matched");
+    for path in state.ext_matched.keys() {
+        assert!(state.all_files.contains_key(path),
+            "ext_matched must be a strict subset of all_files (missing: {:?})", path);
+    }
+}
+
+#[test]
+fn scan_dir_state_extension_match_is_case_insensitive() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("upper.CS"), "class U {}").unwrap();
+    std::fs::write(dir.join("lower.cs"), "class L {}").unwrap();
+
+    let state = super::scan_dir_state(
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+    );
+
+    assert_eq!(state.ext_matched.len(), 2,
+        "extension comparison must be case-insensitive (got {:?})",
+        state.ext_matched.keys().collect::<Vec<_>>());
+}
+
+#[test]
+fn scan_dir_state_excludes_dot_git_directory() {
+    // The watcher event loop already skips `.git/` (massive event floods on
+    // git operations). The shared walker must do the same so reconciliation
+    // and the upcoming periodic rescan see the same view as the live event
+    // stream — otherwise rescan would re-add `.git/*` files that the watcher
+    // never reported as created.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join(".git").join("objects")).unwrap();
+    std::fs::write(dir.join(".git").join("config"), "[core]").unwrap();
+    std::fs::write(dir.join(".git").join("objects").join("blob"), "x").unwrap();
+    std::fs::write(dir.join("real.cs"), "class R {}").unwrap();
+
+    let state = super::scan_dir_state(
+        &dir.to_string_lossy(),
+        &["cs".to_string(), "config".to_string()],
+    );
+
+    assert!(state.all_files.iter().all(|(p, _)| !p.to_string_lossy().contains("/.git/")),
+        ".git/* must NOT appear in all_files (got {:?})",
+        state.all_files.keys().collect::<Vec<_>>());
+    assert!(state.ext_matched.iter().all(|(p, _)| !p.to_string_lossy().contains("/.git/")),
+        ".git/* must NOT appear in ext_matched even when extension matches");
+    assert_eq!(state.ext_matched.len(), 1, "only real.cs survives");
+}
+
+#[test]
+fn scan_dir_state_recurses_into_subdirectories() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("nested").join("deep")).unwrap();
+    std::fs::write(dir.join("top.cs"), "class T {}").unwrap();
+    std::fs::write(dir.join("nested").join("mid.cs"), "class M {}").unwrap();
+    std::fs::write(dir.join("nested").join("deep").join("low.cs"), "class L {}").unwrap();
+
+    let state = super::scan_dir_state(
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+    );
+
+    assert_eq!(state.ext_matched.len(), 3,
+        "walker must recurse (got {:?})",
+        state.ext_matched.keys().collect::<Vec<_>>());
+}
+
+#[test]
+fn scan_dir_state_path_keys_are_clean_path_normalised() {
+    // path_to_id is keyed on `clean_path`-normalised PathBufs, so DirState
+    // must use the same normalisation or set-difference comparisons in
+    // `reconcile_content_index` / `periodic_rescan_once` will spuriously
+    // report drift for paths that differ only in separator style.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("file.cs"), "class F {}").unwrap();
+
+    let state = super::scan_dir_state(
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+    );
+
+    for path in state.all_files.keys() {
+        let s = path.to_string_lossy();
+        assert!(!s.contains('\\'),
+            "scan_dir_state must return clean_path-normalised forward-slash paths, got {:?}", s);
+    }
+}
+
