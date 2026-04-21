@@ -366,6 +366,21 @@ fn process_batch(
         .map(|p| PathBuf::from(clean_path(&p.to_string_lossy())))
         .collect();
 
+    // MINOR-10: drain-before-apply is intentional and MUST stay in this order.
+    //
+    // SAFETY: we `drain()` the input `HashSet`s into owned `Vec`s BEFORE calling
+    // `update_content_index` / `update_definition_index`. Rationale:
+    //   * Both `update_*` helpers may return `false` on a poisoned lock; the
+    //     caller of `process_batch` must NOT see the same file event again
+    //     in the next batch — draining ensures the pending sets are empty
+    //     even on early return.
+    //   * Applying an index update is the side-effect the watcher performs
+    //     "at most once" per debounced batch. A retry after partial apply
+    //     would double-index postings (we rely on the FS watcher, not the
+    //     pending set, to redeliver missed events).
+    //   * Path normalization (`clean_path`) happens once per path here
+    //     instead of inside every hot loop in the `update_*` helpers.
+
     let batch_start = std::time::Instant::now();
 
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)

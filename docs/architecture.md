@@ -744,3 +744,58 @@ The engine has two layers with **different language coverage**:
 | Rust (.rs)        | tree-sitter-rust             | struct, enum, trait (→Interface), method (impl block), constructor (new/default), function, field, enum variant, const/static (→Variable), type alias | ✅ Active (optional: `--features lang-rust`) |
 
 > **Key takeaway:** You can use `content-index` / `xray_grep` on **any** codebase regardless of language. Only `def-index` / `xray_definitions` / `xray_callers` require a supported parser (currently C#, TypeScript/TSX, Rust via tree-sitter; SQL via regex). Each parser is an optional Cargo feature — build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-rust` for Rust, etc.
+
+
+## Shutdown Semantics and Ctrl+C Handling
+
+**MINOR-15 documentation.**
+
+The MCP server is a stdio-based daemon: it reads newline-framed JSON-RPC
+requests from `stdin` in a blocking `BufReader::read_line()` loop on the
+main thread. Graceful shutdown is triggered by **EOF on stdin** — i.e.,
+the MCP client closing its write end of the pipe. On shutdown, the server
+flushes both `ContentIndex` and `DefinitionIndex` to disk so that
+incremental watcher updates survive the next launch.
+
+### Known limitation — `Ctrl+C` inside a terminal session
+
+If `xray serve` is launched manually in a terminal (not as a child
+process of an MCP client) and the operator presses `Ctrl+C`, the
+terminating `SIGINT` / Windows console control event reaches the
+process **while the main thread is parked inside the blocking
+`read_line()` syscall**. Rust's default `Ctrl+C` handler simply aborts
+the process; the shutdown path that writes the in-memory incremental
+index updates to disk is skipped. Concretely:
+
+- Any file events that have been tokenized/applied since the last full
+  index rebuild but have NOT yet been persisted via the debounced
+  watcher save are lost. On next start the indexes are reloaded from
+  the on-disk snapshot, so the loss is equivalent to ~1 debounce
+  window (default 500 ms) of file changes.
+- Search correctness is not affected — the watcher will re-apply
+  those events on the next startup because the FS `mtime`s are still
+  newer than the index `mtime`.
+
+### Recommended operator workflow
+
+- **Preferred:** close `stdin` (e.g., `Ctrl+D` on Unix, `Ctrl+Z<Enter>`
+  on Windows cmd) to trigger the full graceful shutdown path.
+- **From an MCP client:** closing the client (VS Code, Claude Desktop,
+  etc.) closes the pipe automatically — no operator action needed.
+- **Inside a CI script:** send `SIGTERM` only after closing the child
+  process's stdin pipe; on Windows, send
+  `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)` only as a last
+  resort.
+
+### Why we don't install a custom `Ctrl+C` handler
+
+A custom handler would need to inject a "shutdown" message into the
+blocking `read_line()` loop. On Unix this would require swapping to
+`poll()`-based stdin reads; on Windows the equivalent is
+`WaitForMultipleObjects` on the stdin handle plus a signal event.
+Both approaches add platform-specific complexity and a non-trivial
+test surface for a behaviour (operator-initiated `Ctrl+C` on a
+manually launched serve) that is explicitly out of the supported
+deployment mode (MCP client → child process over pipes). The stdin-close
+workaround above covers 100% of production usage.
+

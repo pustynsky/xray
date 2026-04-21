@@ -153,15 +153,37 @@ pub fn run_server(ctx: HandlerContext) {
                 if line.len() > MAX_REQUEST_SIZE {
                     error!(size = line.len(), "Request too large (exceeded {} bytes), skipping", MAX_REQUEST_SIZE);
                     // Drain remaining bytes until newline to re-sync the stream.
+                    // MINOR-16: cap the drain itself so a client that keeps streaming
+                    // without a newline cannot make us loop forever. 64 MB is 6× the
+                    // max legitimate request and still well below any realistic OOM
+                    // threshold; once exceeded we give up and exit the event loop
+                    // rather than risk an unbounded read.
+                    const DRAIN_BYTE_CAP: usize = 64 * 1024 * 1024;
+                    let mut drained: usize = 0;
                     let mut discard = String::new();
-                    loop {
+                    let exceeded = loop {
                         discard.clear();
                         match reader.by_ref().take(8192).read_line(&mut discard) {
-                            Ok(0) => break,
-                            Ok(_) if discard.ends_with('\n') => break,
-                            Ok(_) => continue,
-                            Err(_) => break,
+                            Ok(0) => break false,
+                            Ok(n) => {
+                                drained = drained.saturating_add(n);
+                                if discard.ends_with('\n') {
+                                    break false;
+                                }
+                                if drained >= DRAIN_BYTE_CAP {
+                                    break true;
+                                }
+                            }
+                            Err(_) => break false,
                         }
+                    };
+                    if exceeded {
+                        warn!(
+                            drained_bytes = drained,
+                            cap = DRAIN_BYTE_CAP,
+                            "Oversized-request drain exceeded cap; terminating event loop to avoid unbounded read"
+                        );
+                        break;
                     }
                     continue;
                 }

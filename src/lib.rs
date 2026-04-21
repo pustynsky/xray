@@ -601,7 +601,10 @@ impl Default for ContentIndex {
 #[must_use]
 pub fn tokenize(line: &str, min_len: usize) -> Vec<String> {
     line.split(|c: char| !c.is_alphanumeric() && c != '_')
-        .filter(|s| s.len() >= min_len)
+        // MINOR-24: compare by Unicode scalar count, not byte length. `len()`
+        // would under-count Greek / Cyrillic / CJK tokens (multi-byte UTF-8)
+        // and let them slip below `min_len`, breaking the CJK/Cyrillic index.
+        .filter(|s| s.chars().count() >= min_len)
         .map(|s| s.to_lowercase())
         .collect()
 }

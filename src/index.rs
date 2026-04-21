@@ -1093,6 +1093,51 @@ pub fn cleanup_orphaned_indexes(index_base: &std::path::Path) -> usize {
 }
 
 /// Remove all index files (.file-list, .word-search, .code-structure) whose root matches the given directory.
+/// MINOR-5: sweep stale `.tmp` sidecars left by killed `save_compressed` writes.
+/// Uses an age threshold (`min_age`) to avoid racing with a concurrently-running
+/// xray process that is still writing its temp file.
+///
+/// `save_compressed` writes `<name>.<ext>.tmp` then renames atomically. On SIGKILL
+/// / OOM / power-off the rename never happens and the `.tmp` file accumulates in
+/// `%LOCALAPPDATA%\xray`. We only sweep files whose stem ends with one of the
+/// recognised index extensions, so unrelated `.tmp` files (if any) are left alone.
+pub fn cleanup_stale_tmp_files(index_base: &std::path::Path, min_age: std::time::Duration) -> usize {
+    if !index_base.exists() {
+        return 0;
+    }
+    let now = std::time::SystemTime::now();
+    let mut removed = 0;
+    if let Ok(entries) = std::fs::read_dir(index_base) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|e| e.to_str()) != Some("tmp") {
+                continue;
+            }
+            let stem_ext = path.file_stem()
+                .and_then(|s| std::path::Path::new(s).extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_string()));
+            let is_index_tmp = matches!(
+                stem_ext.as_deref(),
+                Some("file-list") | Some("word-search") | Some("code-structure")
+            );
+            if !is_index_tmp {
+                continue;
+            }
+            let age_ok = entry.metadata()
+                .and_then(|m| m.modified())
+                .ok()
+                .and_then(|m| now.duration_since(m).ok())
+                .is_some_and(|age| age >= min_age);
+            if age_ok && std::fs::remove_file(&path).is_ok() {
+                removed += 1;
+                eprintln!("  Removed stale tmp: {}", path.display());
+            }
+        }
+    }
+    removed
+}
+
 /// Comparison is case-insensitive on the canonicalized paths (Windows-safe).
 /// Returns the number of files removed.
 pub fn cleanup_indexes_for_dir(dir: &str, index_base: &std::path::Path) -> usize {

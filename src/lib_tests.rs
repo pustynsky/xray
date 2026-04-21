@@ -22,6 +22,23 @@ fn test_tokenize_min_length() {
 }
 
 #[test]
+fn test_tokenize_multibyte_min_length_minor_24() {
+    // MINOR-24: prior implementation compared byte length, so a 3-char Greek
+    // token (6 bytes in UTF-8) passed `min_len=3` via `len() >= 3` even when
+    // agents meant "3 Unicode scalars". Check a 2-char Greek token with
+    // `min_len=3` is now correctly rejected (byte-len would let it pass).
+    let tokens = tokenize("αβ аб xy", 3);
+    assert!(
+        tokens.is_empty(),
+        "expected char-count filter to reject 2-char multibyte tokens; got {:?}",
+        tokens
+    );
+    // And a 3-char Greek token should pass `min_len=3`.
+    let tokens = tokenize("αβγ abc", 3);
+    assert_eq!(tokens, vec!["αβγ", "abc"]);
+}
+
+#[test]
 fn test_clean_path_strips_prefix() {
     assert_eq!(clean_path(r"\\?\C:\Users\test"), "C:/Users/test");
 }

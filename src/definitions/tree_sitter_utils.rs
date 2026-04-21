@@ -292,7 +292,18 @@ pub(crate) fn walk_code_stats(
         }
     } else if kind == config.binary_op_node {
         // Logical operators: && and ||
-        if let Some(op) = node.child(1) {
+        // MINOR-14: tree-sitter grammars expose the operator via a named field
+        // (`operator`) on `binary_expression`. Prefer field lookup and fall back
+        // to positional `child(1)` for grammars that do NOT mark the field.
+        if let Some(op) = node
+            .child_by_field_name("operator")
+            .or_else(|| node.child(1))
+        {
+            debug_assert!(
+                !op.kind().is_empty(),
+                "binary_op_node expected an operator child; got empty kind for node kind `{}`",
+                kind,
+            );
             let op_kind = op.kind();
             let is_logical = op_kind == "&&" || op_kind == "||"
                 || (config.check_logical_op_text && {
@@ -304,7 +315,7 @@ pub(crate) fn walk_code_stats(
                 // Cognitive: +1 only at start of new operator sequence
                 let parent_same_op = node.parent()
                     .filter(|p| p.kind() == config.binary_op_node)
-                    .and_then(|p| p.child(1))
+                    .and_then(|p| p.child_by_field_name("operator").or_else(|| p.child(1)))
                     .map(|pop| pop.kind() == op_kind)
                     .unwrap_or(false);
                 if !parent_same_op {
