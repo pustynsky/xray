@@ -21,6 +21,7 @@ mod tips;
 pub use error::SearchError;
 pub use index::{
     build_content_index, build_index, cleanup_indexes_for_dir, cleanup_orphaned_indexes,
+    cleanup_stale_tmp_files,
     content_index_path_for, find_content_index_for_dir, index_dir, index_path_for,
     load_content_index, load_index, save_content_index, save_index,
 };

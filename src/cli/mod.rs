@@ -15,7 +15,7 @@ use std::time::Instant;
 use regex::Regex;
 
 use crate::{
-    build_content_index, build_index, cleanup_indexes_for_dir, cleanup_orphaned_indexes,
+    build_content_index, build_index, cleanup_indexes_for_dir, cleanup_orphaned_indexes, cleanup_stale_tmp_files,
     content_index_path_for, find_content_index_for_dir,
     index_dir, index_path_for, load_content_index, load_index,
     save_content_index, save_index, tokenize,
@@ -110,10 +110,19 @@ pub fn run() {
             } else {
                 eprintln!("Scanning for orphaned indexes in {}...", idx_base.display());
                 let removed = cleanup_orphaned_indexes(&idx_base);
-                if removed == 0 {
+                // MINOR-5: also sweep stale `.tmp` sidecars (older than 1h to avoid
+                // racing with a concurrently-running xray process).
+                let tmp_removed = cleanup_stale_tmp_files(
+                    &idx_base,
+                    std::time::Duration::from_secs(60 * 60),
+                );
+                if removed == 0 && tmp_removed == 0 {
                     eprintln!("No orphaned indexes found.");
                 } else {
-                    eprintln!("Removed {} orphaned index file(s).", removed);
+                    eprintln!(
+                        "Removed {} orphaned index file(s) and {} stale tmp file(s).",
+                        removed, tmp_removed,
+                    );
                 }
             }
             Ok(())
