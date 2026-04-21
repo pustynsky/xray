@@ -109,6 +109,21 @@ pub(crate) fn wait_for_indexes_ready(
     }
 }
 
+/// Record a notify backend error on the shared stats handle.
+///
+/// Extracted from the `start_watcher` event loop so the error-counter
+/// path is unit-testable: an earlier regression left
+/// `events_errors.fetch_add` wired to the wrong counter for ~4 hours
+/// without any test catching it (see
+/// `docs/code-reviews/2026-04-21_audit-3day-hidden-bugs.md` P2 finding).
+/// The helper is tiny by design — its value is the assertion that the
+/// error arm still bumps `events_errors` and nothing else.
+pub(crate) fn record_watcher_event_error(stats: &WatcherStats, err: &notify::Error) {
+    stats.events_errors.fetch_add(1, Ordering::Relaxed);
+    warn!(error = %err, "File watcher error");
+}
+
+
 #[allow(clippy::too_many_arguments)]
 pub fn start_watcher(
     index: Arc<RwLock<ContentIndex>>,
@@ -276,8 +291,7 @@ pub fn start_watcher(
                         }
                 }
                 Ok(Err(e)) => {
-                    stats.events_errors.fetch_add(1, Ordering::Relaxed);
-                    warn!(error = %e, "File watcher error");
+                    record_watcher_event_error(&stats, &e);
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
                     // Check generation on each timeout (watcher restart)

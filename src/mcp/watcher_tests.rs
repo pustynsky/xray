@@ -2082,3 +2082,33 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
     );
 }
 
+
+// ─── record_watcher_event_error ────────────────────────────
+//
+// P2 follow-up from docs/code-reviews/2026-04-21_audit-3day-hidden-bugs.md:
+// the `Ok(Err(e))` arm of the watcher loop was previously untested, so a
+// 4-hour regression where `events_errors.fetch_add` was wired to the
+// wrong counter shipped without any test catching it. Extracting the
+// arm into `record_watcher_event_error` gives us a direct unit test.
+
+#[test]
+fn record_watcher_event_error_bumps_events_errors_and_nothing_else() {
+    let stats = super::WatcherStats::new();
+    let err = notify::Error::generic("simulated backend failure");
+
+    super::record_watcher_event_error(&stats, &err);
+
+    assert_eq!(stats.events_errors.load(Ordering::Relaxed), 1,
+        "events_errors must bump on a notify backend error");
+    // Guard against regressions that route the error into the wrong
+    // counter (the exact class of bug that slipped through for 4 hours).
+    assert_eq!(stats.events_total.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.events_empty_paths.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.periodic_rescan_total.load(Ordering::Relaxed), 0);
+    assert_eq!(stats.periodic_rescan_drift_events.load(Ordering::Relaxed), 0);
+
+    // Second error must accumulate (not clobber).
+    super::record_watcher_event_error(&stats, &err);
+    assert_eq!(stats.events_errors.load(Ordering::Relaxed), 2);
+}
+
