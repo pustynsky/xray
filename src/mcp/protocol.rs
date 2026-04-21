@@ -6,7 +6,8 @@ use serde_json::Value;
 /// Incoming JSON-RPC request (may be a notification if id is None)
 #[derive(Deserialize, Debug)]
 pub struct JsonRpcRequest {
-    #[allow(dead_code)]
+    /// JSON-RPC protocol version. Must equal `"2.0"` per JSON-RPC 2.0 §4;
+    /// validated by the dispatcher in [`crate::mcp::server`].
     pub jsonrpc: String,
     pub id: Option<Value>,
     pub method: String,

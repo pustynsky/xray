@@ -13,9 +13,19 @@ use super::HandlerContext;
 /// Serialize a JSON Value to a string, returning a fallback error JSON
 /// if serialization fails (e.g., due to NaN/Infinity float values).
 /// This prevents panics in MCP handlers from crashing the long-lived server process.
+///
+/// MINOR-29: the fallback path builds its JSON through `serde_json::json!`
+/// so the error message is properly escaped. The previous implementation
+/// used `format!` with the raw `Display` of `serde_json::Error`, which
+/// could contain `"`, `\`, or control characters and therefore emit
+/// invalid JSON for the client.
 pub(crate) fn json_to_string(v: &serde_json::Value) -> String {
     serde_json::to_string(v).unwrap_or_else(|e| {
-        format!(r#"{{"error":"serialization failed: {}"}}"#, e)
+        let fallback = serde_json::json!({
+            "error": format!("serialization failed: {}", e)
+        });
+        serde_json::to_string(&fallback)
+            .unwrap_or_else(|_| String::from(r#"{"error":"serialization fallback failed"}"#))
     })
 }
 

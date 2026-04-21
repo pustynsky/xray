@@ -16,9 +16,29 @@
 //! be compiled.
 /// Extract the UTF-8 text of a tree-sitter node from the source bytes.
 ///
-/// Returns an empty string if the node's byte range contains invalid UTF-8.
+/// Returns an empty string if the node's byte range contains invalid UTF-8,
+/// and emits a `tracing::warn!` once per process (MINOR-13). The warning
+/// is coalesced with an atomic flag so a file with many non-UTF-8 nodes
+/// cannot flood the log — the first occurrence names the node kind and
+/// line for triage, subsequent ones are silent.
 pub(crate) fn node_text<'a>(node: tree_sitter::Node, source: &'a [u8]) -> &'a str {
-    node.utf8_text(source).unwrap_or("")
+    match node.utf8_text(source) {
+        Ok(s) => s,
+        Err(_) => {
+            use std::sync::atomic::{AtomicBool, Ordering};
+            static WARNED: AtomicBool = AtomicBool::new(false);
+            if !WARNED.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    node_kind = node.kind(),
+                    line = node.start_position().row + 1,
+                    "node_text: byte range is not valid UTF-8; returning empty string \
+                     (further occurrences suppressed). Non-UTF-8 source files \
+                     (Windows-1251, SHIFT-JIS) are indexed lossily."
+                );
+            }
+            ""
+        }
+    }
 }
 
 /// Find the first direct child of `node` whose `kind()` matches `kind`.
@@ -63,10 +83,61 @@ pub(crate) fn find_child_by_field<'a>(node: tree_sitter::Node<'a>, field: &str) 
 /// This is the shared core logic used by both C# and TypeScript parameter
 /// counting. Each language finds its parameter list node differently
 /// (`parameter_list` vs `formal_parameters`), but the counting logic is identical.
-pub(crate) fn count_named_children(node: tree_sitter::Node) -> u8 {
+///
+/// Returns `u32` so that pathological auto-generated code with very large
+/// parameter lists is observable at call sites (MINOR-12). Callers saturate
+/// this to the narrower storage type (`u8` in [`CodeStats`]) and emit a
+/// `tracing::warn!` when truncation actually happens, so saturation is no
+/// longer silent.
+pub(crate) fn count_named_children(node: tree_sitter::Node) -> u32 {
     (0..node.child_count())
         .filter(|&i| node.child(i).map(|c| c.is_named()).unwrap_or(false))
-        .count() as u8
+        .count() as u32
+}
+
+/// Saturate a `u32` count into a `u8` for on-disk [`CodeStats`] storage and
+/// emit a `tracing::warn!` the first time truncation happens per call site.
+/// Use at every site that assigns `count_named_children` (or similar wide
+/// counts) into a `u8` field. Keeps the storage format unchanged while
+/// making lossy saturation observable in logs (MINOR-12).
+pub(crate) fn saturate_count_to_u8(value: u32, context: &str) -> u8 {
+    if value > u8::MAX as u32 {
+        tracing::warn!(
+            value,
+            context,
+            "count exceeds u8::MAX; saturating at 255 — complexity metric will be lossy"
+        );
+        u8::MAX
+    } else {
+        value as u8
+    }
+}
+
+/// Hard cap on recursive AST descent for tree-sitter walkers (MINOR-27).
+/// Matches the value used in [`parser_xml`] for consistency. In normal
+/// Rust/TypeScript code the AST depth is well under 50; the cap protects
+/// against pathological auto-generated sources and tree-sitter grammar
+/// regressions which could otherwise cause a `SIGABRT` stack overflow
+/// on an MCP stdio server.
+pub(crate) const MAX_AST_RECURSION_DEPTH: usize = 1024;
+
+/// Emit a one-shot `tracing::warn!` when a walker hits
+/// [`MAX_AST_RECURSION_DEPTH`]. Coalesced with a process-global atomic so
+/// a single pathological file cannot flood the log. The first occurrence
+/// reports the parser name and node line; subsequent ones are silent.
+pub(crate) fn warn_ast_depth_exceeded(parser: &str, node: tree_sitter::Node) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if !WARNED.swap(true, Ordering::Relaxed) {
+        tracing::warn!(
+            parser,
+            line = node.start_position().row + 1,
+            max_depth = MAX_AST_RECURSION_DEPTH,
+            "AST recursion depth exceeded; subtree truncated \
+             (further occurrences suppressed). Definitions / call sites \
+             inside the truncated subtree will be missing from the index."
+        );
+    }
 }
 
 // ─── Code Stats Config ──────────────────────────────────────────────
