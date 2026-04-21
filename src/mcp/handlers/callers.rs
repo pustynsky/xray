@@ -267,6 +267,11 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     };
 
     let limits = CallerLimits { max_callers_per_level, max_total_nodes };
+    // MINOR-9: Relaxed ordering below is correct while `build()` runs on a single thread.
+    // If handle_multi_method_callers is ever parallelized (e.g. `methods.par_iter()`),
+    // `node_count` and `impact_analysis_truncated` must switch to Acquire/Release (or be
+    // replaced with per-method locals that are aggregated after the join) to avoid
+    // silent missed-truncation due to cross-thread reordering.
     let node_count = AtomicUsize::new(0);
     let impact_analysis_truncated = AtomicBool::new(false);
 
@@ -366,6 +371,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             file_cache,
             total_body_lines_emitted,
             tests_found: Vec::new(),
+            per_level_dropped: 0,
         };
         let tree = builder.build(
             &method_name,
@@ -386,6 +392,12 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             "truncated": truncated,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
+        // MINOR-7: surface per-level truncation so clients can distinguish
+        // "full result" from "capped to maxCallersPerLevel".
+        if builder.per_level_dropped > 0 {
+            summary["perLevelTruncated"] = json!(true);
+            summary["callersDroppedPerLevel"] = json!(builder.per_level_dropped);
+        }
         if include_body {
             summary["totalBodyLinesReturned"] = json!(builder.total_body_lines_emitted);
             let (_, tree_available) = compute_body_lines_from_tree(&tree, root_method.as_ref());
@@ -617,6 +629,8 @@ fn handle_multi_method_callers(
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
     let mut total_nodes_all: usize = 0;
+    // MINOR-7: aggregate per-level truncation across all methods in the batch.
+    let mut total_per_level_dropped: usize = 0;
 
     let mut results: Vec<Value> = Vec::new();
 
@@ -625,6 +639,7 @@ fn handle_multi_method_callers(
     let exclude_file_lower: Vec<String> = exclude_file.iter().map(|s| s.to_lowercase()).collect();
     let ext_filter_list = super::utils::prepare_ext_filter(&ext_filter);
 
+    // MINOR-9: see `handle_xray_callers` — same single-threaded Relaxed invariant applies.
     let impact_analysis_truncated = AtomicBool::new(false);
 
     for method_name in methods {
@@ -684,6 +699,7 @@ fn handle_multi_method_callers(
                 file_cache,
                 total_body_lines_emitted,
                 tests_found: Vec::new(),
+                per_level_dropped: 0,
             };
             let tree = builder.build(
                 method_name,
@@ -702,6 +718,13 @@ fn handle_multi_method_callers(
             method_result["nodesVisited"] = json!(builder.visited.len());
             let method_truncated = method_nodes >= max_total_nodes;
             method_result["truncated"] = json!(method_truncated);
+            // MINOR-7: per-method per-level truncation signal
+            let method_dropped = builder.per_level_dropped;
+            total_per_level_dropped += method_dropped;
+            if method_dropped > 0 {
+                method_result["perLevelTruncated"] = json!(true);
+                method_result["callersDroppedPerLevel"] = json!(method_dropped);
+            }
 
             if let Some(root) = &root_method {
                 method_result["rootMethod"] = root.clone();
@@ -782,6 +805,11 @@ fn handle_multi_method_callers(
     let any_truncated = results.iter().any(|r| r["truncated"].as_bool().unwrap_or(false));
     if any_truncated {
         summary["truncated"] = json!(true);
+    }
+    // MINOR-7: aggregate per-level truncation across all methods in the batch
+    if total_per_level_dropped > 0 {
+        summary["perLevelTruncated"] = json!(true);
+        summary["callersDroppedPerLevel"] = json!(total_per_level_dropped);
     }
     if include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
@@ -1243,6 +1271,10 @@ struct CallerTreeBuilder<'a> {
     file_cache: HashMap<String, Option<String>>,
     total_body_lines_emitted: usize,
     tests_found: Vec<Value>,
+    /// MINOR-7: counts callers dropped by per-level `maxCallersPerLevel` truncation.
+    /// Exposed in the summary as `perLevelTruncated` / `callersDroppedPerLevel` so
+    /// LLM clients can distinguish "full result set" from "result set that was capped".
+    per_level_dropped: usize,
 }
 
 impl CallerTreeBuilder<'_> {
@@ -1841,6 +1873,13 @@ impl CallerTreeBuilder<'_> {
             }
         }
 
+        // MINOR-8: final check catches the edge case where the cap is reached on the
+        // last posting via the inner-loop `continue` path (caller_map already at limit,
+        // but we never re-entered the outer loop to trip `collection_capped = true`).
+        if caller_map.len() >= collection_limit {
+            collection_capped = true;
+        }
+
         if collection_capped && self.ctx.impact_analysis {
             self.ctx.impact_analysis_truncated.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -1870,7 +1909,11 @@ impl CallerTreeBuilder<'_> {
                 })
         });
 
-        // Truncate: apply maxCallersPerLevel limit
+        // Truncate: apply maxCallersPerLevel limit.
+        // MINOR-7: count how many non-test callers get dropped so the summary can
+        // report `perLevelTruncated` / `callersDroppedPerLevel` (instead of silently
+        // returning a capped slice).
+        let max_per_level = self.ctx.limits.max_callers_per_level;
         if self.ctx.impact_analysis {
             // When impactAnalysis is enabled, don't truncate test callers —
             // they're needed for the testsCovering array.
@@ -1878,9 +1921,10 @@ impl CallerTreeBuilder<'_> {
             let non_test_end = caller_order.iter()
                 .position(|k| is_test_caller(self.ctx.def_idx, caller_map[k].di, &caller_map[k].file_path))
                 .unwrap_or(caller_order.len());
-            if non_test_end > self.ctx.limits.max_callers_per_level {
+            if non_test_end > max_per_level {
+                self.per_level_dropped += non_test_end - max_per_level;
                 // Too many non-test callers: truncate non-test portion, keep all tests
-                let tests: Vec<String> = caller_order.split_off(self.ctx.limits.max_callers_per_level);
+                let tests: Vec<String> = caller_order.split_off(max_per_level);
                 // tests now contains: remaining non-test (if any) + all test callers
                 // We need to keep only test callers from `tests`
                 let test_keys: Vec<String> = tests.into_iter()
@@ -1889,10 +1933,10 @@ impl CallerTreeBuilder<'_> {
                 caller_order.extend(test_keys);
             }
             // If non_test_end <= max_callers_per_level, all non-test fit + all tests stay
-        } else {
-            caller_order.truncate(self.ctx.limits.max_callers_per_level);
+        } else if caller_order.len() > max_per_level {
+            self.per_level_dropped += caller_order.len() - max_per_level;
+            caller_order.truncate(max_per_level);
         }
-
         // Phase 2: Build nodes from collected caller info
         let mut callers: Vec<Value> = Vec::new();
 
