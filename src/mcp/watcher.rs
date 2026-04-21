@@ -6,12 +6,40 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ignore::WalkBuilder;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use notify::event::ModifyKind;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::{canonicalize_or_warn, clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+/// Lightweight, lock-free counters describing what the file watcher has
+/// observed since startup. Shared via `Arc` between the watcher thread and
+/// `xray_info` so operators can diagnose missed events (`notify` is
+/// best-effort on every platform — see
+/// `docs/bug-reports/bug-2026-04-21-watcher-misses-new-files-both-indexes.md`).
+///
+/// All fields use `Ordering::Relaxed` because they are pure observability
+/// signals — no other data hangs off them.
+#[derive(Debug, Default)]
+pub struct WatcherStats {
+    /// Total `Ok(event)` notifications pulled from the `notify` channel.
+    pub events_total: AtomicU64,
+    /// Subset of `events_total` where `event.paths` was empty. Some
+    /// `notify` backends emit such events (e.g. `EventKind::Create(Any)`
+    /// without a path), and they cannot trigger any index invalidation —
+    /// a non-zero count here is a strong hint that index drift is caused
+    /// by upstream backend behaviour, not by our event-loop logic.
+    pub events_empty_paths: AtomicU64,
+    /// `Err(notify_error)` notifications pulled from the channel.
+    pub events_errors: AtomicU64,
+}
+
+impl WatcherStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
 
 /// Start a file watcher thread that incrementally updates the in-memory index
 /// Returns `true` if the given event kind should invalidate the file-list index.
@@ -84,6 +112,7 @@ pub fn start_watcher(
     file_index_dirty: Arc<AtomicBool>,
     watcher_generation: Arc<AtomicU64>,
     my_generation: u64,
+    stats: Arc<WatcherStats>,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -173,6 +202,24 @@ pub fn start_watcher(
         loop {
             match rx.recv_timeout(Duration::from_millis(debounce_ms)) {
                 Ok(Ok(event)) => {
+                    // Observability (Phase 0 of periodic-rescan rollout):
+                    // every event we *do* receive is counted, and events with
+                    // an empty `paths` vec are flagged separately because
+                    // they cannot drive any index invalidation downstream.
+                    stats.events_total.fetch_add(1, Ordering::Relaxed);
+                    if event.paths.is_empty() {
+                        stats.events_empty_paths.fetch_add(1, Ordering::Relaxed);
+                        debug!(
+                            kind = ?event.kind,
+                            "watcher: event with empty paths (cannot invalidate index)"
+                        );
+                    } else {
+                        debug!(
+                            kind = ?event.kind,
+                            paths_len = event.paths.len(),
+                            "watcher: event received"
+                        );
+                    }
                     // Collect changed files
                     for path in &event.paths {
                         // Skip .git directory — git operations generate massive event floods
@@ -201,6 +248,7 @@ pub fn start_watcher(
                             EventKind::Remove(_) => {
                                 dirty_files.remove(path);
                                 removed_files.insert(path.clone());
+                    stats.events_errors.fetch_add(1, Ordering::Relaxed);
                                 if batch_start.is_none() {
                                     batch_start = Some(Instant::now());
                                 }

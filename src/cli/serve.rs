@@ -62,6 +62,7 @@ pub fn cmd_serve(args: ServeArgs) {
 
     // ─── File watcher ───
     let watcher_generation = Arc::new(AtomicU64::new(0));
+    let watcher_stats = Arc::new(mcp::watcher::WatcherStats::new());
     if args.watch && !is_unresolved {
         let watch_dir = std::fs::canonicalize(&dir_str)
             .unwrap_or_else(|_| PathBuf::from(&dir_str));
@@ -78,6 +79,7 @@ pub fn cmd_serve(args: ServeArgs) {
             Arc::clone(&file_index_dirty),
             Arc::clone(&watcher_generation),
             0, // initial generation
+            Arc::clone(&watcher_stats),
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
@@ -125,6 +127,7 @@ pub fn cmd_serve(args: ServeArgs) {
         watch_enabled: args.watch,
         watch_debounce_ms: args.debounce_ms,
         respect_git_exclude: args.respect_git_exclude,
+        watcher_stats,
     };
     mcp::server::run_server(ctx);
     crate::index::log_memory("serve: event loop exited");

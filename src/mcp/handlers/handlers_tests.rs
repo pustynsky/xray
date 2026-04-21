@@ -98,6 +98,7 @@ fn test_handler_context_field_count_guard() {
         watch_enabled: false,
         watch_debounce_ms: 500,
         respect_git_exclude: false,
+        watcher_stats: Arc::new(crate::mcp::watcher::WatcherStats::new()),
     };
     drop(_guard);
 }
