@@ -199,6 +199,33 @@ pub fn run_server(ctx: HandlerContext) {
                         }
                     };
 
+                    // MINOR-4 / MINOR-25: validate JSON-RPC version. Per JSON-RPC 2.0
+                    // §4, `jsonrpc` MUST be exactly "2.0"; any other value is an
+                    // Invalid Request (-32600). We previously accepted any string
+                    // (field parsed but not checked) which made the server violate
+                    // the spec silently.
+                    if request.jsonrpc != "2.0" {
+                        warn!(
+                            jsonrpc = %request.jsonrpc,
+                            method = %request.method,
+                            "Rejecting request with unsupported JSON-RPC version"
+                        );
+                        let reply_id = request.id.clone().unwrap_or(Value::Null);
+                        let err = JsonRpcErrorResponse::new(
+                            reply_id,
+                            -32600,
+                            format!(
+                                "Invalid Request: jsonrpc must be \"2.0\", got {:?}",
+                                request.jsonrpc
+                            ),
+                        );
+                        if let Ok(resp) = serde_json::to_string(&err) {
+                            let _ = writeln!(writer, "{}", resp);
+                            let _ = writer.flush();
+                        }
+                        continue;
+                    }
+
                     // Handle notifications (no id)
                     if request.id.is_none() {
                         debug!(method = %request.method, "Received notification");
@@ -318,34 +345,55 @@ pub fn run_server(ctx: HandlerContext) {
 
 /// Save in-memory indexes to disk on graceful shutdown.
 /// This preserves incremental watcher updates that were only held in memory.
+///
+/// **Skip heuristic (MINOR-17):** the original implementation skipped save
+/// when `files.is_empty()` to avoid overwriting a good on-disk index with
+/// an empty one when the server started and shut down before the
+/// background builder finished. That guard has a false-negative: a user
+/// who legitimately removed every indexed file would see the stale
+/// populated index persist on disk.
+///
+/// The corrected heuristic gates on `content_ready` / `def_ready`
+/// (Acquire load), which is the authoritative "build finished" signal.
+/// If the index is not ready, the builder is either running or failed —
+/// either way, the on-disk copy (if any) is more trustworthy than our
+/// partial in-memory state. If it is ready, we save unconditionally
+/// (including the empty case, which represents a legitimate "all files
+/// removed" state).
 fn save_indexes_on_shutdown(ctx: &HandlerContext) {
+    use std::sync::atomic::Ordering;
+
     // Save content index
-    match ctx.index.read() {
-        Ok(idx) => {
-            if idx.files.is_empty() {
-                info!("Content index is empty, skipping save");
-            } else if let Err(e) = save_content_index(&idx, &ctx.index_base) {
-                warn!(error = %e, "Failed to save content index on shutdown");
-            } else {
-                info!(files = idx.files.len(), "Content index saved on shutdown");
+    if !ctx.content_ready.load(Ordering::Acquire) {
+        info!("Content index not ready (builder still running or failed), skipping save");
+    } else {
+        match ctx.index.read() {
+            Ok(idx) => {
+                if let Err(e) = save_content_index(&idx, &ctx.index_base) {
+                    warn!(error = %e, "Failed to save content index on shutdown");
+                } else {
+                    info!(files = idx.files.len(), "Content index saved on shutdown");
+                }
             }
+            Err(e) => warn!(error = %e, "Failed to read content index for shutdown save"),
         }
-        Err(e) => warn!(error = %e, "Failed to read content index for shutdown save"),
     }
 
     // Save definition index
     if let Some(ref def) = ctx.def_index {
-        match def.read() {
-            Ok(idx) => {
-                if idx.files.is_empty() {
-                    info!("Definition index is empty, skipping save");
-                } else if let Err(e) = definitions::save_definition_index(&idx, &ctx.index_base) {
-                    warn!(error = %e, "Failed to save definition index on shutdown");
-                } else {
-                    info!(definitions = idx.definitions.len(), "Definition index saved on shutdown");
+        if !ctx.def_ready.load(Ordering::Acquire) {
+            info!("Definition index not ready (builder still running or failed), skipping save");
+        } else {
+            match def.read() {
+                Ok(idx) => {
+                    if let Err(e) = definitions::save_definition_index(&idx, &ctx.index_base) {
+                        warn!(error = %e, "Failed to save definition index on shutdown");
+                    } else {
+                        info!(definitions = idx.definitions.len(), "Definition index saved on shutdown");
+                    }
                 }
+                Err(e) => warn!(error = %e, "Failed to read definition index for shutdown save"),
             }
-            Err(e) => warn!(error = %e, "Failed to read definition index for shutdown save"),
         }
     }
 }

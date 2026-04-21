@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{node_text, find_child_by_kind, find_child_by_field, walk_code_stats, RUST_CODE_STATS_CONFIG};
+use super::tree_sitter_utils::{node_text, find_child_by_kind, find_child_by_field, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, RUST_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ pub(crate) fn parse_rust_definitions(
     let mut defs = Vec::new();
     let source_bytes = source.as_bytes();
     let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
-    walk_rust_node(tree.root_node(), source_bytes, file_id, None, &mut defs, &mut method_nodes);
+    walk_rust_node(tree.root_node(), source_bytes, file_id, None, &mut defs, &mut method_nodes, 0);
 
     // Build per-struct field type maps from collected defs
     let mut struct_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -78,7 +78,15 @@ fn walk_rust_node<'a>(
     parent_name: Option<&str>,
     defs: &mut Vec<DefinitionEntry>,
     method_nodes: &mut Vec<(usize, tree_sitter::Node<'a>)>,
+    depth: usize,
 ) {
+    // MINOR-27: hard cap recursion to avoid SIGABRT on adversarial /
+    // auto-generated code with pathologically deep AST. In normal Rust
+    // code this cap is never hit (typical depth < 30).
+    if depth > MAX_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded("rust", node);
+        return;
+    }
     let kind = node.kind();
 
     match kind {
@@ -131,7 +139,7 @@ fn walk_rust_node<'a>(
                                     }
                                 }
                                 _ => {
-                                    walk_rust_node(child, source, file_id, Some(&name), defs, method_nodes);
+                                    walk_rust_node(child, source, file_id, Some(&name), defs, method_nodes, depth + 1);
                                 }
                             }
                         }
@@ -175,7 +183,7 @@ fn walk_rust_node<'a>(
                                     method_nodes.push((idx, child));
                                 }
                             } else {
-                                walk_rust_node(child, source, file_id, Some(struct_name), defs, method_nodes);
+                                walk_rust_node(child, source, file_id, Some(struct_name), defs, method_nodes, depth + 1);
                             }
                         }
                     }
@@ -216,7 +224,7 @@ fn walk_rust_node<'a>(
     // Default: recurse into children
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            walk_rust_node(child, source, file_id, parent_name, defs, method_nodes);
+            walk_rust_node(child, source, file_id, parent_name, defs, method_nodes, depth + 1);
         }
     }
 }

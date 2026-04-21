@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, TYPESCRIPT_CODE_STATS_CONFIG};
+use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, TYPESCRIPT_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -22,7 +22,7 @@ pub(crate) fn parse_typescript_definitions(
 
     let mut defs = Vec::new();
     let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
-    walk_typescript_node_collecting(tree.root_node(), source, file_id, None, &mut defs, &mut method_nodes);
+    walk_typescript_node_collecting(tree.root_node(), source, file_id, None, &mut defs, &mut method_nodes, 0);
 
     // Build per-class field type maps from the collected defs
     let mut class_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -94,7 +94,13 @@ fn walk_typescript_node_collecting<'a>(
     parent_name: Option<&str>,
     defs: &mut Vec<DefinitionEntry>,
     method_nodes: &mut Vec<(usize, tree_sitter::Node<'a>)>,
+    depth: usize,
 ) {
+    // MINOR-27: hard cap recursion. Normal TS code is well under 50 levels.
+    if depth > MAX_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded("typescript", node);
+        return;
+    }
     let kind = node.kind();
 
     match kind {
@@ -106,7 +112,7 @@ fn walk_typescript_node_collecting<'a>(
                 if let Some(body) = find_child_by_kind(node, "class_body") {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes);
+                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes, depth + 1);
                         }
                     }
                 }
@@ -123,7 +129,7 @@ fn walk_typescript_node_collecting<'a>(
                 {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes);
+                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes, depth + 1);
                         }
                     }
                 }
@@ -138,7 +144,7 @@ fn walk_typescript_node_collecting<'a>(
                 if let Some(body) = find_child_by_kind(node, "enum_body") {
                     for i in 0..body.child_count() {
                         if let Some(child) = body.child(i) {
-                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes);
+                            walk_typescript_node_collecting(child, source, file_id, Some(&name), defs, method_nodes, depth + 1);
                         }
                     }
                 }
@@ -233,7 +239,7 @@ fn walk_typescript_node_collecting<'a>(
         "export_statement" => {
             for i in 0..node.child_count() {
                 if let Some(child) = node.child(i) {
-                    walk_typescript_node_collecting(child, source, file_id, parent_name, defs, method_nodes);
+                    walk_typescript_node_collecting(child, source, file_id, parent_name, defs, method_nodes, depth + 1);
                 }
             }
             return;
@@ -244,7 +250,7 @@ fn walk_typescript_node_collecting<'a>(
     // Default: recurse into children
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            walk_typescript_node_collecting(child, source, file_id, parent_name, defs, method_nodes);
+            walk_typescript_node_collecting(child, source, file_id, parent_name, defs, method_nodes, depth + 1);
         }
     }
 }
@@ -1439,7 +1445,7 @@ fn compute_code_stats_typescript(
 
 pub(crate) fn count_parameters_typescript(method_node: tree_sitter::Node) -> u8 {
     // Direct formal_parameters child
-    find_child_by_kind(method_node, "formal_parameters")
+    let count = find_child_by_kind(method_node, "formal_parameters")
         .or_else(|| {
             // For arrow function fields: public_field_definition -> value -> arrow_function -> formal_parameters
             find_child_by_field(method_node, "value")
@@ -1447,7 +1453,8 @@ pub(crate) fn count_parameters_typescript(method_node: tree_sitter::Node) -> u8 
                 .and_then(|v| find_child_by_kind(v, "formal_parameters"))
         })
         .map(count_named_children)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    super::tree_sitter_utils::saturate_count_to_u8(count, "typescript_formal_parameters")
 }
 
 // walk_code_stats_typescript removed — replaced by unified walk_code_stats() in tree_sitter_utils.rs

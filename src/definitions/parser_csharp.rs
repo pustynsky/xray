@@ -1332,9 +1332,10 @@ fn compute_code_stats_csharp(
 }
 
 pub(crate) fn count_parameters_csharp(method_node: tree_sitter::Node) -> u8 {
-    find_child_by_kind(method_node, "parameter_list")
+    let count = find_child_by_kind(method_node, "parameter_list")
         .map(count_named_children)
-        .unwrap_or(0)
+        .unwrap_or(0);
+    super::tree_sitter_utils::saturate_count_to_u8(count, "csharp_parameter_list")
 }
 
 // walk_code_stats_csharp removed — replaced by unified walk_code_stats() in tree_sitter_utils.rs

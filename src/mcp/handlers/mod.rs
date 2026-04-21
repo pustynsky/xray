@@ -734,6 +734,16 @@ pub struct HandlerContext {
     pub file_index: Arc<RwLock<Option<FileIndex>>>,
     /// Dirty flag for file-list index. Set by watcher on any FS create/delete/rename.
     /// When true, xray_fast rebuilds the file index before serving results.
+    ///
+    /// **Atomic ordering note (MINOR-6):** all reads/writes of this flag use
+    /// `Ordering::Relaxed`. This is intentional and correct because the flag
+    /// is a pure *signal* — it tells a reader "something changed, rebuild on
+    /// your next call" but is **not** used as a happens-before edge for any
+    /// other data. The rebuild itself walks the filesystem from scratch and
+    /// does not rely on memory synchronization with the writer. Contrast with
+    /// `content_ready` / `def_ready` / `bg_ready` (see [`serve::cmd_serve`])
+    /// which publish newly-built index data and therefore require
+    /// `Release`/`Acquire` pairs.
     pub file_index_dirty: Arc<AtomicBool>,
     /// Whether a content index build is currently in progress (background thread or reindex).
     /// Used to prevent concurrent builds. Different from `content_ready` which means
