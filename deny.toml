@@ -1,0 +1,45 @@
+# cargo-deny configuration
+# Reference: https://embarkstudios.github.io/cargo-deny/
+#
+# Runs in CI via .github/workflows/ci.yml (`cargo deny check`).
+
+[graph]
+all-features = false
+
+[advisories]
+version = 2
+ignore = [
+    # RUSTSEC-2025-0141: bincode 1.3.3 unmaintained.
+    # Tracked as MAJOR-10 in docs/code-reviews/2026-04-21_full-snapshot-main-part6.md.
+    # Migration to bincode 2 or postcard requires a breaking on-disk format bump
+    # (all *_INDEX_VERSION constants) and is scheduled as a separate user story.
+    "RUSTSEC-2025-0141",
+]
+
+[licenses]
+version = 2
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    "Zlib",
+    "CC0-1.0",
+    "MPL-2.0",
+    "0BSD",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Start permissive; tighten once the baseline is clean in CI.
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
