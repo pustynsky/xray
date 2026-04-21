@@ -717,6 +717,44 @@ $testBlocks += , {
     } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
 }
 
+# T-RESCAN-CLI-FLAGS: serve --help lists periodic rescan flags (Phase 3 contract)
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-RESCAN-CLI-FLAGS serve-help-lists-periodic-rescan-flags"
+    try {
+        $helpOutput = & $Bin serve --help 2>&1 | Out-String
+        $errors = @()
+        if ($helpOutput -notmatch '--no-periodic-rescan') { $errors += "missing --no-periodic-rescan" }
+        if ($helpOutput -notmatch '--rescan-interval-sec') { $errors += "missing --rescan-interval-sec" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK" }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
+}
+
+# T-RESCAN-INFO-COUNTERS: xray_info exposes periodicRescan* counters when --watch is on
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-RESCAN-INFO-COUNTERS xray-info-exposes-periodic-rescan-counters"
+    try {
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}'
+        ) -join "`n"
+        # --watch enables both the live notify watcher and the periodic
+        # rescan thread; without --watch the watcher block is omitted.
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext --watch 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine) { return @{ Name = $name; Passed = $false; Output = "FAILED (no JSON-RPC response)" } }
+        $errors = @()
+        if ($jsonLine -notmatch 'periodicRescanTotal') { $errors += "missing periodicRescanTotal" }
+        if ($jsonLine -notmatch 'periodicRescanDriftEvents') { $errors += "missing periodicRescanDriftEvents" }
+        if ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK" }
+    } catch { return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" } }
+}
+
 # T-BRANCH-STATUS: smoke test for xray_branch_status MCP tool
 $testBlocks += , {
     param($Bin, $Dir, $Ext)
