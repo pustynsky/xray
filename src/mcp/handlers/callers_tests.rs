@@ -471,6 +471,7 @@ fn test_prefilter_does_not_expand_by_base_types() {
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
+        per_level_dropped: 0,
     };
     let callers = builder.build(
         "Dispose",
@@ -1481,6 +1482,7 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
+        per_level_dropped: 0,
     };
     let callers = builder.build(
         "Process",
@@ -1996,6 +1998,7 @@ fn test_sql_caller_tree_who_calls_sp() {
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
+        per_level_dropped: 0,
     };
     let callers = builder.build(
         "usp_ValidateOrder",
@@ -2537,6 +2540,7 @@ fn test_impact_analysis_finds_test_methods() {
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
+        per_level_dropped: 0,
     };
     let callers = builder.build(
         "process", Some("OrderService"), 0, &initial_chain,
@@ -2671,6 +2675,7 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         file_cache: HashMap::new(),
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
+        per_level_dropped: 0,
     };
     let callers = builder.build(
         "process", Some("OrderService"), 0, &initial_chain,
@@ -3240,3 +3245,189 @@ fn test_callers_hint_not_shown_when_results_exist() {
             "Should NOT have hint when callers are found. Got: {:?}", v.get("hint"));
     }
 }
+
+// ─── MINOR-7 / MINOR-8: per-level truncation signal ───────────────
+
+#[test]
+fn test_per_level_truncation_reports_dropped_count() {
+    // 5 caller classes (ClassB..ClassF) each with one method DoWork() that
+    // calls target ClassA.Process. With max_callers_per_level=2 we expect
+    // `per_level_dropped == 3` (5 collected - 2 kept).
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::collections::HashSet;
+
+    let mut definitions = vec![
+        class_def(0, "ClassA", vec![]),                          // idx 0
+        method_def(0, "Process", "ClassA", 1, 5),                // idx 1 (target)
+    ];
+    // 5 callers in files 1..=5
+    for (i, cls) in ["ClassB", "ClassC", "ClassD", "ClassE", "ClassF"].iter().enumerate() {
+        let fid = (i as u32) + 1;
+        definitions.push(class_def(fid, cls, vec![]));
+        definitions.push(method_def(fid, "DoWork", cls, 1, 10));
+    }
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    let files_list: Vec<String> = (0..6)
+        .map(|i| format!("src/File{}.cs", i))
+        .collect();
+    let mut path_to_id = HashMap::new();
+    for (i, f) in files_list.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+    let def_idx = DefinitionIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        files: files_list.clone(),
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        path_to_id,
+        method_calls: HashMap::new(),
+        ..Default::default()
+    };
+
+    // Content index: "process" appears at line 5 in files 1..=5 (caller lines)
+    // plus the definition line 1 in file 0.
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    let mut process_postings = vec![Posting { file_id: 0, lines: vec![1] }];
+    for fid in 1..=5u32 {
+        process_postings.push(Posting { file_id: fid, lines: vec![5] });
+    }
+    index.insert("process".to_string(), process_postings);
+    // parent_class pre-filter: each caller file must reference "classa"
+    let mut classa_postings = vec![Posting { file_id: 0, lines: vec![1] }];
+    for fid in 1..=5u32 {
+        classa_postings.push(Posting { file_id: fid, lines: vec![5] });
+    }
+    index.insert("classa".to_string(), classa_postings);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; 6],
+        ..Default::default()
+    };
+
+    let limits = CallerLimits { max_callers_per_level: 2, max_total_nodes: 200 };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        resolve_interfaces: false,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
+    };
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 1,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+    };
+    let callers = builder.build("Process", None, 0, &[]);
+
+    assert_eq!(callers.len(), 2, "Expected 2 callers after per-level truncation, got {}", callers.len());
+    assert_eq!(builder.per_level_dropped, 3,
+        "Expected per_level_dropped = 3 (5 collected - 2 kept), got {}",
+        builder.per_level_dropped);
+}
+
+#[test]
+fn test_per_level_truncation_not_set_when_under_limit() {
+    // 2 callers, limit = 10 → nothing dropped, per_level_dropped stays 0.
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::collections::HashSet;
+
+    let mut definitions = vec![
+        class_def(0, "ClassA", vec![]),
+        method_def(0, "Process", "ClassA", 1, 5),
+    ];
+    for (i, cls) in ["ClassB", "ClassC"].iter().enumerate() {
+        let fid = (i as u32) + 1;
+        definitions.push(class_def(fid, cls, vec![]));
+        definitions.push(method_def(fid, "DoWork", cls, 1, 10));
+    }
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    let files_list: Vec<String> = (0..3).map(|i| format!("src/File{}.cs", i)).collect();
+    let mut path_to_id = HashMap::new();
+    for (i, f) in files_list.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+    let def_idx = DefinitionIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        files: files_list.clone(),
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        path_to_id,
+        method_calls: HashMap::new(),
+        ..Default::default()
+    };
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("process".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![5] },
+        Posting { file_id: 2, lines: vec![5] },
+    ]);
+    index.insert("classa".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![5] },
+        Posting { file_id: 2, lines: vec![5] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; 3],
+        ..Default::default()
+    };
+    let limits = CallerLimits { max_callers_per_level: 10, max_total_nodes: 200 };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        resolve_interfaces: false,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
+    };
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 1,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+    };
+    let _ = builder.build("Process", Some("ClassA"), 0, &[]);
+    assert_eq!(builder.per_level_dropped, 0, "Nothing should be dropped under the limit");
+}
+
