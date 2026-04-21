@@ -2626,6 +2626,75 @@ mod audit_regression_tests {
         assert_eq!(temp, PathBuf::from("/some/dir/.myfile.rs.xray_tmp"));
     }
 
+    // ─── MAJOR-12: atomic write via temp + rename ─────────────────────────
+
+    #[test]
+    fn test_write_file_with_endings_is_atomic_no_leftover_temp() {
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("file.txt");
+        std::fs::write(&target, "original\n").unwrap();
+        let ctx = make_ctx(tmp.path());
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "file.txt",
+            "edits": [ { "search": "original", "replace": "updated" } ]
+        }));
+        assert!(!result.is_error, "edit should succeed: {:?}", result);
+
+        // Target rewritten.
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "updated\n");
+
+        // No `.file.txt.xray_tmp` (or any *.xray_tmp) left behind on success.
+        for entry in std::fs::read_dir(tmp.path()).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(
+                !name.ends_with(".xray_tmp"),
+                "unexpected leftover temp file after atomic write: {}",
+                name
+            );
+        }
+    }
+
+    #[test]
+    fn test_write_file_with_endings_succeeds_even_if_stale_temp_exists() {
+        // Simulates recovery from a previous crash that left `.file.txt.xray_tmp`
+        // behind. The new write must overwrite it (File::create truncates), then
+        // rename atomically over the target.
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("file.txt");
+        let stale = tmp.path().join(".file.txt.xray_tmp");
+        std::fs::write(&target, "original\n").unwrap();
+        std::fs::write(&stale, "garbage from a previous crash").unwrap();
+        let ctx = make_ctx(tmp.path());
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "file.txt",
+            "edits": [ { "search": "original", "replace": "recovered" } ]
+        }));
+        assert!(!result.is_error, "edit should succeed despite stale temp: {:?}", result);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "recovered\n");
+        // After successful rename the temp path should no longer exist.
+        assert!(!stale.exists(), "stale temp should have been consumed by rename");
+    }
+
+    #[test]
+    fn test_write_file_with_endings_preserves_original_on_dryrun() {
+        // dryRun must not even create the temp file (no atomic-write side-effects).
+        let tmp = tempfile::tempdir().unwrap();
+        let target = tmp.path().join("file.txt");
+        std::fs::write(&target, "original\n").unwrap();
+        let ctx = make_ctx(tmp.path());
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "file.txt",
+            "dryRun": true,
+            "edits": [ { "search": "original", "replace": "never-written" } ]
+        }));
+        assert!(!result.is_error, "dryRun edit should succeed: {:?}", result);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original\n");
+        assert!(!tmp.path().join(".file.txt.xray_tmp").exists(), "dryRun must not stage a temp file");
+    }
+
     // ─── A1: Multi-file path dedup ───────────────────────────────────────
 
     #[test]
