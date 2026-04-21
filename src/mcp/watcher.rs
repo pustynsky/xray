@@ -35,8 +35,8 @@ pub fn start_watcher(
     extensions: Vec<String>,
     debounce_ms: u64,
     index_base: PathBuf,
-    _content_ready: Arc<AtomicBool>,
-    _def_ready: Arc<AtomicBool>,
+    content_ready: Arc<AtomicBool>,
+    def_ready: Arc<AtomicBool>,
     file_index_dirty: Arc<AtomicBool>,
     watcher_generation: Arc<AtomicU64>,
     my_generation: u64,
@@ -59,12 +59,55 @@ pub fn start_watcher(
             return;
         }
 
+        // ── Wait for the initial index build (MAJOR-8) ──────────────────
+        // `cmd_serve` spawns background threads that build the content and
+        // definition indexes in parallel with the watcher. If reconciliation
+        // starts before those threads finish their final swap, the watcher
+        // would either reconcile against an empty index (wasting work that
+        // the background swap then overwrites) or lose events that arrived
+        // during the build window. Wait for both ready flags with a small
+        // poll interval; respect generation changes and a hard cap so a
+        // stuck builder cannot keep the watcher hung forever.
+        {
+            const READY_POLL_MS: u64 = 50;
+            // Hard cap well above a realistic cold-start build (~30s for
+            // large trees). After this, log and proceed: reconciliation on
+            // a partial index is still safer than silently skipping events.
+            const READY_WAIT_CAP: Duration = Duration::from_secs(300);
+            let wait_start = Instant::now();
+            loop {
+                if content_ready.load(Ordering::Acquire) && def_ready.load(Ordering::Acquire) {
+                    break;
+                }
+                if watcher_generation.load(Ordering::Acquire) != my_generation {
+                    info!(my_generation, "Watcher generation changed during startup wait, exiting");
+                    return;
+                }
+                if wait_start.elapsed() >= READY_WAIT_CAP {
+                    warn!(
+                        waited_s = wait_start.elapsed().as_secs(),
+                        content_ready = content_ready.load(Ordering::Acquire),
+                        def_ready = def_ready.load(Ordering::Acquire),
+                        "Watcher proceeded to reconciliation before initial index build completed (hard cap reached)"
+                    );
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(READY_POLL_MS));
+            }
+            let waited = wait_start.elapsed();
+            if waited.as_millis() > READY_POLL_MS as u128 {
+                info!(
+                    waited_ms = waited.as_millis() as u64,
+                    "Watcher waited for initial index build before reconciliation"
+                );
+            }
+        }
+
         // ── Reconciliation: catch files added/modified/removed while server was offline ──
         // Watcher is already listening — events during reconciliation are buffered in rx channel.
         // Non-blocking: MCP requests work on old data during reconciliation.
         // Only the brief write lock in Phase 4 blocks readers.
         reconcile_content_index(&index, &dir_str, &extensions);
-
         if let Some(ref def_idx) = def_index {
             // Non-blocking reconciliation: parse files OUTSIDE the lock, apply INSIDE.
             // def_ready stays true — MCP requests work on old data during parsing.
