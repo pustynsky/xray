@@ -749,6 +749,12 @@ $testBlocks += , {
         $errors = @()
         if ($jsonLine -notmatch 'periodicRescanTotal') { $errors += "missing periodicRescanTotal" }
         if ($jsonLine -notmatch 'periodicRescanDriftEvents') { $errors += "missing periodicRescanDriftEvents" }
+        # Phase 0 watcher event counters (commit 4922a04): eventsTotal / eventsEmptyPaths / eventsErrors.
+        # Folded into this test (vs a separate T-WATCHER-EVENT-COUNTERS block) because the fixture is
+        # identical: serve --watch + xray_info. Zero extra wall-clock.
+        if ($jsonLine -notmatch 'eventsTotal') { $errors += "missing eventsTotal" }
+        if ($jsonLine -notmatch 'eventsEmptyPaths') { $errors += "missing eventsEmptyPaths" }
+        if ($jsonLine -notmatch 'eventsErrors') { $errors += "missing eventsErrors" }
         if ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
         if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
         return @{ Name = $name; Passed = $true; Output = "OK" }
@@ -1565,9 +1571,25 @@ $testBlocks += , {
             $content = Get-Content -Path $createdFile -Raw
             if ($content -notmatch 'hello world') { $errors += "file content wrong" }
         }
+
+        # Phase 2 (commit 0615a65 fix): `applied` count must exclude edits that were skipped via
+        # `skipIfNotFound`. Issue a 2nd edit on the now-existing file whose search text does NOT
+        # exist; with skipIfNotFound=true the response should report applied:0, not applied:1.
+        $msgs2 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $newFilePath + '","edits":[{"search":"DOES_NOT_EXIST_zzz","replace":"x","skipIfNotFound":true}]}}}')
+        ) -join "`n"
+        $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine2) { $errors += "no response for skipIfNotFound case" }
+        elseif ($jsonLine2 -match '"isError"\s*:\s*true') { $errors += "skipIfNotFound returned isError=true" }
+        # applied must be 0 (not 1) when the only edit was skipped.
+        if ($jsonLine2 -and $jsonLine2 -notmatch '\\?"applied\\?"\s*:\s*0') { $errors += "expected applied:0 when skipIfNotFound matched nothing" }
+
         Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
         if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
-        return @{ Name = $name; Passed = $true; Output = "OK (new file created with fileCreated=true)" }
+        return @{ Name = $name; Passed = $true; Output = "OK (new file created with fileCreated=true; skipIfNotFound -> applied:0)" }
     } catch {
         Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
         return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
@@ -1956,6 +1978,218 @@ $testBlocks += , {
         if ($proc -and !$proc.HasExited) { $proc.Kill() }
         if ($proc) { $proc.Dispose() }
         if ($outEvent) { Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# === 3-day-audit follow-ups (commits 0ba3f04, a75ddbe, 0615a65, 5c4efb5) ===
+
+# T-EDIT-FLEX-GATE: xray_edit flex-space fallback is now opt-in via expectedContext (commit 0ba3f04).
+# Phase 1: no expectedContext -> isError=true + error text includes "pass `expectedContext`", file unchanged.
+# Phase 2: same edit + expectedContext -> success, warning contains [fallbackApplied:flexWhitespace], file mutated.
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-EDIT-FLEX-GATE search-edit-flex-space-opt-in-gate"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_edit_flex_gate_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Fixture: "foo  bar" (two spaces). Search text uses ONE space -> only a flex-space match works.
+        $fixturePath = Join-Path $tmpDir "flex.txt"
+        Set-Content -Path $fixturePath -Value "prelude line`nfoo  bar`ntrailer line" -NoNewline
+        $originalBytes = [System.IO.File]::ReadAllBytes($fixturePath)
+        $mcpPath = ($tmpDir -replace '\\', '/') + '/flex.txt'
+
+        $errors = @()
+
+        # Phase 1: without expectedContext, flex fallback must NOT run.
+        $msgs1 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $mcpPath + '","edits":[{"search":"foo bar","replace":"REPLACED"}]}}}')
+        ) -join "`n"
+        $output1 = ($msgs1 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine1 = $output1 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine1) { $errors += "phase1: no response" }
+        else {
+            if ($jsonLine1 -notmatch '"isError"\s*:\s*true') { $errors += "phase1: expected isError=true (flex fallback must not apply without expectedContext)" }
+            if ($jsonLine1 -notmatch 'expectedContext') { $errors += "phase1: error missing hint to pass expectedContext" }
+        }
+        $bytesAfter1 = [System.IO.File]::ReadAllBytes($fixturePath)
+        if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$originalBytes, [byte[]]$bytesAfter1)) {
+            $errors += "phase1: file was mutated despite isError response"
+        }
+
+        # Phase 2: with expectedContext, flex fallback runs + applies.
+        $msgs2 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $mcpPath + '","edits":[{"search":"foo bar","replace":"REPLACED","expectedContext":"prelude line"}]}}}')
+        ) -join "`n"
+        $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine2) { $errors += "phase2: no response" }
+        else {
+            if ($jsonLine2 -match '"isError"\s*:\s*true') { $errors += "phase2: unexpected isError" }
+            # Stable marker from commit 0ba3f04 for deterministic detection.
+            if ($jsonLine2 -notmatch 'fallbackApplied:flexWhitespace') { $errors += "phase2: missing [fallbackApplied:flexWhitespace] marker" }
+        }
+        $contentAfter = Get-Content -Path $fixturePath -Raw
+        if ($contentAfter -notmatch 'REPLACED') { $errors += "phase2: file not mutated" }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (flex-space gated by expectedContext; marker present)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-FAST-OUTSIDE-DIR: xray_fast rejects dir outside --dir and does not persist an orphan file-list index
+# (security fix MAJOR-14, commit a75ddbe).
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-FAST-OUTSIDE-DIR fast-rejects-outside-server-dir"
+    try {
+        $outsideDir = Join-Path $env:TEMP "search_par_fast_outside_$PID"
+        if (Test-Path $outsideDir) { Remove-Item -Recurse -Force $outsideDir }
+        New-Item -ItemType Directory -Path $outsideDir | Out-Null
+        Set-Content -Path (Join-Path $outsideDir "secret.txt") -Value "should not be indexed"
+
+        # Snapshot file-list index count BEFORE.
+        $idxDir = Join-Path $env:LOCALAPPDATA "xray"
+        $countBefore = (Get-ChildItem -Path $idxDir -Filter "*.file-list" -ErrorAction SilentlyContinue).Count
+
+        $outsidePath = $outsideDir -replace '\\', '/'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":"*","dir":"' + $outsidePath + '"}}}')
+        ) -join "`n"
+        # Serve is pinned to $Dir (the project root) — outside $outsideDir must be rejected.
+        $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        $countAfter = (Get-ChildItem -Path $idxDir -Filter "*.file-list" -ErrorAction SilentlyContinue).Count
+
+        Remove-Item -Recurse -Force $outsideDir -ErrorAction SilentlyContinue
+
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no JSON-RPC response" }
+        else {
+            if ($jsonLine -notmatch '"isError"\s*:\s*true') { $errors += "expected isError=true for outside-dir request" }
+            if ($jsonLine -notmatch '--dir') { $errors += "error text should mention --dir" }
+        }
+        # No orphan file-list index should have been persisted.
+        if ($countAfter -gt $countBefore) { $errors += "orphan file-list index persisted (before=$countBefore, after=$countAfter)" }
+
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (rejected + no orphan index)" }
+    } catch {
+        if (Test-Path $outsideDir) { Remove-Item -Recurse -Force $outsideDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-EDIT-LINE-ENDING: xray_edit response exposes lineEnding ("LF" | "CRLF"), commit 0615a65.
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-EDIT-LINE-ENDING search-edit-line-ending-field"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_edit_le_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # CRLF fixture — write bytes explicitly to avoid PowerShell normalization.
+        $crlfPath = Join-Path $tmpDir "crlf.txt"
+        [System.IO.File]::WriteAllBytes($crlfPath, [System.Text.Encoding]::UTF8.GetBytes("line1`r`nline2`r`nline3"))
+        $crlfMcp = ($tmpDir -replace '\\', '/') + '/crlf.txt'
+
+        # LF fixture.
+        $lfPath = Join-Path $tmpDir "lf.txt"
+        [System.IO.File]::WriteAllBytes($lfPath, [System.Text.Encoding]::UTF8.GetBytes("line1`nline2`nline3"))
+        $lfMcp = ($tmpDir -replace '\\', '/') + '/lf.txt'
+
+        $errors = @()
+
+        # Case 1: CRLF.
+        $msgs1 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $crlfMcp + '","edits":[{"search":"line2","replace":"LINE2"}]}}}')
+        ) -join "`n"
+        $output1 = ($msgs1 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine1 = $output1 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine1) { $errors += "CRLF: no response" }
+        elseif ($jsonLine1 -match '"isError"\s*:\s*true') { $errors += "CRLF: isError=true" }
+        elseif ($jsonLine1 -notmatch '\\?"lineEnding\\?"\s*:\s*\\?"CRLF\\?"') { $errors += "CRLF: lineEnding field missing or not CRLF" }
+
+        # Case 2: LF.
+        $msgs2 = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $lfMcp + '","edits":[{"search":"line2","replace":"LINE2"}]}}}')
+        ) -join "`n"
+        $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine2) { $errors += "LF: no response" }
+        elseif ($jsonLine2 -match '"isError"\s*:\s*true') { $errors += "LF: isError=true" }
+        elseif ($jsonLine2 -notmatch '\\?"lineEnding\\?"\s*:\s*\\?"LF\\?"') { $errors += "LF: lineEnding field missing or not LF" }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (lineEnding reported as CRLF + LF)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-CALLERS-PER-LEVEL-TRUNC: xray_callers summary exposes perLevelTruncated + callersDroppedPerLevel
+# when maxCallersPerLevel drops callers (commit 5c4efb5, MINOR-7).
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-CALLERS-PER-LEVEL-TRUNC callers-per-level-truncation-signal"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_callers_plt_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Target method with 3 distinct callers in 3 separate classes.
+        Set-Content -Path (Join-Path $tmpDir "service.ts") -Value "export class Service {`n    doIt(): void { }`n}"
+        Set-Content -Path (Join-Path $tmpDir "caller1.ts") -Value "import { Service } from './service';`nexport class Caller1 {`n    run(): void {`n        const s = new Service();`n        s.doIt();`n    }`n}"
+        Set-Content -Path (Join-Path $tmpDir "caller2.ts") -Value "import { Service } from './service';`nexport class Caller2 {`n    run(): void {`n        const s = new Service();`n        s.doIt();`n    }`n}"
+        Set-Content -Path (Join-Path $tmpDir "caller3.ts") -Value "import { Service } from './service';`nexport class Caller3 {`n    run(): void {`n        const s = new Service();`n        s.doIt();`n    }`n}"
+
+        & $Bin content-index -d $tmpDir -e ts 2>&1 | Out-Null
+        & $Bin def-index -d $tmpDir -e ts 2>&1 | Out-Null
+
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"doIt","class":"Service","direction":"up","depth":1,"maxCallersPerLevel":1}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no JSON-RPC response" }
+        else {
+            if ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true" }
+            if ($jsonLine -notmatch 'perLevelTruncated') { $errors += "missing perLevelTruncated field" }
+            if ($jsonLine -notmatch 'callersDroppedPerLevel') { $errors += "missing callersDroppedPerLevel field" }
+            # 3 callers, cap=1 -> 2 dropped.
+            if ($jsonLine -notmatch 'callersDroppedPerLevel\\?"\s*:\s*2') { $errors += "expected callersDroppedPerLevel=2" }
+        }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (perLevelTruncated=true, 2 callers dropped of 3)" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
         return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
     }
 }
