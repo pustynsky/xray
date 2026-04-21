@@ -447,9 +447,15 @@ xray serve --dir C:\Projects --ext rs --watch --definitions
 | `--definitions`        | Load (or build on first use) code definition index (tree-sitter AST) |
 | `--metrics`            | Add `responseBytes` and `estimatedTokens` to every tool response     |
 | `--debounce-ms <MS>`   | Debounce delay for file watcher (default: 500)                       |
+| `--no-periodic-rescan` | Disable the periodic rescan fail-safe (see note below)               |
+| `--rescan-interval-sec <SECS>` | Interval for the periodic rescan (default: 300, min: 10 enforced at runtime) |
 | `--log-level <LEVEL>`  | Log level: error, warn, info, debug (default: info)                  |
 | `--max-response-kb <N>`| Max response size in KB before truncation, 0 = unlimited (default: 16)|
 | `--debug-log`          | Write MCP request/response traces and memory diagnostics to `.debug.log` in index dir|
+
+**Periodic rescan fail-safe** (`--no-periodic-rescan`, `--rescan-interval-sec`):
+
+The `notify` crate (and `ReadDirectoryChangesW` on Windows) is best-effort and may drop file events under floods (e.g., immediately after `git checkout && git pull`). When `--watch` is enabled, a background thread runs every `--rescan-interval-sec` seconds (default 5 min) and walks the workspace to detect drift between the on-disk state and the in-memory `ContentIndex` / `FileIndex`. Any drift triggers reconciliation via the same code paths as the live event loop, and `WatcherStats::periodicRescanDriftEvents` (visible in `xray_info`) is incremented — non-zero values in production indicate the watcher is missing events. Pass `--no-periodic-rescan` to disable. Values for `--rescan-interval-sec` below 10 seconds are silently raised to 10 to prevent self-DoS on large workspaces.
 
 ---
 

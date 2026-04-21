@@ -354,6 +354,44 @@ fn update_definition_index(def_index, removed_clean, dirty_clean) -> bool {
 2. Queries that use both indexes (xray_callers) will see slightly stale definition data, which at worst means a caller might be missing from the tree until the next update cycle
 3. True atomicity would require either a single lock for both indexes (reducing read concurrency) or a transaction log (complexity not justified)
 
+### Periodic Rescan (Fail-Safe for Missed Events)
+
+The `notify` crate is **best-effort**: on every platform, the OS may drop file events under load. On Windows, `ReadDirectoryChangesW` has a finite buffer that overflows during event floods (e.g., immediately after `git checkout && git pull`). When this happens silently, the in-memory indexes drift from the on-disk state until the server is restarted or `xray_reindex` is called manually.
+
+To bound that drift, `start_periodic_rescan` (spawned from `cmd_serve` alongside `start_watcher`) runs a dedicated thread that ticks every `--rescan-interval-sec` seconds (default 300 s, minimum 10 s). Each tick:
+
+1. Walks the workspace once via `scan_dir_state` (the same walker the live event loop uses, so `.git/` and ignore-file rules match).
+2. Diffs the result against `ContentIndex` (added / removed / mtime-modified files) and against `FileIndex` (added / removed all-files entries).
+3. If drift is detected, calls the same reconcilers used at startup: `reconcile_content_index` and `definitions::reconcile_definition_index_nonblocking`, and sets `file_index_dirty = true` so the next `xray_fast` rebuilds.
+
+```mermaid
+sequenceDiagram
+    participant FS as Filesystem
+    participant Notify as notify backend
+    participant Watcher as Watcher Thread
+    participant Rescan as Rescan Thread
+    participant Index as Indexes
+
+    FS->>Notify: file created
+    Notify-->>Watcher: event lost (buffer overflow)
+    Note over Watcher: never reaches process_batch
+    Note over Index: stale (file invisible to xray_fast/xray_grep)
+
+    Note over Rescan: sleep N seconds (slice = 500ms)
+    Rescan->>FS: scan_dir_state walk
+    Rescan->>Index: read locks (compute drift)
+    Rescan->>Index: write locks (reconcile)
+    Note over Index: drift resolved within one interval
+```
+
+**Sleep granularity.** The thread sleeps in 500 ms slices (`RESCAN_SHUTDOWN_POLL`) and checks `watcher_generation` between slices. This keeps idle CPU at zero while still terminating the thread within ~500 ms of a workspace switch (rather than waiting up to a full interval).
+
+**Observability.** Every drift event increments `WatcherStats::periodic_rescan_drift_events` (exposed via `xray_info["watcher"]["periodicRescanDriftEvents"]`). A non-zero counter in production means the live notify path is missing events — investigate the platform's event source rather than relying on the rescan to paper over the gap.
+
+**Cost.** On the happy path (no drift) each tick is one filesystem walk plus two `HashSet` diffs — internal fast paths in the reconcilers bail out without taking write locks.
+
+**Disabling.** `--no-periodic-rescan` skips the thread entirely. The minimum interval (`MIN_RESCAN_INTERVAL_SEC = 10` s) prevents accidentally scheduling a self-DoS on a large workspace via `--rescan-interval-sec 1`.
+
 ## Lock Ordering Contract
 
 The server holds four `RwLock`s that can appear on the same call stack.
