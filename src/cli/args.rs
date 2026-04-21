@@ -305,6 +305,20 @@ pub struct ServeArgs {
     /// Respect .git/info/exclude (by default xray ignores it so local-excluded files are indexed)
     #[arg(long)]
     pub respect_git_exclude: bool,
+
+    /// Disable the periodic re-scan fail-safe that catches filesystem
+    /// events the OS-level `notify` watcher dropped (best-effort on every
+    /// platform; see `docs/bug-reports/bug-2026-04-21-watcher-misses-new-files-both-indexes.md`).
+    /// Only relevant together with `--watch`.
+    #[arg(long)]
+    pub no_periodic_rescan: bool,
+
+    /// Interval in seconds between periodic re-scans (default: 300).
+    /// Minimum 10 seconds — values below are silently raised to avoid
+    /// self-DoS on large workspaces. Only relevant together with
+    /// `--watch` and when `--no-periodic-rescan` is NOT set.
+    #[arg(long, default_value = "300")]
+    pub rescan_interval_sec: u64,
 }
 
 impl Default for ServeArgs {
@@ -320,6 +334,8 @@ impl Default for ServeArgs {
             max_response_kb: 16,
             debug_log: false,
             respect_git_exclude: false,
+            no_periodic_rescan: false,
+            rescan_interval_sec: 300,
         }
     }
 }

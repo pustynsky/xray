@@ -258,7 +258,6 @@ pub fn start_watcher(
                             EventKind::Remove(_) => {
                                 dirty_files.remove(path);
                                 removed_files.insert(path.clone());
-                    stats.events_errors.fetch_add(1, Ordering::Relaxed);
                                 if batch_start.is_none() {
                                     batch_start = Some(Instant::now());
                                 }
@@ -277,6 +276,7 @@ pub fn start_watcher(
                         }
                 }
                 Ok(Err(e)) => {
+                    stats.events_errors.fetch_add(1, Ordering::Relaxed);
                     warn!(error = %e, "File watcher error");
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
@@ -949,7 +949,6 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
 /// reconciliation cycle.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct DirState {
-    #[allow(dead_code)] // consumed by `periodic_rescan_once`; binary callers land in Phase 3
     pub all_files: HashMap<PathBuf, SystemTime>,
     pub ext_matched: HashMap<PathBuf, SystemTime>,
 }
@@ -1015,7 +1014,7 @@ pub(crate) fn scan_dir_state(dir: &str, extensions: &[String]) -> DirState {
 /// and for `xray_info` / log emission. All counts are post-filter
 /// (`.git/` excluded, extension-matching where applicable).
 #[derive(Debug, Default, Clone)]
-#[allow(dead_code)] // fields read by the rescan thread in Phase 3 (CLI flags + interval log)
+#[allow(dead_code)] // individual fields are read by tests; aggregate not yet used by the binary
 pub(crate) struct RescanOutcome {
     /// Wall-clock time of the rescan in milliseconds.
     pub elapsed_ms: f64,
@@ -1041,7 +1040,6 @@ pub(crate) struct RescanOutcome {
 /// safety margin matches `reconcile_content_index` so a fresh write
 /// landing within the same second as the previous reconciliation is
 /// still detected.
-#[allow(dead_code)] // wired into binary call path in Phase 3 (rescan thread)
 fn compute_content_drift(
     index: &Arc<RwLock<ContentIndex>>,
     ext_matched: &HashMap<PathBuf, SystemTime>,
@@ -1088,7 +1086,6 @@ fn compute_content_drift(
 /// `(all_files.len(), 0)` so the rescan thread sets `file_index_dirty`
 /// and forces a build on the next request. This matches the watcher
 /// startup contract (`file_index_dirty = true` initially).
-#[allow(dead_code)] // wired into binary call path in Phase 3 (rescan thread)
 fn compute_file_index_drift(
     file_index: &Arc<RwLock<Option<FileIndex>>>,
     all_files: &HashMap<PathBuf, SystemTime>,
@@ -1152,7 +1149,6 @@ fn compute_file_index_drift(
 ///   distinguish "rescan ran, all good" from "rescan recovered a
 ///   missed event" at a glance.
 #[allow(clippy::too_many_arguments)]
-#[allow(dead_code)] // wired into the watcher thread in Phase 3
 pub(crate) fn periodic_rescan_once(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
@@ -1216,6 +1212,92 @@ pub(crate) fn periodic_rescan_once(
         file_index_removed,
         drift_detected,
     }
+}
+
+/// Minimum allowed value of `--rescan-interval-sec`. Values below are
+/// silently raised in [`start_periodic_rescan`] so a typo cannot
+/// schedule a self-DoS on a large workspace (a single tick walks the
+/// whole tree).
+pub(crate) const MIN_RESCAN_INTERVAL_SEC: u64 = 10;
+
+/// Granularity of the shutdown-poll inside the rescan sleep loop.
+/// Small enough to keep workspace-switch latency low, large enough to
+/// keep idle CPU at zero. The thread checks `watcher_generation`
+/// every tick.
+const RESCAN_SHUTDOWN_POLL: Duration = Duration::from_millis(500);
+
+/// Spawn the periodic-rescan fail-safe thread (Phase 3 of the rollout
+/// in `docs/todo_approved_2026-04-21_watcher-periodic-rescan.md`).
+///
+/// Ticks [`periodic_rescan_once`] on `interval_sec` (clamped to
+/// [`MIN_RESCAN_INTERVAL_SEC`]). Sleeps in [`RESCAN_SHUTDOWN_POLL`]
+/// slices so workspace switches (`watcher_generation` bump) cause the
+/// thread to exit within ~500 ms instead of waiting for a full
+/// interval. Idempotent: safe to spawn alongside the live notify
+/// event loop — drift is rare on the happy path and produces no
+/// extra index work (internal fast paths bail out).
+///
+/// Returns immediately after spawning; the join handle is dropped on
+/// purpose (the thread self-terminates on generation change, mirroring
+/// the watcher event loop's shutdown contract).
+#[allow(clippy::too_many_arguments)]
+pub fn start_periodic_rescan(
+    index: Arc<RwLock<ContentIndex>>,
+    def_index: Option<Arc<RwLock<DefinitionIndex>>>,
+    file_index: Arc<RwLock<Option<FileIndex>>>,
+    file_index_dirty: Arc<AtomicBool>,
+    dir: PathBuf,
+    extensions: Vec<String>,
+    interval_sec: u64,
+    watcher_generation: Arc<AtomicU64>,
+    my_generation: u64,
+    stats: Arc<WatcherStats>,
+) {
+    let effective = interval_sec.max(MIN_RESCAN_INTERVAL_SEC);
+    if effective != interval_sec {
+        warn!(
+            requested = interval_sec,
+            effective,
+            min = MIN_RESCAN_INTERVAL_SEC,
+            "periodic rescan interval clamped to minimum"
+        );
+    }
+    let dir_str = clean_path(&dir.to_string_lossy());
+    info!(dir = %dir_str, interval_sec = effective, "periodic rescan thread starting");
+
+    std::thread::spawn(move || {
+        let interval = Duration::from_secs(effective);
+        // Sleep first so the thread does not race the initial index
+        // build / startup reconciliation already triggered by the
+        // watcher event loop.
+        loop {
+            // Sleep in slices for prompt shutdown.
+            let sleep_start = Instant::now();
+            while sleep_start.elapsed() < interval {
+                if watcher_generation.load(Ordering::Acquire) != my_generation {
+                    info!(my_generation, "periodic rescan generation changed, exiting");
+                    return;
+                }
+                std::thread::sleep(RESCAN_SHUTDOWN_POLL);
+            }
+
+            // Re-check after the sleep before doing real work.
+            if watcher_generation.load(Ordering::Acquire) != my_generation {
+                info!(my_generation, "periodic rescan generation changed, exiting");
+                return;
+            }
+
+            let _ = periodic_rescan_once(
+                &index,
+                &def_index,
+                &file_index,
+                &file_index_dirty,
+                &dir_str,
+                &extensions,
+                &stats,
+            );
+        }
+    });
 }
 
 /// Reconcile content index with filesystem after loading from disk cache.
