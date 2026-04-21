@@ -257,14 +257,38 @@ fn apply_edits_to_content(
 
 /// Write modified content back to file, restoring original line endings.
 fn write_file_with_endings(resolved: &Path, content: &str, line_ending: &str) -> Result<(), String> {
+    use std::io::Write;
+
     let output = if line_ending == "\r\n" {
         content.replace('\n', "\r\n")
     } else {
         content.to_string()
     };
 
-    std::fs::write(resolved, output.as_bytes())
-        .map_err(|e| format!("Failed to write file: {}", e))
+    // Atomic write: stage into a sibling temp file, fsync, then rename over the target.
+    // Plain `std::fs::write` does open(O_TRUNC) + write_all, leaving the file empty/partial
+    // if the process is killed between those two steps. The rename below is atomic on POSIX
+    // and best-effort-atomic on Windows (see `rename_replace` for the remove+rename fallback).
+    let tmp = temp_path_for(resolved);
+
+    let staged = (|| -> std::io::Result<()> {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(output.as_bytes())?;
+        f.sync_all()?;
+        Ok(())
+    })();
+
+    if let Err(e) = staged {
+        let _ = std::fs::remove_file(&tmp); // best-effort cleanup
+        return Err(format!("Failed to write file: {}", e));
+    }
+
+    if let Err(e) = rename_replace(&tmp, resolved) {
+        let _ = std::fs::remove_file(&tmp); // best-effort cleanup
+        return Err(e);
+    }
+
+    Ok(())
 }
 
 /// Generate a temp file path in the same directory as `target` for atomic writes.
