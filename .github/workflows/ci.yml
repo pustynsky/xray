@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  clippy:
+    name: Clippy (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test --workspace --locked
+        run: cargo test --workspace --locked
+
+  # Feature matrix (--no-default-features, --all-features, per-feature) is intentionally
+  # deferred until MAJOR-6 (no-default-features build) and MAJOR-7 (lang-sql isolation)
+  # land. Tracked in docs/code-reviews/2026-04-21_full-snapshot-main-part6.md.
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: audit
+      - name: Install cargo-audit
+        run: cargo install --locked cargo-audit
+      - name: cargo audit --deny warnings
+        # RUSTSEC-2025-0141 (bincode 1.3.3 unmaintained) is tracked as MAJOR-10.
+        # Migration to bincode 2 or postcard requires a breaking on-disk format bump
+        # and is scheduled as a separate user story.
+        run: cargo audit --deny warnings --ignore RUSTSEC-2025-0141
+
+  deny:
+    name: cargo deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
