@@ -3390,3 +3390,150 @@ fn test_classify_for_sync_reindex_genuine_outside_still_rejected() {
     );
 }
 
+// ─── Tier 5 regression tests: applied accounting, idempotency, verification ──
+
+/// Fix 1: `applied` must exclude edits that were skipped via `skipIfNotFound`.
+/// Previously every entry in the edits array counted as "applied" regardless of
+/// whether it touched the file — a major correctness hole.
+#[test]
+fn test_tier5_applied_excludes_skipped() {
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello", "replace": "HELLO" },
+            { "search": "nonexistent", "replace": "x", "skipIfNotFound": true },
+            { "search": "world", "replace": "WORLD" },
+        ]
+    }));
+
+    assert!(!result.is_error, "Should succeed: {:?}", result);
+    let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(parsed["applied"], 2, "applied must be 2 (skipped one does not count)");
+    assert_eq!(parsed["skippedEdits"], 1);
+}
+
+/// Fix 2: insert_after run twice in a row must NOT duplicate — second call is a no-op.
+#[test]
+fn test_tier5_insert_after_idempotent() {
+    let (tmp, filename, path) = create_temp_file("use a;\nfn main() {}\n");
+    let ctx = make_ctx(tmp.path());
+
+    // First call: inserts a new line.
+    let r1 = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "insertAfter": "use a;", "content": "use b;" }]
+    }));
+    assert!(!r1.is_error);
+    let after_first = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after_first, "use a;\nuse b;\nfn main() {}\n");
+
+    // Second call with identical edit: must be skipped, file must NOT change.
+    let r2 = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "insertAfter": "use a;", "content": "use b;" }]
+    }));
+    assert!(!r2.is_error, "Second call should succeed (skipped, not errored)");
+    let after_second = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after_second, after_first, "Idempotent: file must not double-insert");
+
+    let parsed: serde_json::Value = serde_json::from_str(&r2.content[0].text).unwrap();
+    assert_eq!(parsed["applied"], 0, "Second idempotent call must report applied=0");
+    assert_eq!(parsed["skippedEdits"], 1);
+    let reason = parsed["skippedDetails"][0]["reason"].as_str().unwrap();
+    assert!(reason.starts_with("alreadyApplied"), "Reason should be alreadyApplied, got: {}", reason);
+}
+
+/// Fix 2: insert_before run twice in a row must NOT duplicate.
+#[test]
+fn test_tier5_insert_before_idempotent() {
+    let (tmp, filename, path) = create_temp_file("fn main() {}\n");
+    let ctx = make_ctx(tmp.path());
+
+    let r1 = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "insertBefore": "fn main() {}", "content": "// comment" }]
+    }));
+    assert!(!r1.is_error);
+    let after_first = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after_first, "// comment\nfn main() {}\n");
+
+    let r2 = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "insertBefore": "fn main() {}", "content": "// comment" }]
+    }));
+    assert!(!r2.is_error);
+    let after_second = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after_second, after_first, "Idempotent: no duplicate comment");
+
+    let parsed: serde_json::Value = serde_json::from_str(&r2.content[0].text).unwrap();
+    assert_eq!(parsed["applied"], 0);
+    assert_eq!(parsed["skippedEdits"], 1);
+}
+
+/// Fix 3: response must contain `lineEnding` so clients can reconcile the LF-based
+/// diff with on-disk CRLF bytes.
+#[test]
+fn test_tier5_response_includes_line_ending_lf() {
+    let (tmp, filename, _) = create_temp_file("a\nb\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+    assert!(!result.is_error);
+    let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(parsed["lineEnding"], "LF");
+}
+
+#[test]
+fn test_tier5_response_includes_line_ending_crlf() {
+    let tmp = tempfile::tempdir().unwrap();
+    let filename = "crlf.txt";
+    let path = tmp.path().join(filename);
+    std::fs::write(&path, b"a\r\nb\r\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "a", "replace": "A" }]
+    }));
+    assert!(!result.is_error, "{:?}", result);
+    let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(parsed["lineEnding"], "CRLF");
+    // File must still be CRLF on disk.
+    let raw = std::fs::read(&path).unwrap();
+    assert!(raw.windows(2).any(|w| w == b"\r\n"), "CRLF endings must be preserved");
+}
+
+/// Fix 4 (post-write verification): verify_written_file returns Ok when bytes match,
+/// Err when they don't. Sanity test for the verification helper itself.
+#[test]
+fn test_tier5_verify_written_file_ok() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("v.txt");
+    std::fs::write(&p, b"hello\n").unwrap();
+    assert!(verify_written_file(&p, "hello\n", "\n").is_ok());
+}
+
+#[test]
+fn test_tier5_verify_written_file_mismatch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("v.txt");
+    std::fs::write(&p, b"hello\n").unwrap();
+    let err = verify_written_file(&p, "goodbye\n", "\n").unwrap_err();
+    assert!(err.contains("Post-write verification failed"), "Got: {}", err);
+}
+
+#[test]
+fn test_tier5_verify_written_file_crlf_ok() {
+    let tmp = tempfile::tempdir().unwrap();
+    let p = tmp.path().join("v.txt");
+    std::fs::write(&p, b"hello\r\nworld\r\n").unwrap();
+    // Expected content is the LF-normalized form; verifier re-applies CRLF.
+    assert!(verify_written_file(&p, "hello\nworld\n", "\r\n").is_ok());
+}
+

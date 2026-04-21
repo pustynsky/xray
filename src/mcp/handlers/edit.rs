@@ -227,8 +227,12 @@ fn apply_edits_to_content(
             let text_edits = parse_text_edits(edits_array)?;
 
             let (new_content, replacements, skipped, edit_warnings) = apply_text_edits(normalized, &text_edits, is_regex)?;
-            let edit_count = text_edits.len();
-            (new_content, edit_count, replacements, skipped, edit_warnings)
+            // `applied` must exclude edits that were skipped via `skipIfNotFound`
+            // or deduplicated via idempotency check. Previously this counted every
+            // entry in the edits array, which made the response claim success for
+            // edits that never touched the file.
+            let applied_count = text_edits.len().saturating_sub(skipped.len());
+            (new_content, applied_count, replacements, skipped, edit_warnings)
         }
     };
 
@@ -291,6 +295,35 @@ fn write_file_with_endings(resolved: &Path, content: &str, line_ending: &str) ->
     Ok(())
 }
 
+/// Re-read the file after a write and verify its bytes match what `write_file_with_endings`
+/// would have produced from (`expected_lf_content`, `line_ending`). Returns Ok on match,
+/// Err with a diagnostic on mismatch. This guards the tool's core contract: the `diff`
+/// returned in the response must correspond to bytes actually on disk. Any divergence
+/// (rare: concurrent writer, antivirus truncation, filesystem quirk) is surfaced rather
+/// than silently hidden under a misleading "applied: N" response.
+fn verify_written_file(resolved: &Path, expected_lf_content: &str, line_ending: &str) -> Result<(), String> {
+    let expected_bytes = if line_ending == "\r\n" {
+        expected_lf_content.replace('\n', "\r\n").into_bytes()
+    } else {
+        expected_lf_content.as_bytes().to_vec()
+    };
+    let actual = std::fs::read(resolved)
+        .map_err(|e| format!("Post-write verification: cannot re-read file: {}", e))?;
+    if actual == expected_bytes {
+        return Ok(());
+    }
+    // Find first differing byte for a useful diagnostic.
+    let mismatch_at = actual.iter()
+        .zip(expected_bytes.iter())
+        .position(|(a, b)| a != b)
+        .unwrap_or_else(|| actual.len().min(expected_bytes.len()));
+    Err(format!(
+        "Post-write verification failed: on-disk bytes do not match the computed diff. \
+         File length expected {} bytes, got {} bytes; first difference at byte offset {}.",
+        expected_bytes.len(), actual.len(), mismatch_at
+    ))
+}
+
 /// Generate a temp file path in the same directory as `target` for atomic writes.
 fn temp_path_for(target: &Path) -> PathBuf {
     let file_name = target.file_name()
@@ -348,6 +381,13 @@ fn handle_single_file_edit(
             return ToolCallResult::error(e);
         }
 
+    // Post-write verification: re-read the file and confirm its bytes match what
+    // we intended to write. This enforces the tool's "diff ↔ content" guarantee.
+    if !dry_run
+        && let Err(e) = verify_written_file(&resolved, &edit_result.modified_content, line_ending) {
+            return ToolCallResult::error(e);
+        }
+
     // Build response
     let mut response = json!({
         "path": path_str,
@@ -356,6 +396,9 @@ fn handle_single_file_edit(
         "linesRemoved": edit_result.lines_removed,
         "newLineCount": edit_result.new_line_count,
         "dryRun": dry_run,
+        // Fix 4: expose line ending so clients can reconcile tool-diff (LF) with
+        // on-disk bytes (LF or CRLF). Prevents "diff disagrees with git diff" confusion.
+        "lineEnding": if line_ending == "\r\n" { "CRLF" } else { "LF" },
     });
 
     if edit_result.total_replacements > 0 {
@@ -532,6 +575,15 @@ fn handle_multi_file_edit(
                 ));
             }
         }
+
+        // Phase 3c-pre: Post-write verification across the whole batch.
+        // A failure here means an on-disk file diverged from the diff we are about
+        // to return — surface it before the response goes out.
+        for (path_str, resolved, result, line_ending, _) in &edit_results {
+            if let Err(e) = verify_written_file(resolved, &result.modified_content, line_ending) {
+                return ToolCallResult::error(format!("File '{}': {}", path_str, e));
+            }
+        }
     }
 
     // Phase 3c: Sync reindex of all written files (only on real writes).
@@ -576,7 +628,7 @@ fn handle_multi_file_edit(
     // Phase 4: Build response with per-file results
     let mut total_applied: usize = 0;
     let mut results_array = Vec::new();
-    for (i, (path_str, _, result, _, file_existed)) in edit_results.iter().enumerate() {
+    for (i, (path_str, _, result, line_ending, file_existed)) in edit_results.iter().enumerate() {
         total_applied += result.applied;
         let mut file_result = json!({
             "path": path_str,
@@ -584,6 +636,7 @@ fn handle_multi_file_edit(
             "linesAdded": result.lines_added,
             "linesRemoved": result.lines_removed,
             "newLineCount": result.new_line_count,
+            "lineEnding": if *line_ending == "\r\n" { "CRLF" } else { "LF" },
         });
         if result.total_replacements > 0 {
             file_result["totalReplacements"] = json!(result.total_replacements);
@@ -1196,12 +1249,25 @@ fn apply_insert(
 
     let anchor_end = target_pos + selected_match_len;
 
+    // Idempotency check: if the content we are about to insert already exists
+    // adjacent to the anchor (same side we would insert on), skip the edit
+    // instead of producing a duplicate. Protects against the common case where
+    // an agent retries a multi-edit call after a partial success.
     if is_after {
         // Insert after: find end of the line containing the anchor, insert on next line
         let line_end = result[anchor_end..].find('\n')
             .map(|p| anchor_end + p)
             .unwrap_or(result.len());
+        // Compare: would-be-inserted text starts with '\n' + insert_content.
+        // If `result[line_end..]` already begins with that sequence, it's a duplicate.
         let insert_text = format!("\n{}", insert_content);
+        if result[line_end..].starts_with(&insert_text) {
+            return Ok((0, Some(SkippedEditDetail {
+                edit_index,
+                search_text: truncate_for_display(anchor),
+                reason: "alreadyApplied: content already present after anchor".to_string(),
+            }), warnings));
+        }
         result.insert_str(line_end, &insert_text);
     } else {
         // Insert before: find start of the line containing the anchor, insert before it
@@ -1209,6 +1275,13 @@ fn apply_insert(
             .map(|p| p + 1)
             .unwrap_or(0);
         let insert_text = format!("{}\n", insert_content);
+        if result[..line_start].ends_with(&insert_text) {
+            return Ok((0, Some(SkippedEditDetail {
+                edit_index,
+                search_text: truncate_for_display(anchor),
+                reason: "alreadyApplied: content already present before anchor".to_string(),
+            }), warnings));
+        }
         result.insert_str(line_start, &insert_text);
     }
 
