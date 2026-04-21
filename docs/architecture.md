@@ -401,7 +401,7 @@ sequenceDiagram
 
 ### 8. File Watcher
 
-OS-level filesystem notifications (via `notify` crate / `ReadDirectoryChangesW` on Windows) with debounced batch processing.
+OS-level filesystem notifications (via `notify` crate / `ReadDirectoryChangesW` on Windows) with debounced batch processing, backed by a periodic rescan fail-safe.
 
 ```mermaid
 stateDiagram-v2
@@ -414,6 +414,8 @@ stateDiagram-v2
     IncrementalUpdate --> Watching
     FullReindex --> Watching
 ```
+
+**Periodic rescan fail-safe.** A separate background thread (`start_periodic_rescan`) ticks every `--rescan-interval-sec` (default 5 min, min 10 s) and walks the workspace to detect drift between disk state and the in-memory `ContentIndex` / `FileIndex`. Drift triggers reconciliation via the same code paths as the live event loop. This bounds the worst-case index staleness when the OS drops events under load (e.g., `git checkout && git pull` overflowing the `ReadDirectoryChangesW` buffer). Counters surfaced in `xray_info["watcher"]["periodicRescanDriftEvents"]`. See [`docs/concurrency.md`](concurrency.md#periodic-rescan-fail-safe-for-missed-events) for the full design.
 
 **Incremental update path** (per file, ~50-100ms):
 
