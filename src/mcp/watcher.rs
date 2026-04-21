@@ -8,7 +8,7 @@ use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watche
 use notify::event::ModifyKind;
 use tracing::{debug, error, info, warn};
 
-use crate::{canonicalize_or_warn, clean_path, tokenize, ContentIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
+use crate::{canonicalize_or_warn, clean_path, tokenize, ContentIndex, FileIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
 use crate::definitions::{self, DefinitionIndex};
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -33,6 +33,16 @@ pub struct WatcherStats {
     pub events_empty_paths: AtomicU64,
     /// `Err(notify_error)` notifications pulled from the channel.
     pub events_errors: AtomicU64,
+    /// Number of times [`periodic_rescan_once`] detected drift between
+    /// the on-disk filesystem state and at least one in-memory index.
+    /// Non-zero in production means the `notify` event stream missed
+    /// (or never received) a filesystem event — the rescan was the
+    /// fail-safe that recovered. Phase 2 of the periodic-rescan rollout.
+    pub periodic_rescan_drift_events: AtomicU64,
+    /// Total number of [`periodic_rescan_once`] invocations completed.
+    /// Useful for sanity-checking the rescan thread is alive when
+    /// `periodic_rescan_drift_events` stays at zero.
+    pub periodic_rescan_total: AtomicU64,
 }
 
 impl WatcherStats {
@@ -939,13 +949,7 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
 /// reconciliation cycle.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct DirState {
-    // `all_files` is populated in Phase 1 but not yet consumed — it is
-    // wired here so Phase 2's `periodic_rescan_once` reuses the same
-    // single walk for FileIndex reconciliation. Kept on the struct to
-    // pin down the eventual API and make the test in
-    // `scan_dir_state_classifies_ext_matched_subset_of_all_files`
-    // meaningful.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // consumed by `periodic_rescan_once`; binary callers land in Phase 3
     pub all_files: HashMap<PathBuf, SystemTime>,
     pub ext_matched: HashMap<PathBuf, SystemTime>,
 }
@@ -1005,6 +1009,213 @@ pub(crate) fn scan_dir_state(dir: &str, extensions: &[String]) -> DirState {
     }
 
     DirState { all_files, ext_matched }
+}
+
+/// Outcome of a single [`periodic_rescan_once`] call. Returned for tests
+/// and for `xray_info` / log emission. All counts are post-filter
+/// (`.git/` excluded, extension-matching where applicable).
+#[derive(Debug, Default, Clone)]
+#[allow(dead_code)] // fields read by the rescan thread in Phase 3 (CLI flags + interval log)
+pub(crate) struct RescanOutcome {
+    /// Wall-clock time of the rescan in milliseconds.
+    pub elapsed_ms: f64,
+    /// `path_to_id` entries missing from disk for `--ext`-matching files.
+    pub content_removed: usize,
+    /// `--ext`-matching files on disk missing from `path_to_id`.
+    pub content_added: usize,
+    /// `--ext`-matching files present in both but with `mtime` newer
+    /// than `index.created_at - 2s`.
+    pub content_modified: usize,
+    /// Files in the file-list view that disappeared from disk.
+    pub file_index_removed: usize,
+    /// Files on disk missing from the file-list view.
+    pub file_index_added: usize,
+    /// `true` iff at least one of the above counters is non-zero.
+    pub drift_detected: bool,
+}
+
+/// Compare the on-disk state in `state.ext_matched` against the
+/// in-memory `ContentIndex` and return drift counts.
+///
+/// Pure read-side helper — no mutation. The 2-second `created_at`
+/// safety margin matches `reconcile_content_index` so a fresh write
+/// landing within the same second as the previous reconciliation is
+/// still detected.
+#[allow(dead_code)] // wired into binary call path in Phase 3 (rescan thread)
+fn compute_content_drift(
+    index: &Arc<RwLock<ContentIndex>>,
+    ext_matched: &HashMap<PathBuf, SystemTime>,
+) -> (usize, usize, usize) {
+    let idx = match index.read() {
+        Ok(g) => g,
+        Err(e) => {
+            error!(error = %e, "periodic_rescan: content index read lock poisoned");
+            return (0, 0, 0);
+        }
+    };
+    let Some(ref p2id) = idx.path_to_id else {
+        // Watcher disabled or index built without path_to_id — nothing
+        // to compare against, so report zero drift (the rescan thread
+        // will not be running in that mode anyway).
+        return (0, 0, 0);
+    };
+    let threshold = UNIX_EPOCH + Duration::from_secs(idx.created_at.saturating_sub(2));
+    let mut added = 0usize;
+    let mut modified = 0usize;
+    for (path, mtime) in ext_matched {
+        if let Some(_fid) = p2id.get(path) {
+            if *mtime > threshold {
+                modified += 1;
+            }
+        } else {
+            added += 1;
+        }
+    }
+    let mut removed = 0usize;
+    for path in p2id.keys() {
+        if !ext_matched.contains_key(path) {
+            removed += 1;
+        }
+    }
+    (added, removed, modified)
+}
+
+/// Compare the on-disk state in `state.all_files` against the in-memory
+/// `FileIndex` and return `(added, removed)` counts.
+///
+/// If the `FileIndex` slot is `None` (lazy: not yet built — happens
+/// before the first `xray_fast` call), drift is reported as
+/// `(all_files.len(), 0)` so the rescan thread sets `file_index_dirty`
+/// and forces a build on the next request. This matches the watcher
+/// startup contract (`file_index_dirty = true` initially).
+#[allow(dead_code)] // wired into binary call path in Phase 3 (rescan thread)
+fn compute_file_index_drift(
+    file_index: &Arc<RwLock<Option<FileIndex>>>,
+    all_files: &HashMap<PathBuf, SystemTime>,
+) -> (usize, usize) {
+    let guard = match file_index.read() {
+        Ok(g) => g,
+        Err(e) => {
+            error!(error = %e, "periodic_rescan: file index read lock poisoned");
+            return (0, 0);
+        }
+    };
+    let Some(ref fi) = *guard else {
+        // Not yet built — treat every disk file as "added" so the
+        // caller marks the index dirty.
+        return (all_files.len(), 0);
+    };
+    // FileIndex stores forward-slash relative paths inside `entries`,
+    // and `all_files` keys are absolute clean_path-normalised. Compare
+    // by suffix-matching `path` against the absolute key — robust to
+    // `root` prefix differences.
+    let in_index: HashSet<&str> = fi.entries.iter()
+        .filter(|e| !e.is_dir)
+        .map(|e| e.path.as_str())
+        .collect();
+
+    let mut added = 0usize;
+    let on_disk_set: HashSet<String> = all_files.keys()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    for disk in &on_disk_set {
+        if !in_index.iter().any(|idx_path| disk.ends_with(idx_path)) {
+            added += 1;
+        }
+    }
+    let mut removed = 0usize;
+    for idx_path in &in_index {
+        if !on_disk_set.iter().any(|disk| disk.ends_with(*idx_path)) {
+            removed += 1;
+        }
+    }
+    (added, removed)
+}
+
+/// Single rescan tick of the periodic-rescan fail-safe (Phase 2 of the
+/// rollout in `docs/todo_approved_2026-04-21_watcher-periodic-rescan.md`).
+///
+/// Walks the workspace once, compares the on-disk state against the
+/// three in-memory indexes, and — when any drift is detected —
+/// (a) sets `file_index_dirty` so the next `xray_fast` rebuilds the
+/// file-list view, and (b) delegates to the existing reconcilers to
+/// fix the content and definition indexes.
+///
+/// **Idempotent and non-blocking.** Safe to call concurrently with the
+/// `notify` event-loop; the worst case is double work, which produces
+/// the same final index state.
+///
+/// Counter semantics:
+/// * `periodic_rescan_total` bumps on every call.
+/// * `periodic_rescan_drift_events` bumps only when at least one
+///   index was out of sync — operators reading `xray_info` can
+///   distinguish "rescan ran, all good" from "rescan recovered a
+///   missed event" at a glance.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // wired into the watcher thread in Phase 3
+pub(crate) fn periodic_rescan_once(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    file_index: &Arc<RwLock<Option<FileIndex>>>,
+    file_index_dirty: &Arc<AtomicBool>,
+    dir: &str,
+    extensions: &[String],
+    stats: &Arc<WatcherStats>,
+) -> RescanOutcome {
+    let start = Instant::now();
+    stats.periodic_rescan_total.fetch_add(1, Ordering::Relaxed);
+
+    let state = scan_dir_state(dir, extensions);
+    let (content_added, content_removed, content_modified) =
+        compute_content_drift(index, &state.ext_matched);
+    let (file_index_added, file_index_removed) =
+        compute_file_index_drift(file_index, &state.all_files);
+
+    let content_drift = content_added + content_removed + content_modified > 0;
+    let file_drift = file_index_added + file_index_removed > 0;
+    let drift_detected = content_drift || file_drift;
+
+    if file_drift {
+        file_index_dirty.store(true, Ordering::Relaxed);
+    }
+    if content_drift {
+        // Delegate to the existing reconcilers. They each perform
+        // their own walk today (acceptable on a 5-min cadence;
+        // collapsing to a single walk is a follow-up). Bailing out
+        // when nothing changed is their internal fast path.
+        reconcile_content_index(index, dir, extensions);
+        if let Some(di) = def_index {
+            definitions::reconcile_definition_index_nonblocking(di, dir, extensions);
+        }
+    }
+
+    if drift_detected {
+        stats.periodic_rescan_drift_events.fetch_add(1, Ordering::Relaxed);
+        warn!(
+            content_added,
+            content_removed,
+            content_modified,
+            file_index_added,
+            file_index_removed,
+            "periodic rescan detected drift — notify event stream missed at least one event"
+        );
+    } else {
+        debug!(
+            ext_files = state.ext_matched.len(),
+            all_files = state.all_files.len(),
+            "periodic rescan: no drift"
+        );
+    }
+
+    RescanOutcome {
+        elapsed_ms: start.elapsed().as_secs_f64() * 1000.0,
+        content_added,
+        content_removed,
+        content_modified,
+        file_index_added,
+        file_index_removed,
+        drift_detected,
+    }
 }
 
 /// Reconcile content index with filesystem after loading from disk cache.

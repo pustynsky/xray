@@ -1179,6 +1179,8 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
             "eventsTotal": ctx.watcher_stats.events_total.load(Ordering::Relaxed),
             "eventsEmptyPaths": ctx.watcher_stats.events_empty_paths.load(Ordering::Relaxed),
             "eventsErrors": ctx.watcher_stats.events_errors.load(Ordering::Relaxed),
+            "periodicRescanTotal": ctx.watcher_stats.periodic_rescan_total.load(Ordering::Relaxed),
+            "periodicRescanDriftEvents": ctx.watcher_stats.periodic_rescan_drift_events.load(Ordering::Relaxed),
         });
     }
 
