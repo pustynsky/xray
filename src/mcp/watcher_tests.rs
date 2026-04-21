@@ -1998,3 +1998,87 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
     );
 }
 
+// ─── Phase 4: integration — recover from a "lost" notify event ───────
+//
+// These tests validate the full Phase 3 thread end-to-end: the
+// rescan thread detects on-disk changes that the notify event stream
+// would have delivered (in a real run) and reconciles the indexes.
+// We simulate a perfectly-lost event by NOT spawning `start_watcher`
+// at all — only `start_periodic_rescan`. If the periodic path catches
+// the file, the architecture is sound regardless of how flaky the
+// underlying notify backend is on a given platform.
+//
+// Each test waits ~MIN_RESCAN_INTERVAL_SEC for one tick (10 s today).
+// Slow but unavoidable — the floor exists to prevent self-DoS in
+// production. Marked `#[ignore]` would defeat the purpose of an
+// integration check on the bug we're fixing, so they run on every
+// `cargo test`.
+
+#[test]
+fn periodic_rescan_thread_recovers_lost_create_event() {
+    // Acceptance #4 of docs/todo_approved_2026-04-21_watcher-periodic-rescan.md:
+    // simulate a fully-lost notify event by spawning ONLY the periodic
+    // rescan thread — no watcher. A new file written directly to disk
+    // must appear in both ContentIndex and FileIndex within one tick.
+    let (tmp, index) = make_batch_test_setup();
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(None));
+    let generation = Arc::new(AtomicU64::new(0));
+
+    super::start_periodic_rescan(
+        Arc::clone(&index),
+        None,
+        Arc::clone(&file_index),
+        Arc::clone(&file_index_dirty),
+        tmp.path().to_path_buf(),
+        vec!["cs".to_string()],
+        super::MIN_RESCAN_INTERVAL_SEC,
+        Arc::clone(&generation),
+        0,
+        Arc::clone(&stats),
+    );
+
+    // Drop a new .cs file directly on disk *without* notifying any
+    // watcher — this is the bug scenario from
+    // docs/bug-reports/bug-2026-04-21-watcher-misses-new-files-both-indexes.md.
+    let new_file = tmp.path().join("gamma.cs");
+    std::fs::write(&new_file, "class Gamma { Logger log; }").unwrap();
+    let clean_new = crate::clean_path(&new_file.to_string_lossy());
+
+    // Wait for the first tick + a small margin for thread scheduling
+    // and the reconcile walk on a 3-file tree.
+    let deadline = Instant::now()
+        + Duration::from_secs(super::MIN_RESCAN_INTERVAL_SEC + 10);
+    while Instant::now() < deadline
+        && stats.periodic_rescan_drift_events.load(Ordering::Relaxed) == 0 {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+
+    // Stop the thread before assertions so a failure doesn't leak it
+    // across the rest of the suite.
+    generation.fetch_add(1, Ordering::Release);
+
+    assert!(
+        stats.periodic_rescan_drift_events.load(Ordering::Relaxed) >= 1,
+        "rescan thread must register drift after a lost create event \
+         (drift_events={}, total_ticks={})",
+        stats.periodic_rescan_drift_events.load(Ordering::Relaxed),
+        stats.periodic_rescan_total.load(Ordering::Relaxed)
+    );
+
+    let idx = index.read().unwrap();
+    assert!(
+        idx.files.iter().any(|f| f == &clean_new),
+        "ContentIndex.files must contain reconciled new file {} \
+         (got {} files: {:?})",
+        clean_new, idx.files.len(), idx.files
+    );
+    drop(idx);
+
+    assert!(
+        file_index_dirty.load(Ordering::Relaxed),
+        "file_index_dirty must be set so the next xray_fast rebuilds"
+    );
+}
+
