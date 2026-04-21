@@ -16,6 +16,8 @@ use serde_json::{json, Value};
 
 use crate::mcp::protocol::ToolCallResult;
 use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind, CodeStats};
+use crate::ContentIndex;
+use crate::mcp::lock_order;
 
 use super::utils::{inject_body_into_obj, inject_branch_warning, best_match_tier, json_to_string, name_similarity};
 use super::HandlerContext;
@@ -240,9 +242,27 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
         ),
     };
 
-    let index = match def_index.read() {
+    // LOCK ORDER (see docs/concurrency.md §"Lock Ordering Contract"):
+    // acquire ctx.index (content) BEFORE ctx.def_index. Held for the
+    // duration of this handler so inner helpers can read content through
+    // the pre-acquired guard without re-entering the content lock, which
+    // would be undefined for std::sync::RwLock on the same thread.
+    //
+    // A poisoned content lock is non-fatal here: the def-index handler
+    // can still answer queries that do not need content enrichment.
+    // `content_read` / `def_read` are RAII-instrumented: drop auto-
+    // releases both the real RwLock guard and the lock-order counter.
+    let content_guard = lock_order::content_read(&ctx.index);
+    let content_idx: Option<&ContentIndex> = content_guard.as_deref();
+
+    let index = match lock_order::def_read(def_index) {
         Ok(idx) => idx,
-        Err(e) => return ToolCallResult::error(format!("Failed to acquire definition index lock: {}", e)),
+        Err(e) => {
+            return ToolCallResult::error(format!(
+                "Failed to acquire definition index lock: {}",
+                e
+            ));
+        }
     };
 
     let search_start = Instant::now();
@@ -269,7 +289,7 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
 
     // 3. ContainsLine mode — early return
     if let Some(line_num) = parsed.contains_line {
-        return handle_contains_line_mode(&index, &parsed, line_num, search_start, ctx);
+        return handle_contains_line_mode(&index, &parsed, line_num, search_start, ctx, content_idx);
     }
 
     // 4. Collect candidate indices from index-based filters
@@ -291,7 +311,7 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
 
     // 6a. Auto-correction: if 0 results, try kind/name correction before generating hints
     if total_results == 0
-        && let Some(corrected_result) = attempt_auto_correction(&index, &parsed, search_start, ctx) {
+        && let Some(corrected_result) = attempt_auto_correction(&index, &parsed, search_start, ctx, content_idx) {
             return corrected_result;
         }
 
@@ -315,7 +335,7 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
 
     // 11. Format output
     format_search_output(&index, &results, &parsed, total_results, &stats_info,
-                         &term_breakdown, search_elapsed, ctx)
+                         &term_breakdown, search_elapsed, ctx, content_idx)
 }
 
 // ─── Audit mode ──────────────────────────────────────────────────────
@@ -367,6 +387,7 @@ fn handle_contains_line_mode(
     line_num: u32,
     search_start: Instant,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
 ) -> ToolCallResult {
     let file_filter = match &args.file_filter {
         Some(f) => f,
@@ -461,8 +482,10 @@ fn handle_contains_line_mode(
     }
 
     // Cross-index enrichment: add usageCount from content index
+    // (read through pre-acquired content guard — see lock order contract
+    // at the top of handle_xray_definitions).
     if args.include_usage_count
-        && let Ok(content_idx) = ctx.index.read() {
+        && let Some(content_idx) = content_idx {
             for obj in &mut containing_defs {
                 if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
                     let name_lower = name.to_lowercase();
@@ -913,6 +936,7 @@ fn format_search_output(
     term_breakdown: &Option<Value>,
     search_elapsed: std::time::Duration,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
 ) -> ToolCallResult {
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
@@ -929,8 +953,10 @@ fn format_search_output(
     }).collect();
 
     // Cross-index enrichment: add usageCount from content index
+    // (read through pre-acquired content guard — see lock order contract
+    // at the top of handle_xray_definitions).
     if args.include_usage_count
-        && let Ok(content_idx) = ctx.index.read() {
+        && let Some(content_idx) = content_idx {
             for obj in &mut defs_json {
                 if let Some(name) = obj.get("name").and_then(|v| v.as_str()) {
                     let name_lower = name.to_lowercase();
@@ -945,7 +971,7 @@ fn format_search_output(
     let summary = build_search_summary(
         index, &defs_json, args, total_results,
         stats_info, term_breakdown, total_body_lines_emitted,
-        total_body_lines_available, search_elapsed, ctx,
+        total_body_lines_available, search_elapsed, ctx, content_idx,
     );
 
     let output = json!({
@@ -1044,6 +1070,7 @@ fn build_search_summary(
     total_body_lines_available: usize,
     search_elapsed: std::time::Duration,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
 ) -> Value {
     let active_definitions: usize = index.file_index.values().map(|v| v.len()).sum();
     let mut summary = json!({
@@ -1112,7 +1139,7 @@ fn build_search_summary(
     // Generate contextual hints when search returns 0 results to help LLM self-correct.
     // Only one hint per query (first matching wins). Guards ensure no overwrite of existing hints.
     if total_results == 0 {
-        generate_zero_result_hints(index, args, &mut summary, ctx);
+        generate_zero_result_hints(index, args, &mut summary, ctx, content_idx);
     }
 
     if index.parse_errors > 0 {
@@ -1337,18 +1364,19 @@ fn attempt_auto_correction(
     original_args: &DefinitionSearchArgs,
     search_start: Instant,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
 ) -> Option<ToolCallResult> {
     // A. Kind mismatch: kind filter is set + name/file filter exists
     if let Some(ref original_kind) = original_args.kind_filter
         && (original_args.name_filter.is_some() || original_args.file_filter.is_some())
-            && let Some(result) = try_kind_correction(index, original_args, original_kind, search_start, ctx) {
+            && let Some(result) = try_kind_correction(index, original_args, original_kind, search_start, ctx, content_idx) {
                 return Some(result);
             }
 
     // B. Nearest name match (≥85% similarity)
     if let Some(ref original_name) = original_args.name_filter
         && !original_args.use_regex
-            && let Some(result) = try_name_correction(index, original_args, original_name, search_start, ctx) {
+            && let Some(result) = try_name_correction(index, original_args, original_name, search_start, ctx, content_idx) {
                 return Some(result);
             }
 
@@ -1364,6 +1392,7 @@ fn try_kind_correction(
     original_kind: &str,
     search_start: Instant,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
 ) -> Option<ToolCallResult> {
     let mut probe_args = original_args.clone();
     probe_args.kind_filter = None;
@@ -1390,7 +1419,7 @@ fn try_kind_correction(
     let mut corrected_args = original_args.clone();
     corrected_args.kind_filter = None;
 
-    run_corrected_search(index, &corrected_args, search_start, ctx, json!({
+    run_corrected_search(index, &corrected_args, search_start, ctx, content_idx, json!({
         "type": "kindCorrected",
         "original": { "kind": original_kind },
         "corrected": { "kind": null },
@@ -1415,6 +1444,7 @@ fn try_name_correction(
     original_name: &str,
     search_start: Instant,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
 ) -> Option<ToolCallResult> {
     let search_lower = original_name.to_lowercase();
     let mut best_name: Option<String> = None;
@@ -1441,7 +1471,7 @@ fn try_name_correction(
     let mut corrected_args = original_args.clone();
     corrected_args.name_filter = Some(corrected_name.clone());
 
-    run_corrected_search(index, &corrected_args, search_start, ctx, json!({
+    run_corrected_search(index, &corrected_args, search_start, ctx, content_idx, json!({
         "type": "nameCorrected",
         "original": { "name": original_name },
         "corrected": { "name": &corrected_name },
@@ -1460,6 +1490,7 @@ fn run_corrected_search(
     args: &DefinitionSearchArgs,
     search_start: Instant,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
     auto_correction: Value,
 ) -> Option<ToolCallResult> {
     let (candidates, def_to_term) = collect_candidates(index, args).ok()?;
@@ -1484,7 +1515,7 @@ fn run_corrected_search(
 
     let tool_result = format_search_output(
         index, &results, args, total_results, &stats_info,
-        &term_breakdown, search_elapsed, ctx,
+        &term_breakdown, search_elapsed, ctx, content_idx,
     );
 
     // Inject autoCorrection into the response summary
@@ -1785,12 +1816,13 @@ fn hint_nearest_name(
 fn hint_name_in_content_not_defs(
     args: &DefinitionSearchArgs,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
 ) -> Option<String> {
     let name = args.name_filter.as_ref()?;
     if !ctx.content_ready.load(std::sync::atomic::Ordering::Acquire) {
         return None;
     }
-    let content_idx = ctx.index.read().ok()?;
+    let content_idx = content_idx?;
     let lower = name.to_lowercase();
     let postings = content_idx.index.get(&lower)?;
     let file_count = postings.len();
@@ -1808,13 +1840,14 @@ fn generate_zero_result_hints(
     args: &DefinitionSearchArgs,
     summary: &mut Value,
     ctx: &HandlerContext,
+    content_idx: Option<&ContentIndex>,
 ) {
     let hint = hint_unsupported_extension(args, ctx)
         .or_else(|| hint_wrong_kind(index, args))
         .or_else(|| hint_file_has_defs_but_filters_narrow(index, args))
         .or_else(|| hint_file_fuzzy_match(index, args))
         .or_else(|| hint_nearest_name(index, args))
-        .or_else(|| hint_name_in_content_not_defs(args, ctx));
+        .or_else(|| hint_name_in_content_not_defs(args, ctx, content_idx));
 
     if let Some(hint_text) = hint {
         summary["hint"] = json!(hint_text);
