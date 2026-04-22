@@ -2267,3 +2267,58 @@ public static class StringExtensions
         "Expected 'StringExtensions' in Truncate's class list"
     );
 }
+
+/// MINOR-11 regression: pathologically nested C# (auto-generated EF migrations,
+/// T4 templates, obfuscated expression trees) must not blow the worker stack.
+/// Mirrors `test_deeply_nested_no_stack_overflow` in definitions_tests_xml.rs.
+///
+/// The walker owns a tripwire at MAX_AST_RECURSION_DEPTH (1024). This test
+/// proves the walker is safe for adversarial input. We run inside a thread
+/// with a large stack (16 MiB) because tree-sitter-c-sharp's own parser also
+/// recurses into the ternary expression — without the larger stack the parse
+/// itself overflows before the walker even runs, masking what we want to test.
+///
+/// We do NOT assert on the emitted warning because tree-sitter may clamp the
+/// AST internally before the walker sees the full depth; the contract is
+/// no-panic and the outer class still being extracted.
+#[test]
+fn test_deeply_nested_csharp_no_stack_overflow() {
+    // Build pathologically nested ternary expression: depth ~ 1500, comfortably
+    // past the 1024 walker tripwire but small enough that tree-sitter-c-sharp
+    // can parse it inside a 16 MiB stack thread.
+    const DEPTH: usize = 1500;
+    let handle = std::thread::Builder::new()
+        .name("deep-csharp-parse".into())
+        .stack_size(16 * 1024 * 1024)
+        .spawn(|| {
+            let mut expr = String::from("0");
+            for _ in 0..DEPTH {
+                expr = format!("(true ? {} : 0)", expr);
+            }
+            let source = format!(
+                "public class Deep {{ public int Compute() {{ return {}; }} }}",
+                expr
+            );
+
+            let mut parser = tree_sitter::Parser::new();
+            parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+            parse_csharp_definitions(&mut parser, &source, 0)
+        })
+        .expect("failed to spawn parse thread");
+
+    // Primary contract: no panic, no stack overflow inside the walker.
+    let (defs, _, _, _) = handle
+        .join()
+        .expect("deeply nested C# must not panic / stack-overflow inside walker");
+
+    // Sanity: at minimum the outer class definition must be extracted (it
+    // lives at depth 0–1, well under any cap). Guards against the walker
+    // accidentally short-circuiting before reaching shallow definitions.
+    assert!(
+        defs.iter().any(|d| d.name == "Deep"),
+        "Outer class 'Deep' must be extracted even when inner expression \
+         is truncated; got defs: {:?}",
+        defs.iter().map(|d| &d.name).collect::<Vec<_>>()
+    );
+}
+
