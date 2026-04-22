@@ -68,6 +68,40 @@ fn test_date_invalid_format() {
     assert!(date_str_to_timestamp_start("").is_err());
 }
 
+#[test]
+fn test_date_invalid_calendar_ranges_git003() {
+    // GIT-003: month/day must be calendar-valid, not just numeric.
+    assert!(date_str_to_timestamp_start("2026-99-99").is_err());
+    assert!(date_str_to_timestamp_start("2026-13-01").is_err());
+    assert!(date_str_to_timestamp_start("2026-00-01").is_err());
+    assert!(date_str_to_timestamp_start("2026-01-32").is_err());
+    assert!(date_str_to_timestamp_start("2026-01-00").is_err());
+    // Feb 29 invalid in non-leap year, valid in leap year.
+    assert!(date_str_to_timestamp_start("2025-02-29").is_err());
+    assert!(date_str_to_timestamp_start("2024-02-29").is_ok());
+    // April has 30 days.
+    assert!(date_str_to_timestamp_start("2026-04-31").is_err());
+    assert!(date_str_to_timestamp_start("2026-04-30").is_ok());
+}
+
+#[test]
+fn test_parse_bounded_usize_git008() {
+    // GIT-008: defaults, valid values, and out-of-range rejected.
+    let args = serde_json::json!({});
+    assert_eq!(parse_bounded_usize(&args, "k", 50, 1000).unwrap(), 50);
+
+    let args = serde_json::json!({ "k": 100 });
+    assert_eq!(parse_bounded_usize(&args, "k", 50, 1000).unwrap(), 100);
+
+    let args = serde_json::json!({ "k": 5000 });
+    let err = parse_bounded_usize(&args, "k", 50, 1000).unwrap_err();
+    assert!(err.contains("k must be 0..=1000"), "{}", err);
+
+    // u64::MAX must not silently wrap.
+    let args = serde_json::json!({ "k": u64::MAX });
+    assert!(parse_bounded_usize(&args, "k", 50, 1000).is_err());
+}
+
 // ── Commit at 1734370112 should fall within 2024-12-16, NOT 2025-12-16 ──
 
 #[test]
