@@ -1,4 +1,4 @@
-#![cfg(any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust"))]
+#![cfg(any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust", feature = "lang-xml"))]
 // Individual helpers and static configs are used only by the parser matching their
 // language. When a single-language feature set is active (e.g. only `lang-rust`),
 // the helpers/configs for the other languages become dead code. Allowing it here

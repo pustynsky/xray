@@ -560,10 +560,11 @@ fn test_process_batch_empty() {
 
 #[test]
 fn test_process_batch_dirty_file() {
-    let (tmp, _root, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
 
-    // Modify file a.cs with new content
-    let file_a = tmp.path().join("a.cs");
+    // Modify file a.cs with new content (use canonical root so paths line up
+    // with path_to_id keys on Windows CI — see make_batch_test_setup docs).
+    let file_a = root.join("a.cs");
     std::fs::write(&file_a, "class AlphaUpdated { NewService service; }").unwrap();
 
     let mut dirty = HashSet::new();
@@ -598,9 +599,9 @@ fn test_process_batch_dirty_file() {
 
 #[test]
 fn test_process_batch_removed_file() {
-    let (tmp, _root, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
 
-    let file_a = tmp.path().join("a.cs");
+    let file_a = root.join("a.cs");
 
     let mut dirty = HashSet::new();
     let mut removed = HashSet::new();
@@ -618,7 +619,7 @@ fn test_process_batch_removed_file() {
     assert!(idx.index.contains_key("beta"),
         "token 'beta' from untouched file should remain");
     // path_to_id should not contain the removed file
-    let clean_a = crate::clean_path(&tmp.path().join("a.cs").to_string_lossy());
+    let clean_a = crate::clean_path(&root.join("a.cs").to_string_lossy());
     assert!(!idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_a)),
         "removed file should not be in path_to_id");
     // removed set should be drained
@@ -627,11 +628,11 @@ fn test_process_batch_removed_file() {
 
 #[test]
 fn test_process_batch_mixed_dirty_and_removed() {
-    let (tmp, _root, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
 
-    // Remove file a, modify file b
-    let file_a = tmp.path().join("a.cs");
-    let file_b = tmp.path().join("b.cs");
+    // Remove file a, modify file b (canonical root — see make_batch_test_setup docs).
+    let file_a = root.join("a.cs");
+    let file_b = root.join("b.cs");
     std::fs::write(&file_b, "class BetaModified { NewToken value; }").unwrap();
 
     let mut dirty = HashSet::new();
