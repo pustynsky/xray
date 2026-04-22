@@ -239,8 +239,17 @@ struct ParsedGrepArgs {
 /// Parse and validate all grep parameters from JSON args.
 /// Returns `Ok(ParsedGrepArgs)` on success, `Err(ToolCallResult)` on validation error.
 fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, ToolCallResult> {
+    // GREP-015: reject empty/whitespace-only `terms` here instead of letting
+    // it propagate into per-mode handlers, where it produces inconsistent
+    // failure modes (regex compiles `""` into a match-everything pattern,
+    // substring path returns silently empty results, etc.). LLM clients
+    // interpret "empty result" as "this code does not exist" — a misleading
+    // signal for what is really a malformed query.
     let terms_str = match args.get("terms").and_then(|v| v.as_str()) {
-        Some(t) => t.to_string(),
+        Some(t) if !t.trim().is_empty() => t.to_string(),
+        Some(_) => return Err(ToolCallResult::error(
+            "Parameter 'terms' must not be empty. Provide one or more search terms (comma-separated for multi-term).".to_string(),
+        )),
         None => return Err(ToolCallResult::error("Missing required parameter: terms".to_string())),
     };
 
@@ -325,11 +334,34 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         args.get("substring").and_then(|v| v.as_bool()).unwrap_or(true)
     };
 
-    let context_lines = args.get("contextLines").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+    // GREP-007: bound user-supplied integers instead of `as usize` truncation.
+    // Without these caps a hostile/buggy client can request `maxResults=10_000_000`
+    // (response builder OOMs while serializing JSON) or `contextLines=1_000_000`
+    // (every matched file's IO + memory blows up by 1 MLOC).
+    fn parse_bounded_usize(args: &Value, key: &str, default: usize, max: usize) -> Result<usize, String> {
+        match args.get(key).and_then(|v| v.as_u64()) {
+            Some(v) => {
+                let v_usize = usize::try_from(v)
+                    .map_err(|_| format!("{key} must be 0..={} (got {v})", max))?;
+                if v_usize > max {
+                    return Err(format!("{key} must be 0..={} (got {v})", max));
+                }
+                Ok(v_usize)
+            }
+            None => Ok(default),
+        }
+    }
+    let context_lines = match parse_bounded_usize(args, "contextLines", 0, 50) {
+        Ok(n) => n,
+        Err(e) => return Err(ToolCallResult::error(e)),
+    };
     // Auto-enable showLines when contextLines > 0
     let show_lines = args.get("showLines").and_then(|v| v.as_bool()).unwrap_or(false)
         || context_lines > 0;
-    let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    let max_results = match parse_bounded_usize(args, "maxResults", 50, 10_000) {
+        Ok(n) => n,
+        Err(e) => return Err(ToolCallResult::error(e)),
+    };
     let count_only = args.get("countOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     let exclude_dir: Vec<String> = args.get("excludeDir")
         .and_then(|v| v.as_array())
@@ -378,6 +410,13 @@ fn expand_regex_terms(
             Err(e) => return Err(ToolCallResult::error(format!("Invalid regex '{}': {}", pat, e))),
         }
     }
+    // GREP-014: dedupe expanded terms across patterns. Two patterns that
+    // overlap on the same token (e.g. `User.*,.*Service` both hit
+    // `UserService`) would otherwise have that token contribute its
+    // TF-IDF score twice in `score_normal_token_search`, silently skewing
+    // file ranking toward documents that match multiple input patterns.
+    expanded.sort();
+    expanded.dedup();
     Ok(expanded)
 }
 
