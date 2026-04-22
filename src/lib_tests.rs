@@ -788,14 +788,27 @@ fn test_decode_utf16be_basic() {
 }
 
 #[test]
-fn test_decode_utf16le_odd_byte_ignored() {
-    // Odd trailing byte should be silently ignored (chunks_exact behavior)
+fn test_decode_utf16le_odd_byte_replacement() {
+    // LIB-009: odd trailing byte signals truncation/corruption. Pre-fix it was
+    // silently dropped; post-fix the decoder emits a U+FFFD replacement so
+    // downstream tokenisation can detect the truncated tail.
     let input = "AB";
     let mut encoded: Vec<u8> = input.encode_utf16()
         .flat_map(|u| u.to_le_bytes())
         .collect();
     encoded.push(0x99); // trailing odd byte
-    assert_eq!(decode_utf16le(&encoded), input);
+    assert_eq!(decode_utf16le(&encoded), "AB\u{FFFD}");
+}
+
+#[test]
+fn test_decode_utf16be_odd_byte_replacement() {
+    // LIB-009: same odd-tail handling for big-endian inputs.
+    let input = "AB";
+    let mut encoded: Vec<u8> = input.encode_utf16()
+        .flat_map(|u| u.to_be_bytes())
+        .collect();
+    encoded.push(0x99);
+    assert_eq!(decode_utf16be(&encoded), "AB\u{FFFD}");
 }
 
 #[test]
@@ -807,6 +820,64 @@ fn test_decode_utf16le_empty() {
 fn test_decode_utf16be_empty() {
     assert_eq!(decode_utf16be(&[]), "");
 }
+
+// ─── LIB-007 / LIB-013 hardening regressions (2026-04-22) ──────────
+
+#[test]
+fn test_lib007_read_file_lossy_rejects_oversized_file() {
+    // LIB-007: files exceeding MAX_INDEX_FILE_BYTES must be rejected before
+    // allocation rather than loaded into RAM. We do not actually create a
+    // 50 MB+ file in the test (slow + IO-heavy); instead, we patch by setting
+    // the file's apparent size via a sparse file (0-byte writes followed by
+    // set_len) which std::fs::metadata reports correctly without consuming
+    // disk on most filesystems.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("huge.txt");
+    let f = std::fs::File::create(&path).unwrap();
+    // Sparse file: 1 byte over the cap. NTFS, ext4, APFS all support this.
+    f.set_len(MAX_INDEX_FILE_BYTES + 1).unwrap();
+    drop(f);
+
+    let err = read_file_lossy(&path).unwrap_err();
+    assert_eq!(err.kind(), std::io::ErrorKind::Other);
+    let msg = err.to_string();
+    assert!(msg.contains("MAX_INDEX_FILE_BYTES"), "error must mention size cap: {}", msg);
+}
+
+#[test]
+fn test_lib007_read_file_lossy_accepts_file_at_exact_cap() {
+    // Boundary check: a file of exactly MAX_INDEX_FILE_BYTES is still accepted.
+    // We don't materialise 50 MB in CI; verify the off-by-one of the comparison
+    // by sparse-allocating up to the cap and reading back (sparse reads as zeros,
+    // which decode_utf16 / from_utf8 handle fine).
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("at_cap.txt");
+    let f = std::fs::File::create(&path).unwrap();
+    f.set_len(MAX_INDEX_FILE_BYTES).unwrap();
+    drop(f);
+
+    // Reading 50 MB of zeros allocates ~50 MB; acceptable in tests, and we want
+    // to prove the boundary inclusively belongs to the accepted side.
+    let result = read_file_lossy(&path);
+    assert!(result.is_ok(), "file at exact cap must be accepted: {:?}", result.err());
+}
+
+#[test]
+fn test_lib013_is_path_within_empty_root_refuses() {
+    // LIB-013: empty root must NOT accept arbitrary paths. Pre-fix this returned
+    // `true` ("no boundary, accept everything"), which made forgetting to pass
+    // a real root a silent scope-bypass. Post-fix returns `false` so the missing
+    // boundary is loud.
+    assert!(!is_path_within("/etc/passwd", ""), "empty root must refuse, not accept");
+    assert!(!is_path_within("C:/Windows/system32", ""));
+    assert!(!is_path_within("", ""));
+    // Sanity: non-empty root with matching path still works.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+    let inside = tmp.path().join("foo.txt").to_string_lossy().to_string();
+    assert!(is_path_within(&inside, &root), "non-empty root must still accept legit paths");
+}
+
 
 
 #[test]

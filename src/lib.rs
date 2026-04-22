@@ -130,7 +130,12 @@ pub fn canonicalize_or_warn(dir: &str) -> std::path::PathBuf {
 pub fn is_path_within(path: &str, root: &str) -> bool {
     let root_norm = clean_path(root).to_lowercase();
     if root_norm.is_empty() {
-        return true; // empty root = no boundary, accept everything
+        // LIB-013: refuse to accept anything when no boundary is provided.
+        // Pre-fix this returned `true` ("no boundary, accept everything"),
+        // which made forgetting to pass a real root a silent scope-bypass.
+        // Callers that legitimately want "no boundary" must pass an explicit
+        // sentinel (e.g. "/" on POSIX) so the intent is visible at the call site.
+        return false;
     }
     let root_trimmed = root_norm.trim_end_matches('/');
     let root_with_sep = format!("{}/", root_trimmed);
@@ -296,6 +301,17 @@ pub fn extract_semantic_prefix(canonical: &std::path::Path) -> String {
     }
 }
 
+/// Maximum file size accepted by [`read_file_lossy`] (LIB-007).
+///
+/// Files larger than this are rejected with `io::ErrorKind::Other` rather than
+/// loaded into memory. The 50 MB ceiling covers the largest realistic source
+/// files in the supported indexed languages while preventing OOM on giant
+/// build artefacts (minified JS bundles, generated SQL dumps) that occasionally
+/// land in indexed directories. UTF-16 inputs at this size still fit in roughly
+/// ~150 MB of working memory after expansion (~3× worst case for ASCII-heavy
+/// content), which is bounded and survivable.
+pub const MAX_INDEX_FILE_BYTES: u64 = 50 * 1024 * 1024;
+
 /// Read a file as a String, handling BOM-detected encodings and lossy UTF-8 fallback.
 ///
 /// Encoding detection order:
@@ -307,7 +323,26 @@ pub fn extract_semantic_prefix(canonical: &std::path::Path) -> String {
 /// Returns `(content, was_lossy)` where `was_lossy` is true if replacement characters
 /// were inserted during lossy UTF-8 conversion. Files successfully decoded via BOM
 /// (UTF-16LE/BE/UTF-8 BOM) return `was_lossy = false`.
+///
+/// Files larger than [`MAX_INDEX_FILE_BYTES`] return `io::ErrorKind::Other`
+/// (LIB-007); existing callers that use `.ok()?` simply skip the file, which is
+/// the desired "oversized files are not indexed" behaviour.
 pub fn read_file_lossy(path: &std::path::Path) -> std::io::Result<(String, bool)> {
+    // LIB-007: bound peak memory before allocation. `std::fs::read` allocates
+    // a Vec sized from the file metadata in one shot, so a 1 GB file produces
+    // a 1 GB allocation regardless of what we do afterwards. Check size first.
+    if let Ok(meta) = std::fs::metadata(path)
+        && meta.len() > MAX_INDEX_FILE_BYTES
+    {
+        return Err(std::io::Error::other(
+            format!(
+                "file '{}' is {} bytes, exceeds MAX_INDEX_FILE_BYTES ({} bytes); skipped to avoid OOM",
+                path.display(),
+                meta.len(),
+                MAX_INDEX_FILE_BYTES
+            ),
+        ));
+    }
     let raw = std::fs::read(path)?;
 
     // UTF-16LE BOM: FF FE
@@ -336,23 +371,38 @@ pub fn read_file_lossy(path: &std::path::Path) -> std::io::Result<(String, bool)
 /// Decode UTF-16LE bytes (after BOM) into a String.
 /// Uses `char::decode_utf16` for proper surrogate pair handling.
 /// Invalid surrogate pairs are replaced with U+FFFD.
+///
+/// LIB-009: an odd-length input means the file was truncated or corrupted.
+/// `chunks_exact(2)` would silently drop the trailing byte, losing the last
+/// code unit. Append a replacement character so downstream tokenisation sees
+/// the truncation rather than masking it.
 fn decode_utf16le(bytes: &[u8]) -> String {
     let u16_iter = bytes.chunks_exact(2)
         .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
-    char::decode_utf16(u16_iter)
+    let mut s: String = char::decode_utf16(u16_iter)
         .map(|r| r.unwrap_or('\u{FFFD}'))
-        .collect()
+        .collect();
+    if !bytes.len().is_multiple_of(2) {
+        s.push('\u{FFFD}');
+    }
+    s
 }
 
 /// Decode UTF-16BE bytes (after BOM) into a String.
 /// Uses `char::decode_utf16` for proper surrogate pair handling.
 /// Invalid surrogate pairs are replaced with U+FFFD.
+///
+/// LIB-009: same trailing-byte handling as [`decode_utf16le`].
 fn decode_utf16be(bytes: &[u8]) -> String {
     let u16_iter = bytes.chunks_exact(2)
         .map(|pair| u16::from_be_bytes([pair[0], pair[1]]));
-    char::decode_utf16(u16_iter)
+    let mut s: String = char::decode_utf16(u16_iter)
         .map(|r| r.unwrap_or('\u{FFFD}'))
-        .collect()
+        .collect();
+    if !bytes.len().is_multiple_of(2) {
+        s.push('\u{FFFD}');
+    }
+    s
 }
 
 // ─── File index types ────────────────────────────────────────────────
