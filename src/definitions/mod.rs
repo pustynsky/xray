@@ -1,7 +1,7 @@
 //! Definition index: AST-based code structure extraction using tree-sitter.
 
 mod types;
-#[cfg(any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust"))]
+#[cfg(any(feature = "lang-csharp", feature = "lang-typescript", feature = "lang-rust", feature = "lang-xml"))]
 mod tree_sitter_utils;
 #[cfg(feature = "lang-csharp")]
 mod parser_csharp;

@@ -588,11 +588,14 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     assert_eq!(o_sub["summary"]["totalFiles"], 1);
 }
 
+#[cfg(windows)]
 #[test] fn test_grep_rejects_outside_dir() {
     let tmp_holder = tempfile::tempdir().unwrap();
     let tmp = tmp_holder.path();
     let index = ContentIndex { root: tmp.to_string_lossy().to_string(), ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), index_base: tmp.to_path_buf(), ..Default::default() };
+    // Drive-letter path Z:\… is only treated as absolute on Windows; on Unix
+    // it would be interpreted as a relative path and accepted.
     let result = handle_xray_grep(&ctx, &json!({"terms": "test", "dir": r"Z:\some\other\path"}));
     assert!(result.is_error);
 }
@@ -1134,6 +1137,10 @@ fn test_read_errors_in_substring_summary() {
 }
 
 /// BUG-7: xray_grep substring matchedTokens should be filtered by dir/ext/exclude.
+///
+/// Windows-only: hard-coded `C:\\project\\…` paths and a `C:\\project\\dir_a`
+/// dir filter — on Unix the prefix match doesn't fire.
+#[cfg(windows)]
 #[test]
 fn test_substring_matched_tokens_filtered_by_dir() {
     // Two files in different directories, each with a unique token containing "service"

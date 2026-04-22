@@ -928,10 +928,17 @@ pub(crate) fn is_main_branch(branch: &str) -> bool {
 }
 
 /// Detect which main branch exists in the repo (main or master).
+///
+/// Falls back to remote refs (`origin/main`, `origin/master`) for fresh clones
+/// and CI checkouts where the local branch hasn't been created yet.
 fn detect_main_branch_name(repo: &str) -> Option<String> {
-    if run_git_command(repo, &["rev-parse", "--verify", "main"]).is_ok() {
+    if run_git_command(repo, &["rev-parse", "--verify", "main"]).is_ok()
+        || run_git_command(repo, &["rev-parse", "--verify", "refs/remotes/origin/main"]).is_ok()
+    {
         Some("main".to_string())
-    } else if run_git_command(repo, &["rev-parse", "--verify", "master"]).is_ok() {
+    } else if run_git_command(repo, &["rev-parse", "--verify", "master"]).is_ok()
+        || run_git_command(repo, &["rev-parse", "--verify", "refs/remotes/origin/master"]).is_ok()
+    {
         Some("master".to_string())
     } else {
         None

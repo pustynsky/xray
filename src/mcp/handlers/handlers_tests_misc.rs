@@ -353,10 +353,12 @@ fn test_validate_search_dir_path_traversal_rejected() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
+#[cfg(windows)]
 #[test]
 fn test_validate_search_dir_windows_absolute_outside_rejected() {
     // Non-existent absolute path that clearly isn't under the server dir
-    // canonicalize will fail, falling back to raw string comparison
+    // canonicalize will fail, falling back to raw string comparison.
+    // Windows-only: drive-letter paths are only absolute on Windows.
     let result = validate_search_dir(
         r"C:\Windows\System32",
         r"C:\Repos\MyProject",
