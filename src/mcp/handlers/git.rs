@@ -182,6 +182,31 @@ pub(crate) fn dispatch_git_tool(
 
 // ─── Date conversion helpers ────────────────────────────────────────
 
+/// GIT-008: parse a positive integer argument with an explicit upper bound.
+///
+/// The previous pattern `args.get(key).as_u64().unwrap_or(default) as usize`
+/// silently truncated on 32-bit targets and accepted absurd values like
+/// `top: 10_000_000`, leading to OOM-class allocations downstream. This
+/// helper enforces a sane cap and returns a structured error otherwise.
+fn parse_bounded_usize(
+    args: &Value,
+    key: &str,
+    default: usize,
+    max: usize,
+) -> Result<usize, String> {
+    match args.get(key).and_then(|v| v.as_u64()) {
+        Some(v) => {
+            let v_usize = usize::try_from(v)
+                .map_err(|_| format!("{key} must be 0..={} (got {v})", max))?;
+            if v_usize > max {
+                return Err(format!("{key} must be 0..={} (got {v})", max));
+            }
+            Ok(v_usize)
+        }
+        None => Ok(default),
+    }
+}
+
 /// Convert YYYY-MM-DD to Unix timestamp (start of day, 00:00:00 UTC).
 ///
 /// Uses Howard Hinnant's `days_from_civil` algorithm for correct date math.
@@ -193,6 +218,28 @@ fn date_str_to_timestamp_start(date: &str) -> Result<i64, String> {
     let y: i64 = parts[0].parse().map_err(|_| format!("Invalid year in '{}'", date))?;
     let m: i64 = parts[1].parse().map_err(|_| format!("Invalid month in '{}'", date))?;
     let d: i64 = parts[2].parse().map_err(|_| format!("Invalid day in '{}'", date))?;
+
+    // GIT-003: validate calendar ranges. Without this the Howard Hinnant
+    // arithmetic happily accepts e.g. `2026-99-99` and produces a wild
+    // timestamp; the date filter then "matches" zero commits and the user
+    // sees an empty result with no idea why. Validate month, day, and
+    // day-of-month against month length (handles Feb-29 correctly).
+    if !(1..=12).contains(&m) {
+        return Err(format!("Invalid month {} in '{}': expected 1..=12", m, date));
+    }
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days_in_month: i64 = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => if leap { 29 } else { 28 },
+        _ => unreachable!(),
+    };
+    if d < 1 || d > days_in_month {
+        return Err(format!(
+            "Invalid day {} in '{}': month {} has {} days",
+            d, date, m, days_in_month
+        ));
+    }
 
     // Howard Hinnant's civil_from_days (days since 1970-01-01)
     let y_adj = if m <= 2 { y - 1 } else { y };
@@ -293,7 +340,11 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
     let from = args.get("from").and_then(|v| v.as_str());
     let to = args.get("to").and_then(|v| v.as_str());
     let date = args.get("date").and_then(|v| v.as_str());
-    let max_results = args.get("maxResults").and_then(|v| v.as_u64()).unwrap_or(50) as usize;
+    // GIT-008: cap maxResults at 1_000_000 (sane upper bound for git log output).
+    let max_results = match parse_bounded_usize(args, "maxResults", 50, 1_000_000) {
+        Ok(n) => n,
+        Err(e) => return ToolCallResult::error(e),
+    };
     let author_filter = args.get("author").and_then(|v| v.as_str());
     let message_filter = args.get("message").and_then(|v| v.as_str());
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -324,6 +375,12 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                     })
                 }).collect();
 
+                let hint = if total_count > commits_json.len() {
+                    "More commits available. Use from/to date filters or increase maxResults. (from cache)"
+                } else {
+                    "(from cache)"
+                };
+
                 let mut output = json!({
                     "commits": commits_json,
                     "summary": {
@@ -332,13 +389,7 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                         "returned": commits_json.len(),
                         "file": file,
                         "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
-                        "hint": format!("{} (from cache)",
-                            if total_count > commits_json.len() {
-                                "More commits available. Use from/to date filters or increase maxResults."
-                            } else {
-                                ""
-                            }
-                        ).trim().to_string()
+                        "hint": hint,
                     }
                 });
 
@@ -425,7 +476,11 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let from = args.get("from").and_then(|v| v.as_str());
     let to = args.get("to").and_then(|v| v.as_str());
-    let top = args.get("top").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+    // GIT-008: cap top at 10_000 (more than enough authors for any repo).
+    let top = match parse_bounded_usize(args, "top", 10, 10_000) {
+        Ok(n) => n,
+        Err(e) => return ToolCallResult::error(e),
+    };
     let message_filter = args.get("message").and_then(|v| v.as_str());
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -714,12 +769,19 @@ fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
              Use xray_git_activity for repo-wide commit history.".to_string()
         );
     }
+    // GIT-008: cap line numbers at 10_000_000 (10x the largest reasonable file).
+    const MAX_BLAME_LINE: u64 = 10_000_000;
     let start_line = match args.get("startLine").and_then(|v| v.as_u64()) {
-        Some(n) if n >= 1 => n as usize,
-        Some(_) => return ToolCallResult::error("startLine must be >= 1".to_string()),
+        Some(n) if (1..=MAX_BLAME_LINE).contains(&n) => n as usize,
+        Some(n) if n < 1 => return ToolCallResult::error("startLine must be >= 1".to_string()),
+        Some(n) => return ToolCallResult::error(format!("startLine must be <= {} (got {})", MAX_BLAME_LINE, n)),
         None => return ToolCallResult::error("Missing required parameter: startLine".to_string()),
     };
-    let end_line = args.get("endLine").and_then(|v| v.as_u64()).map(|n| n as usize);
+    let end_line = match args.get("endLine").and_then(|v| v.as_u64()) {
+        Some(n) if n <= MAX_BLAME_LINE => Some(n as usize),
+        Some(n) => return ToolCallResult::error(format!("endLine must be <= {} (got {})", MAX_BLAME_LINE, n)),
+        None => None,
+    };
 
     // Validate endLine >= startLine if provided
     if let Some(end) = end_line

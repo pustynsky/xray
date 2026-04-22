@@ -268,6 +268,17 @@ fn run_file_history_query(
         .arg("log")
         .arg(format!("--format={}", format));
 
+    // GIT-005: bound git output via --max-count instead of pulling the entire
+    // history and truncating in-process. Without this, a query like
+    // `xray_git_history file=X maxResults=50` on a file with 100k commits
+    // streams ALL 100k commit records out of git, parses each into a
+    // CommitInfo, then throws 99 950 away. Request `max_results + 1` so the
+    // handler's "more commits available" hint still fires correctly when the
+    // cap is hit (total_count > returned).
+    if max_results > 0 {
+        cmd.arg(format!("--max-count={}", max_results.saturating_add(1)));
+    }
+
     if follow {
         cmd.arg("--follow");
     }
