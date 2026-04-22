@@ -202,12 +202,10 @@ fn walk_typescript_node_collecting<'a>(
                 return;
             }
         }
-        "lexical_declaration" => {
-            // Only extract exported variable declarations
-            if is_exported(node) {
-                extract_ts_variable_defs(node, source, file_id, parent_name, defs);
-                return;
-            }
+        // Only extract exported variable declarations
+        "lexical_declaration" if is_exported(node) => {
+            extract_ts_variable_defs(node, source, file_id, parent_name, defs);
+            return;
         }
         "enum_member" | "enum_assignment" => {
             if let Some(def) = extract_ts_enum_member(node, source, file_id, parent_name) {

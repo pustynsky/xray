@@ -1056,7 +1056,7 @@ fn handle_phrase_search(
     let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();
 
     // Sort by number of occurrences descending (most matches first)
-    results.sort_by(|a, b| b.lines.len().cmp(&a.lines.len()));
+    results.sort_by_key(|b| std::cmp::Reverse(b.lines.len()));
 
     if max_results > 0 {
         results.truncate(max_results);
@@ -1240,7 +1240,7 @@ fn handle_multi_phrase_search(
 
     // Sort by occurrences descending
     let mut results = merged;
-    results.sort_by(|a, b| b.lines.len().cmp(&a.lines.len()));
+    results.sort_by_key(|b| std::cmp::Reverse(b.lines.len()));
 
     if max_results > 0 {
         results.truncate(max_results);
@@ -1449,7 +1449,7 @@ fn handle_line_regex_search(
     let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();
 
     // Sort by occurrences descending (most matches first), like phrase search.
-    results.sort_by(|a, b| b.lines.len().cmp(&a.lines.len()));
+    results.sort_by_key(|b| std::cmp::Reverse(b.lines.len()));
 
     if params.max_results > 0 {
         results.truncate(params.max_results);

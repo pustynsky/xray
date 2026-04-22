@@ -425,7 +425,7 @@ pub fn top_authors(
     let total_authors = author_map.len();
 
     let mut ranked: Vec<_> = author_map.into_values().collect();
-    ranked.sort_by(|a, b| b.count.cmp(&a.count));
+    ranked.sort_by_key(|b| std::cmp::Reverse(b.count));
     ranked.truncate(top);
 
     let authors: Vec<AuthorStats> = ranked
