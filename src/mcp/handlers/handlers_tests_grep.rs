@@ -1006,6 +1006,77 @@ fn test_xray_grep_phrase_sort_by_occurrences() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+/// xray_grep phrase mode: tie-break by file path (lexicographic ascending) when
+/// occurrences are equal. Without a deterministic secondary key, the parallel
+/// candidate verification (tier-A) leaves equal-occurrences files in
+/// worker-completion order, so the truncated `max_results` slice is unstable
+/// across runs of the same query.
+#[test]
+fn test_xray_grep_phrase_sort_tie_break_by_path() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_grep_phrase_tiebreak_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Create 6 files, each with exactly 1 occurrence of the same phrase.
+    // Names chosen so that lexicographic order is unambiguous and not the
+    // same as filesystem-creation order.
+    let names = ["zzz.cs", "aaa.cs", "mmm.cs", "bbb.cs", "yyy.cs", "ccc.cs"];
+    for name in &names {
+        let mut f = std::fs::File::create(tmp_dir.join(name)).unwrap();
+        writeln!(f, "var x = user service one;").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4, // exercise parallel candidate verification (tier-A)
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
+    };
+
+    // Run the same query several times; the result order must be stable AND
+    // ascending by file path among the (all-equal) occurrence groups.
+    let mut prev_paths: Option<Vec<String>> = None;
+    for run in 0..5 {
+        let result = dispatch_tool(&ctx, "xray_grep", &json!({
+            "terms": "user service",
+            "phrase": true,
+        }));
+        assert!(!result.is_error, "Run {}: phrase search should not error: {}", run, result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let files = output["files"].as_array().unwrap();
+        assert_eq!(files.len(), names.len(), "Run {}: expected all {} files", run, names.len());
+
+        let paths: Vec<String> = files.iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect();
+
+        // All occurrences are equal (1) → file paths must be sorted ascending.
+        for i in 0..paths.len() - 1 {
+            assert!(paths[i] <= paths[i + 1],
+                "Run {}: tie-broken paths must be ascending; got {:?} before {:?}",
+                run, paths[i], paths[i + 1]);
+        }
+
+        // And identical between runs.
+        if let Some(ref prev) = prev_paths {
+            assert_eq!(prev, &paths,
+                "Run {}: result order is not deterministic between identical queries", run);
+        }
+        prev_paths = Some(paths);
+    }
+
+    cleanup_tmp(&tmp_dir);
+}
+
 /// BUG-6: xray_grep with contextLines>0 should auto-enable showLines.
 #[test]
 fn test_xray_grep_context_lines_auto_enables_show_lines() {

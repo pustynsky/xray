@@ -662,3 +662,64 @@ fn test_tfidf_zero_file_token_count_no_division_by_zero() {
     let entry = results.values().next().unwrap();
     assert!(entry.tf_idf.is_finite(), "TF-IDF should be finite, not NaN/Inf");
 }
+
+// ─── intersect_sorted_unique tests (tier-B helper) ──────────────
+
+#[test]
+fn test_intersect_sorted_unique_basic_overlap() {
+    let a = vec![1u32, 3, 5, 7, 9];
+    let b = vec![2u32, 3, 4, 7, 10];
+    assert_eq!(intersect_sorted_unique(&a, &b), vec![3, 7]);
+}
+
+#[test]
+fn test_intersect_sorted_unique_no_overlap() {
+    let a = vec![1u32, 2, 3];
+    let b = vec![4u32, 5, 6];
+    assert!(intersect_sorted_unique(&a, &b).is_empty());
+}
+
+#[test]
+fn test_intersect_sorted_unique_full_overlap() {
+    let a = vec![1u32, 2, 3];
+    let b = vec![1u32, 2, 3];
+    assert_eq!(intersect_sorted_unique(&a, &b), vec![1, 2, 3]);
+}
+
+#[test]
+fn test_intersect_sorted_unique_empty_inputs() {
+    let empty: Vec<u32> = Vec::new();
+    let a = vec![1u32, 2, 3];
+    assert!(intersect_sorted_unique(&empty, &a).is_empty());
+    assert!(intersect_sorted_unique(&a, &empty).is_empty());
+    let empty2: Vec<u32> = Vec::new();
+    assert!(intersect_sorted_unique(&empty, &empty2).is_empty());
+}
+
+#[test]
+fn test_intersect_sorted_unique_subset() {
+    // a is a strict subset of b
+    let a = vec![5u32, 10, 15];
+    let b = vec![1u32, 5, 7, 10, 12, 15, 20];
+    assert_eq!(intersect_sorted_unique(&a, &b), vec![5, 10, 15]);
+    // and reverse
+    assert_eq!(intersect_sorted_unique(&b, &a), vec![5, 10, 15]);
+}
+
+#[test]
+fn test_intersect_sorted_unique_single_element() {
+    assert_eq!(intersect_sorted_unique(&[42u32], &[42u32]), vec![42]);
+    assert!(intersect_sorted_unique(&[42u32], &[43u32]).is_empty());
+}
+
+#[test]
+fn test_intersect_sorted_unique_preserves_order_and_uniqueness() {
+    let a = vec![1u32, 2, 4, 8, 16, 32, 64];
+    let b = vec![2u32, 4, 16, 64, 128];
+    let result = intersect_sorted_unique(&a, &b);
+    assert_eq!(result, vec![2, 4, 16, 64]);
+    // Verify sortedness + uniqueness invariants
+    for w in result.windows(2) {
+        assert!(w[0] < w[1], "result must be strictly ascending");
+    }
+}
