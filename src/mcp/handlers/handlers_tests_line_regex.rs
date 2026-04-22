@@ -319,3 +319,103 @@ fn line_regex_invalid_pattern_returns_error() {
     assert!(result.is_error, "Invalid regex pattern should produce an error");
     cleanup_tmp(&tmp);
 }
+
+/// MINOR-23 regression: when `showLines=true` accumulates more than
+/// `MAX_CONTENT_CACHE_BYTES` of file content, the cache must stop growing,
+/// matched line numbers stay complete, and the response surfaces a
+/// `lineContentTruncated` hint so the client knows previews are partial.
+///
+/// Cap is 4 KiB under `cfg(test)` (256 MiB in production builds), so this
+/// test produces a few KB of fixtures rather than gigabytes.
+#[test]
+fn line_regex_show_lines_caps_content_cache() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_line_regex_cap_{}_{}",
+        std::process::id(),
+        id
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Three 2 KiB files, each containing the same matching line. Total = 6 KiB,
+    // which exceeds the 4 KiB test-cap, so at least one file's preview must be
+    // dropped. We pad with a short repeating ASCII line so file sizes are
+    // deterministic and easy to reason about.
+    let payload = "ZZ\n".repeat(682); // ~ 2046 bytes per file
+    for i in 0..3 {
+        let path = tmp_dir.join(format!("big_{}.md", i));
+        let mut f = std::fs::File::create(&path).unwrap();
+        // Matching line + padding
+        writeln!(f, "## hit_{}", i).unwrap();
+        f.write_all(payload.as_bytes()).unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        ext: "md".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            tmp_dir.to_string_lossy().to_string(),
+        ))),
+        server_ext: "md".to_string(),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
+    };
+
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": "^## hit_",
+        "regex": true,
+        "lineRegex": true,
+        "showLines": true,
+    }));
+    assert!(
+        !result.is_error,
+        "lineRegex with cap-exceeded showLines should not error: {}",
+        result.content[0].text
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Contract 1: matched line numbers must be complete — all 3 files match.
+    let total_files = output["summary"]["totalFiles"].as_u64().unwrap();
+    assert_eq!(
+        total_files, 3,
+        "All matching files must be reported even when content cache is capped"
+    );
+
+    // Contract 2: the truncation hint must be surfaced.
+    let truncated = output["summary"]["lineContentTruncated"]
+        .as_bool()
+        .unwrap_or(false);
+    assert!(
+        truncated,
+        "summary.lineContentTruncated must be true when cache cap is exceeded; got summary: {}",
+        output["summary"]
+    );
+    let reason = output["summary"]["lineContentTruncationReason"]
+        .as_str()
+        .unwrap_or("");
+    assert!(
+        reason.contains("cache"),
+        "truncationReason should mention the cache budget; got: {:?}",
+        reason
+    );
+
+    // Contract 3: at least one file must lack `lineContent` (cache was capped).
+    let files = output["files"].as_array().unwrap();
+    let without_line_content =
+        files.iter().filter(|f| f.get("lineContent").is_none()).count();
+    assert!(
+        without_line_content >= 1,
+        "At least one file must lack lineContent (cache exhausted); got 0 of {} files",
+        files.len()
+    );
+
+    cleanup_tmp(&tmp_dir);
+}
