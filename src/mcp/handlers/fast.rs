@@ -202,17 +202,38 @@ fn format_and_sort_results(
     elapsed: std::time::Duration,
     ctx: &HandlerContext,
 ) -> Value {
-    // ── Two-pass fileCount: count files only for matched directories ──
-    // Instead of building a HashMap for ALL ~10K directories (O(N × depth)),
-    // we only count files for the ~29 matched directories (O(matched × N)).
-    // This reduces ~435ms to ~30ms on 100K-file repos.
+    // ── Single-pass fileCount via HashMap (FAST-002) ──
+    // The previous implementation rescanned `index_entries` once per matched
+    // directory (O(matched × N)). For the documented use-case
+    // `pattern='*' dirsOnly=true` on a 10k-dir / 100k-file repo that becomes
+    // ~1G byte-comparisons and freezes the single-threaded MCP loop for
+    // multiple seconds. We now build a single `dir → file_count` map in O(N)
+    // (each file walks up its parents once) and look up each matched
+    // directory in O(1). Memory: one usize per *unique* parent directory
+    // (~10k dirs × 16 B ≈ 160 KB on a large repo).
     if params.dirs_only && !params.count_only && !results.is_empty() {
+        let mut dir_file_counts: std::collections::HashMap<&str, usize> =
+            std::collections::HashMap::new();
+        for entry in index_entries {
+            if entry.is_dir {
+                continue;
+            }
+            // Walk every ancestor directory, accumulating one file each.
+            let mut path = entry.path.as_str();
+            while let Some(slash) = path.rfind('/') {
+                path = &path[..slash];
+                if path.is_empty() {
+                    break;
+                }
+                *dir_file_counts.entry(path).or_insert(0) += 1;
+            }
+        }
         for result in &mut results {
             if let Some(dir_path) = result["path"].as_str() {
-                let prefix = format!("{}/", dir_path);
-                let count = index_entries.iter()
-                    .filter(|e| !e.is_dir && e.path.starts_with(&prefix))
-                    .count();
+                let count = dir_file_counts
+                    .get(dir_path.trim_end_matches('/'))
+                    .copied()
+                    .unwrap_or(0);
                 result["fileCount"] = json!(count);
             }
         }
@@ -327,41 +348,45 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         ));
     }
 
-    let index = {
-        // Inside server_dir (or same): use in-memory cache
-        let needs_rebuild = ctx.file_index_dirty.load(Ordering::Relaxed)
-            || ctx.file_index.read().map(|fi| fi.is_none()).unwrap_or(true);
+    // ── Acquire file index without cloning (FAST-003) ──
+    // The previous implementation cloned the entire ~100k-entry FileIndex
+    // (~8 MB) on every request just so the read guard could be released
+    // before the matching loop. The clone alone burned the L2/L3 cache and
+    // dominated allocator pressure under a busy LLM client. We now hold the
+    // read guard for the lifetime of the per-entry scan: read locks do not
+    // block other readers, and the watcher's write-lock contention happens
+    // only during rebuild — which we run BEFORE taking the read guard.
+    let needs_rebuild = ctx.file_index_dirty.load(Ordering::Relaxed)
+        || ctx.file_index.read().map(|fi| fi.is_none()).unwrap_or(true);
 
-        if needs_rebuild {
-            info!(dir = %server_dir, "Building file-list index (dirty or first use)");
-            let new_index = match crate::build_index(&crate::IndexArgs {
-                dir: server_dir.clone(),
-                max_age_hours: 24,
-                hidden: false,
-                no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
-                threads: 0,
-            }) {
-                Ok(idx) => idx,
-                Err(e) => return ToolCallResult::error(format!("Failed to build file index: {}", e)),
-            };
-            // Save to disk for CLI/other consumers
-            let _ = crate::save_index(&new_index, &ctx.index_base);
-            // Store in memory and reset dirty flag
-            if let Ok(mut fi) = ctx.file_index.write() {
-                *fi = Some(new_index);
-            }
-            ctx.file_index_dirty.store(false, Ordering::Relaxed);
-        }
-
-        // Read from in-memory cache
-        let guard = match ctx.file_index.read() {
-            Ok(g) => g,
-            Err(e) => return ToolCallResult::error(format!("Failed to read file index: {}", e)),
+    if needs_rebuild {
+        info!(dir = %server_dir, "Building file-list index (dirty or first use)");
+        let new_index = match crate::build_index(&crate::IndexArgs {
+            dir: server_dir.clone(),
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
+            threads: 0,
+        }) {
+            Ok(idx) => idx,
+            Err(e) => return ToolCallResult::error(format!("Failed to build file index: {}", e)),
         };
-        match guard.as_ref() {
-            Some(idx) => idx.clone(),
-            None => return ToolCallResult::error("File index not available after build".to_string()),
+        // Save to disk for CLI/other consumers
+        let _ = crate::save_index(&new_index, &ctx.index_base);
+        // Store in memory and reset dirty flag
+        if let Ok(mut fi) = ctx.file_index.write() {
+            *fi = Some(new_index);
         }
+        ctx.file_index_dirty.store(false, Ordering::Relaxed);
+    }
+
+    let guard = match ctx.file_index.read() {
+        Ok(g) => g,
+        Err(e) => return ToolCallResult::error(format!("Failed to read file index: {}", e)),
+    };
+    let index = match guard.as_ref() {
+        Some(idx) => idx,
+        None => return ToolCallResult::error("File index not available after build".to_string()),
     };
 
     // When reusing a parent index for a subdirectory request, compute a path prefix
