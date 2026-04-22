@@ -4203,3 +4203,35 @@ fn test_xml_resolve_accepts_relative_inside_workspace() {
 
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+// ─── DEF-H-003 / DEF-H-006 hardening regressions ──────────────────
+
+/// DEF-H-006: numeric args that exceed `u8::MAX` / `u16::MAX` previously
+/// truncated silently via `as u8` / `as u16`. The hardened parser now
+/// rejects them with a typed error so callers see a clear message instead
+/// of confusing under-the-hood wrap-around behaviour.
+#[test]
+fn test_parse_args_min_nesting_overflow_rejected() {
+    let args = json!({"minNesting": 300});
+    let result = parse_definition_args(&args);
+    assert!(result.is_err(), "minNesting=300 must be rejected (>u8::MAX)");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("minNesting"),
+        "error must mention the offending field, got: {err}"
+    );
+}
+
+#[test]
+fn test_parse_args_min_complexity_overflow_rejected() {
+    let args = json!({"minComplexity": 100_000});
+    let result = parse_definition_args(&args);
+    assert!(result.is_err(), "minComplexity=100_000 must be rejected (>u16::MAX)");
+    let err = result.unwrap_err();
+    assert!(
+        err.contains("minComplexity"),
+        "error must mention the offending field, got: {err}"
+    );
+}
+
+

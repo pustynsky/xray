@@ -118,6 +118,13 @@ pub(crate) fn try_intercept(
                 file_path, e
             )));
         }
+        Err(e @ XmlParseError::SourceTooLarge { .. }) => {
+            return Some(ToolCallResult::error(format!(
+                "Skipped XML file '{}': {}. \
+                 Hint: split the document or raise the per-file size cap.",
+                file_path, e
+            )));
+        }
     };
 
     let xml_defs = parse_result.definitions;

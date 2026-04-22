@@ -121,6 +121,25 @@ pub(crate) fn saturate_count_to_u8(value: u32, context: &str) -> u8 {
 /// on an MCP stdio server.
 pub(crate) const MAX_AST_RECURSION_DEPTH: usize = 1024;
 
+/// PARSE-002: hard cap on input size before invoking tree-sitter. Tree-sitter
+/// allocates ~5–10× source size for the parse tree and token table; a 100 MB
+/// generated/vendored file (or a checked-in bundle) would transiently consume
+/// ~1 GB per worker. Matches `ripgrep`'s default `--max-filesize` of 4 MB.
+pub(crate) const MAX_PARSE_SOURCE_BYTES: usize = 4 * 1024 * 1024;
+
+/// PARSE-001: per-parse wall-clock ceiling for tree-sitter.
+///
+/// Without this, a hand-crafted source file (deeply nested generics, attribute
+/// spam, known-pathological tree-sitter inputs) can pin a parser worker thread
+/// indefinitely, freezing the entire incremental indexing pipeline because the
+/// worker pool is fixed at `num_cpus()`.
+///
+/// 2 seconds is generous for legitimate parses (the longest production parse
+/// observed in benches is ~150 ms on a 4 MB file) and short enough to recover
+/// from a single bad file within the user's patience window.
+pub(crate) const PARSE_TIMEOUT_MICROS: u64 = 2_000_000;
+
+
 /// Emit a one-shot `tracing::warn!` when a walker hits
 /// [`MAX_AST_RECURSION_DEPTH`]. Coalesced with a process-global atomic so
 /// a single pathological file cannot flood the log. The first occurrence
