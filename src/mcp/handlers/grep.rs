@@ -1094,8 +1094,17 @@ fn handle_phrase_search(
     let total_files = results.len();
     let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();
 
-    // Sort by number of occurrences descending (most matches first)
-    results.sort_by_key(|b| std::cmp::Reverse(b.lines.len()));
+    // Sort by number of occurrences descending (most matches first).
+    // Tie-break by file path ascending so that, when occurrences are equal,
+    // the truncated `max_results` slice is deterministic across runs (the
+    // tier-A parallel candidate verification means worker-thread completion
+    // order is non-deterministic, so without a secondary key the tail of the
+    // result set could shuffle between identical queries).
+    results.sort_by(|a, b| {
+        b.lines.len()
+            .cmp(&a.lines.len())
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
 
     if max_results > 0 {
         results.truncate(max_results);
@@ -1170,44 +1179,99 @@ fn collect_phrase_matches(
         Err(e) => return Err(format!("Failed to build phrase regex: {}", e)),
     };
 
-    // Find candidate files via AND search on phrase tokens
-    let mut candidate_file_ids: Option<HashSet<u32>> = None;
+    // PERF (tier-B): use per-token line lists from the inverted index to
+    // intersect at the LINE level, not just the file level. The existing
+    // `Posting { file_id, lines: Vec<u32> }` already records which lines a
+    // token appears on inside each file; the previous implementation threw
+    // that information away (only kept `file_id`) and re-scanned every
+    // candidate file's bytes through a regex. The new flow:
+    //   1. For each phrase token, collect (file_id -> sorted-unique line set)
+    //      from its postings, applying file filters once per posting.
+    //   2. Intersect file ids AND line numbers across all tokens. A file
+    //      where token A appears only on line 5 and token B appears only on
+    //      line 12 is dropped without ever opening the file -- the phrase
+    //      cannot fit on a single line in that file.
+    //   3. Read only the surviving candidate files and verify the phrase
+    //      regex/substring on the small set of candidate lines.
+    // For phrases like "foo bar" on a large repo the candidate
+    // file count typically drops from hundreds to ~the result count itself,
+    // eliminating most of the disk I/O that dominated phrase search runtime.
+    // Backward compatible: no index format change.
+    let mut per_token_file_lines: Vec<HashMap<u32, Vec<u32>>> =
+        Vec::with_capacity(phrase_tokens.len());
     for token in &phrase_tokens {
-        if let Some(postings) = index.index.get(token.as_str()) {
-            let file_ids: HashSet<u32> = postings.iter()
-                .filter(|p| {
-                    let path = match index.files.get(p.file_id as usize) {
-                        Some(p) => p,
-                        None => return false,
-                    };
-                    passes_file_filters(path, params)
-                })
-                .map(|p| p.file_id)
-                .collect();
-            candidate_file_ids = Some(match candidate_file_ids {
-                Some(existing) => existing.intersection(&file_ids).cloned().collect(),
-                None => file_ids,
-            });
-        } else {
-            candidate_file_ids = Some(HashSet::new());
-            break;
+        let postings = match index.index.get(token.as_str()) {
+            Some(p) => p,
+            // A token has no postings at all -> intersection is empty -> no matches.
+            None => return Ok(Vec::new()),
+        };
+        let mut map: HashMap<u32, Vec<u32>> = HashMap::with_capacity(postings.len());
+        for p in postings {
+            let path = match index.files.get(p.file_id as usize) {
+                Some(p) => p,
+                None => continue,
+            };
+            if !passes_file_filters(path, params) {
+                continue;
+            }
+            // Postings record a line number once per occurrence; dedup so
+            // intersection works on sets, not multisets.
+            let mut lines = p.lines.clone();
+            lines.sort_unstable();
+            lines.dedup();
+            map.insert(p.file_id, lines);
         }
+        if map.is_empty() {
+            return Ok(Vec::new());
+        }
+        per_token_file_lines.push(map);
     }
 
-    let candidates: Vec<u32> = candidate_file_ids.unwrap_or_default().into_iter().collect();
+    // Start the intersection from the smallest per-token map -- minimises
+    // outer-loop iterations and the size of `current_lines` we carry forward.
+    let smallest_idx = per_token_file_lines
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, m)| m.len())
+        .map(|(i, _)| i)
+        .unwrap_or(0);
+    let smallest = per_token_file_lines.swap_remove(smallest_idx);
+    let other_maps: &[HashMap<u32, Vec<u32>>] = &per_token_file_lines;
+
+    let mut candidates: Vec<(u32, Vec<u32>)> = Vec::new();
+    for (file_id, mut current_lines) in smallest {
+        let mut keep = true;
+        for other in other_maps {
+            match other.get(&file_id) {
+                None => {
+                    keep = false;
+                    break;
+                }
+                Some(other_lines) => {
+                    current_lines = intersect_sorted_unique(&current_lines, other_lines);
+                    if current_lines.is_empty() {
+                        keep = false;
+                        break;
+                    }
+                }
+            }
+        }
+        if keep && !current_lines.is_empty() {
+            candidates.push((file_id, current_lines));
+        }
+    }
 
     // Verify phrase match in raw file content.
     // When phrase contains punctuation, use raw substring match to avoid
     // false positives from tokenizer stripping non-alphanumeric characters.
     let phrase_has_punctuation = phrase.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace());
 
-    // PERF (tier-A): parallelize file I/O + per-file scan across candidates.
-    // Phrase verification is dominated by reading hundreds of candidate files
-    // from disk and running a regex/substring scan on each. Splitting the work
-    // across threads via std::thread::scope (no new deps) gives a near-linear
-    // speedup on multi-core machines without changing semantics. Also drops the
-    // redundant whole-file `phrase_re.is_match(&content)` pre-check that used
-    // to scan each candidate twice.
+    // PERF (tier-A): parallelize file I/O + per-file scan across the
+    // surviving (post-line-intersection) candidates. Even after tier-B's
+    // file-skip, the remaining candidates each require one disk read +
+    // one full content.lines() walk; spreading the work across worker
+    // threads via std::thread::scope (no new deps) keeps the wall-clock
+    // bounded by the slowest read on multi-core boxes.
     let num_threads = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4)
@@ -1220,27 +1284,34 @@ fn collect_phrase_matches(
             let phrase_re_ref = &phrase_re;
             let phrase_lower_ref = phrase_lower.as_str();
             let index_ref = index;
-            let chunk_owned: Vec<u32> = chunk.to_vec();
+            let chunk_owned: Vec<(u32, Vec<u32>)> = chunk.to_vec();
             let handle = scope.spawn(move || {
                 let mut local: Vec<PhraseFileMatch> = Vec::with_capacity(chunk_owned.len());
-                for file_id in chunk_owned {
+                for (file_id, candidate_lines) in chunk_owned {
                     let file_path = &index_ref.files[file_id as usize];
                     let (content, _lossy) = match read_file_lossy(std::path::Path::new(file_path)) {
                         Ok(c) => c,
                         Err(_) => continue,
                     };
+                    let candidate_set: HashSet<u32> = candidate_lines.into_iter().collect();
                     let mut matching_lines = Vec::new();
-                    if phrase_has_punctuation {
-                        for (line_num, line) in content.lines().enumerate() {
-                            if line.to_lowercase().contains(phrase_lower_ref) {
-                                matching_lines.push((line_num + 1) as u32);
-                            }
+                    for (line_num, line) in content.lines().enumerate() {
+                        let line_no = (line_num + 1) as u32;
+                        // Tier-B: only verify lines that the index says contain ALL
+                        // phrase tokens. Other lines cannot satisfy the phrase regex
+                        // (which requires every token, separated by whitespace, on
+                        // a single line) nor the lowercase-substring punctuation
+                        // path (which also matches single-line content).
+                        if !candidate_set.contains(&line_no) {
+                            continue;
                         }
-                    } else {
-                        for (line_num, line) in content.lines().enumerate() {
-                            if phrase_re_ref.is_match(line) {
-                                matching_lines.push((line_num + 1) as u32);
-                            }
+                        let hit = if phrase_has_punctuation {
+                            line.to_lowercase().contains(phrase_lower_ref)
+                        } else {
+                            phrase_re_ref.is_match(line)
+                        };
+                        if hit {
+                            matching_lines.push(line_no);
                         }
                     }
                     if !matching_lines.is_empty() {
@@ -1265,6 +1336,26 @@ fn collect_phrase_matches(
     });
 
     Ok(results)
+}
+
+/// Intersection of two sorted-unique `Vec<u32>` lists, in O(n + m).
+/// Both inputs MUST be sorted ascending and free of duplicates; the result
+/// preserves both invariants.
+fn intersect_sorted_unique(a: &[u32], b: &[u32]) -> Vec<u32> {
+    let mut out = Vec::with_capacity(a.len().min(b.len()));
+    let (mut i, mut j) = (0usize, 0usize);
+    while i < a.len() && j < b.len() {
+        match a[i].cmp(&b[j]) {
+            std::cmp::Ordering::Equal => {
+                out.push(a[i]);
+                i += 1;
+                j += 1;
+            }
+            std::cmp::Ordering::Less => i += 1,
+            std::cmp::Ordering::Greater => j += 1,
+        }
+    }
+    out
 }
 
 /// Multi-phrase search: searches each phrase independently, merges with OR/AND semantics.
@@ -1311,9 +1402,14 @@ fn handle_multi_phrase_search(
     let total_files = merged.len();
     let total_occurrences: usize = merged.iter().map(|r| r.lines.len()).sum();
 
-    // Sort by occurrences descending
+    // Sort by occurrences descending, tie-break by file path ascending for
+    // deterministic ordering after truncation (see collect_phrase_matches).
     let mut results = merged;
-    results.sort_by_key(|b| std::cmp::Reverse(b.lines.len()));
+    results.sort_by(|a, b| {
+        b.lines.len()
+            .cmp(&a.lines.len())
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
 
     if max_results > 0 {
         results.truncate(max_results);
@@ -1522,7 +1618,12 @@ fn handle_line_regex_search(
     let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();
 
     // Sort by occurrences descending (most matches first), like phrase search.
-    results.sort_by_key(|b| std::cmp::Reverse(b.lines.len()));
+    // Tie-break by file path ascending for deterministic truncated output.
+    results.sort_by(|a, b| {
+        b.lines.len()
+            .cmp(&a.lines.len())
+            .then_with(|| a.file_path.cmp(&b.file_path))
+    });
 
     if params.max_results > 0 {
         results.truncate(params.max_results);
