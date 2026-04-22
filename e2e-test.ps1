@@ -2218,6 +2218,89 @@ $testBlocks += , {
 }
 
 
+# T-ARGS-ALIAS-WARN: xray_grep called with VS Code alias `isRegexp:true` returns
+# successfully AND injects `unknownArgsWarning` + concrete "Use 'regex' instead"
+# hint into summary (default warning mode — no env var). Closes NEW-#1 from
+# docs/todo_approved_2026-04-23_xray-grep-edit-followups.md.
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-ARGS-ALIAS-WARN grep-isRegexp-alias-warned-not-rejected"
+    try {
+        $tmpDir = Join-Path $env:TEMP "xray_e2e_args_warn_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "sample.rs") -Value "fn hello() { println!(\"world\"); }`n" -NoNewline
+        & $Bin content-index -d $tmpDir -e rs 2>&1 | Out-Null
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"hello","isRegexp":true}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no JSON-RPC response" }
+        else {
+            # Default mode = NOT an error response, but warning is injected.
+            if ($jsonLine -match '"isError"\s*:\s*true') { $errors += "isError=true (should be warning, not hard-error)" }
+            if ($jsonLine -notmatch 'unknownArgsWarning') { $errors += "missing summary.unknownArgsWarning" }
+            # The alias hint must concretely name the canonical key.
+            if ($jsonLine -notmatch "Use ['\\\\]+regex['\\\\]+ instead") { $errors += "missing 'Use regex instead' alias hint" }
+        }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (warning injected, alias hint present, call succeeded)" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-ARGS-STRICT-ERROR: with XRAY_STRICT_ARGS=1 set, the same alias call returns
+# a structured hard-error (isError=true, UNKNOWN_ARGS code, envHint pointing at
+# the env switch) instead of a warning. Closes NEW-#1 strict-mode contract.
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-ARGS-STRICT-ERROR grep-isRegexp-strict-mode-hard-errors"
+    try {
+        $tmpDir = Join-Path $env:TEMP "xray_e2e_args_strict_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "sample.rs") -Value "fn hello() { println!(\"world\"); }`n" -NoNewline
+        & $Bin content-index -d $tmpDir -e rs 2>&1 | Out-Null
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"hello","isRegexp":true}}}'
+        ) -join "`n"
+        # Set env in the child process scope for this serve invocation only.
+        $env:XRAY_STRICT_ARGS = '1'
+        try {
+            $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
+        } finally {
+            Remove-Item Env:XRAY_STRICT_ARGS -ErrorAction SilentlyContinue
+        }
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no JSON-RPC response" }
+        else {
+            if ($jsonLine -notmatch '"isError"\s*:\s*true') { $errors += "expected isError=true under strict mode" }
+            if ($jsonLine -notmatch 'UNKNOWN_ARGS') { $errors += "missing UNKNOWN_ARGS error code" }
+            if ($jsonLine -notmatch 'XRAY_STRICT_ARGS') { $errors += "missing envHint mentioning XRAY_STRICT_ARGS" }
+        }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (UNKNOWN_ARGS hard-error + envHint under XRAY_STRICT_ARGS=1)" }
+    } catch {
+        Remove-Item Env:XRAY_STRICT_ARGS -ErrorAction SilentlyContinue
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+
 $parallelJobs = @()
 foreach ($block in $testBlocks) {
     $parallelJobs += Start-Job -ScriptBlock $block -ArgumentList $searchBinAbs, $projectDirAbs, $TestExt
