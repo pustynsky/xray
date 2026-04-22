@@ -94,7 +94,7 @@ fn test_verify_call_site_target_direct_match() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // caller_di=1 (processOrder), call_line=25, method="validate", target="OrderValidator"
-    assert!(verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+    assert!(verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator"), None));
 }
 
 // ─── Test 2: Different receiver → should reject ─────────────────
@@ -123,7 +123,7 @@ fn test_verify_call_site_target_different_receiver() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // receiver is "Path" but target class is "DependencyTask" — should return false
-    assert!(!verify_call_site_target(&def_idx, 1, 25, "resolve", Some("DependencyTask")));
+    assert!(!verify_call_site_target(&def_idx, 1, 25, "resolve", Some("DependencyTask"), None));
 }
 
 // ─── Test 3: No receiver, same class (implicit this) ────────────
@@ -151,7 +151,7 @@ fn test_verify_call_site_target_no_receiver_same_class() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // caller is in OrderValidator, target is OrderValidator, no receiver → true
-    assert!(verify_call_site_target(&def_idx, 1, 55, "validate", Some("OrderValidator")));
+    assert!(verify_call_site_target(&def_idx, 1, 55, "validate", Some("OrderValidator"), None));
 }
 
 // ─── Test 4: No receiver, different class ───────────────────────
@@ -180,7 +180,7 @@ fn test_verify_call_site_target_no_receiver_different_class() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // caller is in OrderController, target is OrderValidator, no receiver → false
-    assert!(!verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+    assert!(!verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator"), None));
 }
 
 // ─── Test 5: No target class → always accept ────────────────────
@@ -205,7 +205,7 @@ fn test_verify_call_site_target_no_target_class() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // target_class = None → should always return true (no filtering)
-    assert!(verify_call_site_target(&def_idx, 1, 25, "validate", None));
+    assert!(verify_call_site_target(&def_idx, 1, 25, "validate", None, None));
 }
 
 // ─── Test 6: No call-site data → graceful fallback (true) ───────
@@ -223,7 +223,7 @@ fn test_verify_call_site_target_no_call_site_data() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // No call-site data → rejection (parser covers all patterns now)
-    assert!(!verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+    assert!(!verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator"), None));
 }
 
 // ─── Test 7: Interface match (IOrderValidator → OrderValidator) ─
@@ -253,7 +253,7 @@ fn test_verify_call_site_target_interface_match() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // receiver is "IOrderValidator", target is "OrderValidator" → should match via I-prefix
-    assert!(verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator")));
+    assert!(verify_call_site_target(&def_idx, 1, 25, "validate", Some("OrderValidator"), None));
 }
 
 // ─── Test 8: Comment line — method has call sites but not at queried line ─
@@ -282,7 +282,7 @@ fn test_verify_call_site_target_comment_line_not_real_call() {
 
     // Method has call-site data (endsWith at line 10), but no call at line 5
     // → this is a false positive from content index → should return false
-    assert!(!verify_call_site_target(&def_idx, 1, 5, "resolve", Some("PathUtils")));
+    assert!(!verify_call_site_target(&def_idx, 1, 5, "resolve", Some("PathUtils"), None));
 }
 
 // ─── Test 9: Pre-filter does NOT expand by base_types ────────────
@@ -853,7 +853,7 @@ fn test_verify_call_site_target_fuzzy_interface_match() {
 
     // receiver is IDataModelService, target is DataModelWebService
     // Should match via fuzzy DI: stem "DataModelService" is contained in "DataModelWebService"
-    assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("DataModelWebService")),
+    assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("DataModelWebService"), None),
         "IDataModelService → DataModelWebService should match via fuzzy DI");
 }
 
@@ -884,7 +884,7 @@ fn test_fuzzy_di_no_false_positive() {
 
     // receiver is IService, target is UnrelatedRunner
     // "UnrelatedRunner" does NOT contain "Service" → should NOT match
-    assert!(!verify_call_site_target(&def_idx, 1, 25, "run", Some("UnrelatedRunner")),
+    assert!(!verify_call_site_target(&def_idx, 1, 25, "run", Some("UnrelatedRunner"), None),
         "IService → UnrelatedRunner should NOT match (no 'Service' in class name)");
 }
 
@@ -919,7 +919,7 @@ fn test_verify_fuzzy_di_without_base_types() {
 
     // Without base_types, the only way to match is via is_implementation_of
     // This test would FAIL before the BUG #2 fix (lowercased inputs)
-    assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("DataModelWebService")),
+    assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("DataModelWebService"), None),
         "IDataModelService → DataModelWebService should match via is_implementation_of (fuzzy DI) even without base_types");
 }
 
@@ -948,7 +948,7 @@ fn test_verify_reverse_fuzzy_di_without_base_types() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // Reverse: target is IDataModelService, receiver is DataModelWebService
-    assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("IDataModelService")),
+    assert!(verify_call_site_target(&def_idx, 1, 25, "getData", Some("IDataModelService"), None),
         "DataModelWebService → IDataModelService should match via reverse is_implementation_of");
 }
 
@@ -1007,7 +1007,7 @@ fn test_verify_call_site_target_extension_method() {
     );
 
     // Should match: target is TokenExtensions, which is an extension class for IsValidClrValue
-    assert!(verify_call_site_target(&def_idx, 3, 15, "isvalidclrvalue", Some("TokenExtensions")),
+    assert!(verify_call_site_target(&def_idx, 3, 15, "isvalidclrvalue", Some("TokenExtensions"), None),
         "Extension method IsValidClrValue should match when target class is the extension class");
 }
 
@@ -1035,7 +1035,7 @@ fn test_verify_call_site_target_extension_method_no_match_without_map() {
     // No extension_methods mapping
 
     // Should NOT match: receiver is TokenType, target is TokenExtensions, no relationship
-    assert!(!verify_call_site_target(&def_idx, 3, 15, "isvalidclrvalue", Some("TokenExtensions")),
+    assert!(!verify_call_site_target(&def_idx, 3, 15, "isvalidclrvalue", Some("TokenExtensions"), None),
         "Without extension_methods map, receiver=TokenType should NOT match target=TokenExtensions");
 }
 
@@ -1068,7 +1068,7 @@ fn test_verify_call_site_target_generic_method_call() {
     let def_idx = make_def_index(definitions, method_calls);
 
     // This should match: receiver ISearchService, target SearchService
-    assert!(verify_call_site_target(&def_idx, 1, 20, "SearchAsync", Some("SearchService")),
+    assert!(verify_call_site_target(&def_idx, 1, 20, "SearchAsync", Some("SearchService"), None),
         "Generic method call SearchAsync should match when method_name is properly stripped of type args");
 }
 
