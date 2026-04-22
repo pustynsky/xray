@@ -323,6 +323,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
     let exclude_file_lower: Vec<String> = exclude_file.iter().map(|s| s.to_lowercase()).collect();
     let ext_filter_list = super::utils::prepare_ext_filter(&ext_filter);
+    let extension_methods_lower = build_extension_methods_lower(&def_idx);
     let caller_ctx = CallerTreeContext {
         content_index: &content_index,
         def_idx: &def_idx,
@@ -339,6 +340,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         exclude_patterns,
         exclude_file_lower,
         ext_filter_list,
+        extension_methods_lower,
     };
 
     // Mutable state for body injection (shared across recursive calls)
@@ -381,11 +383,19 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             &initial_chain,
         );
 
-        // Dedup: remove duplicate nodes at root level (can happen with resolveInterfaces)
-        let tree = dedup_caller_tree(tree);
+        // CALL-005: dedup is only needed when resolveInterfaces=true, which is
+        // the only path that can produce duplicate root-level callers (the same
+        // caller found through multiple interface implementations). Without
+        // interface resolution the builder cannot emit duplicates, so the O(N)
+        // walk + per-node `format!()` allocations are pure waste on the hot path.
+        let tree = if resolve_interfaces { dedup_caller_tree(tree) } else { tree };
 
         let total_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
-        let truncated = total_nodes >= max_total_nodes;
+        // CALL-007: `total_nodes == max_total_nodes` means the builder filled
+        // the cap exactly without trying to add another node — that is NOT
+        // truncation. Use `>` so clients aren't tricked into a panic-loop of
+        // ever-larger `maxTotalNodes` retries on full-but-fitting trees.
+        let truncated = total_nodes > max_total_nodes;
         let search_elapsed = search_start.elapsed();
         let mut summary = json!({
             "nodesVisited": builder.visited.len(),
@@ -641,6 +651,10 @@ fn handle_multi_method_callers(
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
     let exclude_file_lower: Vec<String> = exclude_file.iter().map(|s| s.to_lowercase()).collect();
     let ext_filter_list = super::utils::prepare_ext_filter(&ext_filter);
+    // CALL-V-001: build the ext-method lookup once for the whole batch — its
+    // cost is O(N) over `def_idx.extension_methods` and it doesn't change
+    // between methods in the batch.
+    let extension_methods_lower = build_extension_methods_lower(&def_idx);
 
     // MINOR-9: see `handle_xray_callers` — same single-threaded Relaxed invariant applies.
     let impact_analysis_truncated = AtomicBool::new(false);
@@ -666,6 +680,7 @@ fn handle_multi_method_callers(
             exclude_patterns: exclude_patterns.clone(),
             exclude_file_lower: exclude_file_lower.clone(),
             ext_filter_list: ext_filter_list.clone(),
+            extension_methods_lower: extension_methods_lower.clone(),
         };
 
         let method_lower = method_name.to_lowercase();
@@ -712,14 +727,16 @@ fn handle_multi_method_callers(
             );
             file_cache = builder.file_cache;
             total_body_lines_emitted = builder.total_body_lines_emitted;
-            let tree = dedup_caller_tree(tree);
+            // CALL-005: only dedup when resolveInterfaces=true (see single-method handler).
+            let tree = if resolve_interfaces { dedup_caller_tree(tree) } else { tree };
             let method_nodes = node_count.load(std::sync::atomic::Ordering::Relaxed);
             total_nodes_all += method_nodes;
 
             method_result["callTree"] = json!(tree);
             method_result["nodesInTree"] = json!(method_nodes);
             method_result["nodesVisited"] = json!(builder.visited.len());
-            let method_truncated = method_nodes >= max_total_nodes;
+            // CALL-007: `>` not `>=` — exact-fit is not truncation.
+            let method_truncated = method_nodes > max_total_nodes;
             method_result["truncated"] = json!(method_truncated);
             // MINOR-7: per-method per-level truncation signal
             let method_dropped = builder.per_level_dropped;
@@ -1098,6 +1115,24 @@ fn dedup_caller_tree(tree: Vec<Value>) -> Vec<Value> {
         .collect()
 }
 
+/// CALL-V-001: build the lowercase lookup map from
+/// `def_idx.extension_methods` (`method_lower → [class_lower, ...]`).
+/// Called once per `xray_callers` request before the recursive tree build.
+fn build_extension_methods_lower(
+    def_idx: &DefinitionIndex,
+) -> HashMap<String, Vec<String>> {
+    def_idx
+        .extension_methods
+        .iter()
+        .map(|(method, classes)| {
+            (
+                method.to_lowercase(),
+                classes.iter().map(|c| c.to_lowercase()).collect(),
+            )
+        })
+        .collect()
+}
+
 struct CallerLimits {
     max_callers_per_level: usize,
     max_total_nodes: usize,
@@ -1125,6 +1160,15 @@ struct CallerTreeContext<'a> {
     exclude_file_lower: Vec<String>,
     /// Pre-split extension filter list
     ext_filter_list: Vec<String>,
+    /// CALL-V-001: pre-computed lowercase extension-method lookup
+    /// (`method_lower → [class_lower, ...]`). Built once per request from
+    /// `def_idx.extension_methods` to make the hot-path verify check O(1)
+    /// instead of an O(N) linear scan over every extension method in the
+    /// index. On C# repos with thousands of extension methods this dominated
+    /// `xray_callers` latency. Owned because the multi-method handler also
+    /// clones `exclude_patterns`/`ext_filter_list` per method, and the
+    /// per-iteration cost is small (≤5 ms on a 5 k-extension index).
+    extension_methods_lower: HashMap<String, Vec<String>>,
 }
 
 #[cfg(test)]
@@ -1155,6 +1199,7 @@ impl CallerTreeContext<'_> {
             exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
             exclude_file_lower: vec![],
             ext_filter_list: super::utils::prepare_ext_filter("cs"),
+            extension_methods_lower: build_extension_methods_lower(def_idx),
         }
     }
 }
@@ -1447,6 +1492,13 @@ fn verify_call_site_target(
     call_line: u32,
     method_name: &str,
     target_class: Option<&str>,
+    // CALL-V-001: optional pre-computed lowercase lookup
+    // (`method_lower → [class_lower, ...]`) for `def_idx.extension_methods`.
+    // When `Some`, the extension-method check is O(1); when `None`, falls
+    // back to the original O(N) linear scan. Builder hot-path passes
+    // `Some(&context.extension_methods_lower)`; unit tests pass `None`
+    // to keep their fixtures one-liners.
+    extension_methods_lower: Option<&HashMap<String, Vec<String>>>,
 ) -> bool {
     // If no target class specified, accept everything
     let target_class = match target_class {
@@ -1509,13 +1561,26 @@ fn verify_call_site_target(
     // where IsValidClrValue is defined in static class TokenExtensions).
     // If the target class defines this method as an extension method, accept
     // any call site with a matching method name regardless of receiver type.
-    // Note: extension_methods keys are original-case but method_name here is lowercased,
-    // so we do a case-insensitive scan over the map keys.
-    for (ext_method, ext_classes) in &def_idx.extension_methods {
-        if ext_method.eq_ignore_ascii_case(method_name)
-            && ext_classes.iter().any(|c| c.eq_ignore_ascii_case(target_class)) {
-                return true;
-            }
+    //
+    // CALL-V-001: prefer the pre-computed lowercase lookup when the builder
+    // supplies one — that turns the per-call-site check from O(N) over every
+    // extension method in the index into O(1). Tests can still call with
+    // `None` and pay the linear scan to keep their fixtures small.
+    let method_name_lower_for_ext = method_name.to_lowercase();
+    let target_lower_for_ext = target_class.to_lowercase();
+    if let Some(lookup) = extension_methods_lower {
+        if let Some(ext_classes) = lookup.get(&method_name_lower_for_ext)
+            && ext_classes.iter().any(|c| c == &target_lower_for_ext)
+        {
+            return true;
+        }
+    } else {
+        for (ext_method, ext_classes) in &def_idx.extension_methods {
+            if ext_method.eq_ignore_ascii_case(method_name)
+                && ext_classes.iter().any(|c| c.eq_ignore_ascii_case(target_class)) {
+                    return true;
+                }
+        }
     }
 
     // Check if ANY matching call-site passes verification
@@ -1531,9 +1596,13 @@ fn verify_call_site_target(
                 if rt_lower == target_interface {
                     return true;
                 }
-                // Reverse interface: receiver is Foo, target is IFoo
-                if target_lower.starts_with('i')
-                    && rt_lower == target_lower[1..]
+                // Reverse interface: receiver is Foo, target is IFoo.
+                // CALL-V-004: use `strip_prefix` instead of byte-index `[1..]`
+                // to stay safe if `target_lower` ever contains a multi-byte
+                // character that lowercases to one starting with 'i' (Turkish
+                // dotless-İ → i\u{307} edge case). Behavior identical for the
+                // ASCII identifiers we see today.
+                if target_lower.strip_prefix('i').is_some_and(|s| rt_lower == s)
                 {
                     return true;
                 }
@@ -1846,7 +1915,7 @@ impl CallerTreeBuilder<'_> {
 
                 // Verify the call on this line actually targets the expected class
                 if parent_class.is_some()
-                    && !verify_call_site_target(self.ctx.def_idx, caller_di, line, &method_lower, parent_class)
+                    && !verify_call_site_target(self.ctx.def_idx, caller_di, line, &method_lower, parent_class, Some(&self.ctx.extension_methods_lower))
                 {
                     continue;
                 }
