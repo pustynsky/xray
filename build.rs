@@ -16,10 +16,12 @@
 //! Stamp format: `YYYY-MM-DD HH:MM UTC (sha=<short>[-dirty])`
 
 fn main() {
-    // Get current UTC datetime for version string
+    // BUILD-004: tolerate a misconfigured system clock (NTP-less VM,
+    // dead CMOS battery). A clock before 1970 would otherwise panic
+    // here and fail `cargo build` with no useful diagnostic.
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_else(|_| std::time::Duration::from_secs(0))
         .as_secs();
 
     // Convert to human-readable UTC datetime (manual formatting to avoid chrono dependency)
@@ -31,12 +33,20 @@ fn main() {
     let remaining = now % secs_per_day;
     let hours = remaining / secs_per_hour;
     let minutes = (remaining % secs_per_hour) / secs_per_min;
-    let _seconds = remaining % secs_per_min;
 
     // Calculate year/month/day from days since epoch (1970-01-01)
     let (year, month, day) = days_to_date(days);
 
-    let git_stamp = git_short_sha_with_dirty().unwrap_or_else(|| "unknown".to_string());
+    let git_stamp = git_short_sha_with_dirty().unwrap_or_else(|| {
+        // BUILD-012: surface the fallback to developers via a cargo warning
+        // so a missing/broken `git` shows up in the build log instead of
+        // silently embedding `sha=unknown` into release binaries.
+        println!(
+            "cargo:warning=git not found or repository state unreadable; \
+             BUILD_GIT_SHA falls back to 'unknown'"
+        );
+        "unknown".to_string()
+    });
 
     let datetime = format!(
         "{:04}-{:02}-{:02} {:02}:{:02} UTC (sha={})",
@@ -52,6 +62,13 @@ fn main() {
     // "unknown" and the build script caches that until a .git appears.
     println!("cargo:rerun-if-changed=.git/HEAD");
     println!("cargo:rerun-if-changed=.git/index");
+    // BUILD-003: a fast-forward `git pull` on a tracked branch updates
+    // `refs/heads/<branch>` without touching `.git/HEAD`, leaving the
+    // embedded SHA stale until `cargo clean`. Watch the refs directory
+    // and the packed-refs file so cargo re-runs this script after a pull
+    // or a tag update.
+    println!("cargo:rerun-if-changed=.git/refs/heads");
+    println!("cargo:rerun-if-changed=.git/packed-refs");
 }
 
 /// Return `"<short7>"` or `"<short7>-dirty"` when `git` is available;
