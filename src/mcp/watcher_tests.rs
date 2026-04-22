@@ -489,10 +489,19 @@ fn test_watch_index_survives_save_load_roundtrip() {
 // ─── process_batch tests ───────────────────────────────────────────
 
 /// Helper: create a ContentIndex backed by real files in a temp dir,
-/// wrapped in Arc<RwLock> for process_batch.
-fn make_batch_test_setup() -> (tempfile::TempDir, Arc<RwLock<ContentIndex>>) {
+/// wrapped in `Arc<RwLock>` for `process_batch`.
+///
+/// Returns the `TempDir` guard, the **canonical** root `PathBuf`
+/// (with `\\?\` stripped + forward slashes), and the index. Tests that
+/// compare paths against walker / reconcile output must use the returned
+/// `root` (not `tmp.path()`) — on Windows CI runners `%TEMP%` is the 8.3
+/// short form (`RUNNER~1`) but the indexer canonicalises to the long form
+/// (`runneradmin`).
+fn make_batch_test_setup()
+    -> (tempfile::TempDir, std::path::PathBuf, Arc<RwLock<ContentIndex>>)
+{
     let tmp = tempfile::tempdir().unwrap();
-    let dir = tmp.path();
+    let dir = crate::canonicalize_test_root(tmp.path());
 
     let file_a = dir.join("a.cs");
     let file_b = dir.join("b.cs");
@@ -530,12 +539,12 @@ fn make_batch_test_setup() -> (tempfile::TempDir, Arc<RwLock<ContentIndex>>) {
         ..Default::default()
     };
 
-    (tmp, Arc::new(RwLock::new(index)))
+    (tmp, dir, Arc::new(RwLock::new(index)))
 }
 
 #[test]
 fn test_process_batch_empty() {
-    let (_tmp, index) = make_batch_test_setup();
+    let (_tmp, _root, index) = make_batch_test_setup();
     let mut dirty = HashSet::new();
     let mut removed = HashSet::new();
 
@@ -551,7 +560,7 @@ fn test_process_batch_empty() {
 
 #[test]
 fn test_process_batch_dirty_file() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
 
     // Modify file a.cs with new content
     let file_a = tmp.path().join("a.cs");
@@ -589,7 +598,7 @@ fn test_process_batch_dirty_file() {
 
 #[test]
 fn test_process_batch_removed_file() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
 
     let file_a = tmp.path().join("a.cs");
 
@@ -618,7 +627,7 @@ fn test_process_batch_removed_file() {
 
 #[test]
 fn test_process_batch_mixed_dirty_and_removed() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
 
     // Remove file a, modify file b
     let file_a = tmp.path().join("a.cs");
@@ -652,7 +661,7 @@ fn test_process_batch_mixed_dirty_and_removed() {
 
 #[test]
 fn test_process_batch_new_file_in_dirty() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
 
     // Create a brand new file
     let file_c = tmp.path().join("c.cs");
@@ -684,7 +693,7 @@ fn test_process_batch_new_file_in_dirty() {
 
 #[test]
 fn test_process_batch_total_tokens_consistent() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
 
     // Modify file a
     let file_a = tmp.path().join("a.cs");
@@ -867,7 +876,7 @@ fn test_process_batch_returns_false_on_poisoned_def_lock() {
 
 #[test]
 fn test_process_batch_returns_true_on_healthy_locks() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
     let test_file = tmp.path().join("new_healthy.cs");
     std::fs::write(&test_file, "class Healthy { }").unwrap();
 
@@ -1195,7 +1204,7 @@ fn test_apply_tokenized_file_no_path_to_id() {
 
 #[test]
 fn test_nonblocking_update_content_index_tokens_consistent() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
 
     // Modify file a
     let file_a = tmp.path().join("a.cs");
@@ -1217,7 +1226,7 @@ fn test_nonblocking_update_content_index_tokens_consistent() {
 
 #[test]
 fn test_nonblocking_update_content_index_new_file_tokens_consistent() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
 
     // Add a new file
     let file_c = tmp.path().join("c.cs");
@@ -1239,7 +1248,7 @@ fn test_nonblocking_update_content_index_new_file_tokens_consistent() {
 
 #[test]
 fn test_nonblocking_update_content_index_remove_tokens_consistent() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
 
     // Remove file a
     let file_a = tmp.path().join("a.cs");
@@ -1808,7 +1817,7 @@ fn scan_dir_state_path_keys_are_clean_path_normalised() {
 
 #[test]
 fn periodic_rescan_no_drift_does_not_bump_counter() {
-    let (tmp, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
     // Mark index as fresh so the mtime threshold treats existing files
     // as up-to-date (compute_content_drift uses created_at-2s margin).
     {
@@ -1821,7 +1830,7 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
     // Pre-populate file_index with the two existing files so file-index
     // drift check is also clean.
     let file_index = Arc::new(RwLock::new(Some(crate::FileIndex {
-        root: tmp.path().to_string_lossy().to_string(),
+        root: root.to_string_lossy().to_string(),
         format_version: crate::FILE_INDEX_VERSION,
         created_at: 0,
         max_age_secs: 86400,
@@ -1833,7 +1842,7 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
 
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
-        &tmp.path().to_string_lossy(),
+        &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
     );
@@ -1848,19 +1857,19 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
 
 #[test]
 fn periodic_rescan_detects_added_file_and_reconciles_content() {
-    let (tmp, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
     let stats = Arc::new(super::WatcherStats::new());
     let file_index_dirty = Arc::new(AtomicBool::new(false));
     let file_index = Arc::new(RwLock::new(None)); // not built yet
 
     // Simulate the bug: write a file directly to disk, BYPASSING the
     // notify event stream entirely (no watcher running here).
-    let new_file = tmp.path().join("c_added.cs");
+    let new_file = root.join("c_added.cs");
     std::fs::write(&new_file, "class Gamma { Logger log; }").unwrap();
 
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
-        &tmp.path().to_string_lossy(),
+        &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
     );
@@ -1882,17 +1891,17 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
 
 #[test]
 fn periodic_rescan_detects_removed_file_and_reconciles_content() {
-    let (tmp, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
     let stats = Arc::new(super::WatcherStats::new());
     let file_index_dirty = Arc::new(AtomicBool::new(false));
     let file_index = Arc::new(RwLock::new(None));
 
     // Delete b.cs directly from disk.
-    std::fs::remove_file(tmp.path().join("b.cs")).unwrap();
+    std::fs::remove_file(root.join("b.cs")).unwrap();
 
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
-        &tmp.path().to_string_lossy(),
+        &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
     );
@@ -1901,7 +1910,7 @@ fn periodic_rescan_detects_removed_file_and_reconciles_content() {
     assert_eq!(outcome.content_removed, 1);
     assert_eq!(stats.periodic_rescan_drift_events.load(Ordering::Relaxed), 1);
 
-    let clean_b = crate::clean_path(&tmp.path().join("b.cs").to_string_lossy());
+    let clean_b = crate::clean_path(&root.join("b.cs").to_string_lossy());
     let idx = index.read().unwrap();
     assert!(
         !idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_b)),
@@ -1914,7 +1923,7 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
     // FileIndex tracks ALL files (incl. extensions outside --ext).
     // A new .json file added directly to disk must set
     // file_index_dirty even though it doesn't touch the content index.
-    let (tmp, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
     {
         let mut idx = index.write().unwrap();
         idx.created_at = std::time::SystemTime::now()
@@ -1923,7 +1932,7 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
     let stats = Arc::new(super::WatcherStats::new());
     let file_index_dirty = Arc::new(AtomicBool::new(false));
     let file_index = Arc::new(RwLock::new(Some(crate::FileIndex {
-        root: tmp.path().to_string_lossy().to_string(),
+        root: root.to_string_lossy().to_string(),
         format_version: crate::FILE_INDEX_VERSION,
         created_at: 0,
         max_age_secs: 86400,
@@ -1933,11 +1942,11 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
         ],
     })));
 
-    std::fs::write(tmp.path().join("config.json"), "{}").unwrap();
+    std::fs::write(root.join("config.json"), "{}").unwrap();
 
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
-        &tmp.path().to_string_lossy(),
+        &root.to_string_lossy(),
         &["cs".to_string()], // .json is OUTSIDE --ext on purpose
         &stats,
     );
@@ -1964,7 +1973,7 @@ fn periodic_rescan_min_interval_is_ten_seconds() {
 
 #[test]
 fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change() {
-    let (tmp, index) = make_batch_test_setup();
+    let (tmp, _root, index) = make_batch_test_setup();
     let stats = Arc::new(super::WatcherStats::new());
     let file_index_dirty = Arc::new(AtomicBool::new(false));
     let file_index = Arc::new(RwLock::new(None));
@@ -2038,7 +2047,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
     // simulate a fully-lost notify event by spawning ONLY the periodic
     // rescan thread — no watcher. A new file written directly to disk
     // must appear in both ContentIndex and FileIndex within one tick.
-    let (tmp, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
     let stats = Arc::new(super::WatcherStats::new());
     let file_index_dirty = Arc::new(AtomicBool::new(false));
     let file_index = Arc::new(RwLock::new(None));
@@ -2049,7 +2058,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
         None,
         Arc::clone(&file_index),
         Arc::clone(&file_index_dirty),
-        tmp.path().to_path_buf(),
+        root.clone(),
         vec!["cs".to_string()],
         super::MIN_RESCAN_INTERVAL_SEC,
         Arc::clone(&generation),
@@ -2060,7 +2069,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
     // Drop a new .cs file directly on disk *without* notifying any
     // watcher — this is the bug scenario from
     // docs/bug-reports/bug-2026-04-21-watcher-misses-new-files-both-indexes.md.
-    let new_file = tmp.path().join("gamma.cs");
+    let new_file = root.join("gamma.cs");
     std::fs::write(&new_file, "class Gamma { Logger log; }").unwrap();
     let clean_new = crate::clean_path(&new_file.to_string_lossy());
 

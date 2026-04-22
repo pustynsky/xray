@@ -571,7 +571,8 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
 }
 #[test] fn test_grep_with_subdir_filter() {
     let tmp_holder = tempfile::tempdir().unwrap();
-    let tmp = tmp_holder.path();
+    let tmp_buf = crate::canonicalize_test_root(tmp_holder.path());
+    let tmp = tmp_buf.as_path();
     let sub_a = tmp.join("subA"); let sub_b = tmp.join("subB");
     std::fs::create_dir_all(&sub_a).unwrap(); std::fs::create_dir_all(&sub_b).unwrap();
     std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
@@ -1770,7 +1771,8 @@ fn test_grep_file_filter_comma_separated_or_semantics() {
 #[test]
 fn test_grep_with_relative_subdir_filter() {
     let tmp_holder = tempfile::tempdir().unwrap();
-    let tmp = tmp_holder.path();
+    let tmp_buf = crate::canonicalize_test_root(tmp_holder.path());
+    let tmp = tmp_buf.as_path();
     let sub_a = tmp.join("subA"); let sub_b = tmp.join("subB");
     std::fs::create_dir_all(&sub_a).unwrap(); std::fs::create_dir_all(&sub_b).unwrap();
     std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();

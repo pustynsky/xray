@@ -429,9 +429,10 @@ fn test_find_content_index_skips_stale_extensions() {
 #[test]
 fn test_find_content_index_accepts_superset() {
     let tmp = tempfile::tempdir().unwrap();
-    let index_base = tmp.path();
+    let canonical_tmp = crate::canonicalize_test_root(tmp.path());
+    let index_base = canonical_tmp.as_path();
 
-    let root_dir = tmp.path().join("project");
+    let root_dir = canonical_tmp.join("project");
     std::fs::create_dir_all(&root_dir).unwrap();
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
@@ -455,9 +456,10 @@ fn test_find_content_index_accepts_superset() {
 #[test]
 fn test_find_content_index_empty_expected_accepts_any() {
     let tmp = tempfile::tempdir().unwrap();
-    let index_base = tmp.path();
+    let canonical_tmp = crate::canonicalize_test_root(tmp.path());
+    let index_base = canonical_tmp.as_path();
 
-    let root_dir = tmp.path().join("project");
+    let root_dir = canonical_tmp.join("project");
     std::fs::create_dir_all(&root_dir).unwrap();
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
@@ -1083,11 +1085,12 @@ fn test_chunked_content_build_single_vs_multi_thread() {
 #[test]
 fn test_find_content_index_uses_meta_to_skip_non_matching_root() {
     let tmp = tempfile::tempdir().unwrap();
-    let index_base = tmp.path();
+    let canonical_tmp = crate::canonicalize_test_root(tmp.path());
+    let index_base = canonical_tmp.as_path();
 
     // Create two directories
-    let dir_a = tmp.path().join("project_a");
-    let dir_b = tmp.path().join("project_b");
+    let dir_a = canonical_tmp.join("project_a");
+    let dir_b = canonical_tmp.join("project_b");
     std::fs::create_dir_all(&dir_a).unwrap();
     std::fs::create_dir_all(&dir_b).unwrap();
 
@@ -1121,9 +1124,10 @@ fn test_find_content_index_uses_meta_to_skip_non_matching_root() {
 #[test]
 fn test_find_content_index_works_without_meta_sidecar() {
     let tmp = tempfile::tempdir().unwrap();
-    let index_base = tmp.path();
+    let canonical_tmp = crate::canonicalize_test_root(tmp.path());
+    let index_base = canonical_tmp.as_path();
 
-    let root_dir = tmp.path().join("project");
+    let root_dir = canonical_tmp.join("project");
     std::fs::create_dir_all(&root_dir).unwrap();
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
@@ -1184,9 +1188,10 @@ fn test_find_content_index_meta_rejects_extension_mismatch() {
 #[test]
 fn test_cleanup_stale_same_root_removes_old_index() {
     let tmp = tempfile::tempdir().unwrap();
-    let index_base = tmp.path();
+    let canonical_tmp = crate::canonicalize_test_root(tmp.path());
+    let index_base = canonical_tmp.as_path();
 
-    let root_dir = tmp.path().join("project");
+    let root_dir = canonical_tmp.join("project");
     std::fs::create_dir_all(&root_dir).unwrap();
     let root_str = crate::clean_path(&root_dir.to_string_lossy());
 
