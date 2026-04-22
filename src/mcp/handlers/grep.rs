@@ -1342,6 +1342,20 @@ fn handle_line_regex_search(
     let mut per_pattern_matches: Vec<HashMap<String, Vec<u32>>> = vec![HashMap::new(); patterns.len()];
     let mut content_cache: HashMap<String, String> = HashMap::new();
 
+    // MINOR-23: cap total bytes held in `content_cache` so a single broad query
+    // (e.g. lineRegex='.*' with showLines=true on a large repo) cannot OOM the
+    // server. When the cap is exceeded, matches are still recorded — only the
+    // `lineContent` previews for files inserted past the cap are dropped, and
+    // the response surfaces a `lineContentTruncated` hint in the summary.
+    // The cap is lowered for `cfg(test)` so a regression test can exercise the
+    // truncation branch without allocating real megabytes of fixtures.
+    #[cfg(not(test))]
+    const MAX_CONTENT_CACHE_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+    #[cfg(test)]
+    const MAX_CONTENT_CACHE_BYTES: usize = 4 * 1024; // 4 KiB
+    let mut cache_bytes_used: usize = 0;
+    let mut line_content_truncated = false;
+
     for file_path in &index.files {
         if !passes_file_filters(file_path, params) {
             continue;
@@ -1375,7 +1389,17 @@ fn handle_line_regex_search(
         }
 
         if matched_any_pattern && params.show_lines {
-            content_cache.insert(file_path.clone(), content);
+            // Reserve cache budget before insertion. If this file would push us
+            // past the cap, skip caching its content — matched line numbers are
+            // still emitted, only the source preview is dropped (and we set the
+            // `lineContentTruncated` flag so the client knows previews are
+            // partial). Files already cached stay cached; cap is monotone.
+            if cache_bytes_used.saturating_add(content.len()) > MAX_CONTENT_CACHE_BYTES {
+                line_content_truncated = true;
+            } else {
+                cache_bytes_used = cache_bytes_used.saturating_add(content.len());
+                content_cache.insert(file_path.clone(), content);
+            }
         }
     }
 
@@ -1462,6 +1486,24 @@ fn handle_line_regex_search(
         index, search_elapsed, ctx, true,
     );
     apply_dir_auto_converted_note(&mut summary, params);
+    if line_content_truncated {
+        // MINOR-23: tell the client that lineContent previews are partial.
+        // The matched line *numbers* are complete; only `lineContent` arrays
+        // for some files are absent because the cache budget was exceeded.
+        if let Some(obj) = summary.as_object_mut() {
+            obj.insert(
+                "lineContentTruncated".into(),
+                json!(true),
+            );
+            obj.insert(
+                "lineContentTruncationReason".into(),
+                json!(format!(
+                    "showLines content cache exceeded {} MiB cap; line numbers are complete but some files lack `lineContent` previews.",
+                    MAX_CONTENT_CACHE_BYTES / (1024 * 1024)
+                )),
+            );
+        }
+    }
     let output = json!({
         "files": files_json,
         "summary": summary
