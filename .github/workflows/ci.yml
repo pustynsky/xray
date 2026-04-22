@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: ["**"]
+    branches: [main]
   pull_request:
-    branches: ["**"]
+    branches: [main]
 
 env:
   CARGO_TERM_COLOR: always
@@ -35,6 +35,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Tests in src/git/* and src/mcp/handlers/git_handler_tests.rs run
+          # against the actual workspace repo (`.`) and require full history
+          # (HEAD~1, file_history, branch detection). Default shallow clone
+          # (fetch-depth: 1) leaves the working copy in detached HEAD with no
+          # parent commits, so those tests fail in CI but pass locally.
+          fetch-depth: 0
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - name: cargo test --workspace --locked

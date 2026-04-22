@@ -426,6 +426,7 @@ fn test_sanitize_all_special_chars() {
 
 // ─── extract_semantic_prefix tests ───────────────────────────
 
+#[cfg(windows)]
 #[test]
 fn test_prefix_drive_root() {
     // On Windows, C:\ canonicalizes to \\?\C:\ which has Prefix + RootDir, 0 Normal components
@@ -434,6 +435,7 @@ fn test_prefix_drive_root() {
     assert_eq!(result, "c");
 }
 
+#[cfg(windows)]
 #[test]
 fn test_prefix_single_component() {
     let path = std::path::PathBuf::from(r"C:\test");
@@ -441,6 +443,7 @@ fn test_prefix_single_component() {
     assert_eq!(result, "c_test");
 }
 
+#[cfg(windows)]
 #[test]
 fn test_prefix_single_component_drive_d() {
     let path = std::path::PathBuf::from(r"D:\test");
@@ -448,6 +451,7 @@ fn test_prefix_single_component_drive_d() {
     assert_eq!(result, "d_test");
 }
 
+#[cfg(windows)]
 #[test]
 fn test_prefix_two_components() {
     let path = std::path::PathBuf::from(r"C:\Repos\MyProject");
@@ -455,6 +459,7 @@ fn test_prefix_two_components() {
     assert_eq!(result, "repos_myproject");
 }
 
+#[cfg(windows)]
 #[test]
 fn test_prefix_three_components_takes_last_two() {
     let path = std::path::PathBuf::from(r"C:\Repos\rust\search");
@@ -462,6 +467,7 @@ fn test_prefix_three_components_takes_last_two() {
     assert_eq!(result, "rust_search");
 }
 
+#[cfg(windows)]
 #[test]
 fn test_prefix_deep_path() {
     let path = std::path::PathBuf::from(r"C:\a\b\c\deep\project");
@@ -469,6 +475,7 @@ fn test_prefix_deep_path() {
     assert_eq!(result, "deep_project");
 }
 
+#[cfg(windows)]
 #[test]
 fn test_prefix_same_leaf_different_parent() {
     let p1 = std::path::PathBuf::from(r"C:\test\test");
@@ -484,6 +491,7 @@ fn test_prefix_reserved_name_component() {
     assert_eq!(result, "c__con");
 }
 
+#[cfg(windows)]
 #[test]
 fn test_prefix_special_chars_in_component() {
     let path = std::path::PathBuf::from(r"C:\My Projects (2024)\api");

@@ -696,6 +696,23 @@ fn fast_lowercase(s: &str) -> String {
     }
 }
 
+/// Canonicalize a path and return it with `\\?\` prefix stripped + separators
+/// normalised to `/`. Intended for tests that need to compare paths against
+/// indexer/walker output, which always passes through `fs::canonicalize` +
+/// [`clean_path`]. On CI runners with short user names (`runneradmin` ->
+/// `RUNNER~1`), `tempfile::tempdir()` and `std::env::temp_dir()` return the
+/// 8.3 short form; the walker returns the long form. Without this round-trip,
+/// set comparisons spuriously diverge.
+///
+/// Exposed as `pub` (not `#[cfg(test)]`) so the binary crate's tests can
+/// reach it via the lib crate, but it has no production callers.
+#[doc(hidden)]
+#[must_use]
+pub fn canonicalize_test_root(p: &std::path::Path) -> std::path::PathBuf {
+    let canon = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    std::path::PathBuf::from(clean_path(&canon.to_string_lossy()))
+}
+
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod lib_tests;

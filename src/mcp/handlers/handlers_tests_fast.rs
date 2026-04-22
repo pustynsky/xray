@@ -307,6 +307,9 @@ fn test_xray_fast_subdir_reuses_parent_index() {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_subdir_reuse_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
+    // Canonicalize so paths line up with the indexer/walker output on
+    // Windows CI (8.3 short form `RUNNER~1` vs canonical `runneradmin`).
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
 
     // Create a directory structure: root/docs/design/rest-api/
     let subdir = tmp_dir.join("docs").join("design").join("rest-api");
@@ -431,6 +434,7 @@ fn test_xray_fast_subdir_max_depth_relative_to_dir() {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_subdir_maxdepth_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
 
     // Structure:
     //   root/
@@ -1200,6 +1204,7 @@ fn test_xray_fast_filecount_with_subdir() {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_fc_reldir_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
 
     // Structure:
     //   src/
@@ -1307,6 +1312,7 @@ fn test_xray_fast_filecount_with_absolute_dir() {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_fc_absdir_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
 
     let sub = tmp_dir.join("sub");
     let _ = std::fs::create_dir_all(&sub);
@@ -1358,6 +1364,7 @@ fn test_xray_fast_filecount_when_dir_equals_root() {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_fc_rootdir_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
 
     // Structure:
     //   src/
@@ -1517,6 +1524,7 @@ fn test_xray_fast_relative_dir_subdir_search() {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_reldir_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
 
     // Create: root/src/services/UserService.cs, root/src/services/OrderService.cs, root/README.md
     let services_dir = tmp_dir.join("src").join("services");
@@ -1560,6 +1568,7 @@ fn test_xray_fast_relative_dir_pattern_search() {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_reldir_pat_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
 
     let services_dir = tmp_dir.join("src").join("services");
     std::fs::create_dir_all(&services_dir).unwrap();
@@ -1906,6 +1915,7 @@ fn test_xray_fast_subdir_filter_through_symlinked_subdir() {
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_fast_symlink_{}_{}", std::process::id(), id));
     let _ = std::fs::create_dir_all(&tmp_dir);
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
 
     // Workspace root with a real file under `inner/`.
     let workspace = tmp_dir.join("workspace");
