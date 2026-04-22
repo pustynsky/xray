@@ -18,6 +18,28 @@ use serde::{Deserialize, Serialize};
 /// Tokens shorter than this are discarded during tokenization.
 pub const DEFAULT_MIN_TOKEN_LEN: usize = 2;
 
+// ─── Clock ──────────────────────────────────────────────────────────
+
+/// Return the current Unix timestamp in seconds, or `None` if the system
+/// clock is set before the Unix epoch.
+///
+/// **Why `Option` and not `unwrap_or(0)`:** the previous pattern across
+/// `cli/info.rs`, `build.rs`, and the watcher silently substituted `0` on
+/// clock failure. Downstream `now.saturating_sub(created_at)` then evaluated
+/// to `0` for *every* cache, so `xray info` reported every index as "0.0h
+/// ago" and never stale — a misleading "all-fresh" view while the watcher
+/// silently missed changes. Returning `None` lets callers either surface
+/// "unknown age" honestly or treat the failure as "ancient" (force-stale).
+///
+/// On any reasonably-configured host this returns `Some` always.
+#[must_use]
+pub fn current_unix_secs() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
 // ─── Stable hashing ─────────────────────────────────────────────────
 
 /// Stable FNV-1a hash (deterministic across Rust versions, unlike `DefaultHasher`).
