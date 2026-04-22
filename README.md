@@ -124,9 +124,6 @@ xray grep "HttpClient" -d C:\Projects -e cs
 
 # Search file names (instant)
 xray fast "UserService" -d C:\Projects -e cs
-
-# Live filesystem search (no index needed)
-xray find "TODO" -d C:\Projects --contents -e cs
 ```
 
 See [CLI Reference](docs/cli-reference.md) for all commands and options.

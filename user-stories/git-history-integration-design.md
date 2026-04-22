@@ -1,3 +1,6 @@
+> **Status: HISTORICAL DESIGN DOC (pre-implementation, 2026-03)** — kept for context. The shipped implementation may differ; consult the source code in `src/git/` and `CHANGELOG.md` for current behavior.
+
+
 # Design Document: Git History in Search MCP Server
 
 ## 1. Context and Motivation

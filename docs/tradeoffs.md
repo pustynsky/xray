@@ -41,7 +41,7 @@ Every architectural decision has alternatives. This document captures what was c
 
 **Why:**
 
-- **90× faster than the alternative** — `xray_fast` scans the in-memory vec in ~35ms for 100K files. The alternative (`xray_find`) does a live filesystem walk taking ~3s for the same files. The vec scan replaces disk I/O, not a faster algorithm.
+- **90× faster than a live filesystem walk** — `xray_fast` scans the in-memory vec in ~35ms for 100K files. A live walk over the same files takes ~3s. The vec scan replaces disk I/O, not a faster algorithm.
 - Simple — no secondary data structures to build, maintain, or invalidate
 - Cache-friendly — sequential scan over a contiguous `Vec` has excellent CPU cache locality
 - Flexible matching — supports substring, regex, case-insensitive, comma-separated multi-term OR — all patterns that are hard to pre-index efficiently

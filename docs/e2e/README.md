@@ -14,11 +14,11 @@ output format, and all feature flags.
 
 | File | Scope | Key Test IDs |
 |------|-------|-------------|
-| [cli-tests.md](cli-tests.md) | CLI commands: find, fast, grep, index, info, cleanup, def-index | T01–T24, T61–T64 |
+| [cli-tests.md](cli-tests.md) | CLI commands: fast, grep, index, info, cleanup, def-index | T01–T24, T61–T64 |
 | [mcp-grep-tests.md](mcp-grep-tests.md) | MCP `xray_grep`: substring, phrase, truncation, auto-switch | T27, T33–T42, T65–T68 |
 | [mcp-definitions-tests.md](mcp-definitions-tests.md) | MCP `xray_definitions`: body, hints, auto-correct, code stats, ranking | T28, T69–T78, T-AS*, T-RANK*, T-CODESTATS* |
 | [mcp-callers-tests.md](mcp-callers-tests.md) | MCP `xray_callers`: call trees, DI, overloads, type inference | T29–T31, T53–T59, T83–T84, T-FIX3* |
-| [mcp-fast-edit-tests.md](mcp-fast-edit-tests.md) | MCP `xray_fast`, `xray_edit`, `xray_find` | T79–T82, T-EDIT*, T43, T106 |
+| [mcp-fast-edit-tests.md](mcp-fast-edit-tests.md) | MCP `xray_fast`, `xray_edit` | T79–T82, T-EDIT* |
 | [git-tests.md](git-tests.md) | Git tools, cache, blame, branch status | T-GIT*, T-CACHE*, T-BRANCH*, T70 |
 | [language-tests.md](language-tests.md) | SQL, TypeScript, Angular parser-specific tests | T-SQL*, T44–T51, T-ANGULAR*, T-PARSER* |
 | [infrastructure-tests.md](infrastructure-tests.md) | Server protocol, async startup, shutdown, compression, memory, routing | T25–T26, T39–T40, T-ASYNC*, T-LZ4, T-SHUTDOWN* |

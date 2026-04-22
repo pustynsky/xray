@@ -19,7 +19,7 @@ Tests for MCP server protocol, async startup, graceful shutdown, LZ4 compression
 
 **Expected:**
 
-- 16 tools: `xray_grep`, `xray_find`, `xray_fast`, `xray_info`, `xray_reindex`, `xray_reindex_definitions`, `xray_definitions`, `xray_callers`, `xray_edit`, `xray_help`, `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_activity`, `xray_git_blame`, `xray_branch_status`
+- 15 tools: `xray_grep`, `xray_fast`, `xray_info`, `xray_reindex`, `xray_reindex_definitions`, `xray_definitions`, `xray_callers`, `xray_edit`, `xray_help`, `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_activity`, `xray_git_blame`, `xray_branch_status`
 - Each tool has `name`, `description`, `inputSchema`
 
 ---
@@ -303,12 +303,6 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 ### T-ASYNC-06: `xray_help` and `xray_info` work during index build
 
 **Unit test:** `test_dispatch_help_works_while_index_building`
-
----
-
-### T-ASYNC-07: `xray_find` works during index build
-
-**Unit test:** `test_dispatch_find_works_while_index_building`
 
 ---
 

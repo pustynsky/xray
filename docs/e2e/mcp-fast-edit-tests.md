@@ -1,6 +1,6 @@
-# MCP `xray_fast`, `xray_edit`, `xray_find` Tests
+# MCP `xray_fast`, `xray_edit` Tests
 
-Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesystem search (`xray_find`) MCP tools.
+Tests for file name search (`xray_fast`) and file editing (`xray_edit`) MCP tools.
 
 ---
 
@@ -206,39 +206,6 @@ Tests for file name search (`xray_fast`), file editing (`xray_edit`), and filesy
 **Unit tests:** `test_xray_fast_ranking_exact_stem_first`, `test_xray_fast_ranking_shorter_stem_first`
 
 **Status:** ✅ Implemented
-
----
-
-## xray_find
-
-### T43: `serve` — xray_find directory validation (security)
-
-**Expected:**
-
-- Directory outside `server_dir` → error
-- Subdirectory of `server_dir` → accepted
-- No `dir` parameter → uses `server_dir` as default
-
-**Unit tests:** `test_validate_search_dir_subdirectory`, `test_validate_search_dir_outside_rejects`
-
-**Status:** ✅ Implemented
-
----
-
-### T82: `xray_find` — Combined parameters (countOnly, maxDepth, ignoreCase+regex)
-
-**Unit test:** `test_xray_find_combined_parameters`
-
----
-
-### T106: `xray_find` — Contents mode
-
-**Expected:**
-
-- `contents: true` searches file content, not names
-- Results include file path and line number
-
-**Unit test:** `test_xray_find_contents_mode`
 
 ---
 

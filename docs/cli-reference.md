@@ -1,53 +1,6 @@
 # CLI Reference
 
-Complete reference for all `search` CLI commands.
-
-## `xray find` — Live Filesystem Search
-
-Walks the filesystem in real-time. No index needed.
-
-```bash
-# Search for files by name
-xray find "config" -d C:\Projects
-
-# Search with extension filter
-xray find "main" -e rs
-
-# Search file contents
-xray find "TODO" -d C:\Projects --contents -e cs
-
-# Regex search in file contents
-xray find "fn\s+\w+" --contents --regex -e rs
-
-# Case-insensitive search
-xray find "readme" -i -d C:\
-
-# Count matches only
-xray find ".exe" -d C:\Windows -c
-
-# Limit search depth
-xray find "node_modules" -d C:\Projects --max-depth 3
-
-# Include hidden and gitignored files
-xray find "secret" --hidden --no-ignore
-```
-
-**Options:**
-
-| Flag                | Description                           |
-| ------------------- | ------------------------------------- |
-| `-d, --dir <DIR>`   | Root directory (default: `.`)         |
-| `-r, --regex`       | Treat pattern as regex                |
-| `--contents`        | Search file contents instead of names |
-| `--hidden`          | Include hidden files                  |
-| `--max-depth <N>`   | Max directory depth (0 = unlimited)   |
-| `-t, --threads <N>` | Thread count (0 = auto)               |
-| `-i, --ignore-case` | Case-insensitive search               |
-| `--no-ignore`       | Include `.gitignore`d files           |
-| `-c, --count`       | Show match count only                 |
-| `-e, --ext <EXT>`   | Filter by file extension              |
-
----
+Complete reference for all `xray` CLI commands.
 
 ## `xray index` — Build File Name Index
 

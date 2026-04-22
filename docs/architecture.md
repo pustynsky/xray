@@ -7,7 +7,6 @@
 ```mermaid
 graph TB
     subgraph CLI["CLI Layer (clap)"]
-        FIND[xray find]
         INDEX[xray index]
         FAST[xray fast]
         CIDX[xray content-index]
@@ -375,10 +374,10 @@ sequenceDiagram
 | # | Tool | Index/Source | Purpose |
 |---|------|-------------|---------|
 | 1 | `xray_grep` | ContentIndex | Full-text search with TF-IDF, substring, phrase, regex |
-| 2 | `xray_find` | Filesystem walk | Live file search (slow, fallback) |
-| 3 | `xray_fast` | FileIndex | Pre-built file name search (~35ms) |
-| 4 | `xray_definitions` | DefinitionIndex | Structural code search (classes, methods, etc.) |
-| 5 | `xray_callers` | DefinitionIndex + ContentIndex | Call tree analysis (up/down), DI-aware |
+| 2 | `xray_fast` | FileIndex | Pre-built file name search (~35ms) |
+| 3 | `xray_definitions` | DefinitionIndex | Structural code search (classes, methods, etc.) |
+| 4 | `xray_callers` | DefinitionIndex + ContentIndex | Call tree analysis (up/down), DI-aware |
+| 5 | `xray_edit` | Filesystem | Multi-file atomic edits (line-range or text-match), auto-creates files |
 | 6 | `xray_info` | All | Index status, sizes, age |
 | 7 | `xray_help` | — | Best practices guide for LLM agents |
 | 8 | `xray_reindex` | ContentIndex | Force rebuild content index |
@@ -393,7 +392,7 @@ sequenceDiagram
 **Design decisions:**
 
 - **Stdio transport** — no HTTP overhead, direct pipe from VS Code process manager
-- **Async startup** — event loop starts immediately with empty indexes; pre-built indexes load synchronously from disk (< 3s), otherwise build in background threads. `AtomicBool` flags (`content_ready`, `def_ready`) gate search tools — they return "index is building" until ready. `initialize`, `tools/list`, `xray_help`, `xray_info`, and `xray_find` work immediately.
+- **Async startup** — event loop starts immediately with empty indexes; pre-built indexes load synchronously from disk (< 3s), otherwise build in background threads. `AtomicBool` flags (`content_ready`, `def_ready`) gate search tools — they return "index is building" until ready. `initialize`, `tools/list`, `xray_help`, and `xray_info` work immediately.
 - **Single-threaded event loop** — JSON-RPC is sequential; index reads use `RwLock` for watcher concurrency
 - **Indexes held in `Arc<RwLock<T>>`** — watcher thread writes, server thread reads; background build thread writes once at completion
 - **All logging to stderr** — stdout is exclusively for JSON-RPC protocol messages
@@ -511,7 +510,7 @@ For comma-separated multi-term queries, the **best** (lowest) tier across all te
 
 **`xray_grep` phrase mode**: sorted by occurrence count (descending).
 
-**Not ranked**: `xray_grep` token/substring mode (uses TF-IDF), `xray_find` (filesystem walk order), regex mode in `xray_definitions` (no "exact match" semantics).
+**Not ranked**: `xray_grep` token/substring mode (uses TF-IDF), regex mode in `xray_definitions` (no "exact match" semantics).
 
 #### Design Decisions
 
@@ -697,7 +696,6 @@ src/
     └── handlers/             # Tool implementations (one file per tool group)
         ├── mod.rs            # tool_definitions() + dispatch_tool() + reindex handlers
         ├── grep.rs           # handle_xray_grep + phrase/substring helpers
-        ├── find.rs           # handle_xray_find
         ├── fast.rs           # handle_xray_fast
         ├── definitions.rs    # handle_xray_definitions + body/doccomment injection + audit
         ├── callers.rs        # handle_xray_callers + caller/callee tree builders + impactAnalysis
@@ -711,7 +709,6 @@ src/
         ├── handlers_tests_typescript.rs     # TypeScript handler tests
         ├── handlers_tests_rust.rs    # Rust handler tests
         ├── handlers_tests_fast.rs    # File search handler tests
-        ├── handlers_tests_find.rs    # Find handler tests
         ├── handlers_tests_grep.rs    # Grep handler tests
         ├── handlers_tests_git.rs     # Git handler tests
         ├── handlers_tests_misc.rs    # Miscellaneous handler tests

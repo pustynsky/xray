@@ -1,3 +1,6 @@
+> **Status: HISTORICAL DESIGN DOC (pre-implementation, 2026-03)** — kept for context. The shipped implementation may differ; consult the source code in `src/git/` and `CHANGELOG.md` for current behavior.
+
+
 # Design: Git History Cache (Compact In-Memory Cache)
 
 > **Main design:** [`git-history-integration-design.md`](git-history-integration-design.md)

@@ -79,7 +79,7 @@ After all tests pass and the binary is reinstalled, propose creating a branch an
 
 ## MCP Tool Design Rules
 
-- **⚠️ NO new combo tools** — never create a new MCP tool that internally calls multiple existing tools (e.g., a `search_blast_radius` that combines `xray_callers` + `xray_grep` + `xray_git_authors`). Each new tool increases the tool selection burden on the LLM. Currently we have 14 tools — at 20+ the LLM starts to degrade in tool selection accuracy.
+- **⚠️ NO new combo tools** — never create a new MCP tool that internally calls multiple existing tools (e.g., a `search_blast_radius` that combines `xray_callers` + `xray_grep` + `xray_git_authors`). Each new tool increases the tool selection burden on the LLM. Currently we have 15 tools — at 20+ the LLM starts to degrade in tool selection accuracy.
 - **Extend existing tools with parameters** — if a feature combines data from multiple indexes, add it as an optional parameter to the most relevant existing tool. Example: `crossServiceScan: true` in `xray_callers` (internally calls `xray_grep`) is correct — the LLM doesn't need to choose a new tool, just add a flag.
 - **Before implementing a new tool, ask**: "Can this be a parameter on an existing tool?" If yes — do that instead.
 - **If a new tool IS genuinely needed** (new data source, fundamentally different operation), keep it atomic — one index, one data source, one concern. Examples of correct atomic tools: `xray_grep` (content index), `xray_definitions` (definition index), `xray_git_blame` (git CLI).
