@@ -1,15 +1,50 @@
 //! Criterion benchmarks for search engine core operations.
 //!
-//! Run with: `cargo bench`
+//! # How to run
 //!
-//! These benchmarks measure the core operations in isolation,
-//! using synthetic data to ensure reproducibility across machines.
+//! ```text
+//! cargo bench --bench search_benchmarks
+//! ```
+//!
+//! HTML reports are written to `target/criterion/`. To compare against a
+//! saved baseline use `cargo bench -- --save-baseline <name>` and `critcmp`.
+//!
+//! # Important caveats
+//!
+//! These benchmarks measure the core operations in **isolation against
+//! synthetic data** so results are reproducible across machines. Several
+//! known fidelity gaps are tracked in
+//! `docs/user-stories/todo_2026-04-22_benches-review-findings.md`:
+//!
+//! * Some scoring/intersection helpers are inlined copies of production
+//!   logic rather than calls into `code_xray::*` (BENCH-001..003).
+//! * The synthetic corpus is uniform/Zipf-free and does not reflect real
+//!   token-frequency distributions (BENCH-004).
+//! * MCP handler hot paths (`xray_grep`, `xray_definitions`, `xray_callers`,
+//!   `xray_edit`, `xray_git_*`) are not yet covered (BENCH-005).
+//! * `bench_serialization` measures bincode without LZ4-frame compression
+//!   used in production (BENCH-007).
+//!
+//! Treat absolute numbers as ballpark figures — the regression-tracking
+//! value of these benches is in *deltas* across commits, not in absolute
+//! latency claims about production behaviour.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::collections::HashMap;
 
 // Import from the code-xray crate
 use code_xray::{generate_trigrams, tokenize, ContentIndex, Posting, TrigramIndex};
+
+// ─── Shared parameter sets (BENCH-018) ───────────────────────────────
+
+/// Standard file-count sweep used by most benches. Keep in sync with the
+/// regression-tracking baselines under `target/criterion/`.
+const BENCH_SIZES: &[usize] = &[1_000, 10_000, 50_000];
+
+/// Reduced sweep for benches whose per-iteration cost is dominated by
+/// allocation / serialization, where 50k files would push wall-clock past
+/// the criterion default measurement window.
+const BENCH_SIZES_SMALL: &[usize] = &[100, 1_000, 5_000];
 
 // ─── Helpers ─────────────────────────────────────────────────────────
 
@@ -22,7 +57,10 @@ fn build_synthetic_index(num_files: usize, tokens_per_file: usize) -> ContentInd
 
     for file_id in 0..num_files {
         files.push(format!("src/file_{}.cs", file_id));
-        let mut count = 0u32;
+        // BENCH-011: accumulate in u64 so a future bump to `tokens_per_file`
+        // beyond ~4.29e9 fails loudly on the `try_from` below instead of
+        // silently wrapping a `u32` counter.
+        let mut count: u64 = 0;
 
         for t in 0..tokens_per_file {
             let token = format!("token_{}", t % 500); // 500 unique tokens
@@ -67,7 +105,10 @@ fn build_synthetic_index(num_files: usize, tokens_per_file: usize) -> ContentInd
                 });
         }
 
-        file_token_counts.push(count);
+        let count_u32 = u32::try_from(count).expect(
+            "per-file token count overflows u32; lower tokens_per_file or widen ContentIndex::file_token_counts",
+        );
+        file_token_counts.push(count_u32);
     }
 
     ContentIndex {
@@ -157,7 +198,7 @@ fn bench_index_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_lookup");
 
     // Test with different index sizes
-    for &num_files in &[1_000, 10_000, 50_000] {
+    for &num_files in BENCH_SIZES {
         let index = build_synthetic_index(num_files, 200);
 
         group.bench_with_input(
@@ -209,7 +250,7 @@ fn bench_index_lookup(c: &mut Criterion) {
 fn bench_tfidf_scoring(c: &mut Criterion) {
     let mut group = c.benchmark_group("tfidf_scoring");
 
-    for &num_files in &[1_000, 10_000, 50_000] {
+    for &num_files in BENCH_SIZES {
         let index = build_synthetic_index(num_files, 200);
         let total_docs = index.files.len() as f64;
 
@@ -280,7 +321,7 @@ fn bench_regex_scan(c: &mut Criterion) {
     let re_prefix = regex::Regex::new("(?i)^token_4.*$").unwrap();
     let re_exact = regex::Regex::new("(?i)^class$").unwrap();
 
-    for &num_files in &[1_000, 10_000, 50_000] {
+    for &num_files in BENCH_SIZES {
         let index = build_synthetic_index(num_files, 200);
 
         group.bench_with_input(
@@ -317,7 +358,7 @@ fn bench_index_build(c: &mut Criterion) {
     let mut group = c.benchmark_group("index_build");
     group.sample_size(10); // Slower benchmarks need fewer samples
 
-    for &num_files in &[100, 1_000, 5_000] {
+    for &num_files in BENCH_SIZES_SMALL {
         group.bench_with_input(
             BenchmarkId::new("build_synthetic", num_files),
             &num_files,
@@ -409,7 +450,7 @@ fn bench_trigram_build(c: &mut Criterion) {
     let mut group = c.benchmark_group("trigram_build");
     group.sample_size(10);
 
-    for &num_files in &[1_000, 10_000, 50_000] {
+    for &num_files in BENCH_SIZES {
         let index = build_synthetic_index(num_files, 200);
 
         group.bench_with_input(
@@ -429,7 +470,7 @@ fn bench_trigram_build(c: &mut Criterion) {
 fn bench_substring_search(c: &mut Criterion) {
     let mut group = c.benchmark_group("substring_search");
 
-    for &num_files in &[1_000, 10_000, 50_000] {
+    for &num_files in BENCH_SIZES {
         let index = build_synthetic_index(num_files, 200);
         let trigram = build_trigram_for_bench(&index.index);
 
