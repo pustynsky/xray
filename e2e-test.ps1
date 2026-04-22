@@ -6,6 +6,11 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# PS-003: strict mode catches typo'd variable names that would otherwise silently
+# evaluate to $null and let tests false-pass. Applied at top scope so all helpers
+# inherit it. If a legitimate use of `$null` triggers this, fix the use site —
+# do not relax the strictness.
+Set-StrictMode -Version Latest
 $passed = 0
 $failed = 0
 $total = 0

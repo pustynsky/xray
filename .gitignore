@@ -15,6 +15,22 @@ proptest-regressions/
 *.idx
 *.cidx
 *.didx
+
+# scripts/roslyn-callers-audit blobs (1.7GB Roslyn cross-validation artefacts — BLOB-001)
+scripts/roslyn-callers-audit/*.json
+scripts/roslyn-callers-audit/cache_*
+scripts/roslyn-callers-audit/*_stdout.json
+scripts/roslyn-callers-audit/*_stderr.txt
+
+# Script-local logs / output artefacts (PS-010)
+scripts/*.log
+scripts/*.log.err
+scripts/*_output.*
+scripts/single_test_output.txt
+scripts/line_regex_test_output.txt
+
+# Workspace-root debug artefacts
+test-out.log
 .vscode/settings.json
 
 # Project-specific content (may contain internal names/links)
