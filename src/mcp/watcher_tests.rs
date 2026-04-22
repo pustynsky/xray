@@ -978,12 +978,30 @@ fn test_should_invalidate_file_index_modify_any() {
 }
 
 #[test]
-fn test_should_invalidate_file_index_data_change_does_not_invalidate() {
+fn test_should_invalidate_file_index_data_change_invalidates() {
     use notify::EventKind;
     use notify::event::{ModifyKind, DataChange};
     use crate::mcp::watcher::should_invalidate_file_index;
-    // Data-only changes (file content) should NOT trigger file index rebuild
-    assert!(!should_invalidate_file_index(&EventKind::Modify(ModifyKind::Data(DataChange::Content))));
+    // MCP-WCH-001: data-only changes now also invalidate the file-list
+    // index (safe over-approximation). Previously only Create/Remove/
+    // Modify(Name)/Modify(Any) invalidated, which left newly-created
+    // files invisible to xray_fast on Windows/macOS until the periodic
+    // rescan ran (notify-rs delivers Modify(Other)/Modify(Metadata)
+    // for new files in those backends).
+    assert!(should_invalidate_file_index(&EventKind::Modify(ModifyKind::Data(DataChange::Content))));
+}
+
+#[test]
+fn test_should_invalidate_file_index_modify_other_and_metadata_invalidate() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, MetadataKind};
+    use crate::mcp::watcher::should_invalidate_file_index;
+    // MCP-WCH-001 regression test: Windows/ReadDirectoryChangesW and
+    // macOS/FSEvents-degraded routinely deliver Modify(Other) and
+    // Modify(Metadata) for newly-created files. Both must invalidate
+    // the file-list index or xray_fast will miss the new file.
+    assert!(should_invalidate_file_index(&EventKind::Modify(ModifyKind::Other)));
+    assert!(should_invalidate_file_index(&EventKind::Modify(ModifyKind::Metadata(MetadataKind::Any))));
 }
 
 #[test]
