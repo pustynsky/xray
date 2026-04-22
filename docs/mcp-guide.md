@@ -136,6 +136,54 @@ Example:
 
 ---
 
+## Common arg name mistakes (alias hints)
+
+All xray MCP tools validate incoming args against their JSON schema. Unknown
+or alien-named keys are reported in `summary.unknownArgsWarning` (default) or
+as a hard `UNKNOWN_ARGS` error when `XRAY_STRICT_ARGS=1` is set. The most
+common LLM/agent mistakes get a direct “Use 'X' instead” hint via a built-in
+alias table; everything else falls back to a Jaro-Winkler nearest-name
+suggestion.
+
+| You probably meant… | The xray name | Notes |
+|---|---|---|
+| `isRegexp`, `useRegex`, `is_regex` | `regex` | VS Code `grep_search` shape. |
+| `includePattern` | `file` | xray `file=` is **substring + comma-OR**, not a glob. Example: `file='Service,Client'`. |
+| `excludePattern` | `excludeDir` | Array of directory names. |
+| `glob` | `pattern` | `xray_fast` auto-detects `*` / `?`. |
+| `query`, `search` | `terms` (grep) / `name` (definitions) | |
+| `path`, `filePath`, `file_path` | `file` (single file) or `dir` (directory) | |
+| `directory` | `dir` | |
+| `limit`, `max`, `count` | `maxResults` | |
+| `function`, `func`, `methodName` | `method` | `xray_callers`. |
+| `caller` / `callee` | `direction='up'` / `direction='down'` | |
+| `preview`, `dry_run`, `dryrun` | `dryRun` | |
+| `find`, `oldText`, `oldString`, `newText`, `newString` | `edits=[{search:'…', replace:'…'}]` | `xray_edit` Mode B. |
+| `since` / `until` | `from` / `to` | git tools. |
+| `repository`, `repoPath`, `repo_path` | `repo` | git tools. |
+
+With `XRAY_STRICT_ARGS=1` (or `true`/`yes`/`on`) set in the server's
+environment, unknown args produce an immediate error response — useful in CI
+and for agent test runners that want to surface mistakes loudly. Default is
+warning-only so existing scripts don't break.
+
+## `xray_grep` multi-term auto-balance
+
+Multi-term substring-OR queries (e.g.
+`terms='TODO, clearTimeout, localStorage'`) auto-balance when ONE term
+contributes ≥10× more total occurrences than the rarest matched term.
+Dominant-only files beyond an auto-derived cap (`min(100, max(20, 2 *
+second_max))`) are dropped so rare-term matches stay visible. Files matching
+≥2 distinct terms are always kept. When balancing fires, `summary.autoBalance`
+carries `{ dominantTerm, dominantOccurrences, secondMaxOccurrences,
+minNonzeroOccurrences, ratio, cap, droppedFiles, hint }`, and the same hint
+is appended to `summary.warnings[]`.
+
+Opt-out: pass `autoBalance=false` to keep the previous TF-IDF order verbatim.
+Override the cap: pass `maxOccurrencesPerTerm=N` (0..=10000). No effect on
+AND mode, regex, phrase, lineRegex, or single-term queries.
+
+
 ## `xray_grep` — Content Search
 
 Search content index with TF-IDF ranking. Supports multi-term (AND/OR), regex, phrase, and substring search. **Language-agnostic** — works with any text file indexed via `--ext` (C#, Rust, Python, JS/TS, XML, JSON, config, etc.).

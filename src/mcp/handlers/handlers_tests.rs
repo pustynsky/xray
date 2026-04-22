@@ -170,6 +170,52 @@ fn test_dispatch_grep_empty_index() {
 }
 
 #[test]
+fn test_dispatch_grep_unknown_arg_warning_in_summary() {
+    // Default (no env): unknown args are surfaced as a warning in summary,
+    // but the tool still runs successfully so existing scripts don't break.
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let ctx = make_empty_ctx();
+    // SAFETY: serial single-threaded test; restored at end.
+    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
+    let result = dispatch_tool(
+        &ctx,
+        "xray_grep",
+        &json!({"terms": "HttpClient", "isRegexp": true}),
+    );
+    assert!(!result.is_error, "default mode should not hard-fail on unknown arg");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = output["summary"].as_object().expect("summary present");
+    let warning = summary
+        .get("unknownArgsWarning")
+        .and_then(|v| v.as_str())
+        .expect("unknownArgsWarning should be set");
+    assert!(warning.contains("'isRegexp'"), "warning should mention the bad key, got: {warning}");
+    assert!(warning.contains("Use 'regex' instead"), "warning should suggest fix, got: {warning}");
+}
+
+#[test]
+fn test_dispatch_grep_unknown_arg_strict_mode_hard_errors() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let ctx = make_empty_ctx();
+    // SAFETY: serial single-threaded test; restored at end.
+    unsafe { std::env::set_var("XRAY_STRICT_ARGS", "1") };
+    let result = dispatch_tool(
+        &ctx,
+        "xray_grep",
+        &json!({"terms": "HttpClient", "includePattern": "src/**"}),
+    );
+    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
+    assert!(result.is_error, "strict mode should hard-error on unknown arg");
+    let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(body["error"], "UNKNOWN_ARGS");
+    let unknown = body["unknownArgs"].as_array().unwrap();
+    assert_eq!(unknown.len(), 1);
+    assert_eq!(unknown[0]["key"], "includePattern");
+}
+
+use super::arg_validation::STRICT_ARGS_ENV_LOCK;
+
+#[test]
 fn test_dispatch_grep_with_results() {
     let mut idx = HashMap::new();
     idx.insert("httpclient".to_string(), vec![Posting {

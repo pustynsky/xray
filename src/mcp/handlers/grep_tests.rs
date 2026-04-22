@@ -22,6 +22,8 @@ fn make_params<'a>(
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(exclude_dir),
         exclude_lower: exclude.iter().map(|s| s.to_lowercase()).collect(),
         dir_auto_converted_note: None,
+        auto_balance: true,
+        max_occurrences_per_term: None,
     }
 }
 
@@ -110,8 +112,8 @@ fn test_passes_file_filters_combined() {
 #[test]
 fn test_finalize_or_mode_passes_all() {
     let mut scores = HashMap::new();
-    scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![3, 1, 2], tf_idf: 1.0, occurrences: 3, terms_matched: 1 });
-    scores.insert(1, FileScoreEntry { file_path: "b.cs".into(), lines: vec![5], tf_idf: 2.0, occurrences: 1, terms_matched: 1 });
+    scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![3, 1, 2], tf_idf: 1.0, occurrences: 3, terms_matched: 1, per_term_occurrences: vec![3] });
+    scores.insert(1, FileScoreEntry { file_path: "b.cs".into(), lines: vec![5], tf_idf: 2.0, occurrences: 1, terms_matched: 1, per_term_occurrences: vec![1] });
 
     let (results, total_files, total_occ) = finalize_grep_results(scores, false, 2);
     assert_eq!(total_files, 2);
@@ -126,8 +128,8 @@ fn test_finalize_or_mode_passes_all() {
 #[test]
 fn test_finalize_and_mode_filters() {
     let mut scores = HashMap::new();
-    scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![1], tf_idf: 1.0, occurrences: 1, terms_matched: 2 });
-    scores.insert(1, FileScoreEntry { file_path: "b.cs".into(), lines: vec![1], tf_idf: 2.0, occurrences: 1, terms_matched: 1 });
+    scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![1], tf_idf: 1.0, occurrences: 1, terms_matched: 2, per_term_occurrences: vec![1, 1] });
+    scores.insert(1, FileScoreEntry { file_path: "b.cs".into(), lines: vec![1], tf_idf: 2.0, occurrences: 1, terms_matched: 1, per_term_occurrences: vec![1] });
 
     let (results, total_files, _total_occ) = finalize_grep_results(scores, true, 2);
     assert_eq!(total_files, 1);
@@ -137,7 +139,7 @@ fn test_finalize_and_mode_filters() {
 #[test]
 fn test_finalize_dedup_lines() {
     let mut scores = HashMap::new();
-    scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![5, 3, 5, 1, 3], tf_idf: 1.0, occurrences: 5, terms_matched: 1 });
+    scores.insert(0, FileScoreEntry { file_path: "a.cs".into(), lines: vec![5, 3, 5, 1, 3], tf_idf: 1.0, occurrences: 5, terms_matched: 1, per_term_occurrences: vec![5] });
 
     let (results, _, _) = finalize_grep_results(scores, false, 1);
     assert_eq!(results[0].lines, vec![1, 3, 5]);
@@ -476,6 +478,7 @@ fn test_build_grep_response_count_only() {
         tf_idf: 1.0,
         occurrences: 2,
         terms_matched: 1,
+        per_term_occurrences: vec![2],
     }];
     let terms = vec!["hello".to_string()];
 
@@ -499,6 +502,7 @@ fn test_build_grep_response_with_files() {
         tf_idf: 0.5,
         occurrences: 1,
         terms_matched: 1,
+        per_term_occurrences: vec![1],
     }];
     let terms = vec!["hello".to_string()];
 

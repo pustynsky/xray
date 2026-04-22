@@ -1,6 +1,7 @@
 //! MCP tool handlers — dispatches tool calls to specialized handler modules.
 
 mod callers;
+mod arg_validation;
 mod definitions;
 mod edit;
 mod fast;
@@ -107,6 +108,14 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     "substring": {
                         "type": "boolean",
                         "description": "Match within tokens (default: true). Auto-disabled for regex/phrase."
+                    },
+                    "autoBalance": {
+                        "type": "boolean",
+                        "description": "Auto-balance multi-term substring-OR results (default: true). When ONE term has >10× more occurrences than the rarest matched term, dominant-only files are trimmed beyond an auto-derived cap (`min(100, max(20, 2*second_max))`) so rare-term matches stay visible. Files matching ≥2 terms are always kept. Set false to opt out (return raw TF-IDF order). No effect on AND mode, regex, phrase, or single-term queries."
+                    },
+                    "maxOccurrencesPerTerm": {
+                        "type": "integer",
+                        "description": "Explicit cap (in dominant-only files) for auto-balance. Default 0 = derived from `2 * second_max` clamped to [20, 100]. Only consulted when autoBalance triggers."
                     }
                 },
                 "required": ["terms"]
@@ -924,6 +933,18 @@ pub fn dispatch_tool(
         return ToolCallResult::error(DEF_INDEX_BUILDING_MSG.to_string());
     }
 
+    // Strict args validation: detect unknown/aliased keys before dispatch.
+    // - Default: silently collect into `unknown_args_report`, inject as
+    //   `summary.unknownArgsWarning` after the handler runs.
+    // - With `XRAY_STRICT_ARGS=1`: short-circuit with a hard error so the
+    //   caller (CI, scripted agent) cannot proceed against an ignored arg.
+    let unknown_args_report = arg_validation::check_unknown_args(tool_name, arguments);
+    if let Some(ref rep) = unknown_args_report
+        && arg_validation::strict_args_enabled()
+    {
+        return arg_validation::strict_error_response(tool_name, rep);
+    }
+
     let result = match tool_name {
         "xray_grep" => grep::handle_xray_grep(ctx, arguments),
         "xray_fast" => fast::handle_xray_fast(ctx, arguments),
@@ -952,6 +973,12 @@ pub fn dispatch_tool(
         ToolCallResult { is_error: true, ..result }
     } else {
         result
+    };
+
+    // Inject unknown-args warning into summary (after guidance so summary exists).
+    let result = match unknown_args_report {
+        Some(ref rep) => arg_validation::inject_warning(result, rep),
+        None => result,
     };
 
     if result.is_error {

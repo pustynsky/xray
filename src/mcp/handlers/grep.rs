@@ -39,6 +39,14 @@ pub(crate) struct GrepSearchParams<'a> {
     /// Optional note to include in response summary when `dir=` was auto-converted
     /// from a file path to parent dir + file filter.
     pub dir_auto_converted_note: Option<String>,
+    /// When true (default) and the query is multi-term substring-OR, post-process
+    /// results so a dominant common term cannot starve rare-term matches out of
+    /// the response. See [`apply_auto_balance`].
+    pub auto_balance: bool,
+    /// Optional explicit cap (in files) for the dominant-only group when
+    /// auto-balance triggers. `None` lets [`apply_auto_balance`] derive it from
+    /// `2 * second_max` clamped to `[20, 100]`.
+    pub max_occurrences_per_term: Option<usize>,
 }
 
 pub(crate) struct FileScoreEntry {
@@ -47,6 +55,11 @@ pub(crate) struct FileScoreEntry {
     pub tf_idf: f64,
     pub occurrences: usize,
     pub terms_matched: usize,
+    /// Per-term occurrence counts, indexed by term position in the parsed
+    /// `terms_str` (grown lazily during scoring). Required by
+    /// [`apply_auto_balance`] to detect a single dominant term and trim
+    /// dominant-only files when one term swamps the rest.
+    pub per_term_occurrences: Vec<usize>,
 }
 
 /// A single file match from phrase search, with matched lines and optionally cached content.
@@ -54,6 +67,174 @@ pub(crate) struct PhraseFileMatch {
     pub file_path: String,
     pub lines: Vec<u32>,
     pub content: Option<String>,
+}
+
+/// Outcome of [`apply_auto_balance`]. Surfaced in the response as
+/// `summary.autoBalance` so callers can tell that the result set was trimmed
+/// (and which term was dominant) rather than silently see fewer rows.
+#[derive(Debug, Clone)]
+pub(crate) struct AutoBalanceInfo {
+    pub dominant_term: String,
+    pub dominant_occurrences: usize,
+    pub second_max_occurrences: usize,
+    pub min_nonzero_occurrences: usize,
+    pub ratio: f64,
+    pub cap: usize,
+    pub dropped_files: usize,
+}
+
+/// Trim dominant-only files when ONE term contributes >10x more occurrences
+/// than the rarest matched term. Without this, mixed queries like
+/// `terms="TODO, clearTimeout, localStorage"` are dominated by `localStorage`
+/// (~2k matches) and the rare TODO/clearTimeout matches get pushed off the
+/// `maxResults` window — the user sees a noisy list of `localStorage`-only
+/// files and concludes the rare terms don't exist.
+///
+/// Strategy: keep every file matched by ≥2 distinct terms (cross-term
+/// relevance is the high-signal case). Among files matched ONLY by the
+/// dominant term, keep the top `cap` by `tf_idf` and drop the rest. Returns
+/// `None` when no balancing is needed (single-matched-term query, ratio
+/// below threshold, or no dominant-only files to drop).
+///
+/// Cap derivation: `user_cap` if provided, else `2 * second_max_occurrences`
+/// clamped to `[20, 100]` — small enough to keep the response focused, large
+/// enough that the dominant term's strongest hits still surface.
+pub(crate) fn apply_auto_balance(
+    results: &mut Vec<FileScoreEntry>,
+    term_count: usize,
+    raw_terms: &[String],
+    user_cap: Option<usize>,
+) -> Option<AutoBalanceInfo> {
+    if term_count < 2 || results.is_empty() {
+        return None;
+    }
+
+    // Aggregate per-term occurrences across the *full* result set (this runs
+    // before max_results truncation, so the imbalance signal is accurate).
+    let mut per_term_occ = vec![0usize; term_count];
+    for r in results.iter() {
+        for (i, &occ) in r.per_term_occurrences.iter().enumerate() {
+            if i < term_count {
+                per_term_occ[i] += occ;
+            }
+        }
+    }
+
+    let nonzero: Vec<usize> = per_term_occ.iter().copied().filter(|&v| v > 0).collect();
+    if nonzero.len() < 2 {
+        return None;
+    }
+    let max_occ = *nonzero.iter().max().unwrap();
+    let min_occ = *nonzero.iter().min().unwrap();
+    if max_occ < min_occ.saturating_mul(10) {
+        return None;
+    }
+
+    let dominant_idx = per_term_occ
+        .iter()
+        .enumerate()
+        .max_by_key(|&(_, &v)| v)
+        .map(|(i, _)| i)?;
+    let mut sorted = per_term_occ.clone();
+    sorted.sort_unstable();
+    let second_max = sorted.iter().rev().nth(1).copied().unwrap_or(0);
+
+    let cap = user_cap.unwrap_or_else(|| {
+        let derived = second_max.saturating_mul(2);
+        derived.clamp(20, 100)
+    });
+
+    // Sort by tf_idf descending to keep the strongest dominant-only files.
+    // Stable indices via enumerate so we can mirror the "keep" decision
+    // back into the original `results` order at the end.
+    let mut indexed: Vec<(usize, f64, bool)> = results
+        .iter()
+        .enumerate()
+        .map(|(i, r)| {
+            let dom_only = r
+                .per_term_occurrences
+                .get(dominant_idx)
+                .copied()
+                .unwrap_or(0)
+                > 0
+                && r.per_term_occurrences
+                    .iter()
+                    .enumerate()
+                    .all(|(j, &occ)| j == dominant_idx || occ == 0);
+            (i, r.tf_idf, dom_only)
+        })
+        .collect();
+    indexed.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut keep = vec![true; results.len()];
+    let mut kept_dominant_only = 0usize;
+    let mut dropped = 0usize;
+    for (orig_idx, _tf, dom_only) in &indexed {
+        if *dom_only {
+            if kept_dominant_only < cap {
+                kept_dominant_only += 1;
+            } else {
+                keep[*orig_idx] = false;
+                dropped += 1;
+            }
+        }
+    }
+
+    if dropped == 0 {
+        return None;
+    }
+
+    let mut idx = 0usize;
+    results.retain(|_| {
+        let k = keep[idx];
+        idx += 1;
+        k
+    });
+
+    Some(AutoBalanceInfo {
+        dominant_term: raw_terms.get(dominant_idx).cloned().unwrap_or_default(),
+        dominant_occurrences: max_occ,
+        second_max_occurrences: second_max,
+        min_nonzero_occurrences: min_occ,
+        ratio: max_occ as f64 / min_occ.max(1) as f64,
+        cap,
+        dropped_files: dropped,
+    })
+}
+
+/// Render an [`AutoBalanceInfo`] into the response summary so the caller can
+/// see (a) which term was dominant, (b) how many files were dropped, and
+/// (c) the opt-out instructions.
+fn inject_auto_balance(summary: &mut Value, info: &AutoBalanceInfo) {
+    let warning = format!(
+        "Auto-balanced: '{}' had {} occurrences ({:.0}× more than the rarest matched term: {}). \
+         {} dominant-only file(s) trimmed beyond cap={} to keep rare-term matches visible. \
+         Pass autoBalance=false to disable, or maxOccurrencesPerTerm=N to set an explicit cap.",
+        info.dominant_term,
+        info.dominant_occurrences,
+        info.ratio,
+        info.min_nonzero_occurrences,
+        info.dropped_files,
+        info.cap,
+    );
+    summary["autoBalance"] = json!({
+        "dominantTerm": info.dominant_term,
+        "dominantOccurrences": info.dominant_occurrences,
+        "secondMaxOccurrences": info.second_max_occurrences,
+        "minNonzeroOccurrences": info.min_nonzero_occurrences,
+        "ratio": (info.ratio * 100.0).round() / 100.0,
+        "cap": info.cap,
+        "droppedFiles": info.dropped_files,
+        "hint": warning.clone(),
+    });
+    // Append to existing warnings array (or create one) so warning-aware
+    // clients see it without having to look at a new field.
+    let warnings_entry = summary.as_object_mut().and_then(|m| {
+        m.entry("warnings".to_string()).or_insert_with(|| json!([])).as_array_mut()
+    });
+    if let Some(arr) = warnings_entry {
+        arr.push(json!(warning));
+    }
 }
 
 /// Build the common grep summary JSON with readErrors, lossyUtf8Files, and branchWarning.
@@ -234,6 +415,12 @@ struct ParsedGrepArgs {
     /// Set when user passed a file path in `dir=` — we auto-convert it to
     /// parent dir + file filter and surface this note in the response summary.
     dir_auto_converted_note: Option<String>,
+    /// Auto-balance multi-term substring-OR results so a dominant common
+    /// term cannot starve rare-term matches. Default `true`.
+    auto_balance: bool,
+    /// Optional explicit per-term file cap for the dominant-only group when
+    /// auto-balance triggers. `None` = derived from `2 * second_max`.
+    max_occurrences_per_term: Option<usize>,
 }
 
 /// Parse and validate all grep parameters from JSON args.
@@ -372,6 +559,17 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         .map(|arr| arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
         .unwrap_or_default();
 
+    // Auto-balance is opt-out: defaults to true. Only fires for multi-term
+    // substring-OR queries (see apply_auto_balance for full preconditions).
+    let auto_balance = args.get("autoBalance").and_then(|v| v.as_bool()).unwrap_or(true);
+    // When provided, overrides the derived `2 * second_max` cap. Bounded to
+    // avoid OOM via the same pattern as maxResults / contextLines.
+    let max_occurrences_per_term = match parse_bounded_usize(args, "maxOccurrencesPerTerm", 0, 10_000) {
+        Ok(0) => None,
+        Ok(n) => Some(n),
+        Err(e) => return Err(ToolCallResult::error(e)),
+    };
+
     Ok(ParsedGrepArgs {
         terms_str,
         dir_filter,
@@ -389,6 +587,8 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         exclude_dir,
         exclude,
         dir_auto_converted_note,
+        auto_balance,
+        max_occurrences_per_term,
     })
 }
 
@@ -460,6 +660,7 @@ fn score_normal_token_search(
                     tf_idf: 0.0,
                     occurrences: 0,
                     terms_matched: 0,
+                    per_term_occurrences: Vec::new(),
                 });
                 entry.tf_idf += tf_idf;
                 entry.occurrences += occurrences;
@@ -636,6 +837,8 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         exclude_patterns,
         exclude_lower,
         dir_auto_converted_note: parsed.dir_auto_converted_note.clone(),
+        auto_balance: parsed.auto_balance,
+        max_occurrences_per_term: parsed.max_occurrences_per_term,
     };
 
     // --- Substring search mode
@@ -905,10 +1108,15 @@ fn score_token_postings(
                     tf_idf: 0.0,
                     occurrences: 0,
                     terms_matched: 0,
+                    per_term_occurrences: Vec::new(),
                 });
                 entry.tf_idf += tf_idf;
                 entry.occurrences += occurrences;
                 entry.lines.extend_from_slice(&posting.lines);
+                if entry.per_term_occurrences.len() <= term_idx {
+                    entry.per_term_occurrences.resize(term_idx + 1, 0);
+                }
+                entry.per_term_occurrences[term_idx] += occurrences;
                 file_matched_terms.entry(posting.file_id).or_default().insert(term_idx);
             }
         }
@@ -932,6 +1140,7 @@ fn build_substring_response(
     index: &ContentIndex,
     ctx: &HandlerContext,
     params: &GrepSearchParams,
+    auto_balance_info: Option<&AutoBalanceInfo>,
 ) -> ToolCallResult {
     let search_start = params.search_start;
 
@@ -945,6 +1154,9 @@ fn build_substring_response(
         // false truncation ("capped matchedTokens to 20") that confuses LLMs.
         if !warnings.is_empty() {
             summary["warnings"] = json!(warnings);
+        }
+        if let Some(ab) = auto_balance_info {
+            inject_auto_balance(&mut summary, ab);
         }
         apply_dir_auto_converted_note(&mut summary, params);
         let output = json!({ "summary": summary });
@@ -976,6 +1188,9 @@ fn build_substring_response(
     summary["matchedTokens"] = json!(all_matched_tokens);
     if !warnings.is_empty() {
         summary["warnings"] = json!(warnings);
+    }
+    if let Some(ab) = auto_balance_info {
+        inject_auto_balance(&mut summary, ab);
     }
     apply_dir_auto_converted_note(&mut summary, params);
     let output = json!({
@@ -1061,6 +1276,17 @@ fn handle_substring_search(
     let (mut results, total_files, total_occurrences) =
         finalize_grep_results(file_scores, params.mode_and, term_count);
 
+    // Trim a single dominant common term so it cannot starve rare-term matches
+    // off the response. Only fires for multi-term substring-OR; AND mode is
+    // skipped because it already requires every term to match per file. Runs
+    // BEFORE max_results truncation so the cap operates on the full result
+    // set, not the already-truncated head.
+    let auto_balance_info = if params.auto_balance && !params.mode_and && term_count >= 2 {
+        apply_auto_balance(&mut results, term_count, &raw_terms, params.max_occurrences_per_term)
+    } else {
+        None
+    };
+
     if params.max_results > 0 {
         results.truncate(params.max_results);
     }
@@ -1068,6 +1294,7 @@ fn handle_substring_search(
     build_substring_response(
         &results, &raw_terms, &all_matched_tokens, &warnings,
         total_files, total_occurrences, search_mode, index, ctx, params,
+        auto_balance_info.as_ref(),
     )
 }
 

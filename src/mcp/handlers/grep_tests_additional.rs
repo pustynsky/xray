@@ -17,6 +17,8 @@ fn make_params_default<'a>() -> GrepSearchParams<'a> {
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
         exclude_lower: vec![],
         dir_auto_converted_note: None,
+        auto_balance: true,
+        max_occurrences_per_term: None,
     }
 }
 
@@ -213,6 +215,7 @@ fn test_build_substring_response_count_only() {
         tf_idf: 1.0,
         occurrences: 2,
         terms_matched: 1,
+        per_term_occurrences: vec![2],
     }];
     let raw_terms = vec!["svc".to_string()];
     let matched_tokens = vec!["userservice".to_string()];
@@ -221,6 +224,7 @@ fn test_build_substring_response_count_only() {
     let result = build_substring_response(
         &results, &raw_terms, &matched_tokens, &warnings,
         1, 2, "or", &index, &ctx, &params,
+        None,
     );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -244,6 +248,7 @@ fn test_build_substring_response_normal() {
         tf_idf: 0.5,
         occurrences: 1,
         terms_matched: 1,
+        per_term_occurrences: vec![1],
     }];
     let raw_terms = vec!["hello".to_string()];
     let matched_tokens = vec!["hello".to_string()];
@@ -251,6 +256,7 @@ fn test_build_substring_response_normal() {
     let result = build_substring_response(
         &results, &raw_terms, &matched_tokens, &[],
         1, 1, "or", &index, &ctx, &params,
+        None,
     );
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -722,4 +728,112 @@ fn test_intersect_sorted_unique_preserves_order_and_uniqueness() {
     for w in result.windows(2) {
         assert!(w[0] < w[1], "result must be strictly ascending");
     }
+}
+
+
+// ─── apply_auto_balance tests ───
+
+fn entry(path: &str, tf: f64, occ: usize, per_term: Vec<usize>) -> FileScoreEntry {
+    let total: usize = per_term.iter().sum();
+    let terms_matched = per_term.iter().filter(|&&v| v > 0).count();
+    FileScoreEntry {
+        file_path: path.into(),
+        lines: vec![1; total.max(occ)],
+        tf_idf: tf,
+        occurrences: total.max(occ),
+        terms_matched,
+        per_term_occurrences: per_term,
+    }
+}
+
+#[test]
+fn test_auto_balance_triggers_when_one_term_dominates() {
+    // term0 (rare): 5 occurrences in 1 file. term1 (dominant): 100 occurrences
+    // across 100 dominant-only files. Ratio = 100/5 = 20 > 10 → trigger.
+    let raw = vec!["todo".to_string(), "localstorage".to_string()];
+    let mut results = vec![entry("rare.rs", 5.0, 5, vec![5, 0])];
+    for i in 0..100 {
+        results.push(entry(&format!("dom{i}.rs"), 1.0, 1, vec![0, 1]));
+    }
+    let original_len = results.len();
+    let info = apply_auto_balance(&mut results, 2, &raw, None).expect("should trigger");
+    assert_eq!(info.dominant_term, "localstorage");
+    assert_eq!(info.dominant_occurrences, 100);
+    assert_eq!(info.min_nonzero_occurrences, 5);
+    // cap = 2 * second_max (5) clamped [20,100] = 20
+    assert_eq!(info.cap, 20);
+    assert_eq!(info.dropped_files, 100 - 20);
+    assert_eq!(results.len(), original_len - info.dropped_files);
+    // The rare file (matched only by rare term) is always kept.
+    assert!(results.iter().any(|r| r.file_path == "rare.rs"));
+}
+
+#[test]
+fn test_auto_balance_skipped_for_single_term() {
+    let raw = vec!["foo".to_string()];
+    let mut results = vec![
+        entry("a.rs", 1.0, 100, vec![100]),
+        entry("b.rs", 0.5, 1, vec![1]),
+    ];
+    let info = apply_auto_balance(&mut results, 1, &raw, None);
+    assert!(info.is_none(), "single-term query must not auto-balance");
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_auto_balance_skipped_when_ratio_below_threshold() {
+    // 9x ratio — below 10x trigger. No balancing.
+    let raw = vec!["a".to_string(), "b".to_string()];
+    let mut results = vec![
+        entry("a.rs", 1.0, 10, vec![10, 0]),
+        entry("b.rs", 1.0, 90, vec![0, 90]),
+    ];
+    let info = apply_auto_balance(&mut results, 2, &raw, None);
+    assert!(info.is_none(), "ratio 9x must not trigger (threshold is 10x)");
+    assert_eq!(results.len(), 2);
+}
+
+#[test]
+fn test_auto_balance_explicit_max_occurrences_overrides_derived_cap() {
+    let raw = vec!["rare".to_string(), "common".to_string()];
+    let mut results = vec![entry("rare.rs", 5.0, 1, vec![1, 0])];
+    for i in 0..50 {
+        results.push(entry(&format!("dom{i}.rs"), 1.0, 1, vec![0, 1]));
+    }
+    // Derived cap would be max(20, 2*1)=20; user override = 5
+    let info = apply_auto_balance(&mut results, 2, &raw, Some(5)).expect("should trigger");
+    assert_eq!(info.cap, 5);
+    assert_eq!(info.dropped_files, 45);
+    // 1 rare + 5 dominant-only kept
+    assert_eq!(results.len(), 6);
+}
+
+#[test]
+fn test_auto_balance_keeps_multi_term_files_above_cap() {
+    // 1 file matches BOTH terms. 50 dominant-only files. Cap=10 →
+    // 50-10=40 dropped, the multi-term file is always kept regardless of cap.
+    let raw = vec!["a".to_string(), "b".to_string()];
+    let mut results = vec![entry("both.rs", 10.0, 2, vec![1, 50])];
+    for i in 0..50 {
+        results.push(entry(&format!("dom{i}.rs"), 0.1, 1, vec![0, 1]));
+    }
+    let info = apply_auto_balance(&mut results, 2, &raw, Some(10)).expect("should trigger");
+    // dominant total occurrences = 50 (in dom files) + 50 (in both.rs) = 100; rare = 1 → ratio 100
+    assert_eq!(info.dominant_term, "b");
+    assert!(results.iter().any(|r| r.file_path == "both.rs"),
+        "file matched by both terms must always be kept");
+    // 1 multi-term + 10 dominant-only kept
+    assert_eq!(results.len(), 11);
+    assert_eq!(info.dropped_files, 40);
+}
+
+#[test]
+fn test_auto_balance_returns_none_when_nothing_to_drop() {
+    // Even with extreme imbalance, if there are zero dominant-only files
+    // (every dominant match co-occurs with the rare term), nothing to trim.
+    let raw = vec!["a".to_string(), "b".to_string()];
+    let mut results = vec![entry("shared.rs", 1.0, 200, vec![1, 200])];
+    let info = apply_auto_balance(&mut results, 2, &raw, None);
+    assert!(info.is_none(), "no dominant-only files → nothing to drop");
+    assert_eq!(results.len(), 1);
 }
