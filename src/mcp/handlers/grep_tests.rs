@@ -508,3 +508,63 @@ fn test_build_grep_response_with_files() {
     assert!(v.get("files").is_some());
     assert!(v.get("summary").is_some());
 }
+
+// ═══════════════════════════════════════════════════════════════════
+// GREP-007 / GREP-014 / GREP-015 — input hardening regression tests
+// ═══════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_parse_grep_args_rejects_empty_terms_grep015() {
+    let args = json!({"terms": ""});
+    let err = parse_grep_args(&args, "C:/project").unwrap_err();
+    let err_str = format!("{:?}", err);
+    assert!(err_str.contains("must not be empty"), "{}", err_str);
+
+    let args = json!({"terms": "   "});
+    let err = parse_grep_args(&args, "C:/project").unwrap_err();
+    let err_str = format!("{:?}", err);
+    assert!(err_str.contains("must not be empty"), "{}", err_str);
+}
+
+#[test]
+fn test_parse_grep_args_rejects_oversized_max_results_grep007() {
+    let args = json!({"terms": "hello", "maxResults": 10_000_001u64});
+    let err = parse_grep_args(&args, "C:/project").unwrap_err();
+    let err_str = format!("{:?}", err);
+    assert!(err_str.contains("maxResults must be 0..=10000"), "{}", err_str);
+}
+
+#[test]
+fn test_parse_grep_args_rejects_oversized_context_lines_grep007() {
+    let args = json!({"terms": "hello", "contextLines": 1_000_000u64});
+    let err = parse_grep_args(&args, "C:/project").unwrap_err();
+    let err_str = format!("{:?}", err);
+    assert!(err_str.contains("contextLines must be 0..=50"), "{}", err_str);
+}
+
+#[test]
+fn test_parse_grep_args_accepts_max_results_at_cap_grep007() {
+    let args = json!({"terms": "hello", "maxResults": 10_000u64});
+    let parsed = parse_grep_args(&args, "C:/project").unwrap();
+    assert_eq!(parsed.max_results, 10_000);
+}
+
+#[test]
+fn test_expand_regex_terms_dedups_overlapping_matches_grep014() {
+    use crate::ContentIndex;
+    let mut index = ContentIndex::default();
+    index.index.insert("UserService".to_string(), vec![]);
+    index.index.insert("UserController".to_string(), vec![]);
+    index.index.insert("OrderService".to_string(), vec![]);
+
+    // Two patterns that both match `UserService`. Without dedup it would
+    // appear twice and double-count its scoring contribution downstream.
+    let raw = vec!["User.*".to_string(), ".*Service".to_string()];
+    let expanded = expand_regex_terms(&raw, &index).unwrap();
+    let user_service_count = expanded.iter().filter(|s| s.as_str() == "UserService").count();
+    assert_eq!(user_service_count, 1, "expanded={:?}", expanded);
+    // Verify the result is sorted (precondition for dedup).
+    let mut sorted = expanded.clone();
+    sorted.sort();
+    assert_eq!(expanded, sorted);
+}
