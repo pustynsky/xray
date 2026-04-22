@@ -62,7 +62,6 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `xray_grep`                | Search content index with TF-IDF ranking, regex, phrase, AND/OR                                                                         |
 | `xray_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports C#, TypeScript/TSX, Rust (tree-sitter) and SQL (regex). `containsLine`, `includeBody`, `audit`. Relevance-ranked when name filter is active. Requires `--definitions` |
 | `xray_callers`             | Find callers / callees and build recursive call tree. Supports C#, TypeScript/TSX, and SQL (EXEC call chains). Requires `--definitions`  |
-| `xray_find`                | Live filesystem walk (⚠️ slow for large dirs)                                                                                           |
 | `xray_fast`                | Search pre-built file name index (instant). Supports comma-separated OR patterns. Results ranked: exact stem → prefix → contains        |
 | `xray_info`                | Show all indexes with status, sizes, age                                                                                                |
 | `xray_reindex`             | Force rebuild + reload content index                                                                                                    |
@@ -686,7 +685,7 @@ Before generating hints, `xray_definitions` attempts to **automatically correct*
 | Correction | When | What happens |
 |---|---|---|
 | **Kind mismatch** | `kind` filter set + `name` or `file` set, 0 results | Removes kind, finds correct kind, re-runs. E.g., `kind='method'` on Rust code → auto-corrects to `kind='function'` |
-| **Nearest name** | `name` set (non-regex), nearest match ≥85% Jaro-Winkler | Re-runs with corrected name. E.g., `name='hndl_search'` → `name='handle_xray_find'` |
+| **Nearest name** | `name` set (non-regex), nearest match ≥85% Jaro-Winkler | Re-runs with corrected name. E.g., `name='hndl_search'` → `name='handle_xray_grep'` |
 
 When auto-correction produces results, the response includes an `autoCorrection` object in `summary`:
 

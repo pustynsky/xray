@@ -217,7 +217,7 @@ cmd_serve()
 
 - `AtomicBool` with `Release`/`Acquire` ordering gates tool readiness — cheap (no lock contention)
 - Background thread acquires a single write lock to swap the fully-built index into the `Arc<RwLock>`, then sets the `AtomicBool` flag
-- Tools that bypass content readiness: `xray_help`, `xray_info`, `xray_find`, `xray_definitions`, `xray_callers`, git tools
+- Tools that bypass content readiness: `xray_help`, `xray_info`, `xray_definitions`, `xray_callers`, git tools
 - Tools that require content readiness: `xray_grep`, `xray_fast`, `xray_reindex`
 - Tools that require definition readiness: `xray_definitions`, `xray_callers`, `xray_reindex_definitions`
 - `xray_reindex` during background build returns "already building" error to prevent double-builds

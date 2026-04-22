@@ -2,6 +2,8 @@
 
 All numbers in this document are **measured**, not estimated. Criterion benchmarks use synthetic data for reproducibility; CLI and MCP benchmarks use a real production codebase.
 
+> **Last measured: 2026-03.** April 2026 refactors (complexity reduction in `apply_text_edits` / `handle_xray_fast` / `handle_xray_reindex_inner` / `cmd_serve`, periodic watcher rescan, Rust parser via `lang-rust`) have **not** been re-benchmarked against the production C# corpus. Treat the absolute numbers as a March baseline; relative comparisons (xray vs ripgrep, index vs live walk) remain representative.
+
 ## Test Environments
 
 Benchmarks were measured on two machines to show hardware-dependent variability:
@@ -40,14 +42,11 @@ Single-term search for `HttpClient` across the full codebase. xray.exe token mat
 | Tool                                           | Operation                                               | Total Time | Speedup     |
 | ---------------------------------------------- | ------------------------------------------------------- | ---------- | ----------- |
 | `rg HttpClient -g '*.cs' -l`                   | Live file scan                                          | 32.0s      | baseline    |
-| `xray find "HttpClient" --contents -e cs -c` | Live parallel walk (24 threads)                         | 14.5s      | **2×**      |
 | `xray grep "HttpClient" -e cs -c`            | Inverted index (total incl. load)                       | 1.76s      | **18×**     |
 | ↳ index load from disk                         | LZ4 decompress + bincode deserialize (223.7 MB on disk) | 1.19s      | —           |
 | ↳ search + TF-IDF rank                         | HashMap lookup + scoring                                | 0.757ms    | **42,300×** |
 
 > **Note:** In MCP server mode, the index is loaded once at startup. All subsequent queries pay only the search+rank cost (0.6–4ms depending on hardware), not the load cost.
->
-> **Note:** `xray find` (live parallel walk) is slower than indexed search because it reads all 48,779 files from disk. Its advantage over rg is modest (2×) since both perform full filesystem scans. The real speedup comes from the inverted index (18× total, 42,300× in-memory).
 
 ## CLI Search Latency (index pre-loaded from disk)
 
@@ -272,7 +271,6 @@ Verified measurements from two machines:
 | `xray_definitions` | With includeBody                       | ~33 ms                 | —                      |
 | `xray_callers`     | Call tree — callees (down)             | 0.5 ms                 | —                      |
 | `xray_callers`     | Call tree — callers (up, depth 3)      | 3–11 ms                | —                      |
-| `xray_find`        | Live filesystem walk                   | —                      | 983 ms                 |
 
 ## File Name Search
 
