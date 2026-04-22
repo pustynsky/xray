@@ -885,3 +885,51 @@ fn test_worker_panics_default_is_zero() {
     let index = ContentIndex::default();
     assert_eq!(index.worker_panics, 0);
 }
+
+#[test]
+fn test_tokenize_idx_010_already_lowercase_ascii_equivalence() {
+    // IDX-010 regression: the ASCII-lowercase fast path must produce IDENTICAL
+    // output to the legacy `to_lowercase()` path. Any divergence would corrupt
+    // the inverted index by routing the same logical token to two distinct
+    // hash bucket keys.
+    let cases = [
+        "already_lowercase_token",
+        "snake_case_42",
+        "hello",
+        "_underscore_prefix",
+        "trailing_42",
+    ];
+    for c in cases {
+        let fast = crate::tokenize(c, 1);
+        let legacy: Vec<String> = c
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .filter(|s| s.chars().count() >= 1)
+            .map(|s| s.to_lowercase())
+            .collect();
+        assert_eq!(fast, legacy, "divergence on input {c:?}");
+    }
+}
+
+#[test]
+fn test_tokenize_idx_010_uppercase_and_unicode_match_legacy() {
+    // IDX-010 regression: the slow path (containing ASCII uppercase OR any
+    // non-ASCII byte) must still go through `str::to_lowercase` so that
+    // Unicode case folding (Cyrillic, Greek, German ß, etc.) is preserved.
+    let cases = [
+        "HttpClient",                                  // pure ASCII upper-mix
+        "camelCase",                                   // ASCII upper-mix
+        "\u{041F}\u{0440}\u{0438}\u{0432}\u{0435}\u{0442}",   // Russian "Привет" — has uppercase П
+        "caf\u{00E9}",                                  // already lowercase but non-ASCII (é)
+        "GR\u{0395}EK",                                 // Greek Ε + ASCII upper
+    ];
+    for c in cases {
+        let fast = crate::tokenize(c, 1);
+        let legacy: Vec<String> = c
+            .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+            .filter(|s| s.chars().count() >= 1)
+            .map(|s| s.to_lowercase())
+            .collect();
+        assert_eq!(fast, legacy, "divergence on input {c:?}: fast={fast:?} legacy={legacy:?}");
+    }
+}
+
