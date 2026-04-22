@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{node_text, find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, CSHARP_CODE_STATS_CONFIG};
+use super::tree_sitter_utils::{node_text, find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, CSHARP_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -23,7 +23,7 @@ pub(crate) fn parse_csharp_definitions(
     let mut defs = Vec::new();
     let source_bytes = source.as_bytes();
     let mut method_nodes: Vec<(usize, tree_sitter::Node)> = Vec::new();
-    walk_csharp_node_collecting(tree.root_node(), source_bytes, file_id, None, &mut defs, &mut method_nodes);
+    walk_csharp_node_collecting(tree.root_node(), source_bytes, file_id, None, &mut defs, &mut method_nodes, 0);
 
     // Build per-class field type maps and method return type maps from the collected defs
     let mut class_field_types: HashMap<String, HashMap<String, String>> = HashMap::new();
@@ -389,7 +389,7 @@ fn extract_constructor_field_assignments(
     param_types: &HashMap<String, String>,
 ) -> Vec<(String, String)> {
     let mut result = Vec::new();
-    collect_constructor_assignments(body_node, source, param_types, &mut result);
+    collect_constructor_assignments(body_node, source, param_types, &mut result, 0);
     result
 }
 
@@ -398,7 +398,15 @@ fn collect_constructor_assignments(
     source: &[u8],
     param_types: &HashMap<String, String>,
     result: &mut Vec<(String, String)>,
+    depth: usize,
 ) {
+    // Depth-guard tripwire (MINOR-11): pathological auto-generated C# (e.g.
+    // EF migrations or T4 templates) can produce extremely nested expression
+    // trees. Stop descending past MAX_AST_RECURSION_DEPTH to avoid SIGABRT.
+    if depth > MAX_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded("csharp", node);
+        return;
+    }
     if node.kind() == "assignment_expression" || node.kind() == "simple_assignment_expression" {
         // AST: assignment_expression → left = right
         // left is the field (identifier or member_access_expression like this._field)
@@ -452,7 +460,7 @@ fn collect_constructor_assignments(
     }
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i) {
-            collect_constructor_assignments(child, source, param_types, result);
+            collect_constructor_assignments(child, source, param_types, result, depth + 1);
         }
     }
 }
@@ -480,7 +488,7 @@ fn extract_call_sites(
             combined_types.entry(name).or_insert(type_name);
         }
 
-        walk_for_invocations(body_node, source, class_name, &combined_types, base_types, &mut calls);
+        walk_for_invocations(body_node, source, class_name, &combined_types, base_types, &mut calls, 0);
     }
 
     calls.sort_by(|a, b| a.line.cmp(&b.line)
@@ -498,7 +506,15 @@ fn walk_for_invocations(
     field_types: &HashMap<String, String>,
     base_types: &[String],
     calls: &mut Vec<CallSite>,
+    depth: usize,
 ) {
+    // Depth-guard tripwire (MINOR-11): chained calls in adversarial code
+    // (e.g. obfuscated fluent APIs) could descend without bound. Stop past
+    // MAX_AST_RECURSION_DEPTH to keep parse threads alive.
+    if depth > MAX_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded("csharp", node);
+        return;
+    }
     match node.kind() {
         "invocation_expression" => {
             if let Some(call) = extract_invocation(node, source, class_name, field_types, base_types) {
@@ -511,7 +527,7 @@ fn walk_for_invocations(
             // AST: invocation(member_access(invocation(member_access(...)), name), args)
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
-                walk_for_invocations(child, source, class_name, field_types, base_types, calls);
+                walk_for_invocations(child, source, class_name, field_types, base_types, calls, depth + 1);
             }
             return;
         }
@@ -522,7 +538,7 @@ fn walk_for_invocations(
             // Same fix: recurse into all children to capture nested calls in arguments
             for i in 0..node.child_count() {
                 let child = node.child(i).unwrap();
-                walk_for_invocations(child, source, class_name, field_types, base_types, calls);
+                walk_for_invocations(child, source, class_name, field_types, base_types, calls, depth + 1);
             }
             return;
         }
@@ -530,7 +546,7 @@ fn walk_for_invocations(
     }
 
     for i in 0..node.child_count() {
-        walk_for_invocations(node.child(i).unwrap(), source, class_name, field_types, base_types, calls);
+        walk_for_invocations(node.child(i).unwrap(), source, class_name, field_types, base_types, calls, depth + 1);
     }
 }
 
@@ -727,7 +743,16 @@ fn walk_csharp_node_collecting<'a>(
     parent_name: Option<&str>,
     defs: &mut Vec<DefinitionEntry>,
     method_nodes: &mut Vec<(usize, tree_sitter::Node<'a>)>,
+    depth: usize,
 ) {
+    // Depth-guard tripwire (MINOR-11): protect against pathological AST
+    // (auto-generated nested types, deeply nested namespaces). Matches the
+    // pattern used in walk_xml_node, parser_rust::walk_rust_node and
+    // parser_typescript::walk_typescript_node_collecting.
+    if depth > MAX_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded("csharp", node);
+        return;
+    }
     let kind = node.kind();
 
     match kind {
@@ -740,7 +765,7 @@ fn walk_csharp_node_collecting<'a>(
                     let child = node.child(i).unwrap();
                     match child.kind() {
                         "declaration_list" | "enum_member_declaration_list" => {
-                            walk_csharp_node_collecting(child, source, file_id, Some(&name), defs, method_nodes);
+                            walk_csharp_node_collecting(child, source, file_id, Some(&name), defs, method_nodes, depth + 1);
                         }
                         _ => {}
                     }
@@ -802,7 +827,7 @@ fn walk_csharp_node_collecting<'a>(
     }
 
     for i in 0..node.child_count() {
-        walk_csharp_node_collecting(node.child(i).unwrap(), source, file_id, parent_name, defs, method_nodes);
+        walk_csharp_node_collecting(node.child(i).unwrap(), source, file_id, parent_name, defs, method_nodes, depth + 1);
     }
 }
 
