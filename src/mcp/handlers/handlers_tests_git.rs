@@ -13,7 +13,9 @@ fn make_ctx_with_git_cache() -> HandlerContext {
     use crate::git::cache::*;
     use std::io::Cursor;
 
-    // Build a mock cache from git-log-style input
+    // Build a mock cache from git-log-style input.
+    // CACHE-002: production parser expects NUL-separated records (`git log -z`).
+    // Fixture is written with `\n` for readability, then translated to NUL below.
     let log = concat!(
         "COMMIT:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa␞1700000000␞alice@example.com␞Alice␞Initial commit\n",
         "src/main.rs\n",
@@ -27,7 +29,8 @@ fn make_ctx_with_git_cache() -> HandlerContext {
         "src/main.rs\n",
         "\n",
     );
-    let reader = Cursor::new(log.as_bytes());
+    let nul_input: Vec<u8> = log.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
+    let reader = Cursor::new(nul_input);
     let mut builder = GitHistoryCache::builder();
     parse_git_log_stream(reader, &mut builder).expect("parse should succeed");
     let cache = GitHistoryCache::from_builder(
