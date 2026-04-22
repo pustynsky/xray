@@ -54,6 +54,26 @@ pub(crate) fn inject_branch_warning(summary: &mut Value, ctx: &HandlerContext) {
     }
 }
 
+/// DEF-S-006: surface a degraded definition-index state in handler responses.
+///
+/// When `definitions::build_definition_index` could not join one or more parser
+/// worker threads (panic / OOM / tree-sitter abort), `worker_panics` is non-zero
+/// and the index is missing a chunk of files. Without this signal, callers see
+/// suspiciously empty results from `xray_definitions` / `xray_callers` and have
+/// no way to distinguish "no matches" from "index is incomplete". The flag
+/// hints the user to rerun `xray_reindex_definitions`.
+pub(crate) fn inject_index_degraded(summary: &mut Value, ctx: &HandlerContext) {
+    let Some(ref def_arc) = ctx.def_index else { return };
+    let Ok(idx) = def_arc.read() else { return };
+    if idx.worker_panics > 0 {
+        summary["indexDegraded"] = json!(true);
+        summary["indexDegradedHint"] = json!(format!(
+            "{} parser worker(s) panicked during index build — run xray_reindex_definitions to recover",
+            idx.worker_panics
+        ));
+    }
+}
+
 // ─── Dir validation ─────────────────────────────────────────────────
 
 /// Normalize path separators to forward slashes for cross-platform comparison.

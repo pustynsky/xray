@@ -14,7 +14,7 @@ use code_xray::generate_trigrams;
 
 use super::HandlerContext;
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
-use super::utils::{self, inject_body_into_obj, inject_branch_warning, json_to_string, name_similarity, sorted_intersect};
+use super::utils::{self, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, sorted_intersect};
 
 /// Compute total body lines available from a call tree (for size hint).
 /// Walks the JSON tree and sums body lines: `body.len()` for emitted bodies,
@@ -302,6 +302,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
         inject_branch_warning(&mut summary, ctx);
+        inject_index_degraded(&mut summary, ctx);
         let mut output = json!({
             "callTree": template_results,
             "query": {
@@ -406,6 +407,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             }
         }
         inject_branch_warning(&mut summary, ctx);
+        inject_index_degraded(&mut summary, ctx);
         let mut output = json!({
             "callTree": tree,
             "query": {
@@ -504,6 +506,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             }
         }
         inject_branch_warning(&mut summary, ctx);
+        inject_index_degraded(&mut summary, ctx);
         let mut output = json!({
             "callTree": tree,
             "query": {
@@ -826,6 +829,7 @@ fn handle_multi_method_callers(
         }
     }
     inject_branch_warning(&mut summary, ctx);
+    inject_index_degraded(&mut summary, ctx);
 
     let mut output = json!({
         "results": results,

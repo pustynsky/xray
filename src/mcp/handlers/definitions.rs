@@ -19,7 +19,7 @@ use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind, CodeS
 use crate::ContentIndex;
 use crate::mcp::lock_order;
 
-use super::utils::{inject_body_into_obj, inject_branch_warning, best_match_tier, json_to_string, name_similarity};
+use super::utils::{inject_body_into_obj, inject_branch_warning, inject_index_degraded, best_match_tier, json_to_string, name_similarity};
 use super::HandlerContext;
 
 // XML on-demand parsing lives in `super::xml_on_demand` behind the `lang-xml`
@@ -509,6 +509,7 @@ fn handle_contains_line_mode(
         }
     }
     inject_branch_warning(&mut summary, ctx);
+    inject_index_degraded(&mut summary, ctx);
     let output = json!({
         "containingDefinitions": containing_defs,
         "query": {
@@ -1172,6 +1173,7 @@ fn build_search_summary(
         summary["missingTerms"] = missing;
     }
     inject_branch_warning(&mut summary, ctx);
+    inject_index_degraded(&mut summary, ctx);
 
     summary
 }
@@ -1966,6 +1968,7 @@ fn build_auto_summary(
         "totalDefinitions": active_definitions,
     });
     inject_branch_warning(&mut summary, ctx);
+    inject_index_degraded(&mut summary, ctx);
 
     let output = json!({
         "autoSummary": {
