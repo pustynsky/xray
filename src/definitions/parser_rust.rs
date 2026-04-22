@@ -794,7 +794,7 @@ fn compute_code_stats_rust(method_node: tree_sitter::Node, source: &[u8]) -> Cod
 
     // Walk body using unified data-driven walker
     if let Some(body) = find_child_by_kind(method_node, "block") {
-        walk_code_stats(body, source, 0, &mut stats, &RUST_CODE_STATS_CONFIG);
+        walk_code_stats(body, source, 0, 0, &mut stats, &RUST_CODE_STATS_CONFIG);
     }
 
     stats

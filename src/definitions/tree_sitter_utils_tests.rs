@@ -101,7 +101,7 @@ void Process(int x) {
 
     let mut stats = super::CodeStats::default();
     stats.cyclomatic_complexity = 1; // base
-    super::walk_code_stats(method, &bytes, 0, &mut stats, &super::CSHARP_CODE_STATS_CONFIG);
+    super::walk_code_stats(method, &bytes, 0, 0, &mut stats, &super::CSHARP_CODE_STATS_CONFIG);
 
     // if (+1), else-if's inner if (+1) = cyclomatic 3
     assert_eq!(stats.cyclomatic_complexity, 3,
@@ -129,8 +129,46 @@ fn test_walk_code_stats_typescript_config_arrow_function() {
 
     let mut stats = super::CodeStats::default();
     stats.cyclomatic_complexity = 1;
-    super::walk_code_stats(body, bytes, 0, &mut stats, &super::TYPESCRIPT_CODE_STATS_CONFIG);
+    super::walk_code_stats(body, bytes, 0, 0, &mut stats, &super::TYPESCRIPT_CODE_STATS_CONFIG);
 
     assert_eq!(stats.cyclomatic_complexity, 2, "if inside arrow adds +1 cyclomatic");
     assert_eq!(stats.return_count, 1, "return statement counted");
+}
+
+#[test]
+fn test_walk_code_stats_depth_guard_caps_recursion() {
+    // TSU-004 regression: a pathologically deep AST must not blow the worker
+    // thread stack via unbounded `walk_code_stats` recursion. We cannot assert
+    // "does not stack-overflow" directly (overflow aborts the process rather
+    // than panicking), so we assert the *observable* consequence of the depth
+    // guard: with `nesting` >> `MAX_AST_RECURSION_DEPTH`, the recursion is
+    // capped, so `cyclomatic_complexity` (incremented once per visited
+    // `if_statement`) cannot exceed `MAX_AST_RECURSION_DEPTH`.
+    //
+    // Without the guard, this test either (a) reports `cyclomatic_complexity
+    // == nesting` and the assertion fails, or (b) overflows the test thread
+    // stack and aborts — either way the regression is caught.
+    use super::MAX_AST_RECURSION_DEPTH;
+
+    let nesting = 4_000_usize;
+    let mut source = String::with_capacity(nesting * 16 + 64);
+    source.push_str("class C { void M() {");
+    for _ in 0..nesting { source.push_str(" if (true) {"); }
+    for _ in 0..nesting { source.push_str(" }"); }
+    source.push_str(" } }");
+
+    let (tree, bytes) = parse_csharp_snippet(&source);
+    let root = tree.root_node();
+    let body = find_descendant_by_kind(root, "block")
+        .expect("method block present");
+
+    let mut stats = super::CodeStats::default();
+    super::walk_code_stats(body, &bytes, 0, 0, &mut stats, &super::CSHARP_CODE_STATS_CONFIG);
+
+    assert!(
+        (stats.cyclomatic_complexity as usize) <= MAX_AST_RECURSION_DEPTH,
+        "TSU-004: walk_code_stats must cap recursion at MAX_AST_RECURSION_DEPTH \
+         (got cyclomatic_complexity={}, MAX_AST_RECURSION_DEPTH={}, nesting={})",
+        stats.cyclomatic_complexity, MAX_AST_RECURSION_DEPTH, nesting,
+    );
 }
