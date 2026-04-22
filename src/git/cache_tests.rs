@@ -9,8 +9,23 @@ use std::io::Cursor;
 // ─── Test helpers ───────────────────────────────────────────────────
 
 /// Build a mock cache from a git-log-style string.
+///
+/// CACHE-002: production parser expects NUL-separated records (`git log -z`).
+/// To keep fixtures readable, we translate `\n` → `\0` here. Tests that need
+/// to verify `\n`-in-path handling should use `parse_mock_log_raw` instead.
 fn parse_mock_log(input: &str) -> GitHistoryCache {
-    let reader = Cursor::new(input.as_bytes());
+    let nul_input: Vec<u8> = input
+        .as_bytes()
+        .iter()
+        .map(|&b| if b == b'\n' { 0 } else { b })
+        .collect();
+    parse_mock_log_raw(&nul_input)
+}
+
+/// Parse raw NUL-separated bytes (used by CACHE-002 regression tests where the
+/// fixture must contain a literal `\n` byte inside a file path).
+fn parse_mock_log_raw(input: &[u8]) -> GitHistoryCache {
+    let reader = Cursor::new(input);
     let mut builder = GitHistoryCache::builder();
     parse_git_log_stream(reader, &mut builder).expect("parse should succeed");
     GitHistoryCache::from_builder(
@@ -950,7 +965,8 @@ fn test_author_pool_overflow_via_parser() {
         ));
     }
 
-    let reader = Cursor::new(log.as_bytes());
+    let nul_input: Vec<u8> = log.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
+    let reader = Cursor::new(nul_input);
     let mut builder = GitHistoryCache::builder();
     let result = parse_git_log_stream(reader, &mut builder);
 
@@ -986,7 +1002,8 @@ fn test_author_pool_boundary_65535_succeeds() {
         ));
     }
 
-    let reader = Cursor::new(log.as_bytes());
+    let nul_input: Vec<u8> = log.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
+    let reader = Cursor::new(nul_input);
     let mut builder = GitHistoryCache::builder();
     let result = parse_git_log_stream(reader, &mut builder);
 
@@ -1738,4 +1755,125 @@ fn test_query_file_history_total_count_nonexistent_file() {
 
     assert!(history.is_empty());
     assert_eq!(total_count, 0, "Nonexistent file should have 0 total");
+}
+
+// ─── CACHE-001/002/008 hardening regressions (2026-04-22) ─────────────────────
+
+#[test]
+fn test_validate_git_ref_rejects_option_injection() {
+    // CACHE-001: branch arguments starting with `-` would be parsed as git options.
+    // The most dangerous is `--upload-pack=<cmd>` which gives arbitrary command execution
+    // through git's transport machinery.
+    assert!(validate_git_ref("--upload-pack=evil.sh").is_err());
+    assert!(validate_git_ref("-h").is_err());
+    assert!(validate_git_ref("--exec=cmd").is_err());
+    assert!(validate_git_ref("").is_err());
+    // Legitimate refs pass:
+    assert!(validate_git_ref("main").is_ok());
+    assert!(validate_git_ref("feature/foo").is_ok());
+    assert!(validate_git_ref("HEAD~3").is_ok());
+    assert!(validate_git_ref("v1.2.3").is_ok());
+}
+
+#[test]
+fn test_validate_git_hash_rejects_non_hex() {
+    // CACHE-001: `hash` parameter to object_exists/is_ancestor must be hex only.
+    assert!(validate_git_hash("abc").is_err()); // too short
+    assert!(validate_git_hash("a".repeat(41).as_str()).is_err()); // too long
+    assert!(validate_git_hash("--upload-pack=cmd").is_err()); // option injection
+    assert!(validate_git_hash("abcz1234").is_err()); // non-hex
+    assert!(validate_git_hash("").is_err());
+    // Legitimate hashes pass:
+    assert!(validate_git_hash("abcd").is_ok()); // short
+    assert!(validate_git_hash("abcdef0123456789abcdef0123456789abcdef01").is_ok()); // full SHA-1
+    assert!(validate_git_hash("ABCDEF01").is_ok()); // uppercase tolerated
+}
+
+#[test]
+fn test_is_ancestor_rejects_option_injection_without_spawning() {
+    // CACHE-001 regression: even without a real git repo, the validation must reject
+    // attacker-controlled input *before* spawning `git`. We point at a non-existent path;
+    // a real spawn would fail with a different error path. Validation rejects up-front
+    // and returns false.
+    let fake_repo = std::path::PathBuf::from("/nonexistent/xray-cache-001-test");
+    assert!(!GitHistoryCache::is_ancestor(&fake_repo, "--upload-pack=cmd", "abcd1234"));
+    assert!(!GitHistoryCache::is_ancestor(&fake_repo, "abcd1234", "--upload-pack=cmd"));
+    assert!(!GitHistoryCache::object_exists(&fake_repo, "--upload-pack=cmd"));
+}
+
+#[test]
+fn test_parser_handles_path_with_newline() {
+    // CACHE-002 regression: a file path containing `\n` must NOT be misinterpreted as
+    // a commit header. Pre-fix this fixture would have parsed `b\nCOMMIT:bbbb...` as
+    // a second commit and silently corrupted file_commits.
+    //
+    // Production format is `git log -z` (NUL-separated), so we craft NUL records here.
+    let mut input: Vec<u8> = Vec::new();
+    input.extend_from_slice(b"COMMIT:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\xe2\x90\x9e1700000000\xe2\x90\x9ealice@example.com\xe2\x90\x9eAlice\xe2\x90\x9eFirst");
+    input.push(0);
+    // Pathological filename containing a literal newline AND a fake COMMIT header.
+    input.extend_from_slice(b"weird\nCOMMIT:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\xe2\x90\x9e1700001000\xe2\x90\x9eevil@example.com\xe2\x90\x9eEvil\xe2\x90\x9eInjected.txt");
+    input.push(0);
+    input.extend_from_slice(b"normal.txt");
+    input.push(0);
+
+    let cache = parse_mock_log_raw(&input);
+
+    // EXACTLY one commit must be parsed (the injection attempt is treated as a path).
+    assert_eq!(cache.commits.len(), 1, "injection attempt must not create a second commit");
+    assert_eq!(cache.authors.len(), 1, "injected author must not be interned");
+    assert_eq!(cache.authors[0].name, "Alice");
+
+    // The pathological filename must be stored verbatim, attached to the legitimate commit.
+    assert!(
+        cache.file_commits.contains_key("weird\nCOMMIT:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\u{241e}1700001000\u{241e}evil@example.com\u{241e}Evil\u{241e}Injected.txt"),
+        "pathological filename must be preserved verbatim, got keys: {:?}",
+        cache.file_commits.keys().collect::<Vec<_>>()
+    );
+    assert!(cache.file_commits.contains_key("normal.txt"));
+}
+
+#[test]
+fn test_save_to_disk_uses_unique_temp_filename() {
+    // CACHE-008 regression: temp filename must include pid + nanos + counter so two
+    // concurrent saves cannot collide on a fixed `.tmp` path. We can't easily race two
+    // saves in a unit test, but we can verify the temp filename pattern is non-deterministic
+    // by saving twice and checking that no `.tmp` artifact survives (atomic rename succeeded
+    // both times) AND that the parent dir contains no leftover `<file>.tmp` literal.
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray-cache-008-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    ));
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let cache_path = tmp_dir.join("test.git-history");
+
+    let cache = parse_mock_log(multi_commit_log());
+    cache.save_to_disk(&cache_path).expect("first save");
+    cache.save_to_disk(&cache_path).expect("second save");
+
+    // The on-disk file exists.
+    assert!(cache_path.exists(), "cache file must exist after save");
+
+    // No leftover legacy `<file>.tmp` literal — pre-fix the temp name was deterministic.
+    let legacy_tmp = tmp_dir.join("test.git-history.tmp");
+    assert!(
+        !legacy_tmp.exists(),
+        "legacy `.tmp` filename pattern leaked: {legacy_tmp:?}"
+    );
+
+    // No leftover xray_tmp staging files (rename succeeded, cleanup OK).
+    let entries: Vec<_> = std::fs::read_dir(&tmp_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .filter(|n| n.contains("xray_tmp"))
+        .collect();
+    assert!(
+        entries.is_empty(),
+        "unexpected xray_tmp staging files left behind: {entries:?}"
+    );
+
+    // Cleanup.
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }

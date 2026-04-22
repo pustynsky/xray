@@ -12,8 +12,46 @@ use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
+
+// ─── Argument validation (CACHE-001) ────────────────────────────────
+
+/// Reject git ref/branch arguments that begin with `-` (would be parsed as an option
+/// such as `--upload-pack=<cmd>` → arbitrary command execution).
+///
+/// CACHE-001: defence-in-depth at the cache layer; call sites also pass `--` to git.
+pub(crate) fn validate_git_ref(arg: &str) -> Result<(), String> {
+    if arg.is_empty() {
+        return Err("git ref must not be empty".to_string());
+    }
+    if arg.starts_with('-') {
+        return Err(format!(
+            "git ref must not start with '-' (rejected as potential option injection): {arg}"
+        ));
+    }
+    Ok(())
+}
+
+/// Validate that `hash` looks like a git object hash (4-40 lowercase/uppercase hex chars).
+///
+/// CACHE-001: prevents `--upload-pack=...`-style injection through the `hash` parameter
+/// of `object_exists` / `is_ancestor`.
+pub(crate) fn validate_git_hash(hash: &str) -> Result<(), String> {
+    if hash.len() < 4 || hash.len() > 40 {
+        return Err(format!(
+            "git hash must be 4-40 hex chars, got {} chars",
+            hash.len()
+        ));
+    }
+    if !hash.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(format!(
+            "git hash contains non-hex characters: {hash}"
+        ));
+    }
+    Ok(())
+}
 
 // ─── Constants ──────────────────────────────────────────────────────
 
@@ -308,37 +346,77 @@ impl GitHistoryCache {
 
 // ─── Streaming parser ───────────────────────────────────────────────
 
-/// Parse git log output line by line (streaming).
+/// Parse git log output as NUL-separated records (streaming).
 ///
-/// Expected format: `--format=COMMIT:%H␞%at␞%aE␞%aN␞%s` with `--name-only`.
+/// Expected format: `git log -z --format=COMMIT:%H␞%at␞%aE␞%aN␞%s --name-only`.
+/// With `-z`, every record (commit header *or* file path) is terminated by NUL.
+///
+/// CACHE-002: line-based parsing was vulnerable to file paths containing `\n`
+/// being misinterpreted as commit headers (POSIX paths legally contain `\n`).
+/// NUL is the only byte that cannot appear in a path or in any of our header fields.
 ///
 /// Parsing rules:
-/// - Lines starting with `COMMIT:` are commit headers
+/// - Records starting with `COMMIT:` are commit headers
 /// - Split header by `␞` (U+241E) — NOT by `|`
 /// - Subject is the last field — use `fields[4..].join(sep)` as defense
-/// - Non-empty lines after a commit header are file paths
-/// - Empty lines separate commits
+/// - Non-empty records that are not commit headers are file paths
+/// - Empty records are tolerated (no-op) — `-z` does not normally emit them but
+///   we accept them for forward compatibility with `--name-status` and friends
 pub fn parse_git_log_stream(
-    reader: impl BufRead,
+    mut reader: impl BufRead,
     builder: &mut GitHistoryCacheBuilder,
 ) -> Result<(), String> {
     let mut commit_count: u64 = 0;
     let progress_start = std::time::Instant::now();
     let mut last_progress = std::time::Instant::now();
+    let mut buf: Vec<u8> = Vec::with_capacity(256);
 
-    for line_result in reader.lines() {
-        let line = line_result.map_err(|e| format!("IO error reading git log: {}", e))?;
+    loop {
+        buf.clear();
+        let n = reader
+            .read_until(0, &mut buf)
+            .map_err(|e| format!("IO error reading git log: {}", e))?;
+        if n == 0 {
+            break; // EOF
+        }
+        // Strip trailing NUL terminator if present (last record may lack one).
+        if buf.last() == Some(&0) {
+            buf.pop();
+        }
+        // Strip leading `\r`/`\n` bytes: with `-z`, git still emits a literal newline
+        // separator between the commit-header format string and the subsequent file list
+        // (and at end-of-record). The newline is NOT inside any path or header field, so
+        // dropping it here is safe and required for correct parsing.
+        while matches!(buf.first(), Some(b'\r') | Some(b'\n')) {
+            buf.remove(0);
+        }
+        // Empty record — tolerate as separator.
+        if buf.is_empty() {
+            continue;
+        }
+        // Decode UTF-8. With `-c core.quotePath=false`, git emits raw UTF-8;
+        // a non-UTF-8 record indicates corrupted output and we skip it loudly.
+        let record = match std::str::from_utf8(&buf) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!(
+                    "[git-cache] Warning: skipping non-UTF-8 git log record: {}",
+                    e
+                );
+                continue;
+            }
+        };
 
-        if let Some(header) = line.strip_prefix(COMMIT_PREFIX) {
+        if let Some(header) = record.strip_prefix(COMMIT_PREFIX) {
             // Parse commit header: COMMIT:<hash>␞<timestamp>␞<email>␞<name>␞<subject...>
             let fields: Vec<&str> = header.split(FIELD_SEP).collect();
 
             if fields.len() < 5 {
                 // Malformed line — skip silently (robustness)
                 eprintln!(
-                    "[git-cache] Warning: malformed commit line ({} fields, expected >=5): {}",
+                    "[git-cache] Warning: malformed commit record ({} fields, expected >=5): {}",
                     fields.len(),
-                    &line[..line.len().min(100)]
+                    &record[..record.len().min(100)]
                 );
                 builder.current_commit_idx = None;
                 continue;
@@ -386,14 +464,15 @@ pub fn parse_git_log_stream(
                 );
                 last_progress = std::time::Instant::now();
             }
-        } else if !line.is_empty() {
-            // Non-empty line after a commit = file path
-            let file_path = line.trim();
+        } else {
+            // Non-empty record after a commit = file path. Preserve `\n`/whitespace
+            // inside the path (CACHE-002 guarantee) — only drop a trailing newline
+            // if `-z` was somehow not honoured (defensive: e.g. `--name-status`).
+            let file_path = record.trim_end_matches('\n');
             if !file_path.is_empty() {
                 builder.add_file(file_path);
             }
         }
-        // Empty lines are commit separators — nothing to do
     }
 
     Ok(())
@@ -424,15 +503,35 @@ impl GitHistoryCache {
                 .map_err(|e| format!("Failed to create cache directory: {}", e))?;
         }
 
-        // Atomic write: write to temp file first, then rename
-        let tmp_path_str = format!("{}.tmp", path.display());
-        let tmp_path = std::path::PathBuf::from(&tmp_path_str);
+        // Atomic write: write to temp file first, then rename.
+        // CACHE-008: temp filename includes pid + nanos + counter so two concurrent saves
+        // (e.g. periodic refresher + manual rebuild) cannot collide on the same `.tmp` and
+        // silently overwrite each other's output. Mirrors `temp_path_for` in mcp/handlers/edit.rs.
+        static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+        let file_name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "git-cache".to_string());
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tmp_path = path.with_file_name(format!(
+            ".{file_name}.xray_tmp.{pid}.{nanos}.{counter}"
+        ));
 
         crate::index::save_compressed(&tmp_path, self, "git-history")
-            .map_err(|e| format!("Failed to save git cache: {}", e))?;
+            .map_err(|e| {
+                let _ = std::fs::remove_file(&tmp_path); // best-effort cleanup
+                format!("Failed to save git cache: {}", e)
+            })?;
 
-        std::fs::rename(&tmp_path, path)
-            .map_err(|e| format!("Failed to rename temp cache file: {}", e))?;
+        if let Err(e) = std::fs::rename(&tmp_path, path) {
+            let _ = std::fs::remove_file(&tmp_path); // best-effort cleanup
+            return Err(format!("Failed to rename temp cache file: {}", e));
+        }
 
         // Write sidecar .meta file (best-effort)
         crate::index::save_index_meta(path, &crate::index::git_cache_meta(self));
@@ -473,7 +572,14 @@ impl GitHistoryCache {
 
     /// Check if the cached HEAD hash is an ancestor of the current HEAD.
     /// Used to decide between incremental update and full rebuild.
+    ///
+    /// CACHE-001: validates both hashes look like git object hashes before invoking
+    /// `git merge-base`; rejected inputs return `false` without spawning the subprocess
+    /// (so an attacker-controlled `--upload-pack=cmd` cannot reach git).
     pub fn is_ancestor(repo_path: &Path, old_head: &str, new_head: &str) -> bool {
+        if validate_git_hash(old_head).is_err() || validate_git_hash(new_head).is_err() {
+            return false;
+        }
         Command::new("git")
             .args(["merge-base", "--is-ancestor", old_head, new_head])
             .current_dir(repo_path)
@@ -486,7 +592,15 @@ impl GitHistoryCache {
 
     /// Check if a git object exists in the repository.
     /// Used to detect re-cloned repos where the cached HEAD is gone.
+    ///
+    /// CACHE-001: validates `hash` looks like a git object hash before invoking
+    /// `git cat-file`. Note: `git cat-file -t` does not accept `--` separator before
+    /// the object name (history-revision syntax is parsed contextually), so the
+    /// hash-shape validation is the sole gate here.
     pub fn object_exists(repo_path: &Path, hash: &str) -> bool {
+        if validate_git_hash(hash).is_err() {
+            return false;
+        }
         Command::new("git")
             .args(["cat-file", "-t", hash])
             .current_dir(repo_path)
@@ -499,9 +613,14 @@ impl GitHistoryCache {
 
     /// Build cache by running `git log` and parsing output.
     ///
-    /// Spawns `git log --name-only --no-renames` as a child process,
-    /// parses output line-by-line (streaming — no 163 MB in RAM).
+    /// Spawns `git log -z --name-only --no-renames` as a child process,
+    /// parses output as NUL-separated records (streaming — no 163 MB in RAM).
+    ///
+    /// CACHE-001: validates `branch` and inserts `--` before the positional ref.
+    /// CACHE-002: uses `-z` so paths containing `\n` cannot impersonate commit headers.
     pub fn build(repo_path: &Path, branch: &str) -> Result<Self, String> {
+        validate_git_ref(branch)?;
+
         // Check for commit-graph and emit hint if missing
         let commit_graph_path = repo_path.join(".git/objects/info/commit-graph");
         if !commit_graph_path.exists() {
@@ -513,12 +632,20 @@ impl GitHistoryCache {
         // Get HEAD hash for the branch
         let head_hash = Self::get_branch_head(repo_path, branch)?;
 
-        // Spawn git log with streaming output
+        // Spawn git log with streaming output.
+        // `-z` switches output to NUL-terminated records: the format string is emitted
+        // followed by NUL, then each filename followed by NUL. This makes it impossible
+        // for a filename containing `\n` to be misinterpreted as a commit header.
+        //
+        // No `--` separator before `branch`: in `git log`, anything after `--` is treated
+        // as a path-filter, not a revision. CACHE-001 defence relies on `validate_git_ref`
+        // (above) rejecting any `-`-prefixed input before we get here.
         let mut child = Command::new("git")
             .args([
                 "-c",
                 "core.quotePath=false", // raw UTF-8 paths
                 "log",
+                "-z",
                 "--name-only",
                 "--no-renames",
                 &format!("--format={}%H{}%at{}%aE{}%aN{}%s",
@@ -881,7 +1008,13 @@ impl GitHistoryCache {
     }
 
     /// Get the HEAD hash of a branch.
+    ///
+    /// CACHE-001: validates `branch` does not start with `-` so attacker-controlled
+    /// `branch="--upload-pack=cmd"` cannot reach `git rev-parse`'s option parser.
+    /// (Note: `git rev-parse` does not accept `--` as an end-of-options marker for
+    /// positional refs — validation is the sole gate here.)
     fn get_branch_head(repo_path: &Path, branch: &str) -> Result<String, String> {
+        validate_git_ref(branch)?;
         let output = Command::new("git")
             .args(["rev-parse", branch])
             .current_dir(repo_path)

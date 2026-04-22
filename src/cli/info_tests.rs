@@ -4,7 +4,9 @@ use super::*;
 fn create_test_git_history_cache(dir: &std::path::Path) -> std::path::PathBuf {
     use crate::git::cache::{GitHistoryCacheBuilder, parse_git_log_stream};
 
-    // Use the public streaming parser to build a cache
+    // Use the public streaming parser to build a cache.
+    // CACHE-002: production parser expects NUL-separated records (`git log -z`).
+    // Fixture is written with `\n` for readability, then translated to NUL below.
     let git_log = "\
 COMMIT:aabbccddee00112233445566778899aabbccddee␞1700000000␞alice@example.com␞Alice␞Initial commit
 src/main.rs
@@ -13,8 +15,9 @@ COMMIT:112233445566778899aabbccddeeff0011223344␞1700001000␞bob@example.com�
 src/main.rs
 src/lib.rs
 ";
+    let nul_input: Vec<u8> = git_log.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
     let mut builder = GitHistoryCacheBuilder::new();
-    let reader = std::io::BufReader::new(git_log.as_bytes());
+    let reader = std::io::BufReader::new(nul_input.as_slice());
     parse_git_log_stream(reader, &mut builder).unwrap();
 
     let cache = builder.build(
