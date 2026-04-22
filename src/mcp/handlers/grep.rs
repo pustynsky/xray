@@ -1194,41 +1194,75 @@ fn collect_phrase_matches(
         }
     }
 
-    let candidates = candidate_file_ids.unwrap_or_default();
+    let candidates: Vec<u32> = candidate_file_ids.unwrap_or_default().into_iter().collect();
 
     // Verify phrase match in raw file content.
     // When phrase contains punctuation, use raw substring match to avoid
     // false positives from tokenizer stripping non-alphanumeric characters.
     let phrase_has_punctuation = phrase.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace());
 
-    let mut results: Vec<PhraseFileMatch> = Vec::new();
+    // PERF (tier-A): parallelize file I/O + per-file scan across candidates.
+    // Phrase verification is dominated by reading hundreds of candidate files
+    // from disk and running a regex/substring scan on each. Splitting the work
+    // across threads via std::thread::scope (no new deps) gives a near-linear
+    // speedup on multi-core machines without changing semantics. Also drops the
+    // redundant whole-file `phrase_re.is_match(&content)` pre-check that used
+    // to scan each candidate twice.
+    let num_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4)
+        .clamp(1, 8);
+    let chunk_size = candidates.len().div_ceil(num_threads).max(1);
 
-    for &file_id in &candidates {
-        let file_path = &index.files[file_id as usize];
-        if let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(file_path)) {
-            let mut matching_lines = Vec::new();
-            if phrase_has_punctuation {
-                for (line_num, line) in content.lines().enumerate() {
-                    if line.to_lowercase().contains(&phrase_lower) {
-                        matching_lines.push((line_num + 1) as u32);
+    let results: Vec<PhraseFileMatch> = std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for chunk in candidates.chunks(chunk_size) {
+            let phrase_re_ref = &phrase_re;
+            let phrase_lower_ref = phrase_lower.as_str();
+            let index_ref = index;
+            let chunk_owned: Vec<u32> = chunk.to_vec();
+            let handle = scope.spawn(move || {
+                let mut local: Vec<PhraseFileMatch> = Vec::with_capacity(chunk_owned.len());
+                for file_id in chunk_owned {
+                    let file_path = &index_ref.files[file_id as usize];
+                    let (content, _lossy) = match read_file_lossy(std::path::Path::new(file_path)) {
+                        Ok(c) => c,
+                        Err(_) => continue,
+                    };
+                    let mut matching_lines = Vec::new();
+                    if phrase_has_punctuation {
+                        for (line_num, line) in content.lines().enumerate() {
+                            if line.to_lowercase().contains(phrase_lower_ref) {
+                                matching_lines.push((line_num + 1) as u32);
+                            }
+                        }
+                    } else {
+                        for (line_num, line) in content.lines().enumerate() {
+                            if phrase_re_ref.is_match(line) {
+                                matching_lines.push((line_num + 1) as u32);
+                            }
+                        }
+                    }
+                    if !matching_lines.is_empty() {
+                        local.push(PhraseFileMatch {
+                            file_path: file_path.clone(),
+                            lines: matching_lines,
+                            content: if show_lines { Some(content) } else { None },
+                        });
                     }
                 }
-            } else if phrase_re.is_match(&content) {
-                for (line_num, line) in content.lines().enumerate() {
-                    if phrase_re.is_match(line) {
-                        matching_lines.push((line_num + 1) as u32);
-                    }
-                }
-            }
-            if !matching_lines.is_empty() {
-                results.push(PhraseFileMatch {
-                    file_path: file_path.clone(),
-                    lines: matching_lines,
-                    content: if show_lines { Some(content) } else { None },
-                });
+                local
+            });
+            handles.push(handle);
+        }
+        let mut all = Vec::new();
+        for h in handles {
+            if let Ok(local) = h.join() {
+                all.extend(local);
             }
         }
-    }
+        all
+    });
 
     Ok(results)
 }
