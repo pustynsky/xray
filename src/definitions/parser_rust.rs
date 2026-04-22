@@ -245,10 +245,10 @@ fn extract_rust_modifiers(node: tree_sitter::Node, source: &[u8]) -> Vec<String>
                 _ => {
                     let text = node_text(child, source);
                     match text {
-                        "async" | "unsafe" | "const" | "static" | "pub" => {
-                            if !modifiers.iter().any(|m| m == text) {
-                                modifiers.push(text.to_string());
-                            }
+                        "async" | "unsafe" | "const" | "static" | "pub"
+                            if !modifiers.iter().any(|m| m == text) =>
+                        {
+                            modifiers.push(text.to_string());
                         }
                         _ => {}
                     }

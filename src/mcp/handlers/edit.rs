@@ -802,7 +802,7 @@ fn apply_line_operations(lines: &[&str], ops: Vec<LineOperation>) -> Result<(Vec
 
     // Sort by startLine descending (bottom-up)
     let mut sorted_ops: Vec<&LineOperation> = ops.iter().collect();
-    sorted_ops.sort_by(|a, b| b.start_line.cmp(&a.start_line));
+    sorted_ops.sort_by_key(|b| std::cmp::Reverse(b.start_line));
 
     // Check overlaps (after sorting descending)
     // sorted_ops[0] has highest startLine, sorted_ops[last] has lowest

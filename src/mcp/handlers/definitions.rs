@@ -1899,7 +1899,7 @@ impl AutoSummaryGroup {
 
     fn top_definitions(&self, n: usize) -> Vec<String> {
         let mut sorted = self.containers.clone();
-        sorted.sort_by(|a, b| b.1.cmp(&a.1));
+        sorted.sort_by_key(|b| std::cmp::Reverse(b.1));
         sorted.truncate(n);
         sorted.into_iter().map(|(name, _)| name).collect()
     }
@@ -1929,7 +1929,7 @@ fn build_auto_summary(
 
     // Sort groups by total count desc
     let mut sorted_groups: Vec<(String, AutoSummaryGroup)> = groups.into_iter().collect();
-    sorted_groups.sort_by(|a, b| b.1.total().cmp(&a.1.total()));
+    sorted_groups.sort_by_key(|b| std::cmp::Reverse(b.1.total()));
 
     // Format JSON groups
     let groups_json: Vec<Value> = sorted_groups.iter().map(|(dir, data)| {

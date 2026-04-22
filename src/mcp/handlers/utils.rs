@@ -491,11 +491,10 @@ fn phase_reduce_file_count(output: &mut Value, max_bytes: usize, reasons: &mut V
     let current_size = measure_json_size(output);
     if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
         let original_count = files.len();
-        if original_count > 0 {
-            let avg_file_size = current_size / original_count;
+        if let Some(avg_file_size) = current_size.checked_div(original_count) {
             let excess = current_size.saturating_sub(max_bytes);
-            let files_to_remove = if avg_file_size > 0 {
-                (excess / avg_file_size) + 1 // +1 to be safe
+            let files_to_remove = if let Some(div) = excess.checked_div(avg_file_size) {
+                div + 1 // +1 to be safe
             } else {
                 original_count / 2
             };
@@ -587,8 +586,8 @@ fn phase_truncate_largest_array(output: &mut Value, max_bytes: usize, reasons: &
                 if original_count > 0 {
                     // Estimate how many entries to keep
                     let avg_entry_size = current_size / original_count.max(1);
-                    let target_entries = if avg_entry_size > 0 {
-                        max_bytes / avg_entry_size
+                    let target_entries = if let Some(div) = max_bytes.checked_div(avg_entry_size) {
+                        div
                     } else {
                         original_count / 2
                     };

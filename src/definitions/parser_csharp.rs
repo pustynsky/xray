@@ -51,10 +51,10 @@ pub(crate) fn parse_csharp_definitions(
                                 .insert(def.name.clone(), return_type);
                         }
                 }
-                DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record => {
-                    if !def.base_types.is_empty() {
-                        class_base_types.insert(def.name.clone(), def.base_types.clone());
-                    }
+                DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record
+                    if !def.base_types.is_empty() =>
+                {
+                    class_base_types.insert(def.name.clone(), def.base_types.clone());
                 }
                 _ => {}
             }

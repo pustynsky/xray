@@ -631,7 +631,7 @@ impl GitHistoryCache {
             .collect();
 
         // Sort by timestamp descending (newest first)
-        commits.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+        commits.sort_by_key(|b| std::cmp::Reverse(b.timestamp));
 
         // Count total BEFORE truncation
         let total_count = commits.len();
@@ -738,7 +738,7 @@ impl GitHistoryCache {
             .collect();
 
         // Sort by commit count descending
-        summaries.sort_by(|a, b| b.commit_count.cmp(&a.commit_count));
+        summaries.sort_by_key(|b| std::cmp::Reverse(b.commit_count));
 
         summaries
     }
@@ -839,7 +839,7 @@ impl GitHistoryCache {
         }
 
         // Sort by last_modified descending
-        activities.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+        activities.sort_by_key(|b| std::cmp::Reverse(b.last_modified));
 
         activities
     }
