@@ -118,12 +118,19 @@ struct EditResult {
 /// this lets the caller distinguish "edited an existing file" from "created a new file"
 /// reliably (without relying on `normalized.is_empty()` which is also true for
 /// existing-but-empty files).
-fn read_and_validate_file(server_dir: &str, path_str: &str) -> Result<(PathBuf, String, &'static str, bool), String> {
+///
+/// `dry_run` skips parent-directory creation for non-existent files. Without this,
+/// a `dryRun=true` preview against a non-existent path leaves empty parent
+/// directories on disk — violating the "preview without writing" contract (EDIT-003).
+fn read_and_validate_file(server_dir: &str, path_str: &str, dry_run: bool) -> Result<(PathBuf, String, &'static str, bool), String> {
     let resolved = resolve_path(server_dir, path_str);
     let file_existed = resolved.exists();
     if !file_existed {
-        // File doesn't exist — treat as empty (allows creation via insert operations)
-        if let Some(parent) = resolved.parent() {
+        // File doesn't exist — treat as empty (allows creation via insert operations).
+        // EDIT-003: only create parent dirs on a real write. dryRun must be a pure preview.
+        if !dry_run
+            && let Some(parent) = resolved.parent()
+        {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directories for '{}': {}", path_str, e))?;
         }
@@ -142,9 +149,18 @@ fn read_and_validate_file(server_dir: &str, path_str: &str) -> Result<(PathBuf, 
         return Err(format!("Binary file detected, not editable: {}", path_str));
     }
 
+    // EDIT-004: strict UTF-8. Lossy fallback (replacing invalid bytes with U+FFFD)
+    // would silently corrupt non-UTF-8 source files (Windows-1251, Shift-JIS,
+    // GB2312, Latin-1) on the next write. Refuse to edit instead — preserves
+    // original bytes and surfaces the encoding mismatch to the caller.
     let content = match std::str::from_utf8(&raw_bytes) {
         Ok(s) => s.to_string(),
-        Err(_) => String::from_utf8_lossy(&raw_bytes).into_owned(),
+        Err(e) => {
+            return Err(format!(
+                "File '{}' is not valid UTF-8 (invalid byte at offset {}): refuse to edit to avoid silent corruption.",
+                path_str, e.valid_up_to()
+            ));
+        }
     };
 
     let line_ending = detect_line_ending(&content);
@@ -324,29 +340,100 @@ fn verify_written_file(resolved: &Path, expected_lf_content: &str, line_ending: 
     ))
 }
 
-/// Generate a temp file path in the same directory as `target` for atomic writes.
+/// Generate a per-call unique temp file path in the same directory as `target`.
+///
+/// EDIT-005: a deterministic name (e.g. `.{name}.xray_tmp`) collides between
+/// concurrent `xray_edit` calls on the same file (LLM parallel tool-calls, two
+/// MCP servers, agent-vs-formatter). Both `File::create` succeed (truncate),
+/// both write, both rename → second rename overwrites first → silent lost write.
+/// Including PID + nanosecond timestamp + atomic counter makes practical
+/// collision impossible.
 fn temp_path_for(target: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let file_name = target.file_name()
         .map(|n| n.to_string_lossy().to_string())
         .unwrap_or_else(|| "file".to_string());
-    target.with_file_name(format!(".{}.xray_tmp", file_name))
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(".{}.xray_tmp.{}.{}.{}", file_name, pid, nanos, counter))
+}
+
+/// Backup file path used by `rename_replace` to protect against the Windows
+/// remove-then-rename data-loss window (EDIT-007).
+fn backup_path_for(target: &Path) -> PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    let file_name = target.file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_else(|| "file".to_string());
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let counter = COUNTER.fetch_add(1, Ordering::Relaxed);
+    target.with_file_name(format!(".{}.xray_backup.{}.{}.{}", file_name, pid, nanos, counter))
 }
 
 /// Rename `src` to `dst`, replacing `dst` if it exists.
-/// On Windows, std::fs::rename may fail if `dst` exists, so we remove first.
+///
+/// On Windows, `std::fs::rename` may fail when `dst` exists, so we fall back to
+/// `remove(dst)` + `rename(src, dst)`. The naive fallback has a data-loss
+/// window (EDIT-007): if `remove` succeeds but `rename` then fails (antivirus
+/// holding a handle, OneDrive sync, transient I/O), the target is gone forever.
+/// We mitigate by copying the original to a sibling backup first, restoring it
+/// on rename failure. The backup is removed on success.
 fn rename_replace(src: &Path, dst: &Path) -> Result<(), String> {
-    // Try direct rename first (works on most platforms)
+    // Try direct rename first (atomic on POSIX, sometimes works on Windows).
     match std::fs::rename(src, dst) {
         Ok(()) => Ok(()),
         Err(e) => {
-            // Fallback: remove target first, then rename
-            if dst.exists() {
-                std::fs::remove_file(dst)
-                    .map_err(|e2| format!("Cannot remove original '{}': {}", dst.display(), e2))?;
-                std::fs::rename(src, dst)
-                    .map_err(|e2| format!("Cannot rename temp to '{}': {} (original error: {})", dst.display(), e2, e))
-            } else {
-                Err(format!("Cannot rename temp to '{}': {}", dst.display(), e))
+            if !dst.exists() {
+                return Err(format!("Cannot rename temp to '{}': {}", dst.display(), e));
+            }
+            // EDIT-007: stage a backup of the original before remove+rename.
+            let backup = backup_path_for(dst);
+            if let Err(e2) = std::fs::copy(dst, &backup) {
+                return Err(format!(
+                    "Cannot stage backup for '{}': {} (original error: {})",
+                    dst.display(), e2, e
+                ));
+            }
+            if let Err(e2) = std::fs::remove_file(dst) {
+                let _ = std::fs::remove_file(&backup); // best-effort cleanup
+                return Err(format!("Cannot remove original '{}': {}", dst.display(), e2));
+            }
+            match std::fs::rename(src, dst) {
+                Ok(()) => {
+                    let _ = std::fs::remove_file(&backup); // best-effort cleanup
+                    Ok(())
+                }
+                Err(e2) => {
+                    // Restore the backup so the target is not lost.
+                    if let Err(e3) = std::fs::rename(&backup, dst) {
+                        // Last resort: copy back, then remove backup.
+                        if let Err(e4) = std::fs::copy(&backup, dst) {
+                            return Err(format!(
+                                "Cannot rename temp to '{}': {} (original error: {}); \
+                                 also failed to restore backup '{}': rename={}, copy={}",
+                                dst.display(), e2, e, backup.display(), e3, e4
+                            ));
+                        }
+                        let _ = std::fs::remove_file(&backup);
+                    }
+                    Err(format!(
+                        "Cannot rename temp to '{}': {} (original error: {}); \
+                         original file restored from backup.",
+                        dst.display(), e2, e
+                    ))
+                }
             }
         }
     }
@@ -363,7 +450,9 @@ fn handle_single_file_edit(
 ) -> ToolCallResult {
     // Read and validate. `file_existed` is captured BEFORE the write so we can
     // accurately set `fileCreated` and `fileListInvalidated` in the response.
-    let (resolved, normalized, line_ending, file_existed) = match read_and_validate_file(&ctx.server_dir(), path_str) {
+    // Pass dry_run so a preview against a non-existent path doesn't create empty
+    // parent directories (EDIT-003).
+    let (resolved, normalized, line_ending, file_existed) = match read_and_validate_file(&ctx.server_dir(), path_str, dry_run) {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
@@ -510,7 +599,7 @@ fn handle_multi_file_edit(
     let mut file_data: Vec<(&str, PathBuf, String, &'static str, bool)> = Vec::with_capacity(path_strings.len());
     let mut seen_paths: HashSet<PathBuf> = HashSet::with_capacity(path_strings.len());
     for path_str in &path_strings {
-        match read_and_validate_file(&ctx.server_dir(), path_str) {
+        match read_and_validate_file(&ctx.server_dir(), path_str, dry_run) {
             Ok((resolved, normalized, line_ending, file_existed)) => {
                 // Normalize path to handle ./file.txt vs file.txt
                 let normalized_path: PathBuf = resolved.components().collect();

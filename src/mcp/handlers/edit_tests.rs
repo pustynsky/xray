@@ -2724,7 +2724,15 @@ mod audit_regression_tests {
         use std::path::PathBuf;
         let target = PathBuf::from("/some/dir/myfile.rs");
         let temp = super::temp_path_for(&target);
-        assert_eq!(temp, PathBuf::from("/some/dir/.myfile.rs.xray_tmp"));
+        // EDIT-005: temp filename now embeds PID + nanos + counter for concurrency
+        // safety. Verify structure rather than exact string: same parent dir,
+        // dot-prefix + original-name + `.xray_tmp.` infix.
+        assert_eq!(temp.parent(), Some(PathBuf::from("/some/dir").as_path()));
+        let name = temp.file_name().unwrap().to_string_lossy();
+        assert!(name.starts_with(".myfile.rs.xray_tmp."), "got: {}", name);
+        // Ensure two consecutive calls produce distinct names.
+        let temp2 = super::temp_path_for(&target);
+        assert_ne!(temp, temp2, "two consecutive temp paths must be unique");
     }
 
     // ─── MAJOR-12: atomic write via temp + rename ─────────────────────────
@@ -2745,11 +2753,11 @@ mod audit_regression_tests {
         // Target rewritten.
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "updated\n");
 
-        // No `.file.txt.xray_tmp` (or any *.xray_tmp) left behind on success.
+        // No `.file.txt.xray_tmp.*` (or any *.xray_tmp.*) left behind on success.
         for entry in std::fs::read_dir(tmp.path()).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().to_string();
             assert!(
-                !name.ends_with(".xray_tmp"),
+                !name.contains(".xray_tmp"),
                 "unexpected leftover temp file after atomic write: {}",
                 name
             );
@@ -2758,12 +2766,14 @@ mod audit_regression_tests {
 
     #[test]
     fn test_write_file_with_endings_succeeds_even_if_stale_temp_exists() {
-        // Simulates recovery from a previous crash that left `.file.txt.xray_tmp`
-        // behind. The new write must overwrite it (File::create truncates), then
-        // rename atomically over the target.
+        // Simulates recovery from a previous crash that left a stale
+        // `.file.txt.xray_tmp.*` behind. EDIT-005: per-call unique temp names
+        // mean the new write does NOT collide with the stale one. The edit must
+        // succeed and the target must hold the new content; the orphaned stale
+        // temp is harmless and not our problem to clean up.
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("file.txt");
-        let stale = tmp.path().join(".file.txt.xray_tmp");
+        let stale = tmp.path().join(".file.txt.xray_tmp.0.0.0");
         std::fs::write(&target, "original\n").unwrap();
         std::fs::write(&stale, "garbage from a previous crash").unwrap();
         let ctx = make_ctx(tmp.path());
@@ -2774,8 +2784,6 @@ mod audit_regression_tests {
         }));
         assert!(!result.is_error, "edit should succeed despite stale temp: {:?}", result);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "recovered\n");
-        // After successful rename the temp path should no longer exist.
-        assert!(!stale.exists(), "stale temp should have been consumed by rename");
     }
 
     #[test]
@@ -2793,7 +2801,11 @@ mod audit_regression_tests {
         }));
         assert!(!result.is_error, "dryRun edit should succeed: {:?}", result);
         assert_eq!(std::fs::read_to_string(&target).unwrap(), "original\n");
-        assert!(!tmp.path().join(".file.txt.xray_tmp").exists(), "dryRun must not stage a temp file");
+        // dryRun must not stage any *.xray_tmp.* temp file.
+        for entry in std::fs::read_dir(tmp.path()).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().to_string();
+            assert!(!name.contains(".xray_tmp"), "dryRun must not stage a temp file, found: {}", name);
+        }
     }
 
     // ─── A1: Multi-file path dedup ───────────────────────────────────────
@@ -3636,5 +3648,148 @@ fn test_tier5_verify_written_file_crlf_ok() {
     std::fs::write(&p, b"hello\r\nworld\r\n").unwrap();
     // Expected content is the LF-normalized form; verifier re-applies CRLF.
     assert!(verify_written_file(&p, "hello\nworld\n", "\r\n").is_ok());
+}
+
+
+// ─── EDIT-003/004/005/007 hardening regressions (2026-04-22) ──────────
+
+#[test]
+fn test_edit003_dryrun_does_not_create_parent_dirs() {
+    // EDIT-003: dryRun against a non-existent path with deep parent hierarchy
+    // must not leave empty directories on disk.
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new/deeply/nested/file.rs",
+        "dryRun": true,
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "hello\n" }]
+    }));
+    assert!(!result.is_error, "dryRun create should succeed: {:?}", result.content[0].text);
+
+    // Parent directories must NOT exist on disk after a dryRun preview.
+    assert!(!tmp.path().join("new").exists(),
+        "dryRun must not create parent dirs; found: {:?}",
+        std::fs::read_dir(tmp.path()).unwrap().map(|e| e.unwrap().file_name()).collect::<Vec<_>>());
+}
+
+#[test]
+fn test_edit003_real_run_still_creates_parent_dirs() {
+    // Negative half: a real (non-dryRun) write on the same path must continue
+    // to create the parent hierarchy as before.
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new/deeply/nested/file.rs",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "hello\n" }]
+    }));
+    assert!(!result.is_error, "real create should succeed: {:?}", result.content[0].text);
+    assert!(tmp.path().join("new/deeply/nested/file.rs").exists());
+}
+
+#[test]
+fn test_edit004_invalid_utf8_file_is_rejected_not_corrupted() {
+    // EDIT-004: a Latin-1 file containing byte 0xE9 (`é`) is invalid UTF-8.
+    // Pre-fix: lossy decode silently replaced it with U+FFFD, then the write
+    // back permanently destroyed the original bytes. Post-fix: edit is
+    // rejected with a clear error and the file is untouched.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("latin1.txt");
+    let original_bytes = b"caf\xE9\nhello\n";
+    std::fs::write(&path, original_bytes).unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "latin1.txt",
+        "edits": [ { "search": "hello", "replace": "world" } ]
+    }));
+    assert!(result.is_error, "invalid-UTF-8 edit should fail, got: {:?}", result.content[0].text);
+    assert!(result.content[0].text.contains("not valid UTF-8"),
+        "error must mention UTF-8: {}", result.content[0].text);
+
+    // Crucially: original bytes preserved on disk (no silent corruption).
+    let on_disk = std::fs::read(&path).unwrap();
+    assert_eq!(on_disk, original_bytes,
+        "non-UTF-8 file must be preserved byte-for-byte after rejected edit");
+}
+
+#[test]
+fn test_edit004_valid_utf8_with_non_ascii_still_works() {
+    // Negative half: legitimate UTF-8 with multi-byte chars must continue to work.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("u8.txt");
+    std::fs::write(&path, "café\nhello\n").unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "u8.txt",
+        "edits": [ { "search": "hello", "replace": "world" } ]
+    }));
+    assert!(!result.is_error, "valid UTF-8 edit should succeed: {:?}", result.content[0].text);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "café\nworld\n");
+}
+
+#[test]
+fn test_edit005_temp_path_is_unique_per_call() {
+    // EDIT-005: per-call unique temp path. Pre-fix two concurrent edits on the
+    // same file produced the same `.foo.xray_tmp` and silently lost one write.
+    use std::collections::HashSet;
+    let target = PathBuf::from("/some/dir/file.rs");
+    let mut seen = HashSet::new();
+    for _ in 0..1000 {
+        let p = super::temp_path_for(&target);
+        assert!(seen.insert(p), "temp_path_for produced a collision within 1000 calls");
+    }
+}
+
+#[test]
+fn test_edit005_temp_path_includes_pid_and_xray_tmp_marker() {
+    // Sanity check: the new format embeds the live PID so that a different
+    // process editing the same file picks a different temp directory entry.
+    let target = PathBuf::from("/some/dir/file.rs");
+    let p = super::temp_path_for(&target);
+    let name = p.file_name().unwrap().to_string_lossy();
+    assert!(name.starts_with(".file.rs.xray_tmp."), "got: {}", name);
+    let pid = std::process::id().to_string();
+    assert!(name.contains(&format!(".xray_tmp.{}.", pid)),
+        "temp name must embed PID {}, got: {}", pid, name);
+}
+
+#[test]
+fn test_edit007_rename_replace_succeeds_when_target_exists() {
+    // EDIT-007: rename_replace must succeed when the target already exists
+    // (this is the common case post-write). Verify backup cleanup and
+    // correct final content.
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("file.txt");
+    let src = tmp.path().join(".file.txt.xray_tmp.0.0.0");
+    std::fs::write(&target, b"old").unwrap();
+    std::fs::write(&src, b"new").unwrap();
+
+    super::rename_replace(&src, &target).expect("rename should succeed");
+    assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    assert!(!src.exists(), "src temp must be consumed by rename");
+
+    // No backup file leaked.
+    for entry in std::fs::read_dir(tmp.path()).unwrap() {
+        let name = entry.unwrap().file_name().to_string_lossy().to_string();
+        assert!(!name.contains(".xray_backup"), "backup must not leak, found: {}", name);
+    }
+}
+
+#[test]
+fn test_edit007_rename_replace_to_nonexistent_target() {
+    // Edge case: rename to a path whose target does not yet exist (file creation).
+    // No backup needed; direct rename takes the fast path.
+    let tmp = tempfile::tempdir().unwrap();
+    let target = tmp.path().join("file.txt");
+    let src = tmp.path().join(".file.txt.xray_tmp.0.0.0");
+    std::fs::write(&src, b"new").unwrap();
+    assert!(!target.exists());
+
+    super::rename_replace(&src, &target).expect("rename should succeed");
+    assert_eq!(std::fs::read(&target).unwrap(), b"new");
+    assert!(!src.exists());
 }
 
