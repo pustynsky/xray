@@ -1,4 +1,5 @@
 use super::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Helper: build a minimal GitHistoryCache with test data and save it to a temp directory.
 fn create_test_git_history_cache(dir: &std::path::Path) -> std::path::PathBuf {

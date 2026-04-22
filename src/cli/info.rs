@@ -1,32 +1,45 @@
 //! info and info_json commands.
 
 use std::fs;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{index_dir, index::load_compressed, ContentIndex, FileIndex};
+use crate::{current_unix_secs, index_dir, index::load_compressed, ContentIndex, FileIndex};
 #[allow(unused_imports)] // Used in tests (info_tests.rs) and in cmd_info_json
 use crate::index::{load_index_meta, save_index_meta, IndexDetails, IndexMeta};
+
+/// INFO-001: shared age computation that respects the clock-failure semantics
+/// of [`current_unix_secs`]. Returns the number of seconds elapsed since
+/// `created_at`, or `u64::MAX` if the system clock is invalid (treats the
+/// cache as "ancient" so downstream stale checks bias toward force-rebuild
+/// instead of the previous "every cache reports as 0.0 h ago" silent bug).
+fn age_secs_since(created_at: u64) -> u64 {
+    current_unix_secs()
+        .map(|now| now.saturating_sub(created_at))
+        .unwrap_or(u64::MAX)
+}
 
 /// Check if an index is stale based on created_at and max_age_secs from metadata.
 fn is_stale_from_meta(created_at: u64, max_age_secs: u64) -> bool {
     if max_age_secs == 0 {
         return false;
     }
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs();
-    now.saturating_sub(created_at) > max_age_secs
+    // INFO-001: when the clock is invalid we cannot prove freshness, so
+    // bias toward stale=true. Operators reading `xray info` then see a
+    // [STALE] marker and rebuild instead of trusting an unverifiable cache.
+    match current_unix_secs() {
+        Some(now) => now.saturating_sub(created_at) > max_age_secs,
+        None => true,
+    }
 }
 
-/// Compute age in hours from created_at timestamp.
+/// Compute age in hours from created_at timestamp. Returns `f64::INFINITY`
+/// on clock failure so callers' `{:.1}h ago` format strings display a
+/// visibly-broken `infh ago` instead of the previous misleading `0.0h ago`.
 fn age_hours(created_at: u64) -> f64 {
-    let age_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_secs()
-        .saturating_sub(created_at);
-    age_secs as f64 / 3600.0
+    let secs = age_secs_since(created_at);
+    if secs == u64::MAX {
+        return f64::INFINITY;
+    }
+    secs as f64 / 3600.0
 }
 
 pub fn cmd_info() {
@@ -312,11 +325,7 @@ pub(crate) fn cmd_info_json_for_dir(dir: &std::path::Path) -> serde_json::Value 
                 if let Some(meta) = load_index_meta(&path) {
                     indexes.push(meta_to_json(&meta, size, &filename));
                 } else if let Ok(index) = load_compressed::<FileIndex>(&path, "file-index") {
-                    let age_secs = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::ZERO)
-                        .as_secs()
-                        .saturating_sub(index.created_at);
+                    let age_secs = age_secs_since(index.created_at);
                     indexes.push(serde_json::json!({
                         "type": "file",
                         "root": index.root,
@@ -333,11 +342,7 @@ pub(crate) fn cmd_info_json_for_dir(dir: &std::path::Path) -> serde_json::Value 
                 if let Some(meta) = load_index_meta(&path) {
                     indexes.push(meta_to_json(&meta, size, &filename));
                 } else if let Ok(index) = load_compressed::<ContentIndex>(&path, "content-index") {
-                    let age_secs = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::ZERO)
-                        .as_secs()
-                        .saturating_sub(index.created_at);
+                    let age_secs = age_secs_since(index.created_at);
                     indexes.push(serde_json::json!({
                         "type": "content",
                         "root": index.root,
@@ -355,11 +360,7 @@ pub(crate) fn cmd_info_json_for_dir(dir: &std::path::Path) -> serde_json::Value 
                 if let Some(meta) = load_index_meta(&path) {
                     indexes.push(meta_to_json(&meta, size, &filename));
                 } else if let Ok(index) = load_compressed::<crate::definitions::DefinitionIndex>(&path, "definition-index") {
-                    let age_secs = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::ZERO)
-                        .as_secs()
-                        .saturating_sub(index.created_at);
+                    let age_secs = age_secs_since(index.created_at);
                     let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
                     let active_defs: usize = index.file_index.values().map(|v| v.len()).sum();
                     let mut def_info = serde_json::json!({
@@ -386,11 +387,7 @@ pub(crate) fn cmd_info_json_for_dir(dir: &std::path::Path) -> serde_json::Value 
                 if let Some(meta) = load_index_meta(&path) {
                     indexes.push(meta_to_json(&meta, size, &filename));
                 } else if let Ok(cache) = crate::git::cache::GitHistoryCache::load_from_disk(&path) {
-                    let age_secs = SystemTime::now()
-                        .duration_since(UNIX_EPOCH)
-                        .unwrap_or(Duration::ZERO)
-                        .as_secs()
-                        .saturating_sub(cache.built_at);
+                    let age_secs = age_secs_since(cache.built_at);
                     indexes.push(serde_json::json!({
                         "type": "git-history",
                         "commits": cache.commits.len(),
