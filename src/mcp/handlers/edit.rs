@@ -112,12 +112,13 @@ const KNOWN_EDIT_PARAMS: &[&str] = &[
     "expectedLineCount",
 ];
 
-/// Per-edit fields accepted inside `edits[]` / `operations[]` (used only for the
-/// "did you mean" hint when `path` is missing — e.g. caller put `path` inside an
-/// edit object instead of at the top level).
+/// Per-edit fields accepted inside `edits[]` / `operations[]` (used both for
+/// the "did you mean" hint when `path` is missing and for unknown-field
+/// rejection inside `parse_text_edits`).
 const KNOWN_EDIT_OBJECT_FIELDS: &[&str] = &[
     "search",
     "replace",
+    "occurrence",
     "insertAfter",
     "insertBefore",
     "content",
@@ -126,6 +127,154 @@ const KNOWN_EDIT_OBJECT_FIELDS: &[&str] = &[
     "expectedContext",
     "skipIfNotFound",
 ];
+
+/// Common alias names callers reach for inside `edits[]` items (carried over
+/// from Anthropic's text-editor tool, the VS Code `replace_string_in_file`
+/// tool, sed-style "find/with", or just intuitive naming). Each entry maps
+/// `(alias, canonical)`. We do NOT silently accept these — the goal is to
+/// produce an actionable error pointing at the canonical name on the very
+/// first failed attempt, so the caller does not iterate through schema
+/// guesses or fall back to a built-in tool.
+const EDIT_FIELD_SYNONYMS: &[(&str, &str)] = &[
+    // search
+    ("oldText", "search"),
+    ("old_str", "search"),
+    ("oldString", "search"),
+    ("old", "search"),
+    ("find", "search"),
+    ("pattern", "search"),
+    ("searchText", "search"),
+    ("from", "search"),
+    // replace
+    ("newText", "replace"),
+    ("new_str", "replace"),
+    ("newString", "replace"),
+    ("new", "replace"),
+    ("with", "replace"),
+    ("replaceWith", "replace"),
+    ("replaceText", "replace"),
+    ("to", "replace"),
+    ("replacement", "replace"),
+    // insertAfter / insertBefore
+    ("after", "insertAfter"),
+    ("insert_after", "insertAfter"),
+    ("before", "insertBefore"),
+    ("insert_before", "insertBefore"),
+    // content
+    ("text", "content"),
+    ("value", "content"),
+    ("body", "content"),
+    // misc
+    ("expected_context", "expectedContext"),
+    ("context", "expectedContext"),
+    ("skip_if_not_found", "skipIfNotFound"),
+    ("optional", "skipIfNotFound"),
+    ("nth", "occurrence"),
+    ("index", "occurrence"),
+];
+
+/// Inline form-menu used in `edits[]` item error messages. Kept short — the
+/// caller already has the JSON they sent in their context, so the goal is to
+/// remind them which canonical fields exist, not to teach the full schema.
+const EDIT_FORM_MENU: &str = "Each edit item must use ONE of three forms: \
+    (a) {\"search\": \"old\", \"replace\": \"new\"} — text replacement; \
+    (b) {\"insertAfter\": \"anchor\", \"content\": \"...\"} — insert after anchor; \
+    (c) {\"insertBefore\": \"anchor\", \"content\": \"...\"} — insert before anchor. \
+    Optional fields: occurrence, expectedContext, skipIfNotFound. \
+    For Mode A (line-range) use the top-level 'operations' parameter instead.";
+
+/// Look up a synonym in `EDIT_FIELD_SYNONYMS`. Case-sensitive on purpose —
+/// callers consistently use a single casing per attempt and we want to tell
+/// them the exact canonical name.
+fn lookup_edit_field_synonym(key: &str) -> Option<&'static str> {
+    EDIT_FIELD_SYNONYMS
+        .iter()
+        .find(|(alias, _)| *alias == key)
+        .map(|(_, canonical)| *canonical)
+}
+
+/// Validate the keys of a single `edits[]` item. Returns `Some(error)` when
+/// any unknown / aliased / mis-typed field is present, `None` when every key
+/// is recognised. This runs BEFORE per-mode validation so that the caller
+/// gets a synonym/typo hint instead of the misleading "missing 'search'"
+/// message that the search/replace fall-through used to produce.
+///
+/// Mode-A line-range fields (`startLine`/`endLine`) are not valid here
+/// (`edits[]` is Mode B only), so they are reported with a hint to switch to
+/// the `operations` parameter.
+fn check_unknown_edit_object_fields(
+    obj: &serde_json::Map<String, Value>,
+    i: usize,
+) -> Option<String> {
+    // Fields that ARE valid inside an `edits[]` item (Mode B). Excludes the
+    // Mode-A-only line-range fields.
+    const VALID_EDITS_ITEM_FIELDS: &[&str] = &[
+        "search",
+        "replace",
+        "occurrence",
+        "insertAfter",
+        "insertBefore",
+        "content",
+        "expectedContext",
+        "skipIfNotFound",
+    ];
+
+    for key in obj.keys() {
+        if VALID_EDITS_ITEM_FIELDS.contains(&key.as_str()) {
+            continue;
+        }
+        // Surface alias → canonical mapping directly. Most common case in
+        // practice (oldText/newText, find/with, pattern/with, …).
+        if let Some(canonical) = lookup_edit_field_synonym(key) {
+            return Some(format!(
+                "edits[{i}]: unknown field '{key}'. Did you mean '{canonical}'? \
+                 xray_edit uses '{canonical}', not '{key}'. {menu}",
+                i = i, key = key, canonical = canonical, menu = EDIT_FORM_MENU
+            ));
+        }
+        // Mode-A line-range fields used inside edits[] — wrong nesting level.
+        if key == "startLine" || key == "endLine" {
+            return Some(format!(
+                "edits[{i}]: '{key}' is a Mode A (line-range) field and is not valid \
+                 inside 'edits[]' (Mode B is text-match only). For line-range edits, \
+                 use the top-level 'operations' parameter: \
+                 {{\"path\": \"...\", \"operations\": [{{\"startLine\": 5, \"endLine\": 5, \"content\": \"...\"}}]}}.",
+                i = i, key = key
+            ));
+        }
+        // Generic typo → did_you_mean against the canonical field set.
+        let suggestion = did_you_mean(key, VALID_EDITS_ITEM_FIELDS);
+        let mut msg = format!("edits[{}]: unknown field '{}'.", i, key);
+        if let Some(s) = suggestion {
+            msg.push_str(&format!(" Did you mean '{}'?", s));
+        }
+        msg.push(' ');
+        msg.push_str(EDIT_FORM_MENU);
+        return Some(msg);
+    }
+    None
+}
+
+/// Build the error message for an `edits[]` item that contains no canonical
+/// field at all (after `check_unknown_edit_object_fields` has cleared all
+/// keys — i.e. the item is empty `{}` or contains only meta-fields like
+/// `occurrence`/`expectedContext`/`skipIfNotFound`).
+fn missing_edit_form_error_message(edit: &Value, i: usize) -> String {
+    let keys: Vec<String> = edit
+        .as_object()
+        .map(|o| o.keys().cloned().collect())
+        .unwrap_or_default();
+    let got = if keys.is_empty() {
+        "{} (empty object)".to_string()
+    } else {
+        format!("keys [{}]", keys.join(", "))
+    };
+    format!(
+        "edits[{i}]: edit item is missing a primary action field (search/insertAfter/insertBefore). \
+         Got {got}. {menu}",
+        i = i, got = got, menu = EDIT_FORM_MENU
+    )
+}
 
 /// Detect unknown top-level parameters and return an actionable error message,
 /// or `None` if every key is recognised. Suggests the most-likely correct key
@@ -1281,6 +1430,17 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
             ));
         }
 
+        // Validate edit-object keys: reject unknown / aliased fields with an
+        // actionable hint BEFORE the per-mode validation. This catches the
+        // common case where the caller used an alias (oldText/newText, find/with,
+        // pattern/with, etc.) — instead of the misleading "missing or invalid
+        // 'search'" message, surface the alias → canonical mapping directly.
+        if let Some(obj) = edit.as_object()
+            && let Some(msg) = check_unknown_edit_object_fields(obj, i)
+        {
+            return Err(msg);
+        }
+
         if has_insert {
             // Insert mode validation
             if insert_after.is_some() && insert_before.is_some() {
@@ -1302,16 +1462,32 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
                     i
                 ));
             }
-        } else {
-            // Search/replace mode validation
+        } else if has_search_replace {
+            // Search/replace mode validation — at least one of search/replace
+            // is set, so the caller clearly intended this mode. Validate
+            // both halves are present and non-empty.
             let search_str = search.as_deref()
-                .ok_or_else(|| format!("edits[{}]: missing or invalid 'search'", i))?;
+                .ok_or_else(|| format!(
+                    "edits[{}]: 'replace' provided without 'search'. Both fields are required for text replacement. \
+                     Example: {{\"search\": \"old\", \"replace\": \"new\"}}",
+                    i
+                ))?;
             if replace.is_none() {
-                return Err(format!("edits[{}]: missing or invalid 'replace'", i));
+                return Err(format!(
+                    "edits[{}]: 'search' provided without 'replace'. Both fields are required for text replacement. \
+                     Example: {{\"search\": \"old\", \"replace\": \"new\"}}",
+                    i
+                ));
             }
             if search_str.is_empty() {
                 return Err(format!("edits[{}]: 'search' must not be empty", i));
             }
+        } else {
+            // Neither mode signalled. After the unknown-field check above, this
+            // means the edit-object is empty (or contained only meta-fields like
+            // 'occurrence' / 'expectedContext'). Surface the full menu of forms
+            // so the caller can pick one without round-tripping to xray_help.
+            return Err(missing_edit_form_error_message(edit, i));
         }
 
         edits.push(TextEdit {
