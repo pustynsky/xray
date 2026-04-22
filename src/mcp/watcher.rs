@@ -5,7 +5,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use ignore::WalkBuilder;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use notify::event::ModifyKind;
 use tracing::{debug, error, info, warn};
 
 use crate::{canonicalize_or_warn, clean_path, tokenize, ContentIndex, FileIndex, Posting, DEFAULT_MIN_TOKEN_LEN};
@@ -53,16 +52,17 @@ impl WatcherStats {
 
 /// Start a file watcher thread that incrementally updates the in-memory index
 /// Returns `true` if the given event kind should invalidate the file-list index.
-/// Covers create, remove, and rename (cross-platform: Linux/inotify emits
-/// `Modify(Name(_))` for renames, Windows emits Remove+Create pairs).
+///
+/// MCP-WCH-001: previously this only matched `Create`, `Remove`, `Modify(Name)`,
+/// and `Modify(Any)`. notify-rs on Windows (ReadDirectoryChangesW) and on macOS
+/// (FSEvents in degraded mode) routinely delivers `Modify(Other)` and
+/// `Modify(Metadata)` for newly-created files, which left `file_index_dirty`
+/// at `false` and made `xray_fast` miss new files until the 5-min periodic
+/// rescan ran. Inverting the predicate to "anything that isn't `Access(_)`"
+/// is a safe over-approximation: false positives only cost one cheap rebuild
+/// the next time `xray_fast` is called.
 pub(crate) fn should_invalidate_file_index(kind: &EventKind) -> bool {
-    matches!(
-        kind,
-        EventKind::Create(_)
-            | EventKind::Remove(_)
-            | EventKind::Modify(ModifyKind::Name(_))
-            | EventKind::Modify(ModifyKind::Any)
-    )
+    !matches!(kind, EventKind::Access(_))
 }
 
 /// Outcome of [`wait_for_indexes_ready`]. Public to the crate so watcher
@@ -288,6 +288,15 @@ pub fn start_watcher(
                                 break;
                             }
                             batch_start = None;
+                            // MCP-WCH-004: also check autosave after a forced
+                            // flush. Under sustained event load the `Timeout`
+                            // branch (where autosave normally fires) may not
+                            // run for many minutes, so we'd otherwise lose
+                            // every incremental update on crash.
+                            if last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+                                periodic_autosave(&index, &def_index, &index_base);
+                                last_autosave = std::time::Instant::now();
+                            }
                         }
                 }
                 Ok(Err(e)) => {
@@ -297,6 +306,12 @@ pub fn start_watcher(
                     // Check generation on each timeout (watcher restart)
                     if watcher_generation.load(Ordering::Acquire) != my_generation {
                         info!(dir = %dir_str, my_generation, "Watcher generation changed, exiting");
+                        // MCP-WCH-005: flush pending events before exit so a
+                        // workspace switch doesn't drop incremental updates
+                        // already received from the FS.
+                        if !dirty_files.is_empty() || !removed_files.is_empty() {
+                            let _ = process_batch(&index, &def_index, &mut dirty_files, &mut removed_files);
+                        }
                         break;
                     }
                     // Debounce window expired — process batch
@@ -313,9 +328,22 @@ pub fn start_watcher(
                         break;
                     }
                     batch_start = None;
+                    // MCP-WCH-004: opportunistic autosave on every successful
+                    // batch flush, not only when the pending sets are empty.
+                    if last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
+                        periodic_autosave(&index, &def_index, &index_base);
+                        last_autosave = std::time::Instant::now();
+                    }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
                     info!("Watcher channel disconnected, stopping");
+                    // MCP-WCH-005: flush any pending events before exit so we
+                    // don't drop incremental updates that the FS already
+                    // reported. `process_batch` is best-effort; if the lock
+                    // is poisoned we simply give up (same as the live loop).
+                    if !dirty_files.is_empty() || !removed_files.is_empty() {
+                        let _ = process_batch(&index, &def_index, &mut dirty_files, &mut removed_files);
+                    }
                     break;
                 }
             }
