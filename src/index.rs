@@ -1360,7 +1360,6 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     let file_count = file_data.len();
     let read_errors = read_errors.load(std::sync::atomic::Ordering::Relaxed);
     let lossy_file_count = lossy_file_count.load(std::sync::atomic::Ordering::Relaxed);
-    let worker_panics = worker_panic_count.load(std::sync::atomic::Ordering::Relaxed);
     let min_len = args.min_token_len;
     log_memory(&format!("content-build: after file walk ({} files)", file_count));
 
@@ -1465,6 +1464,12 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
 
     let unique_tokens = index.len();
     log_memory(&format!("content-build: after all chunks ({} tokens)", unique_tokens));
+
+    // IDX-008: load `worker_panics` AFTER the chunked tokenization loop.
+    // The previous early load (right after the file walk) captured a snapshot
+    // before any tokenization-thread panics could be recorded, so panics in the
+    // tokenization phase were silently dropped from the persisted index.
+    let worker_panics = worker_panic_count.load(std::sync::atomic::Ordering::Relaxed);
 
     // Build trigram index from inverted index tokens
     let trigram = build_trigram_index(&index);

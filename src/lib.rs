@@ -655,8 +655,23 @@ pub fn tokenize(line: &str, min_len: usize) -> Vec<String> {
         // would under-count Greek / Cyrillic / CJK tokens (multi-byte UTF-8)
         // and let them slip below `min_len`, breaking the CJK/Cyrillic index.
         .filter(|s| s.chars().count() >= min_len)
-        .map(|s| s.to_lowercase())
+        .map(fast_lowercase)
         .collect()
+}
+
+/// IDX-010: lowercase the token without an extra `to_lowercase()` allocation
+/// when the input is already pure ASCII lowercase (the common case for source
+/// code identifiers, JSON keys, and lowercase config tokens). Falls back to
+/// the Unicode-aware `str::to_lowercase` for any input containing ASCII
+/// uppercase or non-ASCII characters — preserving the Greek / Cyrillic / CJK
+/// case-folding semantics established by MINOR-24.
+#[inline]
+fn fast_lowercase(s: &str) -> String {
+    if s.bytes().all(|b| b.is_ascii() && !b.is_ascii_uppercase()) {
+        s.to_string()
+    } else {
+        s.to_lowercase()
+    }
 }
 
 #[cfg(test)]
