@@ -216,6 +216,13 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
 
 /// Remove all definitions for a file from the index
 pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
+    // DEF-S-002: clear stale `empty_file_ids` entry FIRST, before the early
+    // return below. A file that was previously empty has no `file_index` entry,
+    // so the early `None => return` would skip this cleanup otherwise — leaving
+    // its (file_id, size) tuple in `empty_file_ids` forever and inflating the
+    // on-disk index plus audit reports.
+    index.empty_file_ids.retain(|(id, _)| *id != file_id);
+
     let def_indices = match index.file_index.remove(&file_id) {
         Some(indices) => indices,
         None => return,

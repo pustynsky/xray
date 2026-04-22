@@ -193,6 +193,7 @@ fn test_find_def_index_meta_rejects_extension_mismatch() {
 fn test_def_index_format_version_correct_loads_ok() {
     use crate::definitions::DEFINITION_INDEX_VERSION;
     let tmp = tempfile::tempdir().unwrap();
+
     let root = tmp.path().to_string_lossy().to_string();
     let mut idx = crate::definitions::DefinitionIndex::default();
     idx.format_version = DEFINITION_INDEX_VERSION;
@@ -240,3 +241,71 @@ fn test_def_index_format_version_legacy_zero_returns_err() {
     let result = load_definition_index(&root, "rs", tmp.path());
     assert!(result.is_err(), "Loading legacy definition index (version 0) should fail");
 }
+
+// ─── DEF-S-001 / DEF-S-002 hardening regressions (2026-04-22) ──────────────────
+
+#[test]
+fn test_save_compressed_uses_unique_temp_filename() {
+    // DEF-S-001 regression: temp filename must include pid + nanos + counter so
+    // two concurrent saves cannot collide on a fixed `<file>.tmp` path. We can't
+    // race two saves in a unit test, but we can verify the legacy deterministic
+    // name is gone and saving twice in a row leaves no staging artifacts.
+    let tmp = tempfile::tempdir().unwrap();
+    let root_dir = tmp.path().join("project");
+    std::fs::create_dir_all(&root_dir).unwrap();
+    let root_str = clean_path(&root_dir.to_string_lossy());
+
+    save_test_def_index(&root_str, &["cs"], tmp.path());
+    save_test_def_index(&root_str, &["cs"], tmp.path());
+
+    // No leftover legacy `<file>.tmp` literal — pre-fix the temp name was
+    // `<path>.tmp`. The new pattern is `.<file>.xray_tmp.<pid>.<nanos>.<counter>`.
+    let entries: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    let stale_legacy: Vec<_> = entries.iter()
+        .filter(|n| n.ends_with(".code-structure.tmp"))
+        .collect();
+    assert!(
+        stale_legacy.is_empty(),
+        "legacy `.tmp` filename pattern leaked: {stale_legacy:?}"
+    );
+    let stale_xray_tmp: Vec<_> = entries.iter()
+        .filter(|n| n.contains(".xray_tmp."))
+        .collect();
+    assert!(
+        stale_xray_tmp.is_empty(),
+        "unexpected xray_tmp staging files left behind: {stale_xray_tmp:?}"
+    );
+}
+
+#[test]
+fn test_remove_file_definitions_clears_empty_file_ids() {
+    // DEF-S-002 regression: a file that was once empty but later acquires
+    // definitions must not retain its (file_id, size) tuple in `empty_file_ids`.
+    // Pre-fix this entry was kept forever, inflating audit reports and the
+    // on-disk index size.
+    use crate::definitions::incremental::remove_file_definitions;
+
+    let mut idx = DefinitionIndex {
+        root: "/test".to_string(),
+        format_version: crate::definitions::DEFINITION_INDEX_VERSION,
+        ..Default::default()
+    };
+    idx.files.push("/test/foo.cs".to_string());
+    idx.files.push("/test/bar.cs".to_string());
+    idx.empty_file_ids.push((0, 1234));
+    idx.empty_file_ids.push((1, 5678));
+
+    // Removing file_id=0 must drop ONLY its empty_file_ids entry, leaving file_id=1.
+    remove_file_definitions(&mut idx, 0);
+    assert_eq!(
+        idx.empty_file_ids.len(), 1,
+        "empty_file_ids should drop the removed file's entry, got: {:?}",
+        idx.empty_file_ids
+    );
+    assert_eq!(idx.empty_file_ids[0].0, 1, "unrelated file_id must remain");
+}
+

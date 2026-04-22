@@ -620,23 +620,42 @@ pub const LZ4_MAGIC: &[u8; 4] = b"LZ4S";
 
 /// Save a serializable value to a file with LZ4 frame compression.
 ///
-/// **Atomic write:** writes to a `.tmp` sibling file first, then renames
-/// over the target. If the process is killed mid-write, the original file
-/// remains intact (the `.tmp` file is left behind and ignored on load).
+/// **Atomic, collision-resistant write:** writes to a per-call unique temp
+/// sibling (pid + nanos + counter), then renames over the target. If the
+/// process is killed mid-write, the original file remains intact and stale
+/// staging files are eventually cleaned up by the OS / next save attempt.
+///
+/// DEF-S-001 / EDIT-005 / CACHE-008: a deterministic `<file>.tmp` collides
+/// when two processes (or two threads) save the same index concurrently
+/// (e.g. periodic refresher + manual rebuild, two MCP servers sharing
+/// `%LOCALAPPDATA%\xray`). Both `File::create` succeed with O_TRUNC, both
+/// write, both rename → silent lost write. Including pid + nanos + counter
+/// makes practical collision impossible.
 ///
 /// On Windows `fs::rename` is not strictly atomic (it can fail if the
 /// target is held open by another process), but it is crash-safe: if
 /// the process dies before rename completes, the old file survives.
 pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, label: &str) -> Result<(), SearchError> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
+
     let start = Instant::now();
 
-    // Write to a temporary file first (atomic-save pattern)
-    // Append ".tmp" rather than replacing extension — preserves the original
-    // extension in the filename (e.g., "index.word-search.tmp" not "index.tmp").
+    // Write to a per-call unique temporary file first (atomic-save pattern).
+    // Filename pattern matches the one used in `mcp/handlers/edit.rs` and
+    // `git/cache.rs`: `.{file}.xray_tmp.{pid}.{nanos}.{counter}`.
     let tmp_path = {
-        let mut p = path.as_os_str().to_owned();
-        p.push(".tmp");
-        PathBuf::from(p)
+        let parent = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+        let file_name = path.file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| "index".to_string());
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let counter = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+        parent.join(format!(".{file_name}.xray_tmp.{pid}.{nanos}.{counter}"))
     };
     let file = std::fs::File::create(&tmp_path)?;
     let mut writer = BufWriter::new(file);
