@@ -1349,7 +1349,7 @@ fn compute_code_stats_csharp(
         .or_else(|| find_child_by_kind(method_node, "arrow_expression_clause"));
 
     if let Some(body_node) = body {
-        walk_code_stats(body_node, &[], 0, &mut stats, &CSHARP_CODE_STATS_CONFIG);
+        walk_code_stats(body_node, &[], 0, 0, &mut stats, &CSHARP_CODE_STATS_CONFIG);
     }
 
     // callCount is filled separately from method_calls after invocations walk

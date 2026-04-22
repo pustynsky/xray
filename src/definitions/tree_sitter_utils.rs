@@ -265,15 +265,29 @@ pub(crate) static RUST_CODE_STATS_CONFIG: CodeStatsConfig = CodeStatsConfig {
 /// * `node` — current AST node
 /// * `source` — source file bytes (needed for logical operator text check in Rust)
 /// * `nesting` — current nesting depth
+/// * `depth` — current AST recursion depth (start at 0). Bounded by
+///   [`MAX_AST_RECURSION_DEPTH`] to protect against pathological / generated code
+///   blowing the worker thread stack (TSU-004).
 /// * `stats` — mutable stats accumulator
 /// * `config` — language-specific node name configuration
 pub(crate) fn walk_code_stats(
     node: tree_sitter::Node,
     source: &[u8],
     nesting: u32,
+    depth: u32,
     stats: &mut CodeStats,
     config: &CodeStatsConfig,
 ) {
+    // TSU-004: depth guard. Without this, a method body with deeply nested
+    // expressions (5 000+) overflows the worker thread stack (~8 MB default)
+    // and SIGABRTs the indexer. Per-language parser walkers already enforce
+    // this cap; walk_code_stats runs *inside* those walkers and must do the
+    // same so the whole call chain stays bounded.
+    if depth as usize >= MAX_AST_RECURSION_DEPTH {
+        warn_ast_depth_exceeded("walk_code_stats", node);
+        return;
+    }
+
     let kind = node.kind();
 
     // ═══ Complexity increments ═══
@@ -363,7 +377,7 @@ pub(crate) fn walk_code_stats(
                 _ => body_nesting,
             };
 
-            walk_code_stats(child, source, child_nesting, stats, config);
+            walk_code_stats(child, source, child_nesting, depth + 1, stats, config);
         }
     }
 }

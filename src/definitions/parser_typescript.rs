@@ -1434,7 +1434,7 @@ fn compute_code_stats_typescript(
         });
 
     if let Some(body_node) = body {
-        walk_code_stats(body_node, &[], 0, &mut stats, &TYPESCRIPT_CODE_STATS_CONFIG);
+        walk_code_stats(body_node, &[], 0, 0, &mut stats, &TYPESCRIPT_CODE_STATS_CONFIG);
     }
 
     // callCount is filled separately from call_sites after invocations walk
