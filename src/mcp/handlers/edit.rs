@@ -37,6 +37,17 @@ const NEAREST_MATCH_MAX_DISPLAY_LEN: usize = 150;
 
 /// Handle `xray_edit` tool call.
 pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+    // ── Reject unknown top-level parameters ──
+    // Without this guard, common mis-spellings (`files`, `batch`, `targets`)
+    // are silently dropped and the caller is left wondering why their batch
+    // was treated as a single-file edit. Surface the typo with a concrete hint
+    // pointing at `path` (single file) or `paths` (batch — same edits to all).
+    if let Some(obj) = args.as_object()
+        && let Some(unknown_msg) = check_unknown_top_level_params(obj)
+    {
+        return ToolCallResult::error(unknown_msg);
+    }
+
     // ── Parse path/paths ──
     let single_path = args.get("path").and_then(|v| v.as_str());
     let multi_paths = args.get("paths").and_then(|v| v.as_array());
@@ -50,7 +61,7 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         }
         (None, None) => {
             return ToolCallResult::error(
-                "Missing required parameter: 'path' (single file) or 'paths' (array of files).".to_string(),
+                missing_path_error_message(args),
             );
         }
         _ => {}
@@ -86,6 +97,136 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         let path_str = single_path.unwrap(); // validated above
         handle_single_file_edit(ctx, path_str, &mode, is_regex, dry_run, expected_line_count)
     }
+}
+
+/// Set of all top-level parameters accepted by `xray_edit`. Used by
+/// `check_unknown_top_level_params` to flag typos / made-up wrappers
+/// (`files`, `batch`, `targets`, …) that would otherwise be silently dropped.
+const KNOWN_EDIT_PARAMS: &[&str] = &[
+    "path",
+    "paths",
+    "operations",
+    "edits",
+    "regex",
+    "dryRun",
+    "expectedLineCount",
+];
+
+/// Per-edit fields accepted inside `edits[]` / `operations[]` (used only for the
+/// "did you mean" hint when `path` is missing — e.g. caller put `path` inside an
+/// edit object instead of at the top level).
+const KNOWN_EDIT_OBJECT_FIELDS: &[&str] = &[
+    "search",
+    "replace",
+    "insertAfter",
+    "insertBefore",
+    "content",
+    "startLine",
+    "endLine",
+    "expectedContext",
+    "skipIfNotFound",
+];
+
+/// Detect unknown top-level parameters and return an actionable error message,
+/// or `None` if every key is recognised. Suggests the most-likely correct key
+/// via `did_you_mean`, with a special case for the common `files: [...]`
+/// wrapper invented by callers expecting per-file operations.
+fn check_unknown_top_level_params(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    for key in obj.keys() {
+        if KNOWN_EDIT_PARAMS.contains(&key.as_str()) {
+            continue;
+        }
+        // Special case: `files` is the most common invented wrapper. Callers
+        // expecting per-file `operations` (different ops per file) reach for
+        // this shape because their mental model differs from `paths` (which
+        // applies the SAME operations to every file). Surface the mismatch
+        // explicitly so the caller does not waste turns probing variants.
+        if key == "files" {
+            return Some(
+                "Unknown parameter 'files'. xray_edit does NOT take a per-file batch wrapper. \
+                 Use 'paths' (array of file paths — the SAME 'edits'/'operations' are applied to ALL files) \
+                 or call xray_edit once per file. Example batch: \
+                 { \"paths\": [\"a.ts\", \"b.ts\"], \"edits\": [{\"search\": \"foo\", \"replace\": \"bar\"}] }"
+                    .to_string(),
+            );
+        }
+        let suggestion = did_you_mean(key, KNOWN_EDIT_PARAMS);
+        let mut msg = format!("Unknown parameter '{}'.", key);
+        if let Some(s) = suggestion {
+            msg.push_str(&format!(" Did you mean '{}'?", s));
+        }
+        msg.push_str(&format!(
+            " Allowed top-level parameters: {}.",
+            KNOWN_EDIT_PARAMS.join(", ")
+        ));
+        return Some(msg);
+    }
+    None
+}
+
+/// Construct the "missing required parameter" error for the no-`path`/no-`paths` case,
+/// with a concrete example for both single-file and batch forms. If a `path`
+/// field appears inside an `edits[]` / `operations[]` object, surface that as
+/// a structural hint (caller put `path` at the wrong nesting level).
+fn missing_path_error_message(args: &Value) -> String {
+    // Detect path-nested-inside-edit-object as a structural hint.
+    let nested_hint = args.get("edits")
+        .or_else(|| args.get("operations"))
+        .and_then(|v| v.as_array())
+        .and_then(|arr| arr.iter().find(|item| {
+            item.as_object().is_some_and(|o| o.contains_key("path"))
+                && item.as_object().is_some_and(|o| {
+                    o.keys().any(|k| KNOWN_EDIT_OBJECT_FIELDS.contains(&k.as_str()))
+                })
+        }))
+        .map(|_| {
+            " Note: 'path' must be a top-level parameter, not nested inside an 'edits' or 'operations' item."
+        })
+        .unwrap_or("");
+
+    format!(
+        "Missing required parameter: 'path' (single file) or 'paths' (array of files).{} \
+         Single: {{ \"path\": \"a.ts\", \"edits\": [...] }}. \
+         Batch (same edits to all files): {{ \"paths\": [\"a.ts\", \"b.ts\"], \"edits\": [...] }}.",
+        nested_hint
+    )
+}
+
+/// Levenshtein-style "did you mean" — returns the closest candidate within
+/// edit distance 2, or None if no candidate is close enough.
+fn did_you_mean<'a>(input: &str, candidates: &'a [&'a str]) -> Option<&'a str> {
+    let input_lower = input.to_ascii_lowercase();
+    let mut best: Option<(&str, usize)> = None;
+    for cand in candidates {
+        let dist = levenshtein(&input_lower, &cand.to_ascii_lowercase());
+        if dist <= 2 && best.is_none_or(|(_, d)| dist < d) {
+            best = Some((cand, dist));
+        }
+    }
+    best.map(|(c, _)| c)
+}
+
+/// Standard iterative Levenshtein distance. Small inputs (parameter names),
+/// so the O(n*m) table is negligible.
+fn levenshtein(a: &str, b: &str) -> usize {
+    let a_chars: Vec<char> = a.chars().collect();
+    let b_chars: Vec<char> = b.chars().collect();
+    let (m, n) = (a_chars.len(), b_chars.len());
+    if m == 0 { return n; }
+    if n == 0 { return m; }
+    let mut prev: Vec<usize> = (0..=n).collect();
+    let mut curr: Vec<usize> = vec![0; n + 1];
+    for i in 1..=m {
+        curr[0] = i;
+        for j in 1..=n {
+            let cost = if a_chars[i - 1] == b_chars[j - 1] { 0 } else { 1 };
+            curr[j] = (curr[j - 1] + 1)
+                .min(prev[j] + 1)
+                .min(prev[j - 1] + cost);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[n]
 }
 
 /// Detail about a single skipped edit (when `skipIfNotFound=true`).

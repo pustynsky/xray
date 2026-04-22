@@ -3793,3 +3793,142 @@ fn test_edit007_rename_replace_to_nonexistent_target() {
     assert!(!src.exists());
 }
 
+// ─── Unknown / mis-spelled top-level parameter rejection ────────────
+
+/// `files: [...]` is the most common invented wrapper (callers expect per-file
+/// `operations`). Must be rejected with a hint pointing at `paths` and noting
+/// that the SAME edits are applied to all files.
+#[test]
+fn test_unknown_param_files_wrapper_rejected_with_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "files": [
+            { "path": "a.ts", "operations": [{ "startLine": 1, "endLine": 0, "content": "x" }] }
+        ]
+    }));
+
+    assert!(result.is_error, "Expected error for unknown 'files' param");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("Unknown parameter 'files'"), "Should call out 'files': {}", msg);
+    assert!(msg.contains("paths"), "Should suggest 'paths': {}", msg);
+    assert!(msg.contains("SAME"), "Should clarify same-edits semantics: {}", msg);
+}
+
+/// Typos close to known params (edit-distance ≤ 2) get a "did you mean" hint.
+#[test]
+fn test_unknown_param_typo_suggests_correct_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    // `pathh` -> `path`
+    let result = handle_xray_edit(&ctx, &json!({
+        "pathh": "a.ts",
+        "edits": [{ "search": "x", "replace": "y" }]
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("Unknown parameter 'pathh'"), "msg={}", msg);
+    assert!(msg.contains("Did you mean 'path'"), "msg={}", msg);
+}
+
+/// Unknown params far from any known name still list the allowed set.
+#[test]
+fn test_unknown_param_lists_allowed_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "totallyMadeUp": 42,
+        "path": "a.ts",
+        "edits": [{ "search": "x", "replace": "y" }]
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("Unknown parameter 'totallyMadeUp'"), "msg={}", msg);
+    assert!(msg.contains("Allowed top-level parameters"), "msg={}", msg);
+    assert!(msg.contains("paths"), "msg={}", msg);
+}
+
+/// Missing `path` AND missing `paths` returns an error message that includes
+/// concrete examples for both single and batch forms (so the caller does not
+/// have to guess the batch shape).
+#[test]
+fn test_missing_path_error_includes_both_examples() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "edits": [{ "search": "x", "replace": "y" }]
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("Missing required parameter"), "msg={}", msg);
+    assert!(msg.contains("\"path\""), "Should show single-file example: {}", msg);
+    assert!(msg.contains("\"paths\""), "Should show batch example: {}", msg);
+}
+
+/// When `path` is mistakenly nested inside an `edits[]` item, surface that as
+/// a structural hint instead of just saying "missing path".
+#[test]
+fn test_missing_path_detects_nested_path_in_edits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "edits": [
+            { "path": "a.ts", "search": "x", "replace": "y" }
+        ]
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("must be a top-level parameter") || msg.contains("nested"),
+        "Should hint about nesting: {}",
+        msg
+    );
+}
+
+/// Known params with edit distance > 2 are not falsely matched.
+#[test]
+fn test_did_you_mean_skips_distant_candidates() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "xyzzyfoobar": 1,
+        "path": "a.ts",
+        "edits": [{ "search": "x", "replace": "y" }]
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("Unknown parameter 'xyzzyfoobar'"), "msg={}", msg);
+    assert!(!msg.contains("Did you mean"), "Should NOT suggest a distant match: {}", msg);
+}
+
+/// All currently-accepted top-level keys must NOT trip the unknown-param check.
+/// Regression guard: if a new param is added to the schema without updating
+/// `KNOWN_EDIT_PARAMS`, this test (or another using it) will fail.
+#[test]
+fn test_all_known_params_pass_unknown_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\nb\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "a", "replace": "z" }],
+        "regex": false,
+        "dryRun": true,
+        "expectedLineCount": 2,
+    }));
+
+    assert!(!result.is_error, "All known params should pass; got: {:?}", result);
+}
+
