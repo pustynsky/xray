@@ -59,6 +59,12 @@ pub(crate) enum XmlParseError {
     /// Unlike `GrammarLoad`, this is visible to the user.
     #[error("tree-sitter XML parser returned None — file may be malformed or empty")]
     TreeSitterReturnedNone,
+
+    /// PARSE-002: source exceeded the per-file size cap before parsing was
+    /// attempted. Surfaced so the caller can render a clear warning instead
+    /// of a generic "no definitions found".
+    #[error("XML source too large: {size} bytes exceeds limit {limit}")]
+    SourceTooLarge { size: usize, limit: usize },
 }
 
 /// Parsed XML element with additional metadata not in DefinitionEntry.
@@ -131,10 +137,30 @@ pub(crate) fn parse_xml_on_demand_with_warnings(
     source: &str,
     _file_path: &str,
 ) -> Result<ParseResult, XmlParseError> {
+    use super::tree_sitter_utils::{MAX_PARSE_SOURCE_BYTES, PARSE_TIMEOUT_MICROS};
+
+    // PARSE-002: skip oversized sources before tree-sitter allocates ~10× RAM.
+    if source.len() > MAX_PARSE_SOURCE_BYTES {
+        tracing::warn!(
+            target: "xray::parse",
+            file = %_file_path,
+            size = source.len(),
+            limit = MAX_PARSE_SOURCE_BYTES,
+            "skipping oversized XML source"
+        );
+        return Err(XmlParseError::SourceTooLarge {
+            size: source.len(),
+            limit: MAX_PARSE_SOURCE_BYTES,
+        });
+    }
+
     let mut parser = tree_sitter::Parser::new();
     parser
         .set_language(&tree_sitter_xml::LANGUAGE_XML.into())
         .map_err(|e| XmlParseError::GrammarLoad(e.to_string()))?;
+    // PARSE-001: bound parse wall-clock so a single pathological file cannot
+    // pin a worker thread indefinitely.
+    parser.set_timeout_micros(PARSE_TIMEOUT_MICROS);
 
     let tree = parser
         .parse(source, None)

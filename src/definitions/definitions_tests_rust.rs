@@ -503,3 +503,38 @@ impl UserService {
     assert!(index.name_index.contains_key("userservice"), "New name should exist");
     assert!(index.name_index.contains_key("get_user"), "New method should exist");
 }
+
+// ─── PARSE-001/002/007 hardening regressions ────────────────────────
+
+/// PARSE-002: oversized sources must short-circuit before tree-sitter
+/// allocates ~10× RAM. We synthesise a 5 MiB blob (above the 4 MiB cap)
+/// and assert the parser returns empty results without panicking.
+#[test]
+fn test_rust_parse_oversized_source_returns_empty() {
+    let source = "// padding\n".repeat(500_000); // ~5.5 MiB > 4 MiB cap
+    let mut parser = make_rust_parser();
+    let (defs, calls, _) = parse_rust_definitions(&mut parser, &source, 0);
+    assert!(defs.is_empty(), "Oversized source must yield no definitions");
+    assert!(calls.is_empty(), "Oversized source must yield no call sites");
+}
+
+/// PARSE-007: signature builders previously used `from_utf8(...).unwrap_or(\"\")`,
+/// which silently produced empty signatures whenever the slice straddled a
+/// multi-byte codepoint. With `from_utf8_lossy` the U+FFFD replacement char
+/// keeps the signature non-empty for Cyrillic / CJK identifiers.
+#[test]
+fn test_rust_signature_preserves_multibyte_identifiers() {
+    let source = r#"pub fn вычислить(значение: i32) -> i32 { значение + 1 }"#;
+    let mut parser = make_rust_parser();
+    let (defs, _, _) = parse_rust_definitions(&mut parser, source, 0);
+    let func = defs
+        .iter()
+        .find(|d| d.kind == DefinitionKind::Function)
+        .expect("function definition extracted");
+    let sig = func.signature.as_deref().unwrap_or("");
+    assert!(
+        sig.contains("вычислить"),
+        "signature should retain multi-byte identifier, got {:?}",
+        sig
+    );
+}

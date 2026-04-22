@@ -134,12 +134,32 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
 
     // Code stats parameters
     let sort_by = args.get("sortBy").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let min_complexity = args.get("minComplexity").and_then(|v| v.as_u64()).map(|v| v as u16);
-    let min_cognitive = args.get("minCognitive").and_then(|v| v.as_u64()).map(|v| v as u16);
-    let min_nesting = args.get("minNesting").and_then(|v| v.as_u64()).map(|v| v as u8);
-    let min_params = args.get("minParams").and_then(|v| v.as_u64()).map(|v| v as u8);
-    let min_returns = args.get("minReturns").and_then(|v| v.as_u64()).map(|v| v as u8);
-    let min_calls = args.get("minCalls").and_then(|v| v.as_u64()).map(|v| v as u16);
+    // DEF-H-006: validate numeric ranges instead of silently truncating with `as`.
+    // Pre-fix `args.get("minNesting") = 300` became `Some(44_u8)` because `300_u64
+    // as u8 == 44`, returning misleading results that looked legitimate. Now any
+    // out-of-range value is rejected with a clear error.
+    fn parse_bounded_u16(args: &Value, key: &str) -> Result<Option<u16>, String> {
+        match args.get(key).and_then(|v| v.as_u64()) {
+            Some(v) => u16::try_from(v)
+                .map(Some)
+                .map_err(|_| format!("{key} must be 0..={} (got {v})", u16::MAX)),
+            None => Ok(None),
+        }
+    }
+    fn parse_bounded_u8(args: &Value, key: &str) -> Result<Option<u8>, String> {
+        match args.get(key).and_then(|v| v.as_u64()) {
+            Some(v) => u8::try_from(v)
+                .map(Some)
+                .map_err(|_| format!("{key} must be 0..={} (got {v})", u8::MAX)),
+            None => Ok(None),
+        }
+    }
+    let min_complexity = parse_bounded_u16(args, "minComplexity")?;
+    let min_cognitive = parse_bounded_u16(args, "minCognitive")?;
+    let min_nesting = parse_bounded_u8(args, "minNesting")?;
+    let min_params = parse_bounded_u8(args, "minParams")?;
+    let min_returns = parse_bounded_u8(args, "minReturns")?;
+    let min_calls = parse_bounded_u16(args, "minCalls")?;
 
     // Validate sortBy value
     if let Some(ref sort_field) = sort_by {
@@ -607,7 +627,28 @@ fn collect_candidates(
     // Filter by name
     if let Some(ref name) = args.name_filter {
         if args.use_regex {
-            let re = match regex::Regex::new(&format!("(?i){}", name)) {
+            // DEF-H-003: bound regex compile + match memory and reject overlong
+            // patterns. Without these caps, an attacker-controlled pattern such as
+            // `(a*)*b` or `(.*a){30}b` pinned a CPU thread for tens of seconds
+            // inside the def-index read lock, starving the watcher writer.
+            // 256 chars is roughly the longest legitimate identifier-style regex
+            // we expect; longer inputs are almost certainly DoS attempts.
+            const MAX_REGEX_LEN: usize = 256;
+            const REGEX_SIZE_LIMIT: usize = 1 << 20; // 1 MiB compiled NFA
+            const REGEX_DFA_SIZE_LIMIT: usize = 1 << 20; // 1 MiB DFA cache
+            if name.len() > MAX_REGEX_LEN {
+                return Err(format!(
+                    "Regex pattern too long ({} chars, max {})",
+                    name.len(),
+                    MAX_REGEX_LEN
+                ));
+            }
+            let re = match regex::RegexBuilder::new(name)
+                .case_insensitive(true)
+                .size_limit(REGEX_SIZE_LIMIT)
+                .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
+                .build()
+            {
                 Ok(r) => r,
                 Err(e) => return Err(format!("Invalid regex '{}': {}", name, e)),
             };

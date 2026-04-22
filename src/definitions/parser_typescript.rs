@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, TYPESCRIPT_CODE_STATS_CONFIG};
+use super::tree_sitter_utils::{find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, MAX_PARSE_SOURCE_BYTES, PARSE_TIMEOUT_MICROS, TYPESCRIPT_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -12,10 +12,28 @@ pub(crate) fn parse_typescript_definitions(
     source: &str,
     file_id: u32,
 ) -> ParseResult {
+    // PARSE-002: skip oversized sources before tree-sitter allocates ~10× RAM.
+    if source.len() > MAX_PARSE_SOURCE_BYTES {
+        tracing::warn!(
+            target: "xray::parse",
+            file_id = file_id,
+            size = source.len(),
+            limit = MAX_PARSE_SOURCE_BYTES,
+            "skipping oversized TypeScript source"
+        );
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    // PARSE-001: bound parse wall-clock so a single pathological file cannot
+    // pin a worker thread indefinitely.
+    parser.set_timeout_micros(PARSE_TIMEOUT_MICROS);
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
-            eprintln!("[def-index] WARNING: tree-sitter TS parse returned None for file_id={}", file_id);
+            tracing::warn!(
+                target: "xray::parse",
+                file_id = file_id,
+                "tree-sitter TS parse returned None (timeout or grammar error)"
+            );
             return (Vec::new(), Vec::new(), Vec::new());
         }
     };

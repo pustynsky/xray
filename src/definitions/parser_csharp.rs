@@ -3,7 +3,7 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{node_text, find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, CSHARP_CODE_STATS_CONFIG};
+use super::tree_sitter_utils::{node_text, find_child_by_kind, find_descendant_by_kind, find_child_by_field, count_named_children, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, MAX_PARSE_SOURCE_BYTES, PARSE_TIMEOUT_MICROS, CSHARP_CODE_STATS_CONFIG};
 
 // ─── Main entry point ───────────────────────────────────────────────
 
@@ -12,10 +12,28 @@ pub(crate) fn parse_csharp_definitions(
     source: &str,
     file_id: u32,
 ) -> CsharpParseResult {
+    // PARSE-002: skip oversized sources before tree-sitter allocates ~10× RAM.
+    if source.len() > MAX_PARSE_SOURCE_BYTES {
+        tracing::warn!(
+            target: "xray::parse",
+            file_id = file_id,
+            size = source.len(),
+            limit = MAX_PARSE_SOURCE_BYTES,
+            "skipping oversized C# source"
+        );
+        return (Vec::new(), Vec::new(), Vec::new(), HashMap::new());
+    }
+    // PARSE-001: bound parse wall-clock so a single pathological file cannot
+    // pin a worker thread indefinitely.
+    parser.set_timeout_micros(PARSE_TIMEOUT_MICROS);
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
-            eprintln!("[def-index] WARNING: tree-sitter C# parse returned None for file_id={}", file_id);
+            tracing::warn!(
+                target: "xray::parse",
+                file_id = file_id,
+                "tree-sitter C# parse returned None (timeout or grammar error)"
+            );
             return (Vec::new(), Vec::new(), Vec::new(), HashMap::new());
         }
     };
@@ -917,7 +935,9 @@ fn build_type_signature(node: tree_sitter::Node, source: &[u8]) -> String {
             break;
         }
     }
-    let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+    // PARSE-007: lossy decode keeps multi-byte identifiers (Cyrillic / CJK)
+    // legible instead of silently substituting an empty signature.
+    let text = String::from_utf8_lossy(&source[start..end]);
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -948,7 +968,9 @@ fn build_method_signature(node: tree_sitter::Node, source: &[u8]) -> String {
             break;
         }
     }
-    let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+    // PARSE-007: lossy decode keeps multi-byte identifiers (Cyrillic / CJK)
+    // legible instead of silently substituting an empty signature.
+    let text = String::from_utf8_lossy(&source[start..end]);
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 

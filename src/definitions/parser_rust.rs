@@ -3,19 +3,37 @@
 use std::collections::HashMap;
 
 use super::types::*;
-use super::tree_sitter_utils::{node_text, find_child_by_kind, find_child_by_field, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, RUST_CODE_STATS_CONFIG};
+use super::tree_sitter_utils::{node_text, find_child_by_kind, find_child_by_field, walk_code_stats, warn_ast_depth_exceeded, MAX_AST_RECURSION_DEPTH, MAX_PARSE_SOURCE_BYTES, PARSE_TIMEOUT_MICROS, RUST_CODE_STATS_CONFIG};
 
-// ─── Main entry point ───────────────────────────────────────────────
+// ─── Main entry point ─────────────────────────────────
 
 pub(crate) fn parse_rust_definitions(
     parser: &mut tree_sitter::Parser,
     source: &str,
     file_id: u32,
 ) -> ParseResult {
+    // PARSE-002: skip oversized sources before tree-sitter allocates ~10× RAM.
+    if source.len() > MAX_PARSE_SOURCE_BYTES {
+        tracing::warn!(
+            target: "xray::parse",
+            file_id = file_id,
+            size = source.len(),
+            limit = MAX_PARSE_SOURCE_BYTES,
+            "skipping oversized Rust source"
+        );
+        return (Vec::new(), Vec::new(), Vec::new());
+    }
+    // PARSE-001: bound parse wall-clock so a single pathological file cannot
+    // pin a worker thread indefinitely.
+    parser.set_timeout_micros(PARSE_TIMEOUT_MICROS);
     let tree = match parser.parse(source, None) {
         Some(t) => t,
         None => {
-            eprintln!("[def-index] WARNING: tree-sitter Rust parse returned None for file_id={}", file_id);
+            tracing::warn!(
+                target: "xray::parse",
+                file_id = file_id,
+                "tree-sitter Rust parse returned None (timeout or grammar error)"
+            );
             return (Vec::new(), Vec::new(), Vec::new());
         }
     };
@@ -505,7 +523,9 @@ fn extract_rust_const_static_def(
                     break;
                 }
         }
-        let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+        // PARSE-007: use lossy decoding so a multi-byte codepoint that straddles
+        // the [start, end) byte range yields U+FFFD instead of an empty signature.
+        let text = String::from_utf8_lossy(&source[start..end]);
         text.split_whitespace().collect::<Vec<_>>().join(" ")
     };
 
@@ -553,7 +573,9 @@ fn build_rust_signature_before_body(node: tree_sitter::Node, source: &[u8]) -> S
             }
         }
     }
-    let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+    // PARSE-007: lossy decode keeps multi-byte identifiers (Cyrillic / CJK)
+    // legible instead of silently substituting an empty string.
+    let text = String::from_utf8_lossy(&source[start..end]);
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
@@ -567,7 +589,9 @@ fn build_rust_function_signature(node: tree_sitter::Node, source: &[u8]) -> Stri
                 break;
             }
     }
-    let text = std::str::from_utf8(&source[start..end]).unwrap_or("");
+    // PARSE-007: lossy decode prevents multi-byte identifier truncation
+    // from collapsing the signature to an empty string.
+    let text = String::from_utf8_lossy(&source[start..end]);
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
