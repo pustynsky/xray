@@ -3932,3 +3932,207 @@ fn test_all_known_params_pass_unknown_check() {
     assert!(!result.is_error, "All known params should pass; got: {:?}", result);
 }
 
+
+// ─── Mode B (text-match) edits[] item field validation ─────────────
+
+/// Helper: assert that an aliased Mode B item produces an error pointing
+/// at the canonical name on the first attempt.
+fn assert_synonym_rejected(alias: &str, replacement_alias: &str, canonical: &str) {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ alias: "hello", replacement_alias: "world" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error, "Alias '{}' should be rejected", alias);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains(&format!("unknown field '{}'", alias))
+            || msg.contains(&format!("unknown field '{}'", replacement_alias)),
+        "Error should call out the alias key. alias={}, msg={}", alias, msg
+    );
+    assert!(
+        msg.contains(canonical),
+        "Error should suggest canonical '{}'. msg={}", canonical, msg
+    );
+    // Must NOT use the legacy misleading message.
+    assert!(
+        !msg.contains("missing or invalid 'search'"),
+        "Should not fall through to legacy message. msg={}", msg
+    );
+}
+
+#[test]
+fn test_edits_item_oldtext_newtext_rejected_with_canonical() {
+    assert_synonym_rejected("oldText", "newText", "search");
+}
+
+#[test]
+fn test_edits_item_old_str_new_str_rejected_with_canonical() {
+    assert_synonym_rejected("old_str", "new_str", "search");
+}
+
+#[test]
+fn test_edits_item_oldstring_newstring_rejected_with_canonical() {
+    assert_synonym_rejected("oldString", "newString", "search");
+}
+
+#[test]
+fn test_edits_item_find_with_rejected_with_canonical() {
+    assert_synonym_rejected("find", "with", "search");
+}
+
+#[test]
+fn test_edits_item_pattern_replacement_rejected_with_canonical() {
+    assert_synonym_rejected("pattern", "replacement", "search");
+}
+
+#[test]
+fn test_edits_item_after_alias_rejected_with_canonical() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\nb\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "after": "a", "content": "x" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("unknown field 'after'"), "msg={}", msg);
+    assert!(msg.contains("insertAfter"), "msg={}", msg);
+}
+
+/// Empty edit object should produce the menu-of-forms error, not a misleading
+/// "missing or invalid 'search'".
+#[test]
+fn test_edits_item_empty_object_shows_form_menu() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{}],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("missing a primary action field"), "msg={}", msg);
+    assert!(msg.contains("search"), "menu should mention 'search'. msg={}", msg);
+    assert!(msg.contains("insertAfter"), "menu should mention 'insertAfter'. msg={}", msg);
+    assert!(msg.contains("insertBefore"), "menu should mention 'insertBefore'. msg={}", msg);
+}
+
+/// `startLine` / `endLine` inside `edits[]` (Mode A field at Mode B level)
+/// should produce a hint to switch to the `operations` parameter.
+#[test]
+fn test_edits_item_startline_hints_at_operations_param() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\nb\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "startLine": 1, "endLine": 1, "content": "x" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("Mode A"), "msg={}", msg);
+    assert!(msg.contains("operations"), "msg={}", msg);
+}
+
+/// Random typo (e.g. `serch`) close to a known field should surface a
+/// did_you_mean suggestion.
+#[test]
+fn test_edits_item_typo_suggests_canonical() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "serch": "hello", "replace": "world" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("unknown field 'serch'"), "msg={}", msg);
+    assert!(msg.contains("Did you mean 'search'"), "msg={}", msg);
+}
+
+/// Extra unknown field alongside a valid search/replace should still be rejected.
+#[test]
+fn test_edits_item_extra_unknown_field_rejected_even_with_valid_pair() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "hello", "replace": "world", "typoField": 1 }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("unknown field 'typoField'"), "msg={}", msg);
+}
+
+/// Canonical form must still work after the new validation gate.
+/// Regression guard for the happy path.
+#[test]
+fn test_edits_item_canonical_search_replace_still_works() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{
+            "search": "hello",
+            "replace": "world",
+            "occurrence": 1,
+            "expectedContext": "hello",
+            "skipIfNotFound": false
+        }],
+    }));
+
+    assert!(!result.is_error, "Canonical form should succeed: {:?}", result);
+}
+
+/// `replace` without `search` (callers sometimes drop the wrong half) must
+/// produce a clear message — no "missing or invalid 'search'" wording.
+#[test]
+fn test_edits_item_replace_without_search_clear_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "replace": "world" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("'replace' provided without 'search'"),
+        "Should explain which half is missing. msg={}", msg
+    );
+    assert!(
+        !msg.contains("missing or invalid 'search'"),
+        "Should not use legacy phrasing. msg={}", msg
+    );
+}
