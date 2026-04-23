@@ -33,7 +33,7 @@ pub fn cmd_serve(args: ServeArgs) {
 
     // ─── Workspace binding: determine BEFORE index building ───
     let extensions_vec: Vec<String> = exts_for_load.split(',').map(|s| s.to_string()).collect();
-    let ws_binding = mcp::handlers::determine_initial_binding(&dir_str, &extensions_vec);
+    let ws_binding = mcp::handlers::determine_initial_binding(&dir_str, &extensions_vec, args.respect_git_exclude);
     let is_unresolved = ws_binding.status == mcp::handlers::WorkspaceStatus::Unresolved;
     if is_unresolved {
         warn!(target: "xray::startup", dir = %ws_binding.dir, "workspace UNRESOLVED (no source files), skipping index build");
@@ -58,6 +58,7 @@ pub fn cmd_serve(args: ServeArgs) {
         &dir_str, &extensions, &idx_base, &exts_for_load,
         is_unresolved, args.definitions,
         &def_ready, &def_building,
+        args.respect_git_exclude,
     );
 
     // ─── File watcher ───
@@ -81,6 +82,7 @@ pub fn cmd_serve(args: ServeArgs) {
             Arc::clone(&watcher_generation),
             0, // initial generation
             Arc::clone(&watcher_stats),
+            args.respect_git_exclude,
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
@@ -101,6 +103,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 Arc::clone(&watcher_generation),
                 0,
                 Arc::clone(&watcher_stats),
+                args.respect_git_exclude,
             );
         }
     }
@@ -211,6 +214,7 @@ fn load_or_build_content_index(
         read_errors: 0,
         lossy_file_count: 0,
         worker_panics: 0,
+        respect_git_exclude,
     };
     let index = Arc::new(RwLock::new(empty_index));
 
@@ -379,6 +383,7 @@ fn load_or_build_definition_index(
     definitions_enabled: bool,
     def_ready: &Arc<AtomicBool>,
     def_building: &Arc<AtomicBool>,
+    respect_git_exclude: bool,
 ) -> (Option<Arc<RwLock<definitions::DefinitionIndex>>>, Vec<String>) {
     // Use compile-time definition extensions based on enabled Cargo features
     let supported_def_langs = definitions::definition_extensions();
@@ -456,6 +461,7 @@ fn load_or_build_definition_index(
             extension_methods: HashMap::new(),
             selector_index: HashMap::new(),
             template_children: HashMap::new(),
+            respect_git_exclude,
         };
         let def_arc = Arc::new(RwLock::new(empty_def));
 
@@ -513,6 +519,7 @@ fn load_or_build_definition_index(
                     dir: bg_dir.clone(),
                     ext: bg_def_exts.clone(),
                     threads: 0,
+                    respect_git_exclude,
                 });
                 crate::index::log_memory("def-build: finished");
                 if let Err(e) = definitions::save_definition_index(&new_idx, &bg_idx_base) {
@@ -536,6 +543,7 @@ fn load_or_build_definition_index(
                         warn!(error = %e, "Failed to reload definition index from disk, rebuilding");
                         definitions::build_definition_index(&definitions::DefIndexArgs {
                             dir: bg_dir, ext: bg_def_exts, threads: 0,
+                            respect_git_exclude,
                         })
                     });
 

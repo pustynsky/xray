@@ -369,6 +369,7 @@ fn test_audit_cross_validate_with_file_index() {
             dir: project_str.clone(),
             ext: "cs".to_string(),
             threads: 1,
+            respect_git_exclude: false,
         }
     );
 

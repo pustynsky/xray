@@ -73,7 +73,7 @@ The E2E test script uses **`Start-Job`** to run independent MCP tests in paralle
 
 | Group | Tests | Parallelizable | Reason |
 |-------|-------|---------------|--------|
-| **Sequential CLI** | T01-T22, T24, T42/T42b, T49, T54, T61-T64, T65(fast), T76, T80, T82 | ❌ No | Share index files in `%LOCALAPPDATA%/xray/` for current directory |
+| **Sequential CLI** | T01-T22, T24, T42/T42b, T49, T54, T61-T64, T65(fast), T76, T80, T82, T-RESPECT-GIT-EXCLUDE | ❌ No | Share index files in `%LOCALAPPDATA%/xray/` for current directory |
 | **Sequential state** | T-EXT-CHECK, T-DEF-AUDIT, T-SHUTDOWN | ❌ No | T-EXT-CHECK depends on T20; T-SHUTDOWN modifies global state |
 | **MCP callers** | T65-66, T67, T68, T69, T-FIX3-EXPR-BODY, T-FIX3-VERIFY, T-FIX3-LAMBDA, T-OVERLOAD-DEDUP-UP, T-SAME-NAME-IFACE, T-ANGULAR | ✅ Yes | Each creates isolated temp directory with own indexes |
 | **Git MCP** | T-BRANCH-STATUS, T-GIT-FILE-NOT-FOUND, T-GIT-NOCACHE, T-GIT-TOTALCOMMITS, T-GIT-CACHE | ✅ Yes | Read-only queries against current repo |

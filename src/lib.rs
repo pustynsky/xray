@@ -441,7 +441,7 @@ pub struct FileEntry {
 /// Format version for FileIndex. Bump when changing the on-disk struct layout.
 /// Loading an index with a different version triggers a full rebuild via the
 /// fast `read_format_version_from_index_file` header check.
-pub const FILE_INDEX_VERSION: u32 = 1;
+pub const FILE_INDEX_VERSION: u32 = 2;
 
 /// File index: a flat list of all files/directories under a root.
 ///
@@ -460,6 +460,12 @@ pub struct FileIndex {
     pub created_at: u64,
     pub max_age_secs: u64,
     pub entries: Vec<FileEntry>,
+    /// Whether this index was built with `--respect-git-exclude` honoured.
+    /// Persisted so that auto-rebuild paths (in `xray fast` / `xray grep`)
+    /// preserve the user's original choice instead of silently flipping to
+    /// the CLI default. See `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
+    #[serde(default)]
+    pub respect_git_exclude: bool,
 }
 
 impl FileIndex {
@@ -512,7 +518,7 @@ pub fn generate_trigrams(token: &str) -> Vec<String> {
 /// to the files and line numbers where it appears.
 /// Format version for ContentIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const CONTENT_INDEX_VERSION: u32 = 2;
+pub const CONTENT_INDEX_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ContentIndex {
@@ -553,6 +559,12 @@ pub struct ContentIndex {
     /// Zero for a clean build. Non-zero indicates partial/degraded index.
     #[serde(default)]
     pub worker_panics: usize,
+    /// Whether this index was built with `--respect-git-exclude` honoured.
+    /// Persisted so that auto-rebuild paths in `xray grep` preserve the
+    /// user's original choice instead of silently flipping to the CLI
+    /// default. See `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
+    #[serde(default)]
+    pub respect_git_exclude: bool,
 }
 
 impl ContentIndex {
@@ -651,6 +663,7 @@ impl Default for ContentIndex {
             read_errors: 0,
             lossy_file_count: 0,
             worker_panics: 0,
+            respect_git_exclude: false,
         }
     }
 }

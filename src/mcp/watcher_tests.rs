@@ -1708,6 +1708,7 @@ fn scan_dir_state_classifies_ext_matched_subset_of_all_files() {
     let state = super::scan_dir_state(
         &dir.to_string_lossy(),
         &["cs".to_string()],
+        false,
     );
 
     assert_eq!(state.all_files.len(), 4, "all four regular files must appear in all_files");
@@ -1728,6 +1729,7 @@ fn scan_dir_state_extension_match_is_case_insensitive() {
     let state = super::scan_dir_state(
         &dir.to_string_lossy(),
         &["cs".to_string()],
+        false,
     );
 
     assert_eq!(state.ext_matched.len(), 2,
@@ -1752,6 +1754,7 @@ fn scan_dir_state_excludes_dot_git_directory() {
     let state = super::scan_dir_state(
         &dir.to_string_lossy(),
         &["cs".to_string(), "config".to_string()],
+        false,
     );
 
     assert!(state.all_files.iter().all(|(p, _)| !p.to_string_lossy().contains("/.git/")),
@@ -1774,6 +1777,7 @@ fn scan_dir_state_recurses_into_subdirectories() {
     let state = super::scan_dir_state(
         &dir.to_string_lossy(),
         &["cs".to_string()],
+        false,
     );
 
     assert_eq!(state.ext_matched.len(), 3,
@@ -1794,6 +1798,7 @@ fn scan_dir_state_path_keys_are_clean_path_normalised() {
     let state = super::scan_dir_state(
         &dir.to_string_lossy(),
         &["cs".to_string()],
+        false,
     );
 
     for path in state.all_files.keys() {
@@ -1839,6 +1844,7 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
             crate::FileEntry { path: "a.cs".to_string(), size: 0, modified: 0, is_dir: false },
             crate::FileEntry { path: "b.cs".to_string(), size: 0, modified: 0, is_dir: false },
         ],
+        respect_git_exclude: false,
     })));
 
     let outcome = super::periodic_rescan_once(
@@ -1846,6 +1852,7 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
         &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
+        false,
     );
 
     assert!(!outcome.drift_detected, "no drift expected, got {:?}", outcome);
@@ -1873,6 +1880,7 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
         &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
+        false,
     );
 
     assert!(outcome.drift_detected, "added file must trigger drift");
@@ -1905,6 +1913,7 @@ fn periodic_rescan_detects_removed_file_and_reconciles_content() {
         &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
+        false,
     );
 
     assert!(outcome.drift_detected);
@@ -1941,6 +1950,7 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
             crate::FileEntry { path: "a.cs".to_string(), size: 0, modified: 0, is_dir: false },
             crate::FileEntry { path: "b.cs".to_string(), size: 0, modified: 0, is_dir: false },
         ],
+        respect_git_exclude: false,
     })));
 
     std::fs::write(root.join("config.json"), "{}").unwrap();
@@ -1950,6 +1960,7 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
         &root.to_string_lossy(),
         &["cs".to_string()], // .json is OUTSIDE --ext on purpose
         &stats,
+        false,
     );
 
     assert!(outcome.drift_detected, "file-list drift must be detected");
@@ -1992,6 +2003,7 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
         Arc::clone(&generation),
         0,
         Arc::clone(&stats),
+        false,
     );
 
     // Wait for the first tick (interval + small slack for thread scheduling).
@@ -2065,6 +2077,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
         Arc::clone(&generation),
         0,
         Arc::clone(&stats),
+        false,
     );
 
     // Drop a new .cs file directly on disk *without* notifying any

@@ -976,32 +976,32 @@ fn test_workspace_metadata_in_summary() {
 #[test]
 fn test_has_source_files_with_current_dir() {
     let exts = vec!["rs".to_string()];
-    assert!(has_source_files(".", &exts, 3), "Current dir should have .rs files");
+    assert!(has_source_files(".", &exts, 3, false), "Current dir should have .rs files");
 }
 
 #[test]
 fn test_has_source_files_nonexistent_ext() {
     let exts = vec!["zzznotreal".to_string()];
-    assert!(!has_source_files(".", &exts, 3), "Should not find .zzznotreal files");
+    assert!(!has_source_files(".", &exts, 3, false), "Should not find .zzznotreal files");
 }
 
 #[test]
 fn test_determine_initial_binding_explicit_path() {
-    let ws = determine_initial_binding("C:/Projects/MyApp", &["rs".to_string()]);
+    let ws = determine_initial_binding("C:/Projects/MyApp", &["rs".to_string()], false);
     assert_eq!(ws.mode, WorkspaceBindingMode::PinnedCli);
     assert_eq!(ws.dir, "C:/Projects/MyApp");
 }
 
 #[test]
 fn test_determine_initial_binding_dot_with_sources() {
-    let ws = determine_initial_binding(".", &["rs".to_string()]);
+    let ws = determine_initial_binding(".", &["rs".to_string()], false);
     assert_eq!(ws.mode, WorkspaceBindingMode::DotBootstrap);
     assert_eq!(ws.status, WorkspaceStatus::Resolved);
 }
 
 #[test]
 fn test_determine_initial_binding_dot_without_sources() {
-    let ws = determine_initial_binding(".", &["zzznotreal".to_string()]);
+    let ws = determine_initial_binding(".", &["zzznotreal".to_string()], false);
     assert_eq!(ws.mode, WorkspaceBindingMode::Unresolved);
     assert_eq!(ws.status, WorkspaceStatus::Unresolved);
 }

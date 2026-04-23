@@ -138,6 +138,7 @@ pub fn start_watcher(
     watcher_generation: Arc<AtomicU64>,
     my_generation: u64,
     stats: Arc<WatcherStats>,
+    respect_git_exclude: bool,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -207,12 +208,12 @@ pub fn start_watcher(
         // Watcher is already listening — events during reconciliation are buffered in rx channel.
         // Non-blocking: MCP requests work on old data during reconciliation.
         // Only the brief write lock in Phase 4 blocks readers.
-        reconcile_content_index(&index, &dir_str, &extensions);
+        reconcile_content_index(&index, &dir_str, &extensions, respect_git_exclude);
         if let Some(ref def_idx) = def_index {
             // Non-blocking reconciliation: parse files OUTSIDE the lock, apply INSIDE.
             // def_ready stays true — MCP requests work on old data during parsing.
             definitions::reconcile_definition_index_nonblocking(
-                def_idx, &dir_str, &extensions
+                def_idx, &dir_str, &extensions, respect_git_exclude
             );
         }
 
@@ -1011,11 +1012,11 @@ pub(crate) struct DirState {
 /// Errors from individual `WalkBuilder` entries are silently skipped to
 /// preserve the previous behaviour of `reconcile_content_index` —
 /// reconciliation must not abort on a single I/O glitch.
-pub(crate) fn scan_dir_state(dir: &str, extensions: &[String]) -> DirState {
+pub(crate) fn scan_dir_state(dir: &str, extensions: &[String], respect_git_exclude: bool) -> DirState {
     let dir_path = canonicalize_or_warn(dir);
 
     let mut walker = WalkBuilder::new(&dir_path);
-    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(false);
+    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(respect_git_exclude);
 
     let mut all_files: HashMap<PathBuf, SystemTime> = HashMap::new();
     let mut ext_matched: HashMap<PathBuf, SystemTime> = HashMap::new();
@@ -1224,11 +1225,12 @@ pub(crate) fn periodic_rescan_once(
     dir: &str,
     extensions: &[String],
     stats: &Arc<WatcherStats>,
+    respect_git_exclude: bool,
 ) -> RescanOutcome {
     let start = Instant::now();
     stats.periodic_rescan_total.fetch_add(1, Ordering::Relaxed);
 
-    let state = scan_dir_state(dir, extensions);
+    let state = scan_dir_state(dir, extensions, respect_git_exclude);
     let (content_added, content_removed, content_modified) =
         compute_content_drift(index, &state.ext_matched);
     let (file_index_added, file_index_removed) =
@@ -1252,9 +1254,9 @@ pub(crate) fn periodic_rescan_once(
         // their own walk today (acceptable on a 5-min cadence;
         // collapsing to a single walk is a follow-up). Bailing out
         // when nothing changed is their internal fast path.
-        reconcile_content_index(index, dir, extensions);
+        reconcile_content_index(index, dir, extensions, respect_git_exclude);
         if let Some(di) = def_index {
-            definitions::reconcile_definition_index_nonblocking(di, dir, extensions);
+            definitions::reconcile_definition_index_nonblocking(di, dir, extensions, respect_git_exclude);
         }
     }
 
@@ -1325,6 +1327,7 @@ pub fn start_periodic_rescan(
     watcher_generation: Arc<AtomicU64>,
     my_generation: u64,
     stats: Arc<WatcherStats>,
+    respect_git_exclude: bool,
 ) {
     let effective = interval_sec.max(MIN_RESCAN_INTERVAL_SEC);
     if effective != interval_sec {
@@ -1368,6 +1371,7 @@ pub fn start_periodic_rescan(
                 &dir_str,
                 &extensions,
                 &stats,
+                respect_git_exclude,
             );
         }
     });
@@ -1391,6 +1395,7 @@ fn reconcile_content_index(
     index: &Arc<RwLock<ContentIndex>>,
     dir: &str,
     extensions: &[String],
+    respect_git_exclude: bool,
 ) {
     let start = std::time::Instant::now();
     // Capture walk start time for created_at update (not now() at end — avoids race condition
@@ -1405,7 +1410,7 @@ fn reconcile_content_index(
     // The full `all_files` view is intentionally unused at this call site
     // (FileIndex is reconciled elsewhere); Phase 2 (`periodic_rescan_once`)
     // will consume both views from the same `DirState` snapshot.
-    let dir_state = scan_dir_state(dir, extensions);
+    let dir_state = scan_dir_state(dir, extensions, respect_git_exclude);
     let disk_files = &dir_state.ext_matched;
 
     let scanned = disk_files.len();

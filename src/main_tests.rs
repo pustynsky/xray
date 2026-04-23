@@ -52,6 +52,7 @@
             created_at: now,
             max_age_secs: 3600,
             entries: vec![],
+            respect_git_exclude: false,
         };
         assert!(!index.is_stale());
     }
@@ -64,6 +65,7 @@
             created_at: 0, // epoch = definitely stale
             max_age_secs: 3600,
             entries: vec![],
+            respect_git_exclude: false,
         };
         assert!(index.is_stale());
     }
@@ -226,6 +228,7 @@
                     is_dir: true,
                 },
             ],
+            respect_git_exclude: false,
         };
         let encoded = bincode::serialize(&index).unwrap();
         let decoded: FileIndex = bincode::deserialize(&encoded).unwrap();
@@ -973,6 +976,7 @@
             created_at: 0,
             max_age_secs: 0,
             entries: Vec::new(),
+            respect_git_exclude: false,
         };
         drop(_guard);
     }
@@ -998,6 +1002,7 @@
             created_at: 0,
             max_age_secs: 86_400,
             entries: Vec::new(),
+            respect_git_exclude: false,
         };
         crate::index::save_index(&stale, index_base).unwrap();
 
@@ -1025,6 +1030,7 @@
             created_at: 1_700_000_000,
             max_age_secs: 86_400,
             entries: Vec::new(),
+            respect_git_exclude: false,
         };
         crate::index::save_index(&idx, index_base).unwrap();
 
@@ -1032,4 +1038,179 @@
             .expect("current-version FileIndex must load successfully");
         assert_eq!(loaded.format_version, FILE_INDEX_VERSION);
         assert_eq!(loaded.root, dir_str);
+    }
+    // ─── End-to-end propagation: --respect-git-exclude ─────────────────
+    //
+    // Regression test for `docs/bug-reports/2026-04-23_consolidated-fix-plan.md` (Bug 4).
+    // PR #128 plumbed `--respect-git-exclude` only into `build_index` /
+    // `build_content_index` but NOT into the watcher / incremental / definition
+    // walkers. This batch of tests asserts the flag now reaches every walker
+    // construction site, AND that the persisted value (Bug 2) is preferred over
+    // the CLI flag on auto-rebuild.
+
+    fn init_repo_with_exclude(dir: &std::path::Path, exclude_pattern: &str) {
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir)
+            .status()
+            .expect("git init must succeed for the propagation test");
+        let info_dir = dir.join(".git").join("info");
+        std::fs::create_dir_all(&info_dir).expect("create .git/info");
+        std::fs::write(info_dir.join("exclude"), format!("{}\n", exclude_pattern))
+            .expect("write .git/info/exclude");
+    }
+
+    #[test]
+    fn build_index_respects_git_info_exclude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo_with_exclude(dir, "secret.cs");
+        std::fs::write(dir.join("public.cs"), "public class PublicService {}").unwrap();
+        std::fs::write(dir.join("secret.cs"), "public class SecretService {}").unwrap();
+
+        let with_flag = build_index(&IndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            respect_git_exclude: true,
+            threads: 1,
+            ..Default::default()
+        }).unwrap();
+        assert!(with_flag.entries.iter().all(|e| !e.path.ends_with("secret.cs")),
+            "build_index with --respect-git-exclude must skip files in .git/info/exclude (got {:?})",
+            with_flag.entries.iter().map(|e| &e.path).collect::<Vec<_>>());
+        assert!(with_flag.respect_git_exclude,
+            "FileIndex.respect_git_exclude must be persisted so auto-rebuild can preserve it");
+
+        let without_flag = build_index(&IndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            respect_git_exclude: false,
+            threads: 1,
+            ..Default::default()
+        }).unwrap();
+        assert!(without_flag.entries.iter().any(|e| e.path.ends_with("secret.cs")),
+            "without --respect-git-exclude, secret.cs must be present (sanity check on .git/info/exclude wiring)");
+    }
+
+    #[test]
+    fn build_content_index_respects_git_info_exclude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo_with_exclude(dir, "secret.cs");
+        std::fs::write(dir.join("public.cs"), "fn marker_public_token() {}").unwrap();
+        std::fs::write(dir.join("secret.cs"), "fn marker_secret_token() {}").unwrap();
+
+        let idx = build_content_index(&ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            respect_git_exclude: true,
+            threads: 1,
+            ..Default::default()
+        }).unwrap();
+
+        assert!(idx.index.contains_key("marker_public_token"),
+            "public token must be indexed");
+        assert!(!idx.index.contains_key("marker_secret_token"),
+            "secret token in excluded file must NOT be indexed (Bug 4 regression)");
+        assert!(idx.respect_git_exclude,
+            "ContentIndex.respect_git_exclude must be persisted (Bug 2)");
+    }
+
+    #[cfg(feature = "lang-csharp")]
+    #[test]
+    fn build_definition_index_respects_git_info_exclude() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo_with_exclude(dir, "secret.cs");
+        std::fs::write(dir.join("public.cs"), "public class PublicService {}").unwrap();
+        std::fs::write(dir.join("secret.cs"), "public class SecretService {}").unwrap();
+
+        let idx = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            threads: 1,
+            respect_git_exclude: true,
+        });
+
+        assert!(idx.name_index.contains_key("publicservice"),
+            "public class must be indexed");
+        assert!(!idx.name_index.contains_key("secretservice"),
+            "class in excluded file must NOT be indexed (Bug 4 regression: \
+             definitions/mod.rs walker hardcoded git_exclude(false))");
+        assert!(idx.respect_git_exclude,
+            "DefinitionIndex.respect_git_exclude must be persisted (Bug 2)");
+    }
+
+    #[cfg(feature = "lang-csharp")]
+    #[test]
+    fn incremental_reconcile_respects_git_info_exclude() {
+        // Bug 4: definitions/incremental.rs had two walker sites hardcoded to
+        // git_exclude(false). Even if the initial build excluded a file, a
+        // reconcile would re-add it. This test asserts the flag is propagated
+        // through the reconcile path.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo_with_exclude(dir, "secret.cs");
+        std::fs::write(dir.join("public.cs"), "public class PublicService {}").unwrap();
+
+        let mut idx = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            threads: 1,
+            respect_git_exclude: true,
+        });
+
+        // Now drop the excluded file on disk AFTER index build, then reconcile.
+        // Without the fix, reconcile would walk it (.git_exclude(false) hardcoded)
+        // and add SecretService to the index.
+        std::fs::write(dir.join("secret.cs"), "public class SecretService {}").unwrap();
+
+        let extensions = vec!["cs".to_string()];
+        let (added, _modified, _removed) = crate::definitions::reconcile_definition_index(
+            &mut idx,
+            &dir.to_string_lossy(),
+            &extensions,
+            true,
+        );
+
+        assert_eq!(added, 0, "reconcile must NOT pick up files in .git/info/exclude when respect_git_exclude=true");
+        assert!(!idx.name_index.contains_key("secretservice"),
+            "excluded class must remain absent after reconcile (Bug 4 regression)");
+    }
+
+    #[test]
+    fn auto_rebuild_preserves_persisted_respect_git_exclude() {
+        // Bug 2: `xray fast` / `xray grep` auto-rebuild paths previously
+        // hardcoded args.respect_git_exclude (default=false), silently
+        // dropping the user's original choice on stale indexes.
+        // Now the value is persisted in *.meta + bincode struct, and
+        // resolve_respect_git_exclude() prefers persisted over CLI arg.
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo_with_exclude(dir, "secret.cs");
+        std::fs::write(dir.join("public.cs"), "fn marker_public() {}").unwrap();
+        std::fs::write(dir.join("secret.cs"), "fn marker_secret() {}").unwrap();
+
+        let idx_base = tmp.path().join("idx");
+        std::fs::create_dir_all(&idx_base).unwrap();
+
+        // Build & save a content index WITH the flag honoured.
+        let original = build_content_index(&ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            respect_git_exclude: true,
+            threads: 1,
+            ..Default::default()
+        }).unwrap();
+        save_content_index(&original, &idx_base).unwrap();
+
+        // Reload from disk — the flag must round-trip via bincode.
+        let loaded = load_content_index(
+            &dir.to_string_lossy(),
+            "cs",
+            &idx_base,
+        ).expect("content index must load with current format_version");
+
+        assert!(loaded.respect_git_exclude,
+            "ContentIndex.respect_git_exclude must round-trip via bincode (Bug 2)");
+        assert!(!loaded.index.contains_key("marker_secret"),
+            "loaded index must still exclude secret tokens — sanity check");
     }
