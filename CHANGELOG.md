@@ -1,6 +1,12 @@
 # Changelog
 
 
+### Performance
+
+- **`xray_git_history` deleted-file cold path — drop redundant existence probe** (closes Bug 7 of `docs/bug-reports/2026-04-23_consolidated-fix-plan.md`). `file_history` in `src/git/mod.rs` previously made up to **3 git-spawn round-trips** for a single deleted-file query: `git log --follow` (returns 0) → `file_ever_existed_in_git` (extra `git log --all --max-count=1`) → `git log` (no-follow). The middle existence-probe spawn is redundant: when `--follow` returns 0, the no-follow retry itself returns the same correctness signal (>0 → file existed and was deleted; 0 → file genuinely never existed or no commits in active filter). Removed the gate; spawn count for the deleted-file cold path drops from 3 → 2 (~50–100 ms saved on big repos per query). Never-existed and exists-with-commits paths are unchanged in spawn count. `file_ever_existed_in_git` itself is kept — other call sites (`repo_activity`, `annotate_empty_git_result` in `handle_git_history` / `handle_git_authors` / `handle_git_activity`) still need an explicit "existed?" boolean for warning generation. Existing regression tests `test_file_history_returns_commits_for_deleted_file` and `test_file_history_returns_empty_for_never_existed_file` cover both branches with the new flow.
+
+
+
 ### Bug Fixes (hardening bundle 2026-04-23)
 
 - **`xray_definitions` on huge XML files — explicit 64 MiB guard before in-memory parse** (closes Bug 6 of `docs/bug-reports/2026-04-23_consolidated-fix-plan.md`). `handle_xray_definitions` for the on-demand XML path called `std::fs::read_to_string(file_path)` without an upper bound, so a multi-gigabyte XML file (cf. test fixtures, log dumps, dataset exports) would attempt to allocate the whole file into a `String` and OOM the MCP server process. The fix adds `MAX_XML_BYTES = 64 * 1024 * 1024` and a `metadata().len()` pre-check that returns a structured error message (`"XML file '{}' is {} bytes, which exceeds the max supported size of {} bytes (64 MiB). xray_definitions parses the whole file in-memory; use xray_grep for line-level search over very large files."`) BEFORE allocation. Regression test `test_xml_on_demand_rejects_files_above_max_size` in `definitions_tests.rs` uses `File::set_len(65 MiB)` (sparse file — costs zero disk) to assert the guard fires with the documented message.
