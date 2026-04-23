@@ -667,11 +667,11 @@ impl WorkspaceBinding {
 /// Quick check: does a directory contain any files with the given extensions?
 /// Uses a shallow walk (max_depth levels) with early exit on first match.
 /// Returns `true` if at least one matching file is found.
-pub fn has_source_files(dir: &str, extensions: &[String], max_depth: usize) -> bool {
+pub fn has_source_files(dir: &str, extensions: &[String], max_depth: usize, respect_git_exclude: bool) -> bool {
     use ignore::WalkBuilder;
     let walker = WalkBuilder::new(dir)
         .follow_links(true)
-        .git_exclude(false)
+        .git_exclude(respect_git_exclude)
         .max_depth(Some(max_depth))
         .hidden(false)
         .build();
@@ -690,7 +690,7 @@ pub fn has_source_files(dir: &str, extensions: &[String], max_depth: usize) -> b
 /// - Explicit non-dot path → PinnedCli
 /// - Dot path with source files → DotBootstrap
 /// - Dot path without source files → Unresolved
-pub fn determine_initial_binding(dir: &str, extensions: &[String]) -> WorkspaceBinding {
+pub fn determine_initial_binding(dir: &str, extensions: &[String], respect_git_exclude: bool) -> WorkspaceBinding {
     let is_dot = dir == "." || dir == "./" || dir == ".\\";
     if !is_dot {
         // Explicit path — PinnedCli, always resolved
@@ -700,7 +700,7 @@ pub fn determine_initial_binding(dir: &str, extensions: &[String]) -> WorkspaceB
         let canonical = std::fs::canonicalize(dir)
             .map(|p| crate::clean_path(&p.to_string_lossy()))
             .unwrap_or_else(|_| dir.to_string());
-        if has_source_files(&canonical, extensions, 3) {
+        if has_source_files(&canonical, extensions, 3, respect_git_exclude) {
             WorkspaceBinding::dot_bootstrap(canonical)
         } else {
             WorkspaceBinding::unresolved(canonical)
@@ -1343,6 +1343,7 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
     let bg_idx_base = ctx.index_base.clone();
     let bg_ready = Arc::clone(&ctx.def_ready);
     let bg_building = Arc::clone(&ctx.def_building);
+    let bg_respect = ctx.respect_git_exclude;
     std::thread::spawn(move || {
         if bg_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
             return; // another build already running
@@ -1350,6 +1351,7 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
         info!(dir = %bg_dir, "Building definition index in background (workspace switch)");
         let new_idx = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
             dir: bg_dir.clone(), ext: bg_ext.clone(), threads: 0,
+            respect_git_exclude: bg_respect,
         });
         if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
             warn!(error = %e, "Failed to save definition index to disk");
@@ -1362,6 +1364,7 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
                 warn!(error = %e, "Failed to reload def index, rebuilding");
                 crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
                     dir: bg_dir, ext: bg_ext, threads: 0,
+                    respect_git_exclude: bg_respect,
                 })
             });
         *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
@@ -1472,6 +1475,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
         Arc::clone(&ctx.watcher_generation),
         new_gen,
         Arc::clone(&ctx.watcher_stats),
+        ctx.respect_git_exclude,
     ) {
         warn!(error = %e, "Failed to restart file watcher for new workspace");
     } else {
@@ -1497,6 +1501,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
             Arc::clone(&ctx.watcher_generation),
             new_gen,
             Arc::clone(&ctx.watcher_stats),
+            ctx.respect_git_exclude,
         );
     }
 }
@@ -1778,6 +1783,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         dir: dir.to_string(),
         ext: ext.clone(),
         threads: 0,
+        respect_git_exclude: ctx.respect_git_exclude,
     });
 
     // Save to disk
@@ -1807,6 +1813,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
             warn!(error = %e, "Failed to reload def index from disk after reindex, rebuilding");
             crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
                 dir: dir.to_string(), ext: ext.clone(), threads: 0,
+                respect_git_exclude: ctx.respect_git_exclude,
             })
         }
     };

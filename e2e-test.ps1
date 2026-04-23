@@ -176,6 +176,65 @@ Run-Test "T82 grep-max-results-zero" "$Binary grep fn -d $TestDir -e $TestExt --
 # T83: grep with Unicode terms should not crash (exit 0, 0 results)
 Run-Test "T83 grep-unicode-no-crash" "$Binary grep `"数据库连接`" -d $TestDir -e $TestExt"
 
+# T-RESPECT-GIT-EXCLUDE: --respect-git-exclude reaches every walker (Bug 4 from
+# docs/bug-reports/2026-04-23_consolidated-fix-plan.md). Builds a content index
+# over a real `git init` repo whose `.git/info/exclude` lists `secret.cs`, then
+# greps for tokens in both files and asserts the excluded token is absent while
+# the visible one is found. Companion to the 5 Rust integration tests in
+# src/main_tests.rs (which cover the in-process `build_*` + reconcile paths);
+# this test exercises the CLI binary end-to-end.
+Write-Host -NoNewline "  T-RESPECT-GIT-EXCLUDE git-info-exclude-cli ... "
+$total++
+try {
+    $rgxDir = Join-Path $env:TEMP "xray_e2e_respect_git_exclude_$PID"
+    if (Test-Path $rgxDir) { Remove-Item -Recurse -Force $rgxDir }
+    New-Item -ItemType Directory -Path $rgxDir | Out-Null
+
+    Push-Location $rgxDir
+    try {
+        $ErrorActionPreference = "Continue"
+        & git init --quiet 2>&1 | Out-Null
+        $ErrorActionPreference = "Stop"
+    } finally {
+        Pop-Location
+    }
+
+    $rgxInfo = Join-Path $rgxDir ".git\info"
+    if (-not (Test-Path $rgxInfo)) { New-Item -ItemType Directory -Path $rgxInfo | Out-Null }
+    Set-Content -Path (Join-Path $rgxInfo "exclude") -Value 'secret.cs' -NoNewline
+
+    Set-Content -Path (Join-Path $rgxDir "visible.cs") -Value 'class Visible { void marker_visible_token_e2e() { } }'
+    Set-Content -Path (Join-Path $rgxDir "secret.cs")  -Value 'class Secret  { void marker_secret_token_e2e()  { } }'
+
+    $searchBin = (Get-Command xray.exe -ErrorAction SilentlyContinue).Source
+    if (-not $searchBin) { $searchBin = ".\target\debug\xray.exe" }
+
+    $ErrorActionPreference = "Continue"
+    & $searchBin content-index -d $rgxDir -e cs --respect-git-exclude 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "content-index --respect-git-exclude failed (exit=$LASTEXITCODE)" }
+
+    $visibleOut = & $searchBin grep marker_visible_token_e2e -d $rgxDir -e cs 2>&1 | Out-String
+    $secretOut  = & $searchBin grep marker_secret_token_e2e  -d $rgxDir -e cs 2>&1 | Out-String
+    $ErrorActionPreference = "Stop"
+
+    if ($visibleOut -notmatch "visible\.cs") {
+        throw "visible token NOT found (visible.cs should be indexed). grep stdout:`n$visibleOut"
+    }
+    if ($secretOut -match "secret\.cs") {
+        throw "secret token WAS found in excluded file (Bug 4 regression). grep stdout:`n$secretOut"
+    }
+
+    Write-Host "OK" -ForegroundColor Green
+    $passed++
+}
+catch {
+    Write-Host "FAILED (exception: $_)" -ForegroundColor Red
+    $failed++
+}
+finally {
+    Remove-Item -Recurse -Force $rgxDir -ErrorAction SilentlyContinue
+}
+
 # T-SHUTDOWN: save-on-shutdown
 Write-Host -NoNewline "  T-SHUTDOWN save-on-shutdown ... "
 $total++

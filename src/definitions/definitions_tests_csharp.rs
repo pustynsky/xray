@@ -258,7 +258,7 @@ public class MyService { }
 public class OtherService { }
 "#).unwrap();
 
-    let args = DefIndexArgs { dir: dir.to_string_lossy().to_string(), ext: "cs".to_string(), threads: 1 };
+    let args = DefIndexArgs { dir: dir.to_string_lossy().to_string(), ext: "cs".to_string(), threads: 1, respect_git_exclude: false };
     let index = build_definition_index(&args);
 
     let attr_indices = index.attribute_index.get("obsolete").expect("should have 'obsolete'");

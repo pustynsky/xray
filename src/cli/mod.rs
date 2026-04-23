@@ -272,9 +272,14 @@ fn cmd_fast(args: FastArgs) -> Result<(), SearchError> {
         Ok(idx) => {
             if idx.is_stale() && args.auto_reindex {
                 eprintln!("Index is stale, rebuilding...");
+                let effective_respect = resolve_respect_git_exclude(
+                    "file",
+                    Some(idx.respect_git_exclude),
+                    args.respect_git_exclude,
+                );
                 let new_index = build_index(&IndexArgs {
                     dir: args.dir.clone(), max_age_hours: idx.max_age_secs / 3600,
-                    hidden: false, no_ignore: false, respect_git_exclude: args.respect_git_exclude, threads: 0,
+                    hidden: false, no_ignore: false, respect_git_exclude: effective_respect, threads: 0,
                 })?;
                 if let Err(e) = save_index(&new_index, &idx_base) {
                     eprintln!("Warning: failed to save updated index: {}", e);
@@ -404,6 +409,35 @@ fn display_lines_with_context(
     }
 }
 
+/// Resolve the effective `respect_git_exclude` value for an auto-rebuild path.
+///
+/// Prefers the persisted value (from the existing index) over the CLI flag.
+/// When the two disagree, emits a warning so the user is aware that their
+/// new flag value did NOT take effect (use an explicit rebuild command to
+/// flip the persisted value). When there is no persisted value (legacy
+/// pre-v3 indexes), falls back to the CLI flag.
+///
+/// See `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
+fn resolve_respect_git_exclude(
+    index_kind: &str,
+    persisted: Option<bool>,
+    cli_flag: bool,
+) -> bool {
+    match persisted {
+        Some(p) if p != cli_flag => {
+            eprintln!(
+                "Warning: {} index was built with --respect-git-exclude={}, but current invocation requested --respect-git-exclude={}. \
+                 Preserving persisted value to avoid silently flipping the index. \
+                 Use an explicit `xray index-content` / `xray index` command to change the persisted setting.",
+                index_kind, p, cli_flag,
+            );
+            p
+        }
+        Some(p) => p,
+        None => cli_flag,
+    }
+}
+
 /// Load content index, handle stale/missing/auto-reindex.
 fn load_grep_index(
     dir: &str,
@@ -420,9 +454,14 @@ fn load_grep_index(
             if idx.is_stale() && auto_reindex {
                 eprintln!("Content index is stale, rebuilding...");
                 let ext_str = idx.extensions.join(",");
+                let effective_respect = resolve_respect_git_exclude(
+                    "content",
+                    Some(idx.respect_git_exclude),
+                    respect_git_exclude,
+                );
                 let new_idx = build_content_index(&ContentIndexArgs {
                     dir: dir.to_string(), ext: ext_str, max_age_hours: idx.max_age_secs / 3600,
-                    hidden: false, no_ignore: false, respect_git_exclude, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                    hidden: false, no_ignore: false, respect_git_exclude: effective_respect, threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                 })?;
                 let _ = save_content_index(&new_idx, &idx_base);
                 new_idx

@@ -410,6 +410,7 @@ pub fn reconcile_definition_index(
     index: &mut DefinitionIndex,
     dir: &str,
     extensions: &[String],
+    respect_git_exclude: bool,
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
     let walk_start = std::time::SystemTime::now()
@@ -426,7 +427,7 @@ pub fn reconcile_definition_index(
     let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
 
     let mut walker = WalkBuilder::new(&dir_path);
-    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(false);
+    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(respect_git_exclude);
 
     for entry in walker.build() {
         let entry = match entry {
@@ -528,6 +529,7 @@ pub fn reconcile_definition_index_nonblocking(
     def_index: &Arc<RwLock<DefinitionIndex>>,
     dir: &str,
     extensions: &[String],
+    respect_git_exclude: bool,
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
     // Capture walk start time for created_at update (not now() at end — avoids race condition
@@ -543,7 +545,7 @@ pub fn reconcile_definition_index_nonblocking(
     let mut disk_files: HashMap<PathBuf, SystemTime> = HashMap::new();
 
     let mut walker = WalkBuilder::new(&dir_path);
-    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(false);
+    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(respect_git_exclude);
 
     for entry in walker.build() {
         let entry = match entry {

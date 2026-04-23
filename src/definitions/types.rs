@@ -184,7 +184,7 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 2;
+pub const DEFINITION_INDEX_VERSION: u32 = 3;
 
 #[derive(Serialize, Deserialize, Debug)]
 #[derive(Default)]
@@ -257,6 +257,13 @@ pub struct DefinitionIndex {
     /// Zero for a clean build. Non-zero indicates partial/degraded index.
     #[serde(default)]
     pub worker_panics: usize,
+    /// Whether this index was built with `--respect-git-exclude` honoured.
+    /// Persisted so that auto-rebuild paths (`xray serve` definition rebuild,
+    /// `xray_reindex_definitions` MCP tool) preserve the user's original
+    /// choice instead of silently flipping to the CLI default. See
+    /// `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
+    #[serde(default)]
+    pub respect_git_exclude: bool,
 }
 
 impl DefinitionIndex {
@@ -359,6 +366,12 @@ pub struct DefIndexArgs {
     /// tree-sitter parser instance. 0 = auto-detect CPU cores.
     #[arg(short, long, default_value = "0")]
     pub threads: usize,
+
+    /// Respect .git/info/exclude (by default xray ignores it so local-excluded files are indexed).
+    /// Mirrors the same flag on `xray index` / `xray content-index` / `xray serve`.
+    #[arg(long)]
+    pub respect_git_exclude: bool,
+
 }
 
 #[derive(Parser, Debug)]

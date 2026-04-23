@@ -1270,6 +1270,7 @@ pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
         created_at: now,
         max_age_secs: args.max_age_hours * 3600,
         entries,
+        respect_git_exclude: args.respect_git_exclude,
     };
 
     let elapsed = start.elapsed();
@@ -1509,6 +1510,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
         read_errors,
         lossy_file_count,
         worker_panics,
+        respect_git_exclude: args.respect_git_exclude,
     })
 }
 

@@ -65,9 +65,11 @@ pub(crate) fn collect_source_files(
     dir: &Path,
     extensions: &[String],
     threads: usize,
+    respect_git_exclude: bool,
 ) -> Vec<String> {
     let mut walker = WalkBuilder::new(dir);
-    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(false);
+    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(respect_git_exclude);
+
     if threads > 0 {
         walker.threads(threads);
     }
@@ -278,7 +280,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let start = Instant::now();
 
     // ─── Collect all matching source files ─────────────────────
-    let files = collect_source_files(&dir, &extensions, args.threads);
+    let files = collect_source_files(&dir, &extensions, args.threads, args.respect_git_exclude);
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
     crate::index::log_memory(&format!("def-build: after file walk ({} files)", total_files));
@@ -310,6 +312,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         extensions,
         files,
         path_to_id,
+        respect_git_exclude: args.respect_git_exclude,
         ..Default::default()
     };
 

@@ -618,3 +618,35 @@ cargo run -- def-index -d $TEST_DIR -e cs
 - No TypeScript grammar loading errors
 
 **Validates:** Extension-based parser filtering prevents unnecessary grammar loading.
+
+---
+
+## Workspace Filtering
+
+### T-RESPECT-GIT-EXCLUDE: `--respect-git-exclude` reaches every walker (Bug 4)
+
+**Source:** `docs/bug-reports/2026-04-23_consolidated-fix-plan.md` Bug 4 — PR #128 plumbed `--respect-git-exclude` only into top-level args; five walker construction sites in the watcher / incremental / definitions builders silently re-walked excluded files.
+
+**Setup (inside `e2e-test.ps1`, self-contained block):**
+
+```powershell
+$rgxDir = Join-Path $env:TEMP "xray_e2e_respect_git_exclude_$PID"
+git init --quiet
+Set-Content (Join-Path $rgxDir ".git/info/exclude") -Value 'secret.cs' -NoNewline
+Set-Content (Join-Path $rgxDir "visible.cs") -Value 'class Visible { void marker_visible_token_e2e() { } }'
+Set-Content (Join-Path $rgxDir "secret.cs")  -Value 'class Secret  { void marker_secret_token_e2e()  { } }'
+
+xray content-index -d $rgxDir -e cs --respect-git-exclude
+xray grep marker_visible_token_e2e -d $rgxDir -e cs   # must include visible.cs
+xray grep marker_secret_token_e2e  -d $rgxDir -e cs   # must NOT include secret.cs
+```
+
+**Expected:**
+
+- `content-index --respect-git-exclude` exits 0
+- `grep marker_visible_token_e2e` matches `visible.cs`
+- `grep marker_secret_token_e2e` does NOT match `secret.cs` (file was excluded by `.git/info/exclude` and NOT re-added by any rebuild path)
+
+**Validates:** the flag now propagates into every walker construction (`collect_source_files`, `reconcile_definition_index*`, `scan_dir_state`, `has_source_files`) and is persisted in `ContentIndex` / `FileIndex` / `DefinitionIndex` for auto-rebuild paths.
+
+**Companion tests:** 5 Rust integration tests in `src/main_tests.rs` cover the in-process build/reconcile paths with the same fixture (`build_index_respects_git_info_exclude`, `build_content_index_respects_git_info_exclude`, `build_definition_index_respects_git_info_exclude`, `incremental_reconcile_respects_git_info_exclude`, `auto_rebuild_preserves_persisted_respect_git_exclude`).

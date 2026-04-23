@@ -1451,6 +1451,7 @@ fn test_read_root_from_file_index_roundtrip() {
         created_at: 1_700_000_000,
         max_age_secs: 86_400,
         entries: Vec::new(),
+        respect_git_exclude: false,
     };
 
     crate::index::save_compressed(&path, &idx, "test-file-index")

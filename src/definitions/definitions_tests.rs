@@ -65,7 +65,7 @@ fn test_definition_index_build_and_search() {
     std::fs::write(dir.join("test.cs"), "public class TestClass : BaseClass { public void TestMethod() {} }").unwrap();
     std::fs::write(dir.join("test.sql"), "CREATE TABLE TestTable (Id INT NOT NULL)").unwrap();
 
-    let args = DefIndexArgs { dir: dir.to_string_lossy().to_string(), ext: "cs,sql".to_string(), threads: 1 };
+    let args = DefIndexArgs { dir: dir.to_string_lossy().to_string(), ext: "cs,sql".to_string(), threads: 1, respect_git_exclude: false };
     let index = build_definition_index(&args);
 
     assert_eq!(index.files.len(), 2);
@@ -149,6 +149,7 @@ fn test_build_def_index_cs_only_no_ts_parsers() {
         dir: dir.to_string_lossy().to_string(),
         ext: "cs".to_string(), // only C#
         threads: 1,
+        respect_git_exclude: false,
     });
 
     // Should find the C# class and method but NOT the TypeScript function
@@ -171,6 +172,7 @@ fn test_build_def_index_cs_and_ts() {
         dir: dir.to_string_lossy().to_string(),
         ext: "cs,ts".to_string(),
         threads: 1,
+        respect_git_exclude: false,
     });
 
     assert!(idx.name_index.contains_key("userservice"), "Should find C# class");
@@ -191,6 +193,7 @@ fn test_build_def_index_ts_only() {
         dir: dir.to_string_lossy().to_string(),
         ext: "ts".to_string(),
         threads: 1,
+        respect_git_exclude: false,
     });
 
     assert!(!idx.name_index.contains_key("userservice"), "Should NOT find C# class when ext=ts");
@@ -213,6 +216,7 @@ fn test_reconcile_adds_new_file() {
         dir: dir.to_string_lossy().to_string(),
         ext: "cs".to_string(),
         threads: 1,
+        respect_git_exclude: false,
     });
     assert_eq!(index.files.len(), 1);
     assert!(index.name_index.contains_key("existingservice"));
@@ -226,6 +230,7 @@ fn test_reconcile_adds_new_file() {
         &mut index,
         &dir.to_string_lossy(),
         &extensions,
+        false,
     );
 
     assert_eq!(added, 1, "Should have added 1 new file");
@@ -256,6 +261,7 @@ fn test_reconcile_removes_deleted_file() {
         dir: dir.to_string_lossy().to_string(),
         ext: "cs".to_string(),
         threads: 1,
+        respect_git_exclude: false,
     });
     assert_eq!(index.files.len(), 2);
     assert!(index.name_index.contains_key("deleteservice"));
@@ -269,6 +275,7 @@ fn test_reconcile_removes_deleted_file() {
         &mut index,
         &dir.to_string_lossy(),
         &extensions,
+        false,
     );
 
     assert_eq!(added, 0, "Should not have added any files");
@@ -293,6 +300,7 @@ fn test_reconcile_detects_modified_file() {
         dir: dir.to_string_lossy().to_string(),
         ext: "cs".to_string(),
         threads: 1,
+        respect_git_exclude: false,
     });
     assert!(index.name_index.contains_key("oldservice"));
     assert!(index.name_index.contains_key("oldmethod"));
@@ -309,6 +317,7 @@ fn test_reconcile_detects_modified_file() {
         &mut index,
         &dir.to_string_lossy(),
         &extensions,
+        false,
     );
 
     assert_eq!(added, 0, "Should not have added any files");
@@ -331,6 +340,7 @@ fn test_reconcile_skips_unchanged_files() {
         dir: dir.to_string_lossy().to_string(),
         ext: "cs".to_string(),
         threads: 1,
+        respect_git_exclude: false,
     });
     let original_def_count = index.definitions.len();
     assert!(index.name_index.contains_key("stableservice"));
@@ -345,6 +355,7 @@ fn test_reconcile_skips_unchanged_files() {
         &mut index,
         &dir.to_string_lossy(),
         &extensions,
+        false,
     );
 
     assert_eq!(added, 0);
@@ -586,7 +597,7 @@ fn test_collect_source_files_filters_by_extension() {
     std::fs::write(dir.join("util.ts"), "export function helper() {}").unwrap();
 
     let extensions = vec!["cs".to_string()];
-    let files = collect_source_files(dir, &extensions, 1);
+    let files = collect_source_files(dir, &extensions, 1, false);
 
     assert_eq!(files.len(), 1, "Should only find .cs files");
     assert!(files[0].ends_with("service.cs"), "Should find service.cs, got: {}", files[0]);
@@ -598,7 +609,7 @@ fn test_collect_source_files_empty_directory() {
     let dir = tmp.path();
 
     let extensions = vec!["cs".to_string()];
-    let files = collect_source_files(dir, &extensions, 1);
+    let files = collect_source_files(dir, &extensions, 1, false);
 
     assert!(files.is_empty(), "Empty directory should return no files");
 }
@@ -613,7 +624,7 @@ fn test_collect_source_files_multiple_extensions() {
     std::fs::write(dir.join("data.json"), "{}").unwrap();
 
     let extensions = vec!["cs".to_string(), "ts".to_string()];
-    let files = collect_source_files(dir, &extensions, 1);
+    let files = collect_source_files(dir, &extensions, 1, false);
 
     assert_eq!(files.len(), 2, "Should find both .cs and .ts files");
 }
@@ -626,7 +637,7 @@ fn test_collect_source_files_case_insensitive_ext() {
     std::fs::write(dir.join("Service.CS"), "class Upper {}").unwrap();
 
     let extensions = vec!["cs".to_string()];
-    let files = collect_source_files(dir, &extensions, 1);
+    let files = collect_source_files(dir, &extensions, 1, false);
 
     assert_eq!(files.len(), 1, "Extension matching should be case-insensitive");
 }
@@ -650,7 +661,7 @@ fn test_collect_source_files_respects_gitignore() {
     std::fs::write(dir.join("visible.cs"), "class Visible {}").unwrap();
 
     let extensions = vec!["cs".to_string()];
-    let files = collect_source_files(dir, &extensions, 1);
+    let files = collect_source_files(dir, &extensions, 1, false);
 
     assert_eq!(files.len(), 1, "Should only find 1 file (gitignored file excluded)");
     assert!(files[0].ends_with("visible.cs"), "Should find visible.cs");
@@ -873,7 +884,7 @@ fn test_collect_source_files_traverses_subdirectories() {
     std::fs::write(dir.join("sub1").join("deep").join("deep.cs"), "class Deep {}").unwrap();
 
     let extensions = vec!["cs".to_string()];
-    let files = collect_source_files(dir, &extensions, 1);
+    let files = collect_source_files(dir, &extensions, 1, false);
 
     assert_eq!(files.len(), 3, "Should find files in root and all subdirectories");
 }
@@ -1011,6 +1022,7 @@ fn test_definition_index_field_count_guard() {
         worker_panics: 0,
         empty_file_ids: Vec::new(),
         extension_methods: HashMap::new(),
+        respect_git_exclude: false,
     };
     drop(_guard);
 }
@@ -1343,6 +1355,7 @@ fn test_reconcile_nonblocking_adds_new_files() {
         &arc_index,
         &dir.to_string_lossy(),
         &["cs".to_string()],
+        false,
     );
 
     assert!(added > 0, "Should detect new files, got added={}", added);
@@ -1393,6 +1406,7 @@ fn test_reconcile_nonblocking_removes_deleted_files() {
         &arc_index,
         &dir.to_string_lossy(),
         &["cs".to_string()],
+        false,
     );
 
     assert_eq!(removed, 1, "Should detect deleted file");
@@ -1421,6 +1435,7 @@ fn test_reconcile_nonblocking_no_changes() {
         &arc_index,
         &dir.to_string_lossy(),
         &["cs".to_string()],
+        false,
     );
 
     assert_eq!(added, 0);
@@ -1524,6 +1539,7 @@ fn test_reconcile_nonblocking_detects_modified_files() {
         &arc_index,
         &dir.to_string_lossy(),
         &["cs".to_string()],
+        false,
     );
 
     // Should detect as modified (not added, since it was already in path_to_id)
@@ -1599,6 +1615,7 @@ public class Service{i} {{
         dir: dir.to_string_lossy().to_string(),
         ext: "cs".to_string(),
         threads: 4, // Use multiple threads to exercise sub-chunking
+        respect_git_exclude: false,
     });
 
     // Should find all 20 classes
@@ -1655,12 +1672,14 @@ fn test_chunked_def_build_single_vs_multi_thread_consistency() {
         dir: dir.to_string_lossy().to_string(),
         ext: "cs".to_string(),
         threads: 1,
+        respect_git_exclude: false,
     });
 
     let idx_multi = build_definition_index(&DefIndexArgs {
         dir: dir.to_string_lossy().to_string(),
         ext: "cs".to_string(),
         threads: 4,
+        respect_git_exclude: false,
     });
 
     assert_eq!(idx_single.definitions.len(), idx_multi.definitions.len(),

@@ -162,6 +162,7 @@ fn test_content_index_field_count_guard() {
         lossy_file_count: 0,
         worker_panics: 0,
         format_version: crate::CONTENT_INDEX_VERSION,
+        respect_git_exclude: false,
     };
     drop(_guard);
 }
