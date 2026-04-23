@@ -515,7 +515,7 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "skipIfNotFound": "Per-edit flag: if true, silently skip when search/anchor text is not found (default: false). Essential for multi-file 'paths' where not all files contain the target text. Without it, one missing file aborts the entire batch. Response includes 'skippedDetails' array with editIndex, search text, and reason for each skipped edit",
             "regex": "true -> treat edit search strings as regex with $1, $2 capture groups (Mode B search/replace only)",
             "dryRun": "true -> preview unified diff without writing file. Works with both single and multi-file",
-            "expectedLineCount": "Safety check: abort if file has different line count (prevents stale line numbers)",
+            "expectedLineCount": "Safety check: abort if file has different line count (prevents stale line numbers). Uses human/editor line count (matches xray_definitions/xray_grep numbers); reusable from previous response's newLineCount. Honored in both Mode A and Mode B.",
             "errorDiagnostics": "When text/anchor/pattern is not found, the error includes a nearest-match hint showing the most similar line in the file with line number and similarity percentage (e.g., 'Nearest match at line 5 (similarity 92%): ...'). Helps diagnose Unicode quote mismatches, case differences, and whitespace issues"
         }
     })

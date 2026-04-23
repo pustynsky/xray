@@ -658,18 +658,100 @@ fn test_mode_a_expected_line_count_match() {
     let (tmp, filename, path) = create_temp_file("a\nb\nc\n");
     let ctx = make_ctx(tmp.path());
 
-    // "a\nb\nc\n" split by '\n' gives ["a", "b", "c", ""] = 4 elements
+    // "a\nb\nc\n" has 3 contentful lines (trailing '\n' is a terminator,
+    // not an extra empty line) — same convention as `xray_definitions` /
+    // `xray_grep` line numbers, which is what LLMs actually see.
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
             { "startLine": 2, "endLine": 2, "content": "B" }
         ],
-        "expectedLineCount": 4
+        "expectedLineCount": 3
     }));
 
     assert!(!result.is_error, "Correct expectedLineCount should pass");
     let content = std::fs::read_to_string(&path).unwrap();
     assert!(content.contains("B"), "Edit should be applied");
+}
+
+/// Regression: `expectedLineCount` must abort Mode B (text-match) edits too.
+/// Previously the safety check lived inside the Mode A arm only and the
+/// parameter was silently ignored for Mode B (reported 2026-04-23).
+#[test]
+fn test_mode_b_expected_line_count_mismatch() {
+    let (tmp, filename, path) = create_temp_file("foo\nbar\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "foo", "replace": "qux" }],
+        "expectedLineCount": 99999,
+    }));
+
+    assert!(result.is_error, "Mode B should honor expectedLineCount");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("Expected 99999 lines"),
+        "Error should mention expected count, got: {}",
+        text
+    );
+    // File must not have been mutated.
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(content, "foo\nbar\n", "File must be untouched on mismatch");
+}
+
+#[test]
+fn test_mode_b_expected_line_count_match() {
+    let (tmp, filename, path) = create_temp_file("foo\nbar\n");
+    let ctx = make_ctx(tmp.path());
+
+    // 2 contentful lines (human/editor count, matches xray_definitions).
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "foo", "replace": "qux" }],
+        "expectedLineCount": 2,
+    }));
+
+    assert!(
+        !result.is_error,
+        "Correct expectedLineCount should pass, got: {:?}",
+        result
+    );
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("qux"), "Edit should be applied");
+}
+
+/// Pin down the line-counting convention: matches what editors and
+/// `xray_definitions`/`xray_grep` report (1-based, trailing '\n' = terminator).
+#[test]
+fn test_expected_line_count_human_semantics() {
+    let (tmp, filename, _) = create_temp_file("a\nb\nc\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Off-by-one (counting the trailing newline as a separate line) must fail.
+    let bad = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "a", "replace": "A" }],
+        "expectedLineCount": 4,
+        "dryRun": true,
+    }));
+    assert!(
+        bad.is_error,
+        "expectedLineCount=4 must NOT match a 3-line file ('a\\nb\\nc\\n')"
+    );
+
+    // Human count (3) must succeed.
+    let ok = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "a", "replace": "A" }],
+        "expectedLineCount": 3,
+        "dryRun": true,
+    }));
+    assert!(
+        !ok.is_error,
+        "expectedLineCount=3 must match a 3-line file, got: {:?}",
+        ok
+    );
 }
 
 #[test]
