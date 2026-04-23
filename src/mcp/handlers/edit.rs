@@ -507,6 +507,23 @@ fn classify_for_sync_reindex(
     None
 }
 
+/// Count contentful lines in `s` using the same convention editors and
+/// `xray_definitions`/`xray_grep` use for 1-based line numbers:
+///   - empty file → 0
+///   - trailing `\n` is a line terminator, not an extra empty line
+///
+/// Examples: `""` → 0, `"a"` → 1, `"a\n"` → 1, `"a\nb"` → 2, `"a\nb\n"` → 2.
+///
+/// This matches the maximum line number an LLM can ever observe via xray
+/// read tools, so values it passes back as `expectedLineCount` line up.
+fn count_lines(s: &str) -> usize {
+    if s.is_empty() {
+        0
+    } else {
+        s.split('\n').count() - usize::from(s.ends_with('\n'))
+    }
+}
+
 /// Apply edits/operations to file content and return results.
 fn apply_edits_to_content(
     path_str: &str,
@@ -515,21 +532,25 @@ fn apply_edits_to_content(
     is_regex: bool,
     expected_line_count: Option<usize>,
 ) -> Result<EditResult, String> {
+    // expectedLineCount safety check — applies to BOTH modes.
+    // Previously this lived inside the Mode A (Operations) arm only, so
+    // for Mode B (text-match edits) the parameter was silently ignored.
+    if let Some(expected) = expected_line_count {
+        let actual = count_lines(normalized);
+        if actual != expected {
+            return Err(format!(
+                "Expected {} lines, file has {}. File may have changed.",
+                expected, actual
+            ));
+        }
+    }
+
     let (modified_content, applied, total_replacements, skipped_details, warnings) = match mode {
         EditMode::Operations(ops_array) => {
             // Mode A: Line-range operations
             let ops = parse_line_operations(ops_array)?;
 
             let lines: Vec<&str> = normalized.split('\n').collect();
-
-            // expectedLineCount check
-            if let Some(expected) = expected_line_count
-                && lines.len() != expected {
-                    return Err(format!(
-                        "Expected {} lines, file has {}. File may have changed.",
-                        expected, lines.len()
-                    ));
-                }
 
             let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
             (new_lines.join("\n"), applied_count, 0, Vec::new(), Vec::new())
@@ -551,9 +572,11 @@ fn apply_edits_to_content(
     // Generate unified diff
     let diff = generate_unified_diff(path_str, normalized, &modified_content);
 
-    // Count changes
-    let original_line_count = normalized.split('\n').count();
-    let new_line_count = modified_content.split('\n').count();
+    // Count changes — use the same human-line semantics as xray read tools so
+    // `new_line_count` in the response can be reused as `expectedLineCount`
+    // for the next edit without an off-by-one.
+    let original_line_count = count_lines(normalized);
+    let new_line_count = count_lines(&modified_content);
     let lines_delta = new_line_count as i64 - original_line_count as i64;
     let lines_removed = if lines_delta < 0 { -lines_delta } else { 0 };
     let lines_added = if lines_delta > 0 { lines_delta } else { 0 };

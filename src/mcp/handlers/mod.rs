@@ -526,7 +526,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "expectedLineCount": {
                         "type": "integer",
-                        "description": "Safety check: if file has different line count, abort. Prevents stale line numbers."
+                        "description": "Safety check: if file has a different line count, abort. Counts the same way editors and xray_definitions/xray_grep do (1-based, trailing newline = terminator, NOT an extra empty line). Reusable from a previous response's `newLineCount`. Honored in both Mode A and Mode B."
                     }
                 },
                 "required": []
