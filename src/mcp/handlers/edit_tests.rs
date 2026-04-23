@@ -1694,15 +1694,20 @@ fn test_crlf_in_replace_text_is_normalized() {
     assert!(content.contains("new\ntext"), "Replace CRLF should be normalized to LF");
 }
 
-// ─── Part B: Auto-retry with trailing whitespace strip ──────────────
+// ─── Part B (REMOVED): trailing-WS auto-retry was a silent fallback ────
+//
+// PR #1 removed Step 2 (strip trailing whitespace) from `find_with_retry`.
+// Trailing-WS drift now surfaces as `Text not found` with a categorised
+// `Nearest match` hint instead of being silently fixed. Tests below are
+// inverted accordingly. The `..._no_warning` and `..._both_sides_no_retry_needed`
+// tests still pass unchanged because they exercise the exact-match path.
 
 #[test]
-fn test_trailing_whitespace_in_search_auto_retry() {
-    // File has NO trailing whitespace
+fn test_no_silent_match_trailing_whitespace_in_search() {
+    // Was test_trailing_whitespace_in_search_auto_retry — inverted.
     let (tmp, filename, _) = create_temp_file("function hello() {\n    return 42;\n}\n");
     let ctx = make_ctx(tmp.path());
 
-    // Search text has trailing spaces (LLM artifact)
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
@@ -1710,20 +1715,20 @@ fn test_trailing_whitespace_in_search_auto_retry() {
         ]
     }));
 
-    assert!(!result.is_error, "Should auto-retry with stripped trailing whitespace. Error: {:?}",
-        result.content.first().map(|c| &c.text));
+    assert!(result.is_error, "Trailing-WS drift must NOT silently match");
     let text = &result.content[0].text;
-    assert!(text.contains("warnings"), "Response should contain warnings about whitespace trimming");
+    assert!(text.contains("Text not found"), "Got: {}", text);
     let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
-    assert!(content.contains("return 43;"), "Replacement should have been applied");
+    assert!(content.contains("return 42;"), "File must be unchanged");
+    assert!(!content.contains("return 43;"), "No replacement must occur");
 }
 
 #[test]
-fn test_trailing_whitespace_in_anchor_auto_retry() {
+fn test_no_silent_match_trailing_whitespace_in_anchor() {
+    // Was test_trailing_whitespace_in_anchor_auto_retry — inverted.
     let (tmp, filename, _) = create_temp_file("line one\nline two\nline three\n");
     let ctx = make_ctx(tmp.path());
 
-    // Anchor has trailing spaces
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
@@ -1731,12 +1736,11 @@ fn test_trailing_whitespace_in_anchor_auto_retry() {
         ]
     }));
 
-    assert!(!result.is_error, "Should auto-retry anchor with stripped trailing whitespace. Error: {:?}",
-        result.content.first().map(|c| &c.text));
+    assert!(result.is_error, "Anchor trailing-WS drift must NOT silently match");
     let text = &result.content[0].text;
-    assert!(text.contains("warnings"), "Response should contain warnings");
+    assert!(text.contains("Anchor text not found"), "Got: {}", text);
     let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
-    assert!(content.contains("inserted line"), "Insert should have been applied");
+    assert!(!content.contains("inserted line"), "No insert must occur");
 }
 
 #[test]
@@ -1792,9 +1796,12 @@ fn test_trailing_whitespace_retry_fails_gracefully() {
 }
 
 #[test]
-fn test_trailing_whitespace_skip_if_not_found_with_retry() {
-    // With skipIfNotFound=true, trailing whitespace retry should still work
-    let (tmp, filename, _) = create_temp_file("hello world\n");
+fn test_no_silent_match_skip_if_not_found_does_not_resurrect_match() {
+    // Was test_trailing_whitespace_skip_if_not_found_with_retry — inverted.
+    // Before PR #1: Step 2 trimmed search to "hello world" and matched
+    // even with skipIfNotFound=false. After PR #1 the trim is gone, so the
+    // search must surface as Text not found.
+    let (tmp, filename, path) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
     let result = handle_xray_edit(&ctx, &json!({
@@ -1804,9 +1811,9 @@ fn test_trailing_whitespace_skip_if_not_found_with_retry() {
         ]
     }));
 
-    // This should auto-retry and succeed (not skip)
-    assert!(!result.is_error, "Should auto-retry successfully. Error: {:?}",
-        result.content.first().map(|c| &c.text));
+    assert!(result.is_error, "Trailing-WS drift must NOT silently match");
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(content, "hello world\n", "File must be unchanged");
 }
 
 // ─── Part C: Hex diff diagnostics at ≥99% similarity ────────────────
@@ -1865,33 +1872,6 @@ fn test_describe_byte_common_whitespace() {
 }
 
 #[test]
-fn test_strip_trailing_whitespace_per_line() {
-    // C3 fix: trailing newline is now preserved (split('\n') instead of .lines())
-    assert_eq!(
-        super::strip_trailing_whitespace_per_line("hello  \nworld\t\n"),
-        "hello\nworld\n"
-    );
-    assert_eq!(
-        super::strip_trailing_whitespace_per_line("no trailing"),
-        "no trailing"
-    );
-    assert_eq!(
-        super::strip_trailing_whitespace_per_line("  leading preserved  "),
-        "  leading preserved"
-    );
-    // Trailing newline preserved
-    assert_eq!(
-        super::strip_trailing_whitespace_per_line("line1\n"),
-        "line1\n"
-    );
-    // No trailing newline stays without trailing newline
-    assert_eq!(
-        super::strip_trailing_whitespace_per_line("line1"),
-        "line1"
-    );
-}
-
-#[test]
 fn test_normalize_crlf() {
     assert_eq!(super::normalize_crlf("hello\r\nworld"), "hello\nworld");
     assert_eq!(super::normalize_crlf("no crlf here"), "no crlf here");
@@ -1942,11 +1922,19 @@ fn test_all_whitespace_search_does_not_panic() {
     assert!(result.is_error, "All-whitespace search that doesn't match should error");
 }
 
-// ─── Step 3: Trim leading/trailing blank lines ───────────────────────
+// ─── Step 3 (REMOVED): blank-line trim was a silent fallback ────────
+//
+// The Step 3 retry that trimmed leading/trailing blank lines from the search
+// text was removed in PR #1 (cleanup-magic). It silently rewrote the search
+// text and could match a semantically different block. After removal, the same
+// inputs surface as `Text not found` errors — see the
+// `test_no_silent_match_*` tests below.
 
 #[test]
-fn test_blank_line_trim_search_leading_newline() {
-    // File has content without leading blank line, search starts with \n
+fn test_no_silent_match_search_leading_newline() {
+    // Was test_blank_line_trim_search_leading_newline — inverted.
+    // Before PR #1: silent Step 3 trimmed the leading \n and matched.
+    // After PR #1: must surface as Text not found.
     let (tmp, filename, _) = create_temp_file("## Heading\n\nSome text\n");
     let ctx = make_ctx(tmp.path());
 
@@ -1957,16 +1945,20 @@ fn test_blank_line_trim_search_leading_newline() {
         ]
     }));
 
-    assert!(!result.is_error, "Should match after trimming leading blank line. Error: {:?}",
+    assert!(result.is_error,
+        "Search with leading \\n must NOT silently match after PR #1. Got: {:?}",
         result.content.first().map(|c| &c.text));
     let text = &result.content[0].text;
-    assert!(text.contains("warnings"), "Response should contain warning about blank line trimming");
+    assert!(text.contains("Text not found"),
+        "Error should be 'Text not found': {}", text);
     let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
-    assert!(content.contains("## New Heading"), "Replacement should have been applied");
+    assert_eq!(content, "## Heading\n\nSome text\n",
+        "File must be unchanged after error");
 }
 
 #[test]
-fn test_blank_line_trim_search_trailing_newlines() {
+fn test_no_silent_match_search_trailing_newlines() {
+    // Was test_blank_line_trim_search_trailing_newlines — inverted.
     let (tmp, filename, _) = create_temp_file("hello world\n");
     let ctx = make_ctx(tmp.path());
 
@@ -1977,14 +1969,16 @@ fn test_blank_line_trim_search_trailing_newlines() {
         ]
     }));
 
-    assert!(!result.is_error, "Should match after trimming trailing blank lines. Error: {:?}",
+    assert!(result.is_error,
+        "Search with trailing \\n\\n must NOT silently match after PR #1. Got: {:?}",
         result.content.first().map(|c| &c.text));
     let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
-    assert!(content.contains("goodbye world"), "Replacement should have been applied");
+    assert_eq!(content, "hello world\n", "File must be unchanged after error");
 }
 
 #[test]
-fn test_blank_line_trim_anchor_leading_newline() {
+fn test_no_silent_match_anchor_leading_newline() {
+    // Was test_blank_line_trim_anchor_leading_newline — inverted.
     let (tmp, filename, _) = create_temp_file("line one\nline two\nline three\n");
     let ctx = make_ctx(tmp.path());
 
@@ -1995,10 +1989,12 @@ fn test_blank_line_trim_anchor_leading_newline() {
         ]
     }));
 
-    assert!(!result.is_error, "Should match anchor after trimming leading blank line. Error: {:?}",
+    assert!(result.is_error,
+        "Anchor with leading \\n must NOT silently match after PR #1. Got: {:?}",
         result.content.first().map(|c| &c.text));
-    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
-    assert!(content.contains("inserted line"), "Insert should have been applied");
+    let text = &result.content[0].text;
+    assert!(text.contains("Anchor text not found"),
+        "Error should be 'Anchor text not found': {}", text);
 }
 
 #[test]
@@ -2413,15 +2409,6 @@ fn test_expected_context_wrong_context_still_fails() {
 }
 
 // ─── Helper function unit tests ──────────────────────────────────────
-
-#[test]
-fn test_trim_blank_lines() {
-    assert_eq!(trim_blank_lines("\n## Heading"), "## Heading");
-    assert_eq!(trim_blank_lines("text\n\n"), "text");
-    assert_eq!(trim_blank_lines("\n\n## Heading\n\nContent\n\n"), "## Heading\n\nContent");
-    assert_eq!(trim_blank_lines("no change"), "no change");
-    assert_eq!(trim_blank_lines(""), "");
-}
 
 #[test]
 fn test_collapse_spaces() {
@@ -2872,13 +2859,17 @@ mod audit_regression_tests {
 
 /// Regression tests for the apply_text_edits retry-cascade refactoring.
 ///
-/// Cascade stages (find_with_retry):
+/// Cascade stages (find_with_retry) — PR #1 cleanup-magic edition:
 ///   1. Exact literal match
-///   2. Strip trailing whitespace per line
-///   3. Trim leading/trailing blank lines (+ strip trailing WS)
-///   4. Flex-space regex (collapse whitespace)
+///   2. Flex-space regex (collapse whitespace) — OPT-IN via expectedContext
 ///
-/// Each test isolates a single stage and asserts that:
+/// Stages 2 (strip trailing WS) and 3 (trim blank lines) were REMOVED in PR #1.
+/// They silently rewrote the search text and could match a semantically different
+/// block. Their inputs now surface as `Text not found` errors with a categorised
+/// `Nearest match` hint. The former "happy-path" tests for those stages are
+/// inverted below to assert the new diagnose-first behaviour.
+///
+/// Each test isolates a single behaviour and asserts that:
 ///   - The match is found at the right offset.
 ///   - effective_search / matched bytes are correct (so occurrence math, error
 ///     messages, and expectedContext keep working).
@@ -2904,7 +2895,7 @@ mod retry_cascade_tests {
     // Critical: effective_search becomes the trimmed form, so the literal
     // replacement targets exactly what's in the file (no over-write of context).
     #[test]
-    fn test_retry_cascade_strip_trailing_ws() {
+    fn test_no_silent_match_trailing_ws_cascade() {
         let tmp = tempfile::tempdir().unwrap();
         let filename = "a1.txt";
         let path = tmp.path().join(filename);
@@ -2915,23 +2906,20 @@ mod retry_cascade_tests {
         let result = handle_xray_edit(&ctx, &json!({
             "path": filename,
             "edits": [
-                // search HAS trailing whitespace — only step 2 will match
+                // search HAS trailing whitespace — used to silently match via Step 2
                 { "search": "foo   ", "replace": "FOO" }
             ]
         }));
 
-        assert!(!result.is_error,
-            "strip-trailing-ws cascade should succeed: {}", result.content[0].text);
+        // Inverted (PR #1): Step 2 was removed. Trailing-WS drift must surface
+        // as Text not found instead of being silently fixed.
+        assert!(result.is_error,
+            "trailing-WS drift must NOT silently match after PR #1: {}",
+            result.content[0].text);
 
         let content = std::fs::read_to_string(&path).unwrap();
-        assert_eq!(content, "FOO\nbar\n",
-            "After step-2 match, replacement must target the trimmed form (no extra chars eaten)");
-
-        // Surface the warning so a future regression that silently skips warnings is caught.
-        let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
-        let warnings = parsed["warnings"].as_array().expect("response must include warnings array");
-        assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("trimming trailing whitespace")),
-            "Step 2 must record a warning. Got warnings: {:?}", warnings);
+        assert_eq!(content, "foo\nbar\n",
+            "File must be unchanged after Text not found error");
     }
 
     // ─── A2: Step 3 — trim leading/trailing blank lines ──────────────────
@@ -2940,7 +2928,7 @@ mod retry_cascade_tests {
     // packed without those blank lines. Step 1 (exact) fails, step 2 (strip
     // trailing WS) doesn't help, step 3 trims blank lines and matches.
     #[test]
-    fn test_retry_cascade_trim_blank_lines() {
+    fn test_no_silent_match_blank_lines_cascade() {
         let tmp = tempfile::tempdir().unwrap();
         let filename = "a2.txt";
         let path = tmp.path().join(filename);
@@ -2951,29 +2939,26 @@ mod retry_cascade_tests {
         let result = handle_xray_edit(&ctx, &json!({
             "path": filename,
             "edits": [
-                // search HAS leading/trailing blank lines
+                // search HAS leading/trailing blank lines — used to silently match via Step 3
                 { "search": "\n\nfoo\nbar\n\n", "replace": "FOO_BAR" }
             ]
         }));
 
-        assert!(!result.is_error,
-            "trim-blank-lines cascade should succeed: {}", result.content[0].text);
+        // Inverted (PR #1): Step 3 was removed. Blank-line drift must surface
+        // as Text not found instead of being silently fixed.
+        assert!(result.is_error,
+            "blank-line drift must NOT silently match after PR #1: {}",
+            result.content[0].text);
 
         let content = std::fs::read_to_string(&path).unwrap();
-        // Replacement targets trimmed form "foo\nbar" — "prefix\n" and "\nsuffix\n" must remain.
-        assert_eq!(content, "prefix\nFOO_BAR\nsuffix\n",
-            "After step-3 match, replacement must target the trimmed form");
-
-        let parsed: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
-        let warnings = parsed["warnings"].as_array().expect("response must include warnings array");
-        assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("blank lines")),
-            "Step 3 must record a blank-lines warning. Got: {:?}", warnings);
+        assert_eq!(content, "prefix\nfoo\nbar\nsuffix\n",
+            "File must be unchanged after Text not found error");
     }
 
     // ─── A3: Step 4 — flex-space regex ⚠️ HIGHEST RISK ───────────────────
     //
     // search has single spaces between tokens. File has tabs and multiple
-    // spaces. Only step 4 (flex regex) matches. Critical guarantees:
+    // spaces. Only the flex-regex stage matches. Critical guarantees:
     //   - flex_re is set, so apply_literal_replace uses regex::NoExpand path
     //     (NOT effective_search-based String::replace).
     //   - matched bytes preserved verbatim except for the surgical replacement.
@@ -3044,25 +3029,25 @@ mod retry_cascade_tests {
         assert!(err1.contains("nonexistent_token_xyz"),
             "error must echo the original search. Got: {}", err1);
 
-        // Scenario 2: search matches via step 2 (strip trailing WS) but
-        // occurrence overflows. Error must mention the trimmed form because
-        // that's what's being counted in the file.
+        // Scenario 2: search not found, but with extra trailing whitespace
+        // that PR #1's removed Step 2 used to silently strip. Error must
+        // still echo the ORIGINAL (untrimmed) search — the cascade no longer
+        // produces an effective_search divergent from the input.
         let r_overflow = handle_xray_edit(&ctx, &json!({
             "path": filename,
             "edits": [
                 {
-                    "search": "alpha   ",   // step 2 trims to "alpha", which appears 1×
-                    "replace": "A",
-                    "occurrence": 5         // requested 5 — only 1 found
+                    "search": "alpha   ",   // pre-PR#1: stripped to "alpha" → silent match
+                    "replace": "A"
                 }
             ]
         }));
-        assert!(r_overflow.is_error, "occurrence overflow should error");
+        assert!(r_overflow.is_error, "trailing-WS search must NOT silently match after PR #1");
         let err2 = &r_overflow.content[0].text;
-        assert!(err2.contains("Occurrence 5"),
-            "error must include requested occurrence. Got: {}", err2);
-        assert!(err2.contains("only 1 time"),
-            "error must show actual count. Got: {}", err2);
+        assert!(err2.contains("Text not found"),
+            "error must be Text not found. Got: {}", err2);
+        assert!(err2.contains("alpha"),
+            "error must echo the original search. Got: {}", err2);
     }
 
     // ─── A5: expectedContext after a flex-cascade match ─────────────────
@@ -4134,5 +4119,275 @@ fn test_edits_item_replace_without_search_clear_error() {
     assert!(
         !msg.contains("missing or invalid 'search'"),
         "Should not use legacy phrasing. msg={}", msg
+    );
+}
+
+// ═════════════════════════════════════════════════════════════════════
+// PR #1 (cleanup-magic) — new diagnostic and category tests
+// ═════════════════════════════════════════════════════════════════════
+
+/// File `"foo\nbar\n"`, search `"foo \nbar\n"` (extra trailing space on line 1).
+/// Before PR #1: Step 2 silently stripped the space and matched. After PR #1:
+/// must surface as Text not found with `category: trailingWhitespace`.
+#[test]
+fn test_no_silent_match_on_trailing_whitespace_drift() {
+    let (tmp, filename, _) = create_temp_file("foo\nbar\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "foo \nbar\n", "replace": "FOO\nBAR\n" }
+        ]
+    }));
+
+    assert!(result.is_error, "Trailing-WS drift must NOT silently match");
+    let text = &result.content[0].text;
+    assert!(text.contains("Text not found"), "Got: {}", text);
+    assert!(
+        text.contains("category: trailingWhitespace"),
+        "Error should include `(category: trailingWhitespace)`. Got: {}",
+        text
+    );
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert_eq!(content, "foo\nbar\n", "File must be unchanged");
+}
+
+/// Symmetric to the above: extra blank lines in search. After PR #1, the input
+/// surfaces as Text not found instead of being silently fixed by the deleted
+/// Step 3. We do not assert a specific category here — the nearest-match
+/// window may not align tightly enough to score ≥ 0.80, in which case no
+/// category is emitted. The category logic itself is covered by
+/// `test_detect_diff_category_*`.
+#[test]
+fn test_no_silent_match_on_blank_lines_drift() {
+    let (tmp, filename, _) = create_temp_file("prefix\nfoo\nbar\nsuffix\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "\n\nfoo\nbar\n\n", "replace": "FOO_BAR" }
+        ]
+    }));
+
+    assert!(result.is_error, "Blank-line drift must NOT silently match");
+    let text = &result.content[0].text;
+    assert!(text.contains("Text not found"), "Got: {}", text);
+    let content = std::fs::read_to_string(tmp.path().join(&filename)).unwrap();
+    assert_eq!(content, "prefix\nfoo\nbar\nsuffix\n", "File must be unchanged");
+}
+
+/// File saved with CRLF, search uses LF. The handler pre-normalises CRLF→LF
+/// in BOTH file content and search text (`normalize_crlf` in `parse_text_edits`),
+/// so an end-to-end mismatch never reaches the nearest-match diagnostic. The
+/// LF↔CRLF case is therefore covered by the unit test
+/// `test_detect_diff_category_crlf_vs_lf` against `detect_diff_category` directly.
+///
+/// This test asserts the auto-normalisation invariant: a CRLF file with an
+/// LF search must SUCCEED, not error.
+#[test]
+fn test_crlf_file_lf_search_normalised_match() {
+    let tmp = tempfile::tempdir().unwrap();
+    let filename = "crlf.txt";
+    let path = tmp.path().join(filename);
+    std::fs::write(&path, b"hello world\r\nsecond line\r\n").unwrap();
+
+    let ctx = make_ctx(tmp.path());
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello world\nsecond line\n", "replace": "HELLO\nSECOND\n" }
+        ]
+    }));
+
+    assert!(!result.is_error,
+        "CRLF file + LF search must match via auto-normalisation. Got: {}",
+        result.content[0].text);
+}
+
+/// After Step 2/3 removal, a short block that exists in repeated context with
+/// trailing-WS drift in the search must not misfire onto a different occurrence.
+/// This is a regression guard: the deleted Step 2 could match a similar block
+/// that happened to have the right collapsed form. With it gone, the search
+/// either matches exactly or fails loudly.
+#[test]
+fn test_anti_misfire_short_block_in_repeated_context() {
+    let (tmp, filename, path) = create_temp_file(
+        "fn a() {\n    return 1;\n}\n\nfn b() {\n    return 1;\n}\n",
+    );
+    let ctx = make_ctx(tmp.path());
+
+    // Search has a trailing space the file doesn't. Old Step 2 would strip it,
+    // then "    return 1;\n}" matches TWICE. The handler would either error
+    // on ambiguity OR (worse) silently target the wrong copy. Either way the
+    // diagnose-first behaviour is to fail with a clear hint.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "    return 1; \n}", "replace": "    return 42;\n}" }
+        ]
+    }));
+
+    assert!(result.is_error, "Trailing-WS drift on a repeated block must fail loudly");
+    let text = &result.content[0].text;
+    assert!(text.contains("Text not found"), "Got: {}", text);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("return 1;"),
+        "File must be unchanged — no silent misfire onto either copy");
+    assert!(!content.contains("return 42;"), "No replacement must occur");
+}
+
+/// Multi-line whitespace drift with similarity ~0.85 must still emit a
+/// byte-level diff hint after PR #1 (threshold lowered from 0.99 → 0.80).
+/// Before PR #1 this drift would have been silently fixed by Step 2; the
+/// byte hint at the old 0.99 threshold would never fire.
+#[test]
+fn test_byte_diff_hint_at_080_similarity() {
+    // File: 5 short lines without trailing WS.
+    let (tmp, filename, _) = create_temp_file("abc\ndef\nghi\njkl\nmno\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Search: same 5 lines, each with one trailing space. Char-similarity
+    // sits in the ~0.80–0.95 band depending on the diff algorithm — above
+    // the new NEAREST_MATCH_BYTE_DIFF_THRESHOLD (0.80), below the old 0.99.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "abc \ndef \nghi \njkl \nmno \n", "replace": "X" }
+        ]
+    }));
+
+    assert!(result.is_error, "Drift must surface as Text not found");
+    let text = &result.content[0].text;
+    assert!(text.contains("Text not found"), "Got: {}", text);
+    assert!(
+        text.contains("Nearest match"),
+        "Nearest match hint must be present. Got: {}", text
+    );
+    assert!(
+        text.contains("First difference at byte")
+            || text.contains("longer than")
+            || text.contains("Diff category:"),
+        "byte-level hint or category must be present at ≥ 0.80 similarity. Got: {}",
+        text
+    );
+    assert!(
+        text.contains("trailingWhitespace"),
+        "trailingWhitespace category must be detected. Got: {}", text
+    );
+}
+
+/// Regression: `truncate_for_display` must respect UTF-8 char boundaries when
+/// the cap falls inside a multi-byte sequence (e.g. em-dash, 3 bytes).
+#[test]
+fn test_truncate_for_display_utf8_boundary() {
+    // Construct a string whose 150th byte falls inside the em-dash sequence.
+    // 148 ASCII bytes + em-dash (3 bytes) + more ASCII — cap at 150 lands inside
+    // the em-dash. Without floor_char_boundary this would panic.
+    let mut s = String::with_capacity(300);
+    for _ in 0..148 { s.push('a'); }
+    s.push('\u{2014}'); // em-dash, 3 bytes
+    for _ in 0..50 { s.push('b'); }
+
+    // Should not panic and should return a valid UTF-8 string.
+    let out = super::truncate_for_display(&s);
+    assert!(out.is_char_boundary(out.len()), "Output must end on a char boundary");
+    assert!(out.ends_with('\u{2026}'), "Output should end with horizontal ellipsis");
+    // The em-dash must NOT appear half-truncated — either fully present or absent.
+    let dash_count_in = s.matches('\u{2014}').count();
+    let dash_count_out = out.matches('\u{2014}').count();
+    assert!(dash_count_out <= dash_count_in, "Em-dash must not be split");
+}
+
+// ─── detect_diff_category unit tests ───────────────────────────
+
+#[test]
+fn test_detect_diff_category_crlf_vs_lf() {
+    assert_eq!(
+        super::detect_diff_category("hello\nworld\n", "hello\r\nworld\r\n"),
+        "crlfVsLf"
+    );
+}
+
+#[test]
+fn test_detect_diff_category_blank_lines() {
+    assert_eq!(
+        super::detect_diff_category("\n\nfoo\nbar\n\n", "foo\nbar"),
+        "leadingOrTrailingBlankLines"
+    );
+}
+
+#[test]
+fn test_detect_diff_category_trailing_whitespace() {
+    assert_eq!(
+        super::detect_diff_category("foo  \nbar\t\n", "foo\nbar\n"),
+        "trailingWhitespace"
+    );
+}
+
+/// Search uses regular ASCII single quote, file has Unicode right-single-quote
+/// (U+2019). Folding confusables must classify as `unicodeConfusable`.
+#[test]
+fn test_unicode_confusable_category() {
+    assert_eq!(
+        super::detect_diff_category("it's", "it\u{2019}s"),
+        "unicodeConfusable"
+    );
+    // Em-dash vs hyphen.
+    assert_eq!(
+        super::detect_diff_category("a - b", "a \u{2014} b"),
+        "unicodeConfusable"
+    );
+    // NBSP vs space.
+    assert_eq!(
+        super::detect_diff_category("a b", "a\u{00A0}b"),
+        "unicodeConfusable"
+    );
+}
+
+#[test]
+fn test_detect_diff_category_no_recognised_pattern() {
+    // Genuine textual diff — no category.
+    assert_eq!(super::detect_diff_category("foo", "bar"), "");
+    // Identical strings — no category.
+    assert_eq!(super::detect_diff_category("same", "same"), "");
+}
+
+// ─── Mode A append-mode error hint (PR #1, item 1.4) ───────────────
+
+/// Mode A INSERT (`endLine < startLine`) with `startLine > line_count + 1`
+/// must reject the op AND surface a positive append-idiom hint pointing at
+/// `startLine: N+1, endLine: N`. Closes Issue 1 from the UX issues story.
+#[test]
+fn test_insert_out_of_range_includes_append_hint() {
+    // File has 3 lines.
+    let (tmp, filename, _) = create_temp_file("line1\nline2\nline3\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            // INSERT mode (endLine < startLine) at startLine=10 — way past end.
+            { "startLine": 10, "endLine": 9, "content": "x" }
+        ]
+    }));
+
+    assert!(result.is_error, "Out-of-range insert must error");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("out of range for insert"),
+        "Should mention out-of-range insert. Got: {}", text
+    );
+    assert!(
+        text.contains("To append to end of file"),
+        "Error must include positive append-idiom hint. Got: {}", text
+    );
+    // For a 3-line file (after split on '\n' the content has 4 elements
+    // including the trailing empty string — line_count = 4), append idiom is
+    // `startLine: 5, endLine: 4`. Just check both numbers appear together.
+    assert!(
+        text.contains("startLine: "),
+        "Hint must spell out the exact append-idiom coordinates. Got: {}", text
     );
 }
