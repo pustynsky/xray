@@ -38,6 +38,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 | Document | Description |
 |---|---|
+| [Installation Guide](docs/installation.md) | Download the pre-built `xray.exe`, configure VS Code Copilot Chat / Roo Code / Cline as an MCP client (Windows) |
 | [Use Cases & Vision](docs/use-cases.md) | Real-world scenarios, future ideas, and case studies |
 | [CLI Reference](docs/cli-reference.md) | All commands with examples and options |
 | [MCP Server Guide](docs/mcp-guide.md) | Setup, tools API, JSON-RPC examples |
@@ -76,6 +77,10 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 ## Quick Start
 
 ### Installation
+
+**Option A — Pre-built binary (recommended for MCP users on Windows).** Download `xray.exe` from the [GitHub releases page](https://github.com/pustynsky/xray/releases) (the latest build is always at the top — [direct link](https://github.com/pustynsky/xray/releases/latest)), drop it into a folder on your `PATH`, and follow the [Installation Guide](docs/installation.md) for VS Code Copilot Chat / Roo Code / Cline setup.
+
+**Option B — Build from source.**
 
 ```bash
 git clone https://github.com/pustynsky/xray
@@ -135,7 +140,7 @@ See [CLI Reference](docs/cli-reference.md) for all commands and options.
 xray serve --dir C:\Projects --ext cs --watch --definitions
 ```
 
-See [MCP Server Guide](docs/mcp-guide.md) for VS Code setup, tools API, and examples.
+For end-user setup (download binary, configure Copilot Chat / Roo Code / Cline) see the [Installation Guide](docs/installation.md). For tools API, JSON-RPC schemas, and protocol details see the [MCP Server Guide](docs/mcp-guide.md).
 
 ## Architecture Overview
 
