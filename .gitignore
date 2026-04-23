@@ -9,8 +9,13 @@ proptest-regressions/
 *.file-list
 *.word-search
 *.code-structure
+*.file-list.meta
+*.word-search.meta
+*.code-structure.meta
+*.debug.log
 # Git history cache
 *.git-history
+*.git-history.meta
 # Legacy extensions (pre-rename, kept for safety)
 *.idx
 *.cidx
