@@ -4011,6 +4011,59 @@ fn test_xml_on_demand_directory_returns_error_hint() {
 }
 
 
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_rejects_files_above_max_size() {
+    // Bug 6 (consolidated plan 2026-04-23): files above MAX_XML_BYTES (64 MiB)
+    // must be rejected BEFORE read_to_string allocates the whole content into
+    // memory. Uses set_len() to create a 65 MiB sparse file so the test does
+    // not actually allocate 65 MiB on disk.
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_max_size_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let big = tmp_dir.join("big.xml");
+    {
+        let f = std::fs::File::create(&big).unwrap();
+        // 65 MiB > 64 MiB MAX_XML_BYTES guard. set_len creates a sparse file:
+        // metadata().len() reports the logical size while disk usage stays at 0.
+        f.set_len(65 * 1024 * 1024).unwrap();
+    }
+
+    let content_index = crate::ContentIndex {
+        root: std::env::temp_dir().to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(std::env::temp_dir().to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": big.to_string_lossy(),
+        "name": "anything"
+    }));
+    assert!(result.is_error, "Files above MAX_XML_BYTES must return an error");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("max supported size"),
+        "Error message must explain the size limit: {}",
+        text
+    );
+    assert!(
+        text.contains("64 MiB"),
+        "Error message must mention the actual cap (64 MiB): {}",
+        text
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
 // ============================================================================
 // XML on-demand — security & resolver regression tests
 // ----------------------------------------------------------------------------

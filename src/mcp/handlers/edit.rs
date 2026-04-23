@@ -604,6 +604,22 @@ fn write_file_with_endings(resolved: &Path, content: &str, line_ending: &str) ->
         return Err(e);
     }
 
+    // Crash-durability: fsync the parent directory so the rename itself is
+    // persisted before we report success. Without this, a power loss between
+    // the rename and the next implicit metadata flush can leave the directory
+    // entry pointing at the old inode (or no entry at all on a fresh create).
+    // POSIX-only — Windows has no equivalent operation, and `std::fs::File`
+    // refuses to open directories there. Best-effort: a failed parent fsync
+    // does not invalidate the write itself, so we swallow the error.
+    #[cfg(unix)]
+    {
+        if let Some(parent) = resolved.parent()
+            && let Ok(dir) = std::fs::File::open(parent)
+        {
+            let _ = dir.sync_all();
+        }
+    }
+
     Ok(())
 }
 

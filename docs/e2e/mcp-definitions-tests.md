@@ -460,13 +460,13 @@ Tests for the `xray_definitions` MCP tool: body extraction, containsLine, auto-s
 
 **Scenario**: `xray_definitions file='test.xml' containsLine=3 includeBody=true` where line 3 is a leaf element
 
-**Expected**: Parent block returned with `matchedChild`, `matchedLine`, `onDemand: true`. Body includes all siblings.
+**Expected**: Parent block returned with `matchedChild`, `matchedLine`, `xmlOnDemand: true`. Body includes all siblings.
 
 ### T-XML-NAME-FILTER — name filter for XML elements
 
 **Scenario**: `xray_definitions file='test.config' name='appSettings' includeBody=true`
 
-**Expected**: XML element returned with body, signature, attributes. `onDemand: true` in summary.
+**Expected**: XML element returned with body, signature, attributes. `xmlOnDemand: true` in summary.
 
 ### T-XML-GREP-HINT — xmlHint in grep results for XML matches
 
@@ -494,7 +494,7 @@ Tests for the `xray_definitions` MCP tool: body extraction, containsLine, auto-s
 - `matchedBy: "textContent"`
 - `matchedChild: "ServiceType"`
 - `matchedLine: <line number>`
-- `onDemand: true` in summary
+- `xmlOnDemand: true` in summary
 
 Name matches appear first in results, textContent-promoted results after.
 
