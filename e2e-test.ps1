@@ -2070,6 +2070,101 @@ $testBlocks += , {
     }
 }
 
+# T-EDIT-NO-SILENT-TRAILING-WS: PR #1 of cleanup-magic story (docs/todo_approved_2026-04-23_xray-edit-cleanup-magic.md).
+# Step 2 (strip-trailing-whitespace silent retry) and Step 3 (trim-blank-lines silent retry) are removed.
+# Trailing-WS drift in `search` must now surface as a hard error with category=trailingWhitespace, NOT a silent rewrite.
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-EDIT-NO-SILENT-TRAILING-WS search-edit-no-silent-cleanup-magic"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_edit_no_silent_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Fixture: line ends with NO trailing whitespace.
+        # Search text has trailing whitespace -> previously Step 2 silently stripped it and matched. Now must error.
+        $fixturePath = Join-Path $tmpDir "no_silent.txt"
+        Set-Content -Path $fixturePath -Value "alpha`nbeta`ngamma" -NoNewline
+        $originalBytes = [System.IO.File]::ReadAllBytes($fixturePath)
+        $mcpPath = ($tmpDir -replace '\\', '/') + '/no_silent.txt'
+
+        $errors = @()
+
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $mcpPath + '","edits":[{"search":"beta   ","replace":"BETA"}]}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine) { $errors += "no JSON-RPC response" }
+        else {
+            if ($jsonLine -notmatch '"isError"\s*:\s*true') { $errors += "expected isError=true (Step 2 silent retry must be removed)" }
+            if ($jsonLine -notmatch 'Text not found') { $errors += "expected 'Text not found' error" }
+            # PR #1: categorised nearest-match hint must surface (category covered exhaustively by unit tests).
+            if ($jsonLine -notmatch 'Nearest match') { $errors += "missing 'Nearest match' diagnostic" }
+        }
+        $bytesAfter = [System.IO.File]::ReadAllBytes($fixturePath)
+        if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$originalBytes, [byte[]]$bytesAfter)) {
+            $errors += "file was mutated despite isError response (silent retry leaked)"
+        }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (trailing-WS drift errors with category=trailingWhitespace, file unchanged)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+# T-EDIT-INSERT-APPEND-HINT: PR #1 item 1.4 — INSERT out-of-range error includes positive append-idiom hint.
+# Closes UX trap (xray-edit-ux-improvements.md / xray-edit-ux-issues-2026-04-21.md Issue 1).
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-EDIT-INSERT-APPEND-HINT search-edit-insert-out-of-range-append-hint"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_edit_append_hint_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Fixture: 3 lines. Out-of-range INSERT requests startLine=10 (way past EOF).
+        $fixturePath = Join-Path $tmpDir "append_hint.txt"
+        Set-Content -Path $fixturePath -Value "one`ntwo`nthree" -NoNewline
+        $originalBytes = [System.IO.File]::ReadAllBytes($fixturePath)
+        $mcpPath = ($tmpDir -replace '\\', '/') + '/append_hint.txt'
+
+        $errors = @()
+
+        # Mode A INSERT: startLine > endLine and startLine > line_count + 1 -> out-of-range.
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $mcpPath + '","operations":[{"startLine":10,"endLine":9,"content":"appended"}]}}}')
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext txt 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonLine) { $errors += "no JSON-RPC response" }
+        else {
+            if ($jsonLine -notmatch '"isError"\s*:\s*true') { $errors += "expected isError=true for out-of-range INSERT" }
+            if ($jsonLine -notmatch 'To append to end of file') { $errors += "missing positive append-idiom hint" }
+            if ($jsonLine -notmatch 'INSERT mode at line N\+1') { $errors += "hint should mention INSERT mode at line N+1" }
+        }
+        $bytesAfter = [System.IO.File]::ReadAllBytes($fixturePath)
+        if (-not [System.Linq.Enumerable]::SequenceEqual([byte[]]$originalBytes, [byte[]]$bytesAfter)) {
+            $errors += "file was mutated despite isError response"
+        }
+
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (out-of-range INSERT shows append-idiom hint, file unchanged)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+
 # T-FAST-OUTSIDE-DIR: xray_fast rejects dir outside --dir and does not persist an orphan file-list index
 # (security fix MAJOR-14, commit a75ddbe).
 $testBlocks += , {
@@ -2229,7 +2324,7 @@ $testBlocks += , {
         $tmpDir = Join-Path $env:TEMP "xray_e2e_args_warn_$PID"
         if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
         New-Item -ItemType Directory -Path $tmpDir | Out-Null
-        Set-Content -Path (Join-Path $tmpDir "sample.rs") -Value "fn hello() { println!(\"world\"); }`n" -NoNewline
+        Set-Content -Path (Join-Path $tmpDir "sample.rs") -Value "fn hello() { println!(`"world`"); }`n" -NoNewline
         & $Bin content-index -d $tmpDir -e rs 2>&1 | Out-Null
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
@@ -2267,7 +2362,7 @@ $testBlocks += , {
         $tmpDir = Join-Path $env:TEMP "xray_e2e_args_strict_$PID"
         if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
         New-Item -ItemType Directory -Path $tmpDir | Out-Null
-        Set-Content -Path (Join-Path $tmpDir "sample.rs") -Value "fn hello() { println!(\"world\"); }`n" -NoNewline
+        Set-Content -Path (Join-Path $tmpDir "sample.rs") -Value "fn hello() { println!(`"world`"); }`n" -NoNewline
         & $Bin content-index -d $tmpDir -e rs 2>&1 | Out-Null
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',

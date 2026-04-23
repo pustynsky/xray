@@ -35,6 +35,12 @@ const NEAREST_MATCH_MIN_SIMILARITY: f64 = 0.4;
 /// Maximum length of search/match text shown in hint messages.
 const NEAREST_MATCH_MAX_DISPLAY_LEN: usize = 150;
 
+/// Minimum similarity ratio for emitting a byte-level diff hint alongside the
+/// `Nearest match` line. Was 0.99, but multi-line whitespace / blank-line drift
+/// drops similarity to ~0.85–0.95 — right when the byte hint is most needed
+/// (after Step 2/3 silent retries were removed).
+const NEAREST_MATCH_BYTE_DIFF_THRESHOLD: f32 = 0.80;
+
 /// Handle `xray_edit` tool call.
 pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // ── Reject unknown top-level parameters ──
@@ -947,10 +953,19 @@ fn handle_multi_file_edit(
                 for (_, _, tp) in &temp_files[renamed..] {
                     let _ = std::fs::remove_file(tp);
                 }
+                // Build the list of files that already committed (renames
+                // succeeded for indices 0..renamed). These cannot be rolled back
+                // by this tool — surface them so the caller can `git restore`.
+                let committed_files: Vec<String> = temp_files[..renamed]
+                    .iter()
+                    .map(|(p, _, _)| (*p).to_string())
+                    .collect();
+                let committed_json = serde_json::to_string(&committed_files)
+                    .unwrap_or_else(|_| "[]".to_string());
                 return ToolCallResult::error(format!(
                     "File '{}': rename failed after {} of {} files committed: {}. \
-                     Already-committed files cannot be rolled back.",
-                    path_str, renamed, temp_files.len(), e
+                     Already-committed files cannot be rolled back. committedFiles: {}",
+                    path_str, renamed, temp_files.len(), e, committed_json
                 ));
             }
         }
@@ -1172,8 +1187,13 @@ fn apply_line_operations(lines: &[&str], ops: Vec<LineOperation>) -> Result<(Vec
             // Insert mode: startLine can be 1..=line_count+1
             if op.start_line > line_count + 1 {
                 return Err(format!(
-                    "startLine {} out of range for insert (file has {} lines, max insert position is {})",
-                    op.start_line, line_count, line_count + 1
+                    "startLine {} out of range for insert (file has {} lines, max insert position is {}). \
+                     To append to end of file, pass startLine: {}, endLine: {} (INSERT mode at line N+1)",
+                    op.start_line,
+                    line_count,
+                    line_count + 1,
+                    line_count + 1,
+                    line_count
                 ));
             }
         }
@@ -1266,23 +1286,6 @@ fn normalize_crlf(s: &str) -> String {
     } else {
         s.to_string()
     }
-}
-
-/// Strip trailing whitespace from each line of a string.
-/// Used for fuzzy-retry when exact match fails due to invisible trailing spaces.
-fn strip_trailing_whitespace_per_line(s: &str) -> String {
-    // C3 fix: Use split('\n') instead of .lines() to preserve trailing newline.
-    // .lines() drops the trailing empty element for "foo\n", causing newline loss.
-    s.split('\n')
-        .map(|line| line.trim_end())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
-/// Strip leading and trailing blank lines from a string.
-/// Interior blank lines and content are preserved.
-fn trim_blank_lines(s: &str) -> String {
-    s.trim_matches('\n').to_string()
 }
 
 /// Collapse runs of horizontal whitespace (spaces/tabs) to a single space per line.
@@ -1524,13 +1527,19 @@ struct RetrySearchResult {
     warnings: Vec<String>,
 }
 
-/// 4-step auto-retry cascade: exact → strip trailing WS → trim blank lines → flex-space.
+/// 2-step search cascade: exact match, then optional flex-space regex.
 /// Used by both insert-anchor and literal search/replace modes.
 ///
-/// `allow_flex_whitespace`: when `false`, step 4 (regex-based whitespace-collapsing match)
+/// `allow_flex_whitespace`: when `false`, step 2 (regex-based whitespace-collapsing match)
 /// is skipped. Flex-space matching can silently match a semantically-different block
 /// elsewhere in the file, so it is opt-in: enabled only when the caller supplies an
 /// `expectedContext`, which validates ±5 lines around the match and rejects misfires.
+///
+/// Note: prior versions also retried with trailing-whitespace stripping (Step 2) and
+/// blank-line trimming (Step 3). Those were removed in favour of explicit, diagnose-first
+/// behaviour — silent retries masked semantic mismatches and led callers to write the
+/// wrong bytes. Whitespace and blank-line drift now surfaces as a `Text not found`
+/// error with a categorised `Nearest match` hint.
 fn find_with_retry(
     content: &str,
     search_text: &str,
@@ -1542,46 +1551,12 @@ fn find_with_retry(
 
     // Step 1: Exact match
     let mut positions = find_all_occurrences(content, search_text);
-    let mut match_len = search_text.len();
-    let mut effective_search = search_text.to_string();
+    let match_len = search_text.len();
+    let effective_search = search_text.to_string();
     let mut flex_match_lens: Option<Vec<usize>> = None;
     let mut flex_re: Option<Regex> = None;
 
-    // Step 2: Strip trailing whitespace
-    if positions.is_empty() {
-        let trimmed = strip_trailing_whitespace_per_line(search_text);
-        if trimmed != search_text && !trimmed.is_empty() {
-            let m = find_all_occurrences(content, &trimmed);
-            if !m.is_empty() {
-                warnings.push(format!(
-                    "edits[{}]: {} matched after trimming trailing whitespace",
-                    edit_index, label
-                ));
-                match_len = trimmed.len();
-                effective_search = trimmed;
-                positions = m;
-            }
-        }
-    }
-
-    // Step 3: Trim leading/trailing blank lines (+ strip trailing WS)
-    if positions.is_empty() {
-        let line_trimmed = strip_trailing_whitespace_per_line(&trim_blank_lines(search_text));
-        if line_trimmed != search_text && !line_trimmed.is_empty() {
-            let m = find_all_occurrences(content, &line_trimmed);
-            if !m.is_empty() {
-                warnings.push(format!(
-                    "edits[{}]: {} matched after trimming leading/trailing blank lines",
-                    edit_index, label
-                ));
-                match_len = line_trimmed.len();
-                effective_search = line_trimmed;
-                positions = m;
-            }
-        }
-    }
-
-    // Step 4: Flex-space matching (collapse whitespace to regex).
+    // Step 2: Flex-space matching (collapse whitespace to regex).
     // Opt-in: only runs when caller passed allow_flex_whitespace=true (i.e. an
     // expectedContext is present to validate the match). Without that guard, the
     // regex can silently match a similar-looking block elsewhere in the file.
@@ -2026,9 +2001,18 @@ fn nearest_match_hint(content: &str, search_text: &str) -> String {
     let pct = (best_similarity * 100.0).round() as u32;
     let display_text = truncate_for_display(&best_text);
 
-    // Part C: When similarity is very high (≥99%), add byte-level diff diagnostic
-    let byte_diff_hint = if best_similarity >= 0.99 {
-        byte_level_diff_hint(search_text, &best_text)
+    // Part C: When similarity is high enough (≥ NEAREST_MATCH_BYTE_DIFF_THRESHOLD),
+    // add byte-level diff diagnostic plus a category tag for common drift classes.
+    let byte_diff_hint = if best_similarity >= NEAREST_MATCH_BYTE_DIFF_THRESHOLD {
+        let byte_hint = byte_level_diff_hint(search_text, &best_text);
+        let category = detect_diff_category(search_text, &best_text);
+        if !category.is_empty() && !byte_hint.is_empty() {
+            format!("{} (category: {})", byte_hint, category)
+        } else if !category.is_empty() {
+            format!(". Diff category: {}", category)
+        } else {
+            byte_hint
+        }
     } else {
         String::new()
     };
@@ -2075,6 +2059,67 @@ fn byte_level_diff_hint(search: &str, found: &str) -> String {
 
     // Identical bytes — shouldn't happen if we got here, but be safe
     String::new()
+}
+
+/// Categorise the difference between `search` (what the caller passed) and `found`
+/// (the nearest match in the file). Returns one of:
+///   - `"crlfVsLf"`               — line-ending normalisation would make them equal
+///   - `"leadingOrTrailingBlankLines"` — surrounding `\n` padding differs
+///   - `"trailingWhitespace"`       — only trailing spaces/tabs per line differ
+///   - `"unicodeConfusable"`        — only NBSP, en/em-dash, or smart quotes differ
+///   - `""`                        — no recognised category (or strings identical)
+///
+/// The first matching category wins. The detector is conservative: any byte
+/// difference outside the relevant equivalence class disqualifies the category.
+fn detect_diff_category(search: &str, found: &str) -> &'static str {
+    if search == found {
+        return "";
+    }
+
+    // 1. CRLF vs LF: stripping all '\r' from both makes them equal,
+    //    and at least one side actually has a '\r'.
+    let s_no_cr: String = search.chars().filter(|&c| c != '\r').collect();
+    let f_no_cr: String = found.chars().filter(|&c| c != '\r').collect();
+    if s_no_cr == f_no_cr && (search.contains('\r') || found.contains('\r')) {
+        return "crlfVsLf";
+    }
+
+    // 2. Leading/trailing blank lines: trimming '\n' on both ends makes them equal.
+    if search.trim_matches('\n') == found.trim_matches('\n') {
+        return "leadingOrTrailingBlankLines";
+    }
+
+    // 3. Trailing whitespace per line: rstrip [ \t] from each line on both sides
+    //    makes them equal.
+    let rstrip_per_line = |s: &str| -> String {
+        s.split('\n')
+            .map(|line| line.trim_end_matches([' ', '\t']))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    if rstrip_per_line(search) == rstrip_per_line(found) {
+        return "trailingWhitespace";
+    }
+
+    // 4. Unicode confusables: NBSP, en/em-dash, smart quotes.
+    //    If folding all confusables to their ASCII counterparts on BOTH sides
+    //    makes the strings equal, classify accordingly.
+    let fold_confusables = |s: &str| -> String {
+        s.chars()
+            .map(|c| match c {
+                '\u{00A0}' => ' ',     // NBSP
+                '\u{2013}' | '\u{2014}' => '-', // en-dash, em-dash
+                '\u{2018}' | '\u{2019}' => '\'', // single smart quotes
+                '\u{201C}' | '\u{201D}' => '"', // double smart quotes
+                other => other,
+            })
+            .collect()
+    };
+    if fold_confusables(search) == fold_confusables(found) {
+        return "unicodeConfusable";
+    }
+
+    ""
 }
 
 // ─── Diff generation ─────────────────────────────────────────────────
