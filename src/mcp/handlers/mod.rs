@@ -1579,7 +1579,7 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
 
     // Determine if workspace is changing
     let previous_dir = current_dir.clone();
-    let workspace_changed = !dir.eq_ignore_ascii_case(&previous_dir);
+    let workspace_changed = !code_xray::path_eq(&dir, &previous_dir);
 
     // Check if workspace switch is allowed (only blocked in PinnedCli mode)
     if workspace_changed {
@@ -1746,7 +1746,7 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
 
     // Determine if workspace is changing
     let previous_dir = current_dir.clone();
-    let workspace_changed = !dir.eq_ignore_ascii_case(&previous_dir);
+    let workspace_changed = !code_xray::path_eq(&dir, &previous_dir);
 
     // Check if workspace switch is allowed (only blocked in PinnedCli mode)
     if workspace_changed {

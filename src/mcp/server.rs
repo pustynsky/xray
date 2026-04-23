@@ -79,7 +79,7 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
                             && let Some(path) = uri_to_path(uri) {
                                 let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
                                 let old_dir = ws.dir.clone();
-                                if !path.eq_ignore_ascii_case(&old_dir) {
+                                if !code_xray::path_eq(&path, &old_dir) {
                                     ws.set_dir(path.clone());
                                     ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
                                     ws.generation += 1;

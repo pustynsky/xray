@@ -1554,10 +1554,23 @@ fn collect_phrase_matches(
             handles.push(handle);
         }
         let mut all = Vec::new();
+        let mut worker_panics: usize = 0;
         for h in handles {
-            if let Ok(local) = h.join() {
-                all.extend(local);
+            match h.join() {
+                Ok(local) => all.extend(local),
+                // Bug 9 (consolidated plan 2026-04-23): a panic in a phrase-
+                // verification worker silently dropped that chunk's results.
+                // Now we count panics and emit a `tracing::warn!` so the issue
+                // surfaces in logs / metrics instead of returning quietly
+                // with fewer matches than the user expects.
+                Err(_) => worker_panics += 1,
             }
+        }
+        if worker_panics > 0 {
+            tracing::warn!(
+                worker_panics = worker_panics,
+                "phrase verification worker(s) panicked; result set may be incomplete"
+            );
         }
         all
     });

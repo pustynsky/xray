@@ -91,6 +91,31 @@ pub(crate) fn try_intercept(
     // Blocking file read. `handle_xray_definitions` is called from a sync
     // dispatch (see `src/mcp/server.rs`), so no `spawn_blocking` is needed.
     // If that ever changes, this is the place to switch to `tokio::fs`.
+    // DoS guard (consolidated bug plan 2026-04-23 Bug 6): refuse files larger
+    // than 64 MiB BEFORE we read the whole content into memory. The XML
+    // parser walks the source as a single string, so an attacker (or a buggy
+    // installer that drops a huge .config) could OOM the MCP server with a
+    // single request. 64 MiB covers >99.9% of real-world XML configs; users
+    // who need bigger files can grep them with `xray_grep` instead.
+    const MAX_XML_BYTES: u64 = 64 * 1024 * 1024;
+    match std::fs::metadata(&file_path) {
+        Ok(meta) if meta.len() > MAX_XML_BYTES => {
+            return Some(ToolCallResult::error(format!(
+                "XML file '{}' is {} bytes, which exceeds the max supported size of {} bytes (64 MiB). \
+                 xray_definitions parses the whole file in-memory; use xray_grep for line-level search \
+                 over very large files.",
+                file_path, meta.len(), MAX_XML_BYTES
+            )));
+        }
+        Ok(_) => {}
+        Err(e) => {
+            return Some(ToolCallResult::error(format!(
+                "Failed to stat XML file '{}': {}. Hint: check file path and permissions.",
+                file_path, e
+            )));
+        }
+    }
+
     let source = match std::fs::read_to_string(&file_path) {
         Ok(s) => s,
         Err(e) => {
