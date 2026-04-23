@@ -224,12 +224,19 @@ pub fn file_history(
         repo_path, file, filter, max_results, author_filter, message_filter, true,
     )?;
 
-    // Fallback for DELETED files: if --follow returned 0 results AND the file
-    // was ever tracked in git history (including deletions), retry WITHOUT --follow.
-    // `git log --follow` is known to return empty for files that were deleted and
-    // never renamed — removing --follow makes git traverse the delete commit.
+    // Fallback for DELETED files: if --follow returned 0 results, retry WITHOUT --follow.
+    // `git log --follow` is known to return empty for files that were deleted and never
+    // renamed — removing --follow makes git traverse the delete commit.
     // See user story 2026-04-17_git-deleted-files-support.md for details.
-    if total_count == 0 && file_ever_existed_in_git(repo_path, file) {
+    //
+    // Bug 7 (consolidated plan 2026-04-23): we used to gate this retry on a separate
+    // `file_ever_existed_in_git` probe (one extra `git log --all` spawn). That gate is
+    // redundant — the no-follow query itself returns 0 results when the file truly never
+    // existed (or has no commits in the active filter), with the same correctness signal
+    // and one fewer process spawn on the deleted-file cold path. Other call sites that
+    // need an explicit "existed?" boolean (e.g. `annotate_empty_git_result`) still use
+    // `file_ever_existed_in_git` directly.
+    if total_count == 0 {
         let (no_follow_commits, no_follow_total) = run_file_history_query(
             repo_path, file, filter, max_results, author_filter, message_filter, false,
         )?;
