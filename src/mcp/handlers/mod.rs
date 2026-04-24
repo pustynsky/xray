@@ -1,5 +1,6 @@
 //! MCP tool handlers — dispatches tool calls to specialized handler modules.
 
+mod advisory_hints;
 mod callers;
 mod arg_validation;
 mod definitions;
@@ -211,7 +212,12 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                      When results exceed maxResults and no name filter is set, automatically returns a \
                      directory-grouped summary (autoSummary) with definition counts per subdirectory and \
                      top-3 largest classes/interfaces per group, instead of truncated entries. \
-                     Add a name filter or narrow the file scope to get individual definitions.",
+                     Add a name filter or narrow the file scope to get individual definitions. \
+                     ADVISORY HINTS: Property/Field results may include 'valueSourceHint' (string) when the \
+                     symbol carries an attribute with a string-literal argument — the hint surfaces those \
+                     literals as ready-to-grep keys for external config files (manifest, appsettings, env, \
+                     secrets). Shape-based: it does NOT classify the attribute as a binder, only frames \
+                     'if any attribute binds to external configuration, search here'.",
                     lang_list
                 )
             },
@@ -352,7 +358,13 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                      to avoid mixing callers from unrelated classes. Requires server started with --definitions flag. \
                      Limitation: calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be \
                      detected because the tool uses AST parsing without type inference. DI-injected fields, `this`/`base` \
-                     calls, and direct receiver calls are fully supported.",
+                     calls, and direct receiver calls are fully supported. \
+                     ADVISORY HINTS (direction='up' only): the response may include an 'advisories' field (array of \
+                     strings) flagging known AST blind spots: (a) when class= is passed and the class implements an \
+                     interface, suggests re-running with class=IFoo to include interface-receiver call sites; \
+                     (b) when 1–3 callers are returned (and the result was NOT truncated), suggests an \
+                     'xray_grep terms=METHOD countOnly=true' cross-check to verify completeness against AST blind spots \
+                     (DI/dynamic dispatch). Suppressed when 'truncated' or 'perLevelTruncated' is true.",
                     lang_list
                 )
             },

@@ -3431,3 +3431,402 @@ fn test_per_level_truncation_not_set_when_under_limit() {
     assert_eq!(builder.per_level_dropped, 0, "Nothing should be dropped under the limit");
 }
 
+// ─── Advisory hints (interface-vias + low-count) — end-to-end ───────────
+//
+// These tests exercise the wiring of advisory_hints functions through
+// `handle_xray_callers`. Pure-function correctness is covered in
+// `mcp::handlers::advisory_hints::tests`; here we only assert that
+// hints surface in the response JSON under the `advisories` field.
+// See user-stories/xray-response-hints-for-incomplete-results.md.
+
+fn make_ctx_with_idx(def_idx: DefinitionIndex) -> super::HandlerContext {
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        files: def_idx.files.clone(),
+        index: HashMap::new(),
+        total_tokens: 0,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![0; def_idx.files.len()],
+        ..Default::default()
+    };
+    super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
+    // DatabaseClient implements IDatabaseClient. Even with 0 direct callers,
+    // the interface-vias advisory must surface so the agent re-runs without
+    // `class=` or with the interface name.
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "IDatabaseClient".to_string(),
+            kind: DefinitionKind::Interface, line_start: 1, line_end: 20,
+            parent: None, signature: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "DatabaseClient".to_string(),
+            kind: DefinitionKind::Class, line_start: 30, line_end: 200,
+            parent: None, signature: None, modifiers: vec![],
+            attributes: vec![], base_types: vec!["IDatabaseClient".to_string()],
+        },
+        method_def(0, "UpsertMappingAsync", "DatabaseClient", 50, 80),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    // Wire base_type_index so interface_vias_caveat lookup succeeds.
+    def_idx.base_type_index
+        .entry("idatabaseclient".to_string())
+        .or_default().push(1);
+
+    let ctx = make_ctx_with_idx(def_idx);
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": "UpsertMappingAsync",
+        "class": "DatabaseClient",
+        "depth": 1
+    }));
+    assert!(!result.is_error, "handler should not error: {:?}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let advisories = v.get("advisories")
+        .and_then(|a| a.as_array())
+        .unwrap_or_else(|| panic!(
+            "expected `advisories` array; got: {}",
+            serde_json::to_string_pretty(&v).unwrap()));
+    let combined: String = advisories.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(combined.contains("IDatabaseClient"),
+        "advisory should name the interface; got: {combined}");
+    assert!(combined.contains("class=IDatabaseClient"),
+        "advisory should suggest re-running with the interface; got: {combined}");
+}
+
+#[test]
+fn test_advisory_interface_vias_absent_when_class_has_no_interface() {
+    // Class without interface base types → no interface-vias advisory.
+    let definitions = vec![
+        class_def(0, "PlainClass", vec![]),
+        method_def(0, "DoWork", "PlainClass", 5, 15),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let ctx = make_ctx_with_idx(def_idx);
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": "DoWork",
+        "class": "PlainClass",
+        "depth": 1
+    }));
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let combined = v.get("advisories")
+        .and_then(|a| a.as_array())
+        .map(|arr| arr.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n"))
+        .unwrap_or_default();
+    assert!(!combined.contains("implements interface"),
+        "interface-vias advisory must NOT fire here; got: {combined}");
+}
+
+#[test]
+fn test_advisory_low_count_emitted_for_few_callers() {
+    // E2E for the low-count advisory using the builder + handler split,
+    // mirroring the working pattern from `test_impact_analysis_finds_test_methods`:
+    // build the call tree directly (so we control caller count exactly),
+    // then assert the wiring code in `handle_xray_callers` emits the
+    // advisories field. Pure-function correctness is in
+    // `mcp::handlers::advisory_hints::tests`; here we only verify that
+    // a low (≤3) caller count surfaces the `xray_grep ... countOnly=true`
+    // hint.
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+
+    // OrderService.process() is called by Caller.run() — exactly 1 caller.
+    let definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "OrderService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "process".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("OrderService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "Caller".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 1, name: "run".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some("Caller".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(3, vec![CallSite {
+        method_name: "process".to_string(),
+        receiver_type: Some("OrderService".to_string()),
+        line: 20,
+        receiver_is_generic: false,
+    }]);
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    let files_list = vec![
+        "src/OrderService.cs".to_string(),
+        "src/Caller.cs".to_string(),
+    ];
+    path_to_id.insert(PathBuf::from("src/OrderService.cs"), 0);
+    path_to_id.insert(PathBuf::from("src/Caller.cs"), 1);
+
+    let def_idx = DefinitionIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        files: files_list.clone(),
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        path_to_id,
+        method_calls,
+        ..Default::default()
+    };
+
+    // Content index — drives caller-file pre-filter; both target method name
+    // and parent class name must appear as tokens in the caller file.
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("process".to_string(), vec![
+        Posting { file_id: 0, lines: vec![10] },
+        Posting { file_id: 1, lines: vec![20] },
+    ]);
+    index.insert("orderservice".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![20] },
+    ]);
+
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 50,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![25, 25],
+        ..Default::default()
+    };
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": "process",
+        "class": "OrderService",
+        "depth": 1
+    }));
+    assert!(!result.is_error, "handler should not error: {:?}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = v["callTree"].as_array().expect("expected callTree array");
+    assert!(!tree.is_empty() && tree.len() <= 3,
+        "fixture must produce 1..=3 callers for the low-count branch; got tree: {}",
+        serde_json::to_string_pretty(&v).unwrap());
+    let advisories = v.get("advisories")
+        .and_then(|a| a.as_array())
+        .unwrap_or_else(|| panic!(
+            "expected `advisories`; got: {}",
+            serde_json::to_string_pretty(&v).unwrap()));
+    let combined: String = advisories.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(combined.contains("xray_grep") && combined.contains("countOnly=true"),
+        "low-count advisory should suggest xray_grep ... countOnly=true; got: {combined}");
+}
+
+/// Reusable fixture builder for advisory truncation/multi-method tests.
+/// Builds a single class `OrderService` with `process()` plus N caller
+/// classes each invoking it. Returns a wired `HandlerContext`.
+///
+/// Mirrors the wiring pattern from `test_advisory_low_count_emitted_for_few_callers`
+/// (full DefinitionIndex + ContentIndex with parent-class postings so the
+/// caller-file pre-filter sees both `process` and `orderservice` tokens
+/// in every caller file).
+fn build_callers_fixture_with_n_callers(num_callers: usize) -> super::HandlerContext {
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+
+    let mut definitions = vec![
+        DefinitionEntry {
+            file_id: 0, name: "OrderService".to_string(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        DefinitionEntry {
+            file_id: 0, name: "process".to_string(),
+            kind: DefinitionKind::Method, line_start: 10, line_end: 20,
+            parent: Some("OrderService".to_string()), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        },
+    ];
+
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    let mut files_list = vec!["src/OrderService.cs".to_string()];
+
+    for i in 0..num_callers {
+        let file_id = (i + 1) as u32;
+        let class_name = format!("Caller{i}");
+        let method_name = format!("run{i}");
+        files_list.push(format!("src/Caller{i}.cs"));
+        // Class def index = 2 + 2*i, method def index = 3 + 2*i
+        definitions.push(DefinitionEntry {
+            file_id, name: class_name.clone(),
+            kind: DefinitionKind::Class, line_start: 1, line_end: 50,
+            parent: None, signature: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        });
+        let method_def_idx = definitions.len() as u32;
+        definitions.push(DefinitionEntry {
+            file_id, name: method_name,
+            kind: DefinitionKind::Method, line_start: 10, line_end: 30,
+            parent: Some(class_name), signature: None,
+            modifiers: vec![], attributes: vec![], base_types: vec![],
+        });
+        method_calls.insert(method_def_idx, vec![CallSite {
+            method_name: "process".to_string(),
+            receiver_type: Some("OrderService".to_string()),
+            line: 20,
+            receiver_is_generic: false,
+        }]);
+    }
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    for (i, p) in files_list.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(p), i as u32);
+    }
+
+    let def_idx = DefinitionIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        files: files_list.clone(),
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        path_to_id,
+        method_calls,
+        ..Default::default()
+    };
+
+    let mut process_postings = vec![Posting { file_id: 0, lines: vec![10] }];
+    let mut orderservice_postings = vec![Posting { file_id: 0, lines: vec![1] }];
+    for i in 0..num_callers {
+        let fid = (i + 1) as u32;
+        process_postings.push(Posting { file_id: fid, lines: vec![20] });
+        orderservice_postings.push(Posting { file_id: fid, lines: vec![20] });
+    }
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("process".to_string(), process_postings);
+    index.insert("orderservice".to_string(), orderservice_postings);
+
+    let token_counts = vec![25u32; files_list.len()];
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 25 * (1 + num_callers) as u64,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: token_counts,
+        ..Default::default()
+    };
+
+    super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_advisory_low_count_suppressed_when_truncated() {
+    // Regression: the low-count advisory must NOT fire when the result was
+    // truncated by `maxCallersPerLevel`. Otherwise it lies — "Found 2 callers"
+    // would appear for a method that actually has 5 callers, mis-attributing
+    // the cap to AST blind spots instead of response sizing.
+    //
+    // Setup: 5 real callers, but maxCallersPerLevel=2 → tree has 2 nodes,
+    // summary has perLevelTruncated=true. Advisory must be absent.
+    let ctx = build_callers_fixture_with_n_callers(5);
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": "process",
+        "class": "OrderService",
+        "depth": 1,
+        "maxCallersPerLevel": 2
+    }));
+    assert!(!result.is_error, "handler should not error: {:?}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let tree = v["callTree"].as_array().expect("expected callTree array");
+    assert_eq!(tree.len(), 2, "maxCallersPerLevel=2 should cap to 2 nodes; got: {}",
+        serde_json::to_string_pretty(&v).unwrap());
+    let summary = &v["summary"];
+    assert_eq!(summary["perLevelTruncated"], serde_json::Value::Bool(true),
+        "expected perLevelTruncated=true; got summary: {summary}");
+    // The interface-vias advisory may still fire (it's about class= filter
+    // shape, not result count) — here OrderService has no interfaces, so
+    // there should be NO advisories at all.
+    let advisories = v.get("advisories").and_then(|a| a.as_array());
+    if let Some(arr) = advisories {
+        let combined: String = arr.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n");
+        assert!(!combined.contains("countOnly=true"),
+            "low-count advisory must NOT fire under truncation; got: {combined}");
+    }
+}
+
+#[test]
+fn test_advisory_low_count_emitted_in_multi_method_batch() {
+    // Multi-method (batch) wiring regression: handle_multi_method_callers has
+    // its own copy of the advisory wiring. This guards against single/multi
+    // path drift — same fixture, batched query.
+    let ctx = build_callers_fixture_with_n_callers(2);
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": "process,run0", // comma → batch path
+        "depth": 1
+    }));
+    assert!(!result.is_error, "batch handler should not error: {:?}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = v["results"].as_array().expect("batch should return results array");
+    let process_result = results.iter()
+        .find(|r| r["method"].as_str() == Some("process"))
+        .expect("expected per-method result for 'process'");
+    let tree = process_result["callTree"].as_array().expect("expected callTree array");
+    assert!(!tree.is_empty() && tree.len() <= 3,
+        "fixture must produce 1..=3 callers; got: {}",
+        serde_json::to_string_pretty(process_result).unwrap());
+    let advisories = process_result.get("advisories")
+        .and_then(|a| a.as_array())
+        .unwrap_or_else(|| panic!(
+            "expected advisories on per-method result in batch path; got: {}",
+            serde_json::to_string_pretty(process_result).unwrap()));
+    let combined: String = advisories.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n");
+    assert!(combined.contains("xray_grep") && combined.contains("countOnly=true"),
+        "batch path low-count advisory should match single-method format; got: {combined}");
+}
+
