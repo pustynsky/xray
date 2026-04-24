@@ -803,6 +803,23 @@ pub struct HandlerContext {
     /// Interval in seconds between periodic rescans. Clamped to
     /// `MIN_RESCAN_INTERVAL_SEC` by `start_periodic_rescan`.
     pub rescan_interval_sec: u64,
+    /// PERF-02: per-repo cache of `detect_main_branch_name` result.
+    ///
+    /// Lookup key is the raw repo string the caller passed (no
+    /// canonicalisation — canonicalisation would itself spawn a syscall on
+    /// Windows). Value is `Some("main"|"master")` if the probe found one,
+    /// or `None` if the repo has neither (cached so we don't re-probe a
+    /// hopeless case on every request).
+    ///
+    /// **Invalidation:** keyed by repo path, so workspace switches
+    /// naturally miss-then-repopulate (the new repo is a different key).
+    /// Known limitation: if a long-running session does
+    /// `git branch -d main` after the cache populated, the next
+    /// `xray_branch_status` will still report `mainBranch="main"` until
+    /// the server restarts. Acceptable trade-off because the destructive
+    /// rename is a manual one-shot action; the previous behaviour spawned
+    /// up to 4 sequential `git rev-parse` per request indefinitely.
+    pub branch_name_cache: Arc<RwLock<std::collections::HashMap<String, Option<String>>>>,
 }
 
 impl HandlerContext {
@@ -846,6 +863,7 @@ impl Default for HandlerContext {
             watcher_stats: Arc::new(crate::mcp::watcher::WatcherStats::new()),
             periodic_rescan_enabled: false,
             rescan_interval_sec: 300,
+            branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         }
     }
 }

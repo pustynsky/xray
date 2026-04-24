@@ -174,6 +174,7 @@ pub fn cmd_serve(args: ServeArgs) {
         watcher_stats,
         periodic_rescan_enabled: !args.no_periodic_rescan,
         rescan_interval_sec: args.rescan_interval_sec,
+        branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
     };
     mcp::server::run_server(ctx);
     crate::index::log_memory("serve: event loop exited");

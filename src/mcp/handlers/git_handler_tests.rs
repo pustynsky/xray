@@ -519,3 +519,85 @@ fn test_git_activity_no_path_no_warning() {
         "Should NOT have warning when no path filter is provided"
     );
 }
+
+// === PERF-02 main-branch detection cache tests ===
+
+/// First `detect_main_branch_name` call against `.` (the xray repo itself,
+/// which has a `main` branch) populates `branch_name_cache`. Pinned because
+/// PERF-02's whole point is single-spawn cold + zero-spawn warm — a future
+/// refactor that drops the cache would silently restore the 4× spawn cost
+/// the story exists to remove.
+#[test]
+fn test_detect_main_branch_name_populates_cache_on_first_call() {
+    let ctx = make_git_test_ctx();
+    assert!(
+        ctx.branch_name_cache.read().unwrap().is_empty(),
+        "cache must start empty so the assertion below is meaningful"
+    );
+
+    let resolved = detect_main_branch_name(&ctx, ".");
+    assert_eq!(resolved.as_deref(), Some("main"), "xray repo has a main branch");
+
+    let cache = ctx.branch_name_cache.read().unwrap();
+    assert_eq!(cache.len(), 1, "exactly one entry expected after one call");
+    assert_eq!(
+        cache.get("."),
+        Some(&Some("main".to_string())),
+        "cache key is the raw repo string the caller passed"
+    );
+}
+
+/// Second call with the same repo string MUST return the cached value
+/// (verified by mutating the cache to an obviously-fake entry first and
+/// checking the function returns the fake instead of re-probing). This
+/// pins the contract that the cache is consulted before any git spawn.
+#[test]
+fn test_detect_main_branch_name_returns_cached_value_without_reprobe() {
+    let ctx = make_git_test_ctx();
+    ctx.branch_name_cache
+        .write()
+        .unwrap()
+        .insert(".".to_string(), Some("trunk".to_string()));
+
+    let resolved = detect_main_branch_name(&ctx, ".");
+    assert_eq!(
+        resolved.as_deref(),
+        Some("trunk"),
+        "cache hit must short-circuit before probing — if this asserts \
+         'main' instead, the cache lookup was bypassed and PERF-02 is \
+         silently undone"
+    );
+}
+
+/// Negative results (`None`) are also cached so we don't keep re-probing
+/// a hopeless path on every request. This is the warm path for the
+/// `bad_repo` test case from the production handler.
+#[test]
+fn test_detect_main_branch_name_caches_negative_result() {
+    let ctx = make_git_test_ctx();
+    let bad = "/nonexistent/repo/path/perf-02-test";
+    let resolved = detect_main_branch_name(&ctx, bad);
+    assert_eq!(resolved, None, "bad repo path resolves to None");
+
+    let cache = ctx.branch_name_cache.read().unwrap();
+    assert_eq!(
+        cache.get(bad),
+        Some(&None),
+        "negative result must be cached as Some(None), not absent — \
+         otherwise next call re-spawns git for a known-hopeless path"
+    );
+}
+
+/// Different repo strings get separate cache entries. This is the
+/// natural workspace-switch invalidation path documented on the
+/// `branch_name_cache` field.
+#[test]
+fn test_detect_main_branch_name_keys_by_repo_path() {
+    let ctx = make_git_test_ctx();
+    let _ = detect_main_branch_name(&ctx, ".");
+    let _ = detect_main_branch_name(&ctx, "/nonexistent/repo/path/perf-02-keying");
+
+    let cache = ctx.branch_name_cache.read().unwrap();
+    assert_eq!(cache.len(), 2, "each distinct repo string gets its own entry");
+}
+
