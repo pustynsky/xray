@@ -22,6 +22,7 @@ fn make_params<'a>(
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(exclude_dir),
         exclude_lower: exclude.iter().map(|s| s.to_lowercase()).collect(),
         dir_auto_converted_note: None,
+        exact_file_path: &None,
         auto_balance: true,
         max_occurrences_per_term: None,
     }
@@ -312,11 +313,20 @@ fn test_parse_grep_args_exclude_lists() {
 #[test]
 fn test_parse_grep_args_dir_as_file_path_auto_converts_by_heuristic() {
     // Non-existent file path but inside server_dir — detected by looks_like_file_path heuristic.
-    // Should auto-convert to parent + file filter instead of rejecting.
+    // Should auto-convert to parent + exact-file scope (NOT a file= substring filter).
     let args = json!({"terms": "hello", "dir": "C:/nonexistent/project/src/parser_sql.rs"});
     let parsed = parse_grep_args(&args, "C:/nonexistent/project")
         .expect("heuristic file path should auto-convert, not error");
-    assert_eq!(parsed.file_filter.as_deref(), Some("parser_sql.rs"));
+    // file_filter MUST stay None on auto-convert — it's reserved for explicit user
+    // `file=` (substring/comma-OR semantics). Auto-convert pins the FULL path via
+    // `exact_file_path` so nested duplicates of the same basename can't leak.
+    assert!(parsed.file_filter.is_none(),
+        "auto-convert must not set file_filter (substring path); got: {:?}", parsed.file_filter);
+    let exact = parsed.exact_file_path.as_deref()
+        .expect("auto-convert must populate exact_file_path with the resolved file path");
+    let exact_norm = exact.to_lowercase().replace('\\', "/");
+    assert!(exact_norm.ends_with("src/parser_sql.rs"),
+        "exact_file_path must be the full resolved path, got: {}", exact);
     let note = parsed.dir_auto_converted_note.expect("note should be set");
     assert!(note.contains("parser_sql.rs"), "note: {}", note);
 }
@@ -333,7 +343,9 @@ fn test_parse_grep_args_explicit_file_filter() {
 
 #[test]
 fn test_parse_grep_args_explicit_file_wins_over_autoconvert() {
-    // If user passes BOTH dir=<file> and file=<something>, explicit file= wins.
+    // If user passes BOTH dir=<file> and file=<something>, explicit file= wins
+    // for substring scoping; the dir= path is still pinned via exact_file_path,
+    // so the intersection (exact-file AND substring-basename) is the scope.
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("Foo.cs");
     std::fs::write(&file, "x").unwrap();
@@ -345,15 +357,17 @@ fn test_parse_grep_args_explicit_file_wins_over_autoconvert() {
     });
     let parsed = parse_grep_args(&args, &server_dir).unwrap();
     assert_eq!(parsed.file_filter.as_deref(), Some("ExplicitName"),
-        "explicit file= should override auto-populated basename");
+        "explicit file= must NOT be overwritten by auto-convert");
+    assert!(parsed.exact_file_path.is_some(),
+        "auto-convert must still pin exact_file_path even when explicit file= is provided");
     assert!(parsed.dir_auto_converted_note.is_some(),
         "auto-conversion note should still be attached so the LLM sees the hint");
 }
 
 #[test]
 fn test_parse_grep_args_dir_as_real_file_auto_converts() {
-    // dir= pointing to a real file should now auto-convert into
-    // dir=<parent> + file=<basename>, with a hint note attached.
+    // dir= pointing to a real file should auto-convert into
+    // dir=<parent> + exact_file_path=<full path>, with a hint note attached.
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("test_file.txt");
     std::fs::write(&file, "content").unwrap();
@@ -362,8 +376,13 @@ fn test_parse_grep_args_dir_as_real_file_auto_converts() {
     let args = json!({"terms": "hello", "dir": file_str});
     let parsed = parse_grep_args(&args, &server_dir)
         .expect("file path in dir= should auto-convert, not error");
-    assert_eq!(parsed.file_filter.as_deref(), Some("test_file.txt"),
-        "file_filter should be auto-populated from the basename");
+    assert!(parsed.file_filter.is_none(),
+        "auto-convert must not set file_filter (that's substring); got: {:?}", parsed.file_filter);
+    let exact = parsed.exact_file_path.as_deref()
+        .expect("exact_file_path should be populated from the resolved file");
+    let exact_norm = exact.to_lowercase().replace('\\', "/");
+    assert!(exact_norm.ends_with("test_file.txt"),
+        "exact_file_path must be the resolved full path, got: {}", exact);
     assert!(parsed.dir_auto_converted_note.is_some(),
         "dir_auto_converted_note should be set");
     let note = parsed.dir_auto_converted_note.unwrap();

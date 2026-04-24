@@ -718,7 +718,13 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             });
 
             let total_files = files_array.len();
-            let total_entries: usize = file_map.values().map(|v| v.len()).sum();
+            // includeDeleted=true filters files_array down to deleted-only files; totalEntries
+            // must be derived from the SAME filtered dataset, not the unfiltered file_map,
+            // otherwise summary.totalEntries reports commits for files no longer in activity[]
+            // (cache path already does this; CLI path was inconsistent).
+            let total_entries: usize = files_array.iter()
+                .map(|f| f["commitCount"].as_u64().unwrap_or(0) as usize)
+                .sum();
 
             let activity_path_str = activity_path.unwrap_or("");
 

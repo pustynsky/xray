@@ -285,6 +285,114 @@ fn test_git_activity_include_deleted_true_sets_field_and_hint() {
         "hint should mention 'NOT in current HEAD' when includeDeleted=true, got: {}", hint);
 }
 
+
+// ─── includeDeleted parameter (CLI path) ──────────────────────────
+// Verifies summary.totalEntries is derived from the *filtered* files_array,
+// not the unfiltered file_map. Pre-fix the CLI path used
+//   total_entries = file_map.values().map(|v| v.len()).sum()
+// while files_array was already filtered down to deleted-only files —
+// producing a contract bug where summary.totalEntries reported commits for
+// files no longer present in activity[]. The cache path was already correct.
+
+/// Test helper: build a tiny git repo with one survivor file and one deleted
+/// file (mirrors `git_tests::setup_repo_with_deleted_file`, kept private here
+/// to avoid cross-module test-helper visibility churn).
+fn setup_mixed_repo_for_include_deleted() -> tempfile::TempDir {
+    fn run_git(repo: &std::path::Path, args: &[&str]) {
+        let status = std::process::Command::new("git")
+            .arg("-C").arg(repo)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "Test Author")
+            .env("GIT_AUTHOR_EMAIL", "test@example.com")
+            .env("GIT_COMMITTER_NAME", "Test Author")
+            .env("GIT_COMMITTER_EMAIL", "test@example.com")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("failed to run git");
+        assert!(status.success(), "git {:?} failed", args);
+    }
+    let dir = tempfile::TempDir::new().expect("create tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "test@example.com"]);
+    run_git(repo, &["config", "user.name", "Test Author"]);
+    // Survivor: 2 commits, still in HEAD.
+    std::fs::write(repo.join("survivor.txt"), "survivor v1\n").unwrap();
+    run_git(repo, &["add", "survivor.txt"]);
+    run_git(repo, &["commit", "-m", "add survivor", "--quiet"]);
+    std::fs::write(repo.join("survivor.txt"), "survivor v2\n").unwrap();
+    run_git(repo, &["commit", "-am", "modify survivor", "--quiet"]);
+    // Legacy: 3 commits (add, modify, delete), removed from HEAD.
+    std::fs::write(repo.join("legacy.txt"), "legacy v1\n").unwrap();
+    run_git(repo, &["add", "legacy.txt"]);
+    run_git(repo, &["commit", "-m", "add legacy", "--quiet"]);
+    std::fs::write(repo.join("legacy.txt"), "legacy v2\n").unwrap();
+    run_git(repo, &["commit", "-am", "modify legacy", "--quiet"]);
+    std::fs::remove_file(repo.join("legacy.txt")).unwrap();
+    run_git(repo, &["commit", "-am", "delete legacy", "--quiet"]);
+    dir
+}
+
+/// Regression: CLI path with includeDeleted=true must derive summary.totalEntries
+/// from the filtered files_array, not the unfiltered file_map. Pre-fix,
+/// summary.filesChanged correctly reflected only deleted files (1) but
+/// summary.totalEntries still summed commits over both deleted AND surviving
+/// files (2 + 3 = 5 instead of 3).
+#[test]
+fn test_git_activity_cli_include_deleted_total_entries_matches_filtered_activity() {
+    let dir = setup_mixed_repo_for_include_deleted();
+    let repo_path = dir.path().to_str().unwrap().to_string();
+
+    // Empty ctx -> no git cache -> CLI path is taken.
+    let ctx = make_empty_ctx();
+
+    // Baseline (includeDeleted=false): both files present.
+    let baseline = dispatch_tool(&ctx, "xray_git_activity", &json!({
+        "repo": repo_path,
+        "noCache": true
+    }));
+    assert!(!baseline.is_error, "baseline must succeed: {}", baseline.content[0].text);
+    let baseline_out: Value = serde_json::from_str(&baseline.content[0].text).unwrap();
+    let baseline_files = baseline_out["activity"].as_array().unwrap();
+    assert_eq!(baseline_files.len(), 2,
+        "baseline must list both survivor.txt and legacy.txt, got: {}",
+        serde_json::to_string_pretty(&baseline_out).unwrap());
+    let baseline_total: u64 = baseline_files.iter()
+        .map(|f| f["commitCount"].as_u64().unwrap_or(0)).sum();
+    let baseline_summary_total = baseline_out["summary"]["totalEntries"].as_u64().unwrap();
+    assert_eq!(baseline_total, baseline_summary_total,
+        "baseline: summary.totalEntries must equal sum of activity[].commitCount");
+
+    // Filtered (includeDeleted=true): only legacy.txt survives the filter.
+    let filtered = dispatch_tool(&ctx, "xray_git_activity", &json!({
+        "repo": repo_path,
+        "noCache": true,
+        "includeDeleted": true
+    }));
+    assert!(!filtered.is_error, "filtered must succeed: {}", filtered.content[0].text);
+    let filtered_out: Value = serde_json::from_str(&filtered.content[0].text).unwrap();
+    let filtered_files = filtered_out["activity"].as_array().unwrap();
+    assert_eq!(filtered_files.len(), 1,
+        "includeDeleted=true must keep only legacy.txt, got: {}",
+        serde_json::to_string_pretty(&filtered_out).unwrap());
+    assert_eq!(filtered_files[0]["path"].as_str().unwrap(), "legacy.txt");
+
+    let filtered_legacy_commits = filtered_files[0]["commitCount"].as_u64().unwrap();
+    let filtered_summary_total = filtered_out["summary"]["totalEntries"].as_u64().unwrap();
+    let filtered_summary_files = filtered_out["summary"]["filesChanged"].as_u64().unwrap();
+
+    assert_eq!(filtered_summary_files, 1,
+        "summary.filesChanged must equal activity.len() after filtering");
+    assert_eq!(filtered_summary_total, filtered_legacy_commits,
+        "BUG REGRESSION: summary.totalEntries ({}) must equal sum of returned commitCounts ({}) — pre-fix this also counted survivor.txt commits",
+        filtered_summary_total, filtered_legacy_commits);
+    assert!(filtered_summary_total < baseline_summary_total,
+        "includeDeleted filter must shrink totalEntries (baseline={}, filtered={})",
+        baseline_summary_total, filtered_summary_total);
+}
+
+
 #[test]
 fn test_git_activity_include_deleted_filters_existing_files_in_real_repo() {
     // Mock cache references src/main.rs, Cargo.toml, src/lib.rs — all of which
