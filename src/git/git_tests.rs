@@ -206,6 +206,103 @@ fn test_top_authors_limits_results() {
     assert!(authors.len() <= 1, "Should return at most 1 author");
 }
 
+
+/// PERF-04 follow-up: tied counts must be ranked deterministically by
+/// (name asc, email asc) instead of falling out of HashMap iteration
+/// order. Pre-fix the only sort key was `Reverse(count)` and ties came
+/// out in HashMap order — dependent on the hash of the key type. PERF-04
+/// (commit `490b036`) changed the key from `String` to `(String, String)`
+/// and silently flipped that order; the tie-break comparator pins it.
+///
+/// Setup: 4 commits across 3 authors, with two authors tied at 1 commit
+/// each. Build via tempdir to avoid coupling to the live xray repo's
+/// real author list.
+#[test]
+fn test_top_authors_tie_break_by_name_then_email() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    // 3 distinct authors. "Charlie" has 2 commits (top), "Alice" and
+    // "Bob" each have 1 commit (tied). Tie-break by name asc =>
+    // Alice before Bob.
+    commit_as(repo, "Charlie", "charlie@example.com", "f.txt", "v1\n", "c1");
+    commit_as(repo, "Alice", "alice@example.com", "f.txt", "v2\n", "a1");
+    commit_as(repo, "Bob", "bob@example.com", "f.txt", "v3\n", "b1");
+    commit_as(repo, "Charlie", "charlie@example.com", "f.txt", "v4\n", "c2");
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (authors, _, total_authors) =
+        top_authors(repo_str, "", &filter, 10, None).expect("top_authors must succeed");
+    assert_eq!(total_authors, 3);
+    assert_eq!(authors.len(), 3);
+    assert_eq!(authors[0].name, "Charlie");
+    assert_eq!(authors[0].commit_count, 2);
+    // Tied at 1 each — must be name asc: Alice before Bob.
+    assert_eq!(
+        (authors[1].name.as_str(), authors[2].name.as_str()),
+        ("Alice", "Bob"),
+        "tied authors must sort by name ascending; got {:?}, {:?}",
+        authors[1].name, authors[2].name
+    );
+    assert_eq!(authors[1].commit_count, 1);
+    assert_eq!(authors[2].commit_count, 1);
+}
+
+/// PERF-04 follow-up: same display name with two distinct emails counts
+/// as TWO authors (the tuple key disambiguates by both fields). Pre-PERF-04
+/// this was already the case (the formatted key included the email), but
+/// no test pinned it — a future refactor that drops email from the key
+/// would silently merge them. Tie-break is by email asc within the
+/// same name.
+#[test]
+fn test_top_authors_same_name_different_email_are_distinct() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    // Two commits with the same display name but different emails.
+    commit_as(repo, "Pat", "pat@work.example", "f.txt", "v1\n", "work");
+    commit_as(repo, "Pat", "pat@home.example", "f.txt", "v2\n", "home");
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (authors, total_commits, total_authors) =
+        top_authors(repo_str, "", &filter, 10, None).expect("top_authors must succeed");
+    assert_eq!(total_commits, 2);
+    assert_eq!(
+        total_authors, 2,
+        "same name + different email must count as two authors (tuple key disambiguates by email)"
+    );
+    // Both at 1 commit — tie-break by email asc: home@ before work@.
+    assert_eq!(
+        (authors[0].email.as_str(), authors[1].email.as_str()),
+        ("pat@home.example", "pat@work.example"),
+        "tied authors with same name must sort by email ascending"
+    );
+}
+
+/// PERF-04 follow-up: different display names with the same email count
+/// as TWO authors. The tuple key disambiguates on both fields, so this
+/// is also pinned by the same comparator that resolves count ties.
+#[test]
+fn test_top_authors_different_name_same_email_are_distinct() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    commit_as(repo, "Old Name", "shared@example.com", "f.txt", "v1\n", "a");
+    commit_as(repo, "New Name", "shared@example.com", "f.txt", "v2\n", "b");
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (_, total_commits, total_authors) =
+        top_authors(repo_str, "", &filter, 10, None).expect("top_authors must succeed");
+    assert_eq!(total_commits, 2);
+    assert_eq!(
+        total_authors, 2,
+        "different name + same email must count as two authors (tuple key includes name)"
+    );
+}
+
 // ─── Repo activity tests ────────────────────────────────────────────
 
 #[test]
@@ -524,6 +621,46 @@ fn run_git(repo: &std::path::Path, args: &[&str]) {
     assert!(status.success(), "git {:?} failed", args);
 }
 
+
+/// Test helper: create a single commit with the specified author identity.
+/// Bypasses the GIT_AUTHOR_* env override baked into `run_git` (which forces
+/// every commit to "Test Author <test@example.com>" — incompatible with tests
+/// that need multiple distinct authors, e.g. PERF-04 tie-break tests).
+#[cfg(test)]
+fn commit_as(
+    repo: &std::path::Path,
+    name: &str,
+    email: &str,
+    file: &str,
+    body: &str,
+    msg: &str,
+) {
+    std::fs::write(repo.join(file), body).expect("write commit body");
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["add", file])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("git add");
+    assert!(add.success(), "git add failed for {}", file);
+
+    let commit = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit", "-m", msg, "--quiet"])
+        .env("GIT_AUTHOR_NAME", name)
+        .env("GIT_AUTHOR_EMAIL", email)
+        .env("GIT_COMMITTER_NAME", name)
+        .env("GIT_COMMITTER_EMAIL", email)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("git commit");
+    assert!(commit.success(), "git commit as {} <{}> failed", name, email);
+}
+
 #[cfg(test)]
 fn setup_repo_with_deleted_file() -> tempfile::TempDir {
     let dir = tempfile::TempDir::new().expect("create tempdir");
@@ -640,3 +777,177 @@ fn test_list_tracked_files_under_bad_repo_returns_empty() {
         tracked
     );
 }
+
+// ── PERF-03: get_commit_diff via `git show` ─────────────────────
+
+/// Initial-commit regression guard. Pre-PERF-03 the path used a
+/// hard-coded empty-tree SHA (`4b825dc6…`) which does not exist in
+/// every clone (it only resolves when the empty tree object is
+/// reachable from a ref) — so `git diff <empty-tree> <hash>` could
+/// fail with `bad object` on perfectly valid initial commits in
+/// freshly-init'd repos. PERF-03 switches to `git show` which handles
+/// the no-parent case natively (diff against /dev/null). This test
+/// builds a tempdir repo with exactly one commit and asserts the
+/// returned patch contains the canonical `new file mode` /
+/// `--- /dev/null` header lines so a future "optimisation" that
+/// reintroduces the empty-tree SHA fails loudly here.
+#[test]
+fn test_file_history_with_diff_includes_initial_commit_patch() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "perf03@example.com"]);
+    run_git(repo, &["config", "user.name", "PERF-03 Test"]);
+    std::fs::write(repo.join("seed.txt"), "alpha\nbeta\n").expect("write seed.txt");
+    run_git(repo, &["add", "seed.txt"]);
+    run_git(repo, &["commit", "-m", "initial commit (no parent)", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = file_history(repo_str, "seed.txt", &filter, true, 5, None, None);
+    let (commits, _) = result.expect("file_history must succeed on initial commit");
+    assert_eq!(commits.len(), 1, "exactly one commit expected");
+    let patch = commits[0]
+        .patch
+        .as_ref()
+        .expect("initial commit must include patch — pre-PERF-03 this could be empty if the empty-tree SHA was unreachable");
+    assert!(
+        patch.contains("new file mode"),
+        "initial-commit patch must declare a new-file header, got:\n{}",
+        patch
+    );
+    assert!(
+        patch.contains("--- /dev/null"),
+        "initial-commit patch must diff against /dev/null (proves git show handled no-parent case natively without the magic empty-tree SHA), got:\n{}",
+        patch
+    );
+    assert!(
+        patch.contains("+alpha") && patch.contains("+beta"),
+        "initial-commit patch must include the seeded content, got:\n{}",
+        patch
+    );
+}
+
+/// Non-initial commit regression guard. Asserts the patch section
+/// produced by PERF-03's `git show` path contains the same
+/// `+`/`-` content lines you'd get from `git diff <hash>^..<hash>`.
+/// Byte-identity of the patch section (after the `+++`/`---` lines)
+/// was verified pre-merge by walking real history on the xray repo;
+/// this test pins the structural shape that future refactors must
+/// preserve.
+#[test]
+fn test_file_history_with_diff_normal_commit_patch_shape() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "perf03@example.com"]);
+    run_git(repo, &["config", "user.name", "PERF-03 Test"]);
+    std::fs::write(repo.join("seed.txt"), "v1\n").expect("write seed.txt v1");
+    run_git(repo, &["add", "seed.txt"]);
+    run_git(repo, &["commit", "-m", "v1", "--quiet"]);
+    std::fs::write(repo.join("seed.txt"), "v2\n").expect("write seed.txt v2");
+    run_git(repo, &["commit", "-am", "v2", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (commits, _) = file_history(repo_str, "seed.txt", &filter, true, 5, None, None)
+        .expect("file_history must succeed");
+    // commits come newest-first; index 0 is the v2 modification commit.
+    let patch = commits[0]
+        .patch
+        .as_ref()
+        .expect("v2 commit must include patch");
+    assert!(
+        patch.contains("-v1") && patch.contains("+v2"),
+        "v2 commit patch must show -v1 / +v2, got:\n{}",
+        patch
+    );
+    assert!(
+        !patch.contains("new file mode"),
+        "non-initial commit patch must NOT declare a new-file header (would mean git show treated v2 as a creation), got:\n{}",
+        patch
+    );
+}
+/// PERF-03 follow-up regression: `get_commit_diff` against a merge
+/// commit MUST yield a non-empty FIRST-PARENT patch (matching legacy
+/// `git diff <hash>^..<hash>` semantics), not the default `git show
+/// <merge>` combined diff which prunes paths that are uninteresting
+/// against AT LEAST ONE parent.
+///
+/// Setup: branch `feat` writes `v2-feat`, then main writes `v2-main`,
+/// then merge with manual resolution to `v2-merged` (distinct from
+/// both parents — otherwise `git log <file>` history simplification
+/// would skip the merge anyway). Pre-fix `get_commit_diff(repo,
+/// <merge>, "f.txt")` returned an EMPTY string because the default
+/// `git show <merge>` produces combined-diff output for merges, and
+/// combined-diff prunes paths where the merge result equals at least
+/// one parent's tree (here the feature side equals `v2-feat` which
+/// the merge took). Post-fix `--first-parent` restores legacy
+/// behaviour: diff against parent #1 (the main-side commit).
+///
+/// We bypass `file_history` (which uses `--follow` by default and
+/// activates aggressive history simplification that hides merges)
+/// and call `get_commit_diff` directly so the fix is tested in
+/// isolation — this is the function that PERF-03 changed and that
+/// the regression actually lives in.
+#[test]
+fn test_get_commit_diff_merge_commit_uses_first_parent() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "perf03-merge@example.com"]);
+    run_git(repo, &["config", "user.name", "PERF-03 Merge Test"]);
+    // Disable autocrlf for predictable byte-level patch shape on Windows.
+    run_git(repo, &["config", "core.autocrlf", "false"]);
+
+    std::fs::write(repo.join("f.txt"), "v1\n").expect("write v1");
+    run_git(repo, &["add", "f.txt"]);
+    run_git(repo, &["commit", "-m", "a", "--quiet"]);
+
+    run_git(repo, &["checkout", "-q", "-b", "feat"]);
+    std::fs::write(repo.join("f.txt"), "v2-feat\n").expect("write v2-feat");
+    run_git(repo, &["commit", "-am", "b", "--quiet"]);
+
+    run_git(repo, &["checkout", "-q", "main"]);
+    std::fs::write(repo.join("f.txt"), "v2-main\n").expect("write v2-main");
+    run_git(repo, &["commit", "-am", "c", "--quiet"]);
+
+    // --no-ff guarantees an actual merge commit; --no-commit + manual
+    // resolution to a value distinct from both parents avoids history
+    // simplification (and is more representative of real-world merges
+    // with conflicts).
+    run_git(
+        repo,
+        &[
+            "merge",
+            "--no-ff",
+            "--no-commit",
+            "--quiet",
+            "--strategy-option=theirs",
+            "feat",
+        ],
+    );
+    std::fs::write(repo.join("f.txt"), "v2-merged\n").expect("write merge resolution");
+    run_git(repo, &["commit", "-am", "merge", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let merge_hash = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse")
+        .stdout;
+    let merge_hash = String::from_utf8(merge_hash).expect("hash utf-8").trim().to_string();
+
+    let patch =
+        get_commit_diff(repo_str, &merge_hash, "f.txt").expect("get_commit_diff must succeed");
+    assert!(
+        patch.contains("-v2-main") && patch.contains("+v2-merged"),
+        "merge commit patch must show first-parent diff (-v2-main / +v2-merged) — \
+         pre-fix `git show <merge>` produced an EMPTY combined diff because the merge \
+         result was uninteresting against the feature-side parent. Got:\n{}",
+        patch
+    );
+}
+

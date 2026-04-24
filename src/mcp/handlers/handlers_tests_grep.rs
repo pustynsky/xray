@@ -2145,6 +2145,76 @@ fn test_grep_dir_as_file_auto_convert_does_not_match_nested_same_basename() {
     let _ = std::fs::remove_dir_all(&tmp);
 }
 
+
+#[test]
+fn test_grep_dir_as_file_auto_convert_preserves_logical_symlink_path() {
+    static C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = C.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_raw = std::env::temp_dir().join(format!("grep_symlink_exact_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_raw);
+    std::fs::create_dir_all(&tmp_raw).unwrap();
+    // Canonicalize the tmp root so all derived paths match the form the
+    // indexer records. On Windows CI `std::env::temp_dir()` returns the 8.3
+    // short form (`RUNNER~1`) while `WalkBuilder` records the long form
+    // (`runneradmin`); without this normalisation the fixture's
+    // `logical_norm` (built from the short form) would not equal the indexed
+    // path and the sanity assertion would fire spuriously on the runner.
+    let tmp = crate::canonicalize_test_root(&tmp_raw);
+    let root = tmp.join("root");
+    let external = tmp.join("external");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    std::fs::write(external.join("note.md"), "xraySymlinkExactMarker\n").unwrap();
+
+    #[cfg(windows)]
+    std::os::windows::fs::symlink_dir(&external, root.join("personal")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&external, root.join("personal")).unwrap();
+
+    let logical_file = root.join("personal").join("note.md");
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "md".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root.to_string_lossy().to_string()))),
+        index_base: root.join(".index"),
+        ..Default::default()
+    };
+
+    let baseline = handle_xray_grep(&ctx, &json!({ "terms": "xraySymlinkExactMarker" }));
+    assert!(!baseline.is_error, "baseline must succeed: {}", baseline.content[0].text);
+    let baseline_out: Value = serde_json::from_str(&baseline.content[0].text).unwrap();
+    let baseline_paths: Vec<String> = baseline_out["files"].as_array().unwrap().iter()
+        .map(|f| f["path"].as_str().unwrap().replace('\\', "/"))
+        .collect();
+    let logical_norm = logical_file.to_string_lossy().replace('\\', "/");
+    assert_eq!(baseline_paths, vec![logical_norm.clone()],
+        "fixture sanity: index must record the logical symlink path, got: {:?}",
+        baseline_paths);
+
+    let scoped = handle_xray_grep(&ctx, &json!({
+        "terms": "xraySymlinkExactMarker",
+        "dir": logical_file.to_string_lossy().to_string()
+    }));
+    assert!(!scoped.is_error, "auto-convert query must succeed: {}", scoped.content[0].text);
+    let scoped_out: Value = serde_json::from_str(&scoped.content[0].text).unwrap();
+    let scoped_paths: Vec<String> = scoped_out["files"].as_array().unwrap().iter()
+        .map(|f| f["path"].as_str().unwrap().replace('\\', "/"))
+        .collect();
+
+    assert_eq!(scoped_paths, vec![logical_norm.clone()],
+        "exact-file auto-convert must preserve the logical symlink path, not canonicalize to the external target. Got: {:?}",
+        scoped_paths);
+    assert!(scoped_out["summary"]["dirAutoConverted"].as_str().is_some(),
+        "dirAutoConverted note must still be present after logical-path-preserving fix");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
 #[test]
 fn test_grep_explicit_file_filter_keeps_substring_semantics() {
     // Regression guard for the OTHER direction: user-provided file= must KEEP

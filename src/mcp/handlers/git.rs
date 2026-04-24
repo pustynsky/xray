@@ -869,7 +869,7 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let is_main = is_main_branch(&current_branch);
 
     // c. Determine main branch name
-    let main_branch = detect_main_branch_name(repo);
+    let main_branch = detect_main_branch_name(_ctx, repo);
 
     // d. Behind/ahead of main
     let (behind_main, ahead_of_main) = if let Some(ref mb) = main_branch {
@@ -937,7 +937,89 @@ pub(crate) fn is_main_branch(branch: &str) -> bool {
 ///
 /// Falls back to remote refs (`origin/main`, `origin/master`) for fresh clones
 /// and CI checkouts where the local branch hasn't been created yet.
-fn detect_main_branch_name(repo: &str) -> Option<String> {
+///
+/// **PERF-02:** result is cached per repo path on `ctx.branch_name_cache`,
+/// and the cold probe collapses 4 sequential `git rev-parse` invocations
+/// into a single `git for-each-ref` (≈20–80 ms saved per
+/// `xray_branch_status` on Windows where each spawn costs 5–20 ms).
+/// See [`HandlerContext::branch_name_cache`] for the invalidation contract.
+fn detect_main_branch_name(ctx: &HandlerContext, repo: &str) -> Option<String> {
+    // Cache hit: return immediately. Read-lock so concurrent branch_status
+    // requests don't serialise on a write-locked mutex.
+    if let Ok(cache) = ctx.branch_name_cache.read()
+        && let Some(cached) = cache.get(repo) {
+            return cached.clone();
+        }
+
+    let resolved = probe_main_branch_name(repo);
+
+    // Best-effort cache write. If the lock is poisoned we silently re-probe
+    // next call — strictly worse than caching but never worse than the old
+    // uncached path, so swallowing the error is safe.
+    //
+    // **PERF-02 follow-up**: only cache positive results. Negative caching
+    // (`Some(None)`) created a permanent-poisoning bug: a path that gets
+    // probed before its repo exists (e.g. handler called against an
+    // empty workspace, then user runs `git init` + creates a `main`
+    // branch) would forever return None until server restart, even though
+    // a re-probe would now succeed. Re-probing a hopeless path costs one
+    // `git for-each-ref` per request — ≈5-20 ms on Windows, paid only by
+    // the (rare) bad-path case; the common positive path still benefits
+    // from the cache and remains zero-spawn on warm calls.
+    if resolved.is_some()
+        && let Ok(mut cache) = ctx.branch_name_cache.write()
+    {
+        cache.insert(repo.to_string(), resolved.clone());
+    }
+    resolved
+}
+
+/// PERF-02 cold probe: ask `git for-each-ref` for all four candidate refs in
+/// a single spawn instead of running up to 4 sequential `git rev-parse`.
+///
+/// `for-each-ref` prints one line per ref that **exists**, silent for refs
+/// that don't exist. **Output is sorted by refname**, NOT by argument order,
+/// so a repo with both `refs/heads/master` and `refs/remotes/origin/main`
+/// emits `master` BEFORE `origin/main`. We must therefore enumerate which
+/// candidates exist and apply explicit priority — matching the legacy
+/// 4-probe sequence: `main` (local-or-remote) is always preferred over
+/// `master` (local-or-remote). Falls back to the legacy probe sequence if
+/// the combined call fails for any reason (very old git, hardened sandbox
+/// without `for-each-ref`, etc.) so we never regress the resolution itself.
+fn probe_main_branch_name(repo: &str) -> Option<String> {
+    if let Ok(out) = run_git_command(
+        repo,
+        &[
+            "for-each-ref",
+            "--format=%(refname:short)",
+            "refs/heads/main",
+            "refs/heads/master",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/master",
+        ],
+    ) {
+        let mut has_main = false;
+        let mut has_master = false;
+        for line in out.lines() {
+            match line.trim() {
+                "main" | "origin/main" => has_main = true,
+                "master" | "origin/master" => has_master = true,
+                _ => {}
+            }
+        }
+        if has_main {
+            return Some("main".to_string());
+        }
+        if has_master {
+            return Some("master".to_string());
+        }
+        // Combined probe ran but found nothing — don't fall back; the legacy
+        // probe would just confirm the same answer at 4× the cost.
+        return None;
+    }
+
+    // Combined probe failed (very rare). Fall back to the legacy 4-probe
+    // sequence so behaviour is identical to the pre-PERF-02 implementation.
     if run_git_command(repo, &["rev-parse", "--verify", "main"]).is_ok()
         || run_git_command(repo, &["rev-parse", "--verify", "refs/remotes/origin/main"]).is_ok()
     {

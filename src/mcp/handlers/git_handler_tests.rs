@@ -519,3 +519,211 @@ fn test_git_activity_no_path_no_warning() {
         "Should NOT have warning when no path filter is provided"
     );
 }
+
+// === PERF-02 main-branch detection cache tests ===
+
+/// First `detect_main_branch_name` call against `.` (the xray repo itself,
+/// which has a `main` branch) populates `branch_name_cache`. Pinned because
+/// PERF-02's whole point is single-spawn cold + zero-spawn warm — a future
+/// refactor that drops the cache would silently restore the 4× spawn cost
+/// the story exists to remove.
+#[test]
+fn test_detect_main_branch_name_populates_cache_on_first_call() {
+    let ctx = make_git_test_ctx();
+    assert!(
+        ctx.branch_name_cache.read().unwrap().is_empty(),
+        "cache must start empty so the assertion below is meaningful"
+    );
+
+    let resolved = detect_main_branch_name(&ctx, ".");
+    assert_eq!(resolved.as_deref(), Some("main"), "xray repo has a main branch");
+
+    let cache = ctx.branch_name_cache.read().unwrap();
+    assert_eq!(cache.len(), 1, "exactly one entry expected after one call");
+    assert_eq!(
+        cache.get("."),
+        Some(&Some("main".to_string())),
+        "cache key is the raw repo string the caller passed"
+    );
+}
+
+/// Second call with the same repo string MUST return the cached value
+/// (verified by mutating the cache to an obviously-fake entry first and
+/// checking the function returns the fake instead of re-probing). This
+/// pins the contract that the cache is consulted before any git spawn.
+#[test]
+fn test_detect_main_branch_name_returns_cached_value_without_reprobe() {
+    let ctx = make_git_test_ctx();
+    ctx.branch_name_cache
+        .write()
+        .unwrap()
+        .insert(".".to_string(), Some("trunk".to_string()));
+
+    let resolved = detect_main_branch_name(&ctx, ".");
+    assert_eq!(
+        resolved.as_deref(),
+        Some("trunk"),
+        "cache hit must short-circuit before probing — if this asserts \
+         'main' instead, the cache lookup was bypassed and PERF-02 is \
+         silently undone"
+    );
+}
+/// PERF-02 follow-up: negative results (`None`) are intentionally NOT
+/// cached. Caching `Some(None)` was a permanent-poisoning bug — a path
+/// probed before its repo existed (e.g. detect runs against an empty
+/// workspace, then user runs `git init` + creates `main`) would forever
+/// return None until server restart. We trade ~1 extra `git for-each-ref`
+/// per repeated bad-path call (≈5-20 ms) for self-healing recovery.
+#[test]
+fn test_detect_main_branch_name_does_not_cache_negative_result() {
+    let ctx = make_git_test_ctx();
+    let bad = "/nonexistent/repo/path/perf-02-test";
+    let resolved = detect_main_branch_name(&ctx, bad);
+    assert_eq!(resolved, None, "bad repo path resolves to None");
+
+    let cache = ctx.branch_name_cache.read().unwrap();
+    assert!(
+        !cache.contains_key(bad),
+        "negative result must NOT be cached so a later `git init` self-heals; \
+         cache keys present: {:?}",
+        cache.keys().collect::<Vec<_>>()
+    );
+}
+
+/// PERF-02 follow-up: a repo that initially probed as None recovers
+/// once it actually has a branch — pinning the no-negative-cache contract
+/// end-to-end. Builds a tempdir, probes (no `.git` yet → None, no cache
+/// entry), runs `git init -b main` + first commit, probes again → must
+/// return `Some("main")`. Pre-fix this would have stayed None forever.
+#[test]
+fn test_detect_main_branch_name_self_heals_after_git_init() {
+    use std::process::Command;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path().to_str().expect("repo utf-8");
+    let ctx = make_git_test_ctx();
+
+    // Cold probe before `git init` — must resolve to None and NOT cache.
+    let pre = detect_main_branch_name(&ctx, repo);
+    assert_eq!(pre, None, "empty dir has no branches");
+    assert!(
+        !ctx.branch_name_cache.read().unwrap().contains_key(repo),
+        "negative pre-init probe must not poison the cache"
+    );
+
+    // Now initialise the repo with a `main` branch and a commit.
+    let run = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {:?} failed: {:?}", args, out);
+    };
+    run(&["init", "--quiet", "-b", "main"]);
+    std::fs::write(dir.path().join("f.txt"), "hi\n").expect("write");
+    run(&["add", "f.txt"]);
+    run(&["commit", "-m", "init", "--quiet"]);
+
+    // Re-probe must now succeed. Pre-fix: cached `Some(None)` would
+    // shortcut and return None forever.
+    let post = detect_main_branch_name(&ctx, repo);
+    assert_eq!(
+        post.as_deref(),
+        Some("main"),
+        "after `git init -b main` + commit the probe must self-heal"
+    );
+}
+
+/// Different repo strings get separate cache entries. This is the
+/// natural workspace-switch invalidation path documented on the
+/// `branch_name_cache` field.
+#[test]
+fn test_detect_main_branch_name_keys_by_repo_path() {
+    use std::process::Command;
+    // Two distinct positive repos must occupy two distinct cache slots.
+    // (Bad paths are intentionally not cached — see
+    // `test_detect_main_branch_name_does_not_cache_negative_result`.)
+    let dir_a = tempfile::TempDir::new().expect("tempdir-a");
+    let dir_b = tempfile::TempDir::new().expect("tempdir-b");
+    let init_repo = |dir: &std::path::Path| {
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "T")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "T")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {:?} failed: {:?}", args, out);
+        };
+        run(&["init", "--quiet", "-b", "main"]);
+        std::fs::write(dir.join("f.txt"), "hi\n").expect("write");
+        run(&["add", "f.txt"]);
+        run(&["commit", "-m", "init", "--quiet"]);
+    };
+    init_repo(dir_a.path());
+    init_repo(dir_b.path());
+
+    let ctx = make_git_test_ctx();
+    let path_a = dir_a.path().to_str().expect("utf-8");
+    let path_b = dir_b.path().to_str().expect("utf-8");
+    let _ = detect_main_branch_name(&ctx, path_a);
+    let _ = detect_main_branch_name(&ctx, path_b);
+
+    let cache = ctx.branch_name_cache.read().unwrap();
+    assert_eq!(
+        cache.len(),
+        2,
+        "each distinct positive repo string gets its own cache entry"
+    );
+    assert!(cache.contains_key(path_a));
+    assert!(cache.contains_key(path_b));
+}
+
+/// PERF-02 regression: when a repo has BOTH `refs/heads/master` AND
+/// `refs/remotes/origin/main` (and no local `main`), `detect_main_branch_name`
+/// MUST resolve to `"main"` to match legacy 4-probe behaviour. Pre-fix code
+/// trusted `git for-each-ref` to emit refs in argument order, but git sorts
+/// the output by refname → `master` arrived before `origin/main` and the
+/// function returned `"master"`, silently flipping `behindMain`/`aheadOfMain`
+/// onto the wrong upstream for users with this layout. Builds a real temp
+/// repo because mocking git is not in scope here.
+#[test]
+fn test_detect_main_branch_name_prefers_main_over_local_master() {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git must be on PATH for this test");
+        assert!(status.success(), "git {:?} failed in {:?}", args, repo);
+    };
+    // master is the only local branch; origin/main is a remote-tracking ref.
+    run(&["init", "--quiet", "-b", "master"]);
+    run(&["config", "user.email", "perf02@test.local"]);
+    run(&["config", "user.name", "PERF-02 Test"]);
+    std::fs::write(repo.join("seed.txt"), "x").unwrap();
+    run(&["add", "seed.txt"]);
+    run(&["commit", "--quiet", "-m", "init"]);
+    run(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    let ctx = make_git_test_ctx();
+    let resolved = detect_main_branch_name(&ctx, repo.to_str().unwrap());
+    assert_eq!(
+        resolved.as_deref(),
+        Some("main"),
+        "main (even remote-only) MUST win over local master — \
+         legacy 4-probe semantics, lost when a refname-sorted \
+         for-each-ref output was treated as if it were arg-ordered"
+    );
+}
+

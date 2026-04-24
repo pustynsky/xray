@@ -594,6 +594,52 @@ fn test_generate_trigrams_empty() {
     assert!(generate_trigrams("").is_empty());
 }
 
+/// PERF-05 contract pin: the ASCII fast-path must produce
+/// **byte-for-byte identical** output to the general char-based path.
+/// We can't call the general path directly (it's the same function), so
+/// we build the expected trigram list manually via the spec
+/// ("3-character sliding windows") on a mixed corpus and assert
+/// equality — including trigram order, which the index relies on.
+#[test]
+fn test_generate_trigrams_ascii_fast_path_parity() {
+    // ASCII identifier — exercises the fast-path (token.is_ascii() == true).
+    let ascii = generate_trigrams("HandlerContext");
+    let expected_ascii: Vec<String> = "HandlerContext"
+        .chars()
+        .collect::<Vec<_>>()
+        .windows(3)
+        .map(|w| w.iter().collect::<String>())
+        .collect();
+    assert_eq!(
+        ascii, expected_ascii,
+        "PERF-05 ASCII fast-path must match char-based windows byte-for-byte"
+    );
+
+    // Mixed ASCII + Cyrillic — must NOT take the fast-path
+    // (any non-ASCII byte forces the general path), and the result must
+    // be character-aligned, not byte-aligned (otherwise multi-byte UTF-8
+    // sequences would split mid-codepoint).
+    let mixed = generate_trigrams("abПривет");
+    assert_eq!(
+        mixed.len(),
+        6,
+        "8 chars => 6 trigrams (mixed ASCII+Cyrillic must use char-based windows)"
+    );
+    assert_eq!(mixed[0], "abП");
+    assert_eq!(mixed[1], "bПр");
+    // Each trigram must be exactly 3 chars (codepoints), not 3 bytes —
+    // pinning that the general path is char-aware.
+    for t in &mixed {
+        assert_eq!(
+            t.chars().count(),
+            3,
+            "every trigram must be 3 codepoints, got {:?} ({} bytes)",
+            t,
+            t.len()
+        );
+    }
+}
+
 #[test]
 fn test_trigram_index_serialization_roundtrip() {
     let mut trigram_map = HashMap::new();
@@ -940,6 +986,147 @@ fn test_is_path_within_relative_dotdot_escape_still_rejected() {
     );
 }
 
+/// Walk-up canonical fallback regression: a path with a non-existent leaf
+/// inside the workspace must still be classified as inside, even when its
+/// existing ancestor is in a different short/long form than `root`.
+///
+/// Local repro on Linux/macOS uses logically-different but canonically-equal
+/// paths via a symlinked root; on Windows we additionally exercise 8.3 short
+/// names via `GetShortPathName` (the original CI failure on windows-latest).
+#[test]
+fn test_is_path_within_nonexistent_leaf_inside_via_canonical_ancestor() {
+    let tmp = tempfile::tempdir().unwrap();
+    // The canonical root form (long, no symlinks).
+    let canonical_root = std::fs::canonicalize(tmp.path()).unwrap();
+    // Production callers pass `clean_path`-normalised root (forward slashes,
+    // `\\?\` prefix stripped). Mirror that here so the test exercises the
+    // exact shape `is_path_within` sees in MCP handlers.
+    let canonical_root_str = clean_path(&canonical_root.to_string_lossy());
+
+    // Path with a non-existent leaf in canonical form: must always be accepted
+    // (sanity check that the regression test fixture itself is sound).
+    let plain = format!("{}/nonexistent-but-inside", canonical_root_str);
+    assert!(
+        is_path_within(&plain, &canonical_root_str),
+        "plain `<canonical_root>/nonexistent` must be accepted (sanity)"
+    );
+
+    // Cross-form: feed the SAME canonical root but a path computed against the
+    // platform-specific alternate form of that root. On Windows the alternate
+    // is the 8.3 short name; on Unix we simulate via a symlink that points
+    // back at the canonical dir (logically-different prefix, canonically-same).
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        // Resolve short (8.3) form of the canonical root via GetShortPathNameW.
+        // If the volume has 8.3 disabled (`fsutil 8dot3name set`), this returns
+        // the input unchanged — the test then degenerates into the canonical
+        // case, which is fine (no regression possible to assert).
+        let wide: Vec<u16> = std::ffi::OsStr::new(&canonical_root)
+            .encode_wide()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut buf = vec![0u16; 1024];
+        let len = unsafe {
+            unsafe extern "system" {
+                fn GetShortPathNameW(lpsz_long: *const u16, lpsz_short: *mut u16, cch: u32) -> u32;
+            }
+            GetShortPathNameW(wide.as_ptr(), buf.as_mut_ptr(), buf.len() as u32)
+        };
+        if len > 0 && (len as usize) < buf.len() {
+            let short_root = std::ffi::OsString::from_wide(&buf[..len as usize])
+                .to_string_lossy()
+                .to_string();
+            // Only meaningful when short ≠ canonical (i.e. 8.3 is enabled and
+            // the dir name is long enough to be shortened).
+            if short_root != canonical_root.to_string_lossy() {
+                // Same `clean_path` normalisation production callers apply.
+                let short_root_clean = clean_path(&short_root);
+                let cross_form = format!("{}/nonexistent-but-inside", short_root_clean);
+                assert!(
+                    is_path_within(&cross_form, &canonical_root_str),
+                    "Windows 8.3 short-form path with non-existent leaf must be \
+                     classified as inside canonical root (the windows-latest CI \
+                     regression). short={}, canonical_root={}",
+                    cross_form, canonical_root_str
+                );
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        // Symlink an alternate directory that points back at the canonical
+        // root, then ask whether `<symlink>/nonexistent-but-inside` is inside
+        // canonical_root. Pre-fix, the textual `inside` check rejects (the
+        // symlink prefix differs) and `canonicalize(path)` fails because the
+        // leaf does not exist. The walk-up fallback canonicalizes the existing
+        // ancestor (the symlink), which resolves to canonical_root.
+        let parent = tempfile::tempdir().unwrap();
+        let alt = parent.path().join("alt-form");
+        std::os::unix::fs::symlink(&canonical_root, &alt).unwrap();
+        let cross_form = format!("{}/nonexistent-but-inside", alt.to_string_lossy());
+        assert!(
+            is_path_within(&cross_form, &canonical_root_str),
+            "symlinked-alternate path with non-existent leaf must be classified \
+             as inside canonical root. alt={}, canonical_root={}",
+            cross_form, canonical_root_str
+        );
+    }
+}
+
+
+/// Combined regression for the d2b3d8f follow-up review: alternate root
+/// spelling + `..` + non-existent leaf must still be classified as inside.
+///
+/// Pre-fix flow on Linux for `<alt-root>/sub/../newdir` where `<alt-root>`
+/// is a symlink to canonical root, `sub` exists, `newdir` does not:
+///   1. `has_traversal == true` → no-traversal logical branch skipped
+///   2. `resolve_dotdot_logical` collapses to `<alt-root>/newdir` (preserves
+///      the alt prefix) → textual `inside` rejects (alt ≠ canonical)
+///   3. `canonicalize(path)` fails on the non-existent `newdir` leaf
+///   4. After d2b3d8f the walk-up branch was gated `!has_traversal` and
+///      skipped → function returned `false` for a legitimate in-workspace
+///      path.
+///
+/// The follow-up fix routes the walk-up through `safe_for_walkup`, which
+/// holds the `..`-stripped form for traversal inputs (and `None` for genuine
+/// escapes — confirmed by the companion test
+/// `test_is_path_within_relative_dotdot_escape_still_rejected`). The walk-up
+/// then climbs from `newdir` (non-existent) to `<alt-root>` (existing
+/// symlink), canonicalizes it to canonical_root, and accepts.
+#[cfg(unix)]
+#[test]
+fn test_is_path_within_traversal_via_alt_root_nonexistent_leaf_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let canonical_root = std::fs::canonicalize(tmp.path()).unwrap();
+    let canonical_root_str = clean_path(&canonical_root.to_string_lossy());
+
+    // Existing in-root subdir so `..` has something to pop off.
+    let sub = canonical_root.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+
+    // Alternate root: a symlink in a sibling tempdir pointing at canonical_root.
+    let parent = tempfile::tempdir().unwrap();
+    let alt = parent.path().join("alt-form");
+    std::os::unix::fs::symlink(&canonical_root, &alt).unwrap();
+
+    // `<alt-root>/sub/../newdir` — alternate prefix, traversal, non-existent leaf.
+    let cross_form = format!("{}/sub/../newdir", alt.to_string_lossy());
+    assert!(
+        is_path_within(&cross_form, &canonical_root_str),
+        "alternate-root path with `..` and non-existent leaf must be classified \
+         as inside canonical root. cross_form={}, canonical_root={}",
+        cross_form, canonical_root_str
+    );
+
+    // Sanity: the same shape WITHOUT the alternate root prefix already worked
+    // before d2b3d8f — guard against accidental regression of the easier case.
+    let plain_traversal = format!("{}/sub/../newdir", canonical_root_str);
+    assert!(
+        is_path_within(&plain_traversal, &canonical_root_str),
+        "`<canonical_root>/sub/../newdir` must be accepted (sanity)"
+    );
+}
 
 
 #[test]

@@ -23,6 +23,7 @@ fn make_params<'a>(
         exclude_lower: exclude.iter().map(|s| s.to_lowercase()).collect(),
         dir_auto_converted_note: None,
         exact_file_path: &None,
+        exact_file_path_canonical: &None,
         auto_balance: true,
         max_occurrences_per_term: None,
     }

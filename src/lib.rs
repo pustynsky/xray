@@ -196,14 +196,27 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
     // resolution that lands outside the workspace fails the `inside` check.
     // Symlink-escape risk is no worse than the pre-existing no-traversal logical
     // branch, which already trusts textual containment for `WalkBuilder` parity.
-    if has_traversal
-        && let Some(resolved) = resolve_dotdot_logical(path, root)
-    {
-        let logical = resolved.to_lowercase();
-        if inside(&logical) {
-            return true;
+    //
+    // We also stash the resolved (`..`-free) form in `safe_for_walkup` so the
+    // walk-up canonical fallback below can run safely on `..`-bearing inputs
+    // where the original path would silently lose its `..` markers via
+    // `PathBuf::pop`/`file_name` and re-accept genuine escapes.
+    let safe_for_walkup: Option<String> = if has_traversal {
+        let resolved = resolve_dotdot_logical(path, root);
+        if let Some(ref r) = resolved {
+            let logical = r.to_lowercase();
+            if inside(&logical) {
+                return true;
+            }
         }
-    }
+        // `None` here means the resolver classified the input as a genuine
+        // escape (`..` popped past root). We deliberately leave
+        // `safe_for_walkup` as `None` so the walk-up branch below skips it
+        // and the function returns `false` at the end.
+        resolved
+    } else {
+        Some(path.to_string())
+    };
 
     // Canonical fallback: handles 8.3 short names, traversal validation,
     // and arbitrary input shapes that don't share a textual prefix with root.
@@ -218,6 +231,59 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
         }
         // Root failed to canonicalize — compare canonical path against logical root.
         return inside(&canon);
+    }
+
+    // Walk-up canonical fallback for non-existent leaves (Windows 8.3 short/long
+    // form mismatch). When the path itself doesn't exist (e.g. a brand-new
+    // subdir the caller wants to enumerate), `canonicalize(path)` fails and
+    // the textual `inside(logical)` check above can miss legitimate in-workspace
+    // paths whose ancestor exists in a different short/long form than `root`.
+    // Walk up from the leaf to the longest existing ancestor, canonicalize
+    // THAT, then re-attach the unresolved tail and re-check containment.
+    //
+    // Concrete repro (windows-latest CI):
+    //   path = `C:/Users/RUNNER~1/AppData/Local/Temp/xray_fast_test_.../nonexistent-but-inside`
+    //   root = `C:/Users/runneradmin/AppData/Local/Temp/xray_fast_test_...`  (canonical)
+    // Without this branch the textual `inside` rejects (`runner~1` ≠ `runneradmin`)
+    // and the canonicalize(path) above fails on the non-existent leaf.
+    //
+    // SAFETY: this branch operates on `safe_for_walkup`, NOT on the raw
+    // `path` argument. For `..`-bearing inputs we use the resolved form from
+    // `resolve_dotdot_logical`, which has already classified genuine escapes
+    // as `None` (the resolver returns `None` when `..` pops past root). For
+    // confirmed escapes `safe_for_walkup` is `None` and we skip the walk-up
+    // entirely, so a payload like `<root>/sub/../../outside` cannot get a
+    // second chance via `PathBuf::pop`/`file_name` (which silently drops
+    // `..` segments and would re-accept the escape — the bug that broke
+    // `test_is_path_within_relative_dotdot_escape_still_rejected` on Linux
+    // CI when this branch ran unconditionally on the raw `path`).
+    if let Some(walkup_input) = safe_for_walkup.as_deref()
+        && let Ok(canonical_root) = std::fs::canonicalize(root)
+    {
+        let croot = clean_path(&canonical_root.to_string_lossy()).to_lowercase();
+        let croot_trimmed = croot.trim_end_matches('/');
+        let croot_with_sep = format!("{}/", croot_trimmed);
+        let mut p = std::path::PathBuf::from(walkup_input);
+        let mut tail = std::path::PathBuf::new();
+        // Bound the walk so a pathological input cannot stat the entire
+        // ancestor chain. 64 segments far exceeds any realistic in-workspace path.
+        for _ in 0..64 {
+            if p.as_os_str().is_empty() || p.exists() { break; }
+            if let Some(name) = p.file_name() {
+                tail = std::path::PathBuf::from(name).join(&tail);
+            }
+            if !p.pop() { break; }
+        }
+        if !p.as_os_str().is_empty()
+            && let Ok(canonical_anc) = std::fs::canonicalize(&p)
+        {
+            let with_tail = canonical_anc.join(&tail);
+            let canon = clean_path(&with_tail.to_string_lossy()).to_lowercase();
+            let c = canon.trim_end_matches('/');
+            if c == croot_trimmed || c.starts_with(&croot_with_sep) {
+                return true;
+            }
+        }
     }
 
     false
@@ -573,6 +639,38 @@ pub struct TrigramIndex {
 /// Returns empty vec for tokens shorter than 3 chars.
 #[must_use]
 pub fn generate_trigrams(token: &str) -> Vec<String> {
+    // PERF-05: ASCII fast-path. The vast majority of tokens fed into the
+    // trigram index are ASCII identifiers (code, log lines, English text).
+    // The general path below pays for `chars().collect::<Vec<char>>()` (a
+    // heap Vec of 4-byte `char` per code unit) plus a per-window
+    // `iter().collect::<String>()` (another heap String per trigram). For
+    // pure ASCII none of that is needed: each byte is one char so we can
+    // slide directly over `as_bytes().windows(3)` and the 3-byte slice is
+    // already a valid UTF-8 sequence (each byte < 0x80). Allocates exactly
+    // `len-2` Strings of capacity 3 — same as the general path but skips
+    // the intermediate `Vec<char>` and per-window iterator collection.
+    // Non-ASCII tokens (Cyrillic, CJK, emoji) keep the original char-based
+    // path verbatim — code-unit windows would split multi-byte sequences.
+    if token.is_ascii() {
+        if token.len() < 3 {
+            return vec![];
+        }
+        return token
+            .as_bytes()
+            .windows(3)
+            .map(|w| {
+                // SAFETY: token.is_ascii() means every byte < 0x80, so any
+                // 3-byte window is valid UTF-8 (3 single-byte codepoints).
+                // We use the checked conversion + unwrap rather than
+                // from_utf8_unchecked: the validation walk on 3 bytes is
+                // negligible vs. the String heap allocation that follows,
+                // and this keeps the function 100% safe code.
+                std::str::from_utf8(w)
+                    .expect("ASCII bytes are always valid UTF-8")
+                    .to_string()
+            })
+            .collect();
+    }
     let chars: Vec<char> = token.chars().collect();
     if chars.len() < 3 {
         return vec![];

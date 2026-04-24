@@ -803,6 +803,61 @@ pub struct HandlerContext {
     /// Interval in seconds between periodic rescans. Clamped to
     /// `MIN_RESCAN_INTERVAL_SEC` by `start_periodic_rescan`.
     pub rescan_interval_sec: u64,
+    /// PERF-02: per-repo cache of `detect_main_branch_name` result.
+    ///
+    /// Lookup key is the raw repo string the caller passed (no
+    /// canonicalisation — canonicalisation would itself spawn a syscall on
+    /// Windows). Value is `Some("main"|"master")` if the probe found one.
+    ///
+    /// **Negative results are NOT cached** (PERF-02 follow-up). Caching
+    /// `Some(None)` permanently poisoned paths probed before their repo
+    /// existed (e.g. probe runs against an empty workspace, then user runs
+    /// `git init` + creates `main`) — they would forever return None until
+    /// server restart. The map's `Option<String>` value type is kept for
+    /// internal `clone()` ergonomics on cache hits; `None` simply never
+    /// appears as a stored value.
+    ///
+    /// **Invalidation:** keyed by repo path, so workspace switches
+    /// naturally miss-then-repopulate (the new repo is a different key).
+    /// Known limitation: if a long-running session does
+    /// `git branch -d main` after the cache populated, the next
+    /// `xray_branch_status` will still report `mainBranch="main"` until
+    /// the server restarts. Acceptable trade-off because the destructive
+    /// rename is a manual one-shot action; the previous behaviour spawned
+    /// up to 4 sequential `git rev-parse` per request indefinitely.
+    pub branch_name_cache: Arc<RwLock<std::collections::HashMap<String, Option<String>>>>,
+    /// PERF-08: single-flight gate for `xray_fast`'s lazy file-index rebuild.
+    ///
+    /// **Problem fixed:** the previous code did
+    /// `if needs_rebuild { build_index(...); store(...); }` with no
+    /// mutual exclusion. Under N concurrent `xray_fast` calls on a cold
+    /// or dirty context, every thread saw `needs_rebuild=true` (because
+    /// the others hadn't finished writing yet) and **each one ran a
+    /// full filesystem walk + 8 MB allocation + on-disk save in
+    /// parallel**. On a 100k-file repo with 4-8 concurrent LLM tool
+    /// calls this multiplied cold-start cost by ~N.
+    ///
+    /// **Fix:** explicit single-flight via `Mutex<bool> + Condvar`.
+    /// Exactly one thread runs `build_index`; the rest sleep on the
+    /// condvar and wake up to read the freshly-built index. The mutex
+    /// is held only across cheap state inspection — the actual build
+    /// runs lock-free, so other unrelated `xray_fast` requests against
+    /// an already-built index never touch this gate.
+    ///
+    /// **Reset semantics:** the gate is a transient guard — it does
+    /// not own the index. After build completion the gate returns to
+    /// `building=false` and the next dirty signal from the watcher
+    /// (which sets `file_index_dirty=true`) re-triggers exactly one
+    /// rebuild, giving the same single-flight guarantee on every
+    /// invalidation cycle. (`tokio::sync::OnceCell` was rejected
+    /// precisely because it lacks reset semantics.)
+    ///
+    /// **Panic safety:** the builder thread holds an RAII guard that
+    /// resets `building=false` and `notify_all`s on drop, so a panic
+    /// inside `build_index` cannot strand waiters forever — they wake,
+    /// see `file_index` still `None`, and one of them retakes the
+    /// build slot.
+    pub file_index_build_gate: Arc<utils::FileIndexBuildGate>,
 }
 
 impl HandlerContext {
@@ -846,6 +901,8 @@ impl Default for HandlerContext {
             watcher_stats: Arc::new(crate::mcp::watcher::WatcherStats::new()),
             periodic_rescan_enabled: false,
             rescan_interval_sec: 300,
+            branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            file_index_build_gate: Arc::new(utils::FileIndexBuildGate::new()),
         }
     }
 }
