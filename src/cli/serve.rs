@@ -47,19 +47,41 @@ pub fn cmd_serve(args: ServeArgs) {
     let def_building = Arc::new(AtomicBool::new(false));
 
     // ─── Content index: load from disk or build in background ───
-    let index = load_or_build_content_index(
+    // Returns the effective `respect_git_exclude` resolved against any persisted
+    // value on disk — see `resolve_respect_git_exclude` in `super`. This must be
+    // used downstream (watcher, periodic rescan, HandlerContext) instead of the
+    // raw CLI flag, otherwise long-running paths silently drop the user's
+    // original opt-in (Bug 4 follow-up, 2026-04-24).
+    let (index, effective_respect_content) = load_or_build_content_index(
         &dir_str, &exts_for_load, &extensions, &idx_base,
         is_unresolved, args.watch, args.respect_git_exclude,
         &content_ready, &content_building,
     );
 
     // ─── Definition index: same async pattern ───
-    let (def_index, def_extensions_vec) = load_or_build_definition_index(
+    let (def_index, def_extensions_vec, effective_respect_def) = load_or_build_definition_index(
         &dir_str, &extensions, &idx_base, &exts_for_load,
         is_unresolved, args.definitions,
         &def_ready, &def_building,
         args.respect_git_exclude,
     );
+
+    // Pick the canonical effective value for watcher / periodic rescan /
+    // HandlerContext. Content and definition indexes are normally built with
+    // the same flag value; if they differ (exotic mixed-state on disk),
+    // prefer the stricter `true` so excluded files do not leak back via the
+    // walker. Both `resolve_respect_git_exclude` calls have already warned
+    // about any persisted-vs-CLI mismatch.
+    let effective_respect_git_exclude = effective_respect_content || effective_respect_def;
+    if effective_respect_content != effective_respect_def {
+        warn!(
+            target: "xray::startup",
+            content = effective_respect_content,
+            definitions = effective_respect_def,
+            chosen = effective_respect_git_exclude,
+            "Content and definition indexes have different persisted respect_git_exclude values; using the stricter (true) for watcher / reindex paths. Run `xray index-content` and `xray index-definitions` to align them explicitly.",
+        );
+    }
 
     // ─── File watcher ───
     let watcher_generation = Arc::new(AtomicU64::new(0));
@@ -82,7 +104,7 @@ pub fn cmd_serve(args: ServeArgs) {
             Arc::clone(&watcher_generation),
             0, // initial generation
             Arc::clone(&watcher_stats),
-            args.respect_git_exclude,
+            effective_respect_git_exclude,
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
@@ -103,7 +125,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 Arc::clone(&watcher_generation),
                 0,
                 Arc::clone(&watcher_stats),
-                args.respect_git_exclude,
+                effective_respect_git_exclude,
             );
         }
     }
@@ -148,7 +170,7 @@ pub fn cmd_serve(args: ServeArgs) {
         watcher_generation,
         watch_enabled: args.watch,
         watch_debounce_ms: args.debounce_ms,
-        respect_git_exclude: args.respect_git_exclude,
+        respect_git_exclude: effective_respect_git_exclude,
         watcher_stats,
         periodic_rescan_enabled: !args.no_periodic_rescan,
         rescan_interval_sec: args.rescan_interval_sec,
@@ -196,7 +218,7 @@ fn load_or_build_content_index(
     respect_git_exclude: bool,
     content_ready: &Arc<AtomicBool>,
     content_building: &Arc<AtomicBool>,
-) -> Arc<RwLock<ContentIndex>> {
+) -> (Arc<RwLock<ContentIndex>>, bool) {
     // ─── Async startup: create empty indexes, start event loop immediately ───
     let empty_index = ContentIndex {
         root: dir_str.to_string(),
@@ -218,6 +240,12 @@ fn load_or_build_content_index(
     };
     let index = Arc::new(RwLock::new(empty_index));
 
+    // Default to the CLI flag; if a persisted index is loaded below, this is
+    // upgraded to the persisted value via `resolve_respect_git_exclude` so the
+    // caller (cmd_serve) threads the user's original opt-in into the watcher,
+    // periodic rescan, and HandlerContext rather than silently dropping it.
+    let mut effective_respect_git_exclude = respect_git_exclude;
+
     // Try fast load from disk (typically < 3s)
     // Skip if workspace is Unresolved — no point loading/building indexes for wrong directory.
     let start = Instant::now();
@@ -236,6 +264,14 @@ fn load_or_build_content_index(
     if let Some(idx) = loaded {
         let load_elapsed = start.elapsed();
         let cache_age = format_cache_age(idx.created_at);
+        // Resolve effective `respect_git_exclude` against persisted value:
+        // prefer persisted (warn on mismatch) so long-running paths (watcher,
+        // periodic rescan, MCP reindex) cannot silently flip the policy.
+        effective_respect_git_exclude = super::resolve_respect_git_exclude(
+            "serve/content",
+            Some(idx.respect_git_exclude),
+            respect_git_exclude,
+        );
         info!(
             elapsed_ms = format_args!("{:.1}", load_elapsed.as_secs_f64() * 1000.0),
             files = idx.files.len(),
@@ -370,7 +406,7 @@ fn load_or_build_content_index(
         });
     }
 
-    index
+    (index, effective_respect_git_exclude)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -384,7 +420,7 @@ fn load_or_build_definition_index(
     def_ready: &Arc<AtomicBool>,
     def_building: &Arc<AtomicBool>,
     respect_git_exclude: bool,
-) -> (Option<Arc<RwLock<definitions::DefinitionIndex>>>, Vec<String>) {
+) -> (Option<Arc<RwLock<definitions::DefinitionIndex>>>, Vec<String>, bool) {
     // Use compile-time definition extensions based on enabled Cargo features
     let supported_def_langs = definitions::definition_extensions();
     let def_exts = supported_def_langs.iter()
@@ -437,6 +473,11 @@ fn load_or_build_definition_index(
         Vec::new()
     };
 
+    // Default to the CLI flag; persisted value (when an index loads) wins via
+    // `resolve_respect_git_exclude` so reindex / watcher reconcile do not lose
+    // the user's original opt-in.
+    let mut effective_respect_git_exclude = respect_git_exclude;
+
     let def_index = if definitions_enabled {
         // Create an empty DefinitionIndex placeholder
         let empty_def = definitions::DefinitionIndex {
@@ -485,6 +526,11 @@ fn load_or_build_definition_index(
             let cache_age = format_cache_age(idx.created_at);
             let def_file_count = idx.files.len();
             let def_count = idx.definitions.len();
+            effective_respect_git_exclude = super::resolve_respect_git_exclude(
+                "serve/definitions",
+                Some(idx.respect_git_exclude),
+                respect_git_exclude,
+            );
             info!(
                 elapsed_ms = format_args!("{:.1}", def_elapsed.as_secs_f64() * 1000.0),
                 definitions = def_count,
@@ -571,7 +617,7 @@ fn load_or_build_definition_index(
         None
     };
 
-    (def_index, def_extensions_vec)
+    (def_index, def_extensions_vec, effective_respect_git_exclude)
 }
 
 fn build_git_cache_background(
@@ -804,3 +850,173 @@ mod serve_format_cache_age_tests {
             "Future timestamps must clamp to '0s' (regression: integer underflow on now - future)");
     }
 }
+
+
+#[cfg(test)]
+mod serve_respect_git_exclude_tests {
+    //! Regression tests for the serve-path Bug 4 follow-up
+    //! (`docs/user-stories/todo_approved_2026-04-24_respect-git-exclude-serve-persisted-semantics.md`).
+    //!
+    //! Pin down that `load_or_build_content_index` and
+    //! `load_or_build_definition_index` resolve the effective
+    //! `respect_git_exclude` against the **persisted** index value, not the
+    //! raw CLI flag. Without this, a `xray serve` invocation without the
+    //! flag would silently drop the user's original opt-in once the
+    //! watcher / periodic rescan / MCP reindex paths re-walked the tree.
+
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::{build_content_index, save_content_index};
+    use super::ContentIndexArgs;
+
+    fn init_repo_with_exclude(dir: &std::path::Path, pattern: &str) {
+        std::process::Command::new("git")
+            .args(["init", "--quiet"])
+            .current_dir(dir)
+            .output()
+            .expect("git init");
+        let info = dir.join(".git").join("info");
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(info.join("exclude"), format!("{}\n", pattern)).unwrap();
+    }
+
+    /// Regression: `xray serve` without `--respect-git-exclude` must NOT
+    /// silently downgrade a persisted content index that was originally
+    /// built with the flag. The effective value returned from
+    /// `load_or_build_content_index` is what cmd_serve threads into the
+    /// watcher, periodic rescan, and HandlerContext — if it dropped to
+    /// `false` here, every reconcile path would re-add `.git/info/exclude`
+    /// files to the index.
+    #[test]
+    fn serve_load_preserves_persisted_respect_git_exclude_for_content_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo_with_exclude(dir, "secret.cs");
+        std::fs::write(dir.join("public.cs"), "fn marker_public() {}").unwrap();
+        std::fs::write(dir.join("secret.cs"), "fn marker_secret() {}").unwrap();
+
+        let idx_base = dir.join("idx");
+        std::fs::create_dir_all(&idx_base).unwrap();
+
+        // One-time CLI build with the flag honoured.
+        let original = build_content_index(&ContentIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            respect_git_exclude: true,
+            threads: 1,
+            ..Default::default()
+        }).unwrap();
+        save_content_index(&original, &idx_base).unwrap();
+        assert!(original.respect_git_exclude, "sanity: built index has flag=true");
+
+        // Now simulate `xray serve` WITHOUT --respect-git-exclude (CLI = false).
+        let extensions = vec!["cs".to_string()];
+        let content_ready = Arc::new(AtomicBool::new(false));
+        let content_building = Arc::new(AtomicBool::new(false));
+
+        let (_index, effective) = load_or_build_content_index(
+            &dir.to_string_lossy(),
+            "cs",
+            &extensions,
+            &idx_base,
+            false, // is_unresolved
+            false, // watch
+            false, // CLI flag — was true at build time, now false
+            &content_ready,
+            &content_building,
+        );
+
+        assert!(
+            effective,
+            "effective respect_git_exclude must be true (persisted wins over CLI false)"
+        );
+        assert!(
+            content_ready.load(Ordering::Acquire),
+            "content_ready must be set after a synchronous load"
+        );
+    }
+
+    /// Symmetric test for the definition index. Gated on `lang-csharp` because
+    /// the existing test fixture relies on a C# parser; the persistence /
+    /// resolve logic is identical for any language.
+    #[test]
+    #[cfg(feature = "lang-csharp")]
+    fn serve_load_preserves_persisted_respect_git_exclude_for_definition_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        init_repo_with_exclude(dir, "secret.cs");
+        std::fs::write(dir.join("public.cs"), "public class PublicService {}").unwrap();
+        std::fs::write(dir.join("secret.cs"), "public class SecretService {}").unwrap();
+
+        let idx_base = dir.join("idx");
+        std::fs::create_dir_all(&idx_base).unwrap();
+
+        let original = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+            dir: dir.to_string_lossy().to_string(),
+            ext: "cs".to_string(),
+            threads: 1,
+            respect_git_exclude: true,
+        });
+        crate::definitions::save_definition_index(&original, &idx_base).unwrap();
+        assert!(original.respect_git_exclude, "sanity: built def index has flag=true");
+
+        let extensions = vec!["cs".to_string()];
+        let def_ready = Arc::new(AtomicBool::new(false));
+        let def_building = Arc::new(AtomicBool::new(false));
+
+        let (_def_index, _def_extensions, effective) = load_or_build_definition_index(
+            &dir.to_string_lossy(),
+            &extensions,
+            &idx_base,
+            "cs",
+            false, // is_unresolved
+            true,  // definitions_enabled
+            &def_ready,
+            &def_building,
+            false, // CLI flag — was true at build time, now false
+        );
+
+        assert!(
+            effective,
+            "effective respect_git_exclude must be true for definition index (persisted wins)"
+        );
+        assert!(
+            def_ready.load(Ordering::Acquire),
+            "def_ready must be set after a synchronous load"
+        );
+    }
+
+    /// Sanity check: when no persisted index exists yet (cold start without
+    /// `--respect-git-exclude`), the effective value falls through to the CLI
+    /// flag. This guards against regressions where `resolve_respect_git_exclude`
+    /// is mistakenly called with `Some(false)` instead of `None` on cache-miss.
+    #[test]
+    fn serve_cold_start_uses_cli_flag_when_no_persisted_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        // No git repo, no pre-existing index.
+        std::fs::write(dir.join("a.cs"), "public class A {}").unwrap();
+
+        let idx_base = dir.join("idx");
+        std::fs::create_dir_all(&idx_base).unwrap();
+
+        let extensions = vec!["cs".to_string()];
+        let content_ready = Arc::new(AtomicBool::new(false));
+        let content_building = Arc::new(AtomicBool::new(false));
+
+        let (_index, effective) = load_or_build_content_index(
+            &dir.to_string_lossy(),
+            "cs",
+            &extensions,
+            &idx_base,
+            false, // is_unresolved
+            false, // watch
+            true,  // CLI flag
+            &content_ready,
+            &content_building,
+        );
+
+        assert!(effective, "cold start: CLI flag passes through unchanged");
+    }
+}
+

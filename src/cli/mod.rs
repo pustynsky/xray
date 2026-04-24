@@ -418,7 +418,7 @@ fn display_lines_with_context(
 /// pre-v3 indexes), falls back to the CLI flag.
 ///
 /// See `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
-fn resolve_respect_git_exclude(
+pub(crate) fn resolve_respect_git_exclude(
     index_kind: &str,
     persisted: Option<bool>,
     cli_flag: bool,
