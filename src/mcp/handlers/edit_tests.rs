@@ -4490,6 +4490,38 @@ fn test_detect_diff_category_blank_lines() {
 }
 
 #[test]
+fn test_detect_diff_category_blank_lines_crlf() {
+    // Leading CRLF blank line drift.
+    assert_eq!(
+        super::detect_diff_category("\r\nfoo\r\n", "foo\r\n"),
+        "leadingOrTrailingBlankLines"
+    );
+    // Trailing CRLF blank line drift.
+    assert_eq!(
+        super::detect_diff_category("foo\r\n", "foo\r\n\r\n"),
+        "leadingOrTrailingBlankLines"
+    );
+    // Mixed: leading + trailing blank lines, both CRLF.
+    assert_eq!(
+        super::detect_diff_category("\r\n\r\nfoo\r\nbar\r\n\r\n", "foo\r\nbar"),
+        "leadingOrTrailingBlankLines"
+    );
+}
+
+/// Pure LF↔CRLF mismatch must remain `crlfVsLf`, not get re-classified as
+/// blank-line drift after the trim was widened to also strip '\r'. Guard
+/// against accidental priority inversion between branches 1 and 2 of
+/// `detect_diff_category`.
+#[test]
+fn test_detect_diff_category_crlf_vs_lf_priority_over_blank_lines() {
+    assert_eq!(
+        super::detect_diff_category("foo\nbar\n", "foo\r\nbar\r\n"),
+        "crlfVsLf"
+    );
+}
+
+
+#[test]
 fn test_detect_diff_category_trailing_whitespace() {
     assert_eq!(
         super::detect_diff_category("foo  \nbar\t\n", "foo\nbar\n"),
