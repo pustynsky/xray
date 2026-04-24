@@ -13,6 +13,7 @@ use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionK
 use code_xray::generate_trigrams;
 
 use super::HandlerContext;
+use super::advisory_hints::{interface_vias_caveat, low_count_caveat};
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
 use super::utils::{self, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, sorted_intersect};
 
@@ -468,6 +469,31 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             }
         }
 
+        // Advisory hints (interface-vias caveat + low-count cross-check) — emitted
+        // independently of the empty-tree nearest-match hint, because the asymmetry
+        // they describe applies even when results are present.
+        // See user-stories/xray-response-hints-for-incomplete-results.md.
+        //
+        // Truncation guard: `tree.len()` is the POST-truncation top-level node count
+        // (capped by `maxCallersPerLevel`, and the whole tree may have been pruned
+        // by `maxTotalNodes`). Emitting the low-count advisory off a truncated count
+        // would lie about completeness — the asymmetry it describes is
+        // "AST may miss receiver-typed call sites", not "we capped your response".
+        // Skip when either truncation signal fired.
+        let result_truncated = truncated || builder.per_level_dropped > 0;
+        let mut advisories: Vec<String> = Vec::new();
+        if let Some(h) = interface_vias_caveat(&method_name, class_filter.as_deref(), &def_idx) {
+            advisories.push(h);
+        }
+        if !result_truncated
+            && let Some(h) = low_count_caveat(&method_name, tree.len())
+        {
+            advisories.push(h);
+        }
+        if !advisories.is_empty() {
+            output["advisories"] = json!(advisories);
+        }
+
         // Cross-index enrichment: grep references not in call tree
         let include_grep_refs = args.get("includeGrepReferences").and_then(|v| v.as_bool()).unwrap_or(false);
         if include_grep_refs && method_name.len() >= 4 {
@@ -755,6 +781,23 @@ fn handle_multi_method_callers(
                 && let Some(h) = generate_callers_hint(method_name, class_filter, &def_idx) {
                     method_result["hint"] = json!(h);
                 }
+
+            // Advisory hints — see user-stories/xray-response-hints-for-incomplete-results.md.
+            // Truncation guard: skip low-count advisory when this method's result was
+            // capped (per-level or total-nodes). See single-method handler for rationale.
+            let method_result_truncated = method_truncated || method_dropped > 0;
+            let mut advisories: Vec<String> = Vec::new();
+            if let Some(h) = interface_vias_caveat(method_name, class_filter, &def_idx) {
+                advisories.push(h);
+            }
+            if !method_result_truncated
+                && let Some(h) = low_count_caveat(method_name, tree.len())
+            {
+                advisories.push(h);
+            }
+            if !advisories.is_empty() {
+                method_result["advisories"] = json!(advisories);
+            }
 
             let mut tests_found = builder.tests_found;
             if impact_analysis && !tests_found.is_empty() {

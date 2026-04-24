@@ -21,6 +21,7 @@ use crate::mcp::lock_order;
 
 use super::utils::{inject_body_into_obj, inject_branch_warning, inject_index_degraded, best_match_tier, json_to_string, name_similarity};
 use super::HandlerContext;
+use super::advisory_hints::value_source_hint;
 
 // XML on-demand parsing lives in `super::xml_on_demand` behind the `lang-xml`
 // feature flag. `definitions.rs` only re-exports `DefinitionSearchArgs` to that
@@ -1052,6 +1053,13 @@ fn format_definition_entry(
     }
     if !def.base_types.is_empty() {
         obj["baseTypes"] = json!(def.base_types);
+    }
+    // Value-source hint — Property/Field with attribute(s) carrying string-literal
+    // arguments often binds to external configuration (manifest / appsettings /
+    // env / secret store). Surface the literals as ready-to-grep keys.
+    // See user-stories/xray-response-hints-for-incomplete-results.md (AI 3).
+    if let Some(h) = value_source_hint(def) {
+        obj["valueSourceHint"] = json!(h);
     }
     if let Some(ref sig) = def.signature {
         obj["signature"] = json!(sig);
