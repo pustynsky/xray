@@ -820,6 +820,38 @@ pub struct HandlerContext {
     /// rename is a manual one-shot action; the previous behaviour spawned
     /// up to 4 sequential `git rev-parse` per request indefinitely.
     pub branch_name_cache: Arc<RwLock<std::collections::HashMap<String, Option<String>>>>,
+    /// PERF-08: single-flight gate for `xray_fast`'s lazy file-index rebuild.
+    ///
+    /// **Problem fixed:** the previous code did
+    /// `if needs_rebuild { build_index(...); store(...); }` with no
+    /// mutual exclusion. Under N concurrent `xray_fast` calls on a cold
+    /// or dirty context, every thread saw `needs_rebuild=true` (because
+    /// the others hadn't finished writing yet) and **each one ran a
+    /// full filesystem walk + 8 MB allocation + on-disk save in
+    /// parallel**. On a 100k-file repo with 4-8 concurrent LLM tool
+    /// calls this multiplied cold-start cost by ~N.
+    ///
+    /// **Fix:** explicit single-flight via `Mutex<bool> + Condvar`.
+    /// Exactly one thread runs `build_index`; the rest sleep on the
+    /// condvar and wake up to read the freshly-built index. The mutex
+    /// is held only across cheap state inspection — the actual build
+    /// runs lock-free, so other unrelated `xray_fast` requests against
+    /// an already-built index never touch this gate.
+    ///
+    /// **Reset semantics:** the gate is a transient guard — it does
+    /// not own the index. After build completion the gate returns to
+    /// `building=false` and the next dirty signal from the watcher
+    /// (which sets `file_index_dirty=true`) re-triggers exactly one
+    /// rebuild, giving the same single-flight guarantee on every
+    /// invalidation cycle. (`tokio::sync::OnceCell` was rejected
+    /// precisely because it lacks reset semantics.)
+    ///
+    /// **Panic safety:** the builder thread holds an RAII guard that
+    /// resets `building=false` and `notify_all`s on drop, so a panic
+    /// inside `build_index` cannot strand waiters forever — they wake,
+    /// see `file_index` still `None`, and one of them retakes the
+    /// build slot.
+    pub file_index_build_gate: Arc<utils::FileIndexBuildGate>,
 }
 
 impl HandlerContext {
@@ -864,6 +896,7 @@ impl Default for HandlerContext {
             periodic_rescan_enabled: false,
             rescan_interval_sec: 300,
             branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            file_index_build_gate: Arc::new(utils::FileIndexBuildGate::new()),
         }
     }
 }

@@ -6,8 +6,6 @@ use std::time::Instant;
 use serde_json::{json, Value};
 use tracing::info;
 
-use std::sync::atomic::Ordering;
-
 use crate::mcp::protocol::ToolCallResult;
 
 use super::HandlerContext;
@@ -356,28 +354,34 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // read guard for the lifetime of the per-entry scan: read locks do not
     // block other readers, and the watcher's write-lock contention happens
     // only during rebuild — which we run BEFORE taking the read guard.
-    let needs_rebuild = ctx.file_index_dirty.load(Ordering::Relaxed)
-        || ctx.file_index.read().map(|fi| fi.is_none()).unwrap_or(true);
-
-    if needs_rebuild {
-        info!(dir = %server_dir, "Building file-list index (dirty or first use)");
-        let new_index = match crate::build_index(&crate::IndexArgs {
-            dir: server_dir.clone(),
+    //
+    // ── PERF-08: single-flight rebuild via `ensure_file_index` ──
+    // Previously this site checked `needs_rebuild` and ran `build_index`
+    // inline with no mutual exclusion, so N concurrent cold-start
+    // requests each performed a full filesystem walk + 8 MB allocation +
+    // disk save in parallel. The helper coordinates exactly one in-flight
+    // build via Mutex+Condvar; other waiters block until completion and
+    // then read the freshly-built index. See
+    // `HandlerContext.file_index_build_gate` for the contract.
+    let server_dir_for_build = server_dir.clone();
+    let respect_git_exclude = ctx.respect_git_exclude;
+    let index_base = ctx.index_base.clone();
+    if let Err(e) = super::utils::ensure_file_index(ctx, || {
+        info!(dir = %server_dir_for_build, "Building file-list index (dirty or first use)");
+        let new_index = crate::build_index(&crate::IndexArgs {
+            dir: server_dir_for_build.clone(),
             max_age_hours: 24,
             hidden: false,
-            no_ignore: false, respect_git_exclude: ctx.respect_git_exclude,
+            no_ignore: false,
+            respect_git_exclude,
             threads: 0,
-        }) {
-            Ok(idx) => idx,
-            Err(e) => return ToolCallResult::error(format!("Failed to build file index: {}", e)),
-        };
-        // Save to disk for CLI/other consumers
-        let _ = crate::save_index(&new_index, &ctx.index_base);
-        // Store in memory and reset dirty flag
-        if let Ok(mut fi) = ctx.file_index.write() {
-            *fi = Some(new_index);
-        }
-        ctx.file_index_dirty.store(false, Ordering::Relaxed);
+        })
+        .map_err(|e| format!("Failed to build file index: {}", e))?;
+        // Save to disk for CLI/other consumers.
+        let _ = crate::save_index(&new_index, &index_base);
+        Ok(new_index)
+    }) {
+        return ToolCallResult::error(e);
     }
 
     let guard = match ctx.file_index.read() {

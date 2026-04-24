@@ -355,6 +355,160 @@ pub(crate) fn build_grouped_line_content(
 /// Used by tests and as the fallback when no explicit budget is configured.
 pub(crate) const DEFAULT_MAX_RESPONSE_BYTES: usize = 16_384;
 
+// ─── PERF-08: single-flight gate for the file-list rebuild ──────────
+
+/// Single-flight gate that ensures at most one in-flight build of
+/// `HandlerContext.file_index` at any time, regardless of how many
+/// concurrent `xray_fast` requests trigger a rebuild simultaneously.
+///
+/// See the field doc on `HandlerContext.file_index_build_gate` for the
+/// motivation. Implementation: `Mutex<bool> + Condvar`. The bool is
+/// `true` while a thread is inside `build_index`. Other threads observe
+/// it under the mutex and either (a) return immediately if the index is
+/// already fresh, or (b) block on the condvar until the in-flight build
+/// signals completion, then re-check.
+///
+/// Held lock scope is intentionally tiny (state inspection only). The
+/// expensive `build_index` call runs **outside** the mutex, so unrelated
+/// `xray_fast` requests against an already-built / non-dirty index never
+/// touch this gate at all.
+pub struct FileIndexBuildGate {
+    /// `true` while exactly one thread is inside the build closure.
+    pub(crate) building: std::sync::Mutex<bool>,
+    /// Signalled when a build finishes (success, error, or panic).
+    pub(crate) done: std::sync::Condvar,
+}
+
+impl FileIndexBuildGate {
+    pub fn new() -> Self {
+        Self {
+            building: std::sync::Mutex::new(false),
+            done: std::sync::Condvar::new(),
+        }
+    }
+}
+
+impl Default for FileIndexBuildGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Single-flight wrapper around the `xray_fast` file-index rebuild.
+///
+/// Contract:
+/// - Returns `Ok(())` once `ctx.file_index` is populated **and** is
+///   not stale (i.e. `file_index_dirty == false`).
+/// - At most one caller at a time runs `build_fn`. All other callers
+///   that arrive while a build is in flight wait on the condvar and
+///   re-check after wake-up; if the in-flight build succeeded the
+///   waiter returns `Ok(())` without invoking `build_fn`. If the
+///   in-flight build panicked or set the index to `None`, exactly
+///   one waiter takes over as the new builder.
+/// - On `Err` from `build_fn`, the gate is released (other waiters
+///   unblocked) and the error is propagated to this caller. Other
+///   waiters re-check on wake-up and one of them retries the build.
+/// - **Panic safety:** the build slot is held via an RAII guard; if
+///   `build_fn` unwinds, the guard's `Drop` clears `building=false`
+///   and notifies all waiters before unwinding propagates.
+pub fn ensure_file_index<F>(
+    ctx: &HandlerContext,
+    build_fn: F,
+) -> Result<(), String>
+where
+    F: FnOnce() -> Result<crate::FileIndex, String>,
+{
+    use std::sync::atomic::Ordering;
+
+    /// RAII guard: clears the building flag and wakes waiters even on
+    /// panic. Constructed with the flag already set to `true` by the
+    /// caller, so `Drop` is the *only* code path that resets it.
+    struct BuildSlotGuard<'a> {
+        gate: &'a FileIndexBuildGate,
+    }
+    impl Drop for BuildSlotGuard<'_> {
+        fn drop(&mut self) {
+            let mut b = self.gate.building.lock().unwrap_or_else(|e| e.into_inner());
+            *b = false;
+            // Wake every waiter — they all need to re-check whether
+            // the index is now ready or whether a retry is required.
+            self.gate.done.notify_all();
+        }
+    }
+
+    // Single-flight loop: spin only on logical state transitions
+    // (Idle→Building→Idle), never on raw timing. Each iteration either
+    // returns or sleeps on the condvar.
+    loop {
+        let mut building = ctx
+            .file_index_build_gate
+            .building
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+
+        // Re-evaluate `needs_rebuild` under the gate's mutex so that a
+        // builder that just released the slot can publish its result
+        // before we decide. (The `file_index` RwLock is taken briefly
+        // inside this expression — that read lock is not contended
+        // here because the only writer is the build path itself, which
+        // we are coordinating.)
+        let needs_rebuild = ctx.file_index_dirty.load(Ordering::Relaxed)
+            || ctx
+                .file_index
+                .read()
+                .map(|fi| fi.is_none())
+                .unwrap_or(true);
+
+        if !needs_rebuild {
+            return Ok(());
+        }
+
+        if *building {
+            // Another thread owns the slot. Block on the condvar; the
+            // RAII guard in the builder will notify_all on completion
+            // (success, error, or panic). After wake-up we loop and
+            // re-check, which is the correct response to spurious
+            // wake-ups too.
+            while *building {
+                building = ctx
+                    .file_index_build_gate
+                    .done
+                    .wait(building)
+                    .unwrap_or_else(|e| e.into_inner());
+            }
+            // Loop continues — re-checks `needs_rebuild` and either
+            // returns `Ok(())` (the previous build succeeded and is
+            // visible now) or takes the build slot ourselves (the
+            // previous build failed/panicked; index is still missing).
+            continue;
+        }
+
+        // We become the builder. Flip the flag while still holding the
+        // lock so no other thread can also enter this branch in the
+        // same instant. Then drop the lock so the actual build runs
+        // unsynchronised.
+        *building = true;
+        drop(building);
+
+        // From here until function return / unwind, _slot is alive and
+        // its Drop will reset `building=false` + `notify_all` waiters.
+        let _slot = BuildSlotGuard {
+            gate: &ctx.file_index_build_gate,
+        };
+
+        let new_index = build_fn()?; // ← `?` propagates; _slot drops on the way out
+
+        // Publish the freshly-built index and clear dirty flag *before*
+        // the slot guard drops, so waiters that wake up immediately
+        // observe `needs_rebuild == false`.
+        if let Ok(mut fi) = ctx.file_index.write() {
+            *fi = Some(new_index);
+        }
+        ctx.file_index_dirty.store(false, Ordering::Relaxed);
+        return Ok(());
+    }
+}
+
 /// Maximum number of line numbers to include per file entry.
 const MAX_LINES_PER_FILE: usize = 10;
 

@@ -102,6 +102,7 @@ fn test_handler_context_field_count_guard() {
         periodic_rescan_enabled: false,
         rescan_interval_sec: 300,
         branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        file_index_build_gate: Arc::new(crate::mcp::handlers::utils::FileIndexBuildGate::new()),
     };
     drop(_guard);
 }

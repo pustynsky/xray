@@ -1578,6 +1578,232 @@ fn test_inject_body_body_line_range_with_none_is_full_body() {
     assert_eq!(body[5].as_str().unwrap(), "line 8");
 }
 
+// ─── PERF-08: ensure_file_index single-flight gate tests ────────────
+
+mod ensure_file_index_tests {
+    use super::super::ensure_file_index;
+    use crate::FileIndex;
+    use crate::mcp::handlers::HandlerContext;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Barrier, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    /// Build a fresh `FileIndex` with no entries — cheap, suitable for
+    /// the single-flight tests where the *count* of build invocations
+    /// is the only thing under test, not the index contents themselves.
+    fn empty_index(root: &str) -> FileIndex {
+        FileIndex {
+            root: root.to_string(),
+            format_version: crate::FILE_INDEX_VERSION,
+            created_at: 0,
+            max_age_secs: 0,
+            entries: Vec::new(),
+            respect_git_exclude: false,
+        }
+    }
+
+    /// PERF-08 AC #1 — single-flight on cold start under contention.
+    /// Spawn 16 threads against a brand-new (`file_index = None`,
+    /// `dirty = true`) `HandlerContext`. They all race into
+    /// `ensure_file_index` simultaneously. Exactly one of them must
+    /// run the build closure; the other 15 must observe the freshly
+    /// built index without invoking `build_fn`. This pins the
+    /// single-flight contract — without the gate, every thread would
+    /// see `needs_rebuild=true` and run a parallel walk + 8 MB
+    /// allocation + on-disk save.
+    ///
+    /// A `Barrier` is used to maximise the race window, and a small
+    /// `sleep` inside the build closure widens it further so that
+    /// even on a fast machine the late waiters reliably arrive while
+    /// the slot is taken.
+    #[test]
+    fn test_ensure_file_index_single_flight_cold_start_16_threads() {
+        let ctx = Arc::new(HandlerContext::default());
+        let build_count = Arc::new(AtomicU64::new(0));
+        let barrier = Arc::new(Barrier::new(16));
+
+        let mut handles = Vec::with_capacity(16);
+        for _ in 0..16 {
+            let ctx = ctx.clone();
+            let build_count = build_count.clone();
+            let barrier = barrier.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                ensure_file_index(&ctx, || {
+                    build_count.fetch_add(1, Ordering::SeqCst);
+                    // Hold the slot long enough for late waiters to arrive
+                    // and find `building=true` — without this, fast machines
+                    // could let each thread complete in turn and the
+                    // single-flight semantics would never be exercised.
+                    thread::sleep(Duration::from_millis(50));
+                    Ok(empty_index("/tmp/perf08-cold"))
+                })
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked").expect("ensure_file_index failed");
+        }
+
+        let actual = build_count.load(Ordering::SeqCst);
+        assert_eq!(
+            actual, 1,
+            "PERF-08 single-flight: expected exactly 1 build invocation under 16-thread contention, got {}",
+            actual
+        );
+        assert!(
+            ctx.file_index.read().unwrap().is_some(),
+            "file_index must be populated after the cold-start race"
+        );
+        assert!(
+            !ctx.file_index_dirty.load(Ordering::Relaxed),
+            "dirty flag must be cleared after a successful build"
+        );
+    }
+
+    /// PERF-08 AC #2 — exactly one extra build per dirty signal.
+    ///
+    /// Sequence:
+    /// 1. Cold-start race with 16 threads → 1 build (the cold one).
+    /// 2. Watcher signals invalidation by setting `file_index_dirty=true`.
+    /// 3. 16 fresh threads race again → exactly 1 *additional* build.
+    ///
+    /// Total build count must be 2, proving the gate correctly resets
+    /// after each invalidation cycle (rejecting the `OnceCell` design
+    /// which lacks reset semantics).
+    #[test]
+    fn test_ensure_file_index_single_flight_after_dirty_signal() {
+        let ctx = Arc::new(HandlerContext::default());
+        let build_count = Arc::new(AtomicU64::new(0));
+
+        // Phase 1: cold-start race
+        let barrier1 = Arc::new(Barrier::new(16));
+        let mut handles = Vec::with_capacity(16);
+        for _ in 0..16 {
+            let ctx = ctx.clone();
+            let build_count = build_count.clone();
+            let barrier = barrier1.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                ensure_file_index(&ctx, || {
+                    build_count.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(30));
+                    Ok(empty_index("/tmp/perf08-dirty-1"))
+                })
+            }));
+        }
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        assert_eq!(build_count.load(Ordering::SeqCst), 1, "phase 1: cold build must run exactly once");
+
+        // Phase 2: simulate watcher invalidation
+        ctx.file_index_dirty.store(true, Ordering::Relaxed);
+
+        // Phase 3: rebuild race
+        let barrier2 = Arc::new(Barrier::new(16));
+        let mut handles = Vec::with_capacity(16);
+        for _ in 0..16 {
+            let ctx = ctx.clone();
+            let build_count = build_count.clone();
+            let barrier = barrier2.clone();
+            handles.push(thread::spawn(move || {
+                barrier.wait();
+                ensure_file_index(&ctx, || {
+                    build_count.fetch_add(1, Ordering::SeqCst);
+                    thread::sleep(Duration::from_millis(30));
+                    Ok(empty_index("/tmp/perf08-dirty-2"))
+                })
+            }));
+        }
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        assert_eq!(
+            build_count.load(Ordering::SeqCst),
+            2,
+            "PERF-08 reset semantics: cold build (1) + one rebuild after dirty signal (1) = 2 total; \
+             extra builds would mean the gate failed to suppress the second-wave race"
+        );
+    }
+
+    /// PERF-08 AC #3 — panic recovery.
+    ///
+    /// If the first build closure panics, the RAII guard inside the gate
+    /// must clear `building=false` and `notify_all` waiters so the next
+    /// caller can take over the slot — otherwise the gate would deadlock
+    /// permanently after any build failure that unwinds.
+    ///
+    /// We trigger a panic on the first call, catch it via
+    /// `catch_unwind`, then verify a fresh call succeeds and the index
+    /// is populated.
+    #[test]
+    fn test_ensure_file_index_recovers_after_builder_panic() {
+        let ctx = Arc::new(HandlerContext::default());
+        let attempt = Arc::new(Mutex::new(0u32));
+
+        let attempt_clone = attempt.clone();
+        let ctx_clone = ctx.clone();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            ensure_file_index(&ctx_clone, || {
+                *attempt_clone.lock().unwrap() += 1;
+                panic!("PERF-08 simulated builder panic");
+            })
+        }));
+        assert!(result.is_err(), "first call must propagate the panic");
+        assert_eq!(*attempt.lock().unwrap(), 1, "panicking closure ran once");
+        // Gate must be released even though build_fn unwound.
+        assert!(
+            !*ctx.file_index_build_gate.building.lock().unwrap(),
+            "RAII guard must reset building=false after a panic — otherwise next caller deadlocks"
+        );
+        // Index is still missing, dirty is still effectively true.
+        assert!(
+            ctx.file_index.read().unwrap().is_none(),
+            "panicking build must not have published an index"
+        );
+
+        // Second call must succeed (gate accepted a new builder).
+        ensure_file_index(&ctx, || {
+            *attempt.lock().unwrap() += 1;
+            Ok(empty_index("/tmp/perf08-recovery"))
+        })
+        .expect("second call must succeed after panic recovery");
+        assert_eq!(*attempt.lock().unwrap(), 2, "recovery build ran exactly once");
+        assert!(
+            ctx.file_index.read().unwrap().is_some(),
+            "recovery call must populate the index"
+        );
+    }
+
+    /// Defensive guard: when the index is already fresh
+    /// (`file_index = Some`, `dirty = false`), `ensure_file_index`
+    /// must return immediately without invoking `build_fn`. Without
+    /// this fast-path the gate would defeat the whole purpose of the
+    /// in-memory cache.
+    #[test]
+    fn test_ensure_file_index_skips_build_when_fresh() {
+        let ctx = Arc::new(HandlerContext::default());
+        // Pre-populate as if a previous build already ran.
+        *ctx.file_index.write().unwrap() = Some(empty_index("/tmp/perf08-fresh"));
+        ctx.file_index_dirty.store(false, Ordering::Relaxed);
+
+        let build_count = Arc::new(AtomicU64::new(0));
+        let bc = build_count.clone();
+        ensure_file_index(&ctx, || {
+            bc.fetch_add(1, Ordering::SeqCst);
+            Ok(empty_index("/tmp/perf08-should-not-run"))
+        })
+        .expect("ensure_file_index must succeed");
+        assert_eq!(
+            build_count.load(Ordering::SeqCst),
+            0,
+            "build closure must NOT run when the index is fresh and not dirty"
+        );
+    }
+}
+
 
 // ─── name_similarity tests ─────────────────────────────────────────
 
