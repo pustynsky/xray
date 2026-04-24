@@ -1184,7 +1184,19 @@ fn handle_multi_file_edit(
                     file_result["skippedReason"] = json!(reason);
                 }
                 None => {
-                    file_result["contentIndexUpdated"] = json!(true);
+                    // Mirror the single-file path: derive `contentIndexUpdated`
+                    // from the actual batch outcome, NOT from "we tried". When
+                    // the content-index lock was poisoned, `reindex_paths_sync`
+                    // returns `content_updated == 0` and sets
+                    // `content_lock_poisoned = true` (surfaced via the
+                    // batch-level `summary.reindexWarning`). Reporting `true`
+                    // here would tell the caller "your edit landed in the
+                    // index" while the warning says the opposite — caller-side
+                    // staleness checks (e.g. follow-up `xray_grep` looking for
+                    // the new symbol) would then be ignored.
+                    file_result["contentIndexUpdated"] = json!(
+                        batch_stats.as_ref().is_some_and(|s| s.content_updated > 0)
+                    );
                     file_result["defIndexUpdated"] = json!(
                         ctx.def_index.is_some()
                             && batch_stats.as_ref().is_some_and(|s| s.def_updated > 0)
@@ -2012,14 +2024,30 @@ fn apply_literal_replace(
         return Err(format!("Text not found: \"{}\"{}{}", truncate_for_display(search), hint, flex_hint));
     }
 
-    // Check expectedContext on first match
+    // Check expectedContext against the position that will actually be
+    // replaced. For `occurrence: 0` (replace-all) we still validate the first
+    // match — the contract is "the user-supplied context must surround at
+    // least one of the matches we're about to touch", and matching against
+    // the first preserves the historical error message. For `occurrence: N`
+    // (1-indexed nth-match), validate THAT match: otherwise a caller who
+    // explicitly targets the second `Foo` with a context that disambiguates
+    // it from the first `Foo` would see the gate fail on the first match's
+    // surroundings and never reach their intended replacement.
     if let Some(ref ctx_text) = edit.expected_context {
-        let first_len = if let Some(ref lens) = search_result.flex_match_lens {
-            lens[0]
+        let target_idx = match edit.occurrence {
+            0 => 0,
+            n if n <= count => n - 1,
+            // Out-of-range — clamp to first match so the context check
+            // doesn't panic before the canonical "found only N time(s)"
+            // error fires below.
+            _ => 0,
+        };
+        let target_len = if let Some(ref lens) = search_result.flex_match_lens {
+            lens[target_idx]
         } else {
             search_result.match_len
         };
-        check_expected_context(result, search_result.positions[0], first_len, ctx_text)?;
+        check_expected_context(result, search_result.positions[target_idx], target_len, ctx_text)?;
     }
 
     // Apply replacement

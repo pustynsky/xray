@@ -1286,6 +1286,124 @@ fn test_expected_context_optional() {
     assert_eq!(content, "goodbye world\n");
 }
 
+// ─── expectedContext + occurrence: validate the *targeted* match ─────────
+
+#[test]
+fn test_expected_context_validates_targeted_occurrence_not_first() {
+    // Pre-fix: `check_expected_context` was always called against
+    // `positions[0]` (the FIRST match), even when `occurrence: 2` explicitly
+    // targeted the second match. A caller passing context that disambiguates
+    // the second occurrence from the first would see the gate fail on the
+    // first match's surroundings and never reach their intended replacement.
+    //
+    // The window is ±5 lines so the two `Foo` matches must be more than 5
+    // lines apart for the disambiguation to be observable.
+    let body = "// alpha section\nFoo\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\n// beta section\nFoo\n";
+    let (tmp, filename, path) = create_temp_file(body);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "Foo",
+                "replace": "Bar",
+                "occurrence": 2,
+                "expectedContext": "// beta section"
+            }
+        ]
+    }));
+
+    assert!(
+        !result.is_error,
+        "expectedContext on the targeted (2nd) occurrence must succeed, got: {}",
+        result.content[0].text
+    );
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(
+        content.contains("// alpha section\nFoo\n"),
+        "First `Foo` must remain untouched, got: {:?}", content
+    );
+    assert!(
+        content.contains("// beta section\nBar\n"),
+        "Second `Foo` (matching the beta-section context) must be replaced, got: {:?}", content
+    );
+}
+
+#[test]
+fn test_expected_context_rejects_targeted_occurrence_with_wrong_context() {
+    // Symmetric guard: if the user targets `occurrence: 2` but supplies the
+    // FIRST match's context, the gate must reject — pre-fix this would have
+    // PASSED (because the gate only ever looked at the first match), then
+    // silently replaced the second match against the wrong-context contract.
+    //
+    // Spacing matches the test above: >5 lines between matches so each
+    // context is OUTSIDE the other's ±5-line window.
+    let body = "// alpha section\nFoo\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\n// beta section\nFoo\n";
+    let (tmp, filename, path) = create_temp_file(body);
+    let ctx = make_ctx(tmp.path());
+
+    let original = std::fs::read_to_string(&path).unwrap();
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "Foo",
+                "replace": "Bar",
+                "occurrence": 2,
+                // Context belongs to the FIRST match — must NOT validate the 2nd.
+                "expectedContext": "// alpha section"
+            }
+        ]
+    }));
+
+    assert!(
+        result.is_error,
+        "expectedContext targeting 2nd occurrence with 1st-match context must fail, got success: {}",
+        result.content[0].text
+    );
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after, original, "File must not be modified when context check rejects");
+}
+
+#[test]
+fn test_expected_context_occurrence_zero_replace_all_uses_first_match_context() {
+    // Back-compat guard: `occurrence: 0` (replace-all, the default) preserves
+    // the historical behaviour of validating against the first match's
+    // context. The gate's contract for replace-all is "the user-supplied
+    // context must surround at least one of the matches we're about to
+    // touch", and matching against the first preserves both the historical
+    // error message and the all-or-nothing semantics.
+    let (tmp, filename, path) = create_temp_file(
+        "// alpha section\nFoo\n// beta section\nFoo\n",
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "Foo",
+                "replace": "Bar",
+                // occurrence: 0 (default) — replace-all
+                "expectedContext": "// alpha section"
+            }
+        ]
+    }));
+
+    assert!(
+        !result.is_error,
+        "Replace-all with first-match context must succeed: {}",
+        result.content[0].text
+    );
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(
+        content, "// alpha section\nBar\n// beta section\nBar\n",
+        "Replace-all replaces both matches"
+    );
+}
+
 #[test]
 fn test_expected_context_with_insert_after() {
     let (tmp, filename, path) = create_temp_file("using System;\nusing System.IO;\n\nclass Foo {}\n");
@@ -3522,6 +3640,103 @@ fn test_sync_reindex_multi_file_mixed_skipped_reasons() {
     assert_eq!(bad["contentIndexUpdated"], json!(false),
         "out-of-scope .txt file must NOT be sync-indexed");
     assert_eq!(bad["skippedReason"], json!("extensionNotIndexed"));
+}
+
+#[test]
+fn test_sync_reindex_multi_file_poisoned_content_lock_reports_false() {
+    // Pre-fix: `handle_multi_file_edit` set
+    // `contentIndexUpdated = true` UNCONDITIONALLY for every non-skipped file
+    // — even when the underlying `reindex_paths_sync` call returned
+    // `content_lock_poisoned = true` and `content_updated = 0`. The
+    // batch-level `summary.reindexWarning` told the caller "the index lock
+    // was poisoned, FS watcher will reconcile" but the per-file
+    // `contentIndexUpdated: true` told the opposite — caller-side staleness
+    // checks (e.g. an immediate follow-up `xray_grep` looking for the new
+    // symbol) would trust the per-file telemetry and ignore the warning.
+    //
+    // Post-fix: per-file `contentIndexUpdated` mirrors the single-file path
+    // and is derived from `batch_stats.content_updated > 0`, which is `false`
+    // when the lock was poisoned.
+    let tmp = tempfile::tempdir().unwrap();
+    let f1 = tmp.path().join("a.cs");
+    let f2 = tmp.path().join("b.cs");
+    std::fs::write(&f1, "class A {}\n").unwrap();
+    std::fs::write(&f2, "class B {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+
+    // Poison the content-index RwLock — same recipe as
+    // `test_process_batch_returns_false_on_poisoned_content_lock` in
+    // `watcher_tests.rs`.
+    let index_clone = ctx.index.clone();
+    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = index_clone.write().unwrap();
+        panic!("intentional panic to poison RwLock");
+    }));
+    assert!(ctx.index.write().is_err(), "Content lock must be poisoned");
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["a.cs", "b.cs"],
+        "edits": [{"search": "class", "replace": "struct"}],
+    }));
+    assert!(
+        !result.is_error,
+        "Multi-file edit must still return success even when index lock is poisoned (writes succeeded; only the post-write reindex failed): {}",
+        result.content[0].text
+    );
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Batch-level warning must surface the lock-poison condition.
+    assert!(
+        v["summary"]["reindexWarning"].is_string(),
+        "summary.reindexWarning must be present when lock is poisoned, got: {}",
+        v["summary"]
+    );
+
+    // Per-file telemetry must NOT lie about the index state.
+    let results = v["results"].as_array().expect("results must be array");
+    assert_eq!(results.len(), 2);
+    for entry in results {
+        assert_eq!(
+            entry["contentIndexUpdated"], json!(false),
+            "Poisoned content lock → per-file contentIndexUpdated must be false, got: {}",
+            entry
+        );
+    }
+}
+
+#[test]
+fn test_sync_reindex_multi_file_dry_run_omits_index_telemetry() {
+    // Regression guard: the dry-run path doesn't touch the index, so per-file
+    // `contentIndexUpdated` / `defIndexUpdated` / `fileListInvalidated` MUST
+    // NOT be emitted at all (mirrors single-file dry-run behaviour). Pre-fix
+    // this happened to work because the "always true" branch was inside
+    // `if !dry_run`, but the new derived-from-batch logic must preserve it.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("a.cs"), "class A {}\n").unwrap();
+    std::fs::write(tmp.path().join("b.cs"), "class B {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["a.cs", "b.cs"],
+        "edits": [{"search": "class", "replace": "struct"}],
+        "dryRun": true,
+    }));
+    assert!(!result.is_error, "dry-run must succeed: {}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = v["results"].as_array().expect("results array");
+    for entry in results {
+        assert!(
+            entry.get("contentIndexUpdated").is_none(),
+            "dry-run must NOT emit contentIndexUpdated, got: {}",
+            entry
+        );
+        assert!(
+            entry.get("defIndexUpdated").is_none(),
+            "dry-run must NOT emit defIndexUpdated, got: {}",
+            entry
+        );
+    }
 }
 
 #[test]
