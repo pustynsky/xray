@@ -72,7 +72,7 @@ pub fn debug_log_path_for(index_base: &std::path::Path, server_dir: &str) -> Pat
 /// writes a header line, and sets the global enable flag.
 ///
 /// The log filename uses the same semantic prefix as index files (e.g.,
-/// `repos_shared_00343f32.debug.log`) so multiple servers don't overwrite
+/// `repos_<repo>_<hash>.debug.log`) so multiple servers don't overwrite
 /// each other's logs.
 ///
 /// Must be called once at startup before any `log_memory()` / `log_request()` / `log_response()` calls.
