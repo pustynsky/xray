@@ -1802,6 +1802,100 @@ mod ensure_file_index_tests {
             "build closure must NOT run when the index is fresh and not dirty"
         );
     }
+
+    /// PERF-08 follow-up regression — mid-build invalidation must NOT be lost.
+    ///
+    /// Pre-fix the builder did `file_index_dirty.store(false)` *after*
+    /// publishing the index. If a watcher set `dirty=true` *during* the
+    /// in-flight build, that signal was unconditionally erased: a single
+    /// AtomicBool slot, builder writes `false` last → the next caller
+    /// observed `dirty=false, file_index=Some` and **skipped** the
+    /// rebuild despite a stale snapshot. Post-fix the builder swaps
+    /// `dirty=false` *before* running `build_fn`, so any signal arriving
+    /// during the build is preserved as a fresh `true` and triggers one
+    /// more rebuild on the next call.
+    ///
+    /// We exercise this by injecting `dirty=true` from inside the build
+    /// closure (the simplest way to model "watcher signal arriving while
+    /// the build is still running"). After the first call returns, dirty
+    /// MUST be observable as `true` so the next caller rebuilds.
+    #[test]
+    fn test_ensure_file_index_preserves_mid_build_dirty_signal() {
+        let ctx = Arc::new(HandlerContext::default());
+        let build_count = Arc::new(AtomicU64::new(0));
+
+        // First build: simulate a watcher signal landing mid-build.
+        let bc = build_count.clone();
+        let ctx2 = ctx.clone();
+        ensure_file_index(&ctx, || {
+            bc.fetch_add(1, Ordering::SeqCst);
+            // Watcher signals invalidation *during* the build.
+            ctx2.file_index_dirty.store(true, Ordering::Relaxed);
+            thread::sleep(Duration::from_millis(10));
+            Ok(empty_index("/tmp/perf08-mid-build-dirty"))
+        })
+        .unwrap();
+
+        assert!(
+            ctx.file_index_dirty.load(Ordering::Relaxed),
+            "mid-build watcher signal MUST survive the builder's pre-build dirty clear — \
+             pre-fix the unconditional `store(false)` *after* publish erased this signal, \
+             leaving the cache stale until the next watcher event"
+        );
+
+        // Second call: dirty was preserved, so build_fn must run again.
+        let bc = build_count.clone();
+        ensure_file_index(&ctx, || {
+            bc.fetch_add(1, Ordering::SeqCst);
+            Ok(empty_index("/tmp/perf08-mid-build-dirty-2"))
+        })
+        .unwrap();
+        assert_eq!(
+            build_count.load(Ordering::SeqCst),
+            2,
+            "second call MUST rebuild because mid-build dirty signal was preserved"
+        );
+        assert!(
+            !ctx.file_index_dirty.load(Ordering::Relaxed),
+            "after the second build (no further mid-build signal) dirty must be back to false"
+        );
+    }
+
+    /// PERF-08 follow-up regression — failed build restores dirty flag.
+    ///
+    /// The pre-build dirty swap means a failed build that returns
+    /// `Err(...)` must put `dirty` back to its pre-build value,
+    /// otherwise the next caller could see `dirty=false,
+    /// file_index=None` and the distinction between 'never built' and
+    /// 'built and stale' would collapse. The `DirtyRestoreGuard` RAII
+    /// type guarantees restoration on `?` / panic / any non-success exit.
+    #[test]
+    fn test_ensure_file_index_restores_dirty_on_build_error() {
+        let ctx = Arc::new(HandlerContext::default());
+        // Cold start: dirty starts true via Default. Confirm this assumption
+        // explicitly so the test fails loudly if the default ever changes.
+        assert!(
+            ctx.file_index_dirty.load(Ordering::Relaxed),
+            "HandlerContext::default() must start with dirty=true"
+        );
+
+        let result = ensure_file_index(&ctx, || {
+            Err::<crate::FileIndex, _>("PERF-08 simulated build failure".to_string())
+        });
+        assert!(result.is_err(), "build error must propagate");
+
+        assert!(
+            ctx.file_index_dirty.load(Ordering::Relaxed),
+            "DirtyRestoreGuard must put dirty=true back after a failed build, otherwise \
+             a subsequent caller could observe `dirty=false, file_index=None` and the \
+             distinction between 'never built' and 'built and stale' would collapse"
+        );
+        assert!(
+            ctx.file_index.read().unwrap().is_none(),
+            "failed build must not have published any index"
+        );
+    }
+
 }
 
 

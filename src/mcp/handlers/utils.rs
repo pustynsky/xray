@@ -436,6 +436,27 @@ where
         }
     }
 
+    /// RAII guard: restores `file_index_dirty=true` if the build does
+    /// NOT complete successfully (early return via `?`, panic, etc.).
+    /// We cleared `dirty` *before* the build (single-flight guarantee
+    /// against lost watcher invalidations — see `pre_build_dirty` swap
+    /// below) so a failed build must put it back, otherwise the next
+    /// caller would skip the rebuild on a still-stale signal.
+    struct DirtyRestoreGuard<'a> {
+        ctx: &'a HandlerContext,
+        pre_build_dirty: bool,
+        armed: bool,
+    }
+    impl Drop for DirtyRestoreGuard<'_> {
+        fn drop(&mut self) {
+            if self.armed && self.pre_build_dirty {
+                self.ctx
+                    .file_index_dirty
+                    .store(true, Ordering::Relaxed);
+            }
+        }
+    }
+
     // Single-flight loop: spin only on logical state transitions
     // (Idle→Building→Idle), never on raw timing. Each iteration either
     // returns or sleeps on the condvar.
@@ -496,15 +517,32 @@ where
             gate: &ctx.file_index_build_gate,
         };
 
-        let new_index = build_fn()?; // ← `?` propagates; _slot drops on the way out
+        // Clear the dirty flag BEFORE running `build_fn` (not after) so
+        // that any watcher signal arriving DURING the build is preserved
+        // — the next caller will then rebuild against the new fs state.
+        // Pre-fix this used an unconditional `store(false)` *after*
+        // publishing the index, which silently erased mid-build
+        // invalidations and left the cache stale until the next watcher
+        // event after the build finished.
+        let pre_build_dirty = ctx.file_index_dirty.swap(false, Ordering::Relaxed);
+        let mut restore = DirtyRestoreGuard {
+            ctx,
+            pre_build_dirty,
+            armed: true,
+        };
 
-        // Publish the freshly-built index and clear dirty flag *before*
-        // the slot guard drops, so waiters that wake up immediately
-        // observe `needs_rebuild == false`.
+        let new_index = build_fn()?; // ← `?` propagates; restore + _slot drop on the way out
+
+        // Publish the freshly-built index. We do NOT touch
+        // `file_index_dirty` here — it's either still `false` (no
+        // watcher signal during build, our pre-build swap is the
+        // current state) or has been re-set to `true` by a watcher
+        // mid-build (the next caller will rebuild, exactly as
+        // intended). Disarm the restore guard now that build succeeded.
         if let Ok(mut fi) = ctx.file_index.write() {
             *fi = Some(new_index);
         }
-        ctx.file_index_dirty.store(false, Ordering::Relaxed);
+        restore.armed = false;
         return Ok(());
     }
 }
