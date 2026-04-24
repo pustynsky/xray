@@ -1692,3 +1692,92 @@ fn test_chunked_def_build_single_vs_multi_thread_consistency() {
     assert_eq!(calls_single, calls_multi,
         "Single-threaded and multi-threaded builds should produce same call site count");
 }
+
+// ─── Stale `files` counter regression tests ─────────────────────────
+//
+// Regression coverage for `user-stories/stale-content-index-files-counter.md`
+// — definition-index half. Mirrors `live_file_count_*` tests in watcher_tests.rs.
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn def_live_file_count_matches_path_to_id_after_removal() {
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("keep.cs"), "public class Keep { }").unwrap();
+    std::fs::write(dir.join("gone.cs"), "public class Gone { }").unwrap();
+
+    let index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+    assert_eq!(index.live_file_count(), 2, "precondition: two live files");
+    let arc = Arc::new(RwLock::new(index));
+
+    std::fs::remove_file(dir.join("gone.cs")).unwrap();
+    let extensions = vec!["cs".to_string()];
+    let (_added, _modified, removed) = incremental::reconcile_definition_index_nonblocking(
+        &arc, &dir.to_string_lossy(), &extensions, false,
+    );
+    assert_eq!(removed, 1, "reconciliation must detect the removed file");
+
+    let idx = arc.read().unwrap();
+    assert_eq!(idx.live_file_count(), 1,
+        "after removing 1 of 2 files, live_file_count must report 1 (not Vec capacity 2)");
+    // file_id stability: files Vec must NOT shrink — file_ids stay valid.
+    assert_eq!(idx.files.len(), 2,
+        "files Vec is append-only — capacity must stay at 2");
+    let tombstones = idx.files.iter().filter(|s| s.is_empty()).count();
+    assert_eq!(tombstones, 1, "removed file's slot must be tombstoned (empty string)");
+    assert_eq!(idx.path_to_id.len(), 1, "path_to_id must reflect the live set");
+}
+
+#[test]
+fn def_live_file_count_falls_back_to_path_to_id() {
+    use std::path::PathBuf;
+    let mut idx = DefinitionIndex::default();
+    idx.files.push("a.rs".to_string());
+    idx.files.push(String::new()); // tombstone
+    idx.files.push("c.rs".to_string());
+    idx.path_to_id.insert(PathBuf::from("a.rs"), 0);
+    idx.path_to_id.insert(PathBuf::from("c.rs"), 2);
+
+    assert_eq!(idx.live_file_count(), 2,
+        "live_file_count == path_to_id.len(), tombstone slot must NOT be counted");
+    assert_eq!(idx.files.len(), 3, "Vec capacity preserved for file_id stability");
+}
+
+#[cfg(feature = "lang-csharp")]
+#[test]
+fn def_index_meta_uses_live_count_after_removal() {
+    use std::sync::{Arc, RwLock};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("k.cs"), "public class K { }").unwrap();
+    std::fs::write(dir.join("g.cs"), "public class G { }").unwrap();
+
+    let index = build_definition_index(&DefIndexArgs {
+        dir: dir.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        respect_git_exclude: false,
+    });
+    let arc = Arc::new(RwLock::new(index));
+    std::fs::remove_file(dir.join("g.cs")).unwrap();
+    let extensions = vec!["cs".to_string()];
+    let _ = incremental::reconcile_definition_index_nonblocking(
+        &arc, &dir.to_string_lossy(), &extensions, false,
+    );
+
+    let idx = arc.read().unwrap();
+    let meta = crate::index::definition_index_meta(&idx);
+    assert_eq!(meta.files, 1,
+        "IndexMeta.files MUST be the live count, not the Vec capacity \
+         (cross-session ratchet bug)");
+}
+
+

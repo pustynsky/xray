@@ -566,13 +566,20 @@ fn update_content_index(
                 batch_purge_files(&mut idx.index, &purge_ids);
             }
 
-            // Process removed files: update path_to_id and zero token counts
+            // Process removed files: update path_to_id, zero token counts,
+            // tombstone the files[] slot. We never reuse file_id, so the slot
+            // stays in the Vec as an empty string — it's no longer counted as
+            // a live file (see ContentIndex::live_file_count) but file_id
+            // assignments remain stable.
             for path in removed_clean {
                 let fid = idx.path_to_id.as_ref()
                     .and_then(|p2id| p2id.get(path).copied());
                 if let Some(fid) = fid {
                     if (fid as usize) < idx.file_token_counts.len() {
                         idx.file_token_counts[fid as usize] = 0;
+                    }
+                    if (fid as usize) < idx.files.len() {
+                        idx.files[fid as usize].clear();
                     }
                     if let Some(ref mut p2id) = idx.path_to_id {
                         p2id.remove(path);
@@ -756,21 +763,26 @@ fn periodic_autosave(
     let start = std::time::Instant::now();
     let mut saved = Vec::new();
 
-    // Save content index
+    // Save content index.
+    // Gate: `idx.files.is_empty()` — allocator-capacity check, NOT live count.
+    // Rationale: if all files were removed during this session, `live_file_count() == 0`
+    // but the index is still dirty (the on-disk copy holds stale entries). We MUST
+    // checkpoint that "now empty" state so a forced kill doesn't resurrect them.
+    // We only skip when the index has never held any file (allocator never grew).
     match index.read() {
         Ok(idx) => {
             if !idx.files.is_empty() {
                 if let Err(e) = crate::save_content_index(&idx, index_base) {
                     warn!(error = %e, "Periodic autosave: failed to save content index");
                 } else {
-                    saved.push(format!("content({} files)", idx.files.len()));
+                    saved.push(format!("content({} files)", idx.live_file_count()));
                 }
             }
         }
         Err(e) => warn!(error = %e, "Periodic autosave: failed to read content index"),
     }
 
-    // Save definition index
+    // Save definition index — same allocator-capacity gate as above.
     if let Some(def_idx) = def_index {
         match def_idx.read() {
             Ok(idx) => {
@@ -818,7 +830,12 @@ pub(crate) fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
 pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
     let mut path_to_id: std::collections::HashMap<PathBuf, u32> = std::collections::HashMap::new();
 
+    // Skip empty (tombstoned) slots — they correspond to files that were
+    // removed in a previous session. Without this filter a legacy on-disk
+    // index containing tombstones would resurrect them via path_to_id and
+    // the next watcher reconcile would re-tombstone them anyway.
     for (i, path) in index.files.iter().enumerate() {
+        if path.is_empty() { continue; }
         path_to_id.insert(PathBuf::from(path), i as u32);
     }
 
@@ -1495,13 +1512,17 @@ fn reconcile_content_index(
                 batch_purge_files(&mut idx.index, &purge_ids);
             }
 
-            // Process removed files: update path_to_id and zero token counts
+            // Process removed files: update path_to_id, zero token counts,
+            // tombstone the files[] slot (see comment in update_content_index).
             for path in &to_remove {
                 let fid = idx.path_to_id.as_ref()
                     .and_then(|p2id| p2id.get(path).copied());
                 if let Some(fid) = fid {
                     if (fid as usize) < idx.file_token_counts.len() {
                         idx.file_token_counts[fid as usize] = 0;
+                    }
+                    if (fid as usize) < idx.files.len() {
+                        idx.files[fid as usize].clear();
                     }
                     if let Some(ref mut p2id) = idx.path_to_id {
                         p2id.remove(path);

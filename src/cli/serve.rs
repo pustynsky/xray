@@ -276,14 +276,14 @@ fn load_or_build_content_index(
         );
         info!(
             elapsed_ms = format_args!("{:.1}", load_elapsed.as_secs_f64() * 1000.0),
-            files = idx.files.len(),
+            files = idx.live_file_count(),
             tokens = idx.index.len(),
             cache_age = %cache_age,
             "Content index loaded from disk"
         );
         crate::index::log_memory(&format!(
             "serve: content loaded [{}] (files={}, tokens={}, trigrams={}, age={})",
-            load_method, idx.files.len(), idx.index.len(),
+            load_method, idx.live_file_count(), idx.index.len(),
             idx.trigram.trigram_map.len(), cache_age
         ));
         let mut idx = if watch {
@@ -526,7 +526,7 @@ fn load_or_build_definition_index(
         if let Some(idx) = def_loaded {
             let def_elapsed = def_start.elapsed();
             let cache_age = format_cache_age(idx.created_at);
-            let def_file_count = idx.files.len();
+            let def_file_count = idx.live_file_count();
             let def_count = idx.definitions.len();
             effective_respect_git_exclude = super::resolve_respect_git_exclude(
                 "serve/definitions",

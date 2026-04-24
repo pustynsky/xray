@@ -759,7 +759,11 @@ fn test_estimate_definition_index_memory_nonempty() {
         attribute_index: std::collections::HashMap::new(),
         base_type_index: std::collections::HashMap::new(),
         file_index,
-        path_to_id: std::collections::HashMap::new(),
+        path_to_id: {
+            let mut m = std::collections::HashMap::new();
+            m.insert(std::path::PathBuf::from("src/UserService.cs"), 0u32);
+            m
+        },
         method_calls,
         ..Default::default()
     };
@@ -1531,3 +1535,47 @@ fn test_read_format_version_picks_up_stored_value_not_constant() {
     assert_eq!(read_version, Some(0xDEAD_BEEFu32),
         "version reader must return the actually-stored u32, not a constant or stale read");
 }
+
+// ─── Stale `files` counter regression — memory estimate path ────────
+//
+// Counterpart of `live_file_count_*` tests in watcher/definitions: the
+// in-memory size estimate must use live count too, otherwise tombstoned
+// slots silently inflate `memoryEstimate.contentIndex.fileCount` in
+// `xray_info`. See `user-stories/stale-content-index-files-counter.md`.
+
+#[test]
+fn estimate_content_index_memory_uses_live_count_with_tombstones() {
+    use std::path::PathBuf;
+    let mut p2id = HashMap::new();
+    p2id.insert(PathBuf::from("alive_a.cs"), 0u32);
+    p2id.insert(PathBuf::from("alive_b.cs"), 2u32);
+    let idx = code_xray::ContentIndex {
+        root: ".".to_string(),
+        // Slot 1 is tombstoned (file removed): empty string + missing from path_to_id.
+        files: vec!["alive_a.cs".to_string(), String::new(), "alive_b.cs".to_string()],
+        index: HashMap::new(),
+        total_tokens: 0,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![5, 0, 5],
+        path_to_id: Some(p2id),
+        ..Default::default()
+    };
+    let estimate = crate::index::estimate_content_index_memory(&idx);
+    assert_eq!(estimate["fileCount"], 2,
+        "fileCount in memory estimate MUST be live count, not Vec capacity");
+}
+
+#[test]
+fn estimate_definition_index_memory_uses_live_count_with_tombstones() {
+    use std::path::PathBuf;
+    let mut idx = crate::definitions::DefinitionIndex::default();
+    idx.root = ".".to_string();
+    idx.files = vec!["alive_a.rs".to_string(), String::new(), "alive_b.rs".to_string()];
+    idx.path_to_id.insert(PathBuf::from("alive_a.rs"), 0);
+    idx.path_to_id.insert(PathBuf::from("alive_b.rs"), 2);
+
+    let estimate = crate::index::estimate_definition_index_memory(&idx);
+    assert_eq!(estimate["fileCount"], 2,
+        "fileCount in memory estimate MUST be live count, not Vec capacity");
+}
+

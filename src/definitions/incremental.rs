@@ -319,6 +319,12 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
 pub fn remove_file_from_def_index(index: &mut DefinitionIndex, path: &Path) {
     if let Some(&file_id) = index.path_to_id.get(path) {
         remove_file_definitions(index, file_id);
+        // Tombstone the files[] slot. file_id is never reused, so the entry
+        // stays in the Vec as an empty string — no longer counted as a live
+        // file (see DefinitionIndex::live_file_count).
+        if (file_id as usize) < index.files.len() {
+            index.files[file_id as usize].clear();
+        }
         index.path_to_id.remove(path);
     }
 }
@@ -692,10 +698,17 @@ pub fn reconcile_definition_index_nonblocking(
             }
         };
 
-        // Remove deleted files
+        // Remove deleted files: drop secondary indexes, tombstone the
+        // files[] slot. We never reuse file_id, so the slot stays in the
+        // Vec as an empty string — it's no longer counted as a live file
+        // (see DefinitionIndex::live_file_count) but file_id assignments
+        // remain stable.
         for path in &to_remove {
             if let Some(&file_id) = idx.path_to_id.get(path) {
                 remove_file_definitions(&mut idx, file_id);
+                if (file_id as usize) < idx.files.len() {
+                    idx.files[file_id as usize].clear();
+                }
                 idx.path_to_id.remove(path);
             }
         }

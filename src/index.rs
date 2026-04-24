@@ -323,13 +323,23 @@ pub fn estimate_content_index_memory(idx: &ContentIndex) -> serde_json::Value {
     let total_tri_postings: usize = idx.trigram.trigram_map.values().map(|v| v.len()).sum();
     let trigram_map_mb = (idx.trigram.trigram_map.len() as f64 * 80.0 + total_tri_postings as f64 * 4.0) / 1_048_576.0;
 
-    // Files estimate
-    let avg_file_path_len = if !idx.files.is_empty() {
-        let sample = idx.files.len().min(1000);
-        let total: usize = idx.files.iter().take(sample).map(|f| f.len()).sum();
-        total as f64 / sample as f64
-    } else {
-        50.0
+    // Files estimate. `idx.files` is an append-only file_id allocator: removed
+    // entries are tombstoned via `String::clear()` but the slot AND its String
+    // capacity are retained for file_id stability. So the actual memory cost is
+    // proportional to `files.len()` (allocator capacity), NOT `live_file_count()`.
+    // Average length is sampled from live (non-empty) paths only — tombstoned
+    // slots have len()==0 but their original capacity is unchanged, so we use
+    // the live average as a reasonable proxy for the retained capacity.
+    let live_files = idx.live_file_count();
+    let avg_file_path_len = {
+        let mut sum = 0usize;
+        let mut taken = 0usize;
+        for f in idx.files.iter().filter(|s| !s.is_empty()) {
+            sum += f.len();
+            taken += 1;
+            if taken >= 1000 { break; }
+        }
+        if taken > 0 { sum as f64 / taken as f64 } else { 50.0 }
     };
     let files_mb = idx.files.len() as f64 * (24.0 + avg_file_path_len) / 1_048_576.0;
 
@@ -348,7 +358,7 @@ pub fn estimate_content_index_memory(idx: &ContentIndex) -> serde_json::Value {
         "uniqueTokens": idx.index.len(),
         "totalPostings": full_total_postings,
         "trigramCount": idx.trigram.trigram_map.len(),
-        "fileCount": idx.files.len(),
+        "fileCount": live_files,
     })
 }
 
@@ -368,7 +378,11 @@ pub fn estimate_definition_index_memory(idx: &crate::definitions::DefinitionInde
     let total_calls: usize = idx.method_calls.values().map(|v| v.len()).sum();
     let calls_mb = total_calls as f64 * 100.0 / 1_048_576.0;
 
-    // Files: ~74 bytes avg (24 String header + ~50 avg path length)
+    // Files: ~74 bytes avg (24 String header + ~50 avg path length).
+    // `idx.files` is an append-only allocator with tombstones (`String::clear()`
+    // keeps capacity), so memory cost tracks `files.len()`, not `live_file_count()`.
+    // We expose `fileCount: live_files` separately for user-visible stats.
+    let live_files = idx.live_file_count();
     let files_mb = idx.files.len() as f64 * 74.0 / 1_048_576.0;
 
     // Indexes (name_index, kind_index, file_index, etc.):
@@ -400,7 +414,7 @@ pub fn estimate_definition_index_memory(idx: &crate::definitions::DefinitionInde
         "totalEstimateMB": round1(total_mb),
         "definitionCount": active_defs,
         "callSiteCount": total_calls,
-        "fileCount": idx.files.len(),
+        "fileCount": live_files,
         "codeStatsCount": idx.code_stats.len(),
     })
 }
@@ -536,7 +550,7 @@ pub fn content_index_meta(idx: &crate::ContentIndex) -> IndexMeta {
         root: idx.root.clone(),
         created_at: idx.created_at,
         max_age_secs: idx.max_age_secs,
-        files: idx.files.len(),
+        files: idx.live_file_count(),
         extensions: idx.extensions.clone(),
         details: IndexDetails::Content {
             unique_tokens: idx.index.len(),
@@ -569,7 +583,7 @@ pub fn definition_index_meta(idx: &crate::definitions::DefinitionIndex) -> Index
         root: idx.root.clone(),
         created_at: idx.created_at,
         max_age_secs: 0,
-        files: idx.files.len(),
+        files: idx.live_file_count(),
         extensions: idx.extensions.clone(),
         details: IndexDetails::Definition {
             definitions: active_defs,

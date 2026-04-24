@@ -1245,6 +1245,161 @@ $testBlocks += , {
     }
 }
 
+# T-INFO-NO-STALE-FILES-AFTER-REMOVAL: xray_info reports LIVE file count after
+# cross-session file deletion. Regression test for the original ratchet bug
+# documented in user-stories/stale-content-index-files-counter.md.
+#
+# The bug was specifically a CROSS-SESSION ratchet: session A built index with
+# N files, session A removed K files (in-memory live drops to N-K, but
+# `idx.files.len()` stayed N), session A persisted .meta with files=N, session
+# B loaded N from disk and reported N forever. So this test runs TWO server
+# sessions over the same on-disk index to exercise the persisted .meta path.
+# A single-session test would not have caught the persisted-metadata regression.
+#
+# We also assert that session B actually LOADED the on-disk index (not silently
+# fell back to a fresh background rebuild from the live filesystem) by grepping
+# session B stderr for the "Content index loaded from disk" log line. Without
+# this guard the test could false-pass: a rebuild from FS naturally finds 2
+# files even if the load+reconcile path was broken.
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-INFO-NO-STALE-FILES-AFTER-REMOVAL info-files-no-cross-session-ratchet"
+    $proc = $null
+    $errEvent = $null
+    $outEvent = $null
+    $tmpDir = $null
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_stale_files_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Step 1: 3 .cs files + build content index. .meta now persists files=3.
+        for ($i = 1; $i -le 3; $i++) {
+            Set-Content -Path (Join-Path $tmpDir "File$i.cs") -Value "public class C$i { }"
+        }
+        & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
+
+        # Step 2: Session A — start server, query xray_info to confirm baseline
+        # files=3, then exit cleanly so the .meta is rewritten with whatever the
+        # in-memory state holds. Pre-fix this would persist the stale count
+        # forever even after the deletion in step 3 happened across sessions.
+        $msgsA = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}'
+        ) -join "`n"
+        $sessionA = ($msgsA | & $Bin serve --dir $tmpDir --ext cs --watch 2>&1) | Out-String
+        $jsonA = $sessionA -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonA) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (session A: no xray_info response)" }
+        }
+        if ($jsonA -match '\{[^{}]*?\\"type\\":\\"content\\"[^{}]*?\}') {
+            $objA = $Matches[0]
+            if ($objA -match '\\"files\\":\s*(\d+)') {
+                $sessionAFiles = [int]$Matches[1]
+                if ($sessionAFiles -ne 3) {
+                    return @{ Name = $name; Passed = $false; Output = "FAILED (session A baseline: files=$sessionAFiles, expected 3)" }
+                }
+            } else {
+                return @{ Name = $name; Passed = $false; Output = "FAILED (session A: no files field in content object)" }
+            }
+        } else {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (session A: no content-index object)" }
+        }
+
+        # Step 3: Delete one file BETWEEN sessions. Session B's startup
+        # reconciliation must catch this and tombstone the slot.
+        Remove-Item -Force (Join-Path $tmpDir "File2.cs")
+
+        # Step 4: Session B — must observe files=2. Use full Process plumbing
+        # so we can capture stderr and verify the index was LOADED from disk
+        # (not silently rebuilt — which would naturally find 2 files even
+        # under a broken load path and false-pass the test).
+        $msgsB = $msgsA
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Bin
+        $psi.Arguments = "serve --dir `"$tmpDir`" --ext cs --watch"
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+
+        $stderrBuilder = New-Object System.Text.StringBuilder
+        $stdoutBuilder = New-Object System.Text.StringBuilder
+        $errHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+        $outHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+        $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $errHandler -MessageData $stderrBuilder
+        $outEvent = Register-ObjectEvent -InputObject $proc -EventName OutputDataReceived -Action $outHandler -MessageData $stdoutBuilder
+
+        $proc.Start() | Out-Null
+        $proc.BeginErrorReadLine()
+        $proc.BeginOutputReadLine()
+
+        $proc.StandardInput.WriteLine($msgsB.Split("`n")[0])
+        Start-Sleep -Seconds 3   # allow startup reconciliation to finish
+        $proc.StandardInput.WriteLine($msgsB.Split("`n")[1])
+        $proc.StandardInput.WriteLine($msgsB.Split("`n")[2])
+        Start-Sleep -Milliseconds 500
+        $proc.StandardInput.Close()
+        if (-not $proc.WaitForExit(10000)) { $proc.Kill(); $proc.WaitForExit(5000) | Out-Null }
+
+        Start-Sleep -Milliseconds 200
+        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+        Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue
+
+        $stdoutB = $stdoutBuilder.ToString()
+        $stderrB = $stderrBuilder.ToString()
+        if (!$proc.HasExited) { $proc.Kill() }
+        $proc.Dispose()
+
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        # Coverage guard #1: session B must have LOADED the index, not rebuilt it.
+        # Without this check the test could false-pass when the load path is broken
+        # but the rebuild fallback runs and naturally finds 2 files on disk.
+        $errors = @()
+        if ($stderrB -notmatch 'Content index loaded from disk') {
+            $errors += "session B did not load index from disk (rebuild fallback would mask the bug)"
+        }
+        if ($stderrB -match 'Building content index in background') {
+            $errors += "session B unexpectedly rebuilt the content index instead of loading"
+        }
+
+        # Coverage guard #2: actual count assertion.
+        $jsonB = $stdoutB -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        if (-not $jsonB) {
+            $errors += "session B: no xray_info response"
+        } elseif ($jsonB -match '\{[^{}]*?\\"type\\":\\"content\\"[^{}]*?\}') {
+            $objB = $Matches[0]
+            if ($objB -match '\\"files\\":\s*(\d+)') {
+                $sessionBFiles = [int]$Matches[1]
+                if ($sessionBFiles -ne 2) {
+                    $errors += "session B: content files=$sessionBFiles, expected 2 (cross-session ratchet — pre-fix would have reported 3)"
+                }
+            } else {
+                $errors += "session B: no files field in content object"
+            }
+        } else {
+            $errors += "session B: no content-index object"
+        }
+
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (3->2 across sessions, loaded from disk)" }
+    } catch {
+        if ($tmpDir -and (Test-Path $tmpDir)) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        if ($proc -and !$proc.HasExited) { $proc.Kill() }
+        if ($proc) { $proc.Dispose() }
+        if ($errEvent) { Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue }
+        if ($outEvent) { Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # T-BATCH-WATCHER: Batch watcher update — multiple files modified at once (tests batch_purge_files)
 $testBlocks += , {
     param($Bin, $Dir, $Ext)
