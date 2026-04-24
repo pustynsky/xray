@@ -594,6 +594,52 @@ fn test_generate_trigrams_empty() {
     assert!(generate_trigrams("").is_empty());
 }
 
+/// PERF-05 contract pin: the ASCII fast-path must produce
+/// **byte-for-byte identical** output to the general char-based path.
+/// We can't call the general path directly (it's the same function), so
+/// we build the expected trigram list manually via the spec
+/// ("3-character sliding windows") on a mixed corpus and assert
+/// equality — including trigram order, which the index relies on.
+#[test]
+fn test_generate_trigrams_ascii_fast_path_parity() {
+    // ASCII identifier — exercises the fast-path (token.is_ascii() == true).
+    let ascii = generate_trigrams("HandlerContext");
+    let expected_ascii: Vec<String> = "HandlerContext"
+        .chars()
+        .collect::<Vec<_>>()
+        .windows(3)
+        .map(|w| w.iter().collect::<String>())
+        .collect();
+    assert_eq!(
+        ascii, expected_ascii,
+        "PERF-05 ASCII fast-path must match char-based windows byte-for-byte"
+    );
+
+    // Mixed ASCII + Cyrillic — must NOT take the fast-path
+    // (any non-ASCII byte forces the general path), and the result must
+    // be character-aligned, not byte-aligned (otherwise multi-byte UTF-8
+    // sequences would split mid-codepoint).
+    let mixed = generate_trigrams("abПривет");
+    assert_eq!(
+        mixed.len(),
+        6,
+        "8 chars => 6 trigrams (mixed ASCII+Cyrillic must use char-based windows)"
+    );
+    assert_eq!(mixed[0], "abП");
+    assert_eq!(mixed[1], "bПр");
+    // Each trigram must be exactly 3 chars (codepoints), not 3 bytes —
+    // pinning that the general path is char-aware.
+    for t in &mixed {
+        assert_eq!(
+            t.chars().count(),
+            3,
+            "every trigram must be 3 codepoints, got {:?} ({} bytes)",
+            t,
+            t.len()
+        );
+    }
+}
+
 #[test]
 fn test_trigram_index_serialization_roundtrip() {
     let mut trigram_map = HashMap::new();

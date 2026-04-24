@@ -573,6 +573,38 @@ pub struct TrigramIndex {
 /// Returns empty vec for tokens shorter than 3 chars.
 #[must_use]
 pub fn generate_trigrams(token: &str) -> Vec<String> {
+    // PERF-05: ASCII fast-path. The vast majority of tokens fed into the
+    // trigram index are ASCII identifiers (code, log lines, English text).
+    // The general path below pays for `chars().collect::<Vec<char>>()` (a
+    // heap Vec of 4-byte `char` per code unit) plus a per-window
+    // `iter().collect::<String>()` (another heap String per trigram). For
+    // pure ASCII none of that is needed: each byte is one char so we can
+    // slide directly over `as_bytes().windows(3)` and the 3-byte slice is
+    // already a valid UTF-8 sequence (each byte < 0x80). Allocates exactly
+    // `len-2` Strings of capacity 3 — same as the general path but skips
+    // the intermediate `Vec<char>` and per-window iterator collection.
+    // Non-ASCII tokens (Cyrillic, CJK, emoji) keep the original char-based
+    // path verbatim — code-unit windows would split multi-byte sequences.
+    if token.is_ascii() {
+        if token.len() < 3 {
+            return vec![];
+        }
+        return token
+            .as_bytes()
+            .windows(3)
+            .map(|w| {
+                // SAFETY: token.is_ascii() means every byte < 0x80, so any
+                // 3-byte window is valid UTF-8 (3 single-byte codepoints).
+                // We use the checked conversion + unwrap rather than
+                // from_utf8_unchecked: the validation walk on 3 bytes is
+                // negligible vs. the String heap allocation that follows,
+                // and this keeps the function 100% safe code.
+                std::str::from_utf8(w)
+                    .expect("ASCII bytes are always valid UTF-8")
+                    .to_string()
+            })
+            .collect();
+    }
     let chars: Vec<char> = token.chars().collect();
     if chars.len() < 3 {
         return vec![];
