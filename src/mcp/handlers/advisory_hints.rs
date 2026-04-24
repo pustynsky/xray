@@ -44,6 +44,17 @@ pub(crate) const LOW_CALLER_THRESHOLD: usize = 3;
 ///
 /// Generic suffixes on base types are stripped (`IFoo<T>` → `IFoo`) before
 /// the interface lookup. This matters for C# generic interfaces.
+///
+/// **Short-name ambiguity:** `class=Foo` is matched against `name_index`,
+/// which is keyed by short name. Real codebases routinely have multiple
+/// `Foo`/`Repository`/`Service`/`Settings` types in different namespaces.
+/// When more than one concrete (Class/Struct/Record) named `Foo` exists,
+/// the hint switches to an ambiguity-aware wording that (a) explicitly
+/// lists each candidate by `Parent.Name (file)`, (b) reports the *union*
+/// of interfaces collected across them rather than asserting that the
+/// targeted class implements all of them, and (c) drops the "re-run with
+/// `class=IFoo`" recommendation since that interface may belong to a
+/// different `Foo` than the user targeted.
 pub(crate) fn interface_vias_caveat(
     method_name: &str,
     class_filter: Option<&str>,
@@ -53,19 +64,25 @@ pub(crate) fn interface_vias_caveat(
     let cls_lower = cls.to_lowercase();
     let class_def_indices = def_idx.name_index.get(&cls_lower)?;
 
+    // Collect all concrete (Class/Struct/Record) defs that match the short name.
+    let concrete: Vec<&DefinitionEntry> = class_def_indices
+        .iter()
+        .filter_map(|&di| def_idx.definitions.get(di as usize))
+        .filter(|d| {
+            matches!(
+                d.kind,
+                DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record
+            )
+        })
+        .collect();
+
+    if concrete.is_empty() {
+        return None;
+    }
+
     let mut interfaces: Vec<String> = Vec::new();
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-
-    for &di in class_def_indices {
-        let Some(def) = def_idx.definitions.get(di as usize) else {
-            continue;
-        };
-        if !matches!(
-            def.kind,
-            DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record
-        ) {
-            continue;
-        }
+    for def in &concrete {
         for base in &def.base_types {
             // Strip generic suffix `IFoo<T>` → `IFoo` before lookup; tree-sitter
             // captures generics in base type text and we want the bare type name.
@@ -104,13 +121,43 @@ pub(crate) fn interface_vias_caveat(
         .map(|s| format!("`{}`", s))
         .collect::<Vec<_>>()
         .join(", ");
-    let suggested = interfaces[0].as_str();
+
+    if concrete.len() == 1 {
+        // Unambiguous — keep the original concrete recommendation.
+        let suggested = interfaces[0].as_str();
+        return Some(format!(
+            "Filtered by concrete class `{cls}`. Class implements interface(s): {interface_list}. \
+             If `{method_name}` is invoked through a DI-injected interface field (e.g. `{cls}` \
+             is registered as `{suggested}` in DI), those callsites are excluded by the `class=` \
+             filter. Re-run without `class=` or with `class={suggested}` to include \
+             interface-receiver callsites."
+        ));
+    }
+
+    // Ambiguous short name: do NOT claim the targeted class implements every
+    // interface in the union — list candidates and present interfaces as a
+    // collected superset, with a disambiguation recipe.
+    let candidate_count = concrete.len();
+    let candidates = concrete
+        .iter()
+        .map(|d| {
+            let qual = d.parent.as_deref().unwrap_or("(no parent)");
+            let file = def_idx
+                .files
+                .get(d.file_id as usize)
+                .map(|s| s.as_str())
+                .unwrap_or("?");
+            format!("`{qual}.{name}` ({file})", name = d.name)
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
     Some(format!(
-        "Filtered by concrete class `{cls}`. Class implements interface(s): {interface_list}. \
-         If `{method_name}` is invoked through a DI-injected interface field (e.g. `{cls}` \
-         is registered as `{suggested}` in DI), those callsites are excluded by the `class=` \
-         filter. Re-run without `class=` or with `class={suggested}` to include \
-         interface-receiver callsites."
+        "Filtered by concrete class `{cls}`, but {candidate_count} types named `{cls}` exist \
+         in the index: {candidates}. Across all of them, base types include interface(s): \
+         {interface_list} — some may not apply to the type you targeted. AST resolution cannot \
+         disambiguate from the short name alone. To narrow, re-run `xray_callers method=\
+         {method_name}` with the interface that matches your DI registration, or drop `class=` \
+         to include all callsites."
     ))
 }
 
@@ -245,7 +292,7 @@ pub(crate) fn value_source_hint(def: &DefinitionEntry) -> Option<String> {
          [{keys_quoted}]. If any attribute binds to external configuration (manifest, \
          appsettings, env vars, secret store), the runtime value lives outside source code. \
          To search external config files for these keys: \
-         `xray_grep terms='{keys_csv}' ext='xml,json,config,yaml,manifestxml'`.",
+         `xray_grep terms='{keys_csv}' ext='xml,json,config,yaml,yml,manifestxml'`.",
         name = def.name
     ))
 }
@@ -374,6 +421,105 @@ mod tests {
         assert!(hint.contains("`IB`"));
     }
 
+    /// Helper: build an index where each `(name, kind, parent, base_types)`
+    /// entry lives in its own pseudo-file. Used for namespace-collision
+    /// regression tests so the ambiguity-aware hint can surface
+    /// `Parent.Name (file)` candidate lines.
+    type DefSpec<'a> = (&'a str, DefinitionKind, Option<&'a str>, Vec<&'a str>, &'a str);
+
+    fn build_index_with_parents(defs: Vec<DefSpec<'_>>) -> DefinitionIndex {
+        let mut idx = DefinitionIndex {
+            root: ".".to_string(),
+            extensions: vec!["cs".to_string()],
+            files: Vec::new(),
+            ..Default::default()
+        };
+        for (i, (name, kind, parent, base_types, file)) in defs.into_iter().enumerate() {
+            idx.files.push(file.to_string());
+            let def = DefinitionEntry {
+                file_id: i as u32,
+                name: name.to_string(),
+                kind,
+                line_start: 1,
+                line_end: 1,
+                parent: parent.map(|p| p.to_string()),
+                signature: None,
+                modifiers: vec![],
+                attributes: vec![],
+                base_types: base_types.into_iter().map(|s| s.to_string()).collect(),
+            };
+            idx.name_index
+                .entry(def.name.to_lowercase())
+                .or_default()
+                .push(i as u32);
+            idx.kind_index.entry(def.kind).or_default().push(i as u32);
+            idx.file_index.entry(def.file_id).or_default().push(i as u32);
+            for base in &def.base_types {
+                let base_simple = base.split('<').next().unwrap_or(base).trim();
+                idx.base_type_index
+                    .entry(base_simple.to_lowercase())
+                    .or_default()
+                    .push(i as u32);
+            }
+            idx.definitions.push(def);
+        }
+        idx
+    }
+
+    /// Regression for `user-stories/xray-advisory-hints-namespace-collision-and-yml-gap.md`
+    /// (Problem 1). Two unrelated `Foo` classes in different namespaces must
+    /// not have their interface lists merged into a single sentence that
+    /// asserts "class `Foo` implements …" — the hint must explicitly
+    /// acknowledge ambiguity and avoid the misleading `class=IFoo` recipe.
+    #[test]
+    fn interface_vias_emits_ambiguity_notice_for_duplicate_short_name() {
+        let idx = build_index_with_parents(vec![
+            ("IFoo", DefinitionKind::Interface, None, vec![], "i_foo.cs"),
+            ("IBar", DefinitionKind::Interface, None, vec![], "i_bar.cs"),
+            ("Foo", DefinitionKind::Class, Some("Ns.A"), vec!["IFoo"], "a/Foo.cs"),
+            ("Foo", DefinitionKind::Class, Some("Ns.B"), vec!["IBar"], "b/Foo.cs"),
+        ]);
+        let hint =
+            interface_vias_caveat("Bar", Some("Foo"), &idx).expect("expected ambiguity hint");
+        assert!(
+            hint.contains("2 types named `Foo`"),
+            "hint must announce candidate count, got: {hint}"
+        );
+        assert!(
+            hint.contains("`Ns.A.Foo`") && hint.contains("`Ns.B.Foo`"),
+            "hint must list each candidate by Parent.Name, got: {hint}"
+        );
+        assert!(
+            hint.contains("a/Foo.cs") && hint.contains("b/Foo.cs"),
+            "hint must list each candidate's file, got: {hint}"
+        );
+        assert!(
+            hint.contains("`IFoo`") && hint.contains("`IBar`"),
+            "hint must surface the union of interfaces, got: {hint}"
+        );
+        assert!(
+            hint.contains("some may not apply"),
+            "hint must caveat that union spans unrelated types, got: {hint}"
+        );
+        assert!(
+            !hint.contains("class=IFoo") && !hint.contains("class=IBar"),
+            "hint must NOT recommend a specific `class=IInterface` re-run when ambiguous \
+             (the interface may belong to the other `Foo`), got: {hint}"
+        );
+    }
+
+    /// Regression for the same story (Problem 1, edge case): when N>1 same-
+    /// short-name concrete types exist but none implement any interface, the
+    /// hint must stay silent — there is nothing useful to suggest.
+    #[test]
+    fn interface_vias_returns_none_when_ambiguous_and_no_interfaces() {
+        let idx = build_index_with_parents(vec![
+            ("Foo", DefinitionKind::Class, Some("Ns.A"), vec![], "a/Foo.cs"),
+            ("Foo", DefinitionKind::Class, Some("Ns.B"), vec![], "b/Foo.cs"),
+        ]);
+        assert!(interface_vias_caveat("Bar", Some("Foo"), &idx).is_none());
+    }
+
     // ── low_count_caveat ───────────────────────────────────────────────
 
     #[test]
@@ -474,7 +620,10 @@ mod tests {
         assert!(h.contains("`DefaultIndexName`"), "got: {h}");
         assert!(h.contains("`[ConfigurationProperty]`"), "got: {h}");
         assert!(h.contains("xray_grep"), "got: {h}");
-        assert!(h.contains("ext='xml,json,config,yaml,manifestxml'"), "got: {h}");
+        assert!(
+            h.contains("ext='xml,json,config,yaml,yml,manifestxml'"),
+            "hint must include `yml` (Helm/CI/k8s/Pipelines configs use it as often as `yaml`), got: {h}"
+        );
     }
 
     #[test]

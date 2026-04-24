@@ -472,6 +472,72 @@ fn test_round_trip_new_line_count_to_expected_line_count() {
         result2.content[0].text);
 }
 
+/// Regression for `user-stories/xray-edit-blank-line-only-file-line-count-drift.md`.
+/// A file containing exactly one blank line (`"\n"`) splits to `["", ""]`.
+/// The earlier carve-out only handled the empty-file `[""]` case, leaving
+/// blank-line-only files reporting `originalLineCount: 1` while
+/// `apply_line_operations` still saw 2 addressable lines — REPLACE 1..2 /
+/// DELETE 1..2 / range checks against line 2 silently succeeded against a
+/// phantom slot. The generalized rule (drop the trailing-empty sentinel for
+/// any non-empty `lines`) eliminates the phantom across all files.
+#[test]
+fn test_blank_line_only_file_lf_treated_as_one_line() {
+    let (tmp, filename, _) = create_temp_file("\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Range 1..2 must error — line 2 is the phantom slot, not addressable.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 1, "endLine": 2, "content": "x" }
+        ]
+    }));
+    assert!(result.is_error,
+        "REPLACE 1..2 on a 1-line blank file must error (no phantom line 2): {:?}",
+        result.content[0].text);
+    assert!(result.content[0].text.contains("out of range"),
+        "error should be the canonical out-of-range diagnostic, got: {}",
+        result.content[0].text);
+}
+
+#[test]
+fn test_blank_line_only_file_crlf_treated_as_one_line() {
+    // Same shape as the LF case, but for CRLF — the contract is line-count
+    // semantics, not line-ending preservation.
+    let (tmp, filename, _) = create_temp_file("\r\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 2, "endLine": 2, "content": "x" }
+        ]
+    }));
+    assert!(result.is_error,
+        "REPLACE on phantom line 2 of a CRLF blank-line-only file must error: {:?}",
+        result.content[0].text);
+}
+
+#[test]
+fn test_blank_line_only_file_round_trip_line_counts_agree() {
+    // expectedLineCount and newLineCount must agree with Mode A semantics for
+    // blank-line-only files — the whole point of the line-count drift fix.
+    let (tmp, filename, _) = create_temp_file("\n");
+    let ctx = make_ctx(tmp.path());
+
+    // expectedLineCount=1 + REPLACE 1..1 → succeeds (1 is the only addressable line).
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "expectedLineCount": 1,
+        "operations": [
+            { "startLine": 1, "endLine": 1, "content": "" }
+        ]
+    }));
+    assert!(!result.is_error,
+        "expectedLineCount=1 + REPLACE 1..1 on blank-line-only file must succeed: {}",
+        result.content[0].text);
+}
+
 #[test]
 fn test_single_line_file() {
     let (tmp, filename, path) = create_temp_file("only line");
@@ -643,13 +709,21 @@ fn test_mode_a_insert_at_end_of_file() {
     let (tmp, filename, path) = create_temp_file("line1\nline2\n");
     let ctx = make_ctx(tmp.path());
 
-    // Insert after the last line (startLine = 4 because split('\n') on "line1\nline2\n" gives ["line1", "line2", ""])
-    // Actually, for a file "line1\nline2\n", split('\n') gives ["line1", "line2", ""] — 3 elements
-    // Insert at position 4 (after element 3) = append
+    // For "line1\nline2\n", `count_lines` returns 2 (the trailing `\n` is a
+    // terminator, not a line — same convention as `xray_definitions` /
+    // `xray_grep` and the response's `originalLineCount` / `newLineCount`).
+    // INSERT at end of file = `startLine: count_lines + 1`, `endLine: count_lines`
+    // → here startLine=3, endLine=2.
+    //
+    // Previously this test passed `startLine: 4, endLine: 3` because Mode A
+    // counted `split('\n')` elements directly (the trailing-newline sentinel
+    // inflated the count by one). That phantom slot has been removed so Mode A
+    // line numbers agree with every other surface; see the carve-out comment in
+    // `apply_line_operations` for details.
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "operations": [
-            { "startLine": 4, "endLine": 3, "content": "appended" }
+            { "startLine": 3, "endLine": 2, "content": "appended" }
         ]
     }));
 
@@ -1402,6 +1476,50 @@ fn test_expected_context_occurrence_zero_replace_all_uses_first_match_context() 
         content, "// alpha section\nBar\n// beta section\nBar\n",
         "Replace-all replaces both matches"
     );
+}
+
+/// Regression for `user-stories/xray-edit-expected-context-masks-occurrence-out-of-range.md`.
+/// When `occurrence > count`, the canonical "Occurrence N requested but text
+/// … found only M time(s)" diagnostic must fire BEFORE `expectedContext`
+/// validation — otherwise an out-of-range request whose `expectedContext`
+/// happens to mismatch the first match surfaces "Expected context …" and
+/// hides the more fundamental "you targeted a non-existent occurrence" error.
+#[test]
+fn test_occurrence_out_of_range_reported_before_expected_context_mismatch() {
+    let body = "// alpha section\nFoo\nL1\nL2\nL3\nL4\nL5\nL6\nL7\nL8\n// beta section\nFoo\n";
+    let (tmp, filename, path) = create_temp_file(body);
+    let ctx = make_ctx(tmp.path());
+
+    let original = std::fs::read_to_string(&path).unwrap();
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "Foo",
+                "replace": "Bar",
+                "occurrence": 99,
+                // Wrong context for first match — pre-fix this would surface
+                // "Expected context not found" and hide the canonical
+                // "found only 2 time(s)" error.
+                "expectedContext": "context that does not exist anywhere"
+            }
+        ]
+    }));
+
+    assert!(result.is_error, "occurrence 99 against 2 matches must error");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("Occurrence 99 requested") && text.contains("found only 2 time(s)"),
+        "must surface the canonical occurrence-out-of-range diagnostic, NOT \
+         `Expected context …` (which would mask it). Got: {text}"
+    );
+    assert!(
+        !text.contains("Expected context"),
+        "expectedContext mismatch must not leak through when occurrence is out of range; got: {text}"
+    );
+    let after = std::fs::read_to_string(&path).unwrap();
+    assert_eq!(after, original, "file must remain untouched on out-of-range error");
 }
 
 #[test]
