@@ -419,3 +419,223 @@ fn line_regex_show_lines_caps_content_cache() {
 
     cleanup_tmp(&tmp_dir);
 }
+
+// ─── linePatterns: literal-comma-safe array form ──────────────────────────
+
+/// Build an isolated workspace with a small log file used by `linePatterns`
+/// tests where literal `,` inside a pattern matters (CSV regex, log prefixes).
+fn make_line_patterns_log_ctx() -> (HandlerContext, std::path::PathBuf) {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir()
+        .join(format!("xray_line_patterns_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("app.log")).unwrap();
+        writeln!(f, "INFO: starting up").unwrap();
+        writeln!(f, "ERROR,WARN: bad config").unwrap();
+        writeln!(f, "DEBUG: reading file").unwrap();
+        writeln!(f, "ERROR,WARN: missing key").unwrap();
+        writeln!(f, "TRACE: done").unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("data.csv")).unwrap();
+        writeln!(f, "alpha,beta").unwrap();
+        writeln!(f, "no comma here").unwrap();
+        writeln!(f, "x,y").unwrap();
+        writeln!(f, "trailing,").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        ext: "log,csv".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            tmp_dir.to_string_lossy().to_string(),
+        ))),
+        server_ext: "log,csv".to_string(),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
+    };
+    (ctx, tmp_dir)
+}
+
+#[test]
+fn line_patterns_literal_comma_in_log_prefix() {
+    // `^ERROR,WARN:` as a single pattern — `,` is literal, not a separator.
+    // The legacy `terms="^ERROR,WARN:"` path would split into two regexes
+    // (`^ERROR` and `WARN:`), matching far more lines than intended.
+    let (ctx, tmp) = make_line_patterns_log_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "linePatterns": ["^ERROR,WARN:"],
+            "lineRegex": true,
+            "ext": "log",
+            "showLines": true,
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "linePatterns literal-comma should not error: {}",
+        result.content[0].text
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let occ = output["summary"]["totalOccurrences"].as_u64().unwrap_or(0);
+    assert_eq!(
+        occ, 2,
+        "Expected 2 ERROR,WARN: lines, payload: {}",
+        result.content[0].text
+    );
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn line_patterns_csv_two_columns_regex() {
+    // `^[^,]+,[^,]+$` matches exactly-two-column CSV rows. The comma inside
+    // the pattern is structural (the `,` between columns), and would be
+    // mangled by `terms`-based comma-splitting.
+    let (ctx, tmp) = make_line_patterns_log_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "linePatterns": ["^[^,]+,[^,]+$"],
+            "lineRegex": true,
+            "ext": "csv",
+            "showLines": true,
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "linePatterns CSV regex should not error: {}",
+        result.content[0].text
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let occ = output["summary"]["totalOccurrences"].as_u64().unwrap_or(0);
+    // alpha,beta + x,y match; "no comma here" and "trailing," do not.
+    assert_eq!(
+        occ, 2,
+        "Expected 2 two-column rows, payload: {}",
+        result.content[0].text
+    );
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn line_patterns_multiple_patterns_or_semantics() {
+    // Multiple entries in `linePatterns` are independent regexes, OR-combined
+    // by default (same as `terms` comma-OR semantics).
+    let (ctx, tmp) = make_line_patterns_log_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "linePatterns": ["^INFO:", "^TRACE:"],
+            "lineRegex": true,
+            "ext": "log",
+            "showLines": true,
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "linePatterns multi-OR should not error: {}",
+        result.content[0].text
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let occ = output["summary"]["totalOccurrences"].as_u64().unwrap_or(0);
+    assert_eq!(
+        occ, 2,
+        "Expected 1 INFO + 1 TRACE = 2, payload: {}",
+        result.content[0].text
+    );
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn line_patterns_and_terms_mutually_exclusive() {
+    // Passing both `terms` and `linePatterns` is rejected with a hint that
+    // names the precise difference (`,` separator vs literal).
+    let (ctx, tmp) = make_line_patterns_log_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "terms": "^INFO:",
+            "linePatterns": ["^TRACE:"],
+            "lineRegex": true,
+            "ext": "log",
+        }),
+    );
+    assert!(
+        result.is_error,
+        "terms + linePatterns must be rejected, got success: {}",
+        result.content[0].text
+    );
+    let body = &result.content[0].text;
+    assert!(
+        body.contains("mutually exclusive") && body.contains("linePatterns"),
+        "Error must explain mutual exclusivity, got: {}",
+        body
+    );
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn line_patterns_requires_line_regex_true() {
+    // `linePatterns` is meaningful only in line-regex mode. Passing it without
+    // `lineRegex=true` is rejected eagerly so a typo doesn't silently fall
+    // through to substring/regex modes that ignore the array.
+    let (ctx, tmp) = make_line_patterns_log_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "linePatterns": ["^INFO:"],
+            "ext": "log",
+        }),
+    );
+    assert!(
+        result.is_error,
+        "linePatterns without lineRegex must be rejected, got success: {}",
+        result.content[0].text
+    );
+    let body = &result.content[0].text;
+    assert!(
+        body.contains("lineRegex=true"),
+        "Error must point at lineRegex=true, got: {}",
+        body
+    );
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn line_patterns_terms_comma_split_back_compat() {
+    // Back-compat guard: when `linePatterns` is NOT supplied, the old
+    // `terms.split(',')` behaviour for lineRegex is preserved.
+    let (ctx, tmp) = make_line_patterns_log_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "terms": "^INFO:,^TRACE:",
+            "lineRegex": true,
+            "ext": "log",
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "Back-compat comma-split terms must still work: {}",
+        result.content[0].text
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let occ = output["summary"]["totalOccurrences"].as_u64().unwrap_or(0);
+    assert_eq!(
+        occ, 2,
+        "Back-compat OR over `^INFO:,^TRACE:` must still match 2 lines, payload: {}",
+        result.content[0].text
+    );
+    cleanup_tmp(&tmp);
+}

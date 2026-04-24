@@ -887,6 +887,59 @@ fn test_lib013_is_path_within_empty_root_refuses() {
     assert!(is_path_within(&inside, &root), "non-empty root must still accept legit paths");
 }
 
+#[test]
+fn test_is_path_within_relative_dotdot_resolving_inside_accepted() {
+    // Equivalent in-workspace paths must produce the same verdict regardless
+    // of how they're written. Pre-fix, the no-traversal form was accepted via
+    // logical compare while the `..`-bearing form fell through to canonicalize
+    // and was rejected when the leaf didn't exist on disk.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+
+    // Plain in-workspace nonexistent leaf (no `..`): accepted as before.
+    let inside_plain = format!("{}/nonexistent/dir", root);
+    assert!(
+        is_path_within(&inside_plain, &root),
+        "no-traversal in-workspace nonexistent path must still be accepted"
+    );
+
+    // Same logical destination via `..`: must also be accepted.
+    let inside_dotdot = format!("{}/src/../nonexistent/dir", root);
+    assert!(
+        is_path_within(&inside_dotdot, &root),
+        "in-workspace `..`-bearing path that resolves inside root must be accepted"
+    );
+
+    // `..` that resolves back to root itself.
+    let inside_to_root = format!("{}/sub/..", root);
+    assert!(
+        is_path_within(&inside_to_root, &root),
+        "`<root>/sub/..` resolves to root and must be accepted"
+    );
+}
+
+#[test]
+fn test_is_path_within_relative_dotdot_escape_still_rejected() {
+    // Genuine escapes via `..` must still be refused, otherwise the logical
+    // resolution would silently turn into a scope-bypass.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_string_lossy().to_string();
+
+    // Pop past root.
+    let escape_one = format!("{}/../outside-xyz", root);
+    assert!(
+        !is_path_within(&escape_one, &root),
+        "`<root>/../outside` must be rejected"
+    );
+
+    // Pop past root via deeper traversal.
+    let escape_deep = format!("{}/sub/../../outside-xyz", root);
+    assert!(
+        !is_path_within(&escape_deep, &root),
+        "`<root>/sub/../../outside` must be rejected"
+    );
+}
+
 
 
 #[test]
