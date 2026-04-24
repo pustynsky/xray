@@ -4293,6 +4293,178 @@ fn test_edits_item_replace_without_search_clear_error() {
     );
 }
 
+// ─── Mode B shape diagnostics: wrong-type canonical fields + non-object items ───
+// Regression guards for `docs/user-stories/todo_approved_2026-04-24_edit-mode-b-shape-diagnostics-followups.md`.
+// Each test asserts the targeted shape error is emitted instead of the
+// previous misleading downstream message.
+
+/// `{"search": 123, "replace": "x"}` — canonical key, wrong type. Previously
+/// the int silently became `None`, then the s/r branch reported
+/// `'replace' provided without 'search'`, which is misleading because
+/// `search` IS present, just typed wrong.
+#[test]
+fn test_edits_item_search_wrong_type_reports_string_requirement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": 123, "replace": "x" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("'search' must be a string"),
+        "Must report wrong type for 'search'. msg={}", msg
+    );
+    assert!(msg.contains("got number"), "Must name the actual type. msg={}", msg);
+    assert!(
+        !msg.contains("provided without 'search'"),
+        "Must NOT fall through to misleading missing-half message. msg={}", msg
+    );
+}
+
+/// `{"insertAfter": 123, "content": "x"}` — canonical insert-mode key with
+/// wrong type. Previously fell through to the empty-form-menu error.
+#[test]
+fn test_edits_item_insert_after_wrong_type_reports_string_requirement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "insertAfter": 123, "content": "x" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("'insertAfter' must be a string"),
+        "Must report wrong type for 'insertAfter'. msg={}", msg
+    );
+    assert!(msg.contains("got number"), "Must name the actual type. msg={}", msg);
+}
+
+/// `{"search": "a", "replace": "b", "skipIfNotFound": "yes"}` — critical case:
+/// `.unwrap_or(false)` on a wrong-type bool would silently change edit
+/// semantics (caller thinks skip is honoured, batch fails atomically).
+#[test]
+fn test_edits_item_skip_if_not_found_wrong_type_reports_bool_requirement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "a", "replace": "b", "skipIfNotFound": "yes" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("'skipIfNotFound' must be a boolean"),
+        "Must report wrong type for 'skipIfNotFound'. msg={}", msg
+    );
+    assert!(msg.contains("got string"), "Must name the actual type. msg={}", msg);
+}
+
+/// `{"search": "a", "replace": "b", "occurrence": "first"}` — wrong-type
+/// numeric meta-field. Previously silently became `0` (= match all).
+#[test]
+fn test_edits_item_occurrence_wrong_type_reports_integer_requirement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "a", "replace": "b", "occurrence": "first" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("'occurrence' must be a non-negative integer"),
+        "Must report wrong type for 'occurrence'. msg={}", msg
+    );
+}
+
+/// `edits: [123]` — non-object item. Previously fell into the form-menu
+/// error because every `.get(...)` returned None.
+#[test]
+fn test_edits_item_non_object_number_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [123],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("each edit item must be a JSON object"),
+        "Must explain the structural shape problem. msg={}", msg
+    );
+    assert!(msg.contains("got number"), "Must name the actual type. msg={}", msg);
+}
+
+/// `edits: [null]` — same as above for null payloads.
+#[test]
+fn test_edits_item_non_object_null_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [serde_json::Value::Null],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("each edit item must be a JSON object"),
+        "Must explain the structural shape problem. msg={}", msg
+    );
+    assert!(msg.contains("got null"), "Must name the actual type. msg={}", msg);
+}
+
+/// `edits: ["search"]` — bare string is a common mistake when callers
+/// confuse `edits` with a list of search terms.
+#[test]
+fn test_edits_item_non_object_string_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": ["search"],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error);
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(
+        msg.contains("each edit item must be a JSON object"),
+        "Must explain the structural shape problem. msg={}", msg
+    );
+    assert!(msg.contains("got string"), "Must name the actual type. msg={}", msg);
+}
+
+
 // ═════════════════════════════════════════════════════════════════════
 // PR #1 (cleanup-magic) — new diagnostic and category tests
 // ═════════════════════════════════════════════════════════════════════
