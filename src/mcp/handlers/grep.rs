@@ -31,7 +31,15 @@ pub(crate) struct GrepSearchParams<'a> {
     pub dir_filter: &'a Option<String>,
     /// Optional file path/name substring filter (lowercase match against full file path).
     /// Supports comma-separated terms (OR semantics) — any term matching accepts the file.
+    /// When `file_filter_exact` is true, the value is matched as an EXACT basename
+    /// (case-insensitive, no comma split) — used by the dir=<file> auto-convert path.
     pub file_filter: &'a Option<String>,
+    /// True when `file_filter` was auto-populated by the `dir=<file>` auto-convert
+    /// path. Switches `passes_file_filters` to exact-basename matching so the user's
+    /// "scope to this one file" intent is preserved (e.g., dir='src/Service.cs' must
+    /// not also match `MyService.cs`, `Service.cs.bak`, etc.). User-provided `file=`
+    /// keeps substring/comma-OR semantics (this flag stays false).
+    pub file_filter_exact: bool,
     /// Pre-computed exclude dir patterns (avoids per-file allocations)
     pub exclude_patterns: super::utils::ExcludePatterns,
     /// Pre-lowercased exclude path substrings
@@ -349,23 +357,34 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
     if let Some(ext) = params.ext_filter
         && !matches_ext_filter(file_path, ext) { return false; }
 
-    // File name/path substring filter (comma-separated OR semantics).
-    // Match is case-insensitive and checks both the full path and the basename
-    // so `file='CHANGELOG.md'` works regardless of the caller's path style.
+    // File name/path filter. Two semantic modes:
+    //   - DEFAULT (substring, comma-separated OR): user-supplied `file=` filter.
+    //     Case-insensitive substring against both full path and basename so
+    //     `file='CHANGELOG.md'` works regardless of caller path style.
+    //   - EXACT basename (set by `file_filter_exact = true`): used when `dir=<file>`
+    //     was auto-converted to dir=<parent> + file=<basename>. The user's intent
+    //     was "scope to this one file"; substring would silently leak to siblings
+    //     like `MyService.cs`, `Service.cs.bak`, `OldService.cs.disabled`.
     if let Some(file_sub) = params.file_filter {
-        let fp_lower = file_path.to_lowercase().replace('\\', "/");
         let basename_lower = std::path::Path::new(file_path)
             .file_name()
             .and_then(|n| n.to_str())
             .map(|s| s.to_lowercase())
             .unwrap_or_default();
-        let any_match = file_sub.split(',')
-            .map(|t| t.trim().to_lowercase())
-            .filter(|t| !t.is_empty())
-            .any(|needle| {
-                fp_lower.contains(&needle) || basename_lower.contains(&needle)
-            });
-        if !any_match { return false; }
+        if params.file_filter_exact {
+            // Exact basename match (case-insensitive, no comma split — the value
+            // is a single literal filename auto-populated from the dir= path).
+            if basename_lower != file_sub.to_lowercase() { return false; }
+        } else {
+            let fp_lower = file_path.to_lowercase().replace('\\', "/");
+            let any_match = file_sub.split(',')
+                .map(|t| t.trim().to_lowercase())
+                .filter(|t| !t.is_empty())
+                .any(|needle| {
+                    fp_lower.contains(&needle) || basename_lower.contains(&needle)
+                });
+            if !any_match { return false; }
+        }
     }
 
     // Pre-compute lowercased + normalized path once for all exclude checks
@@ -396,6 +415,9 @@ struct ParsedGrepArgs {
     dir_filter: Option<String>,
     ext_filter: Option<String>,
     file_filter: Option<String>,
+    /// True when `file_filter` was auto-populated from a `dir=<file>` path
+    /// (exact basename match required to preserve "scope to one file" intent).
+    file_filter_exact: bool,
     mode_and: bool,
     use_regex: bool,
     use_phrase: bool,
@@ -500,6 +522,9 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    // Set ONLY when the dir=<file> auto-convert path populates file_filter
+    // itself. User-provided file= keeps substring/comma-OR semantics.
+    let mut file_filter_exact = false;
 
     let mut dir_auto_converted_note: Option<String> = None;
 
@@ -520,8 +545,12 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
                             .map(|f| f.to_string_lossy().to_string())
                             .unwrap_or_default();
                         // Explicit `file=` wins; otherwise auto-populate from the filename.
+                        // When auto-populating, switch to exact-basename matching so the
+                        // user's "scope to this one file" intent isn't silently widened to
+                        // substring siblings (`MyService.cs`, `Service.cs.bak`, ...).
                         if file_filter.is_none() && !filename.is_empty() {
                             file_filter = Some(filename.clone());
+                            file_filter_exact = true;
                         }
                         dir_auto_converted_note = Some(format!(
                             "dir='{}' looked like a file path — auto-converted to dir='{}' file='{}'. \
@@ -641,6 +670,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         dir_filter,
         ext_filter,
         file_filter,
+        file_filter_exact,
         mode_and,
         use_regex,
         use_phrase,
@@ -901,6 +931,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         search_start,
         dir_filter: &parsed.dir_filter,
         file_filter: &parsed.file_filter,
+        file_filter_exact: parsed.file_filter_exact,
         exclude_patterns,
         exclude_lower,
         dir_auto_converted_note: parsed.dir_auto_converted_note.clone(),

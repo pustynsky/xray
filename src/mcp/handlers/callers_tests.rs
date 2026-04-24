@@ -3386,6 +3386,7 @@ fn test_per_level_truncation_not_set_when_under_limit() {
         name_index,
         kind_index,
         file_index,
+
         path_to_id,
         method_calls: HashMap::new(),
         ..Default::default()
@@ -3828,5 +3829,280 @@ fn test_advisory_low_count_emitted_in_multi_method_batch() {
     let combined: String = advisories.iter().filter_map(|x| x.as_str()).collect::<Vec<_>>().join("\n");
     assert!(combined.contains("xray_grep") && combined.contains("countOnly=true"),
         "batch path low-count advisory should match single-method format; got: {combined}");
+}
+
+
+
+// ─── impactAnalysis bounded-collection: starvation/truncation contract ───
+// Story: docs/user-stories/todo_approved_2026-04-24_bounded-impact-analysis-test-starvation-and-truncation-contract.md
+//
+// The bounded-collection cap (max_callers_per_level * 20, capped at 5000)
+// guards against latency blow-up on popular method tokens, but it can
+// silently starve test callers that appear LATER in posting order than the
+// cap allows. These tests pin the degraded-path contract:
+//
+//   1. when the cap is hit during impact analysis, `impact_analysis_truncated`
+//      MUST be set so the response surfaces `impactAnalysisTruncated: true`
+//      (a "no tests found" without this signal is a definitive answer; with
+//      this signal it's a "may be incomplete" answer);
+//   2. the bounded path actually CAN starve late test callers — a query that
+//      looks successful (200 OK, results array populated) can return zero
+//      tests not because they don't exist but because they were ordered after
+//      the cap was filled with production callers. This documents the failure
+//      mode so any future fairness fix updates the test together with the code;
+//   3. with a `class=` filter, `parent_file_ids` pre-filtering shrinks the
+//      candidate set BEFORE the cap is checked — tests survive and the
+//      truncation flag stays clear (the recommended path per the story).
+
+/// Build a fixture with `prod_count` production caller files (file_ids 1..=prod_count)
+/// followed by `test_count` test caller files (file_ids prod_count+1 ..= prod_count+test_count).
+/// Each caller is a class with one method `DoWork` whose body (line 5) calls `Process`
+/// on the target class `ClassA` (defined in file 0). Postings are emitted in
+/// file_id order, so production callers come first — the exact ordering the
+/// starvation story describes.
+fn build_impact_starvation_fixture(prod_count: usize, test_count: usize)
+    -> (crate::ContentIndex, crate::definitions::DefinitionIndex)
+{
+    use crate::{ContentIndex, Posting};
+    use crate::definitions::CallSite;
+    use std::path::PathBuf;
+
+    let mut definitions = vec![
+        class_def(0, "ClassA", vec![]),
+        method_def(0, "Process", "ClassA", 1, 5),
+    ];
+    let mut files_list: Vec<String> = vec!["src/ClassA.cs".to_string()];
+    // method_calls: caller_di -> [CallSite{Process on ClassA at line 5}]
+    // Required by `verify_call_site_target` when a class= filter is active —
+    // without these entries every caller is rejected as "no call-site data".
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    let process_call = || CallSite {
+        method_name: "Process".to_string(),
+        receiver_type: Some("ClassA".to_string()),
+        line: 5,
+        receiver_is_generic: false,
+    };
+
+    for i in 0..prod_count {
+        let fid = (i as u32) + 1;
+        let cls = format!("Prod{}", i);
+        files_list.push(format!("src/{}.cs", cls));
+        definitions.push(class_def(fid, &cls, vec![]));
+        let dowork_di = definitions.len() as u32;
+        definitions.push(method_def(fid, "DoWork", &cls, 1, 10));
+        method_calls.insert(dowork_di, vec![process_call()]);
+    }
+    // Test callers: tests/TestCallerN.cs / class TestCallerN { [Fact] DoWork() }
+    // Use the `Fact` attribute (xUnit) so `is_test_method` returns true based on
+    // the attribute strategy (the path-substring heuristic only fires for files
+    // ending with .test.ts / .spec.ts / etc., not for `tests/` segment).
+    for i in 0..test_count {
+        let fid = (prod_count as u32) + 1 + (i as u32);
+        let cls = format!("TestCaller{}", i);
+        files_list.push(format!("tests/{}.cs", cls));
+        definitions.push(class_def(fid, &cls, vec![]));
+        let dowork_di = definitions.len() as u32;
+        definitions.push(crate::definitions::DefinitionEntry {
+            file_id: fid,
+            name: "DoWork".to_string(),
+            kind: crate::definitions::DefinitionKind::Method,
+            line_start: 1,
+            line_end: 10,
+            parent: Some(cls.clone()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec!["Fact".to_string()],
+            base_types: vec![],
+        });
+        method_calls.insert(dowork_di, vec![process_call()]);
+    }
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    for (i, def) in definitions.iter().enumerate() {
+        let idx = i as u32;
+        name_index.entry(def.name.to_lowercase()).or_default().push(idx);
+        kind_index.entry(def.kind).or_default().push(idx);
+        file_index.entry(def.file_id).or_default().push(idx);
+    }
+    let mut path_to_id = HashMap::new();
+    for (i, f) in files_list.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(f), i as u32);
+    }
+
+    let def_idx = crate::definitions::DefinitionIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        files: files_list.clone(),
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        path_to_id,
+        method_calls,
+        ..Default::default()
+    };
+
+    let mut process_postings = vec![Posting { file_id: 0, lines: vec![1] }];
+    for fid in 1..=(prod_count as u32) {
+        process_postings.push(Posting { file_id: fid, lines: vec![5] });
+    }
+    for fid in (prod_count as u32 + 1)..=(prod_count as u32 + test_count as u32) {
+        process_postings.push(Posting { file_id: fid, lines: vec![5] });
+    }
+    let mut classa_postings = vec![Posting { file_id: 0, lines: vec![1] }];
+    for fid in 1..=(prod_count as u32 + test_count as u32) {
+        classa_postings.push(Posting { file_id: fid, lines: vec![5] });
+    }
+
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    index.insert("process".to_string(), process_postings);
+    index.insert("classa".to_string(), classa_postings);
+
+    let n_files = files_list.len();
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; n_files],
+        ..Default::default()
+    };
+    (content_index, def_idx)
+}
+
+#[test]
+fn test_impact_analysis_cap_sets_truncation_flag_when_collection_capped() {
+    // 50 production callers + 5 test callers; max_callers_per_level=2 -> cap=40.
+    // Cap fills with the first 40 prod callers -> collection_capped=true ->
+    // impact_analysis_truncated MUST be set to true so the response surfaces
+    // `impactAnalysisTruncated`.
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::collections::HashSet;
+
+    let (content_index, def_idx) = build_impact_starvation_fixture(50, 5);
+
+    let limits = CallerLimits { max_callers_per_level: 2, max_total_nodes: 10_000 };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        resolve_interfaces: false,
+        impact_analysis: true,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
+    };
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 1,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+    };
+    let _ = builder.build("Process", None, 0, &[]);
+
+    assert!(impact_truncated.load(Ordering::Relaxed),
+        "impact_analysis_truncated MUST be set when collection cap is hit during impactAnalysis. \
+         Without this flag, an empty/short testsCovering result is indistinguishable from a definitive \
+         'no tests cover this method' answer.");
+}
+
+#[test]
+fn test_impact_analysis_bounded_collection_starves_late_test_callers() {
+    // Documents the current degraded behavior: with production callers ordered
+    // BEFORE test callers in postings (the common case for popular helpers /
+    // logging utilities), the cap can fill before tests are even visited —
+    // tests_found stays empty.
+    //
+    // If/when a fairness fix lands (e.g. a separate test-caller budget, or a
+    // second pass over remaining postings), this test must be updated alongside
+    // it: change `tests_found` expectation from empty-but-truncated to
+    // populated-and-truncated. Until then, the truncation flag is the ONLY
+    // honest signal and consumers MUST gate "no tests found" conclusions on it.
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::collections::HashSet;
+
+    let (content_index, def_idx) = build_impact_starvation_fixture(50, 5);
+
+    let limits = CallerLimits { max_callers_per_level: 2, max_total_nodes: 10_000 };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        resolve_interfaces: false,
+        impact_analysis: true,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
+    };
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 1,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+    };
+    let _ = builder.build("Process", None, 0, &[]);
+
+    assert!(impact_truncated.load(Ordering::Relaxed),
+        "truncation flag must be set so the empty test result below is gated by it");
+    assert!(builder.tests_found.is_empty(),
+        "DEGRADED PATH (current behavior): late test callers are starved by the cap. \
+         tests_found should be empty here — if this assertion now FAILS because tests_found is \
+         populated, a fairness fix landed and this test needs to assert the new contract \
+         (truncated AND tests visible). Got: {:?}",
+        builder.tests_found);
+}
+
+#[test]
+fn test_impact_analysis_with_class_filter_avoids_starvation() {
+    // The recommended path per the story: with a `class=` filter,
+    // `parent_file_ids` pre-filtering shrinks the candidate set so the cap
+    // is never hit and ALL test callers are visited. To force the
+    // pre-filter to actually narrow, we override the "classa" postings to
+    // include only a small subset of files (here: 5 prod + 5 tests = 10
+    // files, well under the cap=40).
+    use crate::Posting;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::collections::HashSet;
+
+    let (mut content_index, def_idx) = build_impact_starvation_fixture(50, 5);
+
+    let mut narrowed = vec![Posting { file_id: 0, lines: vec![1] }];
+    for fid in 1..=5u32 {
+        narrowed.push(Posting { file_id: fid, lines: vec![5] });
+    }
+    for fid in 51..=55u32 {
+        narrowed.push(Posting { file_id: fid, lines: vec![5] });
+    }
+    content_index.index.insert("classa".to_string(), narrowed);
+
+    let limits = CallerLimits { max_callers_per_level: 2, max_total_nodes: 10_000 };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        resolve_interfaces: false,
+        impact_analysis: true,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
+    };
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 1,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+    };
+    let _ = builder.build("Process", Some("ClassA"), 0, &[]);
+
+    assert!(!impact_truncated.load(Ordering::Relaxed),
+        "class= filter must narrow the candidate set BEFORE the cap is checked, so the truncation flag stays clear");
+    assert!(!builder.tests_found.is_empty(),
+        "with class= filter, all test callers must be visible (got: {:?})",
+        builder.tests_found);
+    assert_eq!(builder.tests_found.len(), 5,
+        "all 5 test callers must surface (not capped, not starved)");
 }
 

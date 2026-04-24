@@ -22,6 +22,7 @@ fn make_params<'a>(
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(exclude_dir),
         exclude_lower: exclude.iter().map(|s| s.to_lowercase()).collect(),
         dir_auto_converted_note: None,
+        file_filter_exact: false,
         auto_balance: true,
         max_occurrences_per_term: None,
     }

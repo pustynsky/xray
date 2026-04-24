@@ -1979,6 +1979,140 @@ fn test_grep_file_filter_comma_separated_or_semantics() {
 // ─── Grep with relative dir ─────────────────────────────────────────────
 
 #[test]
+fn test_grep_dir_as_file_auto_convert_uses_exact_basename_not_substring_siblings() {
+    // Regression: dir=<file> auto-convert previously populated `file=<basename>`
+    // and let it propagate through `passes_file_filters` with substring semantics,
+    // so a query intended as "scope to this one file" would also match siblings
+    // whose basename CONTAINS the target as a substring (`MyService.cs`,
+    // `Service.cs.bak`, `OldService.cs.disabled`, etc.). Fix: when the auto-convert
+    // path populates `file_filter`, set `file_filter_exact = true`, switching
+    // `passes_file_filters` to exact-basename matching for that filter.
+    use std::io::Write;
+    static C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = C.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("grep_exact_basename_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+
+    // Marker token `xrayExactBasenameMarker` appears in ALL three files so the only
+    // thing that can vary across the test variants is the file-scoping filter.
+    // All three are .cs (indexed extension) so the index sees them; their basenames
+    // share `Service.cs`/`Service` as a substring, the exact case the bug widened.
+    for name in ["Service.cs", "MyService.cs", "OldService.cs"] {
+        let mut f = std::fs::File::create(tmp.join(name)).unwrap();
+        writeln!(f, "// xrayExactBasenameMarker token {}", name).unwrap();
+        writeln!(f, "public class C {{ }}").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))),
+        index_base: tmp.join(".index"),
+        ..Default::default()
+    };
+
+    // Baseline: token search without any file scoping must find all three files
+    // (sanity check that the fixture indexed correctly).
+    let baseline = handle_xray_grep(&ctx, &json!({ "terms": "xrayExactBasenameMarker" }));
+    assert!(!baseline.is_error, "baseline must succeed: {}", baseline.content[0].text);
+    let baseline_out: Value = serde_json::from_str(&baseline.content[0].text).unwrap();
+    let baseline_paths: Vec<String> = baseline_out["files"].as_array().unwrap().iter()
+        .map(|f| f["path"].as_str().unwrap().to_string()).collect();
+    assert!(baseline_paths.iter().any(|p| p.ends_with("/Service.cs") || p.ends_with("\\Service.cs")),
+        "baseline must include Service.cs: {:?}", baseline_paths);
+    assert!(baseline_paths.iter().any(|p| p.ends_with("MyService.cs")),
+        "baseline must include MyService.cs: {:?}", baseline_paths);
+    assert!(baseline_paths.iter().any(|p| p.ends_with("OldService.cs")),
+        "baseline must include OldService.cs: {:?}", baseline_paths);
+
+    // Auto-convert path: dir= points at the literal file Service.cs.
+    let scoped = handle_xray_grep(&ctx, &json!({
+        "terms": "xrayExactBasenameMarker",
+        "dir": tmp.join("Service.cs").to_string_lossy().to_string()
+    }));
+    assert!(!scoped.is_error, "auto-convert query must succeed: {}", scoped.content[0].text);
+    let scoped_out: Value = serde_json::from_str(&scoped.content[0].text).unwrap();
+
+    // Note must still be present for LLM ergonomics (the fix only changed scoping,
+    // not the surfaced hint).
+    assert!(scoped_out["summary"]["dirAutoConverted"].as_str().is_some(),
+        "dirAutoConverted note must still be present after the fix: {}",
+        serde_json::to_string_pretty(&scoped_out).unwrap());
+
+    let scoped_paths: Vec<String> = scoped_out["files"].as_array().unwrap().iter()
+        .map(|f| f["path"].as_str().unwrap().to_string()).collect();
+
+    // Exactly one file: the literal Service.cs the user pointed at.
+    assert_eq!(scoped_paths.len(), 1,
+        "BUG REGRESSION: dir=<file> must scope to exactly that one file (got: {:?})",
+        scoped_paths);
+    let only = &scoped_paths[0];
+    assert!(
+        (only.ends_with("/Service.cs") || only.ends_with("\\Service.cs"))
+            && !only.ends_with("MyService.cs")
+            && !only.ends_with("OldService.cs"),
+        "BUG REGRESSION: scoped result must be the literal Service.cs basename, got: {}",
+        only);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_grep_explicit_file_filter_keeps_substring_semantics() {
+    // Regression guard for the OTHER direction: user-provided file= must KEEP
+    // substring/comma-OR semantics (the fix only flipped behavior for the
+    // auto-convert path). file='Service' should match Service.cs, MyService.cs,
+    // OldService.cs — same as before.
+    use std::io::Write;
+    static C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = C.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("grep_substring_keep_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    for name in ["Service.cs", "MyService.cs", "OldService.cs"] {
+        let mut f = std::fs::File::create(tmp.join(name)).unwrap();
+        writeln!(f, "// xraySubstringKeepMarker token {}", name).unwrap();
+    }
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))),
+        index_base: tmp.join(".index"),
+        ..Default::default()
+    };
+
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": "xraySubstringKeepMarker",
+        "file": "Service"
+    }));
+    assert!(!result.is_error, "explicit file= must succeed: {}", result.content[0].text);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let paths: Vec<String> = out["files"].as_array().unwrap().iter()
+        .map(|f| f["path"].as_str().unwrap().to_string()).collect();
+
+    assert_eq!(paths.len(), 3,
+        "explicit file='Service' (substring) must still match all 3 sibling files (got: {:?})",
+        paths);
+
+    // dirAutoConverted must NOT be present — user did not pass a file path in dir=.
+    assert!(out["summary"]["dirAutoConverted"].as_str().is_none(),
+        "dirAutoConverted must not be set when user passes plain file=: {}",
+        serde_json::to_string_pretty(&out).unwrap());
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+
+#[test]
 fn test_grep_with_relative_subdir_filter() {
     let tmp_holder = tempfile::tempdir().unwrap();
     let tmp_buf = crate::canonicalize_test_root(tmp_holder.path());

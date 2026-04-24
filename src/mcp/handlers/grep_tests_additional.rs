@@ -17,6 +17,7 @@ fn make_params_default<'a>() -> GrepSearchParams<'a> {
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
         exclude_lower: vec![],
         dir_auto_converted_note: None,
+        file_filter_exact: false,
         auto_balance: true,
         max_occurrences_per_term: None,
     }
