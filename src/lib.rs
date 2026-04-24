@@ -220,6 +220,46 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
         return inside(&canon);
     }
 
+    // Walk-up canonical fallback for non-existent leaves (Windows 8.3 short/long
+    // form mismatch). When the path itself doesn't exist (e.g. a brand-new
+    // subdir the caller wants to enumerate), `canonicalize(path)` fails and
+    // the textual `inside(logical)` check above can miss legitimate in-workspace
+    // paths whose ancestor exists in a different short/long form than `root`.
+    // Walk up from the leaf to the longest existing ancestor, canonicalize
+    // THAT, then re-attach the unresolved tail and re-check containment.
+    //
+    // Concrete repro (windows-latest CI):
+    //   path = `C:/Users/RUNNER~1/AppData/Local/Temp/xray_fast_test_.../nonexistent-but-inside`
+    //   root = `C:/Users/runneradmin/AppData/Local/Temp/xray_fast_test_...`  (canonical)
+    // Without this branch the textual `inside` rejects (`runner~1` ≠ `runneradmin`)
+    // and the canonicalize(path) above fails on the non-existent leaf.
+    if let Ok(canonical_root) = std::fs::canonicalize(root) {
+        let croot = clean_path(&canonical_root.to_string_lossy()).to_lowercase();
+        let croot_trimmed = croot.trim_end_matches('/');
+        let croot_with_sep = format!("{}/", croot_trimmed);
+        let mut p = std::path::PathBuf::from(path);
+        let mut tail = std::path::PathBuf::new();
+        // Bound the walk so a pathological input cannot stat the entire
+        // ancestor chain. 64 segments far exceeds any realistic in-workspace path.
+        for _ in 0..64 {
+            if p.as_os_str().is_empty() || p.exists() { break; }
+            if let Some(name) = p.file_name() {
+                tail = std::path::PathBuf::from(name).join(&tail);
+            }
+            if !p.pop() { break; }
+        }
+        if !p.as_os_str().is_empty()
+            && let Ok(canonical_anc) = std::fs::canonicalize(&p)
+        {
+            let with_tail = canonical_anc.join(&tail);
+            let canon = clean_path(&with_tail.to_string_lossy()).to_lowercase();
+            let c = canon.trim_end_matches('/');
+            if c == croot_trimmed || c.starts_with(&croot_with_sep) {
+                return true;
+            }
+        }
+    }
+
     false
 }
 

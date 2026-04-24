@@ -556,7 +556,21 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
                         // Explicit user `file=` (substring-OR) is left untouched —
                         // we only set `exact_file_path` when explicitly auto-converted.
                         if !filename.is_empty() {
-                            exact_file_path = Some(resolved.clone());
+                            // Canonicalize so the comparison in `passes_file_filters`
+                            // matches the indexer's path form. Without this, a Windows
+                            // 8.3 short-name input (`C:\Users\RUNNER~1\…\Service.cs`)
+                            // and the indexed long-name path
+                            // (`C:\Users\runneradmin\…\Service.cs`) compare as
+                            // unequal and the auto-convert query silently returns
+                            // zero hits — exactly the CI failure we hit on
+                            // windows-latest where `%TEMP%` resolves to a short
+                            // 8.3 path. Best-effort: fall back to the logical
+                            // path if canonicalize fails (e.g. file no longer
+                            // exists between resolution and matching).
+                            let canonical = std::fs::canonicalize(path)
+                                .map(|p| crate::clean_path(&p.to_string_lossy()))
+                                .unwrap_or_else(|_| resolved.clone());
+                            exact_file_path = Some(canonical);
                         }
                         dir_auto_converted_note = Some(format!(
                             "dir='{}' looked like a file path — auto-converted to scope=exactly that one file ({}). \
