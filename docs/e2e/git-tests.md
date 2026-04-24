@@ -93,7 +93,7 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 
 **Expected:**
 
-- `tools/list` contains all 16 tools including 6 git tools
+- `tools/list` contains all 15 tools including 6 git tools
 - No `--git` flag needed
 
 ---
