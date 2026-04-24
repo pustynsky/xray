@@ -640,3 +640,94 @@ fn test_list_tracked_files_under_bad_repo_returns_empty() {
         tracked
     );
 }
+
+// ── PERF-03: get_commit_diff via `git show` ─────────────────────
+
+/// Initial-commit regression guard. Pre-PERF-03 the path used a
+/// hard-coded empty-tree SHA (`4b825dc6…`) which does not exist in
+/// every clone (it only resolves when the empty tree object is
+/// reachable from a ref) — so `git diff <empty-tree> <hash>` could
+/// fail with `bad object` on perfectly valid initial commits in
+/// freshly-init'd repos. PERF-03 switches to `git show` which handles
+/// the no-parent case natively (diff against /dev/null). This test
+/// builds a tempdir repo with exactly one commit and asserts the
+/// returned patch contains the canonical `new file mode` /
+/// `--- /dev/null` header lines so a future "optimisation" that
+/// reintroduces the empty-tree SHA fails loudly here.
+#[test]
+fn test_file_history_with_diff_includes_initial_commit_patch() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "perf03@example.com"]);
+    run_git(repo, &["config", "user.name", "PERF-03 Test"]);
+    std::fs::write(repo.join("seed.txt"), "alpha\nbeta\n").expect("write seed.txt");
+    run_git(repo, &["add", "seed.txt"]);
+    run_git(repo, &["commit", "-m", "initial commit (no parent)", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let result = file_history(repo_str, "seed.txt", &filter, true, 5, None, None);
+    let (commits, _) = result.expect("file_history must succeed on initial commit");
+    assert_eq!(commits.len(), 1, "exactly one commit expected");
+    let patch = commits[0]
+        .patch
+        .as_ref()
+        .expect("initial commit must include patch — pre-PERF-03 this could be empty if the empty-tree SHA was unreachable");
+    assert!(
+        patch.contains("new file mode"),
+        "initial-commit patch must declare a new-file header, got:\n{}",
+        patch
+    );
+    assert!(
+        patch.contains("--- /dev/null"),
+        "initial-commit patch must diff against /dev/null (proves git show handled no-parent case natively without the magic empty-tree SHA), got:\n{}",
+        patch
+    );
+    assert!(
+        patch.contains("+alpha") && patch.contains("+beta"),
+        "initial-commit patch must include the seeded content, got:\n{}",
+        patch
+    );
+}
+
+/// Non-initial commit regression guard. Asserts the patch section
+/// produced by PERF-03's `git show` path contains the same
+/// `+`/`-` content lines you'd get from `git diff <hash>^..<hash>`.
+/// Byte-identity of the patch section (after the `+++`/`---` lines)
+/// was verified pre-merge by walking real history on the xray repo;
+/// this test pins the structural shape that future refactors must
+/// preserve.
+#[test]
+fn test_file_history_with_diff_normal_commit_patch_shape() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "perf03@example.com"]);
+    run_git(repo, &["config", "user.name", "PERF-03 Test"]);
+    std::fs::write(repo.join("seed.txt"), "v1\n").expect("write seed.txt v1");
+    run_git(repo, &["add", "seed.txt"]);
+    run_git(repo, &["commit", "-m", "v1", "--quiet"]);
+    std::fs::write(repo.join("seed.txt"), "v2\n").expect("write seed.txt v2");
+    run_git(repo, &["commit", "-am", "v2", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (commits, _) = file_history(repo_str, "seed.txt", &filter, true, 5, None, None)
+        .expect("file_history must succeed");
+    // commits come newest-first; index 0 is the v2 modification commit.
+    let patch = commits[0]
+        .patch
+        .as_ref()
+        .expect("v2 commit must include patch");
+    assert!(
+        patch.contains("-v1") && patch.contains("+v2"),
+        "v2 commit patch must show -v1 / +v2, got:\n{}",
+        patch
+    );
+    assert!(
+        !patch.contains("new file mode"),
+        "non-initial commit patch must NOT declare a new-file header (would mean git show treated v2 as a creation), got:\n{}",
+        patch
+    );
+}

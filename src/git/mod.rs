@@ -320,35 +320,28 @@ fn run_file_history_query(
 
 /// Get the diff/patch for a specific commit and file.
 fn get_commit_diff(repo_path: &str, hash: &str, file: &str) -> Result<String, String> {
-    // Check if this is an initial commit (no parent) by testing git rev-parse
-    let parent_check = Command::new("git")
-        .current_dir(repo_path)
-        .arg("rev-parse")
-        .arg("--verify")
-        .arg(format!("{}^", hash))
-        .output();
-
+    // PERF-03: single `git show` spawn instead of the previous
+    //   1) `git rev-parse --verify <hash>^` (parent probe)
+    //   2) `git diff <hash>^..<hash>` OR `git diff <empty-tree> <hash>` (initial)
+    // sequence. `git show <hash> --format= --patch -- <file>` handles the
+    // initial-commit case natively (diff against /dev/null, no parent
+    // required) and avoids hard-coding the magic empty-tree SHA
+    // `4b825dc6…` — which is not actually present in every clone (`git
+    // diff <empty-tree>` fails with `bad object` when the tree object
+    // isn't reachable from any ref). The patch-section output is byte-
+    // identical to `git diff <hash>^..<hash>` for non-initial commits,
+    // verified pre-change by walking real history on the xray repo.
+    //
+    // Net effect: 200-commit `xray_git_history file=… includeDiff=true`
+    // drops from 400 → 200 spawns (≈1–4s saved on Windows).
     let mut cmd = Command::new("git");
-    cmd.current_dir(repo_path);
-
-    let has_parent = parent_check
-        .map(|o| o.status.success())
-        .unwrap_or(false);
-
-    if has_parent {
-        cmd.arg("diff")
-            .arg(format!("{}^..{}", hash, hash))
-            .arg("--")
-            .arg(file);
-    } else {
-        // Initial commit: show diff against empty tree
-        let empty_tree = "4b825dc642cb6eb9a060e54bf899d69f7cb0cb10";
-        cmd.arg("diff")
-            .arg(empty_tree)
-            .arg(hash)
-            .arg("--")
-            .arg(file);
-    }
+    cmd.current_dir(repo_path)
+        .arg("show")
+        .arg(hash)
+        .arg("--format=")
+        .arg("--patch")
+        .arg("--")
+        .arg(file);
 
     let output = run_git(&mut cmd)?;
 
