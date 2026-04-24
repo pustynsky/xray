@@ -568,23 +568,73 @@ fn test_detect_main_branch_name_returns_cached_value_without_reprobe() {
          silently undone"
     );
 }
-
-/// Negative results (`None`) are also cached so we don't keep re-probing
-/// a hopeless path on every request. This is the warm path for the
-/// `bad_repo` test case from the production handler.
+/// PERF-02 follow-up: negative results (`None`) are intentionally NOT
+/// cached. Caching `Some(None)` was a permanent-poisoning bug — a path
+/// probed before its repo existed (e.g. detect runs against an empty
+/// workspace, then user runs `git init` + creates `main`) would forever
+/// return None until server restart. We trade ~1 extra `git for-each-ref`
+/// per repeated bad-path call (≈5-20 ms) for self-healing recovery.
 #[test]
-fn test_detect_main_branch_name_caches_negative_result() {
+fn test_detect_main_branch_name_does_not_cache_negative_result() {
     let ctx = make_git_test_ctx();
     let bad = "/nonexistent/repo/path/perf-02-test";
     let resolved = detect_main_branch_name(&ctx, bad);
     assert_eq!(resolved, None, "bad repo path resolves to None");
 
     let cache = ctx.branch_name_cache.read().unwrap();
+    assert!(
+        !cache.contains_key(bad),
+        "negative result must NOT be cached so a later `git init` self-heals; \
+         cache keys present: {:?}",
+        cache.keys().collect::<Vec<_>>()
+    );
+}
+
+/// PERF-02 follow-up: a repo that initially probed as None recovers
+/// once it actually has a branch — pinning the no-negative-cache contract
+/// end-to-end. Builds a tempdir, probes (no `.git` yet → None, no cache
+/// entry), runs `git init -b main` + first commit, probes again → must
+/// return `Some("main")`. Pre-fix this would have stayed None forever.
+#[test]
+fn test_detect_main_branch_name_self_heals_after_git_init() {
+    use std::process::Command;
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path().to_str().expect("repo utf-8");
+    let ctx = make_git_test_ctx();
+
+    // Cold probe before `git init` — must resolve to None and NOT cache.
+    let pre = detect_main_branch_name(&ctx, repo);
+    assert_eq!(pre, None, "empty dir has no branches");
+    assert!(
+        !ctx.branch_name_cache.read().unwrap().contains_key(repo),
+        "negative pre-init probe must not poison the cache"
+    );
+
+    // Now initialise the repo with a `main` branch and a commit.
+    let run = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .env("GIT_AUTHOR_NAME", "T")
+            .env("GIT_AUTHOR_EMAIL", "t@example.com")
+            .env("GIT_COMMITTER_NAME", "T")
+            .env("GIT_COMMITTER_EMAIL", "t@example.com")
+            .output()
+            .expect("git");
+        assert!(out.status.success(), "git {:?} failed: {:?}", args, out);
+    };
+    run(&["init", "--quiet", "-b", "main"]);
+    std::fs::write(dir.path().join("f.txt"), "hi\n").expect("write");
+    run(&["add", "f.txt"]);
+    run(&["commit", "-m", "init", "--quiet"]);
+
+    // Re-probe must now succeed. Pre-fix: cached `Some(None)` would
+    // shortcut and return None forever.
+    let post = detect_main_branch_name(&ctx, repo);
     assert_eq!(
-        cache.get(bad),
-        Some(&None),
-        "negative result must be cached as Some(None), not absent — \
-         otherwise next call re-spawns git for a known-hopeless path"
+        post.as_deref(),
+        Some("main"),
+        "after `git init -b main` + commit the probe must self-heal"
     );
 }
 
@@ -593,12 +643,47 @@ fn test_detect_main_branch_name_caches_negative_result() {
 /// `branch_name_cache` field.
 #[test]
 fn test_detect_main_branch_name_keys_by_repo_path() {
+    use std::process::Command;
+    // Two distinct positive repos must occupy two distinct cache slots.
+    // (Bad paths are intentionally not cached — see
+    // `test_detect_main_branch_name_does_not_cache_negative_result`.)
+    let dir_a = tempfile::TempDir::new().expect("tempdir-a");
+    let dir_b = tempfile::TempDir::new().expect("tempdir-b");
+    let init_repo = |dir: &std::path::Path| {
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .env("GIT_AUTHOR_NAME", "T")
+                .env("GIT_AUTHOR_EMAIL", "t@example.com")
+                .env("GIT_COMMITTER_NAME", "T")
+                .env("GIT_COMMITTER_EMAIL", "t@example.com")
+                .output()
+                .expect("git");
+            assert!(out.status.success(), "git {:?} failed: {:?}", args, out);
+        };
+        run(&["init", "--quiet", "-b", "main"]);
+        std::fs::write(dir.join("f.txt"), "hi\n").expect("write");
+        run(&["add", "f.txt"]);
+        run(&["commit", "-m", "init", "--quiet"]);
+    };
+    init_repo(dir_a.path());
+    init_repo(dir_b.path());
+
     let ctx = make_git_test_ctx();
-    let _ = detect_main_branch_name(&ctx, ".");
-    let _ = detect_main_branch_name(&ctx, "/nonexistent/repo/path/perf-02-keying");
+    let path_a = dir_a.path().to_str().expect("utf-8");
+    let path_b = dir_b.path().to_str().expect("utf-8");
+    let _ = detect_main_branch_name(&ctx, path_a);
+    let _ = detect_main_branch_name(&ctx, path_b);
 
     let cache = ctx.branch_name_cache.read().unwrap();
-    assert_eq!(cache.len(), 2, "each distinct repo string gets its own entry");
+    assert_eq!(
+        cache.len(),
+        2,
+        "each distinct positive repo string gets its own cache entry"
+    );
+    assert!(cache.contains_key(path_a));
+    assert!(cache.contains_key(path_b));
 }
 
 /// PERF-02 regression: when a repo has BOTH `refs/heads/master` AND

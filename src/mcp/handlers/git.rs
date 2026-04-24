@@ -956,7 +956,19 @@ fn detect_main_branch_name(ctx: &HandlerContext, repo: &str) -> Option<String> {
     // Best-effort cache write. If the lock is poisoned we silently re-probe
     // next call — strictly worse than caching but never worse than the old
     // uncached path, so swallowing the error is safe.
-    if let Ok(mut cache) = ctx.branch_name_cache.write() {
+    //
+    // **PERF-02 follow-up**: only cache positive results. Negative caching
+    // (`Some(None)`) created a permanent-poisoning bug: a path that gets
+    // probed before its repo exists (e.g. handler called against an
+    // empty workspace, then user runs `git init` + creates a `main`
+    // branch) would forever return None until server restart, even though
+    // a re-probe would now succeed. Re-probing a hopeless path costs one
+    // `git for-each-ref` per request — ≈5-20 ms on Windows, paid only by
+    // the (rare) bad-path case; the common positive path still benefits
+    // from the cache and remains zero-spawn on warm calls.
+    if resolved.is_some()
+        && let Ok(mut cache) = ctx.branch_name_cache.write()
+    {
         cache.insert(repo.to_string(), resolved.clone());
     }
     resolved

@@ -807,9 +807,15 @@ pub struct HandlerContext {
     ///
     /// Lookup key is the raw repo string the caller passed (no
     /// canonicalisation — canonicalisation would itself spawn a syscall on
-    /// Windows). Value is `Some("main"|"master")` if the probe found one,
-    /// or `None` if the repo has neither (cached so we don't re-probe a
-    /// hopeless case on every request).
+    /// Windows). Value is `Some("main"|"master")` if the probe found one.
+    ///
+    /// **Negative results are NOT cached** (PERF-02 follow-up). Caching
+    /// `Some(None)` permanently poisoned paths probed before their repo
+    /// existed (e.g. probe runs against an empty workspace, then user runs
+    /// `git init` + creates `main`) — they would forever return None until
+    /// server restart. The map's `Option<String>` value type is kept for
+    /// internal `clone()` ergonomics on cache hits; `None` simply never
+    /// appears as a stored value.
     ///
     /// **Invalidation:** keyed by repo path, so workspace switches
     /// naturally miss-then-repopulate (the new repo is a different key).
