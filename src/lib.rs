@@ -196,14 +196,27 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
     // resolution that lands outside the workspace fails the `inside` check.
     // Symlink-escape risk is no worse than the pre-existing no-traversal logical
     // branch, which already trusts textual containment for `WalkBuilder` parity.
-    if has_traversal
-        && let Some(resolved) = resolve_dotdot_logical(path, root)
-    {
-        let logical = resolved.to_lowercase();
-        if inside(&logical) {
-            return true;
+    //
+    // We also stash the resolved (`..`-free) form in `safe_for_walkup` so the
+    // walk-up canonical fallback below can run safely on `..`-bearing inputs
+    // where the original path would silently lose its `..` markers via
+    // `PathBuf::pop`/`file_name` and re-accept genuine escapes.
+    let safe_for_walkup: Option<String> = if has_traversal {
+        let resolved = resolve_dotdot_logical(path, root);
+        if let Some(ref r) = resolved {
+            let logical = r.to_lowercase();
+            if inside(&logical) {
+                return true;
+            }
         }
-    }
+        // `None` here means the resolver classified the input as a genuine
+        // escape (`..` popped past root). We deliberately leave
+        // `safe_for_walkup` as `None` so the walk-up branch below skips it
+        // and the function returns `false` at the end.
+        resolved
+    } else {
+        Some(path.to_string())
+    };
 
     // Canonical fallback: handles 8.3 short names, traversal validation,
     // and arbitrary input shapes that don't share a textual prefix with root.
@@ -234,23 +247,23 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
     // Without this branch the textual `inside` rejects (`runner~1` ≠ `runneradmin`)
     // and the canonicalize(path) above fails on the non-existent leaf.
     //
-    // SAFETY: this branch must NOT run for paths that contain `..` segments.
-    // `Path::file_name` returns `None` for `ParentDir` components and `pop`
-    // collapses them structurally, so a genuine escape like
-    // `<root>/sub/../../outside` (where `sub` does not exist on disk) loses
-    // its `..` markers during walk-up and resolves back to an in-root form
-    // (`<root>/sub/outside`), turning a rejection into an accept and breaking
-    // `test_is_path_within_relative_dotdot_escape_still_rejected` on Linux CI.
-    // `..`-bearing paths are already routed through the `has_traversal`
-    // branch above and the canonical fallback, both of which classify
-    // escapes correctly; we deliberately stay out of their way.
-    if !has_traversal
+    // SAFETY: this branch operates on `safe_for_walkup`, NOT on the raw
+    // `path` argument. For `..`-bearing inputs we use the resolved form from
+    // `resolve_dotdot_logical`, which has already classified genuine escapes
+    // as `None` (the resolver returns `None` when `..` pops past root). For
+    // confirmed escapes `safe_for_walkup` is `None` and we skip the walk-up
+    // entirely, so a payload like `<root>/sub/../../outside` cannot get a
+    // second chance via `PathBuf::pop`/`file_name` (which silently drops
+    // `..` segments and would re-accept the escape — the bug that broke
+    // `test_is_path_within_relative_dotdot_escape_still_rejected` on Linux
+    // CI when this branch ran unconditionally on the raw `path`).
+    if let Some(walkup_input) = safe_for_walkup.as_deref()
         && let Ok(canonical_root) = std::fs::canonicalize(root)
     {
         let croot = clean_path(&canonical_root.to_string_lossy()).to_lowercase();
         let croot_trimmed = croot.trim_end_matches('/');
         let croot_with_sep = format!("{}/", croot_trimmed);
-        let mut p = std::path::PathBuf::from(path);
+        let mut p = std::path::PathBuf::from(walkup_input);
         let mut tail = std::path::PathBuf::new();
         // Bound the walk so a pathological input cannot stat the entire
         // ancestor chain. 64 segments far exceeds any realistic in-workspace path.

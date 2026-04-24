@@ -1075,6 +1075,58 @@ fn test_is_path_within_nonexistent_leaf_inside_via_canonical_ancestor() {
 }
 
 
+/// Combined regression for the d2b3d8f follow-up review: alternate root
+/// spelling + `..` + non-existent leaf must still be classified as inside.
+///
+/// Pre-fix flow on Linux for `<alt-root>/sub/../newdir` where `<alt-root>`
+/// is a symlink to canonical root, `sub` exists, `newdir` does not:
+///   1. `has_traversal == true` → no-traversal logical branch skipped
+///   2. `resolve_dotdot_logical` collapses to `<alt-root>/newdir` (preserves
+///      the alt prefix) → textual `inside` rejects (alt ≠ canonical)
+///   3. `canonicalize(path)` fails on the non-existent `newdir` leaf
+///   4. After d2b3d8f the walk-up branch was gated `!has_traversal` and
+///      skipped → function returned `false` for a legitimate in-workspace
+///      path.
+///
+/// The follow-up fix routes the walk-up through `safe_for_walkup`, which
+/// holds the `..`-stripped form for traversal inputs (and `None` for genuine
+/// escapes — confirmed by the companion test
+/// `test_is_path_within_relative_dotdot_escape_still_rejected`). The walk-up
+/// then climbs from `newdir` (non-existent) to `<alt-root>` (existing
+/// symlink), canonicalizes it to canonical_root, and accepts.
+#[cfg(unix)]
+#[test]
+fn test_is_path_within_traversal_via_alt_root_nonexistent_leaf_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let canonical_root = std::fs::canonicalize(tmp.path()).unwrap();
+    let canonical_root_str = clean_path(&canonical_root.to_string_lossy());
+
+    // Existing in-root subdir so `..` has something to pop off.
+    let sub = canonical_root.join("sub");
+    std::fs::create_dir(&sub).unwrap();
+
+    // Alternate root: a symlink in a sibling tempdir pointing at canonical_root.
+    let parent = tempfile::tempdir().unwrap();
+    let alt = parent.path().join("alt-form");
+    std::os::unix::fs::symlink(&canonical_root, &alt).unwrap();
+
+    // `<alt-root>/sub/../newdir` — alternate prefix, traversal, non-existent leaf.
+    let cross_form = format!("{}/sub/../newdir", alt.to_string_lossy());
+    assert!(
+        is_path_within(&cross_form, &canonical_root_str),
+        "alternate-root path with `..` and non-existent leaf must be classified \
+         as inside canonical root. cross_form={}, canonical_root={}",
+        cross_form, canonical_root_str
+    );
+
+    // Sanity: the same shape WITHOUT the alternate root prefix already worked
+    // before d2b3d8f — guard against accidental regression of the easier case.
+    let plain_traversal = format!("{}/sub/../newdir", canonical_root_str);
+    assert!(
+        is_path_within(&plain_traversal, &canonical_root_str),
+        "`<canonical_root>/sub/../newdir` must be accepted (sanity)"
+    );
+}
 
 
 #[test]
