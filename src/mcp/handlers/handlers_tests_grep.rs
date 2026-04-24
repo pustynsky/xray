@@ -2150,8 +2150,19 @@ fn test_grep_dir_as_file_auto_convert_does_not_match_nested_same_basename() {
 fn test_grep_dir_as_file_auto_convert_preserves_logical_symlink_path() {
     static C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = C.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let tmp = std::env::temp_dir().join(format!("grep_symlink_exact_{}_{}", std::process::id(), id));
-    let _ = std::fs::remove_dir_all(&tmp);
+    let tmp_raw = std::env::temp_dir().join(format!("grep_symlink_exact_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_raw);
+    std::fs::create_dir_all(&tmp_raw).unwrap();
+    // Canonicalize the tmp root so all derived paths match the form the
+    // indexer records. On Windows CI `std::env::temp_dir()` returns the 8.3
+    // short form (`RUNNER~1`) while `WalkBuilder` records the long form
+    // (`runneradmin`); without this normalisation the fixture's
+    // `logical_norm` (built from the short form) would not equal the indexed
+    // path and the sanity assertion would fire spuriously on the runner.
+    let tmp = match std::fs::canonicalize(&tmp_raw) {
+        Ok(p) => std::path::PathBuf::from(crate::clean_path(&p.to_string_lossy())),
+        Err(_) => tmp_raw.clone(),
+    };
     let root = tmp.join("root");
     let external = tmp.join("external");
     std::fs::create_dir_all(&root).unwrap();
