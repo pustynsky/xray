@@ -2140,8 +2140,14 @@ fn detect_diff_category(search: &str, found: &str) -> &'static str {
         return "crlfVsLf";
     }
 
-    // 2. Leading/trailing blank lines: trimming '\n' on both ends makes them equal.
-    if search.trim_matches('\n') == found.trim_matches('\n') {
+    // 2. Leading/trailing blank lines: trimming '\n' and '\r' on both ends
+    //    makes them equal. Stripping both characters keeps this branch line-
+    //    ending agnostic so CRLF drift like "\r\nfoo\r\n" vs "foo\r\n" is
+    //    classified correctly. Pure LF↔CRLF mismatch is already handled by the
+    //    crlfVsLf branch above and therefore never reaches this point.
+    if search.trim_matches(|c: char| c == '\n' || c == '\r')
+        == found.trim_matches(|c: char| c == '\n' || c == '\r')
+    {
         return "leadingOrTrailingBlankLines";
     }
 
