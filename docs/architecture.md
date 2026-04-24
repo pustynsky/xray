@@ -293,11 +293,20 @@ This is ~23% overhead on top of the 242 MB content index.
 
 Rather than performing complex incremental updates to the trigram index on every file change, the watcher uses a **lazy rebuild strategy**:
 
-1. On file change: watcher updates the main inverted index incrementally (as before) and sets `trigram_dirty = true`
-2. On next substring search: if `trigram_dirty`, the trigram index is rebuilt from scratch (~200ms), then `trigram_dirty = false`
-3. On bulk reindex (changes > threshold): trigram is rebuilt alongside the main index
+1. On file change: watcher updates the main inverted index incrementally (as before) and sets `trigram_dirty = true`.
+2. On next substring search: if `trigram_dirty`, the trigram index is rebuilt from scratch and swapped in. Then `trigram_dirty = false`.
+3. On bulk reindex (changes > threshold): trigram is rebuilt alongside the main index.
 
-This keeps the watcher fast (no O(n) index shifting) while amortizing the trigram rebuild cost.
+**Locking discipline (`ensure_trigram_index` in [`src/mcp/handlers/grep.rs`](../src/mcp/handlers/grep.rs)):** the rebuild work itself runs under the `ContentIndex` **read lock** — it does **not** block other readers (concurrent `xray_grep` / `xray_callers` queries continue without contention). Only the final pointer swap takes the **write lock**, and a double-checked `trigram_dirty` re-test inside the write critical section guards against duplicate work when two readers race into rebuild. The historical "~200ms write-lock stall on rebuild" no longer applies; the write critical section is microseconds (assignment + flag flip), the rebuild itself is the dominant cost but does not stall readers.
+
+```text
+(reader path on a dirty trigram)
+  read-lock  → build new TrigramIndex from inverted index (the hot work)
+  write-lock → if still dirty: index.trigram = new; trigram_dirty = false (microseconds)
+  read-lock  → normal substring query against fresh trigram
+```
+
+This keeps the watcher fast (no O(n) index shifting) and keeps reader latency bounded even when a rebuild is in flight.
 
 ### 6. Git History Cache
 
@@ -607,7 +616,7 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
-| Substring search after file watcher update | `trigram_dirty` flag → trigram index rebuilt from inverted index on next `xray_grep` with `substring=true` | TrigramIndex (in-memory, part of ContentIndex) | ~200ms |
+| Substring search after file watcher update | `trigram_dirty` flag → trigram index rebuilt from inverted index on next `xray_grep` with `substring=true`. Build runs under read-lock (does **not** block other readers); only the pointer swap takes the write-lock (microseconds, double-checked). | TrigramIndex (in-memory, part of ContentIndex) | rebuild dominates request latency; concurrent reads unaffected |
 | `xray fast` with stale FileIndex | Auto-rebuild if `--auto-reindex true` (default) | FileIndex | ~2–4s |
 | `xray grep` with stale ContentIndex | Auto-rebuild if `--auto-reindex true` (default) | ContentIndex | ~7–16s |
 
