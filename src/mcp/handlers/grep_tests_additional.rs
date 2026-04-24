@@ -18,6 +18,7 @@ fn make_params_default<'a>() -> GrepSearchParams<'a> {
         exclude_lower: vec![],
         dir_auto_converted_note: None,
         exact_file_path: &None,
+        exact_file_path_canonical: &None,
         auto_balance: true,
         max_occurrences_per_term: None,
     }

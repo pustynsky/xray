@@ -40,6 +40,11 @@ pub(crate) struct GrepSearchParams<'a> {
     /// `dir=<root>/Service.cs`; full-path equality closes that hole. User-provided
     /// `file=` keeps substring/comma-OR semantics (this stays `None`).
     pub exact_file_path: &'a Option<String>,
+    /// Optional canonical form of `exact_file_path`, populated ONLY when the
+    /// canonical file is still inside the workspace. This is a narrow fallback
+    /// for Windows short/long path-form mismatches (`RUNNER~1` vs `runneradmin`)
+    /// while preserving logical-path semantics for symlinked workspace paths.
+    pub exact_file_path_canonical: &'a Option<String>,
     /// Pre-computed exclude dir patterns (avoids per-file allocations)
     pub exclude_patterns: super::utils::ExcludePatterns,
     /// Pre-lowercased exclude path substrings
@@ -358,7 +363,26 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
     if let Some(target) = params.exact_file_path {
         let fp_norm = file_path.to_lowercase().replace('\\', "/");
         let target_norm = target.to_lowercase().replace('\\', "/");
-        if fp_norm != target_norm { return false; }
+        if fp_norm != target_norm {
+            // Preserve logical-path semantics first. Only if the logical paths
+            // differ do we attempt the narrow canonical fallback used for
+            // Windows 8.3 short/long path aliases. We do NOT canonicalize the
+            // requested target unconditionally, because that would resolve
+            // symlinked workspace paths to their external targets and break the
+            // exact-file contract for logical paths like `root/personal/note.md`.
+            let Some(target_canonical) = params.exact_file_path_canonical else {
+                return false;
+            };
+            let Ok(fp_canonical) = std::fs::canonicalize(file_path) else {
+                return false;
+            };
+            let fp_canonical_norm = crate::clean_path(&fp_canonical.to_string_lossy())
+                .to_lowercase();
+            let target_canonical_norm = target_canonical.to_lowercase().replace('\\', "/");
+            if fp_canonical_norm != target_canonical_norm {
+                return false;
+            }
+        }
         // Still apply ext / exclude filters below (they're cheap and harmless
         // for a single file; they also keep behavior consistent if the caller
         // ever adds an explicit `ext` that contradicts the auto-converted path).
@@ -420,9 +444,14 @@ struct ParsedGrepArgs {
     ext_filter: Option<String>,
     file_filter: Option<String>,
     /// When `Some(path)`, the request was `dir=<file>` (auto-converted) and
-    /// only that exact file (full normalized path) should match. Closes the
-    /// nested-basename leak (`<parent>/sub/Service.cs` was previously accepted).
+    /// only that exact file (full normalized LOGICAL path) should match.
+    /// Closes the nested-basename leak (`<parent>/sub/Service.cs` was previously
+    /// accepted) without losing symlink-path semantics.
     exact_file_path: Option<String>,
+    /// Narrow fallback for Windows short/long path aliases when the canonical
+    /// file still lives inside the workspace. Not used for symlink targets
+    /// outside the workspace.
+    exact_file_path_canonical: Option<String>,
     mode_and: bool,
     use_regex: bool,
     use_phrase: bool,
@@ -531,6 +560,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     // resolved path of the targeted file so `passes_file_filters` can do exact
     // path equality (basename-only would let `<parent>/sub/<name>` leak).
     let mut exact_file_path: Option<String> = None;
+    let mut exact_file_path_canonical: Option<String> = None;
 
     let mut dir_auto_converted_note: Option<String> = None;
 
@@ -556,21 +586,28 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
                         // Explicit user `file=` (substring-OR) is left untouched —
                         // we only set `exact_file_path` when explicitly auto-converted.
                         if !filename.is_empty() {
-                            // Canonicalize so the comparison in `passes_file_filters`
-                            // matches the indexer's path form. Without this, a Windows
-                            // 8.3 short-name input (`C:\Users\RUNNER~1\…\Service.cs`)
-                            // and the indexed long-name path
-                            // (`C:\Users\runneradmin\…\Service.cs`) compare as
-                            // unequal and the auto-convert query silently returns
-                            // zero hits — exactly the CI failure we hit on
-                            // windows-latest where `%TEMP%` resolves to a short
-                            // 8.3 path. Best-effort: fall back to the logical
-                            // path if canonicalize fails (e.g. file no longer
-                            // exists between resolution and matching).
-                            let canonical = std::fs::canonicalize(path)
-                                .map(|p| crate::clean_path(&p.to_string_lossy()))
-                                .unwrap_or_else(|_| resolved.clone());
-                            exact_file_path = Some(canonical);
+                            // Keep the LOGICAL path as the primary exact-file
+                            // filter so symlinked workspace paths continue to
+                            // match the logical paths recorded by the indexer.
+                            exact_file_path = Some(resolved.clone());
+
+                            // Narrow fallback for Windows 8.3 short/long path
+                            // aliases: if the canonicalized file still lives
+                            // inside the workspace boundary, keep that form too
+                            // so `passes_file_filters` can recover when the
+                            // logical path differs only in root representation
+                            // (`RUNNER~1` vs `runneradmin`). We intentionally do
+                            // NOT keep canonical paths that point outside the
+                            // workspace (symlink/junction targets), because that
+                            // would break the logical-path contract.
+                            if let Ok(canonical) = std::fs::canonicalize(path) {
+                                let canonical = crate::clean_path(&canonical.to_string_lossy());
+                                if canonical != resolved.as_str()
+                                    && code_xray::is_path_within(&canonical, server_dir)
+                                {
+                                    exact_file_path_canonical = Some(canonical);
+                                }
+                            }
                         }
                         dir_auto_converted_note = Some(format!(
                             "dir='{}' looked like a file path — auto-converted to scope=exactly that one file ({}). \
@@ -694,6 +731,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         ext_filter,
         file_filter,
         exact_file_path,
+        exact_file_path_canonical,
         mode_and,
         use_regex,
         use_phrase,
@@ -955,6 +993,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         dir_filter: &parsed.dir_filter,
         file_filter: &parsed.file_filter,
         exact_file_path: &parsed.exact_file_path,
+        exact_file_path_canonical: &parsed.exact_file_path_canonical,
         exclude_patterns,
         exclude_lower,
         dir_auto_converted_note: parsed.dir_auto_converted_note.clone(),
