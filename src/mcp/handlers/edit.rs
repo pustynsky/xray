@@ -1463,20 +1463,123 @@ fn describe_byte(b: u8) -> String {
     }
 }
 
+/// Type name of a JSON value for diagnostic messages — `"number"`, `"string"`,
+/// `"boolean"`, `"null"`, `"array"`, `"object"`.
+fn json_type_name(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
+/// Read a string field from an `edits[]` item. Returns `Ok(None)` if absent,
+/// `Ok(Some(s))` if present and a string, `Err` if present but a different
+/// type. Distinguishing "missing" from "wrong type" prevents the misleading
+/// `'replace' provided without 'search'` message when the caller passed e.g.
+/// `{"search": 123, "replace": "x"}`.
+fn expect_string_field(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+    i: usize,
+) -> Result<Option<String>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(Value::String(s)) => Ok(Some(s.clone())),
+        Some(other) => Err(format!(
+            "edits[{}]: '{}' must be a string, got {}",
+            i,
+            key,
+            json_type_name(other)
+        )),
+    }
+}
+
+/// Same as [`expect_string_field`] for boolean fields (e.g. `skipIfNotFound`).
+/// Critical: `.unwrap_or(false)` on a wrong-type bool would silently change
+/// edit semantics (caller thinks `skipIfNotFound=true` is honoured, batch
+/// fails atomically instead).
+fn expect_bool_field(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+    i: usize,
+) -> Result<Option<bool>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(Value::Bool(b)) => Ok(Some(*b)),
+        Some(other) => Err(format!(
+            "edits[{}]: '{}' must be a boolean (true/false), got {}",
+            i,
+            key,
+            json_type_name(other)
+        )),
+    }
+}
+
+/// Same as [`expect_string_field`] for `u64` fields (e.g. `occurrence`).
+fn expect_u64_field(
+    obj: &serde_json::Map<String, Value>,
+    key: &str,
+    i: usize,
+) -> Result<Option<u64>, String> {
+    match obj.get(key) {
+        None => Ok(None),
+        Some(Value::Number(n)) => match n.as_u64() {
+            Some(u) => Ok(Some(u)),
+            None => Err(format!(
+                "edits[{}]: '{}' must be a non-negative integer, got {}",
+                i, key, n
+            )),
+        },
+        Some(other) => Err(format!(
+            "edits[{}]: '{}' must be a non-negative integer, got {}",
+            i,
+            key,
+            json_type_name(other)
+        )),
+    }
+}
+
 fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
     let mut edits = Vec::with_capacity(edits_array.len());
     for (i, edit) in edits_array.iter().enumerate() {
-        // Part A: Normalize CRLF in all text fields to match LF-normalized file content
-        let search = edit.get("search").and_then(|v| v.as_str()).map(normalize_crlf);
-        let replace = edit.get("replace").and_then(|v| v.as_str()).map(normalize_crlf);
-        let insert_after = edit.get("insertAfter").and_then(|v| v.as_str()).map(normalize_crlf);
-        let insert_before = edit.get("insertBefore").and_then(|v| v.as_str()).map(normalize_crlf);
-        let content = edit.get("content").and_then(|v| v.as_str()).map(normalize_crlf);
-        let occurrence = edit.get("occurrence")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
-        let expected_context = edit.get("expectedContext").and_then(|v| v.as_str()).map(normalize_crlf);
-        let skip_if_not_found = edit.get("skipIfNotFound").and_then(|v| v.as_bool()).unwrap_or(false);
+        // Structural shape: each item must be a JSON object. Without this
+        // up-front check, `edit.get(...)` returns None for every field on a
+        // scalar/null/array payload and the caller falls into the misleading
+        // "missing primary action field" branch — far from the real cause.
+        let Some(obj) = edit.as_object() else {
+            return Err(format!(
+                "edits[{}]: each edit item must be a JSON object, got {}. \
+                 Example: {{\"search\": \"old\", \"replace\": \"new\"}}",
+                i,
+                json_type_name(edit)
+            ));
+        };
+
+        // Validate edit-object keys: reject unknown / aliased fields with an
+        // actionable hint BEFORE per-mode validation. This catches the common
+        // case where the caller used an alias (oldText/newText, find/with,
+        // pattern/with, etc.) — instead of the misleading "missing or invalid
+        // 'search'" message, surface the alias → canonical mapping directly.
+        if let Some(msg) = check_unknown_edit_object_fields(obj, i) {
+            return Err(msg);
+        }
+
+        // Part A: Normalize CRLF in all text fields to match LF-normalized
+        // file content. Type-strict accessors distinguish "missing" from
+        // "present but wrong type" so the caller sees a targeted message
+        // instead of the silent drop / misleading downstream error.
+        let search = expect_string_field(obj, "search", i)?.map(|s| normalize_crlf(&s));
+        let replace = expect_string_field(obj, "replace", i)?.map(|s| normalize_crlf(&s));
+        let insert_after = expect_string_field(obj, "insertAfter", i)?.map(|s| normalize_crlf(&s));
+        let insert_before = expect_string_field(obj, "insertBefore", i)?.map(|s| normalize_crlf(&s));
+        let content = expect_string_field(obj, "content", i)?.map(|s| normalize_crlf(&s));
+        let occurrence = expect_u64_field(obj, "occurrence", i)?.unwrap_or(0) as usize;
+        let expected_context = expect_string_field(obj, "expectedContext", i)?.map(|s| normalize_crlf(&s));
+        let skip_if_not_found = expect_bool_field(obj, "skipIfNotFound", i)?.unwrap_or(false);
 
         let has_search_replace = search.is_some() || replace.is_some();
         let has_insert = insert_after.is_some() || insert_before.is_some();
@@ -1487,17 +1590,6 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
                 "edits[{}]: 'search'/'replace' and 'insertAfter'/'insertBefore' are mutually exclusive",
                 i
             ));
-        }
-
-        // Validate edit-object keys: reject unknown / aliased fields with an
-        // actionable hint BEFORE the per-mode validation. This catches the
-        // common case where the caller used an alias (oldText/newText, find/with,
-        // pattern/with, etc.) — instead of the misleading "missing or invalid
-        // 'search'" message, surface the alias → canonical mapping directly.
-        if let Some(obj) = edit.as_object()
-            && let Some(msg) = check_unknown_edit_object_fields(obj, i)
-        {
-            return Err(msg);
         }
 
         if has_insert {
@@ -1562,6 +1654,7 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
     }
     Ok(edits)
 }
+
 
 /// Suffix added to occurrence errors when the edit is not the first in the batch.
 /// Explains that previous edits may have changed the content, reducing occurrence counts.
