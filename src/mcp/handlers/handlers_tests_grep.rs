@@ -2159,10 +2159,7 @@ fn test_grep_dir_as_file_auto_convert_preserves_logical_symlink_path() {
     // (`runneradmin`); without this normalisation the fixture's
     // `logical_norm` (built from the short form) would not equal the indexed
     // path and the sanity assertion would fire spuriously on the runner.
-    let tmp = match std::fs::canonicalize(&tmp_raw) {
-        Ok(p) => std::path::PathBuf::from(crate::clean_path(&p.to_string_lossy())),
-        Err(_) => tmp_raw.clone(),
-    };
+    let tmp = crate::canonicalize_test_root(&tmp_raw);
     let root = tmp.join("root");
     let external = tmp.join("external");
     std::fs::create_dir_all(&root).unwrap();
