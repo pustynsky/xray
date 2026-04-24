@@ -380,11 +380,11 @@ pwsh scripts/bench-git-perf.ps1 -Repo C:\path\to\real\repo
 | `generate_trigrams`                | PERF-05    | ASCII vs Unicode trigram tax; 18k-vocab build cost                |
 | `regex_compile`                    | PERF-01    | Per-request `Regex::new` vs cached match-only                     |
 | `top_authors_aggregation`          | PERF-04    | `format!` per-commit key vs tuple key over 50k synthetic commits  |
-| `callers_resolve_substring`        | PERF-07    | Per-node lookup + substring scan vs memoised resolution           |
+| `callers_resolve_substring_memo_shape` | PERF-07 | Per-node lookup + substring scan vs memoised resolution — measures memoisation speed-up only; substring path is a linear key walk, NOT representative of production trigram-intersection latency |
 | `bench-git-perf.ps1` PERF-02       | PERF-02    | 4× sequential `git rev-parse` vs combined `for-each-ref`          |
 | `bench-git-perf.ps1` PERF-03       | PERF-03    | Old (rev-parse + diff) vs new (`git show`) per-commit             |
-| `bench-git-perf.ps1` PERF-09       | PERF-09    | `git blame --porcelain` raw cost on largest indexed file          |
-| `bench-git-perf.ps1` PERF-04       | PERF-04    | Raw `git log --max-count=50000` spawn + stream cost               |
+| `bench-git-perf.ps1` PERF-09       | PERF-09    | `git blame --porcelain` subprocess only (Rust parse_blame_porcelain parser excluded — upper bound on what xray can achieve for this file) |
+| `bench-git-perf.ps1` PERF-04       | PERF-04    | `git log --format='%an\|%ae' --max-count=50000` spawn + stream cost (mirrors top_authors production format) |
 
 ### Out of scope for this PR
 
