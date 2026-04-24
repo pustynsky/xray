@@ -4088,6 +4088,179 @@ fn test_all_known_params_pass_unknown_check() {
     assert!(!result.is_error, "All known params should pass; got: {:?}", result);
 }
 
+// ─── Top-level wrong-type diagnostics ((closes follow-up
+//      todo_approved_2026-04-24_edit-top-level-param-type-and-operations-path-hints.md)
+//
+// Each canonical top-level key must be type-checked up-front so callers do
+// NOT silently fall through `.as_str()` / `.as_bool()` / `.as_u64()` and get
+// misleading downstream errors ("missing path", "regex disabled",
+// "expectedLineCount mismatch"). Mirror of the Mode B `expect_*_field` shape
+// diagnostics, but at the top-level params layer.
+
+#[test]
+fn test_top_level_path_wrong_type_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": 123,
+        "edits": [{ "search": "a", "replace": "z" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error, "Numeric `path` must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("'path'"), "msg should name the offending key: {}", msg);
+    assert!(msg.contains("string"), "msg should name the expected type: {}", msg);
+    assert!(msg.contains("number"), "msg should name the actual type: {}", msg);
+}
+
+#[test]
+fn test_top_level_paths_wrong_type_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    // `paths` as a single string (caller forgot the array wrap).
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": "a.txt",
+        "edits": [{ "search": "a", "replace": "z" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error, "String `paths` must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("'paths'"), "msg should name the offending key: {}", msg);
+    assert!(msg.contains("array"), "msg should name the expected type: {}", msg);
+}
+
+#[test]
+fn test_top_level_paths_with_non_string_item_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["a.txt", 7, "b.txt"],
+        "edits": [{ "search": "a", "replace": "z" }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error, "Numeric paths[] item must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("paths[1]"), "msg should pinpoint the bad index: {}", msg);
+    assert!(msg.contains("number"), "msg should name the actual type: {}", msg);
+}
+
+#[test]
+fn test_top_level_regex_wrong_type_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Caller passes the string "true" instead of the boolean `true` —
+    // previously silently fell through to default-false and disabled regex.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "a", "replace": "z" }],
+        "regex": "true",
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error, "String `regex` must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("'regex'"), "msg should name the offending key: {}", msg);
+    assert!(msg.contains("boolean"), "msg should name the expected type: {}", msg);
+    assert!(msg.contains("string"), "msg should name the actual type: {}", msg);
+}
+
+#[test]
+fn test_top_level_dry_run_wrong_type_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "a", "replace": "z" }],
+        "dryRun": 1,
+    }));
+
+    assert!(result.is_error, "Numeric `dryRun` must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("'dryRun'"), "msg should name the offending key: {}", msg);
+    assert!(msg.contains("boolean"), "msg should name the expected type: {}", msg);
+}
+
+#[test]
+fn test_top_level_expected_line_count_wrong_type_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\nb\n");
+    let ctx = make_ctx(tmp.path());
+
+    // String form of an integer — commonly seen when the caller stringifies
+    // their state. Without the type check, `as_u64()` silently returns None
+    // and the count check is skipped.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "a", "replace": "z" }],
+        "expectedLineCount": "2",
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error, "String `expectedLineCount` must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("'expectedLineCount'"), "msg should name the key: {}", msg);
+    assert!(msg.contains("integer"), "msg should name the expected type: {}", msg);
+}
+
+#[test]
+fn test_top_level_operations_wrong_type_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Caller passed a single op object instead of an array.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "operations": { "startLine": 1, "endLine": 1, "content": "z" },
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error, "Object `operations` must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("'operations'"), "msg should name the key: {}", msg);
+    assert!(msg.contains("array"), "msg should name the expected type: {}", msg);
+}
+
+#[test]
+fn test_missing_path_detects_nested_path_in_operations() {
+    // Symmetric to test_missing_path_detects_nested_path_in_edits, for the
+    // Mode A `operations[]` arm. Caller put `path` inside the operation
+    // object instead of at the top-level — surface the structural hint
+    // instead of the literal "missing path" message.
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "operations": [{
+            "path": "a.txt",
+            "startLine": 1,
+            "endLine": 1,
+            "content": "z",
+        }],
+        "dryRun": true,
+    }));
+
+    assert!(result.is_error, "Nested path inside operations[] must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    // Reuses missing_path_error_message's structural hint path.
+    assert!(
+        msg.contains("'path'") && msg.to_lowercase().contains("top"),
+        "msg should hint at top-level placement: {}",
+        msg
+    );
+}
+
+
 
 // ─── Mode B (text-match) edits[] item field validation ─────────────
 

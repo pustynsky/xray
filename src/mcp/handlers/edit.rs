@@ -54,6 +54,19 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         return ToolCallResult::error(unknown_msg);
     }
 
+    // ── Reject wrong-type values for canonical top-level params ──
+    // Caller passing the right key with the wrong JSON type (e.g. `path: 123`,
+    // `regex: "true"`) would otherwise silently fall through to None / default
+    // and surface a misleading downstream error. Run AFTER the unknown-key
+    // check so a typo'd key gets the alias hint, not a generic type error.
+    if let Some(obj) = args.as_object()
+        && let Some(type_msg) = check_top_level_param_types(obj)
+    {
+        return ToolCallResult::error(type_msg);
+    }
+
+
+
     // ── Parse path/paths ──
     let single_path = args.get("path").and_then(|v| v.as_str());
     let multi_paths = args.get("paths").and_then(|v| v.as_array());
@@ -319,11 +332,77 @@ fn check_unknown_top_level_params(obj: &serde_json::Map<String, Value>) -> Optio
     None
 }
 
+/// Validate the JSON type of every recognised top-level parameter. Without
+/// this gate, callers passing the right key with the wrong type — e.g.
+/// `path: 123`, `regex: "true"`, `paths: "a.ts"`, `expectedLineCount: "10"` —
+/// silently fall into `.and_then(|v| v.as_str())` / `.as_bool()` / `.as_u64()`
+/// branches that drop to None or default-false and produce misleading
+/// downstream errors ("missing path", "regex disabled", count mismatch).
+fn check_top_level_param_types(obj: &serde_json::Map<String, Value>) -> Option<String> {
+    fn err(key: &str, expected: &str, actual: &Value) -> String {
+        format!(
+            "Parameter '{}' must be {}, got {}.",
+            key,
+            expected,
+            json_type_name(actual)
+        )
+    }
+
+    if let Some(v) = obj.get("path")
+        && !v.is_string()
+    {
+        return Some(err("path", "a string", v));
+    }
+    if let Some(v) = obj.get("paths") {
+        match v {
+            Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    if !item.is_string() {
+                        return Some(format!(
+                            "Parameter 'paths[{}]' must be a string, got {}.",
+                            i,
+                            json_type_name(item)
+                        ));
+                    }
+                }
+            }
+            other => return Some(err("paths", "an array of strings", other)),
+        }
+    }
+    if let Some(v) = obj.get("operations")
+        && !v.is_array()
+    {
+        return Some(err("operations", "an array", v));
+    }
+    if let Some(v) = obj.get("edits")
+        && !v.is_array()
+    {
+        return Some(err("edits", "an array", v));
+    }
+    if let Some(v) = obj.get("regex")
+        && !v.is_boolean()
+    {
+        return Some(err("regex", "a boolean (true/false)", v));
+    }
+    if let Some(v) = obj.get("dryRun")
+        && !v.is_boolean()
+    {
+        return Some(err("dryRun", "a boolean (true/false)", v));
+    }
+    if let Some(v) = obj.get("expectedLineCount")
+        && v.as_u64().is_none()
+    {
+        return Some(err("expectedLineCount", "a non-negative integer", v));
+    }
+    None
+}
+
 /// Construct the "missing required parameter" error for the no-`path`/no-`paths` case,
 /// with a concrete example for both single-file and batch forms. If a `path`
 /// field appears inside an `edits[]` / `operations[]` object, surface that as
 /// a structural hint (caller put `path` at the wrong nesting level).
 fn missing_path_error_message(args: &Value) -> String {
+
     // Detect path-nested-inside-edit-object as a structural hint.
     let nested_hint = args.get("edits")
         .or_else(|| args.get("operations"))
