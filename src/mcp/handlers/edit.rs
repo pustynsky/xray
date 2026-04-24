@@ -1203,13 +1203,30 @@ fn parse_line_operations(ops_array: &[Value]) -> Result<Vec<LineOperation>, Stri
 
 /// Apply line-range operations bottom-up. Returns (new_lines, applied_count).
 fn apply_line_operations(lines: &[&str], ops: Vec<LineOperation>) -> Result<(Vec<String>, usize), String> {
-    let line_count = lines.len();
+    // Empty file (`""`) splits to `[""]` — a single empty element that represents
+    // the absence of any addressable line, NOT a 1-line file. Treat it as 0
+    // addressable lines so range validation matches the human/`count_lines`
+    // semantics already used by `expectedLineCount` and `newLineCount`.
+    // Without this carve-out, `REPLACE 1..1` on an empty file would silently
+    // succeed and produce content without a trailing newline, while the API
+    // simultaneously reports `originalLineCount: 0` — two contracts on one value.
+    // INSERT mode (`startLine: 1, endLine: 0`) remains the canonical form for
+    // writing into an empty/auto-created file and is unaffected.
+    let line_count = if lines == [""] { 0 } else { lines.len() };
 
     // Validate ranges
     for op in &ops {
         // For insert mode (endLine < startLine), startLine can be line_count + 1 (append after last line)
         if op.end_line >= op.start_line {
             // Replace/delete mode
+            if line_count == 0 {
+                return Err(format!(
+                    "Cannot {} lines in empty file (0 lines). \
+                     To write content into an empty (or auto-created) file, use INSERT mode: \
+                     startLine: 1, endLine: 0, content: '...'",
+                    if op.content.is_empty() { "delete" } else { "replace" }
+                ));
+            }
             if op.start_line > line_count {
                 return Err(format!(
                     "startLine {} out of range (file has {} lines)",
