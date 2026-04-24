@@ -2297,4 +2297,245 @@ fn content_index_meta_uses_live_count_after_removal() {
 }
 
 
+// ─── MCP-WCH-006: post-reconcile checkpoint ──────────────────────────────
+//
+// These tests cover both the pure decision helper
+// `post_reconcile_checkpoint_needed` and the durability sequence it gates:
+// after `start_watcher` runs `reconcile_content_index`, any add/remove
+// activity must reach the on-disk `.meta` immediately — not only after the
+// next 10-minute `periodic_autosave` tick. See
+// `user-stories/meta-checkpoint-durability.md` (Hole #1).
+//
+// Two reviewer-caught regressions during PR review (commit-reviewer
+// 2026-04-25), both fixed in this same change set:
+//   HIGH (first pass): gate on add/remove COUNTS, not net live-count
+//     delta — offline replace (delete A.cs + add B.cs) keeps live count
+//     constant but mutates index.
+//   MEDIUM (second pass): include MODIFIED in the gate — modify-only
+//     reconcile rewrites postings in-place and would otherwise let
+//     session C serve stale search results after a force-kill.
+
+#[test]
+fn test_post_reconcile_checkpoint_needed_triggers_on_content_add() {
+    assert!(post_reconcile_checkpoint_needed(1, 0, 0, false),
+        "add-only delta must trigger save");
+    assert!(post_reconcile_checkpoint_needed(7, 0, 0, false),
+        "multi-add must trigger save");
+}
+
+#[test]
+fn test_post_reconcile_checkpoint_needed_triggers_on_content_removal() {
+    assert!(post_reconcile_checkpoint_needed(0, 0, 1, false),
+        "remove-only delta must trigger save (the original ratchet scenario)");
+    assert!(post_reconcile_checkpoint_needed(0, 0, 5, false),
+        "multi-remove must trigger save");
+}
+
+#[test]
+fn test_post_reconcile_checkpoint_needed_triggers_on_content_modify() {
+    // Reviewer-caught MEDIUM (commit-reviewer 2026-04-25, second pass):
+    // modify-only reconcile rewrites postings in-place. Without this case
+    // in the gate, force-kill of session B → session C loads stale postings
+    // and serves outdated search results for the modified file. The bug
+    // is silent (no counter mismatch in xray_info) but visible to xray_grep.
+    assert!(post_reconcile_checkpoint_needed(0, 1, 0, false),
+        "modify-only delta must trigger save — stale postings on disk \
+         would serve outdated search results until the next periodic save");
+    assert!(post_reconcile_checkpoint_needed(0, 4, 0, false),
+        "multi-modify must trigger save for the same reason");
+}
+
+#[test]
+fn test_post_reconcile_checkpoint_needed_triggers_on_content_replace() {
+    // Offline replace: delete A.cs + add B.cs → net live count unchanged but
+    // index allocator grew and tombstoned a slot. Reviewer-caught HIGH
+    // (commit-reviewer 2026-04-25, first pass): pre-fix `before != after`
+    // gate would have skipped this and let session C load stale
+    // `idx.files[]` after a force-kill of session B.
+    assert!(post_reconcile_checkpoint_needed(1, 0, 1, false),
+        "replace (1 add + 1 remove) MUST trigger save — the index allocator \
+         grew and a slot was tombstoned even though live count is unchanged");
+    assert!(post_reconcile_checkpoint_needed(3, 0, 3, false),
+        "multi-replace MUST trigger save for the same reason");
+}
+
+#[test]
+fn test_post_reconcile_checkpoint_needed_triggers_on_def_change() {
+    // Def change with no content delta still must save: def-index .meta
+    // and binary payload encode per-file definitions, not just a count.
+    assert!(post_reconcile_checkpoint_needed(0, 0, 0, true),
+        "def-only change (e.g. modified .cs body, unchanged file set) must save");
+}
+
+#[test]
+fn test_post_reconcile_checkpoint_needed_skipped_on_noop() {
+    // True steady-state startup: nothing changed in either index → must NOT
+    // save. Required to keep cold-start cost zero on in-sync workspaces.
+    assert!(!post_reconcile_checkpoint_needed(0, 0, 0, false),
+        "no-op reconcile must NOT trigger a save (would cost 1.5-3s on a 60K repo)");
+}
+
+#[test]
+fn test_post_reconcile_checkpoint_writes_meta_after_removal() {
+    // End-to-end durability test for Hole #1:
+    //   1. Build an index with 2 files on disk.
+    //   2. Save it (mimics the previous session's `.meta` baseline).
+    //   3. Remove one file from disk (mimics offline-edit between sessions).
+    //   4. Run the post-reconcile sequence the way `start_watcher` does:
+    //      reconcile (returns add/remove counts) → check
+    //      `post_reconcile_checkpoint_needed` → save.
+    //   5. Assert `.meta` on disk reflects the new live count (1, not 2)
+    //      WITHOUT waiting for the 10-minute `AUTOSAVE_INTERVAL`.
+    let (_tmp, dir, index) = make_batch_test_setup();
+    let index_base = _tmp.path().join("idx");
+    std::fs::create_dir_all(&index_base).unwrap();
+
+    // Save the pre-removal baseline so an old `.meta` exists on disk.
+    {
+        let idx = index.read().unwrap();
+        crate::save_content_index(&idx, &index_base).unwrap();
+    }
+
+    // Future-date `created_at` so the surviving b.cs is NOT spuriously
+    // flagged as modified by this reconcile (its mtime falls below the
+    // future-dated `created_at - 2s` threshold). Without this the test
+    // would still pass on the gate (modified contributes via OR) but
+    // would no longer cleanly isolate the remove-only case it claims
+    // to validate. Same +5s pattern as the periodic-rescan tests above.
+    {
+        let mut idx = index.write().unwrap();
+        idx.created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + 5;
+    }
+
+    let content_path = crate::index::content_index_path_for(
+        &dir.to_string_lossy(), "cs", &index_base,
+    );
+    let meta_path = {
+        let mut p = content_path.as_os_str().to_owned();
+        p.push(".meta");
+        std::path::PathBuf::from(p)
+    };
+    let meta_before: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&meta_path).unwrap()
+    ).unwrap();
+    assert_eq!(meta_before["files"], 2, "baseline meta should record 2 files");
+
+    // Simulate offline removal of one file between sessions.
+    std::fs::remove_file(dir.join("a.cs")).unwrap();
+
+    // Run the post-reconcile sequence start_watcher uses.
+    let dir_str = crate::clean_path(&dir.to_string_lossy());
+    let extensions = vec!["cs".to_string()];
+    let (added, modified, removed) = crate::mcp::watcher::reconcile_content_index(
+        &index, &dir_str, &extensions, false,
+    );
+    assert_eq!(added, 0, "no files added");
+    assert_eq!(modified, 0, "surviving b.cs must not be flagged as modified \
+        (future-dated created_at puts threshold above its mtime)");
+    assert_eq!(removed, 1, "one file removed offline");
+    assert_eq!(index.read().unwrap().live_file_count(), 1,
+        "post-reconcile live count should be 1");
+    assert!(post_reconcile_checkpoint_needed(added, modified, removed, false),
+        "removal must trigger checkpoint");
+
+    periodic_autosave(&index, &None, &index_base);
+
+    // Verify `.meta` on disk now matches the new live count — this is the
+    // file the next session loads at startup. Without the post-reconcile
+    // save, a forced-kill within AUTOSAVE_INTERVAL would resurrect 2.
+    let meta_after: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&meta_path).unwrap()
+    ).unwrap();
+    assert_eq!(meta_after["files"], 1,
+        "post-reconcile checkpoint must rewrite .meta with the new live count");
+}
+
+#[test]
+fn test_post_reconcile_checkpoint_writes_postings_after_modify_only() {
+    // End-to-end durability test for the modify-only case (reviewer-caught
+    // MEDIUM, commit-reviewer 2026-04-25 second pass).
+    //
+    // Scenario: session B starts, reconcile finds an offline-modified file
+    // (no add, no remove), rewrites postings in RAM. Session B is force-
+    // killed before the next periodic save. Session C must load the new
+    // postings from disk, not the pre-modify ones.
+    //
+    //   1. Build an index with 2 files containing token "alpha".
+    //   2. Save it (mimics the previous session's binary index baseline).
+    //   3. Bump file mtime so reconcile sees it as modified, then OVERWRITE
+    //      one file's content so its postings change (alpha → gamma).
+    //   4. Run the post-reconcile sequence: reconcile (returns
+    //      `modified=1`) → check `post_reconcile_checkpoint_needed` → save.
+    //   5. Reload the index from disk and assert the new token "gamma" is
+    //      in the on-disk inverted index for that file.
+    //
+    // Pre-MEDIUM-fix: gate was `added > 0 || removed > 0 || def_changed`,
+    // so a pure-modify reconcile would skip the save and the on-disk
+    // index would still serve stale "alpha" postings until the next
+    // periodic autosave (up to 10 minutes) or shutdown.
+    let (_tmp, dir, index) = make_batch_test_setup();
+    let index_base = _tmp.path().join("idx");
+    std::fs::create_dir_all(&index_base).unwrap();
+
+    {
+        let idx = index.read().unwrap();
+        crate::save_content_index(&idx, &index_base).unwrap();
+    }
+
+    // Set created_at to now + 5s so reconcile only flags files modified
+    // AFTER this baseline (the threshold is `created_at - 2s` whole
+    // seconds, so future-dating by +5s puts the threshold ≥ 3s in the
+    // future and any pre-existing fixture mtime falls safely below it).
+    // Same trick the periodic-rescan tests use to avoid sleep-based
+    // timing flakiness on Windows where mtime sub-second precision can
+    // straddle a 1-2s sleep window.
+    {
+        let mut idx = index.write().unwrap();
+        idx.created_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() + 5;
+    }
+
+    // Sleep past the future-dated threshold. created_at = floor(now)+5,
+    // threshold = created_at - 2 = floor(now)+3 (whole seconds). The
+    // overwrite below sets mtime ≈ now + sleep; we need
+    // floor(now + sleep) > floor(now) + 3, i.e. sleep > 3s + (1 - frac(now)).
+    // Worst case frac(now)≈0 → need sleep > 4s. Round to 5s for headroom
+    // (reconcile uses strict `>` and FS mtime resolution can be 1s on some
+    // filesystems).
+    std::thread::sleep(std::time::Duration::from_millis(5000));
+    std::fs::write(dir.join("a.cs"), "class Gamma { Telemetry tracer; }").unwrap();
+
+    let dir_str = crate::clean_path(&dir.to_string_lossy());
+    let extensions = vec!["cs".to_string()];
+    let (added, modified, removed) = crate::mcp::watcher::reconcile_content_index(
+        &index, &dir_str, &extensions, false,
+    );
+    assert_eq!(added, 0, "no files added");
+    assert_eq!(modified, 1, "one file modified offline");
+    assert_eq!(removed, 0, "no files removed");
+    assert!(post_reconcile_checkpoint_needed(added, modified, removed, false),
+        "modify-only must trigger checkpoint (MEDIUM fix)");
+
+    periodic_autosave(&index, &None, &index_base);
+
+    // Reload the on-disk index and assert it carries the new postings.
+    // This proves the save committed the modify-only delta to disk.
+    let content_path = crate::index::content_index_path_for(
+        &dir.to_string_lossy(), "cs", &index_base,
+    );
+    let reloaded: ContentIndex = crate::index::load_compressed(&content_path, "content")
+        .expect("reload on-disk index");
+    assert!(reloaded.index.contains_key("gamma"),
+        "post-reconcile checkpoint must persist new 'gamma' token to disk \
+         (modify-only case — pre-MEDIUM-fix would still serve stale 'alpha')");
+    assert!(reloaded.index.contains_key("telemetry"),
+        "post-reconcile checkpoint must persist new 'telemetry' token to disk");
+}
+
+
 
