@@ -387,6 +387,92 @@ fn test_empty_file() {
 }
 
 #[test]
+fn test_empty_file_replace_rejected_with_insert_hint() {
+    // Regression for `docs/user-stories/todo_approved_2026-04-24_expected-line-count-empty-file-semantics.md`.
+    // Previously an empty file was internally treated as 1 phantom line slot,
+    // so REPLACE 1..1 silently succeeded and wrote content WITHOUT a trailing
+    // newline — while the response simultaneously reported `originalLineCount: 0`.
+    // After the carve-out, REPLACE on an empty file must error with an explicit
+    // hint pointing at the canonical INSERT idiom.
+    let (tmp, filename, _path) = create_temp_file("");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 1, "endLine": 1, "content": "hello" }
+        ]
+    }));
+
+    assert!(result.is_error, "REPLACE 1..1 on empty file must error");
+    let text = &result.content[0].text;
+    assert!(text.contains("empty file"), "error should mention 'empty file': {text}");
+    assert!(text.contains("INSERT"), "error should suggest INSERT mode: {text}");
+    assert!(text.contains("startLine: 1, endLine: 0"),
+        "error should spell out the canonical INSERT idiom: {text}");
+}
+
+#[test]
+fn test_empty_file_insert_with_expected_line_count_zero() {
+    // Verifies the contract: empty file → expectedLineCount: 0 → INSERT 1..0
+    // succeeds. This is the LLM round-trip path (after a previous edit returned
+    // `newLineCount: 0` on a freshly-emptied file).
+    let (tmp, filename, path) = create_temp_file("");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "expectedLineCount": 0,
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "hello" }
+        ]
+    }));
+
+    assert!(!result.is_error,
+        "empty file + expectedLineCount=0 + INSERT 1..0 should succeed: {}",
+        result.content[0].text);
+    let content = std::fs::read_to_string(&path).unwrap();
+    assert!(content.contains("hello"));
+}
+
+#[test]
+fn test_round_trip_new_line_count_to_expected_line_count() {
+    // End-to-end round-trip guard for the documented contract:
+    //   1. perform an edit → response carries `newLineCount`
+    //   2. feed that value back as `expectedLineCount` on the next edit
+    //   3. the next edit must NOT fail with an off-by-one
+    // Uses a file whose final byte is `\n` because that is the historical
+    // off-by-one trap (`split('\n').count()` returned N+1 for `"a\nb\nc\n"`).
+    let (tmp, filename, _path) = create_temp_file("a\nb\nc\n");
+    let ctx = make_ctx(tmp.path());
+
+    // Edit 1 — replace line 2.
+    let result1 = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 2, "endLine": 2, "content": "B" }
+        ]
+    }));
+    assert!(!result1.is_error, "first edit should succeed: {}", result1.content[0].text);
+    let v1: serde_json::Value = serde_json::from_str(&result1.content[0].text).unwrap();
+    let new_line_count = v1.get("newLineCount").and_then(|v| v.as_u64())
+        .expect("response must carry newLineCount");
+    assert_eq!(new_line_count, 3, "human semantics: 'a\\nB\\nc\\n' is 3 lines");
+
+    // Edit 2 — feed newLineCount back as expectedLineCount.
+    let result2 = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "expectedLineCount": new_line_count,
+        "operations": [
+            { "startLine": 1, "endLine": 1, "content": "A" }
+        ]
+    }));
+    assert!(!result2.is_error,
+        "round-trip newLineCount → expectedLineCount must not off-by-one: {}",
+        result2.content[0].text);
+}
+
+#[test]
 fn test_single_line_file() {
     let (tmp, filename, path) = create_temp_file("only line");
     let ctx = make_ctx(tmp.path());
@@ -2657,7 +2743,10 @@ fn test_auto_create_mode_a_replace_on_nonexistent_fails() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx(tmp.path());
 
-    // Replace lines 5-10 in a nonexistent file (treated as 1-line empty file)
+    // Replace lines 5-10 in a nonexistent file (treated as empty / 0 lines —
+    // see `apply_line_operations` empty-file carve-out). Returns an explicit
+    // empty-file error suggesting INSERT mode rather than the generic
+    // out-of-range message.
     let result = handle_xray_edit(&ctx, &json!({
         "path": "nonexistent.txt",
         "operations": [
@@ -2665,7 +2754,7 @@ fn test_auto_create_mode_a_replace_on_nonexistent_fails() {
         ]
     }));
 
-    assert!(result.is_error, "Replace on nonexistent file should fail (out of range)");
+    assert!(result.is_error, "Replace on nonexistent file should fail (empty file → INSERT-only)");
 }
 
 #[test]
