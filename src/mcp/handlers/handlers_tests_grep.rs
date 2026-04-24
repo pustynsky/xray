@@ -1081,6 +1081,209 @@ fn test_xray_grep_phrase_sort_tie_break_by_path() {
     cleanup_tmp(&tmp_dir);
 }
 
+/// Tier-A regression (sibling of `test_xray_grep_phrase_sort_tie_break_by_path`):
+/// `handle_multi_phrase_search` had the same single-key sort that left
+/// equal-occurrences files in worker-completion order. Now that the secondary
+/// path key is in place, multi-phrase results must be deterministic across
+/// runs and ascending-by-path within an equal-occurrences group.
+#[test]
+fn test_xray_grep_multi_phrase_sort_tie_break_by_path() {
+
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_grep_mphrase_tiebreak_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let names = ["zzz.cs", "aaa.cs", "mmm.cs", "bbb.cs", "yyy.cs", "ccc.cs"];
+    for name in &names {
+        // Every file contains BOTH phrases exactly once → phrase-or count is 2
+        // for every file, so any non-deterministic order will surface here.
+        let mut f = std::fs::File::create(tmp_dir.join(name)).unwrap();
+        writeln!(f, "alpha foo bar baz").unwrap();
+        writeln!(f, "qux quux corge").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
+    };
+
+    let mut prev_paths: Option<Vec<String>> = None;
+    for run in 0..5 {
+        let result = dispatch_tool(&ctx, "xray_grep", &json!({
+            "terms": "foo bar,qux quux",
+            "phrase": true,
+        }));
+        assert!(!result.is_error, "Run {}: multi-phrase search should not error: {}", run, result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+        assert_eq!(mode, "phrase-or", "Run {}: expected phrase-or mode, got {}", run, mode);
+        let files = output["files"].as_array().unwrap();
+        assert_eq!(files.len(), names.len(), "Run {}: expected all {} files", run, names.len());
+
+        let paths: Vec<String> = files.iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect();
+        for i in 0..paths.len() - 1 {
+            assert!(paths[i] <= paths[i + 1],
+                "Run {}: tie-broken paths must be ascending; got {:?} before {:?}",
+                run, paths[i], paths[i + 1]);
+        }
+        if let Some(ref prev) = prev_paths {
+            assert_eq!(prev, &paths,
+                "Run {}: multi-phrase order is not deterministic between identical queries", run);
+        }
+        prev_paths = Some(paths);
+    }
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Tier-A regression (sibling of `test_xray_grep_phrase_sort_tie_break_by_path`):
+/// `handle_line_regex_search` had the same single-key sort. lineRegex mode
+/// also benefits from the secondary path key for stable result truncation.
+#[test]
+fn test_xray_grep_line_regex_sort_tie_break_by_path() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_grep_lineregex_tiebreak_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let names = ["zzz.cs", "aaa.cs", "mmm.cs", "bbb.cs", "yyy.cs", "ccc.cs"];
+    for name in &names {
+        // Every file has exactly one line that the line-regex matches —
+        // occurrence count is 1 for every file. Use a class-declaration line
+        // anchored at start to exercise lineRegex (`^...`) semantics.
+        let mut f = std::fs::File::create(tmp_dir.join(name)).unwrap();
+        writeln!(f, "public class HeadingLine {{}}").unwrap();
+        writeln!(f, "some body text").unwrap();
+    }
+
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
+    };
+
+    let mut prev_paths: Option<Vec<String>> = None;
+    for run in 0..5 {
+        let result = dispatch_tool(&ctx, "xray_grep", &json!({
+            "terms": "^public class",
+            "regex": true,
+            "lineRegex": true,
+        }));
+        assert!(!result.is_error, "Run {}: lineRegex search should not error: {}", run, result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let mode = output["summary"]["searchMode"].as_str().unwrap_or("");
+        assert!(mode.starts_with("lineRegex"), "Run {}: expected lineRegex mode, got {}", run, mode);
+        let files = output["files"].as_array().unwrap();
+        assert_eq!(files.len(), names.len(), "Run {}: expected all {} files", run, names.len());
+
+        let paths: Vec<String> = files.iter()
+
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect();
+        for i in 0..paths.len() - 1 {
+            assert!(paths[i] <= paths[i + 1],
+                "Run {}: tie-broken paths must be ascending; got {:?} before {:?}",
+                run, paths[i], paths[i + 1]);
+        }
+        if let Some(ref prev) = prev_paths {
+            assert_eq!(prev, &paths,
+                "Run {}: lineRegex order is not deterministic between identical queries", run);
+        }
+        prev_paths = Some(paths);
+    }
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Tier-B regression (end-to-end pruning): the `intersect_sorted_unique` helper
+/// is unit-tested directly, but no test exercised the full handler path that
+/// drives line-level posting intersection. The phrase contract is
+/// "all tokens on a single line" — a file with token A on line 1 and token B
+/// on line 2 must NOT match, while a file with both tokens on the same line
+/// must match. Without the line-level pruning the false-match file would be
+/// opened and verified by the per-line scan and correctly rejected; with
+/// pruning it is dropped from the candidate list before any read. Both paths
+/// should produce the same final result — this test pins that contract.
+#[test]
+fn test_xray_grep_phrase_line_level_pruning_same_line_vs_split_lines() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_grep_phrase_pruning_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // matching.cs: both tokens on one line — must be returned.
+    let mut f = std::fs::File::create(tmp_dir.join("matching.cs")).unwrap();
+    writeln!(f, "public class CustomerService {{}}").unwrap();
+    writeln!(f, "unrelated noise").unwrap();
+
+    // split.cs: tokens present in the file but on DIFFERENT lines — file-level
+    // intersection passes (both file_ids appear in both posting lists), but
+    // line-level intersection must drop this file.
+    let mut f = std::fs::File::create(tmp_dir.join("split.cs")).unwrap();
+    writeln!(f, "public interface IFoo {{}}").unwrap();
+    writeln!(f, "class CustomerRepository {{}}").unwrap();
+
+    // unrelated.cs: only one token — must be excluded by file-level intersection.
+    let mut f = std::fs::File::create(tmp_dir.join("unrelated.cs")).unwrap();
+    writeln!(f, "public class Foo {{}}").unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
+    };
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": "public class",
+        "phrase": true,
+    }));
+    assert!(!result.is_error, "phrase search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    let paths: Vec<String> = files.iter()
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+
+    assert!(paths.iter().any(|p| p.ends_with("matching.cs")),
+        "matching.cs (both tokens on the same line) must be in results: {:?}", paths);
+    assert!(paths.iter().any(|p| p.ends_with("unrelated.cs")),
+        "unrelated.cs (single-token line) must match phrase 'public class' (it literally contains it): {:?}", paths);
+    // Crucial: split.cs has tokens on different lines — must be excluded.
+    assert!(!paths.iter().any(|p| p.ends_with("split.cs")),
+        "split.cs (tokens on different lines) must be pruned out, but appeared in: {:?}", paths);
+
+    cleanup_tmp(&tmp_dir);
+}
+
 /// BUG-6: xray_grep with contextLines>0 should auto-enable showLines.
 #[test]
 fn test_xray_grep_context_lines_auto_enables_show_lines() {
