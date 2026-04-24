@@ -27,6 +27,7 @@ param(
     [string]$XrayBin = "xray",
 
     [Parameter()]
+    [ValidateRange(1, [int]::MaxValue)]
     [int]$Iterations = 5,
 
     [Parameter()]
@@ -52,6 +53,9 @@ function Measure-Cmd {
         [scriptblock]$Block,
         [int]$Iterations = 5
     )
+    if ($Iterations -lt 1) {
+        throw "Iterations must be >= 1 (got $Iterations) — a 0-iteration measurement is meaningless"
+    }
     # Warm-up: prime FS cache + git internal caches so we measure steady state.
     & $Block | Out-Null
     $samples = @()
@@ -61,8 +65,17 @@ function Measure-Cmd {
         $sw.Stop()
         $samples += $sw.Elapsed.TotalMilliseconds
     }
-    $sorted = $samples | Sort-Object
-    $median = $sorted[[int]($sorted.Count / 2)]
+    $sorted = @($samples | Sort-Object)
+    # Classical median: average of the two middle elements for even N,
+    # middle element for odd N. The previous one-line `sorted[Count/2]`
+    # picked the upper-middle for even N (e.g. 4 samples returned the 3rd,
+    # not the average of 2nd+3rd) which biased reported medians upward.
+    $n = $sorted.Count
+    if ($n % 2 -eq 1) {
+        $median = $sorted[[int](($n - 1) / 2)]
+    } else {
+        $median = ($sorted[$n / 2 - 1] + $sorted[$n / 2]) / 2.0
+    }
     $min = $sorted[0]
     $max = $sorted[-1]
     [PSCustomObject]@{
