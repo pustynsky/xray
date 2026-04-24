@@ -1294,16 +1294,29 @@ fn parse_line_operations(ops_array: &[Value]) -> Result<Vec<LineOperation>, Stri
 
 /// Apply line-range operations bottom-up. Returns (new_lines, applied_count).
 fn apply_line_operations(lines: &[&str], ops: Vec<LineOperation>) -> Result<(Vec<String>, usize), String> {
-    // Empty file (`""`) splits to `[""]` — a single empty element that represents
-    // the absence of any addressable line, NOT a 1-line file. Treat it as 0
-    // addressable lines so range validation matches the human/`count_lines`
-    // semantics already used by `expectedLineCount` and `newLineCount`.
-    // Without this carve-out, `REPLACE 1..1` on an empty file would silently
-    // succeed and produce content without a trailing newline, while the API
-    // simultaneously reports `originalLineCount: 0` — two contracts on one value.
+    // Mode A addressable line count must match `count_lines()` / human-editor
+    // semantics so it agrees with `expectedLineCount` and `newLineCount`. The
+    // raw `lines.len()` from `split('\n')` over-counts the trailing-newline
+    // sentinel: `""` splits to `[""]` (len 1), `"\n"` splits to `["", ""]`
+    // (len 2), `"a\n"` splits to `["a", ""]` (len 2). In every case where the
+    // last element is empty AND the file is non-empty, that empty element is
+    // the sentinel after the final `\n`, not an addressable line.
+    //
+    // Without this normalization a blank-line-only file (`"\n"`/`"\r\n"`) is
+    // reported as `originalLineCount: 1` but `apply_line_operations` would
+    // treat it as 2 addressable lines — REPLACE 1..2 / DELETE 2 would silently
+    // succeed against a phantom second line. The earlier carve-out for `[""]`
+    // closed only the empty-file case; this generalization closes the
+    // blank-line-only case (and all higher line counts have always been
+    // off-by-one in the same direction).
+    //
     // INSERT mode (`startLine: 1, endLine: 0`) remains the canonical form for
     // writing into an empty/auto-created file and is unaffected.
-    let line_count = if lines == [""] { 0 } else { lines.len() };
+    let line_count = if lines.last() == Some(&"") {
+        lines.len().saturating_sub(1)
+    } else {
+        lines.len()
+    };
 
     // Validate ranges
     for op in &ops {
@@ -2024,6 +2037,32 @@ fn apply_literal_replace(
         return Err(format!("Text not found: \"{}\"{}{}", truncate_for_display(search), hint, flex_hint));
     }
 
+    // Validate occurrence range BEFORE evaluating `expectedContext`. The
+    // canonical "Occurrence N requested but text … found only M time(s)"
+    // diagnostic is the more fundamental error: a caller who asked for
+    // `occurrence: 99` against a text that only matches twice has the wrong
+    // mental model of the file, and that signal must not be masked by an
+    // `expectedContext` mismatch on the (clamped) first match.
+    //
+    // Earlier this check lived AFTER `check_expected_context`, with
+    // `target_idx` clamped to 0 just to avoid an out-of-range panic — but if
+    // the first match's surroundings happened to disagree with the supplied
+    // context, the user got `Expected context …` instead of the canonical
+    // occurrence error. The inline comment in the clamp explicitly promised
+    // the canonical error would fire below; that promise is now actually kept.
+    if edit.occurrence > count {
+        let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
+        let effective_search = if search_result.flex_re.is_some() {
+            search.to_string()
+        } else {
+            search_result.effective_search.clone()
+        };
+        return Err(format!(
+            "Occurrence {} requested but text \"{}\" found only {} time(s){}",
+            edit.occurrence, effective_search, count, hint
+        ));
+    }
+
     // Check expectedContext against the position that will actually be
     // replaced. For `occurrence: 0` (replace-all) we still validate the first
     // match — the contract is "the user-supplied context must surround at
@@ -2034,14 +2073,10 @@ fn apply_literal_replace(
     // it from the first `Foo` would see the gate fail on the first match's
     // surroundings and never reach their intended replacement.
     if let Some(ref ctx_text) = edit.expected_context {
-        let target_idx = match edit.occurrence {
-            0 => 0,
-            n if n <= count => n - 1,
-            // Out-of-range — clamp to first match so the context check
-            // doesn't panic before the canonical "found only N time(s)"
-            // error fires below.
-            _ => 0,
-        };
+        // Safe by construction: the `occurrence > count` guard above ensures
+        // `target_idx` is in range. `occurrence == 0` (replace-all) maps to
+        // the first match.
+        let target_idx = if edit.occurrence == 0 { 0 } else { edit.occurrence - 1 };
         let target_len = if let Some(ref lens) = search_result.flex_match_lens {
             lens[target_idx]
         } else {
@@ -2060,13 +2095,7 @@ fn apply_literal_replace(
                 count
             }
             n => {
-                if n > count {
-                    let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
-                    return Err(format!(
-                        "Occurrence {} requested but text \"{}\" found only {} time(s){}",
-                        n, search, count, hint
-                    ));
-                }
+                // Range already validated above; n is in `1..=count` here.
                 let mut current = 0usize;
                 let replace_owned = replace.to_string();
                 let new_content = re.replace_all(result.as_str(), |caps: &regex::Captures| {
@@ -2091,13 +2120,7 @@ fn apply_literal_replace(
                 count
             }
             n => {
-                if n > count {
-                    let hint = if edit_index > 0 { SEQUENTIAL_EDIT_HINT } else { "" };
-                    return Err(format!(
-                        "Occurrence {} requested but text \"{}\" found only {} time(s){}",
-                        n, effective_search, count, hint
-                    ));
-                }
+                // Range already validated above; n is in `1..=count` here.
                 let mut current = 0usize;
                 let mut new_result = String::new();
                 let mut remaining = result.as_str();
