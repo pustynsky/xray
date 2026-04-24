@@ -460,7 +460,20 @@ pub fn top_authors(
     let total_authors = author_map.len();
 
     let mut ranked: Vec<_> = author_map.into_values().collect();
-    ranked.sort_by_key(|b| std::cmp::Reverse(b.count));
+    // PERF-04 follow-up: stable secondary sort key (name asc, then email asc)
+    // makes the ranking fully deterministic on tie. Pre-fix the only sort key
+    // was `Reverse(count)`, so authors with equal commit counts came out in
+    // HashMap iteration order — which depends on the hash of the key type.
+    // Switching the key from `String` (`format!("{} <{}>", …)`) to
+    // `(String, String)` in PERF-04 changed that hash, silently flipping tie
+    // ordering between callers. Fully-specified comparator pins the order
+    // for snapshot tests / golden output / paginated UIs.
+    ranked.sort_by(|a, b| {
+        b.count
+            .cmp(&a.count)
+            .then_with(|| a.name.cmp(&b.name))
+            .then_with(|| a.email.cmp(&b.email))
+    });
     ranked.truncate(top);
 
     let authors: Vec<AuthorStats> = ranked

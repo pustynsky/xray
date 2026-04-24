@@ -206,6 +206,103 @@ fn test_top_authors_limits_results() {
     assert!(authors.len() <= 1, "Should return at most 1 author");
 }
 
+
+/// PERF-04 follow-up: tied counts must be ranked deterministically by
+/// (name asc, email asc) instead of falling out of HashMap iteration
+/// order. Pre-fix the only sort key was `Reverse(count)` and ties came
+/// out in HashMap order — dependent on the hash of the key type. PERF-04
+/// (commit `490b036`) changed the key from `String` to `(String, String)`
+/// and silently flipped that order; the tie-break comparator pins it.
+///
+/// Setup: 4 commits across 3 authors, with two authors tied at 1 commit
+/// each. Build via tempdir to avoid coupling to the live xray repo's
+/// real author list.
+#[test]
+fn test_top_authors_tie_break_by_name_then_email() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    // 3 distinct authors. "Charlie" has 2 commits (top), "Alice" and
+    // "Bob" each have 1 commit (tied). Tie-break by name asc =>
+    // Alice before Bob.
+    commit_as(repo, "Charlie", "charlie@example.com", "f.txt", "v1\n", "c1");
+    commit_as(repo, "Alice", "alice@example.com", "f.txt", "v2\n", "a1");
+    commit_as(repo, "Bob", "bob@example.com", "f.txt", "v3\n", "b1");
+    commit_as(repo, "Charlie", "charlie@example.com", "f.txt", "v4\n", "c2");
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (authors, _, total_authors) =
+        top_authors(repo_str, "", &filter, 10, None).expect("top_authors must succeed");
+    assert_eq!(total_authors, 3);
+    assert_eq!(authors.len(), 3);
+    assert_eq!(authors[0].name, "Charlie");
+    assert_eq!(authors[0].commit_count, 2);
+    // Tied at 1 each — must be name asc: Alice before Bob.
+    assert_eq!(
+        (authors[1].name.as_str(), authors[2].name.as_str()),
+        ("Alice", "Bob"),
+        "tied authors must sort by name ascending; got {:?}, {:?}",
+        authors[1].name, authors[2].name
+    );
+    assert_eq!(authors[1].commit_count, 1);
+    assert_eq!(authors[2].commit_count, 1);
+}
+
+/// PERF-04 follow-up: same display name with two distinct emails counts
+/// as TWO authors (the tuple key disambiguates by both fields). Pre-PERF-04
+/// this was already the case (the formatted key included the email), but
+/// no test pinned it — a future refactor that drops email from the key
+/// would silently merge them. Tie-break is by email asc within the
+/// same name.
+#[test]
+fn test_top_authors_same_name_different_email_are_distinct() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    // Two commits with the same display name but different emails.
+    commit_as(repo, "Pat", "pat@work.example", "f.txt", "v1\n", "work");
+    commit_as(repo, "Pat", "pat@home.example", "f.txt", "v2\n", "home");
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (authors, total_commits, total_authors) =
+        top_authors(repo_str, "", &filter, 10, None).expect("top_authors must succeed");
+    assert_eq!(total_commits, 2);
+    assert_eq!(
+        total_authors, 2,
+        "same name + different email must count as two authors (tuple key disambiguates by email)"
+    );
+    // Both at 1 commit — tie-break by email asc: home@ before work@.
+    assert_eq!(
+        (authors[0].email.as_str(), authors[1].email.as_str()),
+        ("pat@home.example", "pat@work.example"),
+        "tied authors with same name must sort by email ascending"
+    );
+}
+
+/// PERF-04 follow-up: different display names with the same email count
+/// as TWO authors. The tuple key disambiguates on both fields, so this
+/// is also pinned by the same comparator that resolves count ties.
+#[test]
+fn test_top_authors_different_name_same_email_are_distinct() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    commit_as(repo, "Old Name", "shared@example.com", "f.txt", "v1\n", "a");
+    commit_as(repo, "New Name", "shared@example.com", "f.txt", "v2\n", "b");
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let filter = DateFilter { from_date: None, to_date: None };
+    let (_, total_commits, total_authors) =
+        top_authors(repo_str, "", &filter, 10, None).expect("top_authors must succeed");
+    assert_eq!(total_commits, 2);
+    assert_eq!(
+        total_authors, 2,
+        "different name + same email must count as two authors (tuple key includes name)"
+    );
+}
+
 // ─── Repo activity tests ────────────────────────────────────────────
 
 #[test]
@@ -522,6 +619,46 @@ fn run_git(repo: &std::path::Path, args: &[&str]) {
         .status()
         .expect("failed to run git");
     assert!(status.success(), "git {:?} failed", args);
+}
+
+
+/// Test helper: create a single commit with the specified author identity.
+/// Bypasses the GIT_AUTHOR_* env override baked into `run_git` (which forces
+/// every commit to "Test Author <test@example.com>" — incompatible with tests
+/// that need multiple distinct authors, e.g. PERF-04 tie-break tests).
+#[cfg(test)]
+fn commit_as(
+    repo: &std::path::Path,
+    name: &str,
+    email: &str,
+    file: &str,
+    body: &str,
+    msg: &str,
+) {
+    std::fs::write(repo.join(file), body).expect("write commit body");
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["add", file])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("git add");
+    assert!(add.success(), "git add failed for {}", file);
+
+    let commit = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["commit", "-m", msg, "--quiet"])
+        .env("GIT_AUTHOR_NAME", name)
+        .env("GIT_AUTHOR_EMAIL", email)
+        .env("GIT_COMMITTER_NAME", name)
+        .env("GIT_COMMITTER_EMAIL", email)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("git commit");
+    assert!(commit.success(), "git commit as {} <{}> failed", name, email);
 }
 
 #[cfg(test)]
