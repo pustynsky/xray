@@ -272,8 +272,10 @@ The trigram index is built automatically at the end of `build_content_index()` i
 graph LR
     A[Inverted Index Keys] -->|collect + sort| B[tokens Vec]
     B -->|sliding windows of 3| C[trigram_map]
-    C -->|sort + dedup posting lists| D[TrigramIndex]
+    C -->|sort + dedup token-idx lists| D[TrigramIndex]
 ```
+
+The `dedup` step removes **duplicate token indices that arise from sliding-window overlap within a single token** (e.g. token `"abcabc"` produces trigram `"abc"` twice via the sliding window, so its token-index would be pushed into the `"abc"` posting list twice without dedup). It is **not** dedup of the underlying file-level work — each surviving token-index still resolves to its full posting list of `(file_id, lines)` entries downstream. The benefit is a smaller, sorted posting list that supports cheap intersection during query.
 
 Build time is ~200ms for 754K tokens — negligible compared to the main index build (~7–16s).
 

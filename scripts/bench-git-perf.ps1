@@ -144,16 +144,25 @@ if (-not $BlameFile) {
 }
 if ($BlameFile) {
     Write-Host "PERF-09 using file: $BlameFile"
-    $results += Measure-Cmd -Name "PERF-09 git blame --porcelain (large file)" -Iterations $Iterations -Block {
+    # Measures git's own blame --porcelain subprocess cost only — the
+    # `parse_blame_porcelain` parser path xray actually optimises is in
+    # Rust and cannot be exercised from PowerShell. Treat the number as
+    # an upper bound on what xray could ever achieve for this file
+    # (parser cost is added on top, not subtracted).
+    $results += Measure-Cmd -Name "PERF-09 git blame --porcelain subprocess only (parser excluded)" -Iterations $Iterations -Block {
         git -C $Repo blame --porcelain $BlameFile 2>$null | Out-Null
     }
 } else {
     Write-Warning "PERF-09 skipped: no file selected"
 }
 
-# ─── PERF-04: top_authors ────────────────────────────────────────────
-$results += Measure-Cmd -Name "PERF-04 top_authors raw git log (max 50k commits)" -Iterations $Iterations -Block {
-    git -C $Repo log --format=%H --max-count=50000 2>$null | Out-Null
+# ─── PERF-04: top_authors ──────────────────────────────────────────
+# Mirror production format string: `top_authors` parses `%an|%ae` lines,
+# not bare hashes. The previous `--format=%H` measured the wrong shape
+# (HASH-listing is much cheaper than name+email extraction over the
+# same commit set), under-reporting the real cold-cost of the call.
+$results += Measure-Cmd -Name "PERF-04 top_authors raw git log %an|%ae (max 50k commits)" -Iterations $Iterations -Block {
+    git -C $Repo log --format='%an|%ae' --max-count=50000 2>$null | Out-Null
 }
 
 # ─── Output ──────────────────────────────────────────────────────────

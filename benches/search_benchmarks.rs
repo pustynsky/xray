@@ -751,12 +751,25 @@ fn bench_top_authors_aggregation(c: &mut Criterion) {
 }
 
 fn bench_resolve_parent_substring(c: &mut Criterion) {
-    // Mirrors the hot loop in callers' `resolve_parent_file_ids` +
-    // `collect_substring_file_ids`: for each tree node we do 4-6 HashMap
-    // lookups in `content_index.index` plus a substring scan of all
-    // matching tokens. PERF-07 memoises this per (parent_class) within a
-    // single tree-build.
-    let mut group = c.benchmark_group("callers_resolve_substring");
+    // Mirrors the *memoisation shape* of callers' `resolve_parent_file_ids`:
+    // PERF-07 caches a per-(parent_class) result so a tree-build with N
+    // nodes pays the resolve cost once per distinct class instead of once
+    // per node. The bench compares naive (per-node) vs memoised paths and
+    // demonstrates the speed-up.
+    //
+    // **NOT representative of production substring lookup cost.** The
+    // inner substring scan here is a linear `index.keys()` walk
+    // (`for k in idx2.index.keys() { if k.contains(cls) }`) — production's
+    // `collect_substring_file_ids` (see `src/mcp/handlers/callers.rs`,
+    // ~lines 1483/1495/1508) uses **trigram intersection** against
+    // `content_index.trigrams` and only falls back to a linear scan for
+    // queries shorter than the trigram threshold (3 chars). Numbers from
+    // this bench therefore upper-bound the per-resolve cost; they do not
+    // reflect the real index-lookup latency. **TODO (follow-up)**: replace
+    // the linear key scan with a trigram-intersection helper that mirrors
+    // `collect_substring_file_ids`, and add a separate naive-vs-trigram
+    // bench so the memoisation comparison stays clean.
+    let mut group = c.benchmark_group("callers_resolve_substring_memo_shape");
 
     // Build a synthetic content index where ~5% of files contain a token
     // matching "storagemanager" as a substring (e.g. m_storageManager).
