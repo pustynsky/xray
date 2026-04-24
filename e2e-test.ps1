@@ -1400,6 +1400,165 @@ $testBlocks += , {
     }
 }
 
+# T-CHECKPOINT-AFTER-RECONCILE: post-reconcile checkpoint must survive force-kill.
+# Regression test for user-stories/meta-checkpoint-durability.md (Hole #1).
+#
+# Pre-fix behaviour: session B's startup reconcile updates the in-memory
+# `live_file_count` (PR #208) but the on-disk `.meta` is only refreshed by
+# the 10-minute `periodic_autosave` tick or by graceful shutdown. A force-kill
+# inside that window resurrects the pre-reconcile counter at next start.
+#
+# Post-fix behaviour: session B saves immediately after a reconcile that
+# changed the live count. Force-kill at any time after that → session C
+# loads the new baseline.
+#
+# Scenario:
+#   1. Build index with 3 files via `content-index` cmd (writes .meta=3).
+#   2. Delete one file from disk (offline edit).
+#   3. Start session B (`serve --watch`), wait long enough for reconcile +
+#      post-reconcile save to complete, then FORCE-KILL the process
+#      (no graceful stdin-close → no shutdown save path).
+#   4. Start session C, query `xray_info`, assert files=2.
+#      Pre-fix: returns 3 (stale .meta from step 1 survived force-kill).
+#      Post-fix: returns 2 (session B's post-reconcile save updated .meta).
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-CHECKPOINT-AFTER-RECONCILE post-reconcile-checkpoint-durability"
+    $proc = $null
+    $errEvent = $null
+    $outEvent = $null
+    $tmpDir = $null
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_checkpoint_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+
+        # Step 1: 3 files + build index. .meta now persists files=3.
+        for ($i = 1; $i -le 3; $i++) {
+            Set-Content -Path (Join-Path $tmpDir "File$i.cs") -Value "public class C$i { }"
+        }
+        & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
+
+        # Step 2: Delete one file BETWEEN sessions. Session B's startup
+        # reconciliation must catch this and persist it before being killed.
+        Remove-Item -Force (Join-Path $tmpDir "File2.cs")
+
+        # Step 3: Session B — start `serve --watch`, give the watcher time
+        # to finish reconciliation AND the post-reconcile checkpoint, then
+        # FORCE-KILL. We deliberately do NOT close stdin (the graceful
+        # shutdown path would mask the bug by saving on exit).
+        $psi = New-Object System.Diagnostics.ProcessStartInfo
+        $psi.FileName = $Bin
+        $psi.Arguments = "serve --dir `"$tmpDir`" --ext cs --watch"
+        $psi.UseShellExecute = $false
+        $psi.RedirectStandardInput = $true
+        $psi.RedirectStandardOutput = $true
+        $psi.RedirectStandardError = $true
+        $psi.CreateNoWindow = $true
+
+        $proc = New-Object System.Diagnostics.Process
+        $proc.StartInfo = $psi
+        $stderrBuilder = New-Object System.Text.StringBuilder
+        $errHandler = { if ($EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) } }
+        $errEvent = Register-ObjectEvent -InputObject $proc -EventName ErrorDataReceived -Action $errHandler -MessageData $stderrBuilder
+
+        $proc.Start() | Out-Null
+        $proc.BeginErrorReadLine()
+
+        # Drive the JSON-RPC handshake so serve enters its main loop and
+        # the watcher thread reaches the reconciliation phase.
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}')
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
+
+        # Wait for reconciliation + post-reconcile save to LAND on disk.
+        # Important: we wait for "Periodic autosave complete" (emitted AFTER
+        # the atomic tmp+rename in `save_compressed`), not the earlier
+        # "Post-reconcile checkpoint" log line which is emitted BEFORE the
+        # save call. Killing on the pre-save line would make the test flaky
+        # on slow CI boxes — the rename could happen after the kill and
+        # session C would legitimately load the old .meta even though the
+        # product code is correct. Reviewer-caught MEDIUM (commit-reviewer
+        # 2026-04-25). 8s is comfortably above the worst-case for 3 files
+        # (reconcile <100ms, save <500ms on a tmp dir) and well below the
+        # 10-minute periodic autosave window we are explicitly NOT testing.
+        $waitDeadline = (Get-Date).AddSeconds(8)
+        $sawCheckpointTrigger = $false
+        $sawSaveComplete = $false
+        while ((Get-Date) -lt $waitDeadline) {
+            Start-Sleep -Milliseconds 200
+            $stderrSnap = $stderrBuilder.ToString()
+            if ($stderrSnap -match 'Post-reconcile checkpoint') { $sawCheckpointTrigger = $true }
+            if ($sawCheckpointTrigger -and $stderrSnap -match 'Periodic autosave complete') {
+                $sawSaveComplete = $true
+                break
+            }
+        }
+
+        # FORCE-KILL — no stdin close, no graceful shutdown save. The
+        # post-reconcile save (if it happened) is the only thing that can
+        # have updated .meta on disk.
+        $proc.Kill()
+        $proc.WaitForExit(5000) | Out-Null
+        Start-Sleep -Milliseconds 200
+        Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue
+        $stderrB = $stderrBuilder.ToString()
+        $proc.Dispose()
+        $proc = $null
+
+        if (-not $sawSaveComplete) {
+            & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+            Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+            $reason = if ($sawCheckpointTrigger) {
+                "saw 'Post-reconcile checkpoint' but never saw 'Periodic autosave complete' within 8s — save may be slow or stuck"
+            } else {
+                "never saw 'Post-reconcile checkpoint' log line within 8s — fix not active or watcher stuck"
+            }
+            return @{ Name = $name; Passed = $false; Output = "FAILED (session B: $reason). stderr tail: $($stderrB.Substring([Math]::Max(0,$stderrB.Length-500)))" }
+        }
+
+        # Step 4: Session C — must load the post-reconcile baseline.
+        # We deliberately do NOT pass --watch so reconcile cannot run again
+        # and "fix" .meta a second time. xray_info should report files=2
+        # purely from the on-disk state session B left behind.
+        $msgsC = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_info","arguments":{}}}'
+        ) -join "`n"
+        $sessionC = ($msgsC | & $Bin serve --dir $tmpDir --ext cs 2>&1) | Out-String
+        $jsonC = $sessionC -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+
+        if (-not $jsonC) {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (session C: no xray_info response)" }
+        }
+        if ($jsonC -match '\{[^{}]*?\\"type\\":\\"content\\"[^{}]*?\}') {
+            $objC = $Matches[0]
+            if ($objC -match '\\"files\\":\s*(\d+)') {
+                $sessionCFiles = [int]$Matches[1]
+                if ($sessionCFiles -ne 2) {
+                    return @{ Name = $name; Passed = $false; Output = "FAILED (session C: content files=$sessionCFiles, expected 2 — pre-fix would report 3 because stale .meta from step 1 survived the force-kill)" }
+                }
+            } else {
+                return @{ Name = $name; Passed = $false; Output = "FAILED (session C: no files field in content object)" }
+            }
+        } else {
+            return @{ Name = $name; Passed = $false; Output = "FAILED (session C: no content-index object)" }
+        }
+
+        return @{ Name = $name; Passed = $true; Output = "OK (post-reconcile checkpoint survived force-kill, session C loaded files=2)" }
+    } catch {
+        if ($tmpDir -and (Test-Path $tmpDir)) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        if ($proc -and !$proc.HasExited) { $proc.Kill() }
+        if ($proc) { $proc.Dispose() }
+        if ($errEvent) { Unregister-Event -SourceIdentifier $errEvent.Name -ErrorAction SilentlyContinue }
+        if ($outEvent) { Unregister-Event -SourceIdentifier $outEvent.Name -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 # T-BATCH-WATCHER: Batch watcher update — multiple files modified at once (tests batch_purge_files)
 $testBlocks += , {
     param($Bin, $Dir, $Ext)

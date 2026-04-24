@@ -208,14 +208,52 @@ pub fn start_watcher(
         // Watcher is already listening — events during reconciliation are buffered in rx channel.
         // Non-blocking: MCP requests work on old data during reconciliation.
         // Only the brief write lock in Phase 4 blocks readers.
-        reconcile_content_index(&index, &dir_str, &extensions, respect_git_exclude);
-        if let Some(ref def_idx) = def_index {
+        //
+        // MCP-WCH-006: capture reconciliation deltas so we can checkpoint the
+        // new baseline to disk if reconcile actually changed anything. Closes
+        // the post-reconcile durability window: PR #208 stopped the in-memory
+        // `xray_info` counter from reporting stale post-removal numbers, but
+        // the `.meta` on disk is only refreshed every AUTOSAVE_INTERVAL
+        // (10 min) by `periodic_autosave`. Without an explicit save here, a
+        // forced kill (`Stop-Process -Force`, `cargo install --force`
+        // overwriting the binary, OS crash, power loss) within that window
+        // resurrects the pre-reconcile state on next start — exactly the
+        // ratchet PR #208 fixed at the API layer.
+        //
+        // We gate the save on ANY content reconcile activity (add/modify/
+        // remove) — not just net file-count delta. Three reviewer-caught
+        // cases informed this:
+        //   1. Pure removal (the original ratchet): `before > after` →
+        //      need save so on-disk `files: N` matches RAM.
+        //   2. Replace with equal cardinality (delete A.cs + add B.cs):
+        //      `before == after` but the file-id allocator and inverted
+        //      index diverged → need save (HIGH, commit-reviewer
+        //      2026-04-25 first pass).
+        //   3. Modify-only (`content_added == 0 && content_removed == 0
+        //      && content_modified > 0`): postings purged and rewritten
+        //      in-place, `created_at` and `trigram_dirty` updated. Without
+        //      saving, force-kill → session C loads stale postings and
+        //      serves outdated search results for the modified file
+        //      (MEDIUM, commit-reviewer 2026-04-25 second pass).
+        //
+        // Note on poisoned locks: `reconcile_*` returns (0,0,0) on lock
+        // failure, which suppresses the save (no harm: a poisoned content
+        // lock will already cause `process_batch` to abort the watcher
+        // thread on the next event, and `periodic_autosave` itself also
+        // no-ops on read failure).
+        let (content_added, content_modified, content_removed) =
+            reconcile_content_index(&index, &dir_str, &extensions, respect_git_exclude);
+
+        let def_changed = if let Some(ref def_idx) = def_index {
             // Non-blocking reconciliation: parse files OUTSIDE the lock, apply INSIDE.
             // def_ready stays true — MCP requests work on old data during parsing.
-            definitions::reconcile_definition_index_nonblocking(
+            let (added, modified, removed) = definitions::reconcile_definition_index_nonblocking(
                 def_idx, &dir_str, &extensions, respect_git_exclude
             );
-        }
+            added + modified + removed > 0
+        } else {
+            false
+        };
 
         let mut batch_start: Option<Instant> = None;
         const MAX_ACCUMULATE: Duration = Duration::from_secs(3);
@@ -224,6 +262,24 @@ pub fn start_watcher(
         let mut removed_files: HashSet<PathBuf> = HashSet::new();
         let mut last_autosave = std::time::Instant::now();
         const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(600); // 10 minutes
+
+        // MCP-WCH-006: post-reconcile checkpoint. Save iff reconcile actually
+        // changed something (any add/modify/remove for content, any
+        // add/modify/remove for definitions). Skipped on no-op so
+        // steady-state startups stay free.
+        if post_reconcile_checkpoint_needed(
+            content_added, content_modified, content_removed, def_changed,
+        ) {
+            info!(
+                content_added,
+                content_modified,
+                content_removed,
+                def_changed,
+                "Post-reconcile checkpoint: persisting new baseline to disk"
+            );
+            periodic_autosave(&index, &def_index, &index_base);
+            last_autosave = std::time::Instant::now();
+        }
 
         loop {
             match rx.recv_timeout(Duration::from_millis(debounce_ms)) {
@@ -748,6 +804,36 @@ fn apply_tokenized_file(index: &mut ContentIndex, result: TokenizedFileResult) {
     if (file_id as usize) < index.file_token_counts.len() {
         index.file_token_counts[file_id as usize] = result.total_tokens;
     }
+}
+
+/// Decide whether the post-reconcile checkpoint must run.
+///
+/// Returns `true` iff reconcile actually changed in-memory state in a way
+/// that diverges from the on-disk `.meta` + binary index snapshot:
+/// - `content_added > 0`: file_id allocator grew → divergent `idx.files[]`.
+/// - `content_removed > 0`: slot tombstoned → divergent `idx.files[]` and
+///   stale `live_file_count` on disk (the original ratchet scenario).
+/// - `content_modified > 0`: postings purged and rewritten in-place,
+///   `created_at` and `trigram_dirty` updated → on-disk inverted index
+///   serves stale results for the modified file. Reviewer-caught MEDIUM
+///   (commit-reviewer 2026-04-25, second pass): omitting modify left a
+///   force-kill window where session C would load stale postings even
+///   though file_id allocation was unchanged.
+/// - `def_changed`: any add/modify/remove in the definition index — the
+///   def-index `.meta` and binary payload encode per-file definitions.
+///
+/// Returns `false` only when reconcile was a true no-op (the steady-state
+/// startup case). This keeps cold-start cost zero for in-sync workspaces.
+pub(crate) fn post_reconcile_checkpoint_needed(
+    content_added: usize,
+    content_modified: usize,
+    content_removed: usize,
+    def_changed: bool,
+) -> bool {
+    content_added > 0
+        || content_modified > 0
+        || content_removed > 0
+        || def_changed
 }
 
 /// Periodically save in-memory indexes to disk to protect against data loss
@@ -1413,7 +1499,7 @@ fn reconcile_content_index(
     dir: &str,
     extensions: &[String],
     respect_git_exclude: bool,
-) {
+) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
     // Capture walk start time for created_at update (not now() at end — avoids race condition
     // where files modified during tokenization phase would be missed by next reconciliation)
@@ -1473,7 +1559,7 @@ fn reconcile_content_index(
         }
         Err(e) => {
             error!(error = %e, "Failed to read content index for reconciliation");
-            return;
+            return (0, 0, 0);
         }
     };
     // READ lock released here
@@ -1487,7 +1573,7 @@ fn reconcile_content_index(
             elapsed_ms = format_args!("{:.1}", elapsed_ms),
             "Content index reconciliation: all files up to date"
         );
-        return;
+        return (0, 0, 0);
     }
 
     // ── Phase 3: Tokenize all new/modified files (NO LOCK) ──
@@ -1567,8 +1653,11 @@ fn reconcile_content_index(
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire content index write lock for reconciliation");
+            return (0, 0, 0);
         }
     }
+
+    (added, modified, removed)
 }
 
 #[cfg(test)]
