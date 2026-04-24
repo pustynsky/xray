@@ -267,6 +267,20 @@ pub struct DefinitionIndex {
 }
 
 impl DefinitionIndex {
+    /// Number of live files currently indexed.
+    ///
+    /// `self.files.len()` is the file_id allocator capacity (append-only); on
+    /// removal the slot is tombstoned (string cleared) but the Vec itself is
+    /// never shrunk so file_id remains a stable index. Use this method for any
+    /// user-visible count reporting (`xray_info`, `IndexMeta`, logs, memory
+    /// estimates) so deletions are reflected.
+    ///
+    /// `path_to_id` is the authoritative live set; the raw `files` Vec is the
+    /// id-allocator with tombstones for removed entries.
+    pub fn live_file_count(&self) -> usize {
+        self.path_to_id.len()
+    }
+
     /// Shrink all internal HashMaps to fit their current size.
     /// Call after loading from disk to reclaim excess capacity.
     /// Saves ~20-50 MB for large indexes by eliminating HashMap over-allocation.

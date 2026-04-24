@@ -394,7 +394,7 @@ fn save_indexes_on_shutdown(ctx: &HandlerContext) {
                 if let Err(e) = save_content_index(&idx, &ctx.index_base) {
                     warn!(error = %e, "Failed to save content index on shutdown");
                 } else {
-                    info!(files = idx.files.len(), "Content index saved on shutdown");
+                    info!(files = idx.live_file_count(), "Content index saved on shutdown");
                 }
             }
             Err(e) => warn!(error = %e, "Failed to read content index for shutdown save"),

@@ -1126,7 +1126,8 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
     // ── Content index (in-memory) ──
     if ctx.content_ready.load(Ordering::Acquire) {
         if let Ok(idx) = ctx.index.read() {
-            if !idx.files.is_empty() {
+            let live_files = idx.live_file_count();
+            if live_files > 0 {
                 // Get disk file size without loading
                 let exts_str = idx.extensions.join(",");
                 let disk_path = crate::index::content_index_path_for(&idx.root, &exts_str, &ctx.index_base);
@@ -1143,7 +1144,7 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
                 let mut content_info = json!({
                     "type": "content",
                     "root": idx.root,
-                    "files": idx.files.len(),
+                    "files": live_files,
                     "uniqueTokens": idx.index.len(),
                     "totalTokens": idx.total_tokens,
                     "extensions": idx.extensions,
@@ -1170,7 +1171,8 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
     if let Some(ref def_arc) = ctx.def_index {
         if ctx.def_ready.load(Ordering::Acquire) {
             if let Ok(idx) = def_arc.read() {
-                if !idx.files.is_empty() {
+                let live_files = idx.live_file_count();
+                if live_files > 0 {
                     let disk_path = crate::definitions::definition_index_path_for(
                         &idx.root, &idx.extensions.join(","), &ctx.index_base,
                     );
@@ -1189,7 +1191,7 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
                     let mut def_info = json!({
                         "type": "definition",
                         "root": idx.root,
-                        "files": idx.files.len(),
+                        "files": live_files,
                         "definitions": active_defs,
                         "callSites": call_sites,
                         "extensions": idx.extensions,

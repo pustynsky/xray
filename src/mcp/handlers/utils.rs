@@ -964,7 +964,7 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
             summary["totalTimeMs"] = json!(total_time);
 
             if let Ok(idx) = ctx.index.read() {
-                summary["indexFiles"] = json!(idx.files.len());
+                summary["indexFiles"] = json!(idx.live_file_count());
                 summary["indexTokens"] = json!(idx.index.len());
             }
         }

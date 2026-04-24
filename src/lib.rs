@@ -745,6 +745,26 @@ impl ContentIndex {
         now.saturating_sub(self.created_at) > self.max_age_secs
     }
 
+    /// Number of live files currently indexed.
+    ///
+    /// `self.files.len()` is the file_id allocator capacity (append-only); on
+    /// removal the slot is tombstoned (string cleared) but the Vec itself is
+    /// never shrunk so file_id remains a stable index. Use this method for any
+    /// user-visible count reporting (`xray_info`, `IndexMeta`, logs, memory
+    /// estimates) so deletions are reflected.
+    ///
+    /// When `path_to_id` is populated (server with `--watch`) it is the
+    /// authoritative live set. Otherwise (cold CLI build, no watcher → no
+    /// removals possible) the raw `files.len()` is correct, with a defensive
+    /// filter for empty tombstone slots inherited from older index files.
+    pub fn live_file_count(&self) -> usize {
+        if let Some(ref p2id) = self.path_to_id {
+            p2id.len()
+        } else {
+            self.files.iter().filter(|s| !s.is_empty()).count()
+        }
+    }
+
     /// Pre-warm the trigram index by touching all data structures.
     ///
     /// After deserialization, the OS may not have paged in all the memory

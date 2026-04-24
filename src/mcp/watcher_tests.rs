@@ -929,6 +929,11 @@ fn test_periodic_autosave_saves_both_indexes() {
             attributes: vec![],
             base_types: vec![],
         }],
+        path_to_id: {
+            let mut m = HashMap::new();
+            m.insert(PathBuf::from("file.cs"), 0u32);
+            m
+        },
         ..Default::default()
     }));
 
@@ -1044,6 +1049,47 @@ fn test_periodic_autosave_skips_empty_indexes() {
         })
         .collect();
     assert!(entries.is_empty(), "Empty indexes should not be saved to disk");
+}
+
+// Regression: an index whose live_file_count() == 0 but whose allocator
+// (`idx.files`) has grown is NOT pristine — it represents a "had files,
+// all removed" state. The autosave gate must still checkpoint it so a
+// forced kill doesn't resurrect the previous on-disk state next session.
+// See user-stories/stale-content-index-files-counter.md (review finding).
+#[test]
+fn test_periodic_autosave_checkpoints_post_removal_empty_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+    let root = tmp.path().to_string_lossy().to_string();
+
+    // Content index: allocator grew to 1 slot, then file was removed
+    // (slot tombstoned, path_to_id empty). live_file_count() == 0
+    // but `files.len() == 1`.
+    let content_index = Arc::new(RwLock::new(ContentIndex {
+        root: root.clone(),
+        files: vec![String::new()],
+        index: HashMap::new(),
+        total_tokens: 0,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![0],
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    }));
+    let def_index = Arc::new(RwLock::new(crate::definitions::DefinitionIndex {
+        root: root.clone(),
+        files: vec![String::new()],
+        path_to_id: HashMap::new(),
+        ..Default::default()
+    }));
+
+    periodic_autosave(&content_index, &Some(def_index), index_base);
+
+    let content_path = crate::index::content_index_path_for(&root, "cs", index_base);
+    assert!(
+        content_path.exists(),
+        "Post-removal-empty content index MUST be checkpointed so it doesn't \
+         resurrect on forced-kill restart"
+    );
 }
 
 #[test]
@@ -2152,4 +2198,103 @@ fn record_watcher_event_error_bumps_events_errors_and_nothing_else() {
     super::record_watcher_event_error(&stats, &err);
     assert_eq!(stats.events_errors.load(Ordering::Relaxed), 2);
 }
+
+// ─── Stale `files` counter regression tests ─────────────────────────
+//
+// Regression coverage for `user-stories/stale-content-index-files-counter.md`:
+// `idx.files` is a file_id allocator (append-only, never shrinks). On removal
+// we tombstone the slot (clear the String); the live count is `path_to_id.len()`
+// surfaced via `live_file_count()`. These tests pin the contract end-to-end so
+// `xray_info`, `IndexMeta`, and memory estimates can no longer drift up after
+// reconciliation removes files.
+
+#[test]
+fn live_file_count_matches_path_to_id_after_removal() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let file_a = root.join("a.cs");
+    let clean_a = crate::clean_path(&file_a.to_string_lossy());
+
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+    removed.insert(PathBuf::from(&clean_a));
+
+    process_batch(&index, &None, &mut dirty, &mut removed);
+
+    let idx = index.read().unwrap();
+    assert_eq!(idx.live_file_count(), 1,
+        "after removing 1 of 2 files, live_file_count must report 1, not the Vec capacity 2");
+    assert_eq!(idx.files.len(), 2,
+        "files Vec is append-only — capacity must stay at 2 (file_id stability)");
+    assert!(idx.files[0].is_empty(),
+        "removed file's slot must be tombstoned (empty string), got {:?}", idx.files[0]);
+    assert!(!idx.files[1].is_empty(),
+        "surviving file's slot must NOT be tombstoned");
+    assert_eq!(idx.path_to_id.as_ref().unwrap().len(), 1,
+        "path_to_id must reflect the live set");
+}
+
+#[test]
+fn live_file_count_falls_back_to_files_when_no_path_to_id() {
+    // Cold CLI build (no --watch) has path_to_id = None and no removals can
+    // occur. live_file_count must fall back to files.len() (filtering empties).
+    let mut idx = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["a.cs".to_string(), "b.cs".to_string()],
+        path_to_id: None,
+        ..Default::default()
+    };
+    assert_eq!(idx.live_file_count(), 2,
+        "no path_to_id → live count = non-empty files");
+
+    // Defensive: legacy on-disk index containing tombstoned slots from an
+    // old session must still report the correct live count after a cold load.
+    idx.files.push(String::new());
+    assert_eq!(idx.live_file_count(), 2,
+        "empty tombstone slot must NOT be counted");
+}
+
+#[test]
+fn build_watch_index_skips_tombstoned_slots() {
+    // A legacy index loaded with --watch must not resurrect tombstoned files
+    // into path_to_id (would create a junk PathBuf("") entry).
+    let mut idx = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["live.cs".to_string(), String::new(), "other.cs".to_string()],
+        ..Default::default()
+    };
+    // Mimic the persisted state: trigram empty, path_to_id None on disk.
+    idx.path_to_id = None;
+
+    let watched = build_watch_index_from(idx);
+    let p2id = watched.path_to_id.as_ref().expect("path_to_id must be Some");
+
+    assert_eq!(p2id.len(), 2, "tombstone slot must NOT be inserted");
+    assert!(p2id.contains_key(&PathBuf::from("live.cs")));
+    assert!(p2id.contains_key(&PathBuf::from("other.cs")));
+    assert!(!p2id.contains_key(&PathBuf::from("")),
+        "empty PathBuf must never appear in path_to_id (regression: would loop forever in reconcile)");
+    // file_id stability is preserved — "other.cs" must keep id=2, not be remapped to 1.
+    assert_eq!(p2id[&PathBuf::from("other.cs")], 2);
+}
+
+#[test]
+fn content_index_meta_uses_live_count_after_removal() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let file_a = root.join("a.cs");
+    let clean_a = crate::clean_path(&file_a.to_string_lossy());
+
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+    removed.insert(PathBuf::from(&clean_a));
+    process_batch(&index, &None, &mut dirty, &mut removed);
+
+    let idx = index.read().unwrap();
+    let meta = crate::index::content_index_meta(&idx);
+    assert_eq!(meta.files, 1,
+        "IndexMeta.files MUST be the live count, not the Vec capacity. \
+         This is the cross-session ratchet bug: meta is what later sessions \
+         echo back via `serve: content loaded (files=N)` log.");
+}
+
+
 
