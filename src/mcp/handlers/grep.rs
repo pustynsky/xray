@@ -31,15 +31,15 @@ pub(crate) struct GrepSearchParams<'a> {
     pub dir_filter: &'a Option<String>,
     /// Optional file path/name substring filter (lowercase match against full file path).
     /// Supports comma-separated terms (OR semantics) — any term matching accepts the file.
-    /// When `file_filter_exact` is true, the value is matched as an EXACT basename
-    /// (case-insensitive, no comma split) — used by the dir=<file> auto-convert path.
+    /// Ignored when `exact_file_path` is `Some(_)` — that mode supersedes substring scoping.
     pub file_filter: &'a Option<String>,
-    /// True when `file_filter` was auto-populated by the `dir=<file>` auto-convert
-    /// path. Switches `passes_file_filters` to exact-basename matching so the user's
-    /// "scope to this one file" intent is preserved (e.g., dir='src/Service.cs' must
-    /// not also match `MyService.cs`, `Service.cs.bak`, etc.). User-provided `file=`
-    /// keeps substring/comma-OR semantics (this flag stays false).
-    pub file_filter_exact: bool,
+    /// When `Some(path)`, the file's full normalized path must equal this value
+    /// exactly (case-insensitive, `\` normalized to `/`). Set ONLY by the
+    /// `dir=<file>` auto-convert branch in `parse_grep_args`. The previous
+    /// basename-only check let `subdir/Service.cs` leak when the user pointed
+    /// `dir=<root>/Service.cs`; full-path equality closes that hole. User-provided
+    /// `file=` keeps substring/comma-OR semantics (this stays `None`).
+    pub exact_file_path: &'a Option<String>,
     /// Pre-computed exclude dir patterns (avoids per-file allocations)
     pub exclude_patterns: super::utils::ExcludePatterns,
     /// Pre-lowercased exclude path substrings
@@ -349,33 +349,33 @@ fn ensure_trigram_index(ctx: &HandlerContext) {
 /// Check if a file passes all grep filters (dir, ext, excludeDir, exclude).
 /// Returns true if the file should be included in results.
 fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
-    // Dir prefix filter (subdirectory search)
-    if let Some(prefix) = params.dir_filter
-        && !is_under_dir(file_path, prefix) { return false; }
+    // Exact-file mode (set ONLY by the `dir=<file>` auto-convert branch).
+    // Supersedes dir/file_filter scoping — the user's intent was unambiguously
+    // "this exact file", so we full-path equality-check and short-circuit.
+    // Without this, the recursive prefix `dir_filter=<parent>` would still
+    // accept `<parent>/sub/Service.cs` and the basename match would let it
+    // through (the gap the reviewer flagged).
+    if let Some(target) = params.exact_file_path {
+        let fp_norm = file_path.to_lowercase().replace('\\', "/");
+        let target_norm = target.to_lowercase().replace('\\', "/");
+        if fp_norm != target_norm { return false; }
+        // Still apply ext / exclude filters below (they're cheap and harmless
+        // for a single file; they also keep behavior consistent if the caller
+        // ever adds an explicit `ext` that contradicts the auto-converted path).
+    } else {
+        // Dir prefix filter (subdirectory search) — only meaningful in scoped mode.
+        if let Some(prefix) = params.dir_filter
+            && !is_under_dir(file_path, prefix) { return false; }
 
-    // Extension filter (supports comma-separated extensions)
-    if let Some(ext) = params.ext_filter
-        && !matches_ext_filter(file_path, ext) { return false; }
-
-    // File name/path filter. Two semantic modes:
-    //   - DEFAULT (substring, comma-separated OR): user-supplied `file=` filter.
-    //     Case-insensitive substring against both full path and basename so
-    //     `file='CHANGELOG.md'` works regardless of caller path style.
-    //   - EXACT basename (set by `file_filter_exact = true`): used when `dir=<file>`
-    //     was auto-converted to dir=<parent> + file=<basename>. The user's intent
-    //     was "scope to this one file"; substring would silently leak to siblings
-    //     like `MyService.cs`, `Service.cs.bak`, `OldService.cs.disabled`.
-    if let Some(file_sub) = params.file_filter {
-        let basename_lower = std::path::Path::new(file_path)
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|s| s.to_lowercase())
-            .unwrap_or_default();
-        if params.file_filter_exact {
-            // Exact basename match (case-insensitive, no comma split — the value
-            // is a single literal filename auto-populated from the dir= path).
-            if basename_lower != file_sub.to_lowercase() { return false; }
-        } else {
+        // File name/path filter (substring, comma-separated OR): user-supplied
+        // `file=` filter. Case-insensitive substring against both full path and
+        // basename so `file='CHANGELOG.md'` works regardless of caller path style.
+        if let Some(file_sub) = params.file_filter {
+            let basename_lower = std::path::Path::new(file_path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s.to_lowercase())
+                .unwrap_or_default();
             let fp_lower = file_path.to_lowercase().replace('\\', "/");
             let any_match = file_sub.split(',')
                 .map(|t| t.trim().to_lowercase())
@@ -386,6 +386,10 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
             if !any_match { return false; }
         }
     }
+
+    // Extension filter (supports comma-separated extensions)
+    if let Some(ext) = params.ext_filter
+        && !matches_ext_filter(file_path, ext) { return false; }
 
     // Pre-compute lowercased + normalized path once for all exclude checks
     let needs_lower = !params.exclude_patterns.is_empty() || !params.exclude_lower.is_empty();
@@ -415,9 +419,10 @@ struct ParsedGrepArgs {
     dir_filter: Option<String>,
     ext_filter: Option<String>,
     file_filter: Option<String>,
-    /// True when `file_filter` was auto-populated from a `dir=<file>` path
-    /// (exact basename match required to preserve "scope to one file" intent).
-    file_filter_exact: bool,
+    /// When `Some(path)`, the request was `dir=<file>` (auto-converted) and
+    /// only that exact file (full normalized path) should match. Closes the
+    /// nested-basename leak (`<parent>/sub/Service.cs` was previously accepted).
+    exact_file_path: Option<String>,
     mode_and: bool,
     use_regex: bool,
     use_phrase: bool,
@@ -518,20 +523,21 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     };
 
     // Explicit `file` filter (user-provided). Takes precedence over dir-autoconvert filename.
-    let mut file_filter: Option<String> = args.get("file")
+    let file_filter: Option<String> = args.get("file")
         .and_then(|v| v.as_str())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
-    // Set ONLY when the dir=<file> auto-convert path populates file_filter
-    // itself. User-provided file= keeps substring/comma-OR semantics.
-    let mut file_filter_exact = false;
+    // Set ONLY when the `dir=<file>` auto-convert path fires. Carries the FULL
+    // resolved path of the targeted file so `passes_file_filters` can do exact
+    // path equality (basename-only would let `<parent>/sub/<name>` leak).
+    let mut exact_file_path: Option<String> = None;
 
     let mut dir_auto_converted_note: Option<String> = None;
 
     let dir_filter: Option<String> = if let Some(dir) = args.get("dir").and_then(|v| v.as_str()) {
         match validate_search_dir(dir, server_dir) {
             Ok(filter) => {
-                // Detect file paths passed as dir= and auto-convert to parent-dir + file filter.
+                // Detect file paths passed as dir= and auto-convert to parent-dir + exact-file scope.
                 // Historically this returned an error; now we accept it, surface a note in summary,
                 // and teach the LLM the correct pattern for next time.
                 if let Some(ref resolved) = filter {
@@ -544,20 +550,23 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
                         let filename = path.file_name()
                             .map(|f| f.to_string_lossy().to_string())
                             .unwrap_or_default();
-                        // Explicit `file=` wins; otherwise auto-populate from the filename.
-                        // When auto-populating, switch to exact-basename matching so the
-                        // user's "scope to this one file" intent isn't silently widened to
-                        // substring siblings (`MyService.cs`, `Service.cs.bak`, ...).
-                        if file_filter.is_none() && !filename.is_empty() {
-                            file_filter = Some(filename.clone());
-                            file_filter_exact = true;
+                        // Pin to the exact resolved path so siblings AND nested
+                        // duplicates of the same basename (`<parent>/sub/<name>`)
+                        // can't sneak in via the recursive prefix `dir_filter`.
+                        // Explicit user `file=` (substring-OR) is left untouched —
+                        // we only set `exact_file_path` when explicitly auto-converted.
+                        if !filename.is_empty() {
+                            exact_file_path = Some(resolved.clone());
                         }
                         dir_auto_converted_note = Some(format!(
-                            "dir='{}' looked like a file path — auto-converted to dir='{}' file='{}'. \
-                             Next time pass file='<name>' (or dir=<parent>) directly to avoid this conversion.",
-                            dir, parent, filename
+                            "dir='{}' looked like a file path — auto-converted to scope=exactly that one file ({}). \
+                             To search the WHOLE folder instead, pass dir='{}'. \
+                             Note: explicit file='<substring>' uses substring + comma-OR semantics — \
+                             it would also match siblings like 'My{}', 'Old{}'.",
+                            dir, resolved, parent, filename, filename
                         ));
-                        // Re-validate the parent dir against server_dir scope.
+                        // Re-validate the parent dir against server_dir scope (kept as a
+                        // cheap pre-filter; the exact-path check is the real gate).
                         validate_search_dir(&parent, server_dir).unwrap_or_default()
                     } else {
                         filter
@@ -670,7 +679,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         dir_filter,
         ext_filter,
         file_filter,
-        file_filter_exact,
+        exact_file_path,
         mode_and,
         use_regex,
         use_phrase,
@@ -931,7 +940,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         search_start,
         dir_filter: &parsed.dir_filter,
         file_filter: &parsed.file_filter,
-        file_filter_exact: parsed.file_filter_exact,
+        exact_file_path: &parsed.exact_file_path,
         exclude_patterns,
         exclude_lower,
         dir_auto_converted_note: parsed.dir_auto_converted_note.clone(),

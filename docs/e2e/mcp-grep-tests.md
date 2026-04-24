@@ -356,7 +356,7 @@ Progressive truncation to stay within ~32KB:
 
 ---
 
-### T-GREP-DIR-FILE: `xray_grep` — dir= pointing to a file auto-converts to parent + file filter
+### T-GREP-DIR-FILE: `xray_grep` — dir= pointing to a file auto-converts to exact-file scope
 
 **Input:** `{"terms":"httpclient","dir":"<absolute-path-to-Service.cs>"}`
 
@@ -365,13 +365,16 @@ Progressive truncation to stay within ~32KB:
 - `isError: false` (no error — the request succeeds)
 - `summary.dirAutoConverted` is a string containing:
   - The word `auto-converted`
-  - The filename (e.g., `Service.cs`)
-  - The next-time pattern `file='<name>'`
-- Results are scoped to files whose basename/path contains the auto-populated file filter
+  - The full resolved file path
+  - A note that explicit `file='<substring>'` is substring-OR (so the
+    follow-up hint doesn't accidentally widen the scope)
+- Results are scoped to **exactly** that one file (full normalized path equality):
+  - Sibling basenames (`MyService.cs`, `OldService.cs`) are NOT returned
+  - Nested duplicates (`<parent>/sub/Service.cs`) are NOT returned
 
-**Rationale:** LLMs frequently pass a file path in `dir=`. Instead of hard-failing, the tool transparently splits it into `dir=<parent>` + `file=<basename>`, runs the search, and teaches the correct pattern via the `dirAutoConverted` note so the LLM self-corrects next turn.
+**Rationale:** LLMs frequently pass a file path in `dir=`. Instead of hard-failing, the tool transparently scopes the search to that exact file, runs the query, and teaches the correct dir/file pattern via the `dirAutoConverted` note. Full-path equality (not basename-only) closes the nested-duplicate leak.
 
-**Unit tests:** `test_parse_grep_args_dir_as_file_path_auto_converts_by_heuristic`, `test_parse_grep_args_dir_as_real_file_auto_converts`, `test_grep_dir_as_file_auto_converts_to_parent_plus_file_filter`
+**Unit tests:** `test_parse_grep_args_dir_as_file_path_auto_converts_by_heuristic`, `test_parse_grep_args_dir_as_real_file_auto_converts`, `test_grep_dir_as_file_auto_convert_uses_exact_basename_not_substring_siblings`, `test_grep_dir_as_file_auto_convert_does_not_match_nested_same_basename`
 
 **Status:** ✅ Implemented
 
@@ -391,7 +394,7 @@ Progressive truncation to stay within ~32KB:
 
 **Rationale:** Replaces the old pattern of searching the whole dir and post-filtering — now the filter is applied during index traversal (cheaper, no allocations for non-matching files).
 
-**Unit tests:** `test_parse_grep_args_explicit_file_filter`, `test_parse_grep_args_explicit_file_wins_over_autoconvert`, `test_grep_explicit_file_filter_narrows_results`, `test_grep_file_filter_exact_name_matches_single_file`, `test_grep_file_filter_comma_separated_or_semantics`
+**Unit tests:** `test_parse_grep_args_explicit_file_filter`, `test_parse_grep_args_explicit_file_wins_over_autoconvert`, `test_grep_explicit_file_filter_narrows_results`, `test_grep_file_filter_substring_basename_matches_includes_siblings`, `test_grep_file_filter_comma_separated_or_semantics`
 
 **Status:** ✅ Implemented
 

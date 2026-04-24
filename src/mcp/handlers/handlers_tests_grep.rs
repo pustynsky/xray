@@ -1936,8 +1936,12 @@ fn test_grep_explicit_file_filter_narrows_results() {
 }
 
 #[test]
-fn test_grep_file_filter_exact_name_matches_single_file() {
-    // file='ExactName.cs' should match only files with that basename.
+fn test_grep_file_filter_substring_basename_matches_includes_siblings() {
+    // file='Service.cs' is a SUBSTRING filter (not exact). The basename
+    // substring "service.cs" appears in `Service.cs`, `MyService.cs`,
+    // `OldService.cs`, etc., so all of them are accepted — this is
+    // documented contract, not a bug. Use the dir=<file> auto-convert
+    // form (covered separately) when you want exact-file scoping.
     let (ctx, tmp) = make_e2e_substring_ctx();
     let result = handle_xray_grep(&ctx, &json!({
         "terms": "httpclient",
@@ -1947,9 +1951,16 @@ fn test_grep_file_filter_exact_name_matches_single_file() {
     let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     if let Some(files) = output["files"].as_array() {
         for f in files {
-            let path = f["path"].as_str().unwrap_or("");
-            assert!(path.to_lowercase().ends_with("service.cs"),
-                "Expected basename 'Service.cs', got path '{}'", path);
+            let path = f["path"].as_str().unwrap_or("").to_lowercase();
+            // Substring oracle: full path or basename must contain "service.cs".
+            // Stronger than the previous `ends_with("service.cs")` which only
+            // checked the basename suffix and accidentally read like an
+            // exact-basename oracle (it isn't — substring is the contract).
+            assert!(
+                path.contains("service.cs"),
+                "file= substring filter violated: path '{}' does not contain 'service.cs'",
+                path
+            );
         }
     }
     cleanup_tmp(&tmp);
@@ -2058,6 +2069,78 @@ fn test_grep_dir_as_file_auto_convert_uses_exact_basename_not_substring_siblings
             && !only.ends_with("OldService.cs"),
         "BUG REGRESSION: scoped result must be the literal Service.cs basename, got: {}",
         only);
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn test_grep_dir_as_file_auto_convert_does_not_match_nested_same_basename() {
+    // Reviewer-flagged gap: an earlier fix used basename-only equality, but
+    // `dir_filter` is a recursive prefix match, so a nested duplicate
+    // (`<parent>/sub/Service.cs`) would still match when the user pointed
+    // `dir=<parent>/Service.cs`. The full-path equality check in
+    // `passes_file_filters` (set via `exact_file_path`) closes this gap.
+    use std::io::Write;
+    static C: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = C.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp = std::env::temp_dir().join(format!("grep_exact_nested_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).unwrap();
+    let nested = tmp.join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+
+    // Both files share the basename `Service.cs` and contain the marker.
+    // With basename-only equality the nested copy would leak into the result.
+    for path in [tmp.join("Service.cs"), nested.join("Service.cs")] {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "// xrayNestedBasenameMarker token at {}", path.display()).unwrap();
+        writeln!(f, "public class C {{ }}").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))),
+        index_base: tmp.join(".index"),
+        ..Default::default()
+    };
+
+    // Baseline: token search without scoping must find BOTH copies (proves
+    // the fixture indexed the nested duplicate; otherwise the negative
+    // assertion below would be vacuously true).
+    let baseline = handle_xray_grep(&ctx, &json!({ "terms": "xrayNestedBasenameMarker" }));
+    assert!(!baseline.is_error, "baseline must succeed: {}", baseline.content[0].text);
+    let baseline_out: Value = serde_json::from_str(&baseline.content[0].text).unwrap();
+    let baseline_paths: Vec<String> = baseline_out["files"].as_array().unwrap().iter()
+        .map(|f| f["path"].as_str().unwrap().to_string()).collect();
+    assert_eq!(baseline_paths.len(), 2,
+        "fixture sanity: baseline must index BOTH Service.cs copies, got: {:?}",
+        baseline_paths);
+
+    // Auto-convert path: dir= points at the top-level Service.cs ONLY.
+    let scoped = handle_xray_grep(&ctx, &json!({
+        "terms": "xrayNestedBasenameMarker",
+        "dir": tmp.join("Service.cs").to_string_lossy().to_string()
+    }));
+    assert!(!scoped.is_error, "auto-convert query must succeed: {}", scoped.content[0].text);
+    let scoped_out: Value = serde_json::from_str(&scoped.content[0].text).unwrap();
+    let scoped_paths: Vec<String> = scoped_out["files"].as_array().unwrap().iter()
+        .map(|f| f["path"].as_str().unwrap().to_string()).collect();
+
+    assert_eq!(scoped_paths.len(), 1,
+        "BUG REGRESSION (nested-basename leak): dir=<file> must scope to exactly that one file, \
+         not also accept `<parent>/sub/<same-name>`. Got: {:?}",
+        scoped_paths);
+    let only = scoped_paths[0].replace('\\', "/");
+    assert!(
+        !only.contains("/sub/"),
+        "BUG REGRESSION (nested-basename leak): the nested `sub/Service.cs` must be filtered out, got: {}",
+        only
+    );
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
