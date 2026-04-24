@@ -347,6 +347,53 @@ Scoring time scales linearly with posting list size (number of files containing 
 
 Regex scan time depends on number of unique tokens (500 in synthetic index), not file count.
 
+## PERF-AUDIT-2026-04-24 baselines
+
+The micro-benches below were added in PR `perf/00-extend-benches` as the
+reference point for the [PERF-AUDIT-2026-04-24 story](user-stories/todo_approved_2026-04-24_perf-audit-followups.md).
+Each PERF-* PR records its `before` / `after` numbers against
+`pre-perf-audit` baseline saved here.
+
+### Running
+
+Criterion micro-benches (PERF-01, PERF-04, PERF-05, PERF-07):
+
+```powershell
+cargo bench --bench search_benchmarks -- --save-baseline pre-perf-audit
+# After each PERF-* PR:
+cargo bench --bench search_benchmarks -- --baseline pre-perf-audit
+```
+
+Git-bound benches (PERF-02, PERF-03, PERF-09, PERF-04 raw spawn cost) are
+measured outside criterion to avoid spawn-variance noise:
+
+```powershell
+pwsh scripts/bench-git-perf.ps1 -Repo C:\path\to\real\repo -SaveBaseline pre-perf-audit
+# After each PERF-* PR:
+pwsh scripts/bench-git-perf.ps1 -Repo C:\path\to\real\repo
+```
+
+### Bench-to-task mapping
+
+| Bench group                        | Story task | What it measures                                                  |
+| ---------------------------------- | ---------- | ----------------------------------------------------------------- |
+| `generate_trigrams`                | PERF-05    | ASCII vs Unicode trigram tax; 18k-vocab build cost                |
+| `regex_compile`                    | PERF-01    | Per-request `Regex::new` vs cached match-only                     |
+| `top_authors_aggregation`          | PERF-04    | `format!` per-commit key vs tuple key over 50k synthetic commits  |
+| `callers_resolve_substring`        | PERF-07    | Per-node lookup + substring scan vs memoised resolution           |
+| `bench-git-perf.ps1` PERF-02       | PERF-02    | 4× sequential `git rev-parse` vs combined `for-each-ref`          |
+| `bench-git-perf.ps1` PERF-03       | PERF-03    | Old (rev-parse + diff) vs new (`git show`) per-commit             |
+| `bench-git-perf.ps1` PERF-09       | PERF-09    | `git blame --porcelain` raw cost on largest indexed file          |
+| `bench-git-perf.ps1` PERF-04       | PERF-04    | Raw `git log --max-count=50000` spawn + stream cost               |
+
+### Out of scope for this PR
+
+End-to-end MCP handler latency (`xray_grep`, `xray_callers`, `xray_fast`)
+is **not** covered. Adding it requires exposing `HandlerContext` /
+handler entrypoints behind a `bench-internals` feature flag, which is
+deferred to a follow-up story so PERF-00 stays scoped to additive,
+zero-API-surface changes.
+
 ### Serialization (bincode)
 
 Measured on 5,000-file synthetic index (15.9 MB serialized):

@@ -586,6 +586,262 @@ fn bench_substring_vs_regex(c: &mut Criterion) {
     group.finish();
 }
 
+// ─── PERF-AUDIT-2026-04-24 micro-benches ─────────────────────────────
+//
+// These benches isolate hot paths targeted by `docs/user-stories/
+// todo_approved_2026-04-24_perf-audit-followups.md`. Each PERF-* PR uses
+// `--save-baseline pre-perf-audit` here as its reference point.
+//
+// Scope (PERF-00 minimum, see story v2 / 2026-04-24 cross-LLM review):
+//   * PERF-05: `bench_generate_trigrams` — ASCII vs Unicode token tax
+//   * PERF-01: `bench_regex_compile` — per-request `Regex::new` cost vs
+//     pre-compiled lookup (motivates the LRU cache)
+//   * PERF-04: `bench_top_authors_aggregation` — per-commit `format!` key
+//     vs `(String, String)` tuple key
+//   * PERF-07: `bench_resolve_parent_substring` — repeated per-node
+//     content_index lookups + substring scan (motivates subtree memo)
+//
+// Out of scope (measured separately by `scripts/bench-git-perf.ps1`):
+//   PERF-02 (branch detect), PERF-03 (commit diff), PERF-09 (blame).
+//   Spawning `git` from criterion produces high-variance numbers and
+//   pulls in repo state setup we don't want to bake into the harness.
+//
+// Out of scope (would require exposing private MCP handlers behind a
+// `bench-internals` feature flag; deferred to a follow-up PR):
+//   end-to-end `xray_grep` / `xray_callers` / `xray_fast` handler latency.
+
+fn bench_generate_trigrams(c: &mut Criterion) {
+    let mut group = c.benchmark_group("generate_trigrams");
+
+    // ASCII tokens of varying length — the dominant case in real codebases
+    // (identifiers like "HttpClient", "ExecuteQueryAsync"). PERF-05's ASCII
+    // fast-path skips the `Vec<char>` collect, so improvement here should be
+    // visible without touching the Unicode branch.
+    let ascii_short = "User"; // 4 chars → 2 trigrams
+    let ascii_medium = "HttpClientFactory"; // 17 chars
+    let ascii_long = "VeryLongIdentifierNameForTestingTrigrams"; // 40 chars
+
+    group.bench_function("ascii_short_4ch", |b| {
+        b.iter(|| black_box(generate_trigrams(black_box(ascii_short))))
+    });
+    group.bench_function("ascii_medium_17ch", |b| {
+        b.iter(|| black_box(generate_trigrams(black_box(ascii_medium))))
+    });
+    group.bench_function("ascii_long_40ch", |b| {
+        b.iter(|| black_box(generate_trigrams(black_box(ascii_long))))
+    });
+
+    // Non-ASCII regression guard: PERF-05 must not regress these.
+    // Cyrillic identifier (4 chars, 8 bytes UTF-8) and CJK (4 chars, 12 bytes)
+    // — both require the `Vec<char>` slow path.
+    let cyrillic = "ПользовательСервис"; // 18 chars
+    let cjk = "用户服务管理器"; // 7 chars
+
+    group.bench_function("cyrillic_18ch", |b| {
+        b.iter(|| black_box(generate_trigrams(black_box(cyrillic))))
+    });
+    group.bench_function("cjk_7ch", |b| {
+        b.iter(|| black_box(generate_trigrams(black_box(cjk))))
+    });
+
+    // Whole-vocab build: amortised cost across a synthetic 18k-token vocab
+    // (matches the workspace token count cited in xray's MCP responses).
+    // PERF-05's win is most visible on this curve.
+    let vocab: Vec<String> = (0..18_000)
+        .map(|i| format!("identifier_{}_with_some_suffix", i))
+        .collect();
+    group.bench_function("vocab_18k_tokens", |b| {
+        b.iter(|| {
+            let mut total = 0usize;
+            for t in &vocab {
+                total += generate_trigrams(t).len();
+            }
+            black_box(total);
+        })
+    });
+
+    group.finish();
+}
+
+fn bench_regex_compile(c: &mut Criterion) {
+    let mut group = c.benchmark_group("regex_compile");
+
+    // The three regex sites PERF-01 caches:
+    //   TV: token-vocab anchored, case-insensitive   `(?i)^...$`
+    //   PH: phrase substring                         `(?i)foo.*bar`
+    //   LR: line regex with multi-line               builder + multi_line(true)
+    // We bench compile + match on a small input so the dominant cost is
+    // compilation (the cache replaces only this part).
+    let tv_pat = "(?i)^user.*service$";
+    let ph_pat = "(?i)Http.*Client";
+    let lr_pat = "^[ \\t]*pub fn ";
+    let sample = "pub fn handle_user_service_request() -> Result<(), Error> {";
+
+    group.bench_function("compile_TV_anchored_ci", |b| {
+        b.iter(|| {
+            let re = regex::Regex::new(black_box(tv_pat)).unwrap();
+            black_box(re.is_match(black_box(sample)));
+        })
+    });
+    group.bench_function("compile_PH_phrase_ci", |b| {
+        b.iter(|| {
+            let re = regex::Regex::new(black_box(ph_pat)).unwrap();
+            black_box(re.is_match(black_box(sample)));
+        })
+    });
+    group.bench_function("compile_LR_multiline", |b| {
+        b.iter(|| {
+            let re = regex::RegexBuilder::new(black_box(lr_pat))
+                .multi_line(true)
+                .build()
+                .unwrap();
+            black_box(re.is_match(black_box(sample)));
+        })
+    });
+
+    // Reference point: cached path = compile once, match N times.
+    // Ratio of (compile_TV / cached_match) gives the per-request overhead
+    // PERF-01 will eliminate on cache hits.
+    let cached_re = regex::Regex::new(tv_pat).unwrap();
+    group.bench_function("cached_TV_match_only", |b| {
+        b.iter(|| black_box(cached_re.is_match(black_box(sample))))
+    });
+
+    group.finish();
+}
+
+fn bench_top_authors_aggregation(c: &mut Criterion) {
+    // Mirrors the hot loop in `git::top_authors`:
+    //   `format!("{} <{}>", name, email)` per commit → HashMap key.
+    // PERF-04 swaps the key to `(String, String)` so the format! happens
+    // only N_AUTHORS times instead of N_COMMITS.
+    let mut group = c.benchmark_group("top_authors_aggregation");
+
+    // Synthetic distribution: 50 authors, ~50k commits (matches the
+    // `--max-count=50000` cap in production).
+    let commits: Vec<(String, String)> = (0..50_000)
+        .map(|i| {
+            let a = i % 50;
+            (format!("Author {}", a), format!("a{}@example.com", a))
+        })
+        .collect();
+
+    group.bench_function("string_key_format_50k", |b| {
+        b.iter(|| {
+            let mut m: HashMap<String, usize> = HashMap::new();
+            for (n, e) in &commits {
+                let k = format!("{} <{}>", n, e);
+                *m.entry(k).or_default() += 1;
+            }
+            black_box(m.len());
+        })
+    });
+
+    group.bench_function("tuple_key_50k", |b| {
+        b.iter(|| {
+            let mut m: HashMap<(String, String), usize> = HashMap::new();
+            for (n, e) in &commits {
+                *m.entry((n.clone(), e.clone())).or_default() += 1;
+            }
+            black_box(m.len());
+        })
+    });
+
+    group.finish();
+}
+
+fn bench_resolve_parent_substring(c: &mut Criterion) {
+    // Mirrors the hot loop in callers' `resolve_parent_file_ids` +
+    // `collect_substring_file_ids`: for each tree node we do 4-6 HashMap
+    // lookups in `content_index.index` plus a substring scan of all
+    // matching tokens. PERF-07 memoises this per (parent_class) within a
+    // single tree-build.
+    let mut group = c.benchmark_group("callers_resolve_substring");
+
+    // Build a synthetic content index where ~5% of files contain a token
+    // matching "storagemanager" as a substring (e.g. m_storageManager).
+    let index = build_synthetic_index(10_000, 200);
+    let mut idx2 = index;
+    // Inject substring-matching tokens into the index so the bench actually
+    // exercises the substring scan path. Done outside `b.iter` so we measure
+    // lookup cost, not setup.
+    for (i, fid) in (0..500).enumerate() {
+        let tok = format!("m_storagemanager_{}", i);
+        idx2.index
+            .entry(tok)
+            .or_default()
+            .push(Posting { file_id: fid as u32, lines: vec![1] });
+    }
+
+    let parent_classes = ["StorageManager", "QueryHandler", "UserService"];
+    let lowered: Vec<String> = parent_classes
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+
+    group.bench_function("naive_per_node_3classes_x100", |b| {
+        b.iter(|| {
+            // Simulate 100 tree nodes resolving 3 distinct parent classes.
+            // No memo: every node pays the full 3× lookup + substring scan.
+            let mut total_files = 0usize;
+            for _node in 0..100 {
+                for cls in &lowered {
+                    if let Some(p) = idx2.index.get(cls) {
+                        total_files += p.len();
+                    }
+                    let iface = format!("i{}", cls);
+                    if let Some(p) = idx2.index.get(&iface) {
+                        total_files += p.len();
+                    }
+                    // Substring scan: linear over keys (matches naive impl).
+                    for k in idx2.index.keys() {
+                        if k.contains(cls.as_str()) {
+                            total_files += 1;
+                        }
+                    }
+                }
+            }
+            black_box(total_files);
+        })
+    });
+
+    group.bench_function("memoised_3classes_x100", |b| {
+        b.iter(|| {
+            // PERF-07 target: resolve each parent class once, reuse for all
+            // 100 nodes. Lookup cost amortises 100× → ~3 resolutions total.
+            let mut cache: HashMap<&str, usize> = HashMap::new();
+            for cls in &lowered {
+                let entry = cache.entry(cls.as_str()).or_insert_with(|| {
+                    let mut count = 0usize;
+                    if let Some(p) = idx2.index.get(cls.as_str()) {
+                        count += p.len();
+                    }
+                    let iface = format!("i{}", cls);
+                    if let Some(p) = idx2.index.get(&iface) {
+                        count += p.len();
+                    }
+                    for k in idx2.index.keys() {
+                        if k.contains(cls.as_str()) {
+                            count += 1;
+                        }
+                    }
+                    count
+                });
+                let _ = *entry;
+            }
+            let mut total_files = 0usize;
+            for _node in 0..100 {
+                for cls in &lowered {
+                    total_files += cache.get(cls.as_str()).copied().unwrap_or(0);
+                }
+            }
+            black_box(total_files);
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenize,
@@ -597,5 +853,10 @@ criterion_group!(
     bench_trigram_build,
     bench_substring_search,
     bench_substring_vs_regex,
+    // PERF-AUDIT-2026-04-24 ───────────────────────────────────────────
+    bench_generate_trigrams,
+    bench_regex_compile,
+    bench_top_authors_aggregation,
+    bench_resolve_parent_substring,
 );
 criterion_main!(benches);

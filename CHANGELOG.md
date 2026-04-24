@@ -1,6 +1,11 @@
 # Changelog
 
 
+### Performance (PERF-AUDIT-2026-04-24 baseline harness)
+
+- **PERF-00 — extend benchmarks for the perf-audit story (no production code change).** Added four micro-bench groups in `benches/search_benchmarks.rs` covering the hot paths targeted by the [PERF-AUDIT-2026-04-24 story](docs/user-stories/todo_approved_2026-04-24_perf-audit-followups.md): `generate_trigrams` (PERF-05, ASCII fast-path candidate + Cyrillic/CJK regression guards + 18k-vocab build), `regex_compile` (PERF-01, per-request `Regex::new` cost across the TV/PH/LR sites vs cached match-only reference), `top_authors_aggregation` (PERF-04, `format!` per-commit key vs tuple key over 50k synthetic commits), and `callers_resolve_substring` (PERF-07, naïve per-node lookup + substring scan vs memoised resolution over 100 simulated tree nodes). Spawn-bound git paths (PERF-02 `detect_main_branch_name`, PERF-03 `get_commit_diff`, PERF-09 `parse_blame_porcelain`, PERF-04 raw `git log` cost) are deliberately measured outside criterion via the new `scripts/bench-git-perf.ps1` harness — criterion + `git` subprocess produces high-variance numbers and bakes in repo-state coupling we don't want in the harness. `docs/benchmarks.md` gains a "PERF-AUDIT-2026-04-24 baselines" section documenting how to capture and diff against the `pre-perf-audit` baseline plus a bench-to-task mapping. End-to-end MCP handler latency is intentionally out of scope (would require a `bench-internals` feature flag exposing `HandlerContext` — deferred to a follow-up so this PR stays additive and zero-API-surface).
+
+
 ### Bug Fixes (advisory + edit correctness ripple-grep 2026-04-24)
 
 Cross-review follow-ups to the `three-correctness-followups` and `hardening` bundles below — each item is a sibling/nested case the original fix did not enumerate, caught by re-walking the contract surfaces (predicates, hint strings, line-count semantics, error-priority order). All four ship in one commit because they touch the same two files (`advisory_hints.rs`, `edit.rs`) and share the same root cause: narrow-spec trap (the original story described one shape of the bug; the same predicate can be reached through one more path).
