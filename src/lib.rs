@@ -233,7 +233,20 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
     //   root = `C:/Users/runneradmin/AppData/Local/Temp/xray_fast_test_...`  (canonical)
     // Without this branch the textual `inside` rejects (`runner~1` ≠ `runneradmin`)
     // and the canonicalize(path) above fails on the non-existent leaf.
-    if let Ok(canonical_root) = std::fs::canonicalize(root) {
+    //
+    // SAFETY: this branch must NOT run for paths that contain `..` segments.
+    // `Path::file_name` returns `None` for `ParentDir` components and `pop`
+    // collapses them structurally, so a genuine escape like
+    // `<root>/sub/../../outside` (where `sub` does not exist on disk) loses
+    // its `..` markers during walk-up and resolves back to an in-root form
+    // (`<root>/sub/outside`), turning a rejection into an accept and breaking
+    // `test_is_path_within_relative_dotdot_escape_still_rejected` on Linux CI.
+    // `..`-bearing paths are already routed through the `has_traversal`
+    // branch above and the canonical fallback, both of which classify
+    // escapes correctly; we deliberately stay out of their way.
+    if !has_traversal
+        && let Ok(canonical_root) = std::fs::canonicalize(root)
+    {
         let croot = clean_path(&canonical_root.to_string_lossy()).to_lowercase();
         let croot_trimmed = croot.trim_end_matches('/');
         let croot_with_sep = format!("{}/", croot_trimmed);
