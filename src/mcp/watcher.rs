@@ -261,7 +261,12 @@ pub fn start_watcher(
         let mut dirty_files: HashSet<PathBuf> = HashSet::new();
         let mut removed_files: HashSet<PathBuf> = HashSet::new();
         let mut last_autosave = std::time::Instant::now();
-        const AUTOSAVE_INTERVAL: Duration = Duration::from_secs(600); // 10 minutes
+        // MCP-WCH-007 (PR-B, Hole #2): tracks whether `process_batch` has
+        // applied unsaved changes since the last save. When true, the autosave
+        // gate `autosave_due()` fires after AUTOSAVE_QUIET_INTERVAL (30s)
+        // instead of waiting up to AUTOSAVE_MAX_INTERVAL (10 min). Bounds
+        // force-kill data loss in seconds, not events.
+        let mut have_unsaved = false;
 
         // MCP-WCH-006: post-reconcile checkpoint. Save iff reconcile actually
         // changed something (any add/modify/remove for content, any
@@ -277,8 +282,16 @@ pub fn start_watcher(
                 def_changed,
                 "Post-reconcile checkpoint: persisting new baseline to disk"
             );
-            periodic_autosave(&index, &def_index, &index_base);
+            // Best-effort: warn already logged inside on failure. Cold-start
+            // path — if save fails we leave `have_unsaved=true` so the next
+            // quiet-interval tick in the watcher loop actually retries
+            // (without this flag, callers would clear `have_unsaved` and the
+            // retry could not happen until AUTOSAVE_MAX_INTERVAL).
+            let saved_ok = periodic_autosave(&index, &def_index, &index_base);
             last_autosave = std::time::Instant::now();
+            if !saved_ok {
+                have_unsaved = true;
+            }
         }
 
         loop {
@@ -344,15 +357,32 @@ pub fn start_watcher(
                                 error!("RwLock poisoned, watcher thread exiting");
                                 break;
                             }
+                            // process_batch reaches here only on success with
+                            // a now-drained non-empty input — by definition
+                            // the in-RAM index has changes that haven't hit
+                            // disk yet. (MCP-WCH-007, PR-B)
+                            have_unsaved = true;
                             batch_start = None;
-                            // MCP-WCH-004: also check autosave after a forced
-                            // flush. Under sustained event load the `Timeout`
-                            // branch (where autosave normally fires) may not
-                            // run for many minutes, so we'd otherwise lose
-                            // every incremental update on crash.
-                            if last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
-                                periodic_autosave(&index, &def_index, &index_base);
+                            // MCP-WCH-004 + MCP-WCH-007: also check autosave
+                            // after a forced flush. Under sustained event
+                            // load the `Timeout` branch (where autosave
+                            // normally fires) may not run for many minutes,
+                            // so we'd otherwise lose every incremental update
+                            // on crash. With the quiet-interval gate the
+                            // first save now lands ~30s into a sustained
+                            // burst instead of after the legacy 10 min.
+                            if autosave_due(have_unsaved, last_autosave.elapsed()) {
+                                // MCP-WCH-007: bump `last_autosave` even on
+                                // failure so a transient write error doesn't
+                                // busy-retry every debounce tick — the next
+                                // attempt is throttled to AUTOSAVE_QUIET_INTERVAL.
+                                // Only clear `have_unsaved` on success so the
+                                // retry actually happens.
+                                let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                                 last_autosave = std::time::Instant::now();
+                                if saved_ok {
+                                    have_unsaved = false;
+                                }
                             }
                         }
                 }
@@ -368,15 +398,28 @@ pub fn start_watcher(
                         // already received from the FS.
                         if !dirty_files.is_empty() || !removed_files.is_empty() {
                             let _ = process_batch(&index, &def_index, &mut dirty_files, &mut removed_files);
+                            have_unsaved = true;
+                        }
+                        // MCP-WCH-007: thread is about to exit — there is no
+                        // "next quiet-interval tick". Persist any unsaved work
+                        // (from this final flush or a prior batch that hadn't
+                        // hit the 30s mark yet) before we drop the receiver.
+                        if have_unsaved {
+                            let _ = periodic_autosave(&index, &def_index, &index_base);
                         }
                         break;
                     }
                     // Debounce window expired — process batch
                     if dirty_files.is_empty() && removed_files.is_empty() {
-                        // Check periodic autosave
-                        if last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
-                            periodic_autosave(&index, &def_index, &index_base);
+                        // Check periodic autosave (idle-tick path: quiet
+                        // interval flushes the tail of a recent burst,
+                        // max interval is the unconditional ceiling).
+                        if autosave_due(have_unsaved, last_autosave.elapsed()) {
+                            let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                             last_autosave = std::time::Instant::now();
+                            if saved_ok {
+                                have_unsaved = false;
+                            }
                         }
                         continue;
                     }
@@ -384,12 +427,20 @@ pub fn start_watcher(
                         error!("RwLock poisoned, watcher thread exiting to avoid infinite error loop");
                         break;
                     }
+                    // Successful flush of a non-empty batch — see the
+                    // matching note on the force-flush path. (MCP-WCH-007)
+                    have_unsaved = true;
                     batch_start = None;
-                    // MCP-WCH-004: opportunistic autosave on every successful
-                    // batch flush, not only when the pending sets are empty.
-                    if last_autosave.elapsed() >= AUTOSAVE_INTERVAL {
-                        periodic_autosave(&index, &def_index, &index_base);
+                    // MCP-WCH-004 + MCP-WCH-007: opportunistic autosave on
+                    // every successful batch flush, not only when the
+                    // pending sets are empty. Quiet-interval gate makes the
+                    // first save land ~30s after the burst started.
+                    if autosave_due(have_unsaved, last_autosave.elapsed()) {
+                        let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                         last_autosave = std::time::Instant::now();
+                        if saved_ok {
+                            have_unsaved = false;
+                        }
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -400,6 +451,13 @@ pub fn start_watcher(
                     // is poisoned we simply give up (same as the live loop).
                     if !dirty_files.is_empty() || !removed_files.is_empty() {
                         let _ = process_batch(&index, &def_index, &mut dirty_files, &mut removed_files);
+                        have_unsaved = true;
+                    }
+                    // MCP-WCH-007: thread is about to exit — see matching
+                    // note on the generation-change path. Persist any
+                    // unsaved work before the receiver is dropped.
+                    if have_unsaved {
+                        let _ = periodic_autosave(&index, &def_index, &index_base);
                     }
                     break;
                 }
@@ -836,18 +894,57 @@ pub(crate) fn post_reconcile_checkpoint_needed(
         || def_changed
 }
 
+// MCP-WCH-007 (PR-B, Hole #2 from `user-stories/meta-checkpoint-durability.md`):
+// two-tier autosave timing in `start_watcher`'s event loop. The quiet
+// interval bounds data loss to ~30s in the bursty-edit-then-idle case
+// (delete 50 files → quiet for ~9 min → force-kill loses all 50 pre-PR-B;
+// post-PR-B at most ~30s of unflushed activity is lost). The max
+// interval preserves the legacy 10-minute upper bound so steady-state
+// idle workspaces still write at most once every 10 min.
+pub(crate) const AUTOSAVE_QUIET_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const AUTOSAVE_MAX_INTERVAL: Duration = Duration::from_secs(600);
+
+/// Two-tier autosave gate (PR-B, Hole #2). Returns `true` when the
+/// `start_watcher` event loop should run `periodic_autosave`:
+///
+/// - `have_unsaved && since_last_save >= AUTOSAVE_QUIET_INTERVAL`: bursty
+///   activity recently completed; flush within ~30s of the last batch
+///   so a force-kill loses at most ~30s of changes.
+/// - `since_last_save >= AUTOSAVE_MAX_INTERVAL`: hard ceiling, fires
+///   even with `have_unsaved == false` (matches legacy behavior; on a
+///   clean index the actual `periodic_autosave` call short-circuits via
+///   its existing `!idx.files.is_empty()` allocator-capacity gate).
+///
+/// Pure function for unit testability (no `Instant`, no I/O).
+pub(crate) fn autosave_due(have_unsaved: bool, since_last_save: Duration) -> bool {
+    (have_unsaved && since_last_save >= AUTOSAVE_QUIET_INTERVAL)
+        || since_last_save >= AUTOSAVE_MAX_INTERVAL
+}
+
 /// Periodically save in-memory indexes to disk to protect against data loss
 /// from forced process termination (e.g., VS Code killing the MCP server).
 ///
 /// Takes READ locks only — MCP queries are NOT blocked during save.
 /// Watcher incremental updates (which need write locks) will be briefly delayed.
+/// Returns `true` when the in-memory state is durably reflected on disk
+/// after this call:
+///   - both indexes were skipped because they have never held any file
+///     (allocator capacity == 0),
+///   - or every attempted save succeeded.
+///
+/// Returns `false` when at least one attempted save failed (lock poisoned
+/// or write error). Callers in `start_watcher` use the return value to
+/// decide whether the unsaved-changes flag may be cleared — on failure,
+/// the next quiet-interval tick will re-attempt the save while still
+/// throttling at ~30s instead of busy-retrying every debounce tick.
 fn periodic_autosave(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     index_base: &std::path::Path,
-) {
+) -> bool {
     let start = std::time::Instant::now();
     let mut saved = Vec::new();
+    let mut all_ok = true;
 
     // Save content index.
     // Gate: `idx.files.is_empty()` — allocator-capacity check, NOT live count.
@@ -860,12 +957,16 @@ fn periodic_autosave(
             if !idx.files.is_empty() {
                 if let Err(e) = crate::save_content_index(&idx, index_base) {
                     warn!(error = %e, "Periodic autosave: failed to save content index");
+                    all_ok = false;
                 } else {
                     saved.push(format!("content({} files)", idx.live_file_count()));
                 }
             }
         }
-        Err(e) => warn!(error = %e, "Periodic autosave: failed to read content index"),
+        Err(e) => {
+            warn!(error = %e, "Periodic autosave: failed to read content index");
+            all_ok = false;
+        }
     }
 
     // Save definition index — same allocator-capacity gate as above.
@@ -875,12 +976,16 @@ fn periodic_autosave(
                 if !idx.files.is_empty() {
                     if let Err(e) = crate::definitions::save_definition_index(&idx, index_base) {
                         warn!(error = %e, "Periodic autosave: failed to save definition index");
+                        all_ok = false;
                     } else {
                         saved.push(format!("def({} defs)", idx.definitions.len()));
                     }
                 }
             }
-            Err(e) => warn!(error = %e, "Periodic autosave: failed to read definition index"),
+            Err(e) => {
+                warn!(error = %e, "Periodic autosave: failed to read definition index");
+                all_ok = false;
+            }
         }
     }
 
@@ -892,6 +997,8 @@ fn periodic_autosave(
             "Periodic autosave complete"
         );
     }
+
+    all_ok
 }
 
 /// Check if a path is inside a `.git` directory.

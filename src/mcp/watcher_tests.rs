@@ -2375,6 +2375,135 @@ fn test_post_reconcile_checkpoint_needed_skipped_on_noop() {
         "no-op reconcile must NOT trigger a save (would cost 1.5-3s on a 60K repo)");
 }
 
+// ---------------------------------------------------------------------
+// PR-B (Hole #2 / MCP-WCH-007): autosave_due gate unit tests.
+//
+// `autosave_due(have_unsaved, since_last_save) -> bool` is the pure
+// timing decision behind the `start_watcher` two-tier autosave. It must:
+//   - Stay silent on idle workspaces (no unsaved + below max ceiling).
+//   - Fire after AUTOSAVE_QUIET_INTERVAL when there's pending work
+//     (bursty edits then idle — the data-loss hole this PR closes).
+//   - Fire unconditionally past AUTOSAVE_MAX_INTERVAL (defensive
+//     ceiling matching legacy behavior).
+// ---------------------------------------------------------------------
+
+#[test]
+fn test_autosave_due_skipped_when_idle_and_below_max() {
+    // No unsaved work, well below the max ceiling → must NOT save. This
+    // is the steady-state idle workspace case (no edits in hours,
+    // periodic_autosave should not write to disk).
+    assert!(!autosave_due(false, Duration::from_secs(0)));
+    assert!(!autosave_due(false, Duration::from_secs(29)));
+    assert!(!autosave_due(false, Duration::from_secs(120)));
+    assert!(!autosave_due(false, AUTOSAVE_MAX_INTERVAL - Duration::from_secs(1)));
+}
+
+#[test]
+fn test_autosave_due_skipped_when_unsaved_but_below_quiet() {
+    // We just applied a batch (have_unsaved=true) but the quiet interval
+    // hasn't elapsed yet — must NOT save. This avoids per-event write
+    // amplification on workspaces with rapid sustained activity (an
+    // editor save burst, a `git checkout` storm, a build that touches
+    // hundreds of files in <1s).
+    assert!(!autosave_due(true, Duration::from_secs(0)));
+    assert!(!autosave_due(true, Duration::from_secs(15)));
+    assert!(!autosave_due(true, AUTOSAVE_QUIET_INTERVAL - Duration::from_secs(1)));
+}
+
+#[test]
+fn test_autosave_due_fires_on_quiet_interval_with_unsaved() {
+    // The bursty-edit-then-idle case (delete 50 files, idle for 30s,
+    // force-kill). Pre-PR-B the legacy 10-min gate would have lost all
+    // 50; with the quiet gate we save ~30s after the last batch.
+    assert!(autosave_due(true, AUTOSAVE_QUIET_INTERVAL));
+    assert!(autosave_due(true, AUTOSAVE_QUIET_INTERVAL + Duration::from_secs(1)));
+    assert!(autosave_due(true, Duration::from_secs(120)));
+}
+
+#[test]
+fn test_autosave_due_fires_on_max_interval_even_when_idle() {
+    // Defensive ceiling. Real `periodic_autosave` short-circuits via
+    // its own `!idx.files.is_empty()` allocator-capacity gate when the
+    // index has never held a file, so this is a no-op there — but the
+    // gate itself must still fire to preserve legacy behavior.
+    assert!(autosave_due(false, AUTOSAVE_MAX_INTERVAL));
+    assert!(autosave_due(false, AUTOSAVE_MAX_INTERVAL + Duration::from_secs(1)));
+    assert!(autosave_due(true, AUTOSAVE_MAX_INTERVAL));
+}
+
+#[test]
+fn test_autosave_due_constants_have_expected_values() {
+    // Pin the chosen budget so a future tweak lands intentionally
+    // (and is reviewed against the durability/perf trade-off described
+    // in `user-stories/meta-checkpoint-durability.md` Hole #2).
+    assert_eq!(AUTOSAVE_QUIET_INTERVAL, Duration::from_secs(30),
+        "30s bounds force-kill data loss to ~30s of unflushed activity");
+    assert_eq!(AUTOSAVE_MAX_INTERVAL, Duration::from_secs(600),
+        "10min preserves legacy behavior for steady-state idle workspaces");
+    assert!(AUTOSAVE_QUIET_INTERVAL < AUTOSAVE_MAX_INTERVAL,
+        "quiet interval must be tighter than max ceiling, otherwise have_unsaved gate is dead");
+}
+
+#[test]
+fn test_periodic_autosave_returns_true_on_success() {
+    // Sanity contract: a successful save must return true so callers
+    // in start_watcher can clear `have_unsaved`. Pre-PR-B retry-fix
+    // periodic_autosave returned (), so callers cleared have_unsaved
+    // unconditionally and a transient write error meant we waited the
+    // full AUTOSAVE_MAX_INTERVAL (10 min) before retrying.
+    let (_tmp, _root, content_index) = make_batch_test_setup();
+    let index_base = _tmp.path().join("idx");
+    std::fs::create_dir_all(&index_base).unwrap();
+    let result = periodic_autosave(&content_index, &None, &index_base);
+    assert!(result, "successful save must return true");
+}
+
+#[test]
+fn test_periodic_autosave_returns_true_on_empty_indexes() {
+    // The allocator-capacity gate skips both saves when the index has
+    // never held any file. That "nothing to do" outcome is durably
+    // consistent with on-disk state by definition — must return true
+    // so the caller clears `have_unsaved` and doesn't busy-retry on an
+    // empty workspace.
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path().to_path_buf();
+    let empty_content = Arc::new(RwLock::new(ContentIndex::default()));
+    let result = periodic_autosave(&empty_content, &None, &index_base);
+    assert!(result,
+        "empty (never-allocated) indexes are durably consistent — must return true");
+}
+
+#[test]
+fn test_periodic_autosave_returns_false_on_poisoned_lock() {
+    // Failure semantics: if the read lock is poisoned (a writer panicked
+    // mid-update) we cannot safely save the index. Must return false so
+    // the caller leaves `have_unsaved=true` for the next quiet-interval
+    // tick to retry. Reviewer-caught (commit-reviewer 2026-04-25, PR-B
+    // first review): pre-fix periodic_autosave returned () and callers
+    // cleared the flag unconditionally, hiding the failure for up to
+    // AUTOSAVE_MAX_INTERVAL.
+    let (_tmp, _root, content_index) = make_batch_test_setup();
+    let index_base = _tmp.path().join("idx");
+    std::fs::create_dir_all(&index_base).unwrap();
+
+    // Poison the lock by panicking while holding the write side.
+    let idx_clone = Arc::clone(&content_index);
+    let h = std::thread::spawn(move || {
+        let _guard = idx_clone.write().unwrap();
+        panic!("intentional poisoning for test");
+    });
+    let _ = h.join(); // expect Err — ignore, lock is now poisoned.
+    assert!(content_index.read().is_err(),
+        "lock should be poisoned after panicking writer");
+
+    let result = periodic_autosave(&content_index, &None, &index_base);
+    assert!(!result,
+        "poisoned read lock must surface as save failure (return false) \
+         so the caller retries instead of clearing `have_unsaved`");
+}
+
+
+
 #[test]
 fn test_post_reconcile_checkpoint_writes_meta_after_removal() {
     // End-to-end durability test for Hole #1:
