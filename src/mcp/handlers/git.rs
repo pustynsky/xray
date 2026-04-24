@@ -965,12 +965,15 @@ fn detect_main_branch_name(ctx: &HandlerContext, repo: &str) -> Option<String> {
 /// PERF-02 cold probe: ask `git for-each-ref` for all four candidate refs in
 /// a single spawn instead of running up to 4 sequential `git rev-parse`.
 ///
-/// `for-each-ref` prints one line per ref that **exists** (in the order the
-/// refs were passed) and is silent for refs that don't exist — so we just
-/// inspect the first non-empty line and decide local-or-remote `main` vs
-/// `master`. Falls back to the legacy probe sequence if the combined call
-/// fails for any reason (very old git, hardened sandbox without
-/// `for-each-ref`, etc.) so we never regress the resolution itself.
+/// `for-each-ref` prints one line per ref that **exists**, silent for refs
+/// that don't exist. **Output is sorted by refname**, NOT by argument order,
+/// so a repo with both `refs/heads/master` and `refs/remotes/origin/main`
+/// emits `master` BEFORE `origin/main`. We must therefore enumerate which
+/// candidates exist and apply explicit priority — matching the legacy
+/// 4-probe sequence: `main` (local-or-remote) is always preferred over
+/// `master` (local-or-remote). Falls back to the legacy probe sequence if
+/// the combined call fails for any reason (very old git, hardened sandbox
+/// without `for-each-ref`, etc.) so we never regress the resolution itself.
 fn probe_main_branch_name(repo: &str) -> Option<String> {
     if let Ok(out) = run_git_command(
         repo,
@@ -983,14 +986,20 @@ fn probe_main_branch_name(repo: &str) -> Option<String> {
             "refs/remotes/origin/master",
         ],
     ) {
+        let mut has_main = false;
+        let mut has_master = false;
         for line in out.lines() {
-            let name = line.trim();
-            if name == "main" || name == "origin/main" {
-                return Some("main".to_string());
+            match line.trim() {
+                "main" | "origin/main" => has_main = true,
+                "master" | "origin/master" => has_master = true,
+                _ => {}
             }
-            if name == "master" || name == "origin/master" {
-                return Some("master".to_string());
-            }
+        }
+        if has_main {
+            return Some("main".to_string());
+        }
+        if has_master {
+            return Some("master".to_string());
         }
         // Combined probe ran but found nothing — don't fall back; the legacy
         // probe would just confirm the same answer at 4× the cost.

@@ -601,3 +601,44 @@ fn test_detect_main_branch_name_keys_by_repo_path() {
     assert_eq!(cache.len(), 2, "each distinct repo string gets its own entry");
 }
 
+/// PERF-02 regression: when a repo has BOTH `refs/heads/master` AND
+/// `refs/remotes/origin/main` (and no local `main`), `detect_main_branch_name`
+/// MUST resolve to `"main"` to match legacy 4-probe behaviour. Pre-fix code
+/// trusted `git for-each-ref` to emit refs in argument order, but git sorts
+/// the output by refname → `master` arrived before `origin/main` and the
+/// function returned `"master"`, silently flipping `behindMain`/`aheadOfMain`
+/// onto the wrong upstream for users with this layout. Builds a real temp
+/// repo because mocking git is not in scope here.
+#[test]
+fn test_detect_main_branch_name_prefers_main_over_local_master() {
+    use std::process::Command;
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    let run = |args: &[&str]| {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(repo)
+            .status()
+            .expect("git must be on PATH for this test");
+        assert!(status.success(), "git {:?} failed in {:?}", args, repo);
+    };
+    // master is the only local branch; origin/main is a remote-tracking ref.
+    run(&["init", "--quiet", "-b", "master"]);
+    run(&["config", "user.email", "perf02@test.local"]);
+    run(&["config", "user.name", "PERF-02 Test"]);
+    std::fs::write(repo.join("seed.txt"), "x").unwrap();
+    run(&["add", "seed.txt"]);
+    run(&["commit", "--quiet", "-m", "init"]);
+    run(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+
+    let ctx = make_git_test_ctx();
+    let resolved = detect_main_branch_name(&ctx, repo.to_str().unwrap());
+    assert_eq!(
+        resolved.as_deref(),
+        Some("main"),
+        "main (even remote-only) MUST win over local master — \
+         legacy 4-probe semantics, lost when a refname-sorted \
+         for-each-ref output was treated as if it were arg-ordered"
+    );
+}
+
