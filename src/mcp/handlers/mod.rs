@@ -78,7 +78,12 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "lineRegex": {
                         "type": "boolean",
-                        "description": "Line-anchored regex search (default: false). Auto-enables regex=true and disables substring. Unlike default regex (which matches against tokenized index entries — alphanumeric+underscore only), lineRegex applies the pattern to each line of file content with `multi_line=true`, so `^` and `$` anchor to line boundaries and patterns may contain spaces, punctuation, brackets, etc. Required for: markdown headings (`^## `), C# attributes (`^\\s*\\[Test\\]`), function signatures (`^pub fn`), end-of-line braces (`\\}$`). Comma-separated patterns supported (OR/AND via mode). Whitespace inside patterns is significant — patterns are NOT trimmed. File scope MUST be narrowed via ext/dir/file filters; otherwise every indexed file is read from disk (slower than token regex). Mutually exclusive with phrase=true."
+                        "description": "Line-anchored regex search (default: false). Auto-enables regex=true and disables substring. Unlike default regex (which matches against tokenized index entries — alphanumeric+underscore only), lineRegex applies the pattern to each line of file content with `multi_line=true`, so `^` and `$` anchor to line boundaries and patterns may contain spaces, punctuation, brackets, etc. Required for: markdown headings (`^## `), C# attributes (`^\\s*\\[Test\\]`), function signatures (`^pub fn`), end-of-line braces (`\\}$`). Comma-separated patterns supported (OR/AND via mode). For patterns containing literal `,` (CSV-shape, log prefixes), use `linePatterns` instead. Whitespace inside patterns is significant — patterns are NOT trimmed. File scope MUST be narrowed via ext/dir/file filters; otherwise every indexed file is read from disk (slower than token regex). Mutually exclusive with phrase=true."
+                    },
+                    "linePatterns": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Explicit array of line-regex patterns for `lineRegex=true` mode. Each entry is one pattern, taken verbatim — `,` inside a pattern is preserved (e.g. CSV regex `^[^,]+,[^,]+$`, log prefix `^ERROR,WARN:`). Use this instead of `terms` when any pattern contains a literal comma. Mutually exclusive with `terms`; requires lineRegex=true."
                     },
                     "showLines": {
                         "type": "boolean",

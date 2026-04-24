@@ -182,6 +182,29 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
         }
     }
 
+    // Logical-with-traversal: collapse `..` purely textually against root, then
+    // re-check inside. Without this, equivalent in-workspace paths produce
+    // different verdicts only because of how they're written:
+    //
+    //   `nonexistent/dir`           → accepted via the no-traversal logical branch
+    //   `src/../nonexistent/dir`    → previously rejected (canonical fallback fails
+    //                                 on the missing leaf), now accepted as long as
+    //                                 the resolved logical form stays inside root.
+    //
+    // Genuine escape (`../outside`, `../../etc/passwd`, ...) is still rejected:
+    // the resolver returns None when `..` pops past the root, and any in-root
+    // resolution that lands outside the workspace fails the `inside` check.
+    // Symlink-escape risk is no worse than the pre-existing no-traversal logical
+    // branch, which already trusts textual containment for `WalkBuilder` parity.
+    if has_traversal
+        && let Some(resolved) = resolve_dotdot_logical(path, root)
+    {
+        let logical = resolved.to_lowercase();
+        if inside(&logical) {
+            return true;
+        }
+    }
+
     // Canonical fallback: handles 8.3 short names, traversal validation,
     // and arbitrary input shapes that don't share a textual prefix with root.
     if let Ok(canonical_path) = std::fs::canonicalize(path) {
@@ -198,6 +221,53 @@ pub fn is_path_within(path: &str, root: &str) -> bool {
     }
 
     false
+}
+
+/// Resolve `..` segments in `path` purely textually, joining with `root` if
+/// `path` is relative. Returns `None` when `..` pops past the root prefix
+/// (genuine escape attempt). Used by [`is_path_within`] to give consistent
+/// verdicts to equivalent in-workspace paths regardless of how `..` is
+/// written, even when the leaf does not exist on disk yet.
+fn resolve_dotdot_logical(path: &str, root: &str) -> Option<String> {
+    use std::path::{Component, Path, PathBuf};
+
+    let p = Path::new(path);
+    let combined: PathBuf = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        Path::new(root).join(p)
+    };
+
+    let mut prefix: Option<std::ffi::OsString> = None;
+    let mut has_root = false;
+    let mut stack: Vec<std::ffi::OsString> = Vec::new();
+    for comp in combined.components() {
+        match comp {
+            Component::Prefix(p) => prefix = Some(p.as_os_str().to_os_string()),
+            Component::RootDir => has_root = true,
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if stack.is_empty() {
+                    // `..` would pop past the root prefix — escape attempt.
+                    return None;
+                }
+                stack.pop();
+            }
+            Component::Normal(n) => stack.push(n.to_os_string()),
+        }
+    }
+
+    let mut out = PathBuf::new();
+    if let Some(p) = prefix {
+        out.push(p);
+    }
+    if has_root {
+        out.push(std::path::MAIN_SEPARATOR.to_string());
+    }
+    for s in stack {
+        out.push(s);
+    }
+    Some(clean_path(&out.to_string_lossy()))
 }
 
 

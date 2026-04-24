@@ -406,6 +406,12 @@ struct ParsedGrepArgs {
     /// non-token characters). Mutually exclusive with `phrase`. Implies
     /// `regex=true` (validated in `parse_grep_args`). Auto-disables `substring`.
     use_line_regex: bool,
+    /// Explicit array of line-regex patterns. When `Some`, takes precedence
+    /// over `terms` for the `lineRegex` mode and bypasses comma-splitting,
+    /// so a single pattern can contain literal `,` (e.g. CSV-shape regex
+    /// `^[^,]+,[^,]+$`, log prefix `^ERROR,WARN:`). Ignored outside
+    /// `lineRegex`. Mutually exclusive with `terms` (validated upstream).
+    line_patterns: Option<Vec<String>>,
     context_lines: usize,
     show_lines: bool,
     max_results: usize,
@@ -426,17 +432,66 @@ struct ParsedGrepArgs {
 /// Parse and validate all grep parameters from JSON args.
 /// Returns `Ok(ParsedGrepArgs)` on success, `Err(ToolCallResult)` on validation error.
 fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, ToolCallResult> {
+    // `linePatterns` is the explicit array form for `lineRegex` mode and lets
+    // a single pattern contain literal `,` (CSV regex, log prefixes, etc.).
+    // Parse it first so the `terms` validation below knows whether `terms` is
+    // required for this call.
+    let line_patterns: Option<Vec<String>> = match args.get("linePatterns") {
+        Some(Value::Array(arr)) => {
+            let mut out: Vec<String> = Vec::with_capacity(arr.len());
+            for (i, item) in arr.iter().enumerate() {
+                match item.as_str() {
+                    Some(s) if !s.is_empty() => out.push(s.to_string()),
+                    Some(_) => return Err(ToolCallResult::error(format!(
+                        "Parameter 'linePatterns[{i}]' must be a non-empty string."
+                    ))),
+                    None => return Err(ToolCallResult::error(format!(
+                        "Parameter 'linePatterns[{i}]' must be a string."
+                    ))),
+                }
+            }
+            if out.is_empty() {
+                return Err(ToolCallResult::error(
+                    "Parameter 'linePatterns' must contain at least one pattern.".to_string(),
+                ));
+            }
+            Some(out)
+        }
+        Some(Value::Null) | None => None,
+        Some(_) => return Err(ToolCallResult::error(
+            "Parameter 'linePatterns' must be an array of strings.".to_string(),
+        )),
+    };
+
     // GREP-015: reject empty/whitespace-only `terms` here instead of letting
     // it propagate into per-mode handlers, where it produces inconsistent
     // failure modes (regex compiles `""` into a match-everything pattern,
     // substring path returns silently empty results, etc.). LLM clients
     // interpret "empty result" as "this code does not exist" — a misleading
     // signal for what is really a malformed query.
+    //
+    // Exception: when `linePatterns` is supplied, `terms` is optional — the
+    // line-regex mode reads from the explicit array instead. Mutually
+    // exclusive: passing both is rejected with an actionable hint pointing
+    // at the precise difference (comma is a separator in `terms`, literal
+    // in `linePatterns`).
     let terms_str = match args.get("terms").and_then(|v| v.as_str()) {
-        Some(t) if !t.trim().is_empty() => t.to_string(),
+        Some(t) if !t.trim().is_empty() => {
+            if line_patterns.is_some() {
+                return Err(ToolCallResult::error(
+                    "Parameters 'terms' and 'linePatterns' are mutually exclusive. \
+                     'terms' splits on ',' (multi-pattern OR/AND); 'linePatterns' takes \
+                     each array entry as a single pattern (so a literal ',' inside the \
+                     regex is preserved). Pick one.".to_string(),
+                ));
+            }
+            t.to_string()
+        }
+        Some(_) if line_patterns.is_some() => String::new(),
         Some(_) => return Err(ToolCallResult::error(
             "Parameter 'terms' must not be empty. Provide one or more search terms (comma-separated for multi-term).".to_string(),
         )),
+        None if line_patterns.is_some() => String::new(),
         None => return Err(ToolCallResult::error("Missing required parameter: terms".to_string())),
     };
 
@@ -493,6 +548,17 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     let mut use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_phrase = args.get("phrase").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_line_regex = args.get("lineRegex").and_then(|v| v.as_bool()).unwrap_or(false);
+
+    // `linePatterns` is meaningful only in `lineRegex` mode. Reject the
+    // combination eagerly so a typo doesn't silently fall through to the
+    // token regex / substring branches that ignore the array.
+    if line_patterns.is_some() && !use_line_regex {
+        return Err(ToolCallResult::error(
+            "Parameter 'linePatterns' requires lineRegex=true. \
+             It is only consumed by the line-regex mode; for other modes use 'terms'."
+                .to_string(),
+        ));
+    }
 
     // Validate lineRegex compatibility:
     // - lineRegex implies regex=true (auto-promoted with a note: explicit error
@@ -580,6 +646,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         use_phrase,
         use_substring,
         use_line_regex,
+        line_patterns,
         context_lines,
         show_lines,
         max_results,
@@ -865,7 +932,18 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     // --- Line-based regex mode (supports `^`, `$`, whitespace, non-token chars)
     if parsed.use_line_regex {
-        let mut result = handle_line_regex_search(ctx, &index, &parsed.terms_str, &grep_params);
+        // Prefer explicit `linePatterns` array (literal-comma-safe). Fall back
+        // to comma-splitting `terms` for back-compat with existing callers.
+        let patterns: Vec<String> = match parsed.line_patterns.clone() {
+            Some(p) => p,
+            None => parsed
+                .terms_str
+                .split(',')
+                .map(|s| s.to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+        };
+        let mut result = handle_line_regex_search(ctx, &index, patterns, &grep_params);
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
         return result;
     }
@@ -1712,18 +1790,18 @@ fn handle_multi_phrase_search(
 fn handle_line_regex_search(
     ctx: &HandlerContext,
     index: &ContentIndex,
-    terms_str: &str,
+    patterns: Vec<String>,
     params: &GrepSearchParams,
 ) -> ToolCallResult {
-    // Parse comma-separated patterns. Unlike token regex, we do NOT lowercase —
-    // user-supplied regex flags (e.g., `(?i)`) control case sensitivity. We also
-    // do NOT trim each pattern, because whitespace inside a regex is significant
+    // `patterns` is supplied by the caller already split (legacy: comma-split
+    // from `terms`) or taken verbatim from `linePatterns` (literal-comma-safe).
+    // Unlike token regex, we do NOT lowercase — user-supplied regex flags
+    // (e.g., `(?i)`) control case sensitivity. We also do NOT trim each
+    // pattern, because whitespace inside a regex is significant
     // (e.g., `^## ` matches markdown level-2 headings only, NOT `^##` which would
-    // also match `^### `). Users wanting comma-with-padding (`a, b`) should not
-    // include leading spaces — or should escape them via `\s`/`[ ]`.
-    let patterns: Vec<String> = terms_str
-        .split(',')
-        .map(|s| s.to_string())
+    // also match `^### `).
+    let patterns: Vec<String> = patterns
+        .into_iter()
         .filter(|s| !s.is_empty())
         .collect();
 

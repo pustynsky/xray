@@ -2040,3 +2040,98 @@ fn test_xray_fast_rejects_outside_server_dir() {
 
     cleanup_tmp(&tmp);
 }
+
+#[test]
+fn test_xray_fast_rejects_relative_parent_escape() {
+    // Relative `..\..` should be resolved against server_dir and rejected when
+    // the result lands outside the workspace. Without this guard a caller can
+    // exfiltrate the file list of the server's parent directory by writing
+    // `dir: "..\\.."` instead of an absolute outside path.
+    let (ctx, tmp) = make_xray_fast_ctx();
+
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": "..\\..",
+    }));
+
+    assert!(
+        result.is_error,
+        "Relative parent-escape `..\\..` must be rejected, got: {}",
+        result.content[0].text
+    );
+    let body = &result.content[0].text;
+    assert!(
+        body.contains("Server started with --dir"),
+        "Error should mention server --dir boundary, got: {}",
+        body
+    );
+
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_xray_fast_rejects_normalized_outside_equivalent() {
+    // `<workspace>/sub/../../outside` is textually rooted at workspace but
+    // logically resolves outside. is_path_within's logical-traversal branch
+    // must reject it, not the canonical fallback (which would silently accept
+    // an existing outside dir on disk).
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let escape = format!("{}/sub/../../{}", tmp.display(), "definitely-outside-xyz");
+
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": escape,
+    }));
+
+    assert!(
+        result.is_error,
+        "Normalized outside-equivalent path must be rejected, got: {}",
+        result.content[0].text
+    );
+
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_xray_fast_in_workspace_relative_subdir_still_accepted() {
+    // Regression guard for the boundary tightening above: a plain in-workspace
+    // relative subdir (no `..`) must still be accepted even when the leaf
+    // directory does not exist on disk yet — `xray_fast` returns an empty
+    // result set, NOT a boundary error.
+    let (ctx, tmp) = make_xray_fast_ctx();
+
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": "nonexistent-but-inside",
+    }));
+
+    assert!(
+        !result.is_error,
+        "In-workspace relative subdir must NOT be rejected as outside, got error: {}",
+        result.content[0].text
+    );
+
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_xray_fast_relative_dotdot_resolving_inside_accepted() {
+    // `<workspace>/sub/..` resolves to `<workspace>` itself — must be accepted.
+    // Symmetric counterpart to `*_normalized_outside_equivalent`: `..` inside
+    // the path is fine as long as the resolved result stays in the workspace.
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let inside = format!("{}/sub/..", tmp.display());
+
+    let result = handle_xray_fast(&ctx, &json!({
+        "pattern": "*",
+        "dir": inside,
+    }));
+
+    assert!(
+        !result.is_error,
+        "In-workspace `..` that resolves back to workspace must be accepted, got: {}",
+        result.content[0].text
+    );
+
+    cleanup_tmp(&tmp);
+}
