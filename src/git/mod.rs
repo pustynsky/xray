@@ -332,11 +332,26 @@ fn get_commit_diff(repo_path: &str, hash: &str, file: &str) -> Result<String, St
     // identical to `git diff <hash>^..<hash>` for non-initial commits,
     // verified pre-change by walking real history on the xray repo.
     //
+    // PERF-03 follow-up: `--first-parent` is REQUIRED for merge commits.
+    // Default `git show <merge>` produces a *combined* diff that prunes
+    // "uninteresting" paths (paths where the merge result equals at least
+    // one parent) — for a typical merge of feature into main, that means
+    // an EMPTY patch on every file the merge actually touched, because
+    // the merge result equals the feature side. The legacy `git diff
+    // <hash>^..<hash>` was implicitly first-parent (`^` resolves to
+    // parent #1), so without `--first-parent` here a merge commit's
+    // patch silently went from "normal diff vs trunk" to empty string.
+    // Verified empirically with a temp repo (theirs-strategy merge) where
+    // the default `git show` returned 0 lines and `--first-parent`
+    // matched `git diff HEAD^..HEAD` exactly. For non-merge commits
+    // `--first-parent` is a no-op (only one parent exists).
+    //
     // Net effect: 200-commit `xray_git_history file=… includeDiff=true`
     // drops from 400 → 200 spawns (≈1–4s saved on Windows).
     let mut cmd = Command::new("git");
     cmd.current_dir(repo_path)
         .arg("show")
+        .arg("--first-parent")
         .arg(hash)
         .arg("--format=")
         .arg("--patch")

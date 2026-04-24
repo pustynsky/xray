@@ -731,3 +731,86 @@ fn test_file_history_with_diff_normal_commit_patch_shape() {
         patch
     );
 }
+/// PERF-03 follow-up regression: `get_commit_diff` against a merge
+/// commit MUST yield a non-empty FIRST-PARENT patch (matching legacy
+/// `git diff <hash>^..<hash>` semantics), not the default `git show
+/// <merge>` combined diff which prunes paths that are uninteresting
+/// against AT LEAST ONE parent.
+///
+/// Setup: branch `feat` writes `v2-feat`, then main writes `v2-main`,
+/// then merge with manual resolution to `v2-merged` (distinct from
+/// both parents — otherwise `git log <file>` history simplification
+/// would skip the merge anyway). Pre-fix `get_commit_diff(repo,
+/// <merge>, "f.txt")` returned an EMPTY string because the default
+/// `git show <merge>` produces combined-diff output for merges, and
+/// combined-diff prunes paths where the merge result equals at least
+/// one parent's tree (here the feature side equals `v2-feat` which
+/// the merge took). Post-fix `--first-parent` restores legacy
+/// behaviour: diff against parent #1 (the main-side commit).
+///
+/// We bypass `file_history` (which uses `--follow` by default and
+/// activates aggressive history simplification that hides merges)
+/// and call `get_commit_diff` directly so the fix is tested in
+/// isolation — this is the function that PERF-03 changed and that
+/// the regression actually lives in.
+#[test]
+fn test_get_commit_diff_merge_commit_uses_first_parent() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "perf03-merge@example.com"]);
+    run_git(repo, &["config", "user.name", "PERF-03 Merge Test"]);
+    // Disable autocrlf for predictable byte-level patch shape on Windows.
+    run_git(repo, &["config", "core.autocrlf", "false"]);
+
+    std::fs::write(repo.join("f.txt"), "v1\n").expect("write v1");
+    run_git(repo, &["add", "f.txt"]);
+    run_git(repo, &["commit", "-m", "a", "--quiet"]);
+
+    run_git(repo, &["checkout", "-q", "-b", "feat"]);
+    std::fs::write(repo.join("f.txt"), "v2-feat\n").expect("write v2-feat");
+    run_git(repo, &["commit", "-am", "b", "--quiet"]);
+
+    run_git(repo, &["checkout", "-q", "main"]);
+    std::fs::write(repo.join("f.txt"), "v2-main\n").expect("write v2-main");
+    run_git(repo, &["commit", "-am", "c", "--quiet"]);
+
+    // --no-ff guarantees an actual merge commit; --no-commit + manual
+    // resolution to a value distinct from both parents avoids history
+    // simplification (and is more representative of real-world merges
+    // with conflicts).
+    run_git(
+        repo,
+        &[
+            "merge",
+            "--no-ff",
+            "--no-commit",
+            "--quiet",
+            "--strategy-option=theirs",
+            "feat",
+        ],
+    );
+    std::fs::write(repo.join("f.txt"), "v2-merged\n").expect("write merge resolution");
+    run_git(repo, &["commit", "-am", "merge", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let merge_hash = std::process::Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .expect("git rev-parse")
+        .stdout;
+    let merge_hash = String::from_utf8(merge_hash).expect("hash utf-8").trim().to_string();
+
+    let patch =
+        get_commit_diff(repo_str, &merge_hash, "f.txt").expect("get_commit_diff must succeed");
+    assert!(
+        patch.contains("-v2-main") && patch.contains("+v2-merged"),
+        "merge commit patch must show first-parent diff (-v2-main / +v2-merged) — \
+         pre-fix `git show <merge>` produced an EMPTY combined diff because the merge \
+         result was uninteresting against the feature-side parent. Got:\n{}",
+        patch
+    );
+}
+
