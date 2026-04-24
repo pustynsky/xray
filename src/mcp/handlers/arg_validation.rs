@@ -249,38 +249,48 @@ pub(crate) fn strict_error_response(tool_name: &str, report: &UnknownArgsReport)
 pub(crate) fn inject_warning(result: ToolCallResult, report: &UnknownArgsReport) -> ToolCallResult {
     let was_error = result.is_error;
     let text = match result.content.first() {
-        Some(c) => &c.text,
+        Some(c) => c.text.clone(),
         None => return result,
     };
 
-    let mut output = match serde_json::from_str::<Value>(text) {
-        Ok(v) => v,
-        Err(_) => return result,
-    };
-
-    let Some(obj) = output.as_object_mut() else {
-        return result;
-    };
-
-    if !obj.contains_key("summary") {
-        obj.insert("summary".to_string(), json!({}));
+    // Try the JSON path first: if the body is a JSON object, attach the warning
+    // as structured fields under `summary` so warning-aware clients can read
+    // them programmatically.
+    if let Ok(mut output) = serde_json::from_str::<Value>(&text)
+        && let Some(obj) = output.as_object_mut()
+    {
+        if !obj.contains_key("summary") {
+            obj.insert("summary".to_string(), json!({}));
+        }
+        if let Some(summary) = obj.get_mut("summary").and_then(|v| v.as_object_mut()) {
+            summary.insert(
+                "unknownArgsWarning".to_string(),
+                json!(warning_text(report)),
+            );
+            summary.insert(
+                "unknownArgs".to_string(),
+                json!(report
+                    .unknown
+                    .iter()
+                    .map(|u| json!({"key": u.key, "hint": u.hint}))
+                    .collect::<Vec<_>>()),
+            );
+        }
+        let new_result = ToolCallResult::success(json_to_string(&output));
+        return if was_error {
+            ToolCallResult { is_error: true, ..new_result }
+        } else {
+            new_result
+        };
     }
-    if let Some(summary) = obj.get_mut("summary").and_then(|v| v.as_object_mut()) {
-        summary.insert(
-            "unknownArgsWarning".to_string(),
-            json!(warning_text(report)),
-        );
-        summary.insert(
-            "unknownArgs".to_string(),
-            json!(report
-                .unknown
-                .iter()
-                .map(|u| json!({"key": u.key, "hint": u.hint}))
-                .collect::<Vec<_>>()),
-        );
-    }
 
-    let new_result = ToolCallResult::success(json_to_string(&output));
+    // Fallback path: body is not a JSON object (plain-text error, JSON array,
+    // JSON scalar, ...). Append the warning as a trailing text block so the
+    // hint is not silently lost on the error path. This is critical for
+    // LLM/agent flows where the unknown-arg hint is often the only signal
+    // explaining why the request was malformed.
+    let appended = format!("{}\n\n⚠ {}", text.trim_end(), warning_text(report));
+    let new_result = ToolCallResult::success(appended);
     if was_error {
         ToolCallResult { is_error: true, ..new_result }
     } else {
@@ -541,7 +551,7 @@ mod tests {
     }
 
     #[test]
-    fn inject_warning_no_op_for_non_json_body() {
+    fn inject_warning_appends_to_non_json_body() {
         let result = ToolCallResult::success("not json at all".to_string());
         let report = UnknownArgsReport {
             unknown: vec![UnknownArg {
@@ -550,8 +560,51 @@ mod tests {
             }],
         };
         let injected = inject_warning(result, &report);
-        // Defensive: never break a response over a warning failure.
-        assert_eq!(injected.content[0].text, "not json at all");
+        // Non-JSON body: original text is preserved, warning is appended so
+        // the unknown-arg hint is not silently lost on the error path.
+        let text = &injected.content[0].text;
+        assert!(text.starts_with("not json at all"), "original body must be preserved. Got: {}", text);
+        assert!(text.contains("'foo'"), "warning must mention bad key. Got: {}", text);
+        assert!(text.contains("bar"), "warning must mention hint. Got: {}", text);
+        assert!(text.contains("XRAY_STRICT_ARGS=1"), "warning must include strict-mode hint. Got: {}", text);
+    }
+
+    #[test]
+    fn inject_warning_appends_to_plain_text_error_and_preserves_is_error() {
+        // Real-world shape: handler returns ToolCallResult::error("plain message")
+        // — common across handlers that haven't migrated to structured JSON
+        // errors. The warning must survive this path.
+        let result = ToolCallResult::error("workspace not initialised".to_string());
+        let report = UnknownArgsReport {
+            unknown: vec![UnknownArg {
+                key: "isRegexp".to_string(),
+                hint: "Use 'regex' instead.".to_string(),
+            }],
+        };
+        let injected = inject_warning(result, &report);
+        assert!(injected.is_error, "is_error must be preserved across non-JSON injection");
+        let text = &injected.content[0].text;
+        assert!(text.starts_with("workspace not initialised"), "original error text preserved. Got: {}", text);
+        assert!(text.contains("'isRegexp'"), "alias hint must be present. Got: {}", text);
+        assert!(text.contains("regex"), "alias target must be present. Got: {}", text);
+    }
+
+    #[test]
+    fn inject_warning_appends_to_non_object_json_body() {
+        // JSON array / scalar bodies are valid JSON but not objects — they
+        // can't carry a `summary.unknownArgsWarning` field. Fall back to the
+        // append-to-text path rather than silently dropping the hint.
+        let result = ToolCallResult::success("[1,2,3]".to_string());
+        let report = UnknownArgsReport {
+            unknown: vec![UnknownArg {
+                key: "foo".to_string(),
+                hint: "bar".to_string(),
+            }],
+        };
+        let injected = inject_warning(result, &report);
+        let text = &injected.content[0].text;
+        assert!(text.starts_with("[1,2,3]"), "original JSON array preserved. Got: {}", text);
+        assert!(text.contains("Unknown args silently ignored"), "warning must be appended. Got: {}", text);
     }
 }
 
