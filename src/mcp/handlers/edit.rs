@@ -608,12 +608,20 @@ fn count_lines(s: &str) -> usize {
 }
 
 /// Apply edits/operations to file content and return results.
+///
+/// `file_existed` distinguishes "this is a freshly-created file" from
+/// "this is an edit on an existing (possibly empty) file". The flag is
+/// only consumed by the brace-balance sanity check, which must fire on
+/// existing-but-empty files (an unbalanced INSERT into a 0-byte file is
+/// just as broken as into a non-empty one) but stay silent on auto-create
+/// (the whole content is "new", delta has no meaning there).
 fn apply_edits_to_content(
     path_str: &str,
     normalized: &str,
     mode: &EditMode<'_>,
     is_regex: bool,
     expected_line_count: Option<usize>,
+    file_existed: bool,
 ) -> Result<EditResult, String> {
     // expectedLineCount safety check — applies to BOTH modes.
     // Previously this lived inside the Mode A (Operations) arm only, so
@@ -667,12 +675,14 @@ fn apply_edits_to_content(
     // Post-write structural sanity: asymmetric brace deltas surface the
     // "search included a closer that replace omitted" failure class
     // (commit a823c57 had exactly this bug — caught only by `cargo build`
-    // 30s after the write). Skip the check when the original was empty
-    // (auto-create case: there is no "delta", everything is new content).
-    let brace_balance_warnings = if normalized.is_empty() {
-        Vec::new()
-    } else {
+    // 30s after the write). Skip ONLY on auto-create: a freshly-minted
+    // file has no "original" to delta against. Existing-but-empty files
+    // still get the check — an unbalanced INSERT into a 0-byte file is
+    // just as broken as one into a non-empty file.
+    let brace_balance_warnings = if file_existed {
         brace_balance_warnings(normalized, &modified_content)
+    } else {
+        Vec::new()
     };
 
     Ok(EditResult {
@@ -889,7 +899,7 @@ fn handle_single_file_edit(
     let file_created = !file_existed;
 
     // Apply edits
-    let edit_result = match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count) {
+    let edit_result = match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count, file_existed) {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
@@ -1066,7 +1076,7 @@ fn handle_multi_file_edit(
     // Phase 2: Apply edits to all (in memory)
     let mut edit_results: Vec<(&str, PathBuf, EditResult, &'static str, bool)> = Vec::with_capacity(file_data.len());
     for (path_str, resolved, normalized, line_ending, file_existed) in file_data {
-        match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count) {
+        match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count, file_existed) {
             Ok(result) => {
                 edit_results.push((path_str, resolved, result, line_ending, file_existed));
             }
@@ -2377,11 +2387,15 @@ fn smart_search_not_found_hint(
     has_expected_context: bool,
 ) -> &'static str {
     // (1) Literal escape sequences. Cheap textual check — no parsing.
-    // `\u{` is unambiguous (curly form is a Rust idiom never present in
-    // real source as a substring of a string-literal one would search
-    // for verbatim). `\xNN` is detected as `\x` followed by two hex digits.
-    if search.contains("\\u{") || contains_hex_escape_literal(search) {
-        return ". Tip: 'search' is taken verbatim — \\u{...} and \\xNN are NOT \
+    // `\u{` is unambiguous: it is the only escape form that can encode
+    // non-ASCII characters in Rust source, so its appearance in a
+    // verbatim `search` string is almost certainly a misuse. We do NOT
+    // detect `\xNN` here — Rust's `\xNN` only encodes ASCII bytes
+    // (0x00..0x7F), so it is never the right tool for the typographic
+    // (em-dash etc.) case the hint targets, and detecting it produced
+    // false positives on legitimate path-like input (`C:\x86\toolchain`).
+    if search.contains("\\u{") {
+        return ". Tip: 'search' is taken verbatim — \\u{...} is NOT \
                 interpreted. Pass actual UTF-8 characters instead \
                 (e.g., the literal '—' for U+2014).";
     }
@@ -2403,18 +2417,6 @@ fn smart_search_not_found_hint(
         return ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching";
     }
     ""
-}
-
-/// True if `s` contains the literal byte sequence `\xNN` where NN are two
-/// ASCII hex digits. Used by `smart_search_not_found_hint`.
-fn contains_hex_escape_literal(s: &str) -> bool {
-    let bytes = s.as_bytes();
-    bytes.windows(4).any(|w| {
-        w[0] == b'\\'
-            && w[1] == b'x'
-            && w[2].is_ascii_hexdigit()
-            && w[3].is_ascii_hexdigit()
-    })
 }
 
 /// Generate a byte-level diff hint showing the first difference between two strings.

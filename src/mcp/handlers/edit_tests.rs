@@ -5377,24 +5377,29 @@ fn test_search_with_unicode_escape_literal_hints_verbatim() {
         "Hint must NOT recommend irrelevant expectedContext for an escape-literal bug. Got: {}", text);
 }
 
-/// `\xNN` literal in `search` triggers the same verbatim-bytes hint.
+/// Path-like input containing `\xNN` substrings (e.g. `C:\x86\toolchain`)
+/// must NOT trigger the verbatim-escape tip — `\xNN` only encodes ASCII in
+/// Rust, so its presence here is overwhelmingly a real path, not a misused
+/// escape. The legacy `expectedContext` hint should fire instead.
 #[test]
-fn test_search_with_hex_escape_literal_hints_verbatim() {
+fn test_search_with_path_like_hex_substring_falls_back_to_expected_context() {
     let (tmp, filename, _) = create_temp_file("abc\n");
     let ctx = make_ctx(tmp.path());
 
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
         "edits": [
-            { "search": "\\x41\\x42", "replace": "x" }
+            // `C:\x86\toolchain` happens to contain `\x86` — must not be
+            // mistaken for a misused escape literal.
+            { "search": "C:\\x86\\toolchain\\bin", "replace": "x" }
         ]
     }));
     assert!(result.is_error);
     let text = &result.content[0].text;
-    assert!(text.contains("taken verbatim"),
-        "Hint must explain bytes are verbatim. Got: {}", text);
-    assert!(!text.contains("pass `expectedContext`"),
-        "Hint must NOT recommend expectedContext. Got: {}", text);
+    assert!(!text.contains("taken verbatim"),
+        "Path-like \\xNN must NOT trigger verbatim-bytes tip. Got: {}", text);
+    assert!(text.contains("pass `expectedContext`"),
+        "Legacy fallback hint must fire instead. Got: {}", text);
 }
 
 /// When `search` starts with a leading space and the nearest match shows the
@@ -5560,5 +5565,64 @@ fn test_brace_balance_warning_in_dry_run() {
     let warnings = output["braceBalanceWarnings"].as_array()
         .expect("braceBalanceWarnings must fire on dryRun previews too");
     assert!(!warnings.is_empty(), "Warnings array must not be empty in dry-run");
+}
+
+/// Existing-but-empty file: the brace-balance check must STILL fire when
+/// the very first edit introduces unbalanced delimiters. The skip is only
+/// for auto-create (file did not exist), not for "file existed and
+/// happened to be 0 bytes" — an unbalanced INSERT into a 0-byte file is
+/// just as broken as one into a non-empty file, and the agent benefits
+/// from the same warning.
+#[test]
+fn test_brace_balance_warning_on_existing_empty_file() {
+    let (tmp, filename, _) = create_temp_file("");
+    let ctx = make_ctx(tmp.path());
+
+    // Mode A INSERT (endLine < startLine) at start of empty file. content
+    // has unbalanced curly: one '{' and zero '}'.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "fn f() {\n    body();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output.get("fileCreated"), None,
+        "Sanity: file existed before edit, must NOT report fileCreated");
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must fire on existing-but-empty file with unbalanced edit");
+    let joined = warnings.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join(" | ");
+    assert!(joined.contains("curly"),
+        "Warning must mention 'curly'. Got: {}", joined);
+}
+
+/// Auto-create (file did not exist) is the ONE case where brace-balance
+/// is silenced — there is no original content to delta against, so the
+/// check has no meaningful baseline.
+#[test]
+fn test_brace_balance_no_warning_on_auto_create() {
+    // Don't create the file — let xray_edit auto-create it.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("brand_new.rs");
+    let filename = path.to_str().unwrap().to_string();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "fn f() {\n    body();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Auto-create edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["fileCreated"].as_bool(), Some(true),
+        "Sanity: file must be reported as created");
+    assert!(output.get("braceBalanceWarnings").is_none(),
+        "braceBalanceWarnings must be silent on auto-create. Got: {}", output);
 }
 
