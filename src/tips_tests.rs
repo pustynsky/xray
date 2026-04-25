@@ -768,8 +768,8 @@ fn test_instructions_has_intent_mapping() {
         "INTENT -> TOOL MAPPING should map 'method at file:line N' to xray_definitions containsLine");
     assert!(text.contains("xray_edit with multiple edits"),
         "INTENT -> TOOL MAPPING should map 'replace in files' to xray_edit batch");
-    assert!(text.contains("xray_fast pattern='*' dir='<path>' dirsOnly=true"),
-        "INTENT -> TOOL MAPPING should map 'list files/dirs' to xray_fast dirsOnly");
+    assert!(text.contains("xray_fast pattern=[\"*\"] dir='<path>' dirsOnly=true"),
+        "INTENT -> TOOL MAPPING should map 'list files/dirs' to xray_fast dirsOnly (post 2026-04-25 array migration)");
 }
 
 /// MANDATORY PRE-FLIGHT CHECK forces a conscious justification in <thinking>

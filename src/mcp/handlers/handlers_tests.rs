@@ -492,7 +492,7 @@ fn test_dispatch_fast_while_content_index_building() {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": ["foo"]}));
     assert!(!result.is_error,
         "xray_fast should not be blocked by content_ready=false, got: {}",
         result.content[0].text);

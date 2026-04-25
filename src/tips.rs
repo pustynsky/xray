@@ -106,7 +106,7 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         Tip {
             rule: "File lookup: use xray_fast, not built-in list_files".into(),
             why: "xray_fast uses a pre-built index (~35ms). Built-in list_files does a live filesystem walk (~3s). 90x+ faster.".into(),
-            example: "xray_fast with pattern='UserService' instead of built-in list_files".into(),
+            example: "xray_fast with pattern=[\"UserService\"] instead of built-in list_files".into(),
         },
         Tip {
             rule: "Multi-term OR: find all variants in ONE query".into(),
@@ -253,7 +253,7 @@ pub fn strategies() -> Vec<Strategy> {
             steps: &[
                 "Step 1 - Map the landscape (1 call): xray_definitions file=[\"<dirname>\"] excludeDir=['test','Test','Mock'] -> if many results, returns autoSummary with directory grouping and top classes per subdirectory. If few results, returns full definition list. Use file=[\"<subdir>\"] to drill into specific groups",
                 "Step 2 - Read key implementations (1 call): xray_definitions name=[\"<top 3-5 key classes from step 1>\"] includeBody=true maxBodyLines=30 -> returns source code of the most important files",
-                "Step 3 (optional) - Scope and dependencies (1 call): xray_grep terms=[\"X\"] countOnly=true -> scale (how many files, occurrences); or xray_fast pattern='X' dirsOnly=true -> directory structure",
+                "Step 3 (optional) - Scope and dependencies (1 call): xray_grep terms=[\"X\"] countOnly=true -> scale (how many files, occurrences); or xray_fast pattern=[\"X\"] dirsOnly=true -> directory structure",
             ],
             anti_patterns: &[
                 "Don't use list_files + read_file to explore architecture -- xray_definitions returns classes, methods, file paths, and source code in ONE call",
@@ -442,7 +442,7 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "terms": "Token: [\"HttpClient\"]. Multi-term OR: [\"HttpClient\",\"ILogger\",\"Task\"]. Multi-term AND (mode='and'): [\"ServiceProvider\",\"IUserService\"]. Phrase (phrase=true): [\"new HttpClient\"]. Regex (regex=true): [\"I.*Cache\"]",
             "contextLines": "contextLines=5 shows 5 lines before and 5 lines after each match (like grep -C)",
             "showLines": "Returns groups of consecutive lines with startLine, lines array, and matchIndices",
-            "ext": "'cs', 'cs,sql', 'xml,config' (comma-separated for multiple)",
+            "ext": "[\"cs\"], [\"cs\",\"sql\"], [\"xml\",\"config\"] (each entry is one extension)",
             "substring": "Default: terms=[\"UserService\"] finds IUserService, m_userService. Set substring=false for exact-token-only",
             "dir": "Directory to search (default: server's --dir). Example: dir='src/services'. If a FILE path is passed (e.g., dir='src/main.rs'), it is auto-converted to dir='src' + file=[\"main.rs\"]; the response summary includes a `dirAutoConverted` note. Prefer file= directly to avoid the conversion",
             "file": "Restrict to files whose path or basename contains this substring (case-insensitive). Single: [\"CHANGELOG.md\"]. Multi-term OR: [\"Service\",\"Client\"] finds files matching either. Combines with dir/ext/excludeDir via AND. Use this instead of passing a file path in `dir`",
@@ -463,8 +463,8 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "includeGrepReferences": "includeGrepReferences=true -> adds grepReferences[] with files containing the method name as text but NOT in the call tree. Catches delegate usage, method groups, reflection. Skipped for method names < 4 chars. Each entry has file + tokenCount. For line-level detail, use xray_grep with showLines=true"
         },
         "xray_fast": {
-            "pattern": "Substring or glob. Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor'. Glob: 'Order*', '*Service.cs', 'Use?Service' — auto-converts to regex. No glob chars → substring. '*' or '' with dir → list all. dirsOnly=true for subdirectory listing",
-            "dirsOnly": "Returns directories with fileCount, sorted descending (largest first). Works with wildcard and filtered patterns (e.g., 'Storage,Redis')",
+            "pattern": "Substring or glob. Single: [\"UserService\"]. Multi-term OR: [\"UserService\",\"OrderProcessor\"]. Glob: [\"Order*\"], [\"*Service.cs\"], [\"Use?Service\"] — auto-converts to regex. No glob chars → substring. [\"*\"] or [] with dir → list all. dirsOnly=true for subdirectory listing",
+            "dirsOnly": "Returns directories with fileCount, sorted descending (largest first). Works with wildcard and filtered patterns (e.g., [\"Storage\",\"Redis\"])",
             "maxDepth": "Limit directory depth for dirsOnly results (1=immediate children only, 2=two levels). Default: unlimited. Use maxDepth=1 to avoid truncation on large repos"
         },
         "xray_git_history": {
@@ -663,8 +663,8 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("  \"replace similar patterns in one or more files\"  -> xray_edit with multiple edits (atomic, batch)\n");
     out.push_str("  \"rewrite entire file\"                            -> xray_edit Mode A [{startLine:1, endLine:<total>, content:<new>}]\n");
     out.push_str("  \"create a new file\"                              -> xray_edit (auto-creates — Mode A with endLine:0)\n");
-    out.push_str("  \"list files or subdirectories\"                   -> xray_fast pattern='*' dir='<path>' dirsOnly=true\n");
-    out.push_str("  \"find a file by name\"                            -> xray_fast pattern='<name>'\n");
+    out.push_str("  \"list files or subdirectories\"                   -> xray_fast pattern=[\"*\"] dir='<path>' dirsOnly=true\n");
+    out.push_str("  \"find a file by name\"                            -> xray_fast pattern=[\"<name>\"]\n");
     out.push_str("  \"git blame / history / authors\"                  -> xray_git_blame / xray_git_history / xray_git_authors (works for BOTH existing AND deleted files)\n");
     out.push_str("  \"history of a file that was DELETED/removed\"     -> xray_git_history repo='.' file='<path>' (auto-falls back from --follow; do NOT run raw git log --all --diff-filter=D)\n");
     out.push_str("  \"who deleted a file / when was it removed\"       -> xray_git_history repo='.' file='<path>' (returns full history of deleted files including the deletion commit)\n");

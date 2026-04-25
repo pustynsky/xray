@@ -1037,7 +1037,7 @@ fn test_unresolved_blocks_fast() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": "test"}));
+    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": ["test"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
 }
