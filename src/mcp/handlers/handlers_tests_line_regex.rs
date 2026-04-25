@@ -420,9 +420,9 @@ fn line_regex_show_lines_caps_content_cache() {
     cleanup_tmp(&tmp_dir);
 }
 
-// ─── linePatterns: literal-comma-safe array form ──────────────────────────
+// ─── lineRegex array form: literal-comma-safe entries ────────────────────
 
-/// Build an isolated workspace with a small log file used by `linePatterns`
+/// Build an isolated workspace with a small log file used by lineRegex
 /// tests where literal `,` inside a pattern matters (CSV regex, log prefixes).
 fn make_line_patterns_log_ctx() -> (HandlerContext, std::path::PathBuf) {
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -558,30 +558,3 @@ fn line_patterns_multiple_patterns_or_semantics() {
     cleanup_tmp(&tmp);
 }
 
-#[test]
-fn line_patterns_terms_comma_split_back_compat() {
-    // Back-compat guard: when `linePatterns` is NOT supplied, the old
-    // `terms.split(',')` behaviour for lineRegex is preserved.
-    let (ctx, tmp) = make_line_patterns_log_ctx();
-    let result = handle_xray_grep(
-        &ctx,
-        &json!({
-            "terms": ["^INFO:","^TRACE:"],
-            "lineRegex": true,
-            "ext": ["log"],
-        }),
-    );
-    assert!(
-        !result.is_error,
-        "Back-compat comma-split terms must still work: {}",
-        result.content[0].text
-    );
-    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let occ = output["summary"]["totalOccurrences"].as_u64().unwrap_or(0);
-    assert_eq!(
-        occ, 2,
-        "Back-compat OR over `^INFO:,^TRACE:` must still match 2 lines, payload: {}",
-        result.content[0].text
-    );
-    cleanup_tmp(&tmp);
-}

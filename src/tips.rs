@@ -654,6 +654,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         out.push_str("  \"read the source code of a method/class\"         -> xray_definitions name=[\"X\"] includeBody=true maxBodyLines=0\n");
         out.push_str("  \"find which method is at file:line N\"            -> xray_definitions file=[\"X\"] containsLine=N includeBody=true\n");
         out.push_str("  \"find who calls/implements method X\"             -> xray_callers method=[\"X\"] class='Y' direction='up'\n");
+        out.push_str("  \"verify upstream reachability of helper X\"       -> xray_callers method=[\"X\"] direction='up' (audit: which arg parsers / entry points still reach this helper; add class='Y' when X is a method on a class; do NOT grep+read_file the call sites)\n");
     }
     out.push_str("  \"see a few lines of context around a match\"      -> xray_grep showLines=true contextLines=N\n");
     out.push_str("  \"search text across codebase\"                    -> xray_grep terms=[\"...\"]\n");

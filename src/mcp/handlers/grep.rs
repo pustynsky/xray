@@ -1856,11 +1856,11 @@ fn handle_line_regex_search(
     patterns: Vec<String>,
     params: &GrepSearchParams,
 ) -> ToolCallResult {
-    // `patterns` is supplied by the caller already split (legacy: comma-split
-    // from `terms`) or taken verbatim from `linePatterns` (literal-comma-safe).
-    // Unlike token regex, we do NOT lowercase — user-supplied regex flags
-    // (e.g., `(?i)`) control case sensitivity. We also do NOT trim each
-    // pattern, because whitespace inside a regex is significant
+    // `patterns` is supplied by the caller as one regex per array entry
+    // (taken verbatim from the `terms` array — literal `,` inside an entry is
+    // preserved). Unlike token regex, we do NOT lowercase — user-supplied
+    // regex flags (e.g., `(?i)`) control case sensitivity. We also do NOT
+    // trim each pattern, because whitespace inside a regex is significant
     // (e.g., `^## ` matches markdown level-2 headings only, NOT `^##` which would
     // also match `^### `).
     let patterns: Vec<String> = patterns

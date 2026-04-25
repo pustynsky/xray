@@ -212,6 +212,8 @@ fn test_render_instructions_empty_extensions() {
         "should NOT have definition-dependent reading intent when def_extensions is empty");
     assert!(!text.contains("find who calls/implements method X"),
         "should NOT have caller-lookup intent when def_extensions is empty");
+    assert!(!text.contains("verify upstream reachability of helper X"),
+        "should NOT have reachability-audit intent when def_extensions is empty");
     // STRATEGY RECIPES reference line is always present (detailed bodies are xray_help-only)
     assert!(text.contains("STRATEGY RECIPES"),
         "should still include the STRATEGY RECIPES reference line");
@@ -267,6 +269,8 @@ fn test_task_routing_with_definitions() {
         "should route source-code reading to xray_definitions");
     assert!(text.contains("find who calls/implements method X"),
         "should route caller lookup to xray_callers");
+    assert!(text.contains("verify upstream reachability of helper X\"       -> xray_callers method=[\"X\"] direction='up'"),
+        "should route reachability-audit intent to xray_callers direction='up' (full mapping, not just trigger phrase)");
     // Universal intents always present
     assert!(text.contains("search text across codebase"),
         "should route text search to xray_grep");
@@ -293,6 +297,8 @@ fn test_task_routing_without_definitions() {
         "should NOT have definition-dependent reading intent");
     assert!(!text.contains("find who calls/implements method X"),
         "should NOT have caller-lookup intent");
+    assert!(!text.contains("verify upstream reachability of helper X"),
+        "should NOT have reachability-audit intent when def_extensions is empty");
     assert!(!text.contains("find which method is at file:line"),
         "should NOT have stack-trace intent");
     // Universal routes always present
