@@ -19,7 +19,7 @@ use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind, CodeS
 use crate::ContentIndex;
 use crate::mcp::lock_order;
 
-use super::utils::{inject_body_into_obj, inject_branch_warning, inject_index_degraded, best_match_tier, json_to_string, name_similarity};
+use super::utils::{inject_body_into_obj, inject_branch_warning, inject_index_degraded, best_match_tier, json_to_string, name_similarity, read_enum_string_opt, read_string};
 use super::HandlerContext;
 use super::advisory_hints::value_source_hint;
 
@@ -27,6 +27,22 @@ use super::advisory_hints::value_source_hint;
 // feature flag. `definitions.rs` only re-exports `DefinitionSearchArgs` to that
 // module; the handler itself is invoked via `xml_on_demand::try_intercept` in
 // `handle_xray_definitions`.
+
+/// Closed enum of accepted `sortBy` field names for `xray_definitions`.
+///
+/// MUST stay in sync with the `match field { ... }` arms in [`get_sort_value`].
+/// Drift-guard: `test_all_sort_fields_drift_guard` pins the slice and asserts
+/// each entry resolves through `get_sort_value` against a representative input.
+pub(crate) const ALL_SORT_FIELDS: &[&str] = &[
+    "cyclomaticComplexity",
+    "cognitiveComplexity",
+    "maxNestingDepth",
+    "paramCount",
+    "returnCount",
+    "callCount",
+    "lambdaCount",
+    "lines",
+];
 
 // ─── Parsed arguments struct ─────────────────────────────────────────
 
@@ -118,9 +134,8 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
     let name_filter = if names.is_empty() { None } else { Some(names.join(",")) };
     let kinds = super::utils::read_kind_array(args)?;
     let kind_filter = if kinds.is_empty() { None } else { Some(kinds.join(",")) };
-    let attribute_filter = args.get("attribute").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let base_type_filter = args.get("baseType").and_then(|v| v.as_str())
-        .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
+    let attribute_filter = read_string(args, "attribute")?;
+    let base_type_filter = read_string(args, "baseType")?;
     let base_type_transitive = args.get("baseTypeTransitive").and_then(|v| v.as_bool()).unwrap_or(false);
     let files = super::utils::read_string_array(args, "file")?;
     let file_filter_raw = files.clone();
@@ -163,7 +178,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
     let cross_validate = args.get("crossValidate").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // Code stats parameters
-    let sort_by = args.get("sortBy").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let sort_by = read_enum_string_opt(args, "sortBy", ALL_SORT_FIELDS)?;
     // DEF-H-006: validate numeric ranges instead of silently truncating with `as`.
     // Pre-fix `args.get("minNesting") = 300` became `Some(44_u8)` because `300_u64
     // as u8 == 44`, returning misleading results that looked legitimate. Now any
@@ -190,18 +205,6 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
     let min_params = parse_bounded_u8(args, "minParams")?;
     let min_returns = parse_bounded_u8(args, "minReturns")?;
     let min_calls = parse_bounded_u16(args, "minCalls")?;
-
-    // Validate sortBy value
-    if let Some(ref sort_field) = sort_by {
-        let valid = ["cyclomaticComplexity", "cognitiveComplexity", "maxNestingDepth",
-                     "paramCount", "returnCount", "callCount", "lambdaCount", "lines"];
-        if !valid.contains(&sort_field.as_str()) {
-            return Err(format!(
-                "Invalid sortBy value '{}'. Valid values: {}",
-                sort_field, valid.join(", ")
-            ));
-        }
-    }
 
     // Compute derived fields
     let has_stats = sort_by.is_some()

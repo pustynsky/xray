@@ -22,7 +22,7 @@ use crate::git::cache::GitHistoryCache;
 use crate::mcp::protocol::ToolCallResult;
 
 use super::HandlerContext;
-use super::utils::json_to_string;
+use super::utils::{json_to_string, read_required_string, read_string};
 
 /// Emit a warning or info field on the response depending on the file's git history state.
 ///
@@ -320,14 +320,16 @@ fn format_timestamp(ts: i64) -> String {
 
 /// Handle xray_git_history and xray_git_diff (shared logic, diff controlled by `include_diff`).
 fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) -> ToolCallResult {
-    let repo = match args.get("repo").and_then(|v| v.as_str()) {
-        Some(r) => r,
-        None => return ToolCallResult::error("Missing required parameter: repo".to_string()),
+    let repo = match read_required_string(args, "repo") {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(e),
     };
-    let file = match args.get("file").and_then(|v| v.as_str()) {
-        Some(f) => f,
-        None => return ToolCallResult::error("Missing required parameter: file".to_string()),
+    let file = match read_required_string(args, "file") {
+        Ok(f) => f,
+        Err(e) => return ToolCallResult::error(e),
     };
+    let repo = repo.as_str();
+    let file = file.as_str();
 
     // Detect root-level queries and redirect to xray_git_activity
     if file == "." || file.is_empty() {
@@ -337,16 +339,36 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
         );
     }
 
-    let from = args.get("from").and_then(|v| v.as_str());
-    let to = args.get("to").and_then(|v| v.as_str());
-    let date = args.get("date").and_then(|v| v.as_str());
+    let from_owned = match read_string(args, "from") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let to_owned = match read_string(args, "to") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let date_owned = match read_string(args, "date") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let from = from_owned.as_deref();
+    let to = to_owned.as_deref();
+    let date = date_owned.as_deref();
     // GIT-008: cap maxResults at 1_000_000 (sane upper bound for git log output).
     let max_results = match parse_bounded_usize(args, "maxResults", 50, 1_000_000) {
         Ok(n) => n,
         Err(e) => return ToolCallResult::error(e),
     };
-    let author_filter = args.get("author").and_then(|v| v.as_str());
-    let message_filter = args.get("message").and_then(|v| v.as_str());
+    let author_filter_owned = match read_string(args, "author") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let message_filter_owned = match read_string(args, "message") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let author_filter = author_filter_owned.as_deref();
+    let message_filter = message_filter_owned.as_deref();
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path (history only, not diff — cache has no patch data) ──
@@ -464,24 +486,48 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
 
 /// Handle xray_git_authors.
 fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
-    let repo = match args.get("repo").and_then(|v| v.as_str()) {
-        Some(r) => r,
-        None => return ToolCallResult::error("Missing required parameter: repo".to_string()),
+    let repo = match read_required_string(args, "repo") {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(e),
     };
+    let repo = repo.as_str();
 
     // path takes priority, file is backward-compatible alias
-    let query_path = args.get("path").and_then(|v| v.as_str())
-        .or_else(|| args.get("file").and_then(|v| v.as_str()))
-        .unwrap_or("");
+    let query_path_owned = {
+        let from_path = match read_string(args, "path") {
+            Ok(v) => v,
+            Err(e) => return ToolCallResult::error(e),
+        };
+        match from_path {
+            Some(p) => Some(p),
+            None => match read_string(args, "file") {
+                Ok(v) => v,
+                Err(e) => return ToolCallResult::error(e),
+            },
+        }
+    };
+    let query_path = query_path_owned.as_deref().unwrap_or("");
 
-    let from = args.get("from").and_then(|v| v.as_str());
-    let to = args.get("to").and_then(|v| v.as_str());
+    let from_owned = match read_string(args, "from") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let to_owned = match read_string(args, "to") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let from = from_owned.as_deref();
+    let to = to_owned.as_deref();
     // GIT-008: cap top at 10_000 (more than enough authors for any repo).
     let top = match parse_bounded_usize(args, "top", 10, 10_000) {
         Ok(n) => n,
         Err(e) => return ToolCallResult::error(e),
     };
-    let message_filter = args.get("message").and_then(|v| v.as_str());
+    let message_filter_owned = match read_string(args, "message") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let message_filter = message_filter_owned.as_deref();
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
 
     // ── Cache path ──
@@ -586,16 +632,41 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
 /// Handle xray_git_activity.
 fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
-    let repo = match args.get("repo").and_then(|v| v.as_str()) {
-        Some(r) => r,
-        None => return ToolCallResult::error("Missing required parameter: repo".to_string()),
+    let repo = match read_required_string(args, "repo") {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(e),
     };
+    let repo = repo.as_str();
 
-    let from = args.get("from").and_then(|v| v.as_str());
-    let to = args.get("to").and_then(|v| v.as_str());
-    let date = args.get("date").and_then(|v| v.as_str());
-    let author_filter = args.get("author").and_then(|v| v.as_str());
-    let message_filter = args.get("message").and_then(|v| v.as_str());
+    let from_owned = match read_string(args, "from") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let to_owned = match read_string(args, "to") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let date_owned = match read_string(args, "date") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let author_filter_owned = match read_string(args, "author") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let message_filter_owned = match read_string(args, "message") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let path_owned = match read_string(args, "path") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    let from = from_owned.as_deref();
+    let to = to_owned.as_deref();
+    let date = date_owned.as_deref();
+    let author_filter = author_filter_owned.as_deref();
+    let message_filter = message_filter_owned.as_deref();
     let no_cache = args.get("noCache").and_then(|v| v.as_bool()).unwrap_or(false);
     let include_deleted = args.get("includeDeleted").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -606,7 +677,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 let start = Instant::now();
 
                 // For activity, use empty string for whole-repo scope
-                let query_path = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let query_path = path_owned.as_deref().unwrap_or("");
                 let normalized = GitHistoryCache::normalize_path(query_path);
 
                 let (from_ts, to_ts) = match parse_cache_date_range(from, to, date) {
@@ -673,7 +744,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let start = Instant::now();
 
-    let activity_path = args.get("path").and_then(|v| v.as_str());
+    let activity_path = path_owned.as_deref();
 
     match git::repo_activity(repo, &filter, author_filter, message_filter, activity_path) {
         Ok((file_map, commits_processed)) => {
@@ -759,14 +830,16 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 }
 /// Handle xray_git_blame — always uses CLI (no cache for blame data).
 fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
-    let repo = match args.get("repo").and_then(|v| v.as_str()) {
-        Some(r) => r,
-        None => return ToolCallResult::error("Missing required parameter: repo".to_string()),
+    let repo = match read_required_string(args, "repo") {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(e),
     };
-    let file = match args.get("file").and_then(|v| v.as_str()) {
-        Some(f) => f,
-        None => return ToolCallResult::error("Missing required parameter: file".to_string()),
+    let file = match read_required_string(args, "file") {
+        Ok(f) => f,
+        Err(e) => return ToolCallResult::error(e),
     };
+    let repo = repo.as_str();
+    let file = file.as_str();
 
     // Detect root-level queries — blame requires a specific file
     if file == "." || file.is_empty() {
@@ -852,10 +925,11 @@ fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
 /// Handle xray_branch_status — shows current branch, ahead/behind, dirty files, fetch age.
 fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
-    let repo = match args.get("repo").and_then(|v| v.as_str()) {
-        Some(r) => r,
-        None => return ToolCallResult::error("Missing required parameter: repo".to_string()),
+    let repo = match read_required_string(args, "repo") {
+        Ok(r) => r,
+        Err(e) => return ToolCallResult::error(e),
     };
+    let repo = repo.as_str();
 
     let start = Instant::now();
 
