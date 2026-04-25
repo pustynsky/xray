@@ -21,7 +21,10 @@ use super::HandlerContext;
 /// Shared parameters for substring and phrase search modes.
 /// Eliminates 10+ positional parameters from handle_substring_search and handle_phrase_search.
 pub(crate) struct GrepSearchParams<'a> {
-    pub ext_filter: &'a Option<String>,
+    /// File extension filter. Empty = no filter; otherwise each entry is one
+    /// extension (no leading dot, case-insensitive). Migrated from
+    /// `Option<String>` (comma-split) to a slice in 2026-04-25.
+    pub ext_filter: &'a [String],
     pub show_lines: bool,
     pub context_lines: usize,
     pub max_results: usize,
@@ -29,10 +32,12 @@ pub(crate) struct GrepSearchParams<'a> {
     pub count_only: bool,
     pub search_start: Instant,
     pub dir_filter: &'a Option<String>,
-    /// Optional file path/name substring filter (lowercase match against full file path).
-    /// Supports comma-separated terms (OR semantics) — any term matching accepts the file.
-    /// Ignored when `exact_file_path` is `Some(_)` — that mode supersedes substring scoping.
-    pub file_filter: &'a Option<String>,
+    /// Optional file path/name substring filter. Empty = no filter; otherwise
+    /// each entry is one substring (case-insensitive, OR semantics) matched
+    /// against both the full file path and the basename.
+    /// Ignored when `exact_file_path` is `Some(_)` — that mode supersedes
+    /// substring scoping.
+    pub file_filter: &'a [String],
     /// When `Some(path)`, the file's full normalized path must equal this value
     /// exactly (case-insensitive, `\` normalized to `/`). Set ONLY by the
     /// `dir=<file>` auto-convert branch in `parse_grep_args`. The previous
@@ -391,19 +396,19 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
         if let Some(prefix) = params.dir_filter
             && !is_under_dir(file_path, prefix) { return false; }
 
-        // File name/path filter (substring, comma-separated OR): user-supplied
-        // `file=` filter. Case-insensitive substring against both full path and
-        // basename so `file='CHANGELOG.md'` works regardless of caller path style.
-        if let Some(file_sub) = params.file_filter {
+        // File name/path filter (substring OR over the user-supplied array):
+        // each entry in `file_filter` is one substring; the file passes if any
+        // entry hits either the full path or the basename (case-insensitive).
+        // Empty Vec means "no filter".
+        if !params.file_filter.is_empty() {
             let basename_lower = std::path::Path::new(file_path)
                 .file_name()
                 .and_then(|n| n.to_str())
                 .map(|s| s.to_lowercase())
                 .unwrap_or_default();
             let fp_lower = file_path.to_lowercase().replace('\\', "/");
-            let any_match = file_sub.split(',')
-                .map(|t| t.trim().to_lowercase())
-                .filter(|t| !t.is_empty())
+            let any_match = params.file_filter.iter()
+                .map(|t| t.to_lowercase())
                 .any(|needle| {
                     fp_lower.contains(&needle) || basename_lower.contains(&needle)
                 });
@@ -411,9 +416,14 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
         }
     }
 
-    // Extension filter (supports comma-separated extensions)
-    if let Some(ext) = params.ext_filter
-        && !matches_ext_filter(file_path, ext) { return false; }
+    // Extension filter (array form). Empty Vec = no filter; otherwise the
+    // file's extension must match any entry (case-insensitive). We keep
+    // `matches_ext_filter` accepting a comma-joined string for now — file
+    // extensions never contain `,`, so the round-trip is lossless.
+    if !params.ext_filter.is_empty() {
+        let joined = params.ext_filter.join(",");
+        if !matches_ext_filter(file_path, &joined) { return false; }
+    }
 
     // Pre-compute lowercased + normalized path once for all exclude checks
     let needs_lower = !params.exclude_patterns.is_empty() || !params.exclude_lower.is_empty();
@@ -439,10 +449,19 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
 /// from the main handler to reduce its cognitive complexity.
 #[derive(Debug)]
 struct ParsedGrepArgs {
-    terms_str: String,
+    /// Search terms, post-validation. Each entry is one term taken verbatim
+    /// from the `terms` array (trimmed; empty entries dropped). Empty Vec
+    /// means no terms supplied — only valid when `lineRegex=true` (which
+    /// drives off this same array).
+    terms: Vec<String>,
     dir_filter: Option<String>,
-    ext_filter: Option<String>,
-    file_filter: Option<String>,
+    /// File extension filter. Empty = no filter; otherwise each entry is one
+    /// extension (no leading dot).
+    ext_filter: Vec<String>,
+    /// File path/basename substring filter (case-insensitive OR). Empty = no
+    /// filter. Each entry is one substring; literal `,` inside an entry is
+    /// preserved verbatim.
+    file_filter: Vec<String>,
     /// When `Some(path)`, the request was `dir=<file>` (auto-converted) and
     /// only that exact file (full normalized LOGICAL path) should match.
     /// Closes the nested-basename leak (`<parent>/sub/Service.cs` was previously
@@ -462,12 +481,6 @@ struct ParsedGrepArgs {
     /// non-token characters). Mutually exclusive with `phrase`. Implies
     /// `regex=true` (validated in `parse_grep_args`). Auto-disables `substring`.
     use_line_regex: bool,
-    /// Explicit array of line-regex patterns. When `Some`, takes precedence
-    /// over `terms` for the `lineRegex` mode and bypasses comma-splitting,
-    /// so a single pattern can contain literal `,` (e.g. CSV-shape regex
-    /// `^[^,]+,[^,]+$`, log prefix `^ERROR,WARN:`). Ignored outside
-    /// `lineRegex`. Mutually exclusive with `terms` (validated upstream).
-    line_patterns: Option<Vec<String>>,
     context_lines: usize,
     show_lines: bool,
     max_results: usize,
@@ -488,37 +501,6 @@ struct ParsedGrepArgs {
 /// Parse and validate all grep parameters from JSON args.
 /// Returns `Ok(ParsedGrepArgs)` on success, `Err(ToolCallResult)` on validation error.
 fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, ToolCallResult> {
-    // `linePatterns` is the explicit array form for `lineRegex` mode and lets
-    // a single pattern contain literal `,` (CSV regex, log prefixes, etc.).
-    // Parse it first so the `terms` validation below knows whether `terms` is
-    // required for this call.
-    let line_patterns: Option<Vec<String>> = match args.get("linePatterns") {
-        Some(Value::Array(arr)) => {
-            let mut out: Vec<String> = Vec::with_capacity(arr.len());
-            for (i, item) in arr.iter().enumerate() {
-                match item.as_str() {
-                    Some(s) if !s.is_empty() => out.push(s.to_string()),
-                    Some(_) => return Err(ToolCallResult::error(format!(
-                        "Parameter 'linePatterns[{i}]' must be a non-empty string."
-                    ))),
-                    None => return Err(ToolCallResult::error(format!(
-                        "Parameter 'linePatterns[{i}]' must be a string."
-                    ))),
-                }
-            }
-            if out.is_empty() {
-                return Err(ToolCallResult::error(
-                    "Parameter 'linePatterns' must contain at least one pattern.".to_string(),
-                ));
-            }
-            Some(out)
-        }
-        Some(Value::Null) | None => None,
-        Some(_) => return Err(ToolCallResult::error(
-            "Parameter 'linePatterns' must be an array of strings.".to_string(),
-        )),
-    };
-
     // GREP-015: reject empty/whitespace-only `terms` here instead of letting
     // it propagate into per-mode handlers, where it produces inconsistent
     // failure modes (regex compiles `""` into a match-everything pattern,
@@ -526,36 +508,26 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     // interpret "empty result" as "this code does not exist" — a misleading
     // signal for what is really a malformed query.
     //
-    // Exception: when `linePatterns` is supplied, `terms` is optional — the
-    // line-regex mode reads from the explicit array instead. Mutually
-    // exclusive: passing both is rejected with an actionable hint pointing
-    // at the precise difference (comma is a separator in `terms`, literal
-    // in `linePatterns`).
-    let terms_str = match args.get("terms").and_then(|v| v.as_str()) {
-        Some(t) if !t.trim().is_empty() => {
-            if line_patterns.is_some() {
-                return Err(ToolCallResult::error(
-                    "Parameters 'terms' and 'linePatterns' are mutually exclusive. \
-                     'terms' splits on ',' (multi-pattern OR/AND); 'linePatterns' takes \
-                     each array entry as a single pattern (so a literal ',' inside the \
-                     regex is preserved). Pick one.".to_string(),
-                ));
-            }
-            t.to_string()
-        }
-        Some(_) if line_patterns.is_some() => String::new(),
-        Some(_) => return Err(ToolCallResult::error(
-            "Parameter 'terms' must not be empty. Provide one or more search terms (comma-separated for multi-term).".to_string(),
-        )),
-        None if line_patterns.is_some() => String::new(),
-        None => return Err(ToolCallResult::error("Missing required parameter: terms".to_string())),
+    // `terms` is required unless `lineRegex=true` is also set; the line-regex
+    // mode can drive entirely off non-token patterns where any element of
+    // the array is a valid regex (and an empty array is rejected below in the
+    // `lineRegex` branch).
+    let terms: Vec<String> = match utils::read_string_array(args, "terms") {
+        Ok(v) => v,
+        Err(e) => return Err(ToolCallResult::error(e)),
     };
+    let use_line_regex_peek = args.get("lineRegex").and_then(|v| v.as_bool()).unwrap_or(false);
+    if terms.is_empty() && !use_line_regex_peek {
+        return Err(ToolCallResult::error(
+            "Parameter 'terms' must contain at least one entry. Pass [\"a\",\"b\"] for multi-term search.".to_string(),
+        ));
+    }
 
     // Explicit `file` filter (user-provided). Takes precedence over dir-autoconvert filename.
-    let file_filter: Option<String> = args.get("file")
-        .and_then(|v| v.as_str())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty());
+    let file_filter: Vec<String> = match utils::read_string_array(args, "file") {
+        Ok(v) => v,
+        Err(e) => return Err(ToolCallResult::error(e)),
+    };
     // Set ONLY when the `dir=<file>` auto-convert path fires. Carries the FULL
     // resolved path of the targeted file so `passes_file_filters` can do exact
     // path equality (basename-only would let `<parent>/sub/<name>` leak).
@@ -632,22 +604,14 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         None
     };
 
-    let ext_filter = args.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let ext_filter: Vec<String> = match utils::read_string_array(args, "ext") {
+        Ok(v) => v,
+        Err(e) => return Err(ToolCallResult::error(e)),
+    };
     let mode_and = args.get("mode").and_then(|v| v.as_str()) == Some("and");
     let mut use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_phrase = args.get("phrase").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_line_regex = args.get("lineRegex").and_then(|v| v.as_bool()).unwrap_or(false);
-
-    // `linePatterns` is meaningful only in `lineRegex` mode. Reject the
-    // combination eagerly so a typo doesn't silently fall through to the
-    // token regex / substring branches that ignore the array.
-    if line_patterns.is_some() && !use_line_regex {
-        return Err(ToolCallResult::error(
-            "Parameter 'linePatterns' requires lineRegex=true. \
-             It is only consumed by the line-regex mode; for other modes use 'terms'."
-                .to_string(),
-        ));
-    }
 
     // Validate lineRegex compatibility:
     // - lineRegex implies regex=true (auto-promoted with a note: explicit error
@@ -726,7 +690,7 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     };
 
     Ok(ParsedGrepArgs {
-        terms_str,
+        terms,
         dir_filter,
         ext_filter,
         file_filter,
@@ -737,7 +701,6 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         use_phrase,
         use_substring,
         use_line_regex,
-        line_patterns,
         context_lines,
         show_lines,
         max_results,
@@ -908,14 +871,13 @@ fn build_grep_response(
 /// Only fires when ext filter is explicitly set — avoids noise on generic searches.
 fn inject_grep_ext_hint(
     result: &mut ToolCallResult,
-    ext_filter: &Option<String>,
+    ext_filter: &[String],
     ctx: &HandlerContext,
 ) {
     // Only hint when ext filter is explicitly set
-    let ext_str = match ext_filter {
-        Some(e) => e,
-        None => return,
-    };
+    if ext_filter.is_empty() {
+        return;
+    }
 
     let text = match result.content.first() {
         Some(c) => &c.text,
@@ -939,8 +901,8 @@ fn inject_grep_ext_hint(
         .collect();
 
     // Find non-indexed extensions in the filter
-    let non_indexed: Vec<&str> = ext_str.split(',')
-        .map(|s| s.trim())
+    let non_indexed: Vec<&str> = ext_filter.iter()
+        .map(|s| s.as_str())
         .filter(|e| !e.is_empty() && !server_exts.iter().any(|s| s.eq_ignore_ascii_case(e)))
         .collect();
 
@@ -1003,18 +965,15 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     // --- Substring search mode
     if parsed.use_substring {
-        let mut result = handle_substring_search(ctx, &index, &parsed.terms_str, &grep_params);
+        let mut result = handle_substring_search(ctx, &index, &parsed.terms, &grep_params);
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
         return result;
     }
 
     // --- Phrase search mode
     if parsed.use_phrase {
-        let phrases: Vec<String> = parsed.terms_str
-            .split(',')
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
+        // Each `terms` entry is one phrase, taken verbatim (no comma-split).
+        let phrases: Vec<String> = parsed.terms.clone();
         if phrases.is_empty() {
             return ToolCallResult::error("No search terms provided".to_string());
         }
@@ -1025,26 +984,21 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     // --- Line-based regex mode (supports `^`, `$`, whitespace, non-token chars)
     if parsed.use_line_regex {
-        // Prefer explicit `linePatterns` array (literal-comma-safe). Fall back
-        // to comma-splitting `terms` for back-compat with existing callers.
-        let patterns: Vec<String> = match parsed.line_patterns.clone() {
-            Some(p) => p,
-            None => parsed
-                .terms_str
-                .split(',')
-                .map(|s| s.to_string())
-                .filter(|s| !s.is_empty())
-                .collect(),
-        };
+        // Each `terms` entry is one regex pattern, taken verbatim. Literal
+        // `,` inside an entry is preserved (e.g. CSV-shape regex
+        // `^[^,]+,[^,]+$`, log prefix `^ERROR,WARN:`).
+        let patterns: Vec<String> = parsed.terms.clone();
         let mut result = handle_line_regex_search(ctx, &index, patterns, &grep_params);
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
         return result;
     }
 
     // --- Normal token search
-    let raw_terms: Vec<String> = parsed.terms_str
-        .split(',')
-        .map(|s| s.trim().to_lowercase())
+    // Each `terms` entry is one search term, taken verbatim from the array
+    // (already trimmed, empty entries dropped). Lowercase here for the
+    // tokenizer; user-supplied case is preserved upstream for phrase mode.
+    let raw_terms: Vec<String> = parsed.terms.iter()
+        .map(|s| s.to_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
 
@@ -1081,8 +1035,8 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // Warn when regex=true and pattern uses constructs incompatible with token-based regex.
     // Token regex matches against individual index tokens (alphanumeric+underscore, no whitespace),
     // so anchors `^`/`$` (anchored to token boundaries, not lines) and spaces never match.
-    let pattern_has_spaces = parsed.terms_str.contains(' ');
-    let pattern_has_anchors = parsed.terms_str.contains('^') || parsed.terms_str.contains('$');
+    let pattern_has_spaces = parsed.terms.iter().any(|t| t.contains(' '));
+    let pattern_has_anchors = parsed.terms.iter().any(|t| t.contains('^') || t.contains('$'));
     if parsed.use_regex && (pattern_has_spaces || pattern_has_anchors)
         && let Some(text) = result.content.first_mut().map(|c| &mut c.text)
             && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
@@ -1134,7 +1088,7 @@ fn has_non_token_chars(term: &str) -> bool {
 fn auto_switch_to_phrase_if_needed(
     ctx: &HandlerContext,
     index: &ContentIndex,
-    terms_str: &str,
+    terms: &[String],
     raw_terms: &[String],
     params: &GrepSearchParams,
 ) -> Option<ToolCallResult> {
@@ -1154,11 +1108,8 @@ fn auto_switch_to_phrase_if_needed(
     };
 
     debug!("[substring-trace] {} — auto-switching to phrase mode", reason);
-    let phrases: Vec<String> = terms_str
-        .split(',')
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .collect();
+    // Each `terms` entry is one phrase, taken verbatim (literal-comma-safe).
+    let phrases: Vec<String> = terms.to_vec();
     let mut result = handle_multi_phrase_search(ctx, index, &phrases, params);
     // Inject a note explaining the auto-switch
     if let Some(text) = result.content.first_mut().map(|c| &mut c.text)
@@ -1379,14 +1330,15 @@ fn build_substring_response(
 fn handle_substring_search(
     ctx: &HandlerContext,
     index: &ContentIndex,
-    terms_str: &str,
+    terms: &[String],
     params: &GrepSearchParams,
 ) -> ToolCallResult {
-    // Stage 1: Terms parsing
+    // Stage 1: Terms parsing — lowercase the user-supplied entries (already
+    // trimmed and de-empty'd by `read_string_array`). Substring search runs
+    // against the trigram index whose tokens are lowercased, so we mirror.
     let stage1 = Instant::now();
-    let raw_terms: Vec<String> = terms_str
-        .split(',')
-        .map(|s| s.trim().to_lowercase())
+    let raw_terms: Vec<String> = terms.iter()
+        .map(|s| s.to_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
     debug!("[substring-trace] Terms parsed: {:?} in {:.3}ms", raw_terms, stage1.elapsed().as_secs_f64() * 1000.0);
@@ -1396,7 +1348,7 @@ fn handle_substring_search(
     }
 
     // Auto-switch to phrase mode when terms contain spaces or non-token characters
-    if let Some(result) = auto_switch_to_phrase_if_needed(ctx, index, terms_str, &raw_terms, params) {
+    if let Some(result) = auto_switch_to_phrase_if_needed(ctx, index, terms, &raw_terms, params) {
         return result;
     }
 

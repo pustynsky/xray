@@ -1250,9 +1250,12 @@ pub(crate) fn read_string_array(
             for (i, v) in arr.iter().enumerate() {
                 match v.as_str() {
                     Some(s) => {
-                        let trimmed = s.trim();
-                        if !trimmed.is_empty() {
-                            out.push(trimmed.to_string());
+                        // Skip entirely-whitespace entries, but PRESERVE leading/
+                        // trailing whitespace inside non-empty entries — it is
+                        // significant for regex patterns (e.g. `"^## "` differs
+                        // semantically from `"^##"`).
+                        if !s.trim().is_empty() {
+                            out.push(s.to_string());
                         }
                     }
                     None => {

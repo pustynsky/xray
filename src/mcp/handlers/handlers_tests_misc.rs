@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["policyReminder"].as_str().is_some());
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
@@ -29,7 +29,7 @@ use std::sync::{Arc, RwLock};
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["policyReminder"].as_str().is_some());
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
@@ -46,7 +46,7 @@ fn test_metrics_preserves_handler_search_time() {
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     // searchTimeMs should be present (set by handler)
     let search_time = output["summary"]["searchTimeMs"].as_f64().unwrap();
@@ -136,7 +136,7 @@ fn test_xray_reindex_definitions_has_policy_but_no_next_step_hint() {
     idx.insert("foo".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["test.cs".to_string()], index: idx, total_tokens: 10, extensions: vec!["cs".to_string()], file_token_counts: vec![10], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["foo"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().unwrap() >= 0.0);
 }
@@ -931,7 +931,7 @@ fn test_unresolved_blocks_workspace_dependent_tools() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "test"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
     assert!(result.is_error);
     let text = &result.content[0].text;
     assert!(text.contains("WORKSPACE_UNRESOLVED"), "Should contain WORKSPACE_UNRESOLVED, got: {}", text);
@@ -1079,7 +1079,7 @@ fn test_reindexing_blocks_workspace_dependent_tools() {
         workspace: Arc::new(RwLock::new(ws)),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "test"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("WORKSPACE_REINDEXING"));
 }

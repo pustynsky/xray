@@ -2160,11 +2160,15 @@ fn read_string_array_happy_path() {
 }
 
 #[test]
-fn read_string_array_trims_and_skips_empty() {
+fn read_string_array_skips_empty_preserves_inner_whitespace() {
+    // Whitespace-only entries are skipped (treated as absent), but inner
+    // leading/trailing whitespace inside non-empty entries is PRESERVED —
+    // it is significant for regex patterns (e.g. `"^## "` differs
+    // semantically from `"^##"`).
     let args = json!({ "terms": ["  foo  ", "", "   ", "bar"] });
     assert_eq!(
         read_string_array(&args, "terms").unwrap(),
-        vec!["foo".to_string(), "bar".to_string()]
+        vec!["  foo  ".to_string(), "bar".to_string()]
     );
 }
 

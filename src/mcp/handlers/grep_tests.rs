@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 /// Helper: create GrepSearchParams with given filters.
 fn make_params<'a>(
     dir_filter: &'a Option<String>,
-    ext_filter: &'a Option<String>,
+    ext_filter: &'a [String],
     exclude_dir: &[String],
     exclude: &[String],
 ) -> GrepSearchParams<'a> {
@@ -18,7 +18,7 @@ fn make_params<'a>(
         count_only: false,
         search_start: Instant::now(),
         dir_filter,
-        file_filter: &None,
+        file_filter: &[],
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(exclude_dir),
         exclude_lower: exclude.iter().map(|s| s.to_lowercase()).collect(),
         dir_auto_converted_note: None,
@@ -33,41 +33,41 @@ fn make_params<'a>(
 
 #[test]
 fn test_passes_file_filters_no_filters() {
-    let params = make_params(&None, &None, &[], &[]);
+    let params = make_params(&None, &[], &[], &[]);
     assert!(passes_file_filters("C:/project/src/file.cs", &params));
 }
 
 #[test]
 fn test_passes_file_filters_dir_match() {
     let dir = Some("C:/project/src".to_string());
-    let params = make_params(&dir, &None, &[], &[]);
+    let params = make_params(&dir, &[], &[], &[]);
     assert!(passes_file_filters("C:/project/src/file.cs", &params));
 }
 
 #[test]
 fn test_passes_file_filters_dir_no_match() {
     let dir = Some("C:/project/src".to_string());
-    let params = make_params(&dir, &None, &[], &[]);
+    let params = make_params(&dir, &[], &[], &[]);
     assert!(!passes_file_filters("C:/project/lib/file.cs", &params));
 }
 
 #[test]
 fn test_passes_file_filters_ext_match() {
-    let ext = Some("cs".to_string());
+    let ext = vec!["cs".to_string()];
     let params = make_params(&None, &ext, &[], &[]);
     assert!(passes_file_filters("C:/project/file.cs", &params));
 }
 
 #[test]
 fn test_passes_file_filters_ext_no_match() {
-    let ext = Some("cs".to_string());
+    let ext = vec!["cs".to_string()];
     let params = make_params(&None, &ext, &[], &[]);
     assert!(!passes_file_filters("C:/project/file.xml", &params));
 }
 
 #[test]
 fn test_passes_file_filters_ext_comma_separated() {
-    let ext = Some("cs,sql".to_string());
+    let ext = vec!["cs".to_string(), "sql".to_string()];
     let params = make_params(&None, &ext, &[], &[]);
     assert!(passes_file_filters("C:/project/file.cs", &params));
     assert!(passes_file_filters("C:/project/file.sql", &params));
@@ -77,7 +77,7 @@ fn test_passes_file_filters_ext_comma_separated() {
 #[test]
 fn test_passes_file_filters_exclude_dir() {
     let excl_dir = vec!["test".to_string()];
-    let params = make_params(&None, &None, &excl_dir, &[]);
+    let params = make_params(&None, &[], &excl_dir, &[]);
     assert!(!passes_file_filters("C:/project/test/file.cs", &params));
     assert!(passes_file_filters("C:/project/src/file.cs", &params));
 }
@@ -85,7 +85,7 @@ fn test_passes_file_filters_exclude_dir() {
 #[test]
 fn test_passes_file_filters_exclude_pattern() {
     let excl = vec!["Mock".to_string()];
-    let params = make_params(&None, &None, &[], &excl);
+    let params = make_params(&None, &[], &[], &excl);
     assert!(!passes_file_filters("C:/project/ServiceMock.cs", &params));
     assert!(passes_file_filters("C:/project/Service.cs", &params));
 }
@@ -93,7 +93,7 @@ fn test_passes_file_filters_exclude_pattern() {
 #[test]
 fn test_passes_file_filters_combined() {
     let dir = Some("C:/project/src".to_string());
-    let ext = Some("cs".to_string());
+    let ext = vec!["cs".to_string()];
     let excl_dir = vec!["test".to_string()];
     let excl = vec!["Mock".to_string()];
     let params = make_params(&dir, &ext, &excl_dir, &excl);
@@ -259,9 +259,9 @@ fn test_parse_grep_args_missing_terms() {
 
 #[test]
 fn test_parse_grep_args_basic() {
-    let args = json!({"terms": "hello"});
+    let args = json!({"terms": ["hello"]});
     let result = parse_grep_args(&args, "C:/project").unwrap();
-    assert_eq!(result.terms_str, "hello");
+    assert_eq!(result.terms, vec!["hello".to_string()]);
     assert!(result.use_substring); // default
     assert!(!result.use_regex);
     assert!(!result.use_phrase);
@@ -271,21 +271,21 @@ fn test_parse_grep_args_basic() {
 
 #[test]
 fn test_parse_grep_args_substring_mutually_exclusive_with_regex() {
-    let args = json!({"terms": "hello", "regex": true, "substring": true});
+    let args = json!({"terms": ["hello"], "regex": true, "substring": true});
     let result = parse_grep_args(&args, "C:/project");
     assert!(result.is_err());
 }
 
 #[test]
 fn test_parse_grep_args_substring_mutually_exclusive_with_phrase() {
-    let args = json!({"terms": "hello", "phrase": true, "substring": true});
+    let args = json!({"terms": ["hello"], "phrase": true, "substring": true});
     let result = parse_grep_args(&args, "C:/project");
     assert!(result.is_err());
 }
 
 #[test]
 fn test_parse_grep_args_regex_auto_disables_substring() {
-    let args = json!({"terms": "hello", "regex": true});
+    let args = json!({"terms": ["hello"], "regex": true});
     let result = parse_grep_args(&args, "C:/project").unwrap();
     assert!(!result.use_substring);
     assert!(result.use_regex);
@@ -293,7 +293,7 @@ fn test_parse_grep_args_regex_auto_disables_substring() {
 
 #[test]
 fn test_parse_grep_args_context_lines_enables_show_lines() {
-    let args = json!({"terms": "hello", "contextLines": 3});
+    let args = json!({"terms": ["hello"], "contextLines": 3});
     let result = parse_grep_args(&args, "C:/project").unwrap();
     assert!(result.show_lines);
     assert_eq!(result.context_lines, 3);
@@ -302,7 +302,7 @@ fn test_parse_grep_args_context_lines_enables_show_lines() {
 #[test]
 fn test_parse_grep_args_exclude_lists() {
     let args = json!({
-        "terms": "hello",
+        "terms": ["hello"],
         "excludeDir": ["test", "bin"],
         "exclude": ["mock"]
     });
@@ -315,13 +315,13 @@ fn test_parse_grep_args_exclude_lists() {
 fn test_parse_grep_args_dir_as_file_path_auto_converts_by_heuristic() {
     // Non-existent file path but inside server_dir — detected by looks_like_file_path heuristic.
     // Should auto-convert to parent + exact-file scope (NOT a file= substring filter).
-    let args = json!({"terms": "hello", "dir": "C:/nonexistent/project/src/parser_sql.rs"});
+    let args = json!({"terms": ["hello"], "dir": "C:/nonexistent/project/src/parser_sql.rs"});
     let parsed = parse_grep_args(&args, "C:/nonexistent/project")
         .expect("heuristic file path should auto-convert, not error");
     // file_filter MUST stay None on auto-convert — it's reserved for explicit user
     // `file=` (substring/comma-OR semantics). Auto-convert pins the FULL path via
     // `exact_file_path` so nested duplicates of the same basename can't leak.
-    assert!(parsed.file_filter.is_none(),
+    assert!(parsed.file_filter.is_empty(),
         "auto-convert must not set file_filter (substring path); got: {:?}", parsed.file_filter);
     let exact = parsed.exact_file_path.as_deref()
         .expect("auto-convert must populate exact_file_path with the resolved file path");
@@ -335,9 +335,9 @@ fn test_parse_grep_args_dir_as_file_path_auto_converts_by_heuristic() {
 #[test]
 fn test_parse_grep_args_explicit_file_filter() {
     // User-provided `file` parameter should be captured verbatim.
-    let args = json!({"terms": "hello", "file": "CHANGELOG.md"});
+    let args = json!({"terms": ["hello"], "file": ["CHANGELOG.md"]});
     let parsed = parse_grep_args(&args, "C:/project").unwrap();
-    assert_eq!(parsed.file_filter.as_deref(), Some("CHANGELOG.md"));
+    assert_eq!(parsed.file_filter, vec!["CHANGELOG.md".to_string()]);
     assert!(parsed.dir_auto_converted_note.is_none(),
         "explicit file= should NOT set dir_auto_converted_note");
 }
@@ -352,12 +352,12 @@ fn test_parse_grep_args_explicit_file_wins_over_autoconvert() {
     std::fs::write(&file, "x").unwrap();
     let server_dir = tmp.path().to_string_lossy().to_string();
     let args = json!({
-        "terms": "hello",
+        "terms": ["hello"],
         "dir": file.to_string_lossy().to_string(),
-        "file": "ExplicitName"
+        "file": ["ExplicitName"]
     });
     let parsed = parse_grep_args(&args, &server_dir).unwrap();
-    assert_eq!(parsed.file_filter.as_deref(), Some("ExplicitName"),
+    assert_eq!(parsed.file_filter, vec!["ExplicitName".to_string()],
         "explicit file= must NOT be overwritten by auto-convert");
     assert!(parsed.exact_file_path.is_some(),
         "auto-convert must still pin exact_file_path even when explicit file= is provided");
@@ -374,10 +374,10 @@ fn test_parse_grep_args_dir_as_real_file_auto_converts() {
     std::fs::write(&file, "content").unwrap();
     let server_dir = tmp.path().to_string_lossy().to_string();
     let file_str = file.to_string_lossy().to_string();
-    let args = json!({"terms": "hello", "dir": file_str});
+    let args = json!({"terms": ["hello"], "dir": file_str});
     let parsed = parse_grep_args(&args, &server_dir)
         .expect("file path in dir= should auto-convert, not error");
-    assert!(parsed.file_filter.is_none(),
+    assert!(parsed.file_filter.is_empty(),
         "auto-convert must not set file_filter (that's substring); got: {:?}", parsed.file_filter);
     let exact = parsed.exact_file_path.as_deref()
         .expect("exact_file_path should be populated from the resolved file");
@@ -399,7 +399,7 @@ fn test_parse_grep_args_dir_as_directory_accepted() {
     std::fs::create_dir_all(&sub).unwrap();
     let server_dir = tmp.path().to_string_lossy().to_string();
     let sub_str = sub.to_string_lossy().to_string();
-    let args = json!({"terms": "hello", "dir": sub_str});
+    let args = json!({"terms": ["hello"], "dir": sub_str});
     let result = parse_grep_args(&args, &server_dir);
     assert!(result.is_ok(), "Directory as dir= should be accepted, got: {:?}", result);
 }
@@ -442,7 +442,7 @@ fn test_score_normal_token_search_basic() {
         Posting { file_id: 1, lines: vec![3] },
     ]);
 
-    let params = make_params(&None, &None, &[], &[]);
+    let params = make_params(&None, &[], &[], &[]);
     let terms = vec!["hello".to_string()];
     let scores = score_normal_token_search(&terms, &index, &params);
     assert_eq!(scores.len(), 2);
@@ -455,7 +455,7 @@ fn test_score_normal_token_search_basic() {
 #[test]
 fn test_score_normal_token_search_no_match() {
     let index = ContentIndex::default();
-    let params = make_params(&None, &None, &[], &[]);
+    let params = make_params(&None, &[], &[], &[]);
     let terms = vec!["nonexistent".to_string()];
     let scores = score_normal_token_search(&terms, &index, &params);
     assert!(scores.is_empty());
@@ -489,7 +489,7 @@ fn test_build_grep_response_count_only() {
     let ctx = HandlerContext::default();
     let params = GrepSearchParams {
         count_only: true,
-        ..make_params(&None, &None, &[], &[])
+        ..make_params(&None, &[], &[], &[])
     };
 
     let results = vec![FileScoreEntry {
@@ -514,7 +514,7 @@ fn test_build_grep_response_count_only() {
 fn test_build_grep_response_with_files() {
     let index = ContentIndex::default();
     let ctx = HandlerContext::default();
-    let params = make_params(&None, &None, &[], &[]);
+    let params = make_params(&None, &[], &[], &[]);
 
     let results = vec![FileScoreEntry {
         file_path: "test.cs".to_string(),
@@ -539,20 +539,23 @@ fn test_build_grep_response_with_files() {
 
 #[test]
 fn test_parse_grep_args_rejects_empty_terms_grep015() {
-    let args = json!({"terms": ""});
+    let args = json!({"terms": []});
     let err = parse_grep_args(&args, "C:/project").unwrap_err();
     let err_str = format!("{:?}", err);
-    assert!(err_str.contains("must not be empty"), "{}", err_str);
+    assert!(err_str.contains("at least one entry") || err_str.contains("must not be empty"),
+        "empty array should be rejected: {}", err_str);
 
-    let args = json!({"terms": "   "});
+    // Array of only-whitespace entries normalises to empty after trim/skip.
+    let args = json!({"terms": ["", "   "]});
     let err = parse_grep_args(&args, "C:/project").unwrap_err();
     let err_str = format!("{:?}", err);
-    assert!(err_str.contains("must not be empty"), "{}", err_str);
+    assert!(err_str.contains("at least one entry") || err_str.contains("must not be empty"),
+        "all-whitespace entries should be rejected: {}", err_str);
 }
 
 #[test]
 fn test_parse_grep_args_rejects_oversized_max_results_grep007() {
-    let args = json!({"terms": "hello", "maxResults": 10_000_001u64});
+    let args = json!({"terms": ["hello"], "maxResults": 10_000_001u64});
     let err = parse_grep_args(&args, "C:/project").unwrap_err();
     let err_str = format!("{:?}", err);
     assert!(err_str.contains("maxResults must be 0..=10000"), "{}", err_str);
@@ -560,7 +563,7 @@ fn test_parse_grep_args_rejects_oversized_max_results_grep007() {
 
 #[test]
 fn test_parse_grep_args_rejects_oversized_context_lines_grep007() {
-    let args = json!({"terms": "hello", "contextLines": 1_000_000u64});
+    let args = json!({"terms": ["hello"], "contextLines": 1_000_000u64});
     let err = parse_grep_args(&args, "C:/project").unwrap_err();
     let err_str = format!("{:?}", err);
     assert!(err_str.contains("contextLines must be 0..=50"), "{}", err_str);
@@ -568,7 +571,7 @@ fn test_parse_grep_args_rejects_oversized_context_lines_grep007() {
 
 #[test]
 fn test_parse_grep_args_accepts_max_results_at_cap_grep007() {
-    let args = json!({"terms": "hello", "maxResults": 10_000u64});
+    let args = json!({"terms": ["hello"], "maxResults": 10_000u64});
     let parsed = parse_grep_args(&args, "C:/project").unwrap();
     assert_eq!(parsed.max_results, 10_000);
 }

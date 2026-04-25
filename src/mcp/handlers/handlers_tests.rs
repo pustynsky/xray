@@ -159,13 +159,13 @@ fn test_dispatch_grep_missing_terms() {
     let ctx = make_empty_ctx();
     let result = dispatch_tool(&ctx, "xray_grep", &json!({}));
     assert!(result.is_error);
-    assert!(result.content[0].text.contains("Missing required parameter: terms"));
+    assert!(result.content[0].text.contains("must contain at least one entry"));
 }
 
 #[test]
 fn test_dispatch_grep_empty_index() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 0);
@@ -182,7 +182,7 @@ fn test_dispatch_grep_unknown_arg_warning_in_summary() {
     let result = dispatch_tool(
         &ctx,
         "xray_grep",
-        &json!({"terms": "HttpClient", "isRegexp": true}),
+        &json!({"terms": ["HttpClient"], "isRegexp": true}),
     );
     assert!(!result.is_error, "default mode should not hard-fail on unknown arg");
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -204,7 +204,7 @@ fn test_dispatch_grep_unknown_arg_strict_mode_hard_errors() {
     let result = dispatch_tool(
         &ctx,
         "xray_grep",
-        &json!({"terms": "HttpClient", "includePattern": "src/**"}),
+        &json!({"terms": ["HttpClient"], "includePattern": "src/**"}),
     );
     unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
     assert!(result.is_error, "strict mode should hard-error on unknown arg");
@@ -237,7 +237,7 @@ fn test_dispatch_grep_with_results() {
         index: Arc::new(RwLock::new(index)),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient", "substring": false}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"], "substring": false}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -365,7 +365,7 @@ fn test_dispatch_grep_while_content_index_building() {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["foo"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("being built"),
         "Expected 'being built' message, got: {}", result.content[0].text);
