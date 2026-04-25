@@ -46,7 +46,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
 fn test_contains_line_finds_method() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "QueryService",
+        "file": ["QueryService"],
         "containsLine": 391
     }));
     assert!(!result.is_error);
@@ -61,7 +61,7 @@ fn test_contains_line_finds_method() {
 fn test_contains_line_returns_parent() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "QueryService",
+        "file": ["QueryService"],
         "containsLine": 800
     }));
     assert!(!result.is_error);
@@ -76,7 +76,7 @@ fn test_contains_line_returns_parent() {
 fn test_contains_line_no_match() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "QueryService",
+        "file": ["QueryService"],
         "containsLine": 999
     }));
     assert!(!result.is_error);
@@ -91,9 +91,9 @@ fn test_contains_line_with_kind_filter() {
     let ctx = make_ctx_with_defs();
     // Line 800 is inside both QueryService class and QueryInternalAsync method
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "QueryService",
+        "file": ["QueryService"],
         "containsLine": 800,
-        "kind": "method"
+        "kind": ["method"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -111,9 +111,9 @@ fn test_contains_line_with_parent_filter() {
     // A2 fix: containsLine should respect parent filter
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "QueryService",
+        "file": ["QueryService"],
         "containsLine": 800,
-        "parent": "QueryService"
+        "parent": ["QueryService"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -149,7 +149,7 @@ fn test_find_containing_method_none() {
 fn test_xray_definitions_regex_name_filter() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "Execute.*",
+        "name": ["Execute.*"],
         "regex": true
     }));
     assert!(!result.is_error, "xray_definitions regex should not error: {}", result.content[0].text);
@@ -304,9 +304,9 @@ fn test_xray_definitions_combined_name_parent_kind_filter() {
 
     // Filter: name=ExecuteQueryAsync, parent=ResilientClient, kind=method
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "ExecuteQueryAsync",
-        "parent": "ResilientClient",
-        "kind": "method"
+        "name": ["ExecuteQueryAsync"],
+        "parent": ["ResilientClient"],
+        "kind": ["method"]
     }));
     assert!(!result.is_error, "Combined filter should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -322,9 +322,9 @@ fn test_xray_definitions_combined_name_parent_kind_filter() {
 
     // Verify: same name+kind but different parent should NOT match
     let result2 = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "ExecuteQueryAsync",
-        "parent": "NonExistentClass",
-        "kind": "method"
+        "name": ["ExecuteQueryAsync"],
+        "parent": ["NonExistentClass"],
+        "kind": ["method"]
     }));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
@@ -397,7 +397,7 @@ fn test_xray_definitions_struct_kind() {
     };
 
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "struct"
+        "kind": ["struct"]
     }));
     assert!(!result.is_error, "kind=struct should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -594,7 +594,7 @@ fn test_xray_definitions_enum_member_kind() {
 
     // Filter by kind=enumMember
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "enumMember"
+        "kind": ["enumMember"]
     }));
     assert!(!result.is_error, "kind=enumMember should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -622,7 +622,7 @@ fn test_xray_definitions_enum_member_kind() {
 
 #[test] fn test_xray_definitions_include_body() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "DoWork", "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["DoWork"], "includeBody": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
@@ -635,7 +635,7 @@ fn test_xray_definitions_enum_member_kind() {
 
 #[test] fn test_xray_definitions_include_body_default_false() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "DoWork"}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["DoWork"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["definitions"].as_array().unwrap()[0].get("body").is_none());
     cleanup_tmp(&tmp);
@@ -646,7 +646,7 @@ fn test_xray_definitions_enum_member_kind() {
     // DoWork has 6 body lines starting at line 3
     // Request only lines 5-6 (middle of the method)
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "DoWork",
+        "name": ["DoWork"],
         "includeBody": true,
         "bodyLineStart": 5,
         "bodyLineEnd": 6
@@ -666,7 +666,7 @@ fn test_xray_definitions_enum_member_kind() {
     // DoWork method is in MyService.cs at lines 3-8
     // Use containsLine to find the method, then bodyLineStart/End to narrow the body
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "MyService.cs",
+        "file": ["MyService.cs"],
         "containsLine": 5,
         "includeBody": true,
         "bodyLineStart": 5,
@@ -689,7 +689,7 @@ fn test_xray_definitions_enum_member_kind() {
 
 #[test] fn test_xray_definitions_max_body_lines_truncation() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "Process", "includeBody": true, "maxBodyLines": 5}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["Process"], "includeBody": true, "maxBodyLines": 5}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
     assert_eq!(defs[0]["body"].as_array().unwrap().len(), 5);
@@ -699,7 +699,7 @@ fn test_xray_definitions_enum_member_kind() {
 
 #[test] fn test_xray_definitions_max_total_body_lines_budget() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "DoWork,Process", "includeBody": true, "maxTotalBodyLines": 10}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["DoWork","Process"], "includeBody": true, "maxTotalBodyLines": 10}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let total = output["summary"]["totalBodyLinesReturned"].as_u64().unwrap();
     assert!(total <= 10);
@@ -708,7 +708,7 @@ fn test_xray_definitions_enum_member_kind() {
 
 #[test] fn test_xray_definitions_contains_line_with_body() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"file": "MyService", "containsLine": 5, "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"file": ["MyService"], "containsLine": 5, "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["containingDefinitions"].as_array().unwrap();
     assert_eq!(defs[0]["name"], "DoWork");
@@ -723,7 +723,7 @@ fn test_xray_definitions_enum_member_kind() {
     // MyService.cs: MyService class (1-15), DoWork method (3-8)
     // Line 5 is inside DoWork → both match, DoWork is innermost
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "MyService.cs",
+        "file": ["MyService.cs"],
         "containsLine": 5,
         "includeBody": true
     }));
@@ -751,7 +751,7 @@ fn test_xray_definitions_enum_member_kind() {
     // bodyLineStart/bodyLineEnd should apply only to the innermost definition
     let (ctx, tmp) = make_ctx_with_real_files();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "MyService.cs",
+        "file": ["MyService.cs"],
         "containsLine": 5,
         "includeBody": true,
         "bodyLineStart": 4,
@@ -781,7 +781,7 @@ fn test_xray_definitions_enum_member_kind() {
     // BigFile.cs: BigClass (1-25), Process (5-24)
     // Line 2 is inside BigClass but NOT inside Process → only BigClass matches (single match)
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "BigFile.cs",
+        "file": ["BigFile.cs"],
         "containsLine": 2,
         "includeBody": true
     }));
@@ -803,7 +803,7 @@ fn test_xray_definitions_enum_member_kind() {
     // BigFile.cs: BigClass has 25 lines, Process has 20 lines. Total bodies = 25 + 20 = 45 lines
     // But maxTotalBodyLines=5 → truncation occurs
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "parent": "BigClass",
+        "parent": ["BigClass"],
         "includeBody": true,
         "maxTotalBodyLines": 5
     }));
@@ -825,7 +825,7 @@ fn test_xray_definitions_enum_member_kind() {
     let (ctx, tmp) = make_ctx_with_real_files();
     // DoWork method is 6 lines (3-8). maxTotalBodyLines=500 → no truncation
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "DoWork",
+        "name": ["DoWork"],
         "includeBody": true,
         "maxTotalBodyLines": 500
     }));
@@ -844,7 +844,7 @@ fn test_xray_definitions_enum_member_kind() {
     let (ctx, tmp) = make_ctx_with_real_files();
     // BigFile.cs: Process method (lines 5-24) = 20 lines. maxTotalBodyLines=10 → truncated
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "Process",
+        "name": ["Process"],
         "includeBody": true,
         "maxTotalBodyLines": 10
     }));
@@ -860,7 +860,7 @@ fn test_xray_definitions_enum_member_kind() {
 
 #[test] fn test_xray_definitions_file_cache() {
     let (ctx, tmp) = make_ctx_with_real_files();
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"parent": "MyService", "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"parent": ["MyService"], "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = output["definitions"].as_array().unwrap();
     for def in defs { assert!(def.get("body").is_some()); }
@@ -880,7 +880,7 @@ fn test_xray_definitions_enum_member_kind() {
     let di = DefinitionIndex { root: tmp.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![fs.clone()], definitions, name_index: ni, kind_index: ki, file_index: fi, ..Default::default() };
     let ci = ContentIndex { root: tmp.to_string_lossy().to_string(), files: vec![fs], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "StaleClass", "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["StaleClass"], "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["definitions"].as_array().unwrap()[0].get("bodyWarning").is_some());
     let _ = std::fs::remove_dir_all(&tmp);
@@ -894,7 +894,7 @@ fn test_xray_definitions_enum_member_kind() {
     let di = DefinitionIndex { root: ".".to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![ne.clone()], definitions, name_index: ni, kind_index: ki, file_index: fi, ..Default::default() };
     let ci = ContentIndex { root: ".".to_string(), files: vec![ne], extensions: vec!["cs".to_string()], file_token_counts: vec![0], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(ci)), def_index: Some(Arc::new(RwLock::new(di))), ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "GhostClass", "includeBody": true}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["GhostClass"], "includeBody": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["definitions"].as_array().unwrap()[0]["bodyError"], "failed to read file");
 }
@@ -1031,7 +1031,7 @@ fn test_xray_definitions_file_filter_forward_slash() {
     // T77: file filter with forward slashes should match backslash-stored paths
     let ctx = make_ctx_with_backslash_paths();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "src/Services/UserService"
+        "file": ["src/Services/UserService"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1044,7 +1044,7 @@ fn test_xray_definitions_file_filter_backslash() {
     // T77: file filter with backslashes should also still work
     let ctx = make_ctx_with_backslash_paths();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": r"src\Services\UserService"
+        "file": [r"src\Services\UserService"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1057,7 +1057,7 @@ fn test_xray_definitions_file_filter_mixed_separators() {
     // T77: mixed separators should work
     let ctx = make_ctx_with_backslash_paths();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": r"src/Services\UserService"
+        "file": [r"src/Services\UserService"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1070,7 +1070,7 @@ fn test_xray_definitions_file_filter_no_match() {
     // Sanity check: non-matching file filter returns 0
     let ctx = make_ctx_with_backslash_paths();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "src/NonExistent/Path"
+        "file": ["src/NonExistent/Path"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1083,7 +1083,7 @@ fn test_xray_definitions_contains_line_forward_slash() {
     // T77: containsLine with forward-slash file filter should work
     let ctx = make_ctx_with_backslash_paths();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "src/Services/UserService",
+        "file": ["src/Services/UserService"],
         "containsLine": 15
     }));
     assert!(!result.is_error);
@@ -1100,7 +1100,7 @@ fn test_xray_definitions_contains_line_backslash() {
     // T77: containsLine with backslash file filter should also work
     let ctx = make_ctx_with_backslash_paths();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": r"src\Services\UserService",
+        "file": [r"src\Services\UserService"],
         "containsLine": 15
     }));
     assert!(!result.is_error);
@@ -1114,7 +1114,7 @@ fn test_xray_definitions_contains_line_mixed_separators() {
     // T77: containsLine with mixed separators should work
     let ctx = make_ctx_with_backslash_paths();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": r"src/Services\UserService",
+        "file": [r"src/Services\UserService"],
         "containsLine": 15
     }));
     assert!(!result.is_error);
@@ -1130,8 +1130,8 @@ fn test_xray_definitions_comma_separated_name_filter() {
 
     // Search for multiple names at once: ResilientClient,QueryService,ProxyClient
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "ResilientClient,QueryService,ProxyClient",
-        "kind": "class"
+        "name": ["ResilientClient","QueryService","ProxyClient"],
+        "kind": ["class"]
     }));
     assert!(!result.is_error, "Comma-separated name filter should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1159,8 +1159,8 @@ fn test_xray_definitions_comma_separated_name_partial_match() {
     let ctx = make_ctx_with_defs();
 
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "ResilientClient,NonExistentClass123,QueryService",
-        "kind": "class"
+        "name": ["ResilientClient","NonExistentClass123","QueryService"],
+        "kind": ["class"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1181,8 +1181,8 @@ fn test_xray_definitions_case_insensitive_name() {
     let ctx = make_ctx_with_defs();
 
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "resilientclient",
-        "kind": "class"
+        "name": ["resilientclient"],
+        "kind": ["class"]
     }));
     assert!(!result.is_error, "Case-insensitive name search should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1199,8 +1199,8 @@ fn test_xray_definitions_case_insensitive_name_mixed() {
     let ctx = make_ctx_with_defs();
 
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "QUERYSERVICE",
-        "kind": "class"
+        "name": ["QUERYSERVICE"],
+        "kind": ["class"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1219,7 +1219,7 @@ fn test_contains_line_outside_any_definition() {
     let ctx = make_ctx_with_defs();
 
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "ResilientClient",
+        "file": ["ResilientClient"],
         "containsLine": 301
     }));
     assert!(!result.is_error, "containsLine=301 should not error");
@@ -1236,7 +1236,7 @@ fn test_contains_line_inside_class_but_outside_method() {
     let ctx = make_ctx_with_defs();
 
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "ResilientClient",
+        "file": ["ResilientClient"],
         "containsLine": 270
     }));
     assert!(!result.is_error, "containsLine=270 should not error");
@@ -1261,10 +1261,10 @@ fn test_xray_definitions_empty_intersection_all_valid_params() {
     let ctx = make_ctx_with_defs();
 
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "ExecuteQueryAsync",
-        "kind": "method",
-        "file": "NonExistentPath",
-        "parent": "NonExistentClass"
+        "name": ["ExecuteQueryAsync"],
+        "kind": ["method"],
+        "file": ["NonExistentPath"],
+        "parent": ["NonExistentClass"]
     }));
     assert!(!result.is_error, "Empty intersection should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1350,7 +1350,7 @@ fn test_xray_definitions_sort_by_cognitive_complexity() {
 
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "sortBy": "cognitiveComplexity",
-        "kind": "method",
+        "kind": ["method"],
         "maxResults": 3
     }));
     assert!(!result.is_error, "sortBy should not error: {}", result.content[0].text);

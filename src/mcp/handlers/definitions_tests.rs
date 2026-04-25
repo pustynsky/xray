@@ -214,8 +214,8 @@ fn test_parent_ranking_only_active_with_parent_filter() {
 fn test_file_filter_comma_separated_matches_multiple_files() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "file": "ResilientClient.cs,ProxyClient.cs",
-        "kind": "method"
+        "file": ["ResilientClient.cs","ProxyClient.cs"],
+        "kind": ["method"]
     }));
     assert!(!result.is_error, "should not error: {:?}", result.content[0].text);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -234,8 +234,8 @@ fn test_file_filter_comma_separated_matches_multiple_files() {
 fn test_file_filter_single_value_still_works() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "file": "QueryService.cs",
-        "kind": "method"
+        "file": ["QueryService.cs"],
+        "kind": ["method"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -251,7 +251,7 @@ fn test_file_filter_single_value_still_works() {
 fn test_file_filter_comma_separated_no_match_returns_empty() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "file": "NonExistent.cs,AlsoMissing.cs"
+        "file": ["NonExistent.cs","AlsoMissing.cs"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -265,8 +265,8 @@ fn test_file_filter_comma_separated_no_match_returns_empty() {
 fn test_parent_filter_comma_separated_matches_multiple_classes() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "parent": "ResilientClient,ProxyClient",
-        "kind": "method"
+        "parent": ["ResilientClient","ProxyClient"],
+        "kind": ["method"]
     }));
     assert!(!result.is_error, "should not error: {:?}", result.content[0].text);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -285,8 +285,8 @@ fn test_parent_filter_comma_separated_matches_multiple_classes() {
 fn test_parent_filter_single_value_still_works() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "parent": "QueryService",
-        "kind": "method"
+        "parent": ["QueryService"],
+        "kind": ["method"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -302,7 +302,7 @@ fn test_parent_filter_single_value_still_works() {
 fn test_parent_filter_comma_separated_no_match_returns_empty() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "parent": "NonExistentClass,AlsoMissing"
+        "parent": ["NonExistentClass","AlsoMissing"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -831,16 +831,21 @@ fn test_base_type_transitive_hint_for_large_hierarchy() {
 }
 
 #[test]
-fn test_parent_filter_comma_with_spaces_trimmed() {
+fn test_parent_filter_multi_entry_array_matches_both() {
+    // Post 2026-04-25 array migration: each entry is one parent class; multi-entry
+    // array means OR. Replaces the legacy `parent: " A , B "` whitespace-trimming
+    // test — array-form has no separator, so trimming around `,` no longer applies.
+    // (Intra-element whitespace is now PRESERVED by `read_string_array`; that is
+    // covered by `read_string_array_skips_empty_preserves_inner_whitespace`.)
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "parent": " ResilientClient , ProxyClient ",
-        "kind": "method"
+        "parent": ["ResilientClient","ProxyClient"],
+        "kind": ["method"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = v["definitions"].as_array().unwrap();
-    assert!(defs.len() >= 2, "spaces should be trimmed, still match both classes");
+    assert!(defs.len() >= 2, "multi-entry parent array should match methods of both parent classes");
 }
 
 // ─── termBreakdown tests ──────────────────────────────────────────
@@ -849,7 +854,7 @@ fn test_parent_filter_comma_with_spaces_trimmed() {
 fn test_term_breakdown_multi_term_shows_per_term_counts() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "name": "QueryService,ResilientClient"
+        "name": ["QueryService","ResilientClient"]
     }));
     assert!(!result.is_error, "should not error: {:?}", result.content[0].text);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -871,7 +876,7 @@ fn test_term_breakdown_multi_term_shows_per_term_counts() {
 fn test_term_breakdown_single_term_not_present() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "name": "QueryService"
+        "name": ["QueryService"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -883,7 +888,7 @@ fn test_term_breakdown_single_term_not_present() {
 fn test_term_breakdown_regex_not_present() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "name": "Query.*",
+        "name": ["Query.*"],
         "regex": true
     }));
     assert!(!result.is_error);
@@ -896,7 +901,7 @@ fn test_term_breakdown_regex_not_present() {
 fn test_term_breakdown_no_name_filter_not_present() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "kind": "class"
+        "kind": ["class"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -908,7 +913,7 @@ fn test_term_breakdown_no_name_filter_not_present() {
 fn test_term_breakdown_with_zero_match_term() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "name": "QueryService,NonExistentXyzZzz"
+        "name": ["QueryService","NonExistentXyzZzz"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -923,7 +928,7 @@ fn test_term_breakdown_with_zero_match_term() {
 fn test_term_breakdown_counts_are_pre_truncation() {
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "name": "QueryService,ResilientClient",
+        "name": ["QueryService","ResilientClient"],
         "maxResults": 1
     }));
     assert!(!result.is_error);
@@ -969,14 +974,15 @@ fn test_parse_args_empty_returns_defaults() {
 
 #[test]
 fn test_parse_args_name_filter_empty_string_is_none() {
-    let args = json!({"name": ""});
+    // Migration 2026-04-25: empty array (or omitted) means "no filter".
+    let args = json!({"name": []});
     let parsed = parse_definition_args(&args).unwrap();
-    assert!(parsed.name_filter.is_none(), "empty name should be treated as None");
+    assert!(parsed.name_filter.is_none(), "empty name array should be treated as None");
 }
 
 #[test]
 fn test_parse_args_name_filter_non_empty() {
-    let args = json!({"name": "UserService"});
+    let args = json!({"name": ["UserService"]});
     let parsed = parse_definition_args(&args).unwrap();
     assert_eq!(parsed.name_filter, Some("UserService".to_string()));
 }
@@ -1152,7 +1158,7 @@ fn test_collect_candidates_no_filters_returns_all() {
 #[test]
 fn test_collect_candidates_kind_filter() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "class"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["class"]})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     assert_eq!(candidates.len(), 2, "kind=class → 2 classes");
     for &idx in &candidates {
@@ -1163,7 +1169,7 @@ fn test_collect_candidates_kind_filter() {
 #[test]
 fn test_collect_candidates_name_substring() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "Service"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["Service"]})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     assert_eq!(candidates.len(), 2, "name=Service → UserService + OrderService");
 }
@@ -1171,7 +1177,7 @@ fn test_collect_candidates_name_substring() {
 #[test]
 fn test_collect_candidates_name_multi_term() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "UserService,GetOrder"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["UserService","GetOrder"]})).unwrap();
     let (candidates, def_to_term) = collect_candidates(&index, &args).unwrap();
     assert_eq!(candidates.len(), 2, "name=UserService,GetOrder → 2 matches");
     // Check term mapping
@@ -1181,7 +1187,7 @@ fn test_collect_candidates_name_multi_term() {
 #[test]
 fn test_collect_candidates_kind_and_name_intersection() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "method", "name": "GetUser"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["method"], "name": ["GetUser"]})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     assert_eq!(candidates.len(), 1, "kind=method + name=GetUser → 1 match");
     assert_eq!(index.definitions[candidates[0] as usize].name, "GetUser");
@@ -1189,10 +1195,14 @@ fn test_collect_candidates_kind_and_name_intersection() {
 
 #[test]
 fn test_collect_candidates_invalid_kind_returns_error() {
-    let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "nonexistent"})).unwrap();
-    let result = collect_candidates(&index, &args);
-    assert!(result.is_err(), "Invalid kind should return error");
+    // After 2026-04-25 array migration, kind validation happens at parse time
+    // (closed enum via JSON-Schema-style read_kind_array), not at collect time.
+    // The test now asserts the parse error directly.
+    let result = parse_definition_args(&json!({"kind": ["nonexistent"]}));
+    assert!(result.is_err(), "Invalid kind should return parse error");
+    let err = result.unwrap_err();
+    assert!(err.contains("unknown") && err.contains("nonexistent"),
+        "error should name the bad value: {err}");
 }
 
 #[test]
@@ -1207,7 +1217,7 @@ fn test_collect_candidates_attribute_filter() {
 #[test]
 fn test_collect_candidates_regex_name() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "Get.*", "regex": true})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["Get.*"], "regex": true})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     assert_eq!(candidates.len(), 2, "regex Get.* → GetUser + GetOrder");
 }
@@ -1218,7 +1228,7 @@ fn test_collect_candidates_regex_name() {
 fn test_apply_entry_filters_file_filter() {
     let index = make_test_def_index();
     let candidates: Vec<u32> = (0..4).collect();
-    let args = parse_definition_args(&json!({"file": "UserService.cs"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["UserService.cs"]})).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
     assert_eq!(results.len(), 2, "file=UserService.cs → 2 defs in that file");
     for (_, def) in &results {
@@ -1230,7 +1240,7 @@ fn test_apply_entry_filters_file_filter() {
 fn test_apply_entry_filters_parent_filter() {
     let index = make_test_def_index();
     let candidates: Vec<u32> = (0..4).collect();
-    let args = parse_definition_args(&json!({"parent": "UserService"})).unwrap();
+    let args = parse_definition_args(&json!({"parent": ["UserService"]})).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
     assert_eq!(results.len(), 1, "parent=UserService → 1 method");
     assert_eq!(results[0].1.name, "GetUser");
@@ -1305,7 +1315,7 @@ fn test_apply_entry_filters_exclude_dir() {
 fn test_apply_entry_filters_comma_separated_file() {
     let index = make_test_def_index();
     let candidates: Vec<u32> = (0..4).collect();
-    let args = parse_definition_args(&json!({"file": "UserService.cs,OrderService.cs"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["UserService.cs","OrderService.cs"]})).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
     assert_eq!(results.len(), 4, "both files → all 4 defs");
 }
@@ -1314,7 +1324,7 @@ fn test_apply_entry_filters_comma_separated_file() {
 fn test_apply_entry_filters_parent_no_match_returns_empty() {
     let index = make_test_def_index();
     let candidates: Vec<u32> = (0..4).collect();
-    let args = parse_definition_args(&json!({"parent": "NonExistentClass"})).unwrap();
+    let args = parse_definition_args(&json!({"parent": ["NonExistentClass"]})).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
     assert_eq!(results.len(), 0);
 }
@@ -1369,7 +1379,7 @@ fn test_apply_stats_filters_sort_by_lines_no_stats_needed() {
 fn test_compute_term_breakdown_single_term_returns_none() {
     let results: Vec<(u32, &DefinitionEntry)> = vec![];
     let def_to_term = HashMap::new();
-    let args = parse_definition_args(&json!({"name": "UserService"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["UserService"]})).unwrap();
     let breakdown = compute_term_breakdown(&results, &def_to_term, &args);
     assert!(breakdown.is_none(), "Single term → no breakdown");
 }
@@ -1387,7 +1397,7 @@ fn test_compute_term_breakdown_no_name_returns_none() {
 fn test_compute_term_breakdown_regex_returns_none() {
     let results: Vec<(u32, &DefinitionEntry)> = vec![];
     let def_to_term = HashMap::new();
-    let args = parse_definition_args(&json!({"name": "Get.*", "regex": true})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["Get.*"], "regex": true})).unwrap();
     let breakdown = compute_term_breakdown(&results, &def_to_term, &args);
     assert!(breakdown.is_none(), "Regex → no breakdown");
 }
@@ -1403,7 +1413,7 @@ fn test_compute_term_breakdown_multi_term() {
         (0, &index.definitions[0]),
         (3, &index.definitions[3]),
     ];
-    let args = parse_definition_args(&json!({"name": "UserService,GetOrder"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["UserService","GetOrder"]})).unwrap();
     let breakdown = compute_term_breakdown(&results, &def_to_term, &args);
     assert!(breakdown.is_some(), "Multi-term → should have breakdown");
     let bd = breakdown.unwrap();
@@ -1440,7 +1450,7 @@ fn test_sort_results_relevance_exact_before_prefix() {
         (1, &index.definitions[1]), // GetUser
         (0, &index.definitions[0]), // UserService
     ];
-    let args = parse_definition_args(&json!({"name": "userservice"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["userservice"]})).unwrap();
     sort_results(&mut results, &index, &args);
     assert_eq!(results[0].1.name, "UserService", "Exact match should sort first");
 }
@@ -1560,7 +1570,7 @@ fn test_parse_args_base_type_transitive() {
 
 #[test]
 fn test_parse_args_file_and_parent_filter() {
-    let args = json!({"file": "UserService.cs", "parent": "UserService"});
+    let args = json!({"file": ["UserService.cs"], "parent": ["UserService"]});
     let parsed = parse_definition_args(&args).unwrap();
     assert_eq!(parsed.file_filter, Some("UserService.cs".to_string()));
     assert_eq!(parsed.parent_filter, Some("UserService".to_string()));
@@ -1592,7 +1602,7 @@ fn test_parse_args_contains_line_non_numeric_ignored() {
 #[test]
 fn test_collect_candidates_invalid_regex_returns_error() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "[invalid(", "regex": true})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["[invalid("], "regex": true})).unwrap();
     let result = collect_candidates(&index, &args);
     assert!(result.is_err(), "Invalid regex should return error");
     assert!(result.unwrap_err().contains("Invalid regex"));
@@ -1602,7 +1612,7 @@ fn test_collect_candidates_invalid_regex_returns_error() {
 fn test_collect_candidates_kind_no_matches_returns_empty() {
     let index = make_test_def_index();
     // "property" kind exists in the enum but no definitions have it
-    let args = parse_definition_args(&json!({"kind": "property"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["property"]})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     assert!(candidates.is_empty(), "No properties exist → empty result");
 }
@@ -1611,7 +1621,7 @@ fn test_collect_candidates_kind_no_matches_returns_empty() {
 fn test_collect_candidates_attribute_and_kind_intersection() {
     let index = make_test_def_index();
     // Injectable attribute is on UserService (class). kind=method should yield empty intersection
-    let args = parse_definition_args(&json!({"attribute": "Injectable", "kind": "method"})).unwrap();
+    let args = parse_definition_args(&json!({"attribute": "Injectable", "kind": ["method"]})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     assert!(candidates.is_empty(), "Injectable + method → empty (Injectable is on a class)");
 }
@@ -1624,8 +1634,8 @@ fn test_apply_entry_filters_combined_file_and_parent() {
     let candidates: Vec<u32> = (0..4).collect();
     // Both file and parent filter — intersection
     let args = parse_definition_args(&json!({
-        "file": "UserService.cs",
-        "parent": "UserService"
+        "file": ["UserService.cs"],
+        "parent": ["UserService"]
     })).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
     assert_eq!(results.len(), 1, "file=UserService.cs + parent=UserService → only GetUser");
@@ -1637,7 +1647,7 @@ fn test_apply_entry_filters_case_insensitive_file() {
     let index = make_test_def_index();
     let candidates: Vec<u32> = (0..4).collect();
     // Uppercase file filter still matches
-    let args = parse_definition_args(&json!({"file": "USERSERVICE.CS"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["USERSERVICE.CS"]})).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
     assert_eq!(results.len(), 2, "case-insensitive file filter should match");
 }
@@ -1647,7 +1657,7 @@ fn test_apply_entry_filters_parent_null_excluded_when_parent_filter_set() {
     let index = make_test_def_index();
     let candidates: Vec<u32> = (0..4).collect();
     // UserService (idx 0) and OrderService (idx 2) have parent=None → excluded
-    let args = parse_definition_args(&json!({"parent": "UserService,OrderService"})).unwrap();
+    let args = parse_definition_args(&json!({"parent": ["UserService","OrderService"]})).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
     // Only methods (which have parents) should be returned
     for (_, def) in &results {
@@ -1955,7 +1965,7 @@ fn test_sort_results_kind_priority_class_before_method() {
         (1, &index.definitions[1]), // GetUser (method)
         (0, &index.definitions[0]), // UserService (class)
     ];
-    let args = parse_definition_args(&json!({"name": "user"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["user"]})).unwrap();
     sort_results(&mut results, &index, &args);
     // Both contain "user" — class (kind_priority=0) should come before method (kind_priority=1)
     assert_eq!(results[0].1.kind, DefinitionKind::Class,
@@ -1970,7 +1980,7 @@ fn test_sort_results_parent_filter_exact_parent_first() {
         (1, &index.definitions[1]), // GetUser (parent: UserService)
     ];
     // parent=UserService — exact match should sort first
-    let args = parse_definition_args(&json!({"parent": "UserService"})).unwrap();
+    let args = parse_definition_args(&json!({"parent": ["UserService"]})).unwrap();
     sort_results(&mut results, &index, &args);
     assert_eq!(results[0].1.name, "GetUser",
         "Exact parent match 'UserService' should sort first");
@@ -2011,7 +2021,7 @@ fn test_sort_results_name_length_tiebreaker() {
         (0, &index.definitions[0]), // AB
     ];
     // Both contain "ab" — tiebreak by name length
-    let args = parse_definition_args(&json!({"name": "ab"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["ab"]})).unwrap();
     sort_results(&mut results, &index, &args);
     assert_eq!(results[0].1.name, "AB", "Shorter name should sort first as tiebreaker");
     assert_eq!(results[1].1.name, "ABC");
@@ -2020,14 +2030,17 @@ fn test_sort_results_name_length_tiebreaker() {
 // ─── compute_term_breakdown: edge case ───────────────────────────
 
 #[test]
-fn test_compute_term_breakdown_comma_only_returns_none() {
+fn test_compute_term_breakdown_empty_name_returns_none() {
     let results: Vec<(u32, &DefinitionEntry)> = vec![];
     let def_to_term = HashMap::new();
-    let args = parse_definition_args(&json!({"name": ",,,"})).unwrap();
-    // name=",,," → after filtering empty strings, terms is empty → name_filter is Some(",,,") but terms.len() < 2
-    // Actually, ",,," splits into ["", "", "", ""], filter empty → empty vec, len() = 0 < 2 → None
+    let args = parse_definition_args(&json!({"name": []})).unwrap();
+    // After 2026-04-25 array migration: empty array → name_filter is None,
+    // breakdown returns None (no terms to break down). The legacy
+    // "comma-only string" case (`name=",,,"`) is no longer reachable —
+    // `read_string_array` rejects string input outright with an actionable
+    // hint, so coverage of that legacy shape is gone by design.
     let breakdown = compute_term_breakdown(&results, &def_to_term, &args);
-    assert!(breakdown.is_none(), "Comma-only name → no usable terms → no breakdown");
+    assert!(breakdown.is_none(), "Empty name array → no usable terms → no breakdown");
 }
 
 // ─── property→field hint tests ────────────────────────────────────
@@ -2065,8 +2078,8 @@ fn test_kind_property_hint_when_fields_exist() {
 
     // Search with kind="property" and parent="UserService" — should return 0 results + hint
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "kind": "property",
-        "parent": "UserService"
+        "kind": ["property"],
+        "parent": ["UserService"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2085,7 +2098,7 @@ fn test_kind_property_no_hint_when_results_exist() {
     // If kind="property" returns results, no hint needed
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = handle_xray_definitions(&ctx, &serde_json::json!({
-        "kind": "class"
+        "kind": ["class"]
     }));
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2101,7 +2114,7 @@ fn test_hint_wrong_kind() {
     // make_test_def_index has: UserService (class), GetUser (method), OrderService (class), GetOrder (method)
     // Searching kind='function' with name='GetUser' should give hint suggesting 'method'
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "function", "name": "GetUser"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["function"], "name": ["GetUser"]})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
@@ -2118,7 +2131,7 @@ fn test_hint_wrong_kind() {
 fn test_hint_wrong_kind_with_file_filter() {
     // Searching kind='function' with file='UserService' should give hint showing available kinds
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "function", "file": "UserService.cs"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["function"], "file": ["UserService.cs"]})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
@@ -2135,7 +2148,7 @@ fn test_hint_wrong_kind_with_file_filter() {
 fn test_hint_file_has_defs_but_name_not_found() {
     // File 'UserService.cs' has definitions, but name='nonexistent' doesn't match any
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"file": "UserService.cs", "name": "nonexistent"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["UserService.cs"], "name": ["nonexistent"]})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
@@ -2152,7 +2165,7 @@ fn test_hint_file_has_defs_but_name_not_found() {
 fn test_hint_nearest_name_match() {
     // Search for 'GetUsr' — close to 'GetUser' but not exact
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "GetUsr"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["GetUsr"]})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
@@ -2195,7 +2208,7 @@ fn test_hint_name_in_content_not_in_defs() {
     };
 
     let def_index_guard = ctx.def_index.as_ref().unwrap().read().unwrap();
-    let args = parse_definition_args(&json!({"name": "inputSchema"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["inputSchema"]})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     // LOCK ORDER: pre-acquire content guard and thread it through — matches
@@ -2216,7 +2229,7 @@ fn test_hint_name_in_content_not_in_defs() {
 fn test_hint_priority_kind_first() {
     // When both kind is wrong AND name is a typo, kind hint (A) should take priority over name hint (B)
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "function", "name": "GetUsr"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["function"], "name": ["GetUsr"]})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
@@ -2234,7 +2247,7 @@ fn test_hint_priority_kind_first() {
 fn test_hint_no_hint_for_regex() {
     // Regex search resulting in 0 results should NOT give nearest-name hint
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "xyz_nonexistent_regex.*", "regex": true})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["xyz_nonexistent_regex.*"], "regex": true})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
@@ -2255,7 +2268,7 @@ fn test_hint_no_hint_for_regex() {
 fn test_hint_no_hint_when_results_found() {
     // When search finds results, no hint should be generated
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "GetUser"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["GetUser"]})).unwrap();
     let defs_json = vec![json!({"name": "GetUser"})];
     let stats_info = StatsFilterInfo { applied: false, before_count: 1 };
     let ctx = HandlerContext::default();
@@ -2282,7 +2295,7 @@ fn test_hint_existing_property_field_hint_not_overwritten() {
     index.kind_index.entry(DefinitionKind::Field).or_default().push(field_idx);
     index.file_index.entry(0).or_default().push(field_idx);
 
-    let args = parse_definition_args(&json!({"kind": "property"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["property"]})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
     let ctx = HandlerContext::default();
@@ -2330,8 +2343,8 @@ fn test_auto_correct_kind_method_to_function() {
     // Searching kind='function' + name='GetUser' should auto-correct to kind='method'
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "kind": "function",
-        "name": "GetUser"
+        "kind": ["function"],
+        "name": ["GetUser"]
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2357,8 +2370,8 @@ fn test_auto_correct_kind_with_file_filter() {
     // kind='function' + file='UserService.cs' — should auto-correct kind
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "kind": "function",
-        "file": "UserService.cs"
+        "kind": ["function"],
+        "file": ["UserService.cs"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2375,7 +2388,7 @@ fn test_auto_correct_kind_no_trigger_without_name_or_file() {
     // kind='function' WITHOUT name/file — auto-correction should NOT trigger
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "kind": "function"
+        "kind": ["function"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2390,7 +2403,7 @@ fn test_auto_correct_name_typo() {
     // name='GetUsr' — close to 'getuser' (Jaro-Winkler ~95%)
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "name": "GetUsr"
+        "name": ["GetUsr"]
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2414,7 +2427,7 @@ fn test_auto_correct_name_below_threshold_no_correction() {
     // name='xyz_totally_different' — very low similarity to any name
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "name": "xyz_totally_different"
+        "name": ["xyz_totally_different"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2428,7 +2441,7 @@ fn test_auto_correct_name_below_threshold_no_correction() {
 fn test_auto_correct_name_not_triggered_for_regex() {
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "name": "GetUsr",
+        "name": ["GetUsr"],
         "regex": true
     }));
     assert!(!result.is_error);
@@ -2442,8 +2455,8 @@ fn test_auto_correct_kind_takes_priority_over_name() {
     // kind='function' + name='GetUser' — kind correction should fire first
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "kind": "function",
-        "name": "GetUser"
+        "kind": ["function"],
+        "name": ["GetUser"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2460,7 +2473,7 @@ fn test_auto_correct_kind_takes_priority_over_name() {
 fn test_auto_correct_no_correction_when_results_found() {
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "name": "GetUser"
+        "name": ["GetUser"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2475,9 +2488,9 @@ fn test_auto_correct_preserves_other_filters() {
     // After kind correction, file filter should still be applied
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "kind": "function",
-        "name": "GetUser",
-        "file": "OrderService.cs"
+        "kind": ["function"],
+        "name": ["GetUser"],
+        "file": ["OrderService.cs"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2506,7 +2519,7 @@ fn test_auto_correct_name_blocked_by_length_ratio() {
     // Even if Jaro-Winkler similarity is high due to shared prefix.
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "name": "UserServiceController"
+        "name": ["UserServiceController"]
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2523,7 +2536,7 @@ fn test_auto_correct_name_typo_passes_length_ratio() {
     // Length ratio = 6/7 = 0.86 ≥ 0.6 → auto-correction should fire.
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "name": "GetUsr"
+        "name": ["GetUsr"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2539,7 +2552,7 @@ fn test_auto_correct_name_typo_passes_length_ratio_similar_length() {
     // This is NOT a substring match, so normal search returns 0 results → auto-correction kicks in.
     let ctx = make_auto_correction_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "name": "UserServise"
+        "name": ["UserServise"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2560,7 +2573,7 @@ fn test_include_usage_count_present() {
     // Definition name exists in content index → usageCount > 0
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = super::super::dispatch_tool(&ctx, "xray_definitions", &serde_json::json!({
-        "name": "ExecuteQueryAsync",
+        "name": ["ExecuteQueryAsync"],
         "includeUsageCount": true
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
@@ -2585,8 +2598,8 @@ fn test_include_usage_count_zero() {
     // Definition name NOT in content index → usageCount = 0
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = super::super::dispatch_tool(&ctx, "xray_definitions", &serde_json::json!({
-        "name": "ResilientClient",
-        "kind": "class",
+        "name": ["ResilientClient"],
+        "kind": ["class"],
         "includeUsageCount": true
     }));
     assert!(!result.is_error);
@@ -2607,7 +2620,7 @@ fn test_include_usage_count_default_off() {
     // Without includeUsageCount parameter → no usageCount in output
     let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
     let result = super::super::dispatch_tool(&ctx, "xray_definitions", &serde_json::json!({
-        "name": "ExecuteQueryAsync"
+        "name": ["ExecuteQueryAsync"]
     }));
     assert!(!result.is_error);
     let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2647,7 +2660,7 @@ fn test_hint_e_xml_extension_suggests_on_demand() {
     // file='something.xml' → Hint should suggest XML on-demand parsing via containsLine/name
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "config.xml"
+        "file": ["config.xml"]
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2663,7 +2676,7 @@ fn test_hint_e_md_extension_not_in_content_index_suggests_read_file() {
     // Should suggest read_file
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "notes.xyz"
+        "file": ["notes.xyz"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2678,7 +2691,7 @@ fn test_hint_e_cs_extension_no_hint() {
     // file='UserService.cs' → .cs IS in def_extensions → Hint E should NOT fire
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "UserService.cs"
+        "file": ["UserService.cs"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2695,7 +2708,7 @@ fn test_hint_e_case_insensitive_extension() {
     // file='Config.XML' (uppercase) → should still match .xml as XML on-demand
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "Config.XML"
+        "file": ["Config.XML"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2709,7 +2722,7 @@ fn test_hint_e_comma_separated_file_filter() {
     // file='foo.xml,bar.xml' → XML extension → XML on-demand hint fires
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "foo.xml,bar.xml"
+        "file": ["foo.xml","bar.xml"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -2726,8 +2739,8 @@ fn test_hint_name_kind_mismatch_class_with_method_kind() {
     // Should produce hint suggesting parent=UserService
     let index = make_test_def_index();
     let args = parse_definition_args(&json!({
-        "name": "UserService",
-        "kind": "method"
+        "name": ["UserService"],
+        "kind": ["method"]
     })).unwrap();
     // Simulate: search returned 1 result — the class itself (name substring matched)
     let defs_json = vec![json!({
@@ -2756,8 +2769,8 @@ fn test_hint_name_kind_mismatch_no_hint_when_method_found() {
     // name=GetUser + kind=method → returns the method → no hint
     let index = make_test_def_index();
     let args = parse_definition_args(&json!({
-        "name": "GetUser",
-        "kind": "method"
+        "name": ["GetUser"],
+        "kind": ["method"]
     })).unwrap();
     let defs_json = vec![json!({
         "name": "GetUser",
@@ -2779,8 +2792,8 @@ fn test_hint_name_kind_mismatch_interface_with_field_kind() {
     // name=UserService + kind=field → returns the interface → hint
     let index = make_test_def_index();
     let args = parse_definition_args(&json!({
-        "name": "UserService",
-        "kind": "field"
+        "name": ["UserService"],
+        "kind": ["field"]
     })).unwrap();
     let defs_json = vec![json!({
         "name": "UserService",
@@ -2806,7 +2819,7 @@ fn test_hint_name_kind_mismatch_no_hint_without_name_filter() {
     // kind=method without name → no hint (hint only applies when name is set)
     let index = make_test_def_index();
     let args = parse_definition_args(&json!({
-        "kind": "method"
+        "kind": ["method"]
     })).unwrap();
     let defs_json = vec![json!({
         "name": "GetUser",
@@ -2830,7 +2843,7 @@ fn test_hint_f_file_fuzzy_match_slash_mismatch() {
     // file='Components/Utils' → 0 results, but 'ComponentsUtils' exists in index
     let index = make_test_def_index_with_file("C:/src/ComponentsUtils/Helper.cs");
     let args = parse_definition_args(&json!({
-        "file": "Components/Utils"
+        "file": ["Components/Utils"]
     })).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
@@ -2851,7 +2864,7 @@ fn test_hint_f_file_fuzzy_no_hint_when_no_near_miss() {
     // file='TotallyNonexistent' → 0 results and no near-miss → no Hint F
     let index = make_test_def_index();
     let args = parse_definition_args(&json!({
-        "file": "TotallyNonexistent"
+        "file": ["TotallyNonexistent"]
     })).unwrap();
     let defs_json: Vec<Value> = vec![];
     let stats_info = StatsFilterInfo { applied: false, before_count: 0 };
@@ -2979,38 +2992,38 @@ fn make_auto_summary_test_index() -> DefinitionIndex {
 
 #[test]
 fn test_should_auto_summary_triggers_on_overflow() {
-    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 3})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/"], "maxResults": 3})).unwrap();
     assert!(should_auto_summary(&args, 7), "should trigger: 7 results > maxResults 3");
 }
 
 #[test]
 fn test_should_auto_summary_not_triggered_when_results_fit() {
-    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 100})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/"], "maxResults": 100})).unwrap();
     assert!(!should_auto_summary(&args, 7), "should NOT trigger: 7 results <= maxResults 100");
 }
 
 #[test]
 fn test_should_auto_summary_not_triggered_with_name_filter() {
-    let args = parse_definition_args(&json!({"file": "Services/", "name": "BigService", "maxResults": 3})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/"], "name": ["BigService"], "maxResults": 3})).unwrap();
     assert!(!should_auto_summary(&args, 7), "should NOT trigger: name filter is set");
 }
 
 #[test]
 fn test_should_auto_summary_not_triggered_with_include_body() {
-    let args = parse_definition_args(&json!({"file": "Services/", "includeBody": true, "maxResults": 3})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/"], "includeBody": true, "maxResults": 3})).unwrap();
     assert!(!should_auto_summary(&args, 7), "should NOT trigger: includeBody is set");
 }
 
 #[test]
 fn test_should_auto_summary_not_triggered_with_sort_by() {
-    let args = parse_definition_args(&json!({"file": "Services/", "sortBy": "cognitiveComplexity", "maxResults": 3})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/"], "sortBy": "cognitiveComplexity", "maxResults": 3})).unwrap();
     assert!(!should_auto_summary(&args, 7), "should NOT trigger: sortBy is set — user wants ranked individual results");
 }
 
 #[test]
 fn test_auto_summary_groups_by_directory() {
     let index = make_auto_summary_test_index();
-    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 3})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/"], "maxResults": 3})).unwrap();
 
     // Collect all candidates (simulating the handler flow)
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
@@ -3052,7 +3065,7 @@ fn test_auto_summary_groups_by_directory() {
 #[test]
 fn test_auto_summary_top_definitions_by_size() {
     let index = make_auto_summary_test_index();
-    let args = parse_definition_args(&json!({"file": "Services/Auth", "maxResults": 1})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/Auth"], "maxResults": 1})).unwrap();
 
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
@@ -3084,7 +3097,7 @@ fn test_auto_summary_top_definitions_by_size() {
 #[test]
 fn test_auto_summary_counts_by_kind() {
     let index = make_auto_summary_test_index();
-    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 1})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/"], "maxResults": 1})).unwrap();
 
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
@@ -3113,7 +3126,7 @@ fn test_auto_summary_counts_by_kind() {
 #[test]
 fn test_auto_summary_hint_contains_concrete_names() {
     let index = make_auto_summary_test_index();
-    let args = parse_definition_args(&json!({"file": "Services/", "maxResults": 1})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Services/"], "maxResults": 1})).unwrap();
 
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     let results = apply_entry_filters(&index, &candidates, &args);
@@ -3165,7 +3178,7 @@ fn test_extract_group_directory_no_base() {
 #[test]
 fn test_hint_fn_unsupported_extension_xml_returns_some() {
     let ctx = make_hint_e_ctx();
-    let args = parse_definition_args(&json!({"file": "config.xml"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["config.xml"]})).unwrap();
     let result = hint_unsupported_extension(&args, &ctx);
     assert!(result.is_some(), "Should return Some for .xml extension");
     let hint = result.unwrap();
@@ -3176,7 +3189,7 @@ fn test_hint_fn_unsupported_extension_xml_returns_some() {
 #[test]
 fn test_hint_fn_unsupported_extension_supported_returns_none() {
     let ctx = make_hint_e_ctx();
-    let args = parse_definition_args(&json!({"file": "UserService.cs"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["UserService.cs"]})).unwrap();
     let result = hint_unsupported_extension(&args, &ctx);
     assert!(result.is_none(), "Should return None for supported .cs extension");
 }
@@ -3184,7 +3197,7 @@ fn test_hint_fn_unsupported_extension_supported_returns_none() {
 #[test]
 fn test_hint_fn_unsupported_extension_no_file_filter_returns_none() {
     let ctx = make_hint_e_ctx();
-    let args = parse_definition_args(&json!({"name": "UserService"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["UserService"]})).unwrap();
     let result = hint_unsupported_extension(&args, &ctx);
     assert!(result.is_none(), "Should return None when no file filter");
 }
@@ -3192,7 +3205,7 @@ fn test_hint_fn_unsupported_extension_no_file_filter_returns_none() {
 #[test]
 fn test_hint_fn_wrong_kind_returns_some() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "function", "name": "GetUser"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["function"], "name": ["GetUser"]})).unwrap();
     let result = hint_wrong_kind(&index, &args);
     assert!(result.is_some(), "Should return Some when kind mismatch");
     let hint = result.unwrap();
@@ -3203,7 +3216,7 @@ fn test_hint_fn_wrong_kind_returns_some() {
 #[test]
 fn test_hint_fn_wrong_kind_no_kind_filter_returns_none() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "GetUser"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["GetUser"]})).unwrap();
     let result = hint_wrong_kind(&index, &args);
     assert!(result.is_none(), "Should return None without kind filter");
 }
@@ -3211,7 +3224,7 @@ fn test_hint_fn_wrong_kind_no_kind_filter_returns_none() {
 #[test]
 fn test_hint_fn_wrong_kind_no_name_or_file_returns_none() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "function"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["function"]})).unwrap();
     let result = hint_wrong_kind(&index, &args);
     assert!(result.is_none(), "Should return None without name/file filter alongside kind");
 }
@@ -3222,7 +3235,7 @@ fn test_hint_fn_wrong_kind_no_name_or_file_returns_none() {
 fn test_collect_candidates_multi_kind_filter() {
     let index = make_test_def_index();
     // kind="class,method" should return both classes and methods
-    let args = parse_definition_args(&json!({"kind": "class,method"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["class","method"]})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     // make_test_def_index has: UserService (class), GetUser (method), OrderService (class), GetOrder (method)
     assert_eq!(candidates.len(), 4, "kind=class,method → all 4 definitions");
@@ -3237,7 +3250,7 @@ fn test_collect_candidates_multi_kind_filter() {
 fn test_collect_candidates_multi_kind_single_value() {
     // Backward compatibility: single kind value still works
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "method"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["method"]})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     assert_eq!(candidates.len(), 2, "kind=method → 2 methods");
     for &idx in &candidates {
@@ -3249,7 +3262,7 @@ fn test_collect_candidates_multi_kind_single_value() {
 fn test_collect_candidates_multi_kind_with_name() {
     let index = make_test_def_index();
     // kind="class,method" + name="GetUser" → only GetUser (method)
-    let args = parse_definition_args(&json!({"kind": "class,method", "name": "GetUser"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["class","method"], "name": ["GetUser"]})).unwrap();
     let (candidates, _) = collect_candidates(&index, &args).unwrap();
     assert_eq!(candidates.len(), 1, "kind=class,method + name=GetUser → 1 result");
     assert_eq!(index.definitions[candidates[0] as usize].name, "GetUser");
@@ -3257,10 +3270,11 @@ fn test_collect_candidates_multi_kind_with_name() {
 
 #[test]
 fn test_collect_candidates_multi_kind_invalid_value() {
-    let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"kind": "class,invalid_kind"})).unwrap();
-    let result = collect_candidates(&index, &args);
+    // After 2026-04-25 array migration, validation happens at parse time.
+    let result = parse_definition_args(&json!({"kind": ["class","invalid_kind"]}));
     assert!(result.is_err(), "Should return Err for invalid kind value");
+    let err = result.unwrap_err();
+    assert!(err.contains("invalid_kind"), "error should name the bad value: {err}");
 }
 
 // ─── Missing terms tests ─────────────────────────────────────────────
@@ -3271,8 +3285,8 @@ fn test_compute_missing_terms_kind_mismatch() {
     // Search for name="UserService,GetUser" with kind="class"
     // UserService is class (found), GetUser is method (missing due to kind mismatch)
     let args = parse_definition_args(&json!({
-        "kind": "class",
-        "name": "UserService,GetUser"
+        "kind": ["class"],
+        "name": ["UserService","GetUser"]
     })).unwrap();
     let defs_json = vec![json!({"name": "UserService", "kind": "class"})];
     let result = compute_missing_terms(&index, &defs_json, &args);
@@ -3290,7 +3304,7 @@ fn test_compute_missing_terms_kind_mismatch() {
 fn test_compute_missing_terms_no_kind_filter() {
     let index = make_test_def_index();
     // Without kind filter, missing terms should not be computed
-    let args = parse_definition_args(&json!({"name": "UserService,GetUser"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["UserService","GetUser"]})).unwrap();
     let defs_json = vec![json!({"name": "UserService", "kind": "class"})];
     let result = compute_missing_terms(&index, &defs_json, &args);
     assert!(result.is_none(), "Should return None without kind filter");
@@ -3301,8 +3315,8 @@ fn test_compute_missing_terms_all_found() {
     let index = make_test_def_index();
     // Both terms are classes — both found
     let args = parse_definition_args(&json!({
-        "kind": "class",
-        "name": "UserService,OrderService"
+        "kind": ["class"],
+        "name": ["UserService","OrderService"]
     })).unwrap();
     let defs_json = vec![
         json!({"name": "UserService", "kind": "class"}),
@@ -3316,7 +3330,7 @@ fn test_compute_missing_terms_all_found() {
 fn test_compute_missing_terms_single_name() {
     let index = make_test_def_index();
     // Single name — missing terms not applicable
-    let args = parse_definition_args(&json!({"kind": "class", "name": "GetUser"})).unwrap();
+    let args = parse_definition_args(&json!({"kind": ["class"], "name": ["GetUser"]})).unwrap();
     let defs_json: Vec<Value> = vec![];
     let result = compute_missing_terms(&index, &defs_json, &args);
     assert!(result.is_none(), "Should return None for single name");
@@ -3327,8 +3341,8 @@ fn test_compute_missing_terms_not_in_index() {
     let index = make_test_def_index();
     // One term exists (UserService), other doesn't exist at all
     let args = parse_definition_args(&json!({
-        "kind": "class",
-        "name": "UserService,NonExistentClass"
+        "kind": ["class"],
+        "name": ["UserService","NonExistentClass"]
     })).unwrap();
     let defs_json = vec![json!({"name": "UserService", "kind": "class"})];
     let result = compute_missing_terms(&index, &defs_json, &args);
@@ -3344,7 +3358,7 @@ fn test_compute_missing_terms_not_in_index() {
 #[test]
 fn test_hint_fn_file_has_defs_returns_some() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"file": "UserService.cs", "name": "nonexistent"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["UserService.cs"], "name": ["nonexistent"]})).unwrap();
     let result = hint_file_has_defs_but_filters_narrow(&index, &args);
     assert!(result.is_some(), "Should return Some when file has defs but name not found");
     let hint = result.unwrap();
@@ -3355,7 +3369,7 @@ fn test_hint_fn_file_has_defs_returns_some() {
 #[test]
 fn test_hint_fn_file_has_defs_no_file_filter_returns_none() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "nonexistent"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["nonexistent"]})).unwrap();
     let result = hint_file_has_defs_but_filters_narrow(&index, &args);
     assert!(result.is_none(), "Should return None without file filter");
 }
@@ -3364,7 +3378,7 @@ fn test_hint_fn_file_has_defs_no_file_filter_returns_none() {
 fn test_hint_cross_file_match_single() {
     // Search for "OrderService" in file "UserService.cs" — it exists in OrderService.cs
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"file": "UserService.cs", "name": "OrderService"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["UserService.cs"], "name": ["OrderService"]})).unwrap();
     let result = hint_file_has_defs_but_filters_narrow(&index, &args);
     assert!(result.is_some(), "Should return Some when file has defs");
     let hint = result.unwrap();
@@ -3378,7 +3392,7 @@ fn test_hint_cross_file_match_single() {
 fn test_hint_cross_file_match_comma_separated() {
     // Search for "GetOrder,GetUser" in file "OrderService.cs" — GetUser exists in UserService.cs
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"file": "OrderService.cs", "name": "GetUser,GetOrder"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["OrderService.cs"], "name": ["GetUser","GetOrder"]})).unwrap();
     let _result = hint_file_has_defs_but_filters_narrow(&index, &args);
     // GetOrder IS in OrderService.cs, so it matches the file filter → not a zero-result scenario
     // at file level. But hint_file_has_defs_but_filters_narrow is only called when the FULL
@@ -3393,7 +3407,7 @@ fn test_hint_cross_file_match_comma_separated() {
     // So total_results=1 (GetOrder). This hint function wouldn't be called (>0 results).
     //
     // Better test: search for two names that are BOTH absent from the target file.
-    let args2 = parse_definition_args(&json!({"file": "UserService.cs", "name": "OrderService,GetOrder"})).unwrap();
+    let args2 = parse_definition_args(&json!({"file": ["UserService.cs"], "name": ["OrderService","GetOrder"]})).unwrap();
     let result2 = hint_file_has_defs_but_filters_narrow(&index, &args2);
     assert!(result2.is_some());
     let hint2 = result2.unwrap();
@@ -3405,7 +3419,7 @@ fn test_hint_cross_file_match_comma_separated() {
 fn test_hint_cross_file_no_match_anywhere() {
     // Search for a name that doesn't exist in ANY file → should fall back to xray_grep suggestion
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"file": "UserService.cs", "name": "CompletelyBogus"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["UserService.cs"], "name": ["CompletelyBogus"]})).unwrap();
     let result = hint_file_has_defs_but_filters_narrow(&index, &args);
     assert!(result.is_some());
     let hint = result.unwrap();
@@ -3477,7 +3491,7 @@ fn test_hint_cross_file_max_three_files() {
     };
 
     // Search for CommonHelper in Target.cs — it exists in Alpha, Beta, Gamma, Delta
-    let args = parse_definition_args(&json!({"file": "Target.cs", "name": "CommonHelper"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Target.cs"], "name": ["CommonHelper"]})).unwrap();
     let result = hint_file_has_defs_but_filters_narrow(&index, &args);
     assert!(result.is_some());
     let hint = result.unwrap();
@@ -3495,7 +3509,7 @@ fn test_hint_cross_file_max_three_files() {
 #[test]
 fn test_hint_fn_fuzzy_match_returns_some() {
     let index = make_test_def_index_with_file("C:/src/ComponentsUtils/Helper.cs");
-    let args = parse_definition_args(&json!({"file": "Components/Utils"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["Components/Utils"]})).unwrap();
     let result = hint_file_fuzzy_match(&index, &args);
     assert!(result.is_some(), "Should return Some for fuzzy file match");
     let hint = result.unwrap();
@@ -3505,7 +3519,7 @@ fn test_hint_fn_fuzzy_match_returns_some() {
 #[test]
 fn test_hint_fn_fuzzy_match_no_match_returns_none() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"file": "TotallyNonexistent"})).unwrap();
+    let args = parse_definition_args(&json!({"file": ["TotallyNonexistent"]})).unwrap();
     let result = hint_file_fuzzy_match(&index, &args);
     assert!(result.is_none(), "Should return None when no near-miss");
 }
@@ -3513,7 +3527,7 @@ fn test_hint_fn_fuzzy_match_no_match_returns_none() {
 #[test]
 fn test_hint_fn_nearest_name_returns_some() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "GetUsr"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["GetUsr"]})).unwrap();
     let result = hint_nearest_name(&index, &args);
     assert!(result.is_some(), "Should return Some for typo name match");
     let hint = result.unwrap();
@@ -3524,7 +3538,7 @@ fn test_hint_fn_nearest_name_returns_some() {
 #[test]
 fn test_hint_fn_nearest_name_regex_returns_none() {
     let index = make_test_def_index();
-    let args = parse_definition_args(&json!({"name": "GetUsr", "regex": true})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["GetUsr"], "regex": true})).unwrap();
     let result = hint_nearest_name(&index, &args);
     assert!(result.is_none(), "Should return None for regex search");
 }
@@ -3557,7 +3571,7 @@ fn test_hint_fn_content_not_defs_returns_some() {
         ..Default::default()
     };
 
-    let args = parse_definition_args(&json!({"name": "inputSchema"})).unwrap();
+    let args = parse_definition_args(&json!({"name": ["inputSchema"]})).unwrap();
     // Thread pre-acquired content guard — matches the production path.
     let content_guard = ctx.index.read().unwrap();
     let result = hint_name_in_content_not_defs(&args, &ctx, Some(&content_guard));
@@ -3623,8 +3637,8 @@ fn test_xml_on_demand_name_matches_text_content() {
 
     // Search by text content value "PremiumStorage"
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "services.xml",
-        "name": "PremiumStorage"
+        "file": ["services.xml"],
+        "name": ["PremiumStorage"]
     }));
     assert!(!result.is_error, "Should not error: {:?}", result.content[0].text);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -3689,7 +3703,7 @@ fn test_xml_on_demand_name_matches_text_content() {
             ..Default::default()
         };
 
-        let result = handle_xray_definitions(&ctx, &json!({ "file": "services.xml", "name": "PremiumStorage", "includeBody": true }));
+        let result = handle_xray_definitions(&ctx, &json!({ "file": ["services.xml"], "name": ["PremiumStorage"], "includeBody": true }));
         assert!(!result.is_error, "Error: {:?}", result.content[0].text);
         let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
@@ -3741,7 +3755,7 @@ fn test_xml_on_demand_name_matches_text_content() {
             ..Default::default()
         };
 
-        let result = handle_xray_definitions(&ctx, &json!({ "file": "dedup.xml", "name": "PremiumFeature" }));
+        let result = handle_xray_definitions(&ctx, &json!({ "file": ["dedup.xml"], "name": ["PremiumFeature"] }));
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
@@ -3788,7 +3802,7 @@ fn test_xml_on_demand_name_matches_text_content() {
         };
 
         // Search with 2-char term "ab" — should match tag <AB> by name, but NOT textContent "ab" in <Item>
-        let result = handle_xray_definitions(&ctx, &json!({ "file": "minlen.xml", "name": "ab" }));
+        let result = handle_xray_definitions(&ctx, &json!({ "file": ["minlen.xml"], "name": ["ab"] }));
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
@@ -3826,7 +3840,7 @@ fn test_xml_on_demand_name_matches_text_content() {
         };
 
         // Search with lowercase — should still find PremiumStorage
-        let result = handle_xray_definitions(&ctx, &json!({ "file": "case.xml", "name": "premiumstorage" }));
+        let result = handle_xray_definitions(&ctx, &json!({ "file": ["case.xml"], "name": ["premiumstorage"] }));
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
@@ -3866,7 +3880,7 @@ fn test_xml_on_demand_name_matches_text_content() {
             ..Default::default()
         };
 
-        let result = handle_xray_definitions(&ctx, &json!({ "file": "prio.xml", "name": "Service" }));
+        let result = handle_xray_definitions(&ctx, &json!({ "file": ["prio.xml"], "name": ["Service"] }));
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
@@ -3918,7 +3932,7 @@ fn test_xml_on_demand_name_matches_text_content() {
             ..Default::default()
         };
 
-        let result = handle_xray_definitions(&ctx, &json!({ "file": "mb.xml", "name": "SearchService" }));
+        let result = handle_xray_definitions(&ctx, &json!({ "file": ["mb.xml"], "name": ["SearchService"] }));
         assert!(!result.is_error);
         let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
         let defs = v["definitions"].as_array().unwrap();
@@ -3963,8 +3977,8 @@ fn test_xml_on_demand_name_matches_element_name_not_just_text() {
     };
 
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "test.xml",
-        "name": "ServiceType"
+        "file": ["test.xml"],
+        "name": ["ServiceType"]
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -3999,8 +4013,8 @@ fn test_xml_on_demand_directory_returns_error_hint() {
 
     let dir_name = tmp_dir.file_name().unwrap().to_string_lossy().to_string();
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": dir_name,
-        "name": "SomeElement"
+        "file": [dir_name],
+        "name": ["SomeElement"]
     }));
     assert!(result.is_error, "Should return error for directory path");
     let text = &result.content[0].text;
@@ -4045,8 +4059,8 @@ fn test_xml_on_demand_rejects_files_above_max_size() {
     };
 
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": big.to_string_lossy(),
-        "name": "anything"
+        "file": [big.to_string_lossy()],
+        "name": ["anything"]
     }));
     assert!(result.is_error, "Files above MAX_XML_BYTES must return an error");
     let text = &result.content[0].text;
@@ -4100,8 +4114,8 @@ fn test_xml_resolve_no_substring_collision() {
     };
 
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "web.config",
-        "name": "item"
+        "file": ["web.config"],
+        "name": ["item"]
     }));
 
     assert!(result.is_error, "Should error: no file named 'web.config' exists");
@@ -4147,8 +4161,8 @@ fn test_xml_resolve_rejects_dotdot_escape() {
     };
 
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "../secret.config",
-        "name": "item"
+        "file": ["../secret.config"],
+        "name": ["item"]
     }));
 
     assert!(result.is_error, "Should reject `..` escape from workspace");
@@ -4190,8 +4204,8 @@ fn test_xml_resolve_rejects_absolute_outside_workspace() {
     };
 
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": outside_file.to_string_lossy().to_string(),
-        "name": "item"
+        "file": [outside_file.to_string_lossy().to_string()],
+        "name": ["item"]
     }));
 
     assert!(
@@ -4234,8 +4248,8 @@ fn test_xml_resolve_accepts_relative_inside_workspace() {
     };
 
     let result = handle_xray_definitions(&ctx, &json!({
-        "file": "src/app.config",
-        "name": "entry"
+        "file": ["src/app.config"],
+        "name": ["entry"]
     }));
 
     assert!(

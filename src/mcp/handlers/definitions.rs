@@ -89,15 +89,36 @@ impl DefinitionSearchArgs {
 ///
 /// Returns `Err(message)` for validation failures (invalid containsLine, invalid sortBy).
 fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
-    let name_filter = args.get("name").and_then(|v| v.as_str())
-        .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
-    let kind_filter = args.get("kind").and_then(|v| v.as_str()).map(|s| s.to_string());
+    // List-shaped params (`name`, `kind`, `file`, `parent`) accept array<string>
+    // per the 2026-04-25 list-params migration. Internally they remain stored as
+    // comma-joined `Option<String>` so existing downstream split-based consumers
+    // (kind/name/file/parent filtering throughout this module) continue to work
+    // unchanged. Cleanup of those splits is tracked separately.
+    //
+    // ACCEPTED TRADE-OFF: a literal `,` inside an array entry will still be
+    // split by downstream consumers because the join+split bridge is lossy.
+    // This is acceptable for these specific keys:
+    //   - `kind`: closed enum (no commas possible).
+    //   - `name`, `parent`: identifier-like values (commas illegal in target-
+    //     language identifiers).
+    //   - `file`: paths COULD theoretically contain `,` but it is rare; the
+    //     follow-up cleanup that removes the comma-split downstream is the
+    //     proper fix and is tracked as a separate task.
+    //
+    // `attribute` and `baseType` stay single-value strings (semantic single-
+    // value, not lists).
+    let names = super::utils::read_string_array(args, "name")?;
+    let name_filter = if names.is_empty() { None } else { Some(names.join(",")) };
+    let kinds = super::utils::read_kind_array(args)?;
+    let kind_filter = if kinds.is_empty() { None } else { Some(kinds.join(",")) };
     let attribute_filter = args.get("attribute").and_then(|v| v.as_str()).map(|s| s.to_string());
     let base_type_filter = args.get("baseType").and_then(|v| v.as_str())
         .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
     let base_type_transitive = args.get("baseTypeTransitive").and_then(|v| v.as_bool()).unwrap_or(false);
-    let file_filter = args.get("file").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let parent_filter = args.get("parent").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let files = super::utils::read_string_array(args, "file")?;
+    let file_filter = if files.is_empty() { None } else { Some(files.join(",")) };
+    let parents = super::utils::read_string_array(args, "parent")?;
+    let parent_filter = if parents.is_empty() { None } else { Some(parents.join(",")) };
 
     let contains_line = match args.get("containsLine") {
         Some(v) if v.is_i64() || v.is_u64() => {

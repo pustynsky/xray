@@ -337,7 +337,7 @@ fn test_xray_definitions_max_results_one_caps_output() {
     // Use name filter to bypass autoSummary (which triggers when results > maxResults without name filter)
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "maxResults": 1,
-        "name": "Service"
+        "name": ["Service"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();

@@ -355,8 +355,8 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
 fn test_ts_xray_definitions_finds_class() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "UserService",
-        "kind": "class"
+        "name": ["UserService"],
+        "kind": ["class"]
     }));
     assert!(!result.is_error, "xray_definitions should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -371,8 +371,8 @@ fn test_ts_xray_definitions_finds_class() {
 fn test_ts_xray_definitions_finds_interface() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "IUserService",
-        "kind": "interface"
+        "name": ["IUserService"],
+        "kind": ["interface"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -386,8 +386,8 @@ fn test_ts_xray_definitions_finds_interface() {
 fn test_ts_xray_definitions_finds_method() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "getUser",
-        "kind": "method"
+        "name": ["getUser"],
+        "kind": ["method"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -402,7 +402,7 @@ fn test_ts_xray_definitions_finds_method() {
 fn test_ts_xray_definitions_finds_function() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "function"
+        "kind": ["function"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -417,7 +417,7 @@ fn test_ts_xray_definitions_finds_function() {
 fn test_ts_xray_definitions_finds_enum() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "enum"
+        "kind": ["enum"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -431,7 +431,7 @@ fn test_ts_xray_definitions_finds_enum() {
 fn test_ts_xray_definitions_finds_enum_member() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "enumMember"
+        "kind": ["enumMember"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -450,7 +450,7 @@ fn test_ts_xray_definitions_finds_enum_member() {
 fn test_ts_xray_definitions_finds_type_alias() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "typeAlias"
+        "kind": ["typeAlias"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -464,7 +464,7 @@ fn test_ts_xray_definitions_finds_type_alias() {
 fn test_ts_xray_definitions_finds_variable() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "variable"
+        "kind": ["variable"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -478,7 +478,7 @@ fn test_ts_xray_definitions_finds_variable() {
 fn test_ts_xray_definitions_finds_field() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "field"
+        "kind": ["field"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -493,7 +493,7 @@ fn test_ts_xray_definitions_finds_field() {
 fn test_ts_xray_definitions_finds_constructor() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "constructor"
+        "kind": ["constructor"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -525,8 +525,8 @@ fn test_ts_xray_definitions_base_type_abstract() {
     let ctx = make_ts_ctx_with_defs();
     // OrderProcessor has modifiers ["export", "abstract"] — search by name to verify modifiers
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "OrderProcessor",
-        "kind": "class"
+        "name": ["OrderProcessor"],
+        "kind": ["class"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -546,7 +546,7 @@ fn test_ts_xray_definitions_base_type_abstract() {
 fn test_ts_contains_line_finds_method() {
     let (ctx, tmp) = make_ts_ctx_with_real_files();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "UserService",
+        "file": ["UserService"],
         "containsLine": 8
     }));
     assert!(!result.is_error);
@@ -563,7 +563,7 @@ fn test_ts_contains_line_finds_method() {
 fn test_ts_xray_definitions_include_body() {
     let (ctx, tmp) = make_ts_ctx_with_real_files();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "getUser",
+        "name": ["getUser"],
         "includeBody": true
     }));
     assert!(!result.is_error);
@@ -632,9 +632,9 @@ fn test_ts_xray_callers_nonexistent_method() {
 fn test_ts_xray_definitions_combined_name_parent_kind() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "getUser",
-        "parent": "UserService",
-        "kind": "method"
+        "name": ["getUser"],
+        "parent": ["UserService"],
+        "kind": ["method"]
     }));
     assert!(!result.is_error, "Combined filter should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -648,9 +648,9 @@ fn test_ts_xray_definitions_combined_name_parent_kind() {
 
     // Verify: same name+kind but different parent should NOT match
     let result2 = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "getUser",
-        "parent": "NonExistentClass",
-        "kind": "method"
+        "name": ["getUser"],
+        "parent": ["NonExistentClass"],
+        "kind": ["method"]
     }));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
@@ -663,7 +663,7 @@ fn test_ts_xray_definitions_combined_name_parent_kind() {
 fn test_ts_xray_definitions_name_regex() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "User.*",
+        "name": ["User.*"],
         "regex": true
     }));
     assert!(!result.is_error, "Regex search should not error: {}", result.content[0].text);
@@ -934,8 +934,8 @@ fn test_mixed_cs_ts_definitions_query() {
 
     // Query by name — should find both C# and TS versions
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "UserService",
-        "kind": "class"
+        "name": ["UserService"],
+        "kind": ["class"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -949,8 +949,8 @@ fn test_mixed_cs_ts_definitions_query() {
 
     // Filter by file to scope to one language
     let result_cs = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "UserService",
-        "file": ".cs"
+        "name": ["UserService"],
+        "file": [".cs"]
     }));
     assert!(!result_cs.is_error);
     let output_cs: Value = serde_json::from_str(&result_cs.content[0].text).unwrap();
@@ -1168,8 +1168,8 @@ fn test_tsx_file_support_through_handler() {
 
     // Find class in .tsx file
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "AppComponent",
-        "kind": "class"
+        "name": ["AppComponent"],
+        "kind": ["class"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1181,8 +1181,8 @@ fn test_tsx_file_support_through_handler() {
 
     // Find method in .tsx file with parent filter
     let result2 = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "render",
-        "parent": "AppComponent"
+        "name": ["render"],
+        "parent": ["AppComponent"]
     }));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
@@ -1255,7 +1255,7 @@ fn test_ts_incremental_update_through_handler() {
 
     // Verify OldService is found
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "OldService"
+        "name": ["OldService"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1279,7 +1279,7 @@ fn test_ts_incremental_update_through_handler() {
 
     // Step 4: Verify NewService is found, OldService is NOT found
     let result_new = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "NewService"
+        "name": ["NewService"]
     }));
     assert!(!result_new.is_error);
     let output_new: Value = serde_json::from_str(&result_new.content[0].text).unwrap();
@@ -1288,7 +1288,7 @@ fn test_ts_incremental_update_through_handler() {
     assert_eq!(defs_new[0]["name"], "NewService");
 
     let result_old = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "OldService"
+        "name": ["OldService"]
     }));
     assert!(!result_old.is_error);
     let output_old: Value = serde_json::from_str(&result_old.content[0].text).unwrap();
@@ -1297,7 +1297,7 @@ fn test_ts_incremental_update_through_handler() {
 
     // Verify new methods are found
     let result_exec = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "execute", "parent": "NewService"
+        "name": ["execute"], "parent": ["NewService"]
     }));
     assert!(!result_exec.is_error);
     let output_exec: Value = serde_json::from_str(&result_exec.content[0].text).unwrap();
@@ -1393,7 +1393,7 @@ fn test_ts_xray_definitions_exclude_dir() {
 
     // Without excludeDir — both should appear
     let result_all = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "kind": "class"
+        "kind": ["class"]
     }));
     assert!(!result_all.is_error);
     let output_all: Value = serde_json::from_str(&result_all.content[0].text).unwrap();
