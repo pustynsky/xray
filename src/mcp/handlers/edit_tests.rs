@@ -5272,3 +5272,357 @@ fn test_insert_out_of_range_includes_append_hint() {
         "Hint must spell out the exact append-idiom coordinates. Got: {}", text
     );
 }
+
+/// Mode A REPLACE (`endLine >= startLine`) with `startLine > line_count`
+/// must reject the op AND surface the same append-idiom hint that INSERT
+/// already carries. Without this, agents that try to append by reusing the
+/// last `newLineCount` (`startLine: N+1`) get a bare "out of range" error
+/// with no path forward and frequently fall back to overwriting line N.
+/// Closes docs/user-stories/todo_2026-04-25_xray-edit-append-and-line-staleness.md §2.1.
+#[test]
+fn test_replace_out_of_range_includes_append_hint() {
+    // 3-line file. line_count is what apply_line_operations computes; the
+    // hint must reference `line_count + 1` for the append form.
+    let (tmp, filename, _) = create_temp_file("line1\nline2\nline3\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            // Mode A REPLACE (endLine >= startLine) past EOF.
+            { "startLine": 99, "endLine": 99, "content": "x" }
+        ]
+    }));
+
+    assert!(result.is_error, "Out-of-range REPLACE must error");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("out of range"),
+        "Should mention out-of-range. Got: {}", text
+    );
+    assert!(
+        text.contains("To append after the last line"),
+        "REPLACE error must include append-idiom hint. Got: {}", text
+    );
+    assert!(
+        text.contains("INSERT mode"),
+        "Hint must explain the INSERT-mode trick. Got: {}", text
+    );
+    assert!(
+        text.contains("To replace the last line"),
+        "Hint must also document the replace-last-line form. Got: {}", text
+    );
+}
+
+/// Successful Mode A `xray_edit` response must carry an `appendIdiom` object
+/// with the canonical (startLine, endLine) values for an INSERT-after-EOF
+/// follow-up call. This eliminates the "agent guesses N+1 from stale state"
+/// failure class.
+#[test]
+fn test_edit_response_includes_append_idiom() {
+    let (tmp, filename, _) = create_temp_file("alpha\nbeta\ngamma\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 2, "endLine": 2, "content": "BETA" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let new_line_count = output["newLineCount"].as_u64()
+        .expect("newLineCount must be present");
+    let append = output["appendIdiom"].as_object()
+        .expect("appendIdiom must be present in successful response");
+    assert_eq!(
+        append["startLine"].as_u64().unwrap(),
+        new_line_count + 1,
+        "appendIdiom.startLine must equal newLineCount + 1"
+    );
+    assert_eq!(
+        append["endLine"].as_u64().unwrap(),
+        new_line_count,
+        "appendIdiom.endLine must equal newLineCount"
+    );
+}
+
+
+// ─── Smart search-not-found hints (2026-04-25 search-hint-quality story) ─────
+
+/// `\u{NNNN}` literal in `search` is a caller-side bug — the contract is that
+/// `search` bytes are taken verbatim, so the escape never gets interpreted.
+/// The error message must point this out and NOT recommend `expectedContext`,
+/// which is irrelevant.
+#[test]
+fn test_search_with_unicode_escape_literal_hints_verbatim() {
+    let (tmp, filename, _) = create_temp_file("hello — world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello \\u{2014} world", "replace": "x" }
+        ]
+    }));
+    assert!(result.is_error, "Search with literal escape must fail to match");
+    let text = &result.content[0].text;
+    assert!(text.contains("taken verbatim"),
+        "Hint must explain bytes are verbatim. Got: {}", text);
+    assert!(text.contains("\\u{...}") || text.contains("\\xNN"),
+        "Hint must mention the escape forms. Got: {}", text);
+    assert!(!text.contains("pass `expectedContext`"),
+        "Hint must NOT recommend irrelevant expectedContext for an escape-literal bug. Got: {}", text);
+}
+
+/// Path-like input containing `\xNN` substrings (e.g. `C:\x86\toolchain`)
+/// must NOT trigger the verbatim-escape tip — `\xNN` only encodes ASCII in
+/// Rust, so its presence here is overwhelmingly a real path, not a misused
+/// escape. The legacy `expectedContext` hint should fire instead.
+#[test]
+fn test_search_with_path_like_hex_substring_falls_back_to_expected_context() {
+    let (tmp, filename, _) = create_temp_file("abc\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // `C:\x86\toolchain` happens to contain `\x86` — must not be
+            // mistaken for a misused escape literal.
+            { "search": "C:\\x86\\toolchain\\bin", "replace": "x" }
+        ]
+    }));
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(!text.contains("taken verbatim"),
+        "Path-like \\xNN must NOT trigger verbatim-bytes tip. Got: {}", text);
+    assert!(text.contains("pass `expectedContext`"),
+        "Legacy fallback hint must fire instead. Got: {}", text);
+}
+
+/// When `search` starts with a leading space and the nearest match shows the
+/// first difference at byte 0, surface a boundary-whitespace tip pointing at
+/// trim-or-insertAfter — not the irrelevant expectedContext hint.
+#[test]
+fn test_search_boundary_whitespace_byte0_mismatch_hints_trim() {
+    // File starts the line at column 0; user's `search` starts with a leading
+    // space, so byte 0 mismatches (' ' vs first non-whitespace char).
+    // Force a high-similarity nearest match by including ~30 chars of real
+    // content after the bad leading space.
+    let body = "fn very_unique_marker_for_test_xyz123() {\n    let inner = 1;\n}\n";
+    let (tmp, filename, _) = create_temp_file(body);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // Leading space — not present in the actual file.
+            { "search": " fn very_unique_marker_for_test_xyz123() {\n    let inner = 1;\n}", "replace": "x" }
+        ]
+    }));
+    assert!(result.is_error, "Mismatched leading whitespace must fail to match");
+    let text = &result.content[0].text;
+    // The nearest_match_hint should have produced "First difference at byte 0:".
+    assert!(text.contains("First difference at byte 0:"),
+        "Setup invariant: nearest match must report byte-0 diff. Got: {}", text);
+    assert!(text.contains("leading whitespace") || text.contains("trim the first line"),
+        "Hint must surface the boundary-whitespace tip. Got: {}", text);
+    assert!(text.contains("insertAfter"),
+        "Hint must mention insertAfter as alternative. Got: {}", text);
+    assert!(!text.contains("pass `expectedContext`"),
+        "Hint must NOT recommend expectedContext for byte-0 boundary mismatch. Got: {}", text);
+}
+
+/// Regression: the legacy `expectedContext` fallback still fires for plain
+/// not-found cases that don't match either of the new heuristics.
+#[test]
+fn test_search_not_found_falls_back_to_expected_context_hint() {
+    let (tmp, filename, _) = create_temp_file("alpha\nbeta\ngamma\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // Plain non-matching, non-leading-whitespace, non-escape search.
+            { "search": "completely_missing_token", "replace": "x" }
+        ]
+    }));
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("pass `expectedContext`"),
+        "Legacy fallback hint must still fire when no smarter hint applies. Got: {}", text);
+}
+
+
+// ─── Brace-balance warnings (2026-04-25 brace-balance story) ─────────
+
+/// Asymmetric search/replace that drops a `}` (the most common
+/// xray_edit footgun, observed multiple times in this branch alone)
+/// must surface a `braceBalanceWarnings` entry pointing at the
+/// imbalance. The warning is informational: the write still succeeds,
+/// but the agent now has a structural-sanity signal without waiting
+/// for `cargo build` to complain 30s later.
+#[test]
+fn test_brace_balance_warning_drops_closer() {
+    let original = "fn outer() {\n    if cond {\n        do_thing();\n    }\n}\n";
+    let (tmp, filename, _) = create_temp_file(original);
+    let ctx = make_ctx(tmp.path());
+
+    // search captures the closing `}` of the inner `if`; replace
+    // omits it. Resulting file has one extra orphan `}` removed
+    // from balance — net delta: '{' = 0, '}' = -1.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "        do_thing();\n    }\n", "replace": "        do_thing();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must be present when '{' delta != '}' delta");
+    assert!(!warnings.is_empty(), "Warnings array must not be empty");
+    let joined = warnings.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join(" | ");
+    assert!(joined.contains("curly"),
+        "Warning must mention 'curly' for {{}} mismatch. Got: {}", joined);
+    assert!(joined.contains("'}' delta = -1") || joined.contains("'}' delta = -1,"),
+        "Warning must report '}}' delta = -1. Got: {}", joined);
+}
+
+/// Replace adds an unclosed `(` — round-pair imbalance must fire its
+/// own warning class.
+#[test]
+fn test_brace_balance_warning_orphan_opener() {
+    let original = "let x = foo();\n";
+    let (tmp, filename, _) = create_temp_file(original);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // foo() -> foo(bar — net delta: '(' = 0, ')' = -1
+            { "search": "foo()", "replace": "foo(bar" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must be present for round-brace mismatch");
+    let joined = warnings.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join(" | ");
+    assert!(joined.contains("round"),
+        "Warning must mention 'round' for () mismatch. Got: {}", joined);
+}
+
+/// Balanced edit (e.g. add an `if/else` block — equal `{` and `}`
+/// deltas) must NOT emit `braceBalanceWarnings` — false positives on
+/// language-agnostic content are unacceptable.
+#[test]
+fn test_brace_balance_no_warning_when_balanced() {
+    let original = "fn f() {\n    body();\n}\n";
+    let (tmp, filename, _) = create_temp_file(original);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // Add an inner block — both '{' and '}' grow by 1.
+            { "search": "    body();\n", "replace": "    if cond {\n        body();\n    }\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output.get("braceBalanceWarnings").is_none(),
+        "braceBalanceWarnings must be absent when deltas agree. Got response: {}", output);
+}
+
+/// `dryRun: true` still surfaces brace warnings — agents iterating on
+/// a preview should see structural concerns before committing.
+#[test]
+fn test_brace_balance_warning_in_dry_run() {
+    let original = "fn outer() {\n    if cond {\n        do_thing();\n    }\n}\n";
+    let (tmp, filename, _) = create_temp_file(original);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "dryRun": true,
+        "edits": [
+            { "search": "        do_thing();\n    }\n", "replace": "        do_thing();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Dry-run edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must fire on dryRun previews too");
+    assert!(!warnings.is_empty(), "Warnings array must not be empty in dry-run");
+}
+
+/// Existing-but-empty file: the brace-balance check must STILL fire when
+/// the very first edit introduces unbalanced delimiters. The skip is only
+/// for auto-create (file did not exist), not for "file existed and
+/// happened to be 0 bytes" — an unbalanced INSERT into a 0-byte file is
+/// just as broken as one into a non-empty file, and the agent benefits
+/// from the same warning.
+#[test]
+fn test_brace_balance_warning_on_existing_empty_file() {
+    let (tmp, filename, _) = create_temp_file("");
+    let ctx = make_ctx(tmp.path());
+
+    // Mode A INSERT (endLine < startLine) at start of empty file. content
+    // has unbalanced curly: one '{' and zero '}'.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "fn f() {\n    body();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output.get("fileCreated"), None,
+        "Sanity: file existed before edit, must NOT report fileCreated");
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must fire on existing-but-empty file with unbalanced edit");
+    let joined = warnings.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join(" | ");
+    assert!(joined.contains("curly"),
+        "Warning must mention 'curly'. Got: {}", joined);
+}
+
+/// Auto-create (file did not exist) is the ONE case where brace-balance
+/// is silenced — there is no original content to delta against, so the
+/// check has no meaningful baseline.
+#[test]
+fn test_brace_balance_no_warning_on_auto_create() {
+    // Don't create the file — let xray_edit auto-create it.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("brand_new.rs");
+    let filename = path.to_str().unwrap().to_string();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 1, "endLine": 0, "content": "fn f() {\n    body();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Auto-create edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["fileCreated"].as_bool(), Some(true),
+        "Sanity: file must be reported as created");
+    assert!(output.get("braceBalanceWarnings").is_none(),
+        "braceBalanceWarnings must be silent on auto-create. Got: {}", output);
+}
+

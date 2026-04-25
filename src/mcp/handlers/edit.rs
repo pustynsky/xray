@@ -484,6 +484,10 @@ struct EditResult {
     lines_added: i64,
     lines_removed: i64,
     new_line_count: usize,
+    /// Post-write structural sanity warnings about asymmetric brace deltas.
+    /// One entry per disagreeing pair class (`{}`, `()`, `[]`). Empty in the
+    /// common case. See `brace_balance_warnings` for the heuristic.
+    brace_balance_warnings: Vec<String>,
 }
 
 /// Read and validate a file, returning its content and line ending style.
@@ -604,12 +608,20 @@ fn count_lines(s: &str) -> usize {
 }
 
 /// Apply edits/operations to file content and return results.
+///
+/// `file_existed` distinguishes "this is a freshly-created file" from
+/// "this is an edit on an existing (possibly empty) file". The flag is
+/// only consumed by the brace-balance sanity check, which must fire on
+/// existing-but-empty files (an unbalanced INSERT into a 0-byte file is
+/// just as broken as into a non-empty one) but stay silent on auto-create
+/// (the whole content is "new", delta has no meaning there).
 fn apply_edits_to_content(
     path_str: &str,
     normalized: &str,
     mode: &EditMode<'_>,
     is_regex: bool,
     expected_line_count: Option<usize>,
+    file_existed: bool,
 ) -> Result<EditResult, String> {
     // expectedLineCount safety check — applies to BOTH modes.
     // Previously this lived inside the Mode A (Operations) arm only, so
@@ -660,6 +672,19 @@ fn apply_edits_to_content(
     let lines_removed = if lines_delta < 0 { -lines_delta } else { 0 };
     let lines_added = if lines_delta > 0 { lines_delta } else { 0 };
 
+    // Post-write structural sanity: asymmetric brace deltas surface the
+    // "search included a closer that replace omitted" failure class
+    // (commit a823c57 had exactly this bug — caught only by `cargo build`
+    // 30s after the write). Skip ONLY on auto-create: a freshly-minted
+    // file has no "original" to delta against. Existing-but-empty files
+    // still get the check — an unbalanced INSERT into a 0-byte file is
+    // just as broken as one into a non-empty file.
+    let brace_balance_warnings = if file_existed {
+        brace_balance_warnings(normalized, &modified_content)
+    } else {
+        Vec::new()
+    };
+
     Ok(EditResult {
         modified_content,
         applied,
@@ -670,6 +695,7 @@ fn apply_edits_to_content(
         lines_added,
         lines_removed,
         new_line_count,
+        brace_balance_warnings,
     })
 }
 
@@ -873,7 +899,7 @@ fn handle_single_file_edit(
     let file_created = !file_existed;
 
     // Apply edits
-    let edit_result = match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count) {
+    let edit_result = match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count, file_existed) {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
@@ -902,6 +928,12 @@ fn handle_single_file_edit(
         // Fix 4: expose line ending so clients can reconcile tool-diff (LF) with
         // on-disk bytes (LF or CRLF). Prevents "diff disagrees with git diff" confusion.
         "lineEnding": if line_ending == "\r\n" { "CRLF" } else { "LF" },
+        // INSERT-after-EOF idiom hint: agents can read these values directly
+        // from a previous response instead of guessing from stale state.
+        "appendIdiom": {
+            "startLine": edit_result.new_line_count + 1,
+            "endLine": edit_result.new_line_count,
+        },
     });
 
     if edit_result.total_replacements > 0 {
@@ -921,6 +953,10 @@ fn handle_single_file_edit(
 
     if !edit_result.warnings.is_empty() {
         response["warnings"] = json!(edit_result.warnings);
+    }
+
+    if !edit_result.brace_balance_warnings.is_empty() {
+        response["braceBalanceWarnings"] = json!(edit_result.brace_balance_warnings);
     }
 
     if !edit_result.diff.is_empty() {
@@ -1040,7 +1076,7 @@ fn handle_multi_file_edit(
     // Phase 2: Apply edits to all (in memory)
     let mut edit_results: Vec<(&str, PathBuf, EditResult, &'static str, bool)> = Vec::with_capacity(file_data.len());
     for (path_str, resolved, normalized, line_ending, file_existed) in file_data {
-        match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count) {
+        match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count, file_existed) {
             Ok(result) => {
                 edit_results.push((path_str, resolved, result, line_ending, file_existed));
             }
@@ -1149,6 +1185,12 @@ fn handle_multi_file_edit(
             "linesRemoved": result.lines_removed,
             "newLineCount": result.new_line_count,
             "lineEnding": if *line_ending == "\r\n" { "CRLF" } else { "LF" },
+            // INSERT-after-EOF idiom hint: agents can read these values directly
+            // from a previous response instead of guessing from stale state.
+            "appendIdiom": {
+                "startLine": result.new_line_count + 1,
+                "endLine": result.new_line_count,
+            },
         });
         if result.total_replacements > 0 {
             file_result["totalReplacements"] = json!(result.total_replacements);
@@ -1165,6 +1207,9 @@ fn handle_multi_file_edit(
         }
         if !result.warnings.is_empty() {
             file_result["warnings"] = json!(result.warnings);
+        }
+        if !result.brace_balance_warnings.is_empty() {
+            file_result["braceBalanceWarnings"] = json!(result.brace_balance_warnings);
         }
         if !result.diff.is_empty() {
             file_result["diff"] = json!(result.diff);
@@ -1333,14 +1378,27 @@ fn apply_line_operations(lines: &[&str], ops: Vec<LineOperation>) -> Result<(Vec
             }
             if op.start_line > line_count {
                 return Err(format!(
-                    "startLine {} out of range (file has {} lines)",
-                    op.start_line, line_count
+                    "startLine {} out of range (file has {} lines). \
+                     To append after the last line, pass startLine: {}, endLine: {} \
+                     (INSERT mode at line N+1). \
+                     To replace the last line, pass startLine: {}, endLine: {}.",
+                    op.start_line,
+                    line_count,
+                    line_count + 1,
+                    line_count,
+                    line_count,
+                    line_count,
                 ));
             }
             if op.end_line > line_count {
                 return Err(format!(
-                    "endLine {} out of range (file has {} lines)",
-                    op.end_line, line_count
+                    "endLine {} out of range (file has {} lines). \
+                     To append after the last line, pass startLine: {}, endLine: {} \
+                     (INSERT mode at line N+1).",
+                    op.end_line,
+                    line_count,
+                    line_count + 1,
+                    line_count,
                 ));
             }
         } else {
@@ -1866,9 +1924,9 @@ fn apply_insert(
             }), warnings));
         }
         let hint = nearest_match_hint(result, anchor);
-        let flex_hint = if edit.expected_context.is_none() {
-            ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching"
-        } else { "" };
+        let flex_hint = smart_search_not_found_hint(
+            anchor, &hint, edit.expected_context.is_some(),
+        );
         return Err(format!("Anchor text not found: \"{}\"{}{}", truncate_for_display(anchor), hint, flex_hint));
     }
 
@@ -2031,9 +2089,9 @@ fn apply_literal_replace(
             }), warnings));
         }
         let hint = nearest_match_hint(result, search);
-        let flex_hint = if edit.expected_context.is_none() {
-            ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching"
-        } else { "" };
+        let flex_hint = smart_search_not_found_hint(
+            search, &hint, edit.expected_context.is_some(),
+        );
         return Err(format!("Text not found: \"{}\"{}{}", truncate_for_display(search), hint, flex_hint));
     }
 
@@ -2302,6 +2360,65 @@ fn nearest_match_hint(content: &str, search_text: &str) -> String {
     )
 }
 
+
+/// Pick the most useful hint to append to a `Text not found` /
+/// `Anchor text not found` error, given the user's `search`, the formatted
+/// `nearest_match_hint`, and whether `expectedContext` was supplied.
+///
+/// Priority order (highest-confidence first):
+/// 1. `search` contains a Rust/JSON-style escape literal (`\u{...}` or
+///    `\xNN`). The contract is that `search` bytes are taken verbatim, so
+///    these escapes never get interpreted. The legacy `expectedContext`
+///    hint is unrelated and misleads callers into pasting the same broken
+///    escape with one extra parameter.
+/// 2. `near_hint` shows `First difference at byte 0:` AND `search` starts
+///    with leading whitespace (space or tab). This catches the
+///    "copied an indented block one column off" failure where the user's
+///    boundary line has whitespace the file at that offset does not.
+///    `expectedContext` cannot fix this either — it's a ±5-line safety
+///    check, not a fuzzy matcher.
+/// 3. Fallback: the existing `expectedContext` hint, only if the caller
+///    didn't already pass one.
+///
+/// Returns an empty string when no hint should be appended.
+fn smart_search_not_found_hint(
+    search: &str,
+    near_hint: &str,
+    has_expected_context: bool,
+) -> &'static str {
+    // (1) Literal escape sequences. Cheap textual check — no parsing.
+    // `\u{` is unambiguous: it is the only escape form that can encode
+    // non-ASCII characters in Rust source, so its appearance in a
+    // verbatim `search` string is almost certainly a misuse. We do NOT
+    // detect `\xNN` here — Rust's `\xNN` only encodes ASCII bytes
+    // (0x00..0x7F), so it is never the right tool for the typographic
+    // (em-dash etc.) case the hint targets, and detecting it produced
+    // false positives on legitimate path-like input (`C:\x86\toolchain`).
+    if search.contains("\\u{") {
+        return ". Tip: 'search' is taken verbatim — \\u{...} is NOT \
+                interpreted. Pass actual UTF-8 characters instead \
+                (e.g., the literal '—' for U+2014).";
+    }
+    // (2) Boundary-whitespace mismatch at byte 0. The nearest_match_hint
+    // already computed the byte-diff position; we re-use its formatted
+    // marker text so we don't need to refactor the return type. This is a
+    // narrow heuristic — it only fires when there's a high-similarity
+    // nearest match AND the user's search starts with whitespace AND the
+    // diff is at the very first byte.
+    if near_hint.contains("First difference at byte 0:")
+        && (search.starts_with(' ') || search.starts_with('\t'))
+    {
+        return ". Tip: leading whitespace in 'search' doesn't match the file at \
+                byte 0 — trim the first line of your `search`, or use \
+                insertAfter/insertBefore with a unique anchor.";
+    }
+    // (3) Legacy fallback.
+    if !has_expected_context {
+        return ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching";
+    }
+    ""
+}
+
 /// Generate a byte-level diff hint showing the first difference between two strings.
 /// Used when similarity is ≥99% to help identify invisible whitespace differences.
 fn byte_level_diff_hint(search: &str, found: &str) -> String {
@@ -2408,6 +2525,46 @@ fn detect_diff_category(search: &str, found: &str) -> &'static str {
 }
 
 // ─── Diff generation ─────────────────────────────────────────────────
+
+/// Compute brace-balance delta warnings between original and modified
+/// content. Returns one warning per disagreeing pair class (`{}`, `()`,
+/// `[]`). Empty Vec when all three pairs are balanced (the common case).
+///
+/// The check is intentionally crude: it counts raw bytes, ignoring
+/// strings, comments, and char literals. That makes it correct for
+/// **delta** comparison (a brace that exists identically in both
+/// pre- and post-edit cancels out) and dirt-cheap to compute.
+///
+/// Caveat: an edit that adds AND removes the same number of
+/// counter-balanced braces (e.g. moves a block to a different scope)
+/// has delta = 0 and won't fire. That is the deliberate trade-off —
+/// false positives on Python/Markdown/SQL would be unacceptable.
+fn brace_balance_warnings(original: &str, modified: &str) -> Vec<String> {
+    let pairs: [(u8, u8, &str); 3] = [
+        (b'{', b'}', "curly"),
+        (b'(', b')', "round"),
+        (b'[', b']', "square"),
+    ];
+    let mut out = Vec::new();
+    for &(open, close, name) in &pairs {
+        let count_b = |s: &str, b: u8| s.as_bytes().iter().filter(|&&c| c == b).count() as isize;
+        let d_open = count_b(modified, open) - count_b(original, open);
+        let d_close = count_b(modified, close) - count_b(original, close);
+        if d_open != d_close {
+            out.push(format!(
+                "{} brace count drifted asymmetrically: \
+                 '{}' delta = {:+}, '{}' delta = {:+}. \
+                 If this was unintended (most common cause: search \
+                 included a closer that replace omitted), the file may \
+                 no longer compile — verify with cargo build / linter.",
+                name,
+                open as char, d_open,
+                close as char, d_close,
+            ));
+        }
+    }
+    out
+}
 
 /// Generate a unified diff between original and modified content.
 fn generate_unified_diff(path: &str, original: &str, modified: &str) -> String {
