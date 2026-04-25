@@ -14,9 +14,16 @@ use code_xray::generate_trigrams;
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
 use super::utils::{self,
     build_line_content_from_matches, inject_branch_warning, is_under_dir, json_to_string,
-    matches_ext_filter, sorted_intersect, validate_search_dir,
+    matches_ext_filter, read_enum_string_with_default, sorted_intersect, validate_search_dir,
 };
 use super::HandlerContext;
+
+/// Closed enum of accepted `mode` values for `xray_grep`.
+///
+/// Drift-guard: `test_all_grep_modes_drift_guard` pins the slice; any change
+/// here must be paired with a downstream branch update in the term-combining
+/// logic that consumes `mode_and`.
+pub(crate) const ALL_GREP_MODES: &[&str] = &["or", "and"];
 
 /// Shared parameters for substring and phrase search modes.
 /// Eliminates 10+ positional parameters from handle_substring_search and handle_phrase_search.
@@ -608,7 +615,10 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         Ok(v) => v,
         Err(e) => return Err(ToolCallResult::error(e)),
     };
-    let mode_and = args.get("mode").and_then(|v| v.as_str()) == Some("and");
+    let mode_and = match read_enum_string_with_default(args, "mode", ALL_GREP_MODES, "or") {
+        Ok(m) => m == "and",
+        Err(e) => return Err(ToolCallResult::error(e)),
+    };
     let mut use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_phrase = args.get("phrase").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_line_regex = args.get("lineRegex").and_then(|v| v.as_bool()).unwrap_or(false);

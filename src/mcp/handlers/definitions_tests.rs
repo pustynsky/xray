@@ -530,22 +530,16 @@ fn test_base_type_transitive_no_match_returns_empty() {
 }
 
 #[test]
-fn test_base_type_empty_string_treated_as_no_filter() {
+fn test_base_type_empty_string_rejected() {
     let ctx = make_transitive_inheritance_ctx();
     let result_empty = handle_xray_definitions(&ctx, &serde_json::json!({
         "baseType": ""
     }));
-    assert!(!result_empty.is_error);
-    let v_empty: serde_json::Value = serde_json::from_str(&result_empty.content[0].text).unwrap();
-    let defs_empty = v_empty["definitions"].as_array().unwrap();
-
-    let result_no_filter = handle_xray_definitions(&ctx, &serde_json::json!({}));
-    let v_no_filter: serde_json::Value = serde_json::from_str(&result_no_filter.content[0].text).unwrap();
-    let defs_no_filter = v_no_filter["definitions"].as_array().unwrap();
-
-    assert_eq!(defs_empty.len(), defs_no_filter.len(),
-        "baseType='' should return same results as no baseType filter. Got {} vs {}",
-        defs_empty.len(), defs_no_filter.len());
+    // Post 2026-04-25 strict-typing: empty string is unambiguous user error,
+    // not silently treated as "no filter". Caller must omit the key instead.
+    assert!(result_empty.is_error, "baseType='' should now be a hard error");
+    assert!(result_empty.content[0].text.contains("'baseType'"),
+        "error must name the offending key: {}", result_empty.content[0].text);
 }
 
 #[test]
@@ -988,10 +982,16 @@ fn test_parse_args_name_filter_non_empty() {
 }
 
 #[test]
-fn test_parse_args_base_type_empty_string_is_none() {
+fn test_parse_args_base_type_empty_string_rejected() {
+    // Post 2026-04-25 strict-typing: empty single-string param is an error,
+    // not silently "None". Caller should omit the key.
     let args = json!({"baseType": ""});
-    let parsed = parse_definition_args(&args).unwrap();
-    assert!(parsed.base_type_filter.is_none(), "empty baseType should be treated as None");
+    let result = parse_definition_args(&args);
+    assert!(result.is_err(), "empty baseType must be rejected");
+    let err = result.unwrap_err();
+    assert!(err.contains("'baseType'"), "error must name the key: {}", err);
+    assert!(err.contains("non-empty string") || err.contains("empty"),
+        "error must mention emptiness: {}", err);
 }
 
 #[test]
@@ -1033,7 +1033,11 @@ fn test_parse_args_sort_by_invalid_rejected() {
     let args = json!({"sortBy": "invalidField"});
     let result = parse_definition_args(&args);
     assert!(result.is_err());
-    assert!(result.unwrap_err().contains("Invalid sortBy"));
+    // Post 2026-04-25 strict-typing: error shape unified across enum-typed
+    // single-string params (`'sortBy' must be one of [...]`).
+    let err = result.unwrap_err();
+    assert!(err.contains("'sortBy'"), "error must name the key: {}", err);
+    assert!(err.contains("must be one of"), "error must use enum-shape diagnostic: {}", err);
 }
 
 #[test]

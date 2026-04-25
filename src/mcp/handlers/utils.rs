@@ -1276,6 +1276,118 @@ pub(crate) fn read_string_array(
     }
 }
 
+/// Strict reader for an OPTIONAL single-string MCP parameter.
+///
+/// Symmetric to [`read_string_array`] for the single-value case. Returns:
+/// - `Ok(None)` when the key is missing or `Value::Null`.
+/// - `Ok(Some(s))` when the value is a `Value::String` with non-whitespace content.
+/// - `Err(msg)` when the value is the wrong type (`Array`, `Number`, `Bool`,
+///   `Object`) OR an empty/whitespace-only string. Both failure modes
+///   are explicit so wrong-type input never silently degrades into
+///   "filter dropped, query proceeded against unfiltered superset".
+///
+/// The empty-string-is-Err policy is intentional and DIFFERS from the per-element
+/// whitespace-skip behaviour of [`read_string_array`] (which preserves whitespace
+/// inside non-empty array entries because it can be regex-significant). For a
+/// single-value param, an empty string is unambiguous user error: the caller
+/// either meant to pass a value or meant to omit the key. Silently treating it
+/// as absent would re-introduce the same "filter silently skipped" failure mode
+/// that the 2026-04-25 strict-typing migration is closing.
+pub(crate) fn read_string(args: &Value, key: &str) -> Result<Option<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(s)) => {
+            if s.trim().is_empty() {
+                Err(format!(
+                    "'{key}' must be a non-empty string (got empty / whitespace-only). \
+                     Pass a non-empty string or omit the key. \
+                     Single-value params reject empty strings since the 2026-04-25 strict-typing migration. \
+                     Example: '{key}': \"value\"."
+                ))
+            } else {
+                Ok(Some(s.clone()))
+            }
+        }
+        Some(other) => Err(format!(
+            "'{key}' must be a string (got {}). \
+             Single-value params reject arrays/numbers/bools/objects since the 2026-04-25 strict-typing migration. \
+             Example: '{key}': \"value\".",
+            type_label(other)
+        )),
+    }
+}
+
+/// Strict reader for a REQUIRED single-string MCP parameter.
+///
+/// Distinguishes "missing" from "wrong type" in the error message — fixes the
+/// misleading `Missing required parameter: <key>` error that the legacy
+/// `args.get(K).and_then(|v| v.as_str())` pattern produced when the caller
+/// passed an array/number/bool/object instead of a string.
+pub(crate) fn read_required_string(args: &Value, key: &str) -> Result<String, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Err(format!("Missing required parameter: '{key}'.")),
+        _ => match read_string(args, key)? {
+            Some(s) => Ok(s),
+            // `read_string` returned `Ok(None)` only on missing/null, both already
+            // matched above; an empty/whitespace string surfaced as `Err` upstream.
+            // This arm is unreachable but kept exhaustive for future maintenance.
+            None => Err(format!("Missing required parameter: '{key}'.")),
+        },
+    }
+}
+
+/// Strict reader for an OPTIONAL enum-typed string MCP parameter (closed set,
+/// with a default). Returns the default when the key is missing/null; errors on
+/// wrong type, empty string, or value outside `allowed`.
+///
+/// Used for `direction` (default `"up"`), `mode` (default `"or"`), etc. Pair
+/// each call site with a `pub const ALL_X: &[&str] = &[...]` next to the enum
+/// definition + an exhaustive-match drift-guard test (mirror of `ALL_KINDS`).
+pub(crate) fn read_enum_string_with_default(
+    args: &Value,
+    key: &str,
+    allowed: &[&str],
+    default: &str,
+) -> Result<String, String> {
+    match read_string(args, key)? {
+        None => Ok(default.to_string()),
+        Some(s) => {
+            if allowed.iter().any(|a| a.eq_ignore_ascii_case(&s)) {
+                Ok(s)
+            } else {
+                Err(format!(
+                    "'{key}' must be one of {:?} (got {:?}).",
+                    allowed, s
+                ))
+            }
+        }
+    }
+}
+
+/// Strict reader for an OPTIONAL enum-typed string MCP parameter (closed set,
+/// no default — absence yields `None`). Used for `sortBy` where unset means
+/// "do not sort".
+pub(crate) fn read_enum_string_opt(
+    args: &Value,
+    key: &str,
+    allowed: &[&str],
+) -> Result<Option<String>, String> {
+    match read_string(args, key)? {
+        None => Ok(None),
+        Some(s) => {
+            if allowed.iter().any(|a| a.eq_ignore_ascii_case(&s)) {
+                Ok(Some(s))
+            } else {
+                Err(format!(
+                    "'{key}' must be one of {:?} (got {:?}).",
+                    allowed, s
+                ))
+            }
+        }
+    }
+}
+
+
 /// Like [`read_string_array`] but additionally validates each element against
 /// the closed [`known_kinds`] enum. Used by `xray_definitions` for the `kind`
 /// parameter.

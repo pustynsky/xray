@@ -2768,6 +2768,47 @@ $testBlocks += , {
     }
 }
 
+# T-CLASS-ARRAY-REJECT: callers with class=["..."] (array) must be rejected as wrong-type
+# Acceptance criterion for docs/user-stories/todo_2026-04-25_strict-string-params-step2.md §5.
+# Pre-fix behaviour: array silently dropped the filter and the query ran against the
+# unfiltered superset (real correctness regression observed via scripts/test-r3-class-array.ps1).
+# Post-fix: the call MUST return isError=true with a hint citing 'class' and the JSON type.
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-CLASS-ARRAY-REJECT callers-class-array-rejected-strict-string"
+    try {
+        $tmpDir = Join-Path $env:TEMP "xray_e2e_class_array_reject_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "validator.ts") -Value "export class OrderValidator {`n    check(): boolean {`n        return true;`n    }`n}"
+        Set-Content -Path (Join-Path $tmpDir "service.ts")   -Value "import { OrderValidator } from './validator';`n`nexport class OrderService {`n    processOrder(): void {`n        const validator = new OrderValidator();`n        validator.check();`n    }`n}"
+        & $Bin content-index -d $tmpDir -e ts 2>&1 | Out-Null
+        & $Bin def-index     -d $tmpDir -e ts 2>&1 | Out-Null
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["processOrder"],"class":["OrderService"],"direction":"up"}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
+        $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $jsonLine) { $errors += "no JSON-RPC response" }
+        else {
+            if ($jsonLine -notmatch '"isError"\s*:\s*true') { $errors += "expected isError=true (array on single-string param must be rejected)" }
+            if ($jsonLine -notmatch "'class'")              { $errors += "error message must cite 'class' in single quotes" }
+            if ($jsonLine -notmatch '2026-04-25')             { $errors += "error message should reference the 2026-04-25 strict-typing migration" }
+            if ($jsonLine -match '"callTree"')                { $errors += "unexpected callTree in response — wrong-type input must NOT silently drop the filter" }
+        }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (class=[...] rejected with isError=true + 'class' + 2026-04-25 hint)" }
+    } catch {
+        if (Test-Path $tmpDir) { & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null; Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
 
 $parallelJobs = @()
 foreach ($block in $testBlocks) {

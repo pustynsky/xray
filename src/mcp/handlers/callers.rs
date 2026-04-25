@@ -15,7 +15,14 @@ use code_xray::generate_trigrams;
 use super::HandlerContext;
 use super::advisory_hints::{interface_vias_caveat, low_count_caveat};
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
-use super::utils::{self, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, sorted_intersect};
+use super::utils::{self, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, read_enum_string_with_default, read_string, sorted_intersect};
+
+/// Closed enum of accepted `direction` values for `xray_callers`.
+///
+/// Drift-guard: any addition here MUST be reflected in the matching downstream
+/// branches in the handler bodies; the `test_all_directions_drift_guard`
+/// unit test pins the slice contents.
+pub(crate) const ALL_DIRECTIONS: &[&str] = &["up", "down"];
 
 /// Compute total body lines available from a call tree (for size hint).
 /// Walks the JSON tree and sums body lines: `body.len()` for emitted bodies,
@@ -192,7 +199,10 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
     if methods.is_empty() {
         return ToolCallResult::error("method parameter is empty after parsing".to_string());
     }
-    let class_filter = args.get("class").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let class_filter = match read_string(args, "class") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
 
     // For multi-method batch, delegate to batch handler
     if methods.len() > 1 {
@@ -211,15 +221,9 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         }
         raw.min(10) as usize
     };
-    let direction = {
-        let raw = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
-        let d = raw.to_lowercase();
-        if d != "up" && d != "down" {
-            return ToolCallResult::error(format!(
-                "Invalid direction '{}'. Must be 'up' or 'down'.", raw
-            ));
-        }
-        d
+    let direction = match read_enum_string_with_default(args, "direction", ALL_DIRECTIONS, "up") {
+        Ok(d) => d.to_lowercase(),
+        Err(e) => return ToolCallResult::error(e),
     };
     let direction = direction.as_str();
     // 2026-04-25 list-params migration: `ext` is now `array<string>` (each entry is
@@ -619,15 +623,9 @@ fn handle_multi_method_callers(
         }
         raw.min(10) as usize
     };
-    let direction = {
-        let raw = args.get("direction").and_then(|v| v.as_str()).unwrap_or("up");
-        let d = raw.to_lowercase();
-        if d != "up" && d != "down" {
-            return ToolCallResult::error(format!(
-                "Invalid direction '{}'. Must be 'up' or 'down'.", raw
-            ));
-        }
-        d
+    let direction = match read_enum_string_with_default(args, "direction", ALL_DIRECTIONS, "up") {
+        Ok(d) => d.to_lowercase(),
+        Err(e) => return ToolCallResult::error(e),
     };
     // 2026-04-25 list-params migration: `ext` is `array<string>`; bridged to
     // comma-joined String for downstream compatibility (see handle_xray_callers).

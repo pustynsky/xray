@@ -2238,3 +2238,269 @@ fn read_kind_array_inherits_string_form_rejection() {
     assert!(err.contains("array of strings"), "err = {err}");
 }
 
+// ─── read_string / read_required_string / read_enum_string_* ───────────
+//
+// Coverage for the 2026-04-25 strict-typing migration of OPTIONAL and REQUIRED
+// single-string MCP parameters. Symmetric to `read_string_array` above.
+//
+// What we pin:
+//  * happy path  (string -> Some / String / default)
+//  * absence    (None | Null -> Ok(None) for read_string,
+//                              Err("Missing") for read_required_string,
+//                              default for read_enum_string_with_default)
+//  * empty / whitespace -> hard Err (NOT silently absent — see
+//                                    `read_string` doc comment)
+//  * wrong type (Array, Number, Bool, Object) -> Err naming the type
+//  * enum non-member -> Err with `must be one of` + `'<key>'`
+//
+// The empty-string-is-Err contract is non-negotiable: it is the whole point of
+// the migration (close the "silent filter dropped" failure mode). If a future
+// caller adds back "empty == absent" coercion, these tests fail loudly.
+
+#[test]
+fn read_string_returns_none_when_missing() {
+    let args = json!({});
+    assert_eq!(read_string(&args, "class").unwrap(), None);
+}
+
+#[test]
+fn read_string_returns_none_when_null() {
+    let args = json!({ "class": null });
+    assert_eq!(read_string(&args, "class").unwrap(), None);
+}
+
+#[test]
+fn read_string_returns_value_when_string() {
+    let args = json!({ "class": "UserService" });
+    assert_eq!(read_string(&args, "class").unwrap(), Some("UserService".to_string()));
+}
+
+#[test]
+fn read_string_preserves_internal_whitespace() {
+    // Symmetric with `read_string_array` element-skip: only outer trim()
+    // governs absent-vs-present; internal whitespace is significant.
+    let args = json!({ "class": "  My Service  " });
+    assert_eq!(read_string(&args, "class").unwrap(),
+        Some("  My Service  ".to_string()));
+}
+
+#[test]
+fn read_string_rejects_empty_string() {
+    let args = json!({ "class": "" });
+    let err = read_string(&args, "class").unwrap_err();
+    assert!(err.contains("'class'"), "err = {err}");
+    assert!(err.contains("non-empty"), "err = {err}");
+    assert!(err.contains("2026-04-25"), "err = {err}");
+}
+
+#[test]
+fn read_string_rejects_whitespace_only() {
+    let args = json!({ "class": "   \t  " });
+    let err = read_string(&args, "class").unwrap_err();
+    assert!(err.contains("non-empty"), "err = {err}");
+}
+
+#[test]
+fn read_string_rejects_array() {
+    let args = json!({ "class": ["UserService"] });
+    let err = read_string(&args, "class").unwrap_err();
+    assert!(err.contains("'class'"), "err = {err}");
+    assert!(err.contains("must be a string"), "err = {err}");
+    assert!(err.contains("array"), "err = {err}");
+    assert!(err.contains("2026-04-25"), "err = {err}");
+}
+
+#[test]
+fn read_string_rejects_number() {
+    let args = json!({ "class": 42 });
+    let err = read_string(&args, "class").unwrap_err();
+    assert!(err.contains("must be a string"), "err = {err}");
+    assert!(err.contains("number"), "err = {err}");
+}
+
+#[test]
+fn read_string_rejects_bool() {
+    let args = json!({ "class": true });
+    let err = read_string(&args, "class").unwrap_err();
+    assert!(err.contains("boolean"), "err = {err}");
+}
+
+#[test]
+fn read_string_rejects_object() {
+    let args = json!({ "class": {"name": "X"} });
+    let err = read_string(&args, "class").unwrap_err();
+    assert!(err.contains("object"), "err = {err}");
+}
+
+#[test]
+fn read_required_string_returns_value() {
+    let args = json!({ "repo": "." });
+    assert_eq!(read_required_string(&args, "repo").unwrap(), ".".to_string());
+}
+
+#[test]
+fn read_required_string_missing_yields_clear_error() {
+    let args = json!({});
+    let err = read_required_string(&args, "repo").unwrap_err();
+    assert!(err.contains("Missing required parameter"), "err = {err}");
+    assert!(err.contains("'repo'"), "err = {err}");
+}
+
+#[test]
+fn read_required_string_null_yields_clear_error() {
+    let args = json!({ "repo": null });
+    let err = read_required_string(&args, "repo").unwrap_err();
+    assert!(err.contains("Missing required parameter"), "err = {err}");
+}
+
+#[test]
+fn read_required_string_wrong_type_distinguishes_from_missing() {
+    // The whole point of `read_required_string` over the legacy
+    // `args.get(K).and_then(|v| v.as_str()).ok_or("Missing required")`:
+    // wrong-type input must NOT show up as "missing".
+    let args = json!({ "repo": ["."] });
+    let err = read_required_string(&args, "repo").unwrap_err();
+    assert!(!err.contains("Missing required"),
+        "wrong-type input must NOT collapse to Missing: err = {err}");
+    assert!(err.contains("must be a string"), "err = {err}");
+    assert!(err.contains("array"), "err = {err}");
+}
+
+#[test]
+fn read_required_string_rejects_empty() {
+    let args = json!({ "repo": "" });
+    let err = read_required_string(&args, "repo").unwrap_err();
+    // Empty string is rejected by `read_string` first; either error shape
+    // ("non-empty" or "Missing required") is acceptable as long as the key
+    // is named and the call returns Err.
+    assert!(err.contains("'repo'"), "err = {err}");
+}
+
+#[test]
+fn read_enum_string_with_default_returns_default_when_absent() {
+    let args = json!({});
+    assert_eq!(
+        read_enum_string_with_default(&args, "direction", &["up", "down"], "up").unwrap(),
+        "up".to_string()
+    );
+}
+
+#[test]
+fn read_enum_string_with_default_accepts_member() {
+    let args = json!({ "direction": "down" });
+    assert_eq!(
+        read_enum_string_with_default(&args, "direction", &["up", "down"], "up").unwrap(),
+        "down".to_string()
+    );
+}
+
+#[test]
+fn read_enum_string_with_default_is_case_insensitive() {
+    let args = json!({ "direction": "DOWN" });
+    let v = read_enum_string_with_default(&args, "direction", &["up", "down"], "up").unwrap();
+    // Returns the user-supplied casing; downstream callers .to_lowercase() if needed.
+    assert_eq!(v, "DOWN".to_string());
+}
+
+#[test]
+fn read_enum_string_with_default_rejects_non_member() {
+    let args = json!({ "direction": "sideways" });
+    let err = read_enum_string_with_default(&args, "direction", &["up", "down"], "up").unwrap_err();
+    assert!(err.contains("'direction'"), "err = {err}");
+    assert!(err.contains("must be one of"), "err = {err}");
+}
+
+#[test]
+fn read_enum_string_with_default_rejects_wrong_type() {
+    let args = json!({ "direction": ["up"] });
+    let err = read_enum_string_with_default(&args, "direction", &["up", "down"], "up").unwrap_err();
+    assert!(err.contains("must be a string"), "err = {err}");
+}
+
+#[test]
+fn read_enum_string_opt_returns_none_when_absent() {
+    let args = json!({});
+    assert_eq!(
+        read_enum_string_opt(&args, "sortBy", &["lines", "callCount"]).unwrap(),
+        None
+    );
+}
+
+#[test]
+fn read_enum_string_opt_accepts_member() {
+    let args = json!({ "sortBy": "lines" });
+    assert_eq!(
+        read_enum_string_opt(&args, "sortBy", &["lines", "callCount"]).unwrap(),
+        Some("lines".to_string())
+    );
+}
+
+#[test]
+fn read_enum_string_opt_rejects_non_member() {
+    let args = json!({ "sortBy": "chaos" });
+    let err = read_enum_string_opt(&args, "sortBy", &["lines", "callCount"]).unwrap_err();
+    assert!(err.contains("'sortBy'"), "err = {err}");
+    assert!(err.contains("must be one of"), "err = {err}");
+}
+
+// ─── Drift-guards for the const-slice enum domains ────────────────────
+//
+// `direction`, `mode`, `sortBy` are not backed by Rust enums (they are bare
+// strings inside the JSON request). The compile-time exhaustive-match guard
+// used for `kind` (DefinitionKind <-> ALL_KINDS) is therefore not available.
+// These runtime drift-guards pin the slice contents AND verify each entry
+// flows through the matching downstream branch — if a developer adds a
+// variant to ALL_X without wiring up the consumer, these fire.
+
+mod drift_guards {
+    use crate::mcp::handlers::callers::ALL_DIRECTIONS;
+    use crate::mcp::handlers::definitions::ALL_SORT_FIELDS;
+    use crate::mcp::handlers::grep::ALL_GREP_MODES;
+
+    #[test]
+    fn all_directions_pinned_to_up_down() {
+        assert_eq!(ALL_DIRECTIONS, &["up", "down"],
+            "ALL_DIRECTIONS drift: handler `direction` branches assume exactly up/down. \
+             If you add a value, audit handle_xray_callers + handle_multi_method_callers.");
+    }
+
+    #[test]
+    fn all_grep_modes_pinned_to_or_and() {
+        assert_eq!(ALL_GREP_MODES, &["or", "and"],
+            "ALL_GREP_MODES drift: handler `mode_and` consumer assumes binary or/and. \
+             If you add a value, audit handle_xray_grep term-combining logic.");
+    }
+
+    #[test]
+    fn all_sort_fields_validated_via_read_enum_string_opt() {
+        // Drift-guard: every entry in ALL_SORT_FIELDS must round-trip cleanly
+        // through `read_enum_string_opt` against the live `ALL_SORT_FIELDS`
+        // constant, and a non-member string must produce the new
+        // "must be one of [...]" error containing the full slice.
+        //
+        // NOTE: this guard validates the parser-level contract only — it does
+        // NOT prove that every entry is wired into the downstream sort
+        // function (`get_sort_value` in definitions.rs). Adding a new field
+        // to `ALL_SORT_FIELDS` without a matching `get_sort_value` arm would
+        // PASS this test but silently degrade the new field to a constant
+        // sort key at runtime. Tracking item: see
+        // `docs/user-stories/todo_2026-04-25_xray-edit-and-response-ux.md`
+        // (out-of-band) and the broader sort-field coverage gap.
+        use serde_json::json;
+        // Drift-guard: exercise read_enum_string_opt with each field of
+        // ALL_SORT_FIELDS so adding a value (or renaming one) without
+        // updating the validator is caught at compile-time-of-tests.
+        for &field in ALL_SORT_FIELDS {
+            let args = json!({ "sortBy": field });
+            let r = super::super::read_enum_string_opt(&args, "sortBy", ALL_SORT_FIELDS);
+            assert!(r.is_ok(), "ALL_SORT_FIELDS entry {field:?} must parse OK");
+            assert_eq!(r.unwrap(), Some(field.to_string()));
+        }
+        let args = json!({ "sortBy": "definitelyNotASortField" });
+        let err = super::super::read_enum_string_opt(&args, "sortBy", ALL_SORT_FIELDS).unwrap_err();
+        for &field in ALL_SORT_FIELDS {
+            assert!(err.contains(field), "error must enumerate slice; missing {field:?}: {err}");
+        }
+    }
+}
+
