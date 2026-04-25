@@ -679,7 +679,7 @@ fn apply_edits_to_content(
     // file has no "original" to delta against. Existing-but-empty files
     // still get the check — an unbalanced INSERT into a 0-byte file is
     // just as broken as one into a non-empty file.
-    let brace_balance_warnings = if file_existed {
+    let brace_balance_warnings = if file_existed && !is_prose_extension(path_str) {
         brace_balance_warnings(normalized, &modified_content)
     } else {
         Vec::new()
@@ -2564,6 +2564,23 @@ fn brace_balance_warnings(original: &str, modified: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Prose / markup file extensions where round/square/curly braces in the
+/// content are NOT structural — parens in English text ("(see X)", "e.g. ..."),
+/// markdown emphasis, etc. — and `brace_balance_warnings` would only generate
+/// false positives. Keep `.html`/`.xml` OUT of this list: they routinely host
+/// inline JS/templates where braces ARE structural.
+fn is_prose_extension(path_str: &str) -> bool {
+    const PROSE_EXTS: &[&str] = &["md", "markdown", "txt", "rst", "adoc", "asciidoc"];
+    std::path::Path::new(path_str)
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| {
+            let lower = e.to_ascii_lowercase();
+            PROSE_EXTS.contains(&lower.as_str())
+        })
+        .unwrap_or(false)
 }
 
 /// Generate a unified diff between original and modified content.
