@@ -416,6 +416,13 @@ Cross-review follow-ups to the `three-correctness-followups` and `hardening` bun
 
 ## Unreleased
 
+### Bug Fixes — `xray_edit` brace-balance heuristic skipped on prose extensions (2026-04-25)
+
+- **Symptom** — `xray_edit` calls on `.md` / `.txt` / `.rst` / `.adoc` files routinely produced `braceBalanceWarnings` for unbalanced parentheses in English prose ("e.g. ...", "(see X)", smiley-like constructs). The heuristic counted bytes in the diff, agnostic to language structure.
+- **Impact** — False positives trained agents to ignore `braceBalanceWarnings` entirely, weakening the signal on real source-file edits where the warning IS meaningful.
+- **Fix** — `apply_edits_to_content` now skips `brace_balance_warnings` when the target file's extension is in a small prose-extension set (`md`, `markdown`, `txt`, `rst`, `adoc`, `asciidoc`). `.tex` is intentionally NOT in the list — LaTeX uses `{}` structurally (command arguments, environments) and unbalanced curly braces there are real bugs. `.html`/`.xml` also stay out: they routinely host inline JS/templates with structural braces.
+- **Tests** — Two new tests in `src/mcp/handlers/edit_tests.rs`: `test_brace_balance_no_warning_on_prose_extensions` (loops over the prose-skip list, including upper-case `MD`) and `test_brace_balance_still_warns_on_source_extensions` (counter-test pinning `.rs` behaviour). Five existing brace-balance tests migrated to a new `create_temp_source_file` helper (`.rs` extension) — they were incidentally using `.txt`, which is now silenced.
+
 ### Bug Fixes — Symlinked subdirectory support across MCP path checks (2026-04-20)
 
 - **Symptom** — `xray_edit`, `xray_fast`, and `xray_grep` invoked against a symlinked subdirectory under the workspace root (e.g., `docs/personal` → `D:\Personal\…`) returned `skippedReason: "outsideServerDir"`, `dir_is_outside`, `"directory is outside workspace"`, or empty result sets — even though the indexer correctly walked the symlinked tree and stored entries under their logical paths.

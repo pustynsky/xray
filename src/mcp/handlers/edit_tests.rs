@@ -21,6 +21,17 @@ fn create_temp_file(content: &str) -> (tempfile::TempDir, String, PathBuf) {
     (tmp, filename.to_string(), path)
 }
 
+/// Helper: like `create_temp_file` but uses a `.rs` extension. Required by
+/// brace-balance tests because `.txt` (the default in `create_temp_file`) is
+/// in the prose-extension skip list, which silences `braceBalanceWarnings`.
+fn create_temp_source_file(content: &str) -> (tempfile::TempDir, String, PathBuf) {
+    let tmp = tempfile::tempdir().unwrap();
+    let filename = "test_file.rs";
+    let path = tmp.path().join(filename);
+    std::fs::write(&path, content).unwrap();
+    (tmp, filename.to_string(), path)
+}
+
 /// Helper: create a temp file with a custom name, return full path.
 fn create_named_temp_file(dir: &std::path::Path, name: &str, content: &str) -> PathBuf {
     let path = dir.join(name);
@@ -5467,7 +5478,7 @@ fn test_search_not_found_falls_back_to_expected_context_hint() {
 #[test]
 fn test_brace_balance_warning_drops_closer() {
     let original = "fn outer() {\n    if cond {\n        do_thing();\n    }\n}\n";
-    let (tmp, filename, _) = create_temp_file(original);
+    let (tmp, filename, _) = create_temp_source_file(original);
     let ctx = make_ctx(tmp.path());
 
     // search captures the closing `}` of the inner `if`; replace
@@ -5498,7 +5509,7 @@ fn test_brace_balance_warning_drops_closer() {
 #[test]
 fn test_brace_balance_warning_orphan_opener() {
     let original = "let x = foo();\n";
-    let (tmp, filename, _) = create_temp_file(original);
+    let (tmp, filename, _) = create_temp_source_file(original);
     let ctx = make_ctx(tmp.path());
 
     let result = handle_xray_edit(&ctx, &json!({
@@ -5525,7 +5536,7 @@ fn test_brace_balance_warning_orphan_opener() {
 #[test]
 fn test_brace_balance_no_warning_when_balanced() {
     let original = "fn f() {\n    body();\n}\n";
-    let (tmp, filename, _) = create_temp_file(original);
+    let (tmp, filename, _) = create_temp_source_file(original);
     let ctx = make_ctx(tmp.path());
 
     let result = handle_xray_edit(&ctx, &json!({
@@ -5548,7 +5559,7 @@ fn test_brace_balance_no_warning_when_balanced() {
 #[test]
 fn test_brace_balance_warning_in_dry_run() {
     let original = "fn outer() {\n    if cond {\n        do_thing();\n    }\n}\n";
-    let (tmp, filename, _) = create_temp_file(original);
+    let (tmp, filename, _) = create_temp_source_file(original);
     let ctx = make_ctx(tmp.path());
 
     let result = handle_xray_edit(&ctx, &json!({
@@ -5575,7 +5586,7 @@ fn test_brace_balance_warning_in_dry_run() {
 /// from the same warning.
 #[test]
 fn test_brace_balance_warning_on_existing_empty_file() {
-    let (tmp, filename, _) = create_temp_file("");
+    let (tmp, filename, _) = create_temp_source_file("");
     let ctx = make_ctx(tmp.path());
 
     // Mode A INSERT (endLine < startLine) at start of empty file. content
@@ -5624,5 +5635,67 @@ fn test_brace_balance_no_warning_on_auto_create() {
         "Sanity: file must be reported as created");
     assert!(output.get("braceBalanceWarnings").is_none(),
         "braceBalanceWarnings must be silent on auto-create. Got: {}", output);
+}
+
+
+/// Prose extensions (.md, .txt, .rst, .adoc, .tex) MUST NOT emit
+/// `braceBalanceWarnings` — English prose routinely contains unbalanced
+/// parens ("e.g. ...", "(see X)", smiley-like constructs) that the
+/// heuristic flags as false positives. The check is for source files.
+#[test]
+fn test_brace_balance_no_warning_on_prose_extensions() {
+    for ext in ["md", "markdown", "txt", "rst", "adoc", "MD"] {
+        let original = "# heading\n\ninitial line.\n";
+        let tmp = tempfile::tempdir().unwrap();
+        let filename = format!("notes.{}", ext);
+        let path = tmp.path().join(&filename);
+        std::fs::write(&path, original).unwrap();
+        let ctx = make_ctx(tmp.path());
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": path.to_str().unwrap(),
+            "edits": [
+                // Append prose with intentionally unbalanced parens — would
+                // fire the heuristic on a .rs file.
+                { "search": "initial line.\n",
+                  "replace": "initial line.\n\nNote (e.g. see X for details.\n" }
+            ]
+        }));
+        assert!(!result.is_error,
+            "Edit on .{} must succeed: {}", ext, result.content[0].text);
+
+        let output: serde_json::Value =
+            serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(output.get("braceBalanceWarnings").is_none(),
+            "braceBalanceWarnings must be silent on prose extension .{}. Got: {}",
+            ext, output);
+    }
+}
+
+/// Sanity counter-test: the prose-skip list MUST NOT include source
+/// extensions. An unbalanced edit on a .rs file still warns.
+#[test]
+fn test_brace_balance_still_warns_on_source_extensions() {
+    let original = "fn f() {\n    body();\n}\n";
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("src_file.rs");
+    std::fs::write(&path, original).unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_str().unwrap(),
+        "edits": [
+            // Drop the closer — would balance on prose, breaks on .rs.
+            { "search": "    body();\n}\n", "replace": "    body();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must fire on .rs even after prose-skip change");
+    assert!(warnings.iter().any(|w| w.as_str().unwrap_or("").contains("curly")),
+        "Expected a curly-brace warning. Got: {:?}", warnings);
 }
 
