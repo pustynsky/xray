@@ -2718,17 +2718,51 @@ fn test_hint_e_case_insensitive_extension() {
 }
 
 #[test]
-fn test_hint_e_comma_separated_file_filter() {
-    // file='foo.xml,bar.xml' → XML extension → XML on-demand hint fires
+fn test_hint_e_comma_separated_file_filter_with_name_rejects() {
+    // Multi-file XML *with* an XML on-demand-eligible shape (name set)
+    // must produce an actionable "single file" error. This is the
+    // contract change introduced by the 2026-04-25 file_filter_raw
+    // multi-file reject. Before: array was silently joined with comma
+    // and the index path tried to open `"foo.xml,bar.xml"` literally.
+    let ctx = make_hint_e_ctx();
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["foo.xml","bar.xml"],
+        "name": ["X"]
+    }));
+    assert!(result.is_error,
+        "multi-file XML on-demand-eligible request must error, got: {}",
+        result.content[0].text);
+    let msg = &result.content[0].text;
+    assert!(msg.contains("single file"),
+        "error must mention 'single file'; got: {msg}");
+    assert!(msg.contains("foo.xml") && msg.contains("bar.xml"),
+        "error must echo both filenames; got: {msg}");
+}
+
+#[test]
+fn test_hint_e_comma_separated_file_filter_without_name_falls_through_to_hint() {
+    // Multi-file XML *without* an XML on-demand-eligible shape (no name,
+    // no containsLine) must FALL THROUGH to the index path so its
+    // existing Hint E ("XML extension not indexed; use containsLine
+    // or name") can fire. This is the regression that the commit-reviewer
+    // subagent caught: the earlier version of the multi-file reject ran
+    // before the eligibility gate and preempted Hint E for the
+    // file-only request shape, leaving callers with a "single file"
+    // error suggesting `file=["foo.xml"]` — but a one-element XML
+    // array without name/containsLine STILL would not activate
+    // on-demand parsing, so the suggestion led nowhere.
     let ctx = make_hint_e_ctx();
     let result = handle_xray_definitions(&ctx, &json!({
         "file": ["foo.xml","bar.xml"]
     }));
-    assert!(!result.is_error);
+    assert!(!result.is_error,
+        "file-only multi-XML must fall through to hint, not error. Got: {}",
+        result.content[0].text);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = v["summary"]["hint"].as_str()
-        .expect("Should have hint for comma-separated XML extensions");
-    assert!(hint.contains("containsLine") || hint.contains("on-demand"), "Hint should suggest XML on-demand. Got: {}", hint);
+        .expect("Should have Hint E for XML extension without on-demand-eligible shape");
+    assert!(hint.contains("containsLine") || hint.contains("on-demand"),
+        "Hint E should suggest XML on-demand affordances. Got: {}", hint);
 }
 
 // ─── Tests for Hint: name+kind mismatch (Fix 1) ─────────────────────
@@ -4302,4 +4336,251 @@ fn test_parse_args_min_complexity_overflow_rejected() {
     );
 }
 
+// ─── file_filter_raw migration tests (multi-file XML / containsLine reject) ───
+//
+// Regression guard for the "comma-joined bridge" silent-failure bug surfaced
+// during cross-repo (.cs/.sql/.xml) validation of the 2026-04-25 list-params
+// migration. Before this fix, `file=["A.xml","B.xml"]` was joined into
+// `"A.xml,B.xml"` and:
+//   * XML on-demand parser tried to open the literal joined path → cryptic
+//     "file not found" after a slow filesystem stat.
+//   * containsLine substring path scanned every indexed file path for the
+//     substring `"a.xml,b.xml"` → 0 results, no error, no hint.
+// Both modes are conceptually single-file. The fix adds `file_filter_raw`
+// (un-normalized array straight from the request) and rejects multi-file
+// requests with an actionable error.
+
+#[test]
+fn test_parse_args_populates_file_filter_raw() {
+    let args = json!({"file": ["A.cs", "B.xml"]});
+    let parsed = parse_definition_args(&args).unwrap();
+    assert_eq!(parsed.file_filter_raw, vec!["A.cs".to_string(), "B.xml".to_string()]);
+    // Legacy `file_filter` bridge stays comma-joined for downstream consumers
+    // that still split internally (hint paths, file_matches_filter).
+    assert_eq!(parsed.file_filter.as_deref(), Some("A.cs,B.xml"));
+}
+
+#[test]
+fn test_parse_args_file_filter_raw_empty_when_no_filter() {
+    let args = json!({});
+    let parsed = parse_definition_args(&args).unwrap();
+    assert!(parsed.file_filter_raw.is_empty());
+    assert!(parsed.file_filter.is_none());
+}
+
+#[test]
+fn test_parse_args_file_filter_raw_preserves_case() {
+    // Critical: file_filter_raw must NOT be lowercased (unlike file_filter_terms),
+    // because XML on-demand uses it as the literal path for fs::read_to_string
+    // — and that's case-sensitive on Linux/Mac.
+    let args = json!({"file": ["Mixed/Case/Path.Config"]});
+    let parsed = parse_definition_args(&args).unwrap();
+    assert_eq!(parsed.file_filter_raw, vec!["Mixed/Case/Path.Config".to_string()]);
+}
+
+#[test]
+fn test_contains_line_rejects_multi_file_array() {
+    let def_index = make_test_def_index_with_file("Helper.cs");
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        files: vec!["Helper.cs".to_string()],
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["A.cs", "B.cs"],
+        "containsLine": 5,
+    }));
+    assert!(result.is_error, "multi-file containsLine must error");
+    let msg = &result.content[0].text;
+    assert!(msg.contains("single file"),
+        "error must mention 'single file'; got: {msg}");
+    assert!(msg.contains("A.cs"), "error must echo first file; got: {msg}");
+    assert!(msg.contains("B.cs"), "error must echo second file; got: {msg}");
+    assert!(msg.contains("containsLine=5"),
+        "error must include actionable hint with line; got: {msg}");
+}
+
+#[test]
+fn test_contains_line_single_file_array_still_works() {
+    // Regression guard: single-element file array must keep working after the
+    // multi-file reject was added (otherwise we'd break every well-formed call).
+    let def_index = make_test_def_index_with_file("Helper.cs");
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        files: vec!["Helper.cs".to_string()],
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+    // Helper class spans line 1–50 (per make_test_def_index_with_file).
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["Helper.cs"],
+        "containsLine": 10,
+    }));
+    assert!(!result.is_error,
+        "single-element file array containsLine must succeed: {}",
+        result.content[0].text);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["containingDefinitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 1, "should find Helper class containing line 10");
+    assert_eq!(defs[0]["name"], "Helper");
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_rejects_multi_file_array() {
+    use std::io::Write;
+    let tmp_dir = std::env::temp_dir()
+        .join(format!("xray_xml_multi_reject_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    // Both files exist on disk so this isn't a "file not found" path — the
+    // reject must happen BEFORE any filesystem access (cheap diagnostic, not
+    // a slow stat-then-fail).
+    let xml_a = r#"<Root><Service><Name>A</Name></Service></Root>"#;
+    let xml_b = r#"<Root><Service><Name>B</Name></Service></Root>"#;
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("a.xml")).unwrap();
+        f.write_all(xml_a.as_bytes()).unwrap();
+    }
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("b.xml")).unwrap();
+        f.write_all(xml_b.as_bytes()).unwrap();
+    }
+    let content_index = crate::ContentIndex {
+        root: tmp_dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["a.xml", "b.xml"],
+        "name": ["Service"],
+    }));
+    assert!(result.is_error,
+        "multi-file XML on-demand must error, got: {}", result.content[0].text);
+    let msg = &result.content[0].text;
+    assert!(msg.contains("single file"),
+        "must mention 'single file'; got: {msg}");
+    assert!(msg.contains("a.xml"), "must echo first file; got: {msg}");
+    assert!(msg.contains("b.xml"), "must echo second file; got: {msg}");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_single_file_array_still_works() {
+    // Regression guard: `file=["only.xml"]` (1 element) must still hit XML
+    // on-demand. Otherwise the multi-file reject would shadow the legitimate
+    // single-file path.
+    use std::io::Write;
+    let tmp_dir = std::env::temp_dir()
+        .join(format!("xray_xml_single_array_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let xml = r#"<Root><Service><Name>OnlyOne</Name></Service></Root>"#;
+    {
+        let mut f = std::fs::File::create(tmp_dir.join("only.xml")).unwrap();
+        f.write_all(xml.as_bytes()).unwrap();
+    }
+    let content_index = crate::ContentIndex {
+        root: tmp_dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["only.xml"],
+        "name": ["Service"],
+    }));
+    assert!(!result.is_error,
+        "single-element file array must succeed: {}", result.content[0].text);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(v["summary"]["xmlOnDemand"], true,
+        "single-file array must still hit XML on-demand path");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_rejects_mixed_extensions_with_xml() {
+    // Mixed extensions where at least one looks XML must reject when
+    // the request is XML on-demand-eligible (has name or containsLine).
+    // The error must (a) echo BOTH filenames so the user knows which
+    // call broke, (b) suggest the XML-looking entry as the next call —
+    // NOT just `[0]` which would point at the .cs file in this case
+    // and give the user a dead-end suggestion.
+    let ctx = HandlerContext {
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        server_ext: "xml,cs".to_string(),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["A.cs", "B.xml"],
+        "name": ["Service"],
+    }));
+    assert!(result.is_error,
+        "mixed-ext multi-file with at least one XML must error, got: {}",
+        result.content[0].text);
+    let msg = &result.content[0].text;
+    assert!(msg.contains("single file"),
+        "must mention 'single file'; got: {msg}");
+    assert!(msg.contains("A.cs"), "must echo non-XML entry; got: {msg}");
+    assert!(msg.contains("B.xml"), "must echo XML entry; got: {msg}");
+    // The actionable retry suggestion must point at the XML-looking
+    // entry (B.xml), not at the literal first array slot (A.cs).
+    // We assert it via `file=["B.xml"]` which is the documented
+    // suggestion shape.
+    assert!(msg.contains("file=[\"B.xml\"]"),
+        "suggested retry must point at XML entry B.xml, not at first slot A.cs. Got: {msg}");
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_mixed_ext_falls_through_when_not_eligible() {
+    // Mixed extensions WITHOUT name/containsLine must NOT error — the
+    // request shape (file-only) is not on-demand-eligible, so XML
+    // on-demand should not preempt the index path. This pairs with
+    // `test_xml_on_demand_rejects_mixed_extensions_with_xml` to pin
+    // that the multi-file reject only fires under the eligibility
+    // gate, not whenever the array contains an XML extension.
+    let ctx = HandlerContext {
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        server_ext: "xml,cs".to_string(),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["A.cs", "B.xml"]
+        // no name, no containsLine
+    }));
+    // Should NOT error from XML on-demand. May or may not have hints
+    // from the index path, but the multi-file reject must not fire.
+    if result.is_error {
+        let msg = &result.content[0].text;
+        assert!(!msg.contains("single file"),
+            "multi-file reject must not fire without name/containsLine. Got: {msg}");
+    }
+}
 

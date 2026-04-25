@@ -1,6 +1,31 @@
 # Changelog
 
 
+### BREAKING follow-up (file_filter_raw multi-file reject — 2026-04-25)
+
+- **`xray_definitions` now hard-rejects multi-file `file=[A,B,...]` requests in two single-file-only code paths**: XML on-demand parsing (when the request shape is on-demand-eligible — has `name` or `containsLine` AND at least one entry has an XML-family extension) and `containsLine` substring lookup. Both paths are conceptually single-file (open one document; locate one line in one document) and previously degraded silently when given a multi-file array because the array was joined to a comma-string bridge (`"a.xml,b.xml"`) before reaching them. Symptoms before the fix: `file=["A.config","B.config"]` produced a cryptic "file not found" after a slow `fs::metadata` stat (XML on-demand tried to open the literal joined path); `file=["A.cs","B.cs"], containsLine=10` silently returned an empty result set (substring scan against the bridge string never matched any indexed file path).
+- **Reject is gated on on-demand-eligibility, NOT on "array contains XML extension"**: requests that pass an XML-looking multi-file array WITHOUT `name`/`containsLine` (e.g. `file=["foo.xml","bar.xml"]` with no other filter) FALL THROUGH to the index path so its existing Hint E ("XML extension not indexed; use `containsLine` or `name`") can fire. Without this gate, the multi-file reject would preempt Hint E and suggest `file=["foo.xml"]` — but a one-element XML array without name/containsLine STILL would not activate on-demand parsing, so the suggestion would lead nowhere. (Caught by the commit-reviewer subagent in the first iteration of this fix.)
+- **New error shape** (single-file-required diagnostic, raised before any filesystem access):
+  - XML on-demand: `"XML on-demand requires a single file path, but `file` has 2 entries: [\"A.cs\",\"B.xml\"]. Run xray_definitions once per file (suggested first call: file=[\"B.xml\"]). XML on-demand opens and parses one file at a time; multi-file batching is not supported."` — the suggestion always points at the FIRST XML-looking entry in the array (B.xml in mixed-extension example), not at literal index 0.
+  - `containsLine`: `"containsLine requires a single file in 'file' (got 2 entries: [\"A.cs\",\"B.cs\"]). Run xray_definitions once per file: file=[\"A.cs\"], containsLine=10."`
+- **Internal mechanism**: a new `pub file_filter_raw: Vec<String>` field on `DefinitionSearchArgs` carries the un-normalized array straight from `read_string_array` (no lowercasing, no `\` → `/` rewrite). The legacy `file_filter: Option<String>` (comma-joined bridge) and `file_filter_terms: Option<Vec<String>>` (lowercased, slash-normalized for index-side substring matching) are retained for the hint paths and `file_matches_filter` that already split internally. The case-preserving `file_filter_raw` is mandatory for filesystem-touching code paths because case-sensitive filesystems (Linux/macOS) reject the lowercased path.
+- **Provenance**: surfaced during cross-repo Tier 4.6 validation of the 2026-04-25 list-params migration in a C#/SQL/XML repository. The user observation `file=["Directory.Build.props","NuGet.Config"]` produced a cryptic single-file error, which led to the audit of all seven `args.file_filter` consumer sites and the severity classification (2 Important, 2 Low UX, 3 OK because they already split the joined bridge string internally).
+- **Single-file array unaffected**: `file=["only.xml"]` (one element) continues to hit XML on-demand and `containsLine` exactly as before. The reject is keyed on `len > 1`, not on "is array".
+- **Tests** (`src/mcp/handlers/definitions_tests.rs`):
+  - `test_parse_args_populates_file_filter_raw` — pins the bridge-vs-raw contract.
+  - `test_parse_args_file_filter_raw_empty_when_no_filter` — empty-when-absent invariant.
+  - `test_parse_args_file_filter_raw_preserves_case` — critical regression guard for case-sensitive FS.
+  - `test_contains_line_rejects_multi_file_array` — multi-file containsLine errors with `'single file'` + both filenames + `containsLine=N` echoed for actionability.
+  - `test_contains_line_single_file_array_still_works` — single-element array still returns the containing class (regression guard so the new reject does not shadow legitimate calls).
+  - `test_xml_on_demand_rejects_multi_file_array` — multi-file XML errors before any filesystem touch.
+  - `test_xml_on_demand_single_file_array_still_works` — single-element XML on-demand still hits the XML parser (`summary.xmlOnDemand == true`).
+  - `test_xml_on_demand_rejects_mixed_extensions_with_xml` — `file=["A.cs","B.xml"]` with `name` set rejects, echoes both filenames, and the suggested retry points at the XML-looking entry (`B.xml`) — not at the literal first slot.
+  - `test_xml_on_demand_mixed_ext_falls_through_when_not_eligible` — `file=["A.cs","B.xml"]` WITHOUT `name`/`containsLine` does NOT error (the multi-file reject is gated on the on-demand-eligibility check, not on "array contains XML"). Pins the regression that the commit-reviewer subagent caught in the first iteration of this fix.
+  - `test_hint_e_comma_separated_file_filter_with_name_rejects` — split from the previous `test_hint_e_comma_separated_file_filter`. Asserts the new error contract for the on-demand-eligible shape (multi-XML + `name`).
+  - `test_hint_e_comma_separated_file_filter_without_name_falls_through_to_hint` — split from the previous `test_hint_e_comma_separated_file_filter`. Restores hint-path coverage for the file-only multi-XML shape (no `name`, no `containsLine`) — the multi-file reject must NOT preempt Hint E here.
+- Full suite: **2 227 unit tests pass** (was 2 222 in the bin target before this follow-up; +5 net = 9 new tests added, 1 pre-existing test split into 2). All previously-passing tests still pass; only the renamed/split `test_hint_e_comma_separated_file_filter_*` pair changes contract from "asserts hint" to two distinct assertions tied to the new eligibility-gated reject.
+
+
 ### BREAKING (MCP list params: comma-strings → arrays — 2026-04-25)
 
 - **MCP list-style parameters now require JSON arrays. Comma-separated strings are hard-rejected** with an error citing the param name, the date `2026-04-25`, and the word `array`. The migration covers every list-shaped MCP arg across the indexable surface:
