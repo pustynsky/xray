@@ -56,6 +56,7 @@ pub(crate) fn try_intercept(
     args: &DefinitionSearchArgs,
     search_start: Instant,
     ctx: &HandlerContext,
+    indexed_files: &[String],
 ) -> Option<ToolCallResult> {
     // Activation gate. The XML on-demand path opens, parses, and reports
     // against ONE file, so it only fires when ALL three conditions hold:
@@ -116,10 +117,72 @@ pub(crate) fn try_intercept(
     // `xml_indices` was non-empty and len == 1 implies index 0 is XML.
     let _ext = extract_file_extension(file_filter)?;
 
-    // Resolve file path (sandboxed to workspace, MAJOR-1/MAJOR-2 in review)
+    // Resolve file path (sandboxed to workspace, MAJOR-1/MAJOR-2 in review).
+    //
+    // If the verbatim input does not exist on disk, try a path-component-
+    // aligned suffix lookup against the index of already-discovered files
+    // (see `resolve_via_index_suffix` for the matching contract). This
+    // lets `file=["app.config"]` resolve to `web/configs/app.config` when
+    // there is exactly one such file in the workspace, without re-
+    // introducing the substring-collision class that the 2026-04-17
+    // security review closed (e.g. `web.config` must NOT match
+    // `webapp.config`). Only the not-found error path triggers the
+    // fallback — exact-path calls keep their fast path.
+    //
+    // The fallback is **gated to plain workspace-relative inputs**:
+    // absolute paths and inputs containing `..` segments must keep their
+    // original failure (MAJOR-2 sandbox contract). Otherwise an explicit
+    // outside-workspace input like `/etc/app.config` would be silently
+    // reinterpreted as a suffix query against an unrelated indexed
+    // `etc/app.config`, which downgrades the explicit-rejection contract.
     let file_path = match resolve_xml_file_path(file_filter, ctx) {
         Ok(p) => p,
-        Err(diag) => return Some(ToolCallResult::error(diag)),
+        Err(diag) => {
+            let normalised = file_filter.replace('\\', "/");
+            let raw_path = std::path::Path::new(file_filter);
+            let has_dotdot = normalised.split('/').any(|c| c == "..");
+            let is_absolute_like = raw_path.is_absolute()
+                || normalised.starts_with('/')
+                || normalised
+                    .chars()
+                    .nth(1)
+                    .is_some_and(|c| c == ':'); // Windows drive prefix `C:`
+            if has_dotdot || is_absolute_like {
+                return Some(ToolCallResult::error(diag));
+            }
+            match resolve_via_index_suffix(file_filter, indexed_files) {
+                SuffixResolution::Unique(rel) => {
+                    match resolve_xml_file_path(&rel, ctx) {
+                        Ok(p) => p,
+                        // Re-canonicalisation can still fail (e.g. file removed
+                        // from disk after indexing). Fall back to the original
+                        // diagnostic so the user sees the canonical error.
+                        Err(_) => return Some(ToolCallResult::error(diag)),
+                    }
+                }
+                SuffixResolution::Ambiguous(candidates) => {
+                    // Show up to 5 candidates to keep the message bounded.
+                    let shown: Vec<&String> = candidates.iter().take(5).collect();
+                    let more = candidates.len().saturating_sub(shown.len());
+                    let suffix = if more > 0 {
+                        format!(" (+{more} more)")
+                    } else {
+                        String::new()
+                    };
+                    return Some(ToolCallResult::error(format!(
+                        "XML file '{}' is ambiguous: {} indexed files end with that path-component suffix: {:?}{}. \
+                         Pass the full workspace-relative path to disambiguate. \
+                         Use xray_fast pattern=[\"{}\"] to list candidates.",
+                        file_filter,
+                        candidates.len(),
+                        shown,
+                        suffix,
+                        file_filter,
+                    )));
+                }
+                SuffixResolution::None => return Some(ToolCallResult::error(diag)),
+            }
+        }
     };
 
     // Directories are explicitly rejected — on-demand parsing needs a single
@@ -275,7 +338,7 @@ pub(crate) fn resolve_xml_file_path(
         format!(
             "Failed to resolve XML file '{}': {}. \
              Hint: pass a path relative to the workspace ('{}') or an absolute path \
-             inside it. Use xray_fast pattern='*.xml' to discover XML files.",
+             inside it. Use xray_fast pattern=[\"*.xml\"] to discover XML files.",
             file_filter, e, server_dir
         )
     })?;
@@ -303,7 +366,83 @@ pub(crate) fn resolve_xml_file_path(
     Ok(canonical_str)
 }
 
-/// Extract the last `.ext` from a (possibly comma-separated) file filter.
+/// Outcome of looking up a partial file path in the indexed file list.
+///
+/// Used by [`try_intercept`] when [`resolve_xml_file_path`] cannot find the
+/// verbatim input on disk: a basename or path-suffix that maps to exactly
+/// one indexed file is silently re-resolved; ambiguity is reported so the
+/// caller can disambiguate; absence falls through to the original error.
+#[derive(Debug)]
+pub(crate) enum SuffixResolution {
+    /// Exactly one indexed file ends with the requested path components.
+    Unique(String),
+    /// More than one indexed file ends with the requested path components.
+    Ambiguous(Vec<String>),
+    /// No indexed file matches.
+    None,
+}
+
+/// Path-component-aligned suffix lookup against `indexed_files`.
+///
+/// Contract:
+/// - `input` and every indexed path are normalised to forward slashes and
+///   split on `/`. Empty components (from leading/trailing slashes) are
+///   discarded so callers can pass `Sub/file.xml` or `/Sub/file.xml`
+///   interchangeably.
+/// - A path matches iff its **last `N` components** are byte-equal (case-
+///   insensitive) to the input components, where `N = input.components().len()`.
+///   This is stricter than `path.contains(input)` and crucially prevents
+///   `web.config` from matching `webapp.config` (different basename
+///   components), which the 2026-04-17 security review explicitly forbade.
+/// - Empty input is treated as no-match (`SuffixResolution::None`).
+///
+/// Time complexity: `O(F * C)` where `F = indexed_files.len()` and
+/// `C = input.components().len()` — a linear scan over the indexed file
+/// list with a short component-equality check per file. Only invoked on
+/// the not-found error path, so the cost does not regress exact-path
+/// requests.
+pub(crate) fn resolve_via_index_suffix(
+    input: &str,
+    indexed_files: &[String],
+) -> SuffixResolution {
+    let input_components: Vec<String> = input
+        .replace('\\', "/")
+        .split('/')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_lowercase())
+        .collect();
+    if input_components.is_empty() {
+        return SuffixResolution::None;
+    }
+
+    let mut matches: Vec<String> = Vec::new();
+    for path in indexed_files {
+        let normalised = path.replace('\\', "/");
+        let parts: Vec<&str> = normalised
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .collect();
+        if parts.len() < input_components.len() {
+            continue;
+        }
+        let tail = &parts[parts.len() - input_components.len()..];
+        let equal = tail
+            .iter()
+            .zip(input_components.iter())
+            .all(|(a, b)| a.eq_ignore_ascii_case(b));
+        if equal {
+            matches.push(path.clone());
+        }
+    }
+
+    match matches.len() {
+        0 => SuffixResolution::None,
+        1 => SuffixResolution::Unique(matches.into_iter().next().expect("len==1")),
+        _ => SuffixResolution::Ambiguous(matches),
+    }
+}
+
+
 ///
 /// For `file='Service,web.config'` we look at the **last** term because
 /// comma-separated filters are OR-lists and the XML extension is the discriminator
