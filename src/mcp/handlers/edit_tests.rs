@@ -5739,3 +5739,58 @@ fn test_generic_unknown_param_shows_canonical_examples() {
     assert!(msg.contains(CANONICAL_MODE_B_EXAMPLE), "should contain Mode B example: {msg}");
 }
 
+
+// ─── High-similarity actual content hint (#2 part 2) ─────────────────────
+
+#[test]
+fn test_high_similarity_shows_actual_content_single_line() {
+    // File has 5 spaces between backtick and "when"; search has 1 space.
+    // Similarity should be ~95%+ → hint includes copy-pastable actual content.
+    let file_line = "/// - `Ok(None)`     when the key is missing";
+    let (tmp, filename, _) = create_temp_file(&format!("line one\n{}\nline three\n", file_line));
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "/// - `Ok(None)` when the key is missing", "replace": "replaced" }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("Actual content (copy-pastable):"), "should include actual content: {text}");
+    assert!(text.contains(file_line), "actual content should be the full file line: {text}");
+}
+
+#[test]
+fn test_high_similarity_shows_actual_content_multiline() {
+    // Multi-line search with minor whitespace diff → high similarity.
+    let file_text = "fn foo() {\n    let x = 42;\n}";
+    let (tmp, filename, _) = create_temp_file(&format!("before\n{}\nafter\n", file_text));
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "fn foo() {\n  let x = 42;\n}", "replace": "replaced" }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("Actual content"), "should include actual content for multiline: {text}");
+}
+
+#[test]
+fn test_low_similarity_no_actual_content() {
+    // Low similarity → no actual content hint.
+    let (tmp, filename, _) = create_temp_file("alpha beta gamma\ndelta epsilon\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "completely different text here", "replace": "replaced" }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(!text.contains("Actual content"), "low similarity should NOT include actual content: {text}");
+}
+

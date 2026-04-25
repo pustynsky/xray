@@ -2397,9 +2397,29 @@ fn nearest_match_hint(content: &str, search_text: &str) -> String {
         String::new()
     };
 
+    // Part D: When similarity is very high (≥ 90%), append the FULL actual
+    // text from the file (up to 800 bytes). This lets the LLM copy-paste
+    // the exact content into its corrected `search` without having to
+    // re-read the file or guess at whitespace/punctuation differences.
+    // Gate on raw float (not rounded pct) to avoid the 89.5%→90% rounding band.
+    let actual_content_hint = if best_similarity >= 0.90 {
+        let cap = 800;
+        if best_text.len() <= cap {
+            format!(" Actual content (copy-pastable): `{}`", best_text)
+        } else {
+            format!(
+                " Actual content (truncated to {} bytes): `{}`",
+                cap,
+                &best_text[..best_text.floor_char_boundary(cap)]
+            )
+        }
+    } else {
+        String::new()
+    };
+
     format!(
-        ". Nearest match at line {} (similarity {}%): \"{}\"{}",
-        best_line_num, pct, display_text, byte_diff_hint
+        ". Nearest match at line {} (similarity {}%): \"{}\"{}{}",
+        best_line_num, pct, display_text, byte_diff_hint, actual_content_hint
     )
 }
 

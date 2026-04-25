@@ -1,5 +1,7 @@
 # Changelog
 
+## 2026-04-25
+
 ### BREAKING (MCP single-string params: strict typing — step 2 of 2026-04-25 strict-typing migration)
 
 - **Single-string MCP parameters now hard-reject wrong-type input (`array`, `number`, `bool`, `object`) and empty/whitespace-only strings.** Closes the asymmetry left over after the 2026-04-25 list-params migration: every list-shaped param (`terms`, `name`, `kind`, `file`, `parent`, `method`, `pattern`, `ext`) was strictified through `read_string_array`, but the matching single-value siblings (`class`, `attribute`, `baseType`, `from`, `to`, `date`, `author`, `message`, `path`, `repo`, `file` in git tools, `direction`, `mode`, `sortBy`) were still parsed by hand-rolled `args.get(K).and_then(|v| v.as_str())`. Wrong-type input on the OPTIONAL filter half (`class=["X"]`, `attribute=42`, etc.) silently dropped the filter and let the query proceed against the unfiltered superset — a real correctness regression, exhibited by [`scripts/test-r3-class-array.ps1`](scripts/test-r3-class-array.ps1) which produced a 21-node call tree from `xray_callers method=["dispatch_tool"] class=["OrderService"]` instead of an error. Wrong-type input on the REQUIRED half (`repo`, `file`) collapsed to a misleading `"Missing required parameter"` error. Empty strings (`baseType=""`, `class=""`) silently fell through to no-filter.
@@ -414,7 +416,9 @@ Cross-review follow-ups to the `three-correctness-followups` and `hardening` bun
 
 - **Unused imports `IndexDetails` and `IndexMeta` in `info.rs`** — Removed two unused imports that produced a compiler warning.
 
-## Unreleased
+### UX — Copy-pastable actual content in high-similarity error hints (2026-04-25)
+
+- When `xray_edit` Mode B search fails with similarity ≥ 90%, the error now includes the full actual text from the file (up to 800 bytes) prefixed with `Actual content (copy-pastable):`. This lets the caller fix their `search` string in one shot without re-reading the file.
 
 ### UX — Canonical examples in `xray_edit` error hints (2026-04-25)
 
