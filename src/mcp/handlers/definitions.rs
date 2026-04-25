@@ -333,8 +333,13 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
     // See `super::xml_on_demand::try_intercept` for the contract — it returns
     // `Some(result)` iff the request is XML-shaped AND something the on-demand
     // parser can answer (containsLine or name filter).
+    //
+    // `&index.files` is passed so that on-demand can fall back to path-
+    // component-aligned suffix resolution against the file index when the
+    // user gives a basename / partial path that does not exist verbatim
+    // under server_dir. See `todo_2026-04-25_definitions-file-suffix-matching.md`.
     #[cfg(feature = "lang-xml")]
-    if let Some(result) = super::xml_on_demand::try_intercept(&parsed, search_start, ctx) {
+    if let Some(result) = super::xml_on_demand::try_intercept(&parsed, search_start, ctx, &index.files) {
         return result;
     }
 

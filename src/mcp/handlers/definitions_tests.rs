@@ -4584,3 +4584,403 @@ fn test_xml_on_demand_mixed_ext_falls_through_when_not_eligible() {
     }
 }
 
+
+// ─── XML on-demand: partial-path / suffix resolution (story todo_2026-04-25) ───
+//
+// When `resolve_xml_file_path` cannot find the verbatim input on disk,
+// `try_intercept` falls back to a path-component-aligned suffix lookup
+// against the indexed file list. The lookup is intentionally stricter
+// than `path.contains(input)` to preserve the 2026-04-17 security fix
+// (web.config must NOT match webapp.config).
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_partial_path_basename_resolves_unique() {
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_basename_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let nested = tmp_dir.join("web").join("configs");
+    std::fs::create_dir_all(&nested).unwrap();
+    let target = nested.join("app.config");
+    std::fs::write(&target, "<root><setting>resolved</setting></root>").unwrap();
+
+    // Build a real index (so `index.files` carries the indexed XML path).
+    let mut def_index = make_test_def_index();
+    let file_id = def_index.files.len() as u32;
+    def_index.files.push("web/configs/app.config".to_string());
+    def_index.file_index.insert(file_id, vec![]);
+
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    // Pass only the basename — the file does NOT exist at workspace root,
+    // so the verbatim resolve fails and the suffix fallback must pick the
+    // single indexed match.
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["app.config"],
+        "name": ["setting"]
+    }));
+
+    assert!(
+        !result.is_error,
+        "basename should resolve via suffix lookup. Error: {}",
+        result.content[0].text
+    );
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("resolved") || text.contains("setting"),
+        "should return data from web/configs/app.config. Got: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_partial_path_suffix_resolves_unique() {
+    // Path-suffix input (`configs/app.config`) when the indexed file is
+    // `web/configs/app.config`. Last 2 components must align.
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_suffix_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let nested = tmp_dir.join("web").join("configs");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(
+        nested.join("app.config"),
+        "<root><setting>suffix</setting></root>",
+    )
+    .unwrap();
+
+    let mut def_index = make_test_def_index();
+    let file_id = def_index.files.len() as u32;
+    def_index.files.push("web/configs/app.config".to_string());
+    def_index.file_index.insert(file_id, vec![]);
+
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["configs/app.config"],
+        "name": ["setting"]
+    }));
+
+    assert!(
+        !result.is_error,
+        "path-suffix should resolve via suffix lookup. Error: {}",
+        result.content[0].text
+    );
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_partial_path_ambiguous_returns_error_with_candidates() {
+    // Two indexed files share the same basename. Suffix lookup must NOT
+    // silently pick one — it must error and list candidates so the caller
+    // disambiguates.
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_ambig_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let a_dir = tmp_dir.join("web");
+    let b_dir = tmp_dir.join("api");
+    std::fs::create_dir_all(&a_dir).unwrap();
+    std::fs::create_dir_all(&b_dir).unwrap();
+    std::fs::write(a_dir.join("app.config"), "<root><a/></root>").unwrap();
+    std::fs::write(b_dir.join("app.config"), "<root><b/></root>").unwrap();
+
+    let mut def_index = make_test_def_index();
+    let id_a = def_index.files.len() as u32;
+    def_index.files.push("web/app.config".to_string());
+    def_index.file_index.insert(id_a, vec![]);
+    let id_b = def_index.files.len() as u32;
+    def_index.files.push("api/app.config".to_string());
+    def_index.file_index.insert(id_b, vec![]);
+
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["app.config"],
+        "name": ["a"]
+    }));
+
+    assert!(
+        result.is_error,
+        "ambiguous basename must error, not silently merge or pick. Got: {}",
+        result.content[0].text
+    );
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("ambiguous") || text.contains("web/app.config") || text.contains("api/app.config"),
+        "error must list candidates, got: {text}"
+    );
+    // The remediation hint must use the array `pattern=["..."]` form because
+    // xray_fast rejects bare strings post-2026-04-25 list-params migration.
+    assert!(
+        text.contains("pattern=[\"app.config\"]"),
+        "hint must point at array-form xray_fast call, got: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_partial_path_does_not_collide_via_substring() {
+    // SECURITY regression mirror of test_xml_resolve_no_substring_collision:
+    // even after adding the suffix fallback, `web.config` must NOT resolve
+    // to `webapp.config` (different basename component). The fallback uses
+    // path-component equality, not substring, so this stays rejected.
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_no_collide_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    std::fs::write(tmp_dir.join("webapp.config"), "<root><leak/></root>").unwrap();
+
+    let mut def_index = make_test_def_index();
+    let file_id = def_index.files.len() as u32;
+    def_index.files.push("webapp.config".to_string());
+    def_index.file_index.insert(file_id, vec![]);
+
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["web.config"],
+        "name": ["leak"]
+    }));
+
+    assert!(
+        result.is_error,
+        "web.config must NOT resolve to webapp.config via suffix fallback"
+    );
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains("\"name\": \"leak\"") && !text.contains("<leak/>"),
+        "must not return data from webapp.config. Got: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+// ─── Unit tests for resolve_via_index_suffix (no filesystem) ───────────────
+
+#[cfg(feature = "lang-xml")]
+use crate::mcp::handlers::xml_on_demand::{resolve_via_index_suffix, SuffixResolution};
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_resolve_via_index_suffix_basename_unique() {
+    let files = vec![
+        "src/foo.rs".to_string(),
+        "web/configs/app.config".to_string(),
+    ];
+    match resolve_via_index_suffix("app.config", &files) {
+        SuffixResolution::Unique(p) => assert_eq!(p, "web/configs/app.config"),
+        other => panic!("expected Unique, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_resolve_via_index_suffix_path_suffix_unique() {
+    let files = vec![
+        "a/configs/app.config".to_string(),
+        "b/different.config".to_string(),
+    ];
+    match resolve_via_index_suffix("configs/app.config", &files) {
+        SuffixResolution::Unique(p) => assert_eq!(p, "a/configs/app.config"),
+        other => panic!("expected Unique, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_resolve_via_index_suffix_ambiguous_lists_all() {
+    let files = vec![
+        "a/app.config".to_string(),
+        "b/app.config".to_string(),
+        "c/app.config".to_string(),
+    ];
+    match resolve_via_index_suffix("app.config", &files) {
+        SuffixResolution::Ambiguous(c) => assert_eq!(c.len(), 3),
+        other => panic!("expected Ambiguous, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_resolve_via_index_suffix_no_substring_collision() {
+    // Critical security property: `web.config` must NOT match `webapp.config`
+    // because the basename components differ (`web.config` ≠ `webapp.config`).
+    let files = vec!["site/webapp.config".to_string()];
+    match resolve_via_index_suffix("web.config", &files) {
+        SuffixResolution::None => {}
+        other => panic!("expected None (no component match), got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_resolve_via_index_suffix_case_insensitive() {
+    let files = vec!["Web/Configs/App.Config".to_string()];
+    match resolve_via_index_suffix("app.config", &files) {
+        SuffixResolution::Unique(p) => assert_eq!(p, "Web/Configs/App.Config"),
+        other => panic!("expected Unique (case-insensitive), got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_resolve_via_index_suffix_normalises_backslashes() {
+    // Windows-style separators in input must be treated equivalent to /.
+    let files = vec!["web/configs/app.config".to_string()];
+    match resolve_via_index_suffix(r"configs\app.config", &files) {
+        SuffixResolution::Unique(p) => assert_eq!(p, "web/configs/app.config"),
+        other => panic!("expected Unique with backslash input, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_resolve_via_index_suffix_empty_input_is_none() {
+    let files = vec!["foo.rs".to_string()];
+    match resolve_via_index_suffix("", &files) {
+        SuffixResolution::None => {}
+        other => panic!("expected None for empty input, got {other:?}"),
+    }
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_resolve_via_index_suffix_input_longer_than_path_is_none() {
+    let files = vec!["app.config".to_string()];
+    match resolve_via_index_suffix("deeper/path/app.config", &files) {
+        SuffixResolution::None => {}
+        other => panic!("expected None when input has more components than file, got {other:?}"),
+    }
+}
+
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_partial_path_absolute_outside_workspace_does_not_use_fallback() {
+    // SECURITY regression: an explicit absolute path outside the workspace
+    // must keep its outside-workspace rejection even when an indexed file
+    // happens to share the trailing path components. The suffix fallback
+    // is gated to plain workspace-relative inputs; absolute paths and
+    // `..` escapes must NOT be silently reinterpreted as suffix queries.
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_abs_no_fallback_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    // Create the in-workspace file the indexed path points at, so the
+    // suffix fallback WOULD succeed if it were not gated.
+    let nested = tmp_dir.join("etc");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("app.config"), "<root><leak/></root>").unwrap();
+
+    let mut def_index = make_test_def_index();
+    let file_id = def_index.files.len() as u32;
+    def_index.files.push("etc/app.config".to_string());
+    def_index.file_index.insert(file_id, vec![]);
+
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    // Use a platform-appropriate absolute path that is NOT inside the
+    // workspace. On Windows we cannot guarantee `/etc/app.config` exists,
+    // but the gate triggers on the absolute-like shape regardless of
+    // existence (resolve_xml_file_path fails first, gate then prevents
+    // fallback).
+    #[cfg(unix)]
+    let abs_input = "/etc/app.config";
+    #[cfg(windows)]
+    let abs_input = r"C:\etc\app.config";
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": [abs_input],
+        "name": ["leak"]
+    }));
+
+    assert!(
+        result.is_error,
+        "absolute outside-workspace path must NOT be rewritten via suffix fallback"
+    );
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains("<leak/>") && !text.contains("\"name\": \"leak\""),
+        "must not return data from the in-workspace etc/app.config. Got: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_partial_path_dotdot_input_does_not_use_fallback() {
+    // SECURITY regression: `..` segments in input must NOT be rewritten
+    // via suffix fallback even when the trailing components match an
+    // indexed file. Same threat model as the absolute-path test —
+    // explicit traversal intent should not be silently “fixed”.
+    let tmp_dir = std::env::temp_dir().join(format!("xray_xml_dotdot_no_fallback_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let nested = tmp_dir.join("web");
+    std::fs::create_dir_all(&nested).unwrap();
+    std::fs::write(nested.join("app.config"), "<root><leak/></root>").unwrap();
+
+    let mut def_index = make_test_def_index();
+    let file_id = def_index.files.len() as u32;
+    def_index.files.push("web/app.config".to_string());
+    def_index.file_index.insert(file_id, vec![]);
+
+    let ctx = HandlerContext {
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["../web/app.config"],
+        "name": ["leak"]
+    }));
+
+    assert!(
+        result.is_error,
+        "input with `..` segments must NOT be rewritten via suffix fallback"
+    );
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains("<leak/>") && !text.contains("\"name\": \"leak\""),
+        "must not return data from web/app.config via dotdot input. Got: {text}"
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
