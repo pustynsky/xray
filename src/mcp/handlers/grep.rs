@@ -1116,10 +1116,24 @@ fn auto_switch_to_phrase_if_needed(
         && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
             if let Some(summary) = output.get_mut("summary") {
                 let note = if has_punctuation {
-                    format!("{} — auto-switched to phrase search (~100x slower). \
-                     Tip: use last segment only for faster substring search \
-                     (e.g., 'SqlClient' instead of 'System.Data.SqlClient', \
-                     'Blobs' instead of 'Azure.Storage.Blobs')", reason)
+                    // Surface the actual offending characters from raw_terms so
+                    // the hint is context-specific instead of always pointing at
+                    // .NET-namespace examples. Alphanumerics and underscores are
+                    // kept by tokenize(); spaces are reported via the has_spaces
+                    // channel, so we exclude both here. BTreeSet gives stable,
+                    // deterministic ordering for tests and human readers.
+                    let offenders: std::collections::BTreeSet<char> = raw_terms
+                        .iter()
+                        .flat_map(|t| t.chars())
+                        .filter(|c| !c.is_alphanumeric() && *c != '_' && *c != ' ')
+                        .collect();
+                    let chars: String = offenders.iter().collect();
+                    format!(
+                        "{} ({}) — auto-switched to phrase search (~100x slower). \
+                         Tip: drop the punctuation for a fast substring match, \
+                         or pass lineRegex=true to match the literal pattern on raw lines.",
+                        reason, chars
+                    )
                 } else {
                     format!("{} — auto-switched to phrase search \
                      (substring mode operates on individual tokens which only contain \

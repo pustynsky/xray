@@ -2349,7 +2349,8 @@ fn test_substring_non_count_only_still_has_matched_tokens() {
 // ─── Block B: auto-switch hint should be actionable ─────────
 
 /// Block B: when dotted terms trigger phrase auto-switch, the hint should contain
-/// actionable advice ("Tip: use last segment only") not just explain the mechanism.
+/// actionable advice — the offending characters from the user input plus the
+/// `lineRegex=true` alternative — not just explain the mechanism.
 #[test]
 fn test_auto_switch_phrase_hint_is_actionable() {
     let (ctx, tmp) = make_e2e_substring_ctx();
@@ -2363,11 +2364,16 @@ fn test_auto_switch_phrase_hint_is_actionable() {
     let note = output["summary"]["searchModeNote"].as_str()
         .expect("searchModeNote should exist for auto-switched phrase search");
 
-    // Hint should contain actionable advice
+    // After 2026-04-25 dynamic-note migration the hint lists the actual
+    // offending characters from raw_terms (here: '.') and points at both
+    // remediations (drop punctuation OR use lineRegex=true) instead of
+    // the old hardcoded SqlClient/Blobs example.
     assert!(note.contains("Tip:"),
         "searchModeNote should contain 'Tip:' with actionable advice. Got: {}", note);
-    assert!(note.contains("SqlClient"),
-        "searchModeNote should contain example like 'SqlClient'. Got: {}", note);
+    assert!(note.contains("(.)"),
+        "searchModeNote should list the offending character '.'. Got: {}", note);
+    assert!(note.contains("lineRegex=true"),
+        "searchModeNote should mention lineRegex=true alternative. Got: {}", note);
     assert!(note.contains("~100x slower"),
         "searchModeNote should warn about slowdown (~100x slower). Got: {}", note);
 
@@ -2393,6 +2399,35 @@ fn test_phrase_pure_punctuation_hints_line_regex() {
         "error should point to lineRegex=true as the alternative. Got: {}", msg);
     assert!(msg.contains("Example:"),
         "error should include a copy-pasteable example. Got: {}", msg);
+
+    cleanup_tmp(&tmp);
+}
+
+
+/// Block B: dynamic searchModeNote — hint must list the actual offending
+/// characters from raw_terms, not the old hardcoded SqlClient/Blobs example.
+/// Multiple distinct punctuation chars must all show up in deterministic order
+/// (BTreeSet<char>) and the hint must point at lineRegex=true as the alternative.
+#[test]
+fn test_search_mode_note_lists_actual_offending_chars() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["foo(bar)"]
+    }));
+    assert!(!result.is_error, "Punctuation term should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let note = output["summary"]["searchModeNote"].as_str()
+        .expect("searchModeNote should exist");
+
+    // BTreeSet<char> sorts ASCII codepoints, so '(' (0x28) comes before ')' (0x29).
+    assert!(note.contains("(()"),
+        "note should list both '(' and ')' in deterministic order. Got: {}", note);
+    assert!(note.contains(")"),
+        "note should list ')'. Got: {}", note);
+    assert!(note.contains("lineRegex=true"),
+        "note should mention lineRegex=true alternative. Got: {}", note);
+    assert!(!note.contains("SqlClient"),
+        "note should no longer carry the obsolete hardcoded SqlClient hint. Got: {}", note);
 
     cleanup_tmp(&tmp);
 }
