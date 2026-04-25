@@ -40,28 +40,38 @@ pub(crate) use self::callers::resolve_call_site;
 /// Used to dynamically generate language lists in xray_definitions and xray_callers descriptions.
 pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
     let lang_list = crate::tips::format_supported_languages(def_extensions);
+    // Single source of truth for the closed `kind` enum exposed via
+    // `xray_definitions.kind`. Derived from `DefinitionKind::ALL_KINDS` so the
+    // schema and the runtime validator (`utils::read_kind_array`) cannot drift.
+    let kind_enum: Vec<&'static str> = crate::definitions::DefinitionKind::ALL_KINDS
+        .iter()
+        .map(|k| k.as_str())
+        .collect();
     let mut tools = vec![
         ToolDefinition {
             name: "xray_grep".to_string(),
-            description: "Preferred for content/pattern search across indexed files. Use before built-in text/regex search for indexed file types. Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results. Comma-separated phrases with spaces are searched independently (OR/AND).".to_string(),
+            description: "Preferred for content/pattern search across indexed files. Use before built-in text/regex search for indexed file types. Search file contents using an inverted index with TF-IDF ranking. LANGUAGE-AGNOSTIC: works with any text file (C#, Rust, Python, JS/TS, XML, JSON, config, etc.). Supports exact tokens, multi-term OR/AND, regex, phrase search, substring search, and exclusion filters. Results ranked by relevance. Index stays in memory for instant subsequent queries (~0.001s). Substring search is ON by default. Large results are auto-truncated to ~16KB (~4K tokens). Use countOnly=true or narrow with dir/ext/excludeDir for focused results. Multi-term OR/AND via array `terms` — each entry is one term; literal commas inside an entry are preserved.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "terms": {
-                        "type": "string",
-                        "description": "Search terms. Comma-separated for multi-term OR/AND."
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Search terms. Each array entry is one term. Multi-term OR/AND via `mode`. Literal commas inside an entry are preserved (e.g. regex `^[^,]+,[^,]+$`)."
                     },
                     "dir": {
                         "type": "string",
                         "description": "Directory to search (default: server's --dir). Supports both absolute and relative paths — relative paths are resolved against server_dir. If a FILE path is passed, it is auto-converted to its parent directory + file= basename filter; the response includes a `dirAutoConverted` note explaining the conversion. To narrow to a specific file, prefer `file='<name>'` directly."
                     },
                     "file": {
-                        "type": "string",
-                        "description": "Restrict results to files whose path or basename contains this substring (case-insensitive). Comma-separated for multi-term OR (e.g., 'Service,Client'). Combines with `dir`/`ext`/`excludeDir` via AND. Use this to search in a specific file or a small set of files without passing a file path in `dir`."
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Restrict results to files whose path or basename contains any of these substrings (case-insensitive, OR semantics — e.g., [\"Service\",\"Client\"]). Combines with `dir`/`ext`/`excludeDir` via AND."
                     },
                     "ext": {
-                        "type": "string",
-                        "description": "File extension filter, comma-separated (default: all indexed)"
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File extension filter. Each array entry is one extension (without dot); multiple entries = OR — e.g., [\"rs\",\"toml\"]. Default: all indexed."
                     },
                     "mode": {
                         "type": "string",
@@ -74,16 +84,11 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "phrase": {
                         "type": "boolean",
-                        "description": "Exact phrase match on raw file content (default: false). Matches literal strings including XML tags, angle brackets, slashes — no escaping needed. Example: terms='<MaxRetries>3</MaxRetries>', phrase=true finds the exact XML tag. Comma-separated phrases are searched independently with OR/AND semantics."
+                        "description": "Exact phrase match on raw file content (default: false). Matches literal strings including XML tags, angle brackets, slashes — no escaping needed. Example: terms=['<MaxRetries>3</MaxRetries>'], phrase=true finds the exact XML tag. Multi-phrase OR/AND via the `terms` array."
                     },
                     "lineRegex": {
                         "type": "boolean",
-                        "description": "Line-anchored regex search (default: false). Auto-enables regex=true and disables substring. Unlike default regex (which matches against tokenized index entries — alphanumeric+underscore only), lineRegex applies the pattern to each line of file content with `multi_line=true`, so `^` and `$` anchor to line boundaries and patterns may contain spaces, punctuation, brackets, etc. Required for: markdown headings (`^## `), C# attributes (`^\\s*\\[Test\\]`), function signatures (`^pub fn`), end-of-line braces (`\\}$`). Comma-separated patterns supported (OR/AND via mode). For patterns containing literal `,` (CSV-shape, log prefixes), use `linePatterns` instead. Whitespace inside patterns is significant — patterns are NOT trimmed. File scope MUST be narrowed via ext/dir/file filters; otherwise every indexed file is read from disk (slower than token regex). Mutually exclusive with phrase=true."
-                    },
-                    "linePatterns": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Explicit array of line-regex patterns for `lineRegex=true` mode. Each entry is one pattern, taken verbatim — `,` inside a pattern is preserved (e.g. CSV regex `^[^,]+,[^,]+$`, log prefix `^ERROR,WARN:`). Use this instead of `terms` when any pattern contains a literal comma. Mutually exclusive with `terms`; requires lineRegex=true."
+                        "description": "Line-anchored regex search (default: false). Auto-enables regex=true and disables substring. Unlike default regex (which matches against tokenized index entries — alphanumeric+underscore only), lineRegex applies the pattern to each line of file content with `multi_line=true`, so `^` and `$` anchor to line boundaries and patterns may contain spaces, punctuation, brackets, etc. Required for: markdown headings (`^## `), C# attributes (`^\\s*\\[Test\\]`), function signatures (`^pub fn`), end-of-line braces (`\\}$`). Each `terms` array entry is one regex pattern, taken verbatim — literal `,` inside a pattern is preserved (CSV-shape, log prefixes). Whitespace inside patterns is significant — patterns are NOT trimmed. File scope MUST be narrowed via ext/dir/file filters; otherwise every indexed file is read from disk (slower than token regex). Mutually exclusive with phrase=true."
                     },
                     "showLines": {
                         "type": "boolean",
@@ -130,16 +135,16 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
 
         ToolDefinition {
             name: "xray_fast".to_string(),
-            description: "PREFERRED file lookup tool — searches pre-built file name index. Instant results (~35ms for 100K files). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Example: pattern='UserService,OrderProcessor' finds files whose name contains ANY of the terms. Supports pattern='*' or empty pattern with dir to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files or list_directory. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field.".to_string(),
+            description: "PREFERRED file lookup tool — searches pre-built file name index. Instant results (~35ms for 100K files). Auto-builds index if not present. Pass multiple patterns as an array (`pattern: [\"UserService\",\"OrderProcessor\"]`) for multi-file lookup with OR semantics. Supports `pattern=['*']` or an empty array with `dir` to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files or list_directory. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "pattern": { "type": "string", "description": "File name substring or glob pattern. Comma-separated for multi-term OR. Glob characters (* and ?) are auto-detected and converted to regex (e.g., 'Order*' finds files starting with Order, 'Use?Service' matches single char). Without glob chars, uses substring matching. Use '*' to list all entries. Empty string with dir also lists all." },
+                    "pattern": { "type": "array", "items": { "type": "string" }, "description": "File name substring or glob pattern(s). Each array entry is one pattern; multiple entries = OR. Glob characters (* and ?) are auto-detected and converted to regex (e.g., 'Order*' finds files starting with Order, 'Use?Service' matches single char). Without glob chars, uses substring matching. Use ['*'] to list all entries. Empty array with `dir` also lists all." },
                     "dir": { "type": "string", "description": "Directory to search. Supports both absolute and relative paths. Relative paths are resolved against server_dir (e.g., 'src/services' resolves to server_dir/src/services)." },
-                    "ext": { "type": "string", "description": "Filter by extension" },
+                    "ext": { "type": "array", "items": { "type": "string" }, "description": "File extension filter. Each array entry is one extension (without dot); multiple entries = OR — e.g., [\"rs\",\"toml\"]." },
                     "regex": { "type": "boolean", "description": "Treat as regex" },
                     "ignoreCase": { "type": "boolean", "description": "Case-insensitive" },
-                    "dirsOnly": { "type": "boolean", "description": "Show only directories. Returns directories sorted by fileCount descending (largest first). Useful for identifying important modules. Works with both wildcard (pattern='*') and filtered patterns (e.g., 'Storage,Redis'). ext filter is ignored (directories have no extension)" },
+                    "dirsOnly": { "type": "boolean", "description": "Show only directories. Returns directories sorted by fileCount descending (largest first). Useful for identifying important modules. Works with both wildcard (pattern=['*']) and filtered patterns (e.g., ['Storage','Redis']). ext filter is ignored (directories have no extension)" },
                     "filesOnly": { "type": "boolean", "description": "Show only files" },
                     "countOnly": { "type": "boolean", "description": "Count only" },
                     "maxDepth": { "type": "integer", "description": "Max directory depth for dirsOnly results (1=immediate children only). Default: unlimited" },
@@ -165,8 +170,9 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                 "properties": {
                     "dir": { "type": "string", "description": "Directory to reindex" },
                     "ext": {
-                        "type": "string",
-                        "description": "File extensions (comma-separated)"
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File extensions, e.g., [\"rs\",\"toml\"]"
                     }
                 },
                 "required": []
@@ -191,8 +197,9 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                 "properties": {
                     "dir": { "type": "string", "description": "Directory to reindex (default: server's --dir)" },
                     "ext": {
-                        "type": "string",
-                        "description": "File extensions to parse, comma-separated (default: server's --ext)"
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File extensions to parse, e.g., [\"rs\",\"toml\"] (default: server's --ext)"
                     }
                 },
                 "required": []
@@ -230,12 +237,17 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "name": {
-                        "type": "string",
-                        "description": "Name to search (substring). Comma-separated for multi-term OR."
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Name(s) to search (substring). Each array entry is one term; multiple entries = OR."
                     },
                     "kind": {
-                        "type": "string",
-                        "description": "Filter by definition kind. Comma-separated for multi-kind OR (e.g., 'class,interface,enum'). Valid values: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember, function, typeAlias, variable, storedProcedure, table, view, sqlFunction, userDefinedType, column, sqlIndex."
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": kind_enum
+                        },
+                        "description": "Filter by definition kind(s). Each array entry is one kind. Empty/omitted = all kinds."
                     },
                     "attribute": {
                         "type": "string",
@@ -250,12 +262,14 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                         "description": "When true with baseType, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType. Known limitation: name-only matching (no namespace resolution). (default: false)"
                     },
                     "file": {
-                        "type": "string",
-                        "description": "Filter by file path substring. Comma-separated for multi-term OR. Use file='<dirname>' to explore an entire module — returns all definitions in files matching this directory path."
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Filter by file path substring(s). Each array entry is one term; multiple entries = OR. Use file=['<dirname>'] to explore an entire module — returns all definitions in files matching this directory path."
                     },
                     "parent": {
-                        "type": "string",
-                        "description": "Filter by parent/containing class name. Comma-separated for multi-term OR."
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Filter by parent/containing class name(s). Each array entry is one term; multiple entries = OR."
                     },
                     "containsLine": {
                         "type": "integer",
@@ -377,8 +391,9 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                 "type": "object",
                 "properties": {
                     "method": {
-                        "type": "string",
-                        "description": "Method name to find callers/callees for. Comma-separated for multi-method batch (e.g., 'Foo,Bar,Baz'). Each method gets an independent call tree. Single method returns {callTree: [...]}, multiple methods return {results: [{method, callTree}, ...]}."
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Method name(s) to find callers/callees for. Each array entry is one method; multiple entries = batch (e.g., [\"Foo\",\"Bar\",\"Baz\"]). Each method gets an independent call tree. Single-element array returns {callTree: [...]}, multi-element returns {results: [{method, callTree}, ...]}."
                     },
                     "class": {
                         "type": "string",
@@ -394,8 +409,9 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                         "description": "'up' = callers (default), 'down' = callees."
                     },
                     "ext": {
-                        "type": "string",
-                        "description": "File extension filter (default: server's --ext)"
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "File extension filter. Each array entry is one extension (without dot); multiple entries = OR — e.g., [\"cs\",\"sql\"]. Default: server's --ext."
                     },
                     "excludeDir": {
                         "type": "array",

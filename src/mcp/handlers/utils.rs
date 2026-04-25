@@ -1209,6 +1209,100 @@ pub(crate) fn best_match_tier(name: &str, terms: &[String]) -> u8 {
     best
 }
 
+/// Resolve the closed enum of valid `kind` values for `xray_definitions`.
+/// Derived at runtime from
+/// [`crate::definitions::types::DefinitionKind::ALL_KINDS`] so the schema
+/// validator and the parser-side enum cannot drift. Computed once per
+/// process via [`std::sync::OnceLock`].
+///
+/// Drift guards live next to the enum itself (see
+/// `definitions::types::kinds_drift_tests::all_kinds_lists_every_variant`).
+fn known_kinds() -> &'static [&'static str] {
+    use crate::definitions::DefinitionKind;
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Vec<&'static str>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            DefinitionKind::ALL_KINDS
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<&'static str>>()
+        })
+        .as_slice()
+}
+
+/// Read a JSON array-of-strings argument from MCP tool call args.
+///
+/// Returns an empty `Vec` when the param is absent or `null`. Trims each entry
+/// and skips empty ones (matches the prior comma-split behaviour for empty
+/// segments). Returns an `Err` with an actionable message when the param is
+/// present but is not an array of strings — the canonical schema-mismatch path
+/// after the 2026-04-25 list-params-to-arrays migration. The error message
+/// always includes a concrete `["a","b"]` example so LLM callers can self-correct.
+pub(crate) fn read_string_array(
+    args: &Value,
+    key: &str,
+) -> Result<Vec<String>, String> {
+    match args.get(key) {
+        None | Some(Value::Null) => Ok(Vec::new()),
+        Some(Value::Array(arr)) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for (i, v) in arr.iter().enumerate() {
+                match v.as_str() {
+                    Some(s) => {
+                        let trimmed = s.trim();
+                        if !trimmed.is_empty() {
+                            out.push(trimmed.to_string());
+                        }
+                    }
+                    None => {
+                        return Err(format!(
+                            "'{key}' must be an array of strings; element [{i}] is {} (got {}). Example: '{key}': [\"a\",\"b\"].",
+                            type_label(v),
+                            v
+                        ));
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Some(other) => Err(format!(
+            "'{key}' must be an array of strings (got {}). The string-with-comma form was removed in the 2026-04-25 migration. Example: '{key}': [\"a\",\"b\"].",
+            type_label(other)
+        )),
+    }
+}
+
+/// Like [`read_string_array`] but additionally validates each element against
+/// the closed [`known_kinds`] enum. Used by `xray_definitions` for the `kind`
+/// parameter.
+pub(crate) fn read_kind_array(args: &Value) -> Result<Vec<String>, String> {
+    let raw = read_string_array(args, "kind")?;
+    let valid = known_kinds();
+    for k in &raw {
+        if !valid.contains(&k.as_str()) {
+            return Err(format!(
+                "'kind' contains unknown value '{k}'. Valid values: {}.",
+                valid.join(", ")
+            ));
+        }
+    }
+    Ok(raw)
+}
+
+/// Human-readable JSON value type label for diagnostic messages.
+fn type_label(v: &Value) -> &'static str {
+    match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    }
+}
+
 #[cfg(test)]
 #[path = "utils_tests.rs"]
 mod tests;
+
