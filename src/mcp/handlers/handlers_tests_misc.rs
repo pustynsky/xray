@@ -1175,3 +1175,68 @@ fn test_xray_reindex_definitions_ext_string_form_rejected() {
     assert!(msg.contains("array") || msg.contains("2026-04-25"),
         "Error must explain array contract / cite migration. Got: {}", msg);
 }
+
+
+// ─── §4.6 audit: per-key array-form contract for ALL migrated MCP keys ───
+//
+// Contract (established as of step 5 round 1, 2026-04-25): every MCP tool key
+// migrated from comma-separated `string` to `array<string>` MUST have an
+// end-to-end regression test that bare-string is rejected with an error
+// citing the parameter name and ("array" OR "2026-04-25").
+//
+// Steps 5 (xray_fast.{pattern,ext}) and 6 (xray_reindex(_definitions).ext)
+// added per-handler tests inline. Earlier steps 2–4 (xray_grep.{terms,file,ext},
+// xray_definitions.{name,kind,file,parent}, xray_callers.{method,ext}) did
+// not. The helper-level tests (`read_string_array_rejects_string_form_*`)
+// prove the helper rejects, but they do NOT catch a regression where a
+// handler stops calling `read_string_array` for a specific key (e.g. someone
+// re-introduces `args.get("terms").and_then(|v| v.as_str())`).
+//
+// This single table-driven test closes the audit gap. Each (tool, key) pair
+// dispatches with a bare-string value and asserts the canonical rejection
+// shape. Adding a new migrated key WITHOUT extending this table is the
+// expected forcing function for the next reviewer.
+#[test]
+fn test_all_migrated_keys_reject_bare_string_form() {
+    // (tool, key, extra_args_to_make_call_reach_the_parser)
+    // - xray_grep needs nothing else (terms is the only required key; file/ext
+    //   are optional but should still be parsed when present).
+    // - xray_definitions needs def_index (via make_ctx_with_defs) and at least
+    //   `name` to reach the kind/file/parent parsers.
+    // - xray_callers needs def_index and `method` to reach the ext parser.
+    // - xray_fast / xray_reindex / xray_reindex_definitions are covered by
+    //   step-5 / step-6 inline tests; not duplicated here.
+    let ctx = make_ctx_with_defs();
+    let cases: &[(&str, &str, serde_json::Value)] = &[
+        // xray_grep — step 2
+        ("xray_grep", "terms", json!({ "terms": "foo" })),
+        ("xray_grep", "file",  json!({ "terms": ["foo"], "file": "a.rs" })),
+        ("xray_grep", "ext",   json!({ "terms": ["foo"], "ext": "rs" })),
+        // xray_definitions — step 3
+        ("xray_definitions", "name",   json!({ "name":   "Foo" })),
+        ("xray_definitions", "kind",   json!({ "name": ["Foo"], "kind":   "class" })),
+        ("xray_definitions", "file",   json!({ "name": ["Foo"], "file":   "a.cs" })),
+        ("xray_definitions", "parent", json!({ "name": ["Foo"], "parent": "Bar" })),
+        // xray_callers — step 4
+        ("xray_callers", "method", json!({ "method": "Foo" })),
+        ("xray_callers", "ext",    json!({ "method": ["ExecuteQueryAsync"], "ext": "cs" })),
+    ];
+
+    for (tool, key, args) in cases {
+        let result = dispatch_tool(&ctx, tool, args);
+        assert!(
+            result.is_error,
+            "({tool}, {key}): bare-string must be rejected post 2026-04-25 migration. Got non-error: {}",
+            result.content[0].text
+        );
+        let msg = &result.content[0].text;
+        assert!(
+            msg.contains(*key),
+            "({tool}, {key}): error must mention the offending parameter name. Got: {msg}"
+        );
+        assert!(
+            msg.contains("array") || msg.contains("2026-04-25"),
+            "({tool}, {key}): error must explain array contract or cite migration date. Got: {msg}"
+        );
+    }
+}
