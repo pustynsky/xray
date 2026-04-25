@@ -5325,7 +5325,7 @@ fn test_replace_out_of_range_includes_append_hint() {
     );
 }
 
-/// Successful Mode A `xray_edit` response must carry an `appendIdiom` object
+/// Successful Mode A `xray_edit` response must carry an `appendRangeHint` object
 /// with the canonical (startLine, endLine) values for an INSERT-after-EOF
 /// follow-up call. This eliminates the "agent guesses N+1 from stale state"
 /// failure class.
@@ -5346,17 +5346,17 @@ fn test_edit_response_includes_append_idiom() {
         serde_json::from_str(&result.content[0].text).unwrap();
     let new_line_count = output["newLineCount"].as_u64()
         .expect("newLineCount must be present");
-    let append = output["appendIdiom"].as_object()
-        .expect("appendIdiom must be present in successful response");
+    let append = output["appendRangeHint"].as_object()
+        .expect("appendRangeHint must be present in successful response");
     assert_eq!(
         append["startLine"].as_u64().unwrap(),
         new_line_count + 1,
-        "appendIdiom.startLine must equal newLineCount + 1"
+        "appendRangeHint.startLine must equal newLineCount + 1"
     );
     assert_eq!(
         append["endLine"].as_u64().unwrap(),
         new_line_count,
-        "appendIdiom.endLine must equal newLineCount"
+        "appendRangeHint.endLine must equal newLineCount"
     );
 }
 

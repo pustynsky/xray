@@ -973,7 +973,7 @@ fn handle_single_file_edit(
         "lineEnding": if line_ending == "\r\n" { "CRLF" } else { "LF" },
         // INSERT-after-EOF idiom hint: agents can read these values directly
         // from a previous response instead of guessing from stale state.
-        "appendIdiom": {
+        "appendRangeHint": {
             "startLine": edit_result.new_line_count + 1,
             "endLine": edit_result.new_line_count,
         },
@@ -1230,7 +1230,7 @@ fn handle_multi_file_edit(
             "lineEnding": if *line_ending == "\r\n" { "CRLF" } else { "LF" },
             // INSERT-after-EOF idiom hint: agents can read these values directly
             // from a previous response instead of guessing from stale state.
-            "appendIdiom": {
+            "appendRangeHint": {
                 "startLine": result.new_line_count + 1,
                 "endLine": result.new_line_count,
             },

@@ -2,6 +2,10 @@
 
 ## 2026-04-25
 
+### Rename — `appendIdiom` → `appendRangeHint` in `xray_edit` response (2026-04-25)
+
+- Renamed the `appendIdiom` response field to `appendRangeHint` for clarity. The field contains `{startLine, endLine}` for an INSERT-after-EOF follow-up call. Old name was confusing (`start > end` looked like a bug) and didn't convey its purpose.
+
 ### BREAKING (MCP single-string params: strict typing — step 2 of 2026-04-25 strict-typing migration)
 
 - **Single-string MCP parameters now hard-reject wrong-type input (`array`, `number`, `bool`, `object`) and empty/whitespace-only strings.** Closes the asymmetry left over after the 2026-04-25 list-params migration: every list-shaped param (`terms`, `name`, `kind`, `file`, `parent`, `method`, `pattern`, `ext`) was strictified through `read_string_array`, but the matching single-value siblings (`class`, `attribute`, `baseType`, `from`, `to`, `date`, `author`, `message`, `path`, `repo`, `file` in git tools, `direction`, `mode`, `sortBy`) were still parsed by hand-rolled `args.get(K).and_then(|v| v.as_str())`. Wrong-type input on the OPTIONAL filter half (`class=["X"]`, `attribute=42`, etc.) silently dropped the filter and let the query proceed against the unfiltered superset — a real correctness regression, exhibited by [`scripts/test-r3-class-array.ps1`](scripts/test-r3-class-array.ps1) which produced a 21-node call tree from `xray_callers method=["dispatch_tool"] class=["OrderService"]` instead of an error. Wrong-type input on the REQUIRED half (`repo`, `file`) collapsed to a misleading `"Missing required parameter"` error. Empty strings (`baseType=""`, `class=""`) silently fell through to no-filter.
