@@ -202,6 +202,29 @@ const EDIT_FORM_MENU: &str = "Each edit item must use ONE of three forms: \
     Optional fields: occurrence, expectedContext, skipIfNotFound. \
     For Mode A (line-range) use the top-level 'operations' parameter instead.";
 
+/// Canonical examples block, prefixed for inline appending into error messages.
+/// Defined in `tips.rs` as the single source of truth so error hints emitted by
+/// `xray_edit` and the per-tool `xray_help tool="xray_edit"` payload cannot drift apart.
+use crate::tips::{CANONICAL_MODE_A_EXAMPLE, CANONICAL_MODE_B_EXAMPLE};
+
+/// Common invented top-level wrappers callers reach for from other code-mod
+/// tool families (Anthropic text-editor `files`/`changes`, sed-style `patches`,
+/// diff-tools `hunks`/`diff`, generic `batch`/`targets`). Listed here so the
+/// rejection hint can call them out by name and steer the caller to `path` /
+/// `paths` instead of producing a generic "unknown parameter" message.
+const INVENTED_TOP_LEVEL_WRAPPERS: &[&str] =
+    &["files", "batch", "targets", "changes", "hunks", "patches", "diff"];
+
+/// Append both canonical examples to an error message. Single source of truth
+/// — `tips::tool_help("xray_edit")` consumes the same constants so the help
+/// payload and the error hints cannot drift apart.
+fn canonical_examples_block() -> String {
+    format!(
+        " Canonical examples — Mode A (line-range): {} | Mode B (text-match): {}",
+        CANONICAL_MODE_A_EXAMPLE, CANONICAL_MODE_B_EXAMPLE
+    )
+}
+
 /// Look up a synonym in `EDIT_FIELD_SYNONYMS`. Case-sensitive on purpose —
 /// callers consistently use a single casing per attempt and we want to tell
 /// them the exact canonical name.
@@ -299,6 +322,10 @@ fn missing_edit_form_error_message(edit: &Value, i: usize) -> String {
 /// or `None` if every key is recognised. Suggests the most-likely correct key
 /// via `did_you_mean`, with a special case for the common `files: [...]`
 /// wrapper invented by callers expecting per-file operations.
+///
+/// Every rejection path appends `canonical_examples_block()` so the very first
+/// failed attempt teaches the schema (Mode A + Mode B) without forcing a
+/// follow-up `xray_help` round-trip.
 fn check_unknown_top_level_params(obj: &serde_json::Map<String, Value>) -> Option<String> {
     for key in obj.keys() {
         if KNOWN_EDIT_PARAMS.contains(&key.as_str()) {
@@ -310,13 +337,28 @@ fn check_unknown_top_level_params(obj: &serde_json::Map<String, Value>) -> Optio
         // applies the SAME operations to every file). Surface the mismatch
         // explicitly so the caller does not waste turns probing variants.
         if key == "files" {
-            return Some(
+            let mut msg = String::from(
                 "Unknown parameter 'files'. xray_edit does NOT take a per-file batch wrapper. \
                  Use 'paths' (array of file paths — the SAME 'edits'/'operations' are applied to ALL files) \
                  or call xray_edit once per file. Example batch: \
-                 { \"paths\": [\"a.ts\", \"b.ts\"], \"edits\": [{\"search\": \"foo\", \"replace\": \"bar\"}] }"
-                    .to_string(),
+                 { \"paths\": [\"a.ts\", \"b.ts\"], \"edits\": [{\"search\": \"foo\", \"replace\": \"bar\"}] }.",
             );
+            msg.push_str(&canonical_examples_block());
+            return Some(msg);
+        }
+        // Other invented wrappers from sibling tool families. Same pattern:
+        // call them out by name, steer to path/paths.
+        if INVENTED_TOP_LEVEL_WRAPPERS.contains(&key.as_str()) {
+            let mut msg = format!(
+                "Unknown parameter '{}'. xray_edit does NOT use this wrapper — \
+                 it is invented by other code-mod tool families. \
+                 Use 'path' (single file) or 'paths' (array, same edits applied to all). \
+                 Allowed top-level parameters: {}.",
+                key,
+                KNOWN_EDIT_PARAMS.join(", ")
+            );
+            msg.push_str(&canonical_examples_block());
+            return Some(msg);
         }
         let suggestion = did_you_mean(key, KNOWN_EDIT_PARAMS);
         let mut msg = format!("Unknown parameter '{}'.", key);
@@ -327,6 +369,7 @@ fn check_unknown_top_level_params(obj: &serde_json::Map<String, Value>) -> Optio
             " Allowed top-level parameters: {}.",
             KNOWN_EDIT_PARAMS.join(", ")
         ));
+        msg.push_str(&canonical_examples_block());
         return Some(msg);
     }
     None

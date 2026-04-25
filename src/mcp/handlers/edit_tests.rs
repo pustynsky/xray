@@ -5699,3 +5699,43 @@ fn test_brace_balance_still_warns_on_source_extensions() {
         "Expected a curly-brace warning. Got: {:?}", warnings);
 }
 
+
+// ─── Canonical examples in error hints (#1) ─────────────────────────────────
+
+#[test]
+fn test_files_rejection_shows_canonical_examples() {
+    let mut map = serde_json::Map::new();
+    map.insert("files".into(), json!([{"path": "a.rs"}]));
+    map.insert("operations".into(), json!([]));
+    let msg = check_unknown_top_level_params(&map).expect("should reject 'files'");
+    assert!(msg.contains("operations"), "should mention Mode A: {msg}");
+    assert!(msg.contains("edits"), "should mention Mode B: {msg}");
+    assert!(msg.contains(CANONICAL_MODE_A_EXAMPLE), "should contain Mode A example: {msg}");
+    assert!(msg.contains(CANONICAL_MODE_B_EXAMPLE), "should contain Mode B example: {msg}");
+}
+
+#[test]
+fn test_invented_wrapper_rejection_shows_canonical_examples() {
+    for wrapper in INVENTED_TOP_LEVEL_WRAPPERS {
+        if *wrapper == "files" { continue; } // tested separately above
+        let mut map = serde_json::Map::new();
+        map.insert((*wrapper).into(), json!([]));
+        let msg = check_unknown_top_level_params(&map)
+            .unwrap_or_else(|| panic!("should reject '{wrapper}'"));
+        assert!(msg.contains("invented by other code-mod tool families"), "wrapper={wrapper}: {msg}");
+        assert!(msg.contains(CANONICAL_MODE_A_EXAMPLE), "wrapper={wrapper}: {msg}");
+        assert!(msg.contains(CANONICAL_MODE_B_EXAMPLE), "wrapper={wrapper}: {msg}");
+    }
+}
+
+#[test]
+fn test_generic_unknown_param_shows_canonical_examples() {
+    let mut map = serde_json::Map::new();
+    map.insert("pat".into(), json!("src/foo.rs"));
+    let msg = check_unknown_top_level_params(&map).expect("should reject 'pat'");
+    // 'pat' is close to 'path' so did_you_mean should fire
+    assert!(msg.contains("Did you mean 'path'"), "should suggest 'path': {msg}");
+    assert!(msg.contains(CANONICAL_MODE_A_EXAMPLE), "should contain Mode A example: {msg}");
+    assert!(msg.contains(CANONICAL_MODE_B_EXAMPLE), "should contain Mode B example: {msg}");
+}
+

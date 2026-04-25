@@ -1338,3 +1338,73 @@ fn test_parameter_examples_includes_deleted_file_docs() {
         "includeDeleted documentation must mention the single `git ls-files` performance invariant"
     );
 }
+
+// ─── tool_help per-tool reference (#6) ───────────────────────────────────
+
+#[test]
+fn test_tool_help_xray_edit_includes_canonical_examples() {
+    let ext = vec!["rs".to_string()];
+    let val = tool_help("xray_edit", &ext).expect("xray_edit should be known");
+    let examples = val.get("canonicalExamples").expect("should have canonicalExamples");
+    let mode_a = examples.get("modeA_lineRange").and_then(|v| v.as_str()).unwrap();
+    let mode_b = examples.get("modeB_textMatch").and_then(|v| v.as_str()).unwrap();
+    assert_eq!(mode_a, CANONICAL_MODE_A_EXAMPLE);
+    assert_eq!(mode_b, CANONICAL_MODE_B_EXAMPLE);
+}
+
+#[test]
+fn test_tool_help_unknown_tool_returns_error_with_valid_names() {
+    let ext = vec!["rs".to_string()];
+    let err = tool_help("xray_nonexistent", &ext).unwrap_err();
+    assert!(err.contains("Unknown tool"), "{err}");
+    assert!(err.contains("xray_edit"), "should list known tools: {err}");
+    assert!(err.contains("xray_grep"), "should list known tools: {err}");
+}
+
+#[test]
+fn test_tool_help_no_tool_keeps_full_payload() {
+    let ext = vec!["rs".to_string()];
+    let full = render_json(&ext);
+    // Full payload has bestPractices; per-tool payload does not
+    assert!(full.get("bestPractices").is_some(), "full payload should have bestPractices");
+}
+
+#[test]
+fn test_tool_help_per_tool_response_compact() {
+    let ext = vec!["rs".to_string()];
+    for name in KNOWN_TOOL_NAMES {
+        let val = tool_help(name, &ext).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let bytes = serde_json::to_string(&val).unwrap().len();
+        assert!(bytes < 8192, "tool_help('{name}') is {bytes} bytes, should be <8KB");
+    }
+}
+
+
+#[test]
+fn test_known_tool_names_covers_parameter_examples() {
+    let ext = vec!["rs".to_string()];
+    let examples = parameter_examples(&ext);
+    let map = examples.as_object().expect("parameter_examples should be object");
+    for key in map.keys() {
+        assert!(
+            KNOWN_TOOL_NAMES.contains(&key.as_str()),
+            "parameter_examples has '{}' but KNOWN_TOOL_NAMES does not",
+            key
+        );
+    }
+}
+
+#[test]
+fn test_known_tool_names_all_have_parameter_examples() {
+    let ext = vec!["rs".to_string()];
+    let examples = parameter_examples(&ext);
+    let map = examples.as_object().expect("parameter_examples should be object");
+    for name in KNOWN_TOOL_NAMES {
+        assert!(
+            map.contains_key(*name),
+            "KNOWN_TOOL_NAMES has '{}' but parameter_examples does not",
+            name
+        );
+    }
+}
+

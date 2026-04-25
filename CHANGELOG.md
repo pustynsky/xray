@@ -416,6 +416,17 @@ Cross-review follow-ups to the `three-correctness-followups` and `hardening` bun
 
 ## Unreleased
 
+### UX — Canonical examples in `xray_edit` error hints (2026-04-25)
+
+- Every top-level parameter rejection (`files`, `batch`, `targets`, `changes`, `hunks`, `patches`, `diff`, typos) now appends copy-pastable canonical examples for both Mode A (line-range) and Mode B (text-match).
+- Constants `CANONICAL_MODE_A_EXAMPLE` / `CANONICAL_MODE_B_EXAMPLE` live in `tips.rs` as single source of truth, shared by error hints and the new per-tool `xray_help`.
+
+### Feature — Per-tool `xray_help { tool: "xray_edit" }` (2026-04-25)
+
+- `xray_help` now accepts an optional `tool` parameter returning a focused reference card (<8KB) for a single tool.
+- For `xray_edit`, the card includes `canonicalExamples` with both mode shapes.
+- Unknown tool name returns an error listing all valid tool names.
+
 ### Bug Fixes — `xray_edit` brace-balance heuristic skipped on prose extensions (2026-04-25)
 
 - **Symptom** — `xray_edit` calls on `.md` / `.txt` / `.rst` / `.adoc` files routinely produced `braceBalanceWarnings` for unbalanced parentheses in English prose ("e.g. ...", "(see X)", smiley-like constructs). The heuristic counted bytes in the diff, agnostic to language structure.
