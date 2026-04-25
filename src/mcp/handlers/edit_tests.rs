@@ -5349,3 +5349,104 @@ fn test_edit_response_includes_append_idiom() {
     );
 }
 
+
+// ─── Smart search-not-found hints (2026-04-25 search-hint-quality story) ─────
+
+/// `\u{NNNN}` literal in `search` is a caller-side bug — the contract is that
+/// `search` bytes are taken verbatim, so the escape never gets interpreted.
+/// The error message must point this out and NOT recommend `expectedContext`,
+/// which is irrelevant.
+#[test]
+fn test_search_with_unicode_escape_literal_hints_verbatim() {
+    let (tmp, filename, _) = create_temp_file("hello — world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "hello \\u{2014} world", "replace": "x" }
+        ]
+    }));
+    assert!(result.is_error, "Search with literal escape must fail to match");
+    let text = &result.content[0].text;
+    assert!(text.contains("taken verbatim"),
+        "Hint must explain bytes are verbatim. Got: {}", text);
+    assert!(text.contains("\\u{...}") || text.contains("\\xNN"),
+        "Hint must mention the escape forms. Got: {}", text);
+    assert!(!text.contains("pass `expectedContext`"),
+        "Hint must NOT recommend irrelevant expectedContext for an escape-literal bug. Got: {}", text);
+}
+
+/// `\xNN` literal in `search` triggers the same verbatim-bytes hint.
+#[test]
+fn test_search_with_hex_escape_literal_hints_verbatim() {
+    let (tmp, filename, _) = create_temp_file("abc\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "\\x41\\x42", "replace": "x" }
+        ]
+    }));
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("taken verbatim"),
+        "Hint must explain bytes are verbatim. Got: {}", text);
+    assert!(!text.contains("pass `expectedContext`"),
+        "Hint must NOT recommend expectedContext. Got: {}", text);
+}
+
+/// When `search` starts with a leading space and the nearest match shows the
+/// first difference at byte 0, surface a boundary-whitespace tip pointing at
+/// trim-or-insertAfter — not the irrelevant expectedContext hint.
+#[test]
+fn test_search_boundary_whitespace_byte0_mismatch_hints_trim() {
+    // File starts the line at column 0; user's `search` starts with a leading
+    // space, so byte 0 mismatches (' ' vs first non-whitespace char).
+    // Force a high-similarity nearest match by including ~30 chars of real
+    // content after the bad leading space.
+    let body = "fn very_unique_marker_for_test_xyz123() {\n    let inner = 1;\n}\n";
+    let (tmp, filename, _) = create_temp_file(body);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // Leading space — not present in the actual file.
+            { "search": " fn very_unique_marker_for_test_xyz123() {\n    let inner = 1;\n}", "replace": "x" }
+        ]
+    }));
+    assert!(result.is_error, "Mismatched leading whitespace must fail to match");
+    let text = &result.content[0].text;
+    // The nearest_match_hint should have produced "First difference at byte 0:".
+    assert!(text.contains("First difference at byte 0:"),
+        "Setup invariant: nearest match must report byte-0 diff. Got: {}", text);
+    assert!(text.contains("leading whitespace") || text.contains("trim the first line"),
+        "Hint must surface the boundary-whitespace tip. Got: {}", text);
+    assert!(text.contains("insertAfter"),
+        "Hint must mention insertAfter as alternative. Got: {}", text);
+    assert!(!text.contains("pass `expectedContext`"),
+        "Hint must NOT recommend expectedContext for byte-0 boundary mismatch. Got: {}", text);
+}
+
+/// Regression: the legacy `expectedContext` fallback still fires for plain
+/// not-found cases that don't match either of the new heuristics.
+#[test]
+fn test_search_not_found_falls_back_to_expected_context_hint() {
+    let (tmp, filename, _) = create_temp_file("alpha\nbeta\ngamma\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // Plain non-matching, non-leading-whitespace, non-escape search.
+            { "search": "completely_missing_token", "replace": "x" }
+        ]
+    }));
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("pass `expectedContext`"),
+        "Legacy fallback hint must still fire when no smarter hint applies. Got: {}", text);
+}
+

@@ -1891,9 +1891,9 @@ fn apply_insert(
             }), warnings));
         }
         let hint = nearest_match_hint(result, anchor);
-        let flex_hint = if edit.expected_context.is_none() {
-            ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching"
-        } else { "" };
+        let flex_hint = smart_search_not_found_hint(
+            anchor, &hint, edit.expected_context.is_some(),
+        );
         return Err(format!("Anchor text not found: \"{}\"{}{}", truncate_for_display(anchor), hint, flex_hint));
     }
 
@@ -2056,9 +2056,9 @@ fn apply_literal_replace(
             }), warnings));
         }
         let hint = nearest_match_hint(result, search);
-        let flex_hint = if edit.expected_context.is_none() {
-            ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching"
-        } else { "" };
+        let flex_hint = smart_search_not_found_hint(
+            search, &hint, edit.expected_context.is_some(),
+        );
         return Err(format!("Text not found: \"{}\"{}{}", truncate_for_display(search), hint, flex_hint));
     }
 
@@ -2325,6 +2325,73 @@ fn nearest_match_hint(content: &str, search_text: &str) -> String {
         ". Nearest match at line {} (similarity {}%): \"{}\"{}",
         best_line_num, pct, display_text, byte_diff_hint
     )
+}
+
+
+/// Pick the most useful hint to append to a `Text not found` /
+/// `Anchor text not found` error, given the user's `search`, the formatted
+/// `nearest_match_hint`, and whether `expectedContext` was supplied.
+///
+/// Priority order (highest-confidence first):
+/// 1. `search` contains a Rust/JSON-style escape literal (`\u{...}` or
+///    `\xNN`). The contract is that `search` bytes are taken verbatim, so
+///    these escapes never get interpreted. The legacy `expectedContext`
+///    hint is unrelated and misleads callers into pasting the same broken
+///    escape with one extra parameter.
+/// 2. `near_hint` shows `First difference at byte 0:` AND `search` starts
+///    with leading whitespace (space or tab). This catches the
+///    "copied an indented block one column off" failure where the user's
+///    boundary line has whitespace the file at that offset does not.
+///    `expectedContext` cannot fix this either — it's a ±5-line safety
+///    check, not a fuzzy matcher.
+/// 3. Fallback: the existing `expectedContext` hint, only if the caller
+///    didn't already pass one.
+///
+/// Returns an empty string when no hint should be appended.
+fn smart_search_not_found_hint(
+    search: &str,
+    near_hint: &str,
+    has_expected_context: bool,
+) -> &'static str {
+    // (1) Literal escape sequences. Cheap textual check — no parsing.
+    // `\u{` is unambiguous (curly form is a Rust idiom never present in
+    // real source as a substring of a string-literal one would search
+    // for verbatim). `\xNN` is detected as `\x` followed by two hex digits.
+    if search.contains("\\u{") || contains_hex_escape_literal(search) {
+        return ". Tip: 'search' is taken verbatim — \\u{...} and \\xNN are NOT \
+                interpreted. Pass actual UTF-8 characters instead \
+                (e.g., the literal '—' for U+2014).";
+    }
+    // (2) Boundary-whitespace mismatch at byte 0. The nearest_match_hint
+    // already computed the byte-diff position; we re-use its formatted
+    // marker text so we don't need to refactor the return type. This is a
+    // narrow heuristic — it only fires when there's a high-similarity
+    // nearest match AND the user's search starts with whitespace AND the
+    // diff is at the very first byte.
+    if near_hint.contains("First difference at byte 0:")
+        && (search.starts_with(' ') || search.starts_with('\t'))
+    {
+        return ". Tip: leading whitespace in 'search' doesn't match the file at \
+                byte 0 — trim the first line of your `search`, or use \
+                insertAfter/insertBefore with a unique anchor.";
+    }
+    // (3) Legacy fallback.
+    if !has_expected_context {
+        return ". Hint: pass `expectedContext` to enable flexible-whitespace fallback matching";
+    }
+    ""
+}
+
+/// True if `s` contains the literal byte sequence `\xNN` where NN are two
+/// ASCII hex digits. Used by `smart_search_not_found_hint`.
+fn contains_hex_escape_literal(s: &str) -> bool {
+    let bytes = s.as_bytes();
+    bytes.windows(4).any(|w| {
+        w[0] == b'\\'
+            && w[1] == b'x'
+            && w[2].is_ascii_hexdigit()
+            && w[3].is_ascii_hexdigit()
+    })
 }
 
 /// Generate a byte-level diff hint showing the first difference between two strings.
