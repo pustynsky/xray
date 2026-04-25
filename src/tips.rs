@@ -4,6 +4,21 @@
 use std::borrow::Cow;
 use serde_json::{json, Value};
 
+/// Canonical Mode A example (line-range splice) for `xray_edit`. Single source
+/// of truth shared by:
+///   - `xray_edit` rejection-error hints (when caller sends an invented
+///     top-level wrapper like `files` / `batch` / `targets`),
+///   - the per-tool `xray_help tool="xray_edit"` payload.
+/// Keeping both consumers on this constant prevents the help text and the
+/// error hint from drifting apart.
+pub const CANONICAL_MODE_A_EXAMPLE: &str =
+    "{\"path\": \"src/foo.rs\", \"operations\": [{\"startLine\": 5, \"endLine\": 5, \"content\": \"new line\\n\"}]}";
+
+/// Canonical Mode B example (text find/replace). Sibling of
+/// `CANONICAL_MODE_A_EXAMPLE`; same single-source-of-truth contract.
+pub const CANONICAL_MODE_B_EXAMPLE: &str =
+    "{\"path\": \"src/foo.rs\", \"edits\": [{\"search\": \"old\", \"replace\": \"new\"}]}";
+
 /// Map file extensions to human-readable language names for tool descriptions.
 /// Separates tree-sitter languages from regex-based (SQL).
 /// Deduplicates (ts+tsx → one "TypeScript/TSX").
@@ -517,6 +532,19 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "dryRun": "true -> preview unified diff without writing file. Works with both single and multi-file",
             "expectedLineCount": "Safety check: abort if file has different line count (prevents stale line numbers). Uses human/editor line count (matches xray_definitions/xray_grep numbers); reusable from previous response's newLineCount. Honored in both Mode A and Mode B.",
             "errorDiagnostics": "When text/anchor/pattern is not found, the error includes a nearest-match hint showing the most similar line in the file with line number and similarity percentage (e.g., 'Nearest match at line 5 (similarity 92%): ...'). Helps diagnose Unicode quote mismatches, case differences, and whitespace issues"
+        },
+        "xray_help": {
+            "tool": "Optional string: return help for a single tool (e.g. 'xray_edit', 'xray_grep'). Omit to get the full reference catalog."
+        },
+        "xray_info": {
+            "file": "Array of file paths. Returns lineCount, byteSize, lineEnding, extension, indexed status for each file."
+        },
+        "xray_reindex": {
+            "dir": "Project root directory to index. Binds the workspace and builds content + definition indexes.",
+            "ext": "Array of file extensions to index (e.g. ['rs', 'ts', 'cs']). Overrides defaults."
+        },
+        "xray_reindex_definitions": {
+            "ext": "Array of file extensions to reindex definitions for. Rebuilds only the definition (AST) index."
         }
     })
 }
@@ -567,6 +595,69 @@ pub fn render_cli(def_extensions: &[String]) -> String {
     out.push('\n');
 
     out
+}
+
+/// Known tool names recognised by `tool_help` — mirrors the dispatch list in
+/// `src/mcp/handlers/mod.rs::dispatch_tool_call`. A drift-guard test in
+/// `tips_tests.rs` keeps this in sync with the actual tool registry.
+pub const KNOWN_TOOL_NAMES: &[&str] = &[
+    "xray_definitions",
+    "xray_grep",
+    "xray_callers",
+    "xray_fast",
+    "xray_edit",
+    "xray_info",
+    "xray_reindex",
+    "xray_reindex_definitions",
+    "xray_help",
+    "xray_git_history",
+    "xray_git_diff",
+    "xray_git_authors",
+    "xray_git_activity",
+    "xray_git_blame",
+    "xray_branch_status",
+];
+
+/// Per-tool reference card returned by `xray_help { tool: "<name>" }`.
+///
+/// Goal: a focused, ~1KB payload an LLM agent can request when it needs to
+/// recover from a first-attempt schema error — without consuming the budget
+/// of the full `render_json` reference catalog. Keeps the `xray_edit` entry
+/// in particular short by reusing `CANONICAL_MODE_A_EXAMPLE` /
+/// `CANONICAL_MODE_B_EXAMPLE` (so a schema change updates one place).
+///
+/// Returns `Err` with the list of known tool names when `tool_name` is not
+/// recognised, so the caller can self-correct in one round-trip.
+pub fn tool_help(tool_name: &str, def_extensions: &[String]) -> Result<Value, String> {
+    if !KNOWN_TOOL_NAMES.contains(&tool_name) {
+        return Err(format!(
+            "Unknown tool '{}'. Known tools: {}.",
+            tool_name,
+            KNOWN_TOOL_NAMES.join(", ")
+        ));
+    }
+
+    let parameters = parameter_examples(def_extensions)
+        .get(tool_name)
+        .cloned()
+        .unwrap_or(json!({}));
+
+    let mut payload = json!({
+        "tool": tool_name,
+        "parameters": parameters,
+    });
+
+    // xray_edit is the only tool with two valid mode shapes — surface both
+    // canonical examples up front so the caller does not need to reconstruct
+    // them from the parameter description.
+    if tool_name == "xray_edit" {
+        payload["canonicalExamples"] = json!({
+            "modeA_lineRange": CANONICAL_MODE_A_EXAMPLE,
+            "modeB_textMatch": CANONICAL_MODE_B_EXAMPLE,
+        });
+    }
+
+    Ok(payload)
 }
 
 /// Render tips as JSON for MCP xray_help tool.

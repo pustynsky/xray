@@ -576,7 +576,12 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
             description: "Show best practices and usage tips for xray tools. Call this when unsure which tool to use or how to optimize queries. Returns a concise guide with tool selection priorities, performance tiers, and common pitfalls.".to_string(),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "tool": {
+                        "type": "string",
+                        "description": "Optional: return help for a single tool only (e.g. 'xray_edit', 'xray_grep'). Omit to get the full reference catalog."
+                    }
+                },
                 "required": []
             }),
         },
@@ -1050,7 +1055,7 @@ pub fn dispatch_tool(
         "xray_definitions" => definitions::handle_xray_definitions(ctx, arguments),
         "xray_callers" => callers::handle_xray_callers(ctx, arguments),
         "xray_edit" => edit::handle_xray_edit(ctx, arguments),
-        "xray_help" => handle_xray_help(ctx),
+        "xray_help" => handle_xray_help(ctx, arguments),
         // Git history tools
         "xray_git_history" | "xray_git_diff" | "xray_git_authors" | "xray_git_activity" | "xray_git_blame" | "xray_branch_status" => {
             git::dispatch_git_tool(ctx, tool_name, arguments)
@@ -1138,9 +1143,22 @@ pub fn dispatch_tool(
 
 // ─── Small inline handlers ──────────────────────────────────────────
 
-fn handle_xray_help(ctx: &HandlerContext) -> ToolCallResult {
-    let help = crate::tips::render_json(&ctx.def_extensions);
-    ToolCallResult::success(utils::json_to_string(&help))
+fn handle_xray_help(ctx: &HandlerContext, arguments: &Value) -> ToolCallResult {
+    match arguments.get("tool") {
+        Some(Value::String(tool_name)) => {
+            match crate::tips::tool_help(tool_name, &ctx.def_extensions) {
+                Ok(help) => ToolCallResult::success(utils::json_to_string(&help)),
+                Err(msg) => ToolCallResult::error(msg),
+            }
+        }
+        Some(_) => ToolCallResult::error(
+            "Parameter 'tool' must be a string (e.g. 'xray_edit'). Omit it to get the full reference catalog.".to_string()
+        ),
+        None => {
+            let help = crate::tips::render_json(&ctx.def_extensions);
+            ToolCallResult::success(utils::json_to_string(&help))
+        }
+    }
 }
 
 /// Build xray_info response from in-memory indexes only.
