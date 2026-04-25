@@ -110,6 +110,14 @@ fn test_render_instructions_contains_key_terms() {
     // INTENT -> TOOL MAPPING must include directory-listing routing
     assert!(text.contains("list files or subdirectories"),
         "INTENT -> TOOL MAPPING should include directory-listing intent");
+    // INTENT -> TOOL MAPPING must teach the insert/append-EOF idiom (Mode A
+    // empty range). Without this line the most common xray_edit slip-up —
+    // passing startLine:N, endLine:N (=REPLACE) when the agent meant to
+    // INSERT — keeps shipping. See todo_2026-04-25 §2.3 follow-up.
+    assert!(text.contains("INSERT lines (no replace)"),
+        "INTENT -> TOOL MAPPING should include insert/append-EOF idiom for xray_edit");
+    assert!(text.contains("startLine:N,endLine:N-1"),
+        "insert idiom hint should spell out the empty-range form (startLine:N,endLine:N-1)");
     // Removed sections should NOT be present
     assert!(!text.contains("Quick Reference"), "instructions should NOT have Quick Reference (replaced by INTENT -> TOOL MAPPING)");
     assert!(!text.contains("TOOL PRIORITY"), "instructions should NOT have TOOL PRIORITY (replaced by INTENT -> TOOL MAPPING)");
@@ -336,6 +344,27 @@ fn test_xray_edit_description_starts_with_override() {
         "xray_edit description must start with 'ALWAYS USE THIS instead of apply_diff' override. \
          Current start: '{}'",
         &edit_tool.description[..80.min(edit_tool.description.len())]
+    );
+}
+
+/// Mode A schema must teach BOTH the insert-before-line idiom (endLine = startLine-1)
+/// AND the append-EOF idiom (startLine = lineCount+1, endLine = lineCount). Without
+/// these, agents fall back to startLine:N, endLine:N (=REPLACE line N) when they
+/// meant to INSERT, silently overwriting content. See todo_2026-04-25 §2.3 follow-up.
+#[test]
+fn test_xray_edit_schema_teaches_insert_and_append_idioms() {
+    use crate::mcp::handlers::tool_definitions;
+    let tools = tool_definitions(&["rs".to_string()]);
+    let edit_tool = tools.iter().find(|t| t.name == "xray_edit")
+        .expect("xray_edit tool not found");
+    let schema_str = edit_tool.input_schema.to_string();
+    assert!(
+        schema_str.contains("INSERT before startLine"),
+        "xray_edit endLine schema must document the insert-before idiom (endLine = startLine-1)"
+    );
+    assert!(
+        schema_str.contains("APPEND after EOF") || schema_str.contains("startLine = lineCount+1"),
+        "xray_edit startLine schema must document the append-EOF idiom"
     );
 }
 

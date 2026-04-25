@@ -1877,9 +1877,22 @@ fn handle_line_regex_search(
     // match at the very start of the file content, breaking any anchor-based
     // search on multi-line files. user-supplied flags like `(?m)`/`(?s)` still
     // override our defaults.
+    //
+    // We ALSO enable `crlf(true)`. Without it, `$` in multi-line mode matches
+    // only the position before `\n`, NOT before `\r\n` — so the whole-content
+    // pre-check (`re.is_match(&content)`) silently rejects CRLF files whose
+    // matches end with `}\r\n` and the per-line scan that would have matched
+    // never runs. With `crlf(true)`, both `^` and `$` treat `\r\n` as a single
+    // line terminator, matching how `str::lines()` splits content for the
+    // per-line scan below. Regression test:
+    // `tests_line_regex::line_regex_dollar_anchor_crlf_file_matches_closing_brace`.
     let mut compiled: Vec<regex::Regex> = Vec::with_capacity(patterns.len());
     for pat in &patterns {
-        match regex::RegexBuilder::new(pat).multi_line(true).build() {
+        match regex::RegexBuilder::new(pat)
+            .multi_line(true)
+            .crlf(true)
+            .build()
+        {
             Ok(re) => compiled.push(re),
             Err(e) => return ToolCallResult::error(format!("Invalid regex '{}': {}", pat, e)),
         }
