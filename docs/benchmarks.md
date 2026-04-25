@@ -92,70 +92,70 @@ Comprehensive comparison of MCP `tools/call` JSON-RPC queries vs `rg` (ripgrep v
 #### Test 1: Token search (single term, common identifier)
 
 - **What it tests**: Basic inverted index lookup, TF-IDF ranking
-- **MCP**: `xray_grep terms="OrderServiceProvider" countOnly=true`
+- **MCP**: `xray_grep terms=["OrderServiceProvider"] countOnly=true`
 - **rg**: `rg "OrderServiceProvider" --type cs -l`
 
 #### Test 2: Multi-term OR search (find all variants of a class)
 
 - **What it tests**: Multi-term OR mode, ranking across variants
-- **MCP**: `xray_grep terms="UserMapperCache,IUserMapperCache,UserMapperCacheEntry" mode="or" countOnly=true`
+- **MCP**: `xray_grep terms=["UserMapperCache","IUserMapperCache","UserMapperCacheEntry"] mode="or" countOnly=true`
 - **rg**: `rg "UserMapperCache|IUserMapperCache|UserMapperCacheEntry" --type cs -l`
 
 #### Test 3: Multi-term AND search (find files using multiple types together)
 
 - **What it tests**: AND mode intersection
-- **MCP**: `xray_grep terms="IFeatureResolver,MonitoredTask" mode="and" countOnly=true`
+- **MCP**: `xray_grep terms=["IFeatureResolver","MonitoredTask"] mode="and" countOnly=true`
 - **rg**: `rg -l "IFeatureResolver" | ForEach-Object { if (rg -q "MonitoredTask" $_) { $_ } }`
 
 #### Test 4: Substring search (compound camelCase identifier)
 
 - **What it tests**: Trigram-based substring matching (now the default behavior)
-- **MCP**: `xray_grep terms="FindAsyncWithQuery" countOnly=true` (substring=true is the default)
+- **MCP**: `xray_grep terms=["FindAsyncWithQuery"] countOnly=true` (substring=true is the default)
   → matched tokens: `findasyncwithqueryactivity`, `findasyncwithqueryactivityname`
 - **rg**: `rg "FindAsyncWithQuery" --type cs -l`
 
 #### Test 5: Substring search (short substring inside long identifiers)
 
 - **What it tests**: Trigram matching for 4+ char substrings (now the default behavior)
-- **MCP**: `xray_grep terms="ProductQuery" countOnly=true` (substring=true is the default)
+- **MCP**: `xray_grep terms=["ProductQuery"] countOnly=true` (substring=true is the default)
   → matched 46 distinct tokens (productquerybuilder, iproductquerymanager, parsedproductqueryrequest, etc.)
 - **rg**: `rg "ProductQuery" --type cs -l`
 
 #### Test 6: Phrase search (exact multi-word sequence)
 
 - **What it tests**: Phrase matching across adjacent tokens (requires line-by-line scan)
-- **MCP**: `xray_grep terms="new ConcurrentDictionary" phrase=true countOnly=true`
+- **MCP**: `xray_grep terms=["new ConcurrentDictionary"] phrase=true countOnly=true`
 - **rg**: `rg "new ConcurrentDictionary" --type cs -l`
 
 #### Test 7: Regex search (pattern matching)
 
 - **What it tests**: Regex over tokenized index
-- **MCP**: `xray_grep terms="I.*Cache" regex=true countOnly=true`
+- **MCP**: `xray_grep terms=["I.*Cache"] regex=true countOnly=true`
 - **rg**: `rg "I\w*Cache" --type cs -l`
 
 #### Test 8: Full results with context lines
 
 - **What it tests**: Line-level results, context window, ranking relevance
-- **MCP**: `xray_grep terms="InitializeIndexAsync" showLines=true contextLines=3 maxResults=5`
+- **MCP**: `xray_grep terms=["InitializeIndexAsync"] showLines=true contextLines=3 maxResults=5`
 - **rg**: `rg "InitializeIndexAsync" --type cs -C 3`
 
 #### Test 9: Exclusion filters (production-only results)
 
 - **What it tests**: Exclude patterns for Test/Mock filtering
-- **MCP**: `xray_grep terms="StorageIndexManager" exclude=["Test","Mock"] excludeDir=["test"] countOnly=true`
+- **MCP**: `xray_grep terms=["StorageIndexManager"] exclude=["Test","Mock"] excludeDir=["test"] countOnly=true`
 - **rg**: `rg "StorageIndexManager" --type cs -l --glob "!*Test*" --glob "!*Mock*" --glob "!*test*"`
 
 #### Test 10: AST definitions with inline source code
 
 - **What it tests**: Tree-sitter AST index, definition lookup with inline source code
-- **MCP**: `xray_definitions name="InitializeIndexAsync" kind="method" includeBody=true maxBodyLines=20`
+- **MCP**: `xray_definitions name=["InitializeIndexAsync"] kind=["method"] includeBody=true maxBodyLines=20`
   → Returns 18 structured definitions with signatures, parent classes, line ranges, and source code
 - **rg**: `rg "InitializeIndexAsync" --type cs -A 20` (approximate, unstructured)
 
 #### Test 11: Call tree (callers analysis)
 
 - **What it tests**: Recursive caller tracing with depth
-- **MCP**: `xray_callers method="InitializeIndexAsync" class="StorageIndexManager" depth=3 excludeDir=["test","Test","Mock"]`
+- **MCP**: `xray_callers method=["InitializeIndexAsync"] class="StorageIndexManager" depth=3 excludeDir=["test","Test","Mock"]`
   → Returns 48-node hierarchical call tree in ~0.5–11ms (varies by direction and graph density)
 - **rg**: No equivalent. Would require 7+ sequential `rg` + `read_file` calls (estimated 5+ minutes of agent round-trips)
 
@@ -189,10 +189,10 @@ With **`substring=false` (exact token mode)**, searching for `UserMapperCache` o
 
 ```json
 // Current default behavior (substring=true): 26 files — matches rg!
-{ "terms": "UserMapperCache", "countOnly": true }
+{ "terms": ["UserMapperCache"], "countOnly": true }
 
 // Exact token mode (opt-in): 13 files (misses compound identifiers)
-{ "terms": "UserMapperCache", "substring": false, "countOnly": true }
+{ "terms": ["UserMapperCache"], "substring": false, "countOnly": true }
 ```
 
 Both modes complete in ~1ms. The default substring mode finds **28 matched tokens** including:

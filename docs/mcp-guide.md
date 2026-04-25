@@ -170,7 +170,7 @@ warning-only so existing scripts don't break.
 ## `xray_grep` multi-term auto-balance
 
 Multi-term substring-OR queries (e.g.
-`terms='TODO, clearTimeout, localStorage'`) auto-balance when ONE term
+`terms=["TODO","clearTimeout","localStorage"]`) auto-balance when ONE term
 contributes ≥10× more total occurrences than the rarest matched term.
 Dominant-only files beyond an auto-derived cap (`min(100, max(20, 2 *
 second_max))`) are dropped so rare-term matches stay visible. Files matching
@@ -760,7 +760,7 @@ If auto-correction produces 0 results, it falls through to the regular hint syst
 When a multi-name query with a `kind` filter returns results but some terms are silently dropped due to kind mismatch, the response `summary` includes a `missingTerms` array:
 
 ```json
-// Request: name="UserService,GetUser" kind="class"
+// Request: name=["UserService","GetUser"] kind=["class"]
 // UserService is a class (found), GetUser is a method (filtered out by kind)
 {
   "definitions": [
