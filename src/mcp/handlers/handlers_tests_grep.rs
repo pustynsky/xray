@@ -2,7 +2,7 @@
 
 use super::*;
 use super::grep::handle_xray_grep;
-use super::handlers_test_utils::{cleanup_tmp, make_empty_ctx};
+use super::handlers_test_utils::{cleanup_tmp, make_empty_ctx, HandlerContextBuilder};
 use crate::index::build_trigram_index;
 use crate::Posting;
 use std::collections::HashMap;
@@ -29,10 +29,9 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
         total_tokens, extensions: vec!["cs".to_string()], file_token_counts,
         trigram, ..Default::default()
     };
-    HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        ..Default::default()
-    }
+    HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .build()
 }
 
 #[test] fn test_substring_xray_finds_partial_match() {
@@ -166,10 +165,9 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
         trigram_dirty: true,
         ..Default::default()
     };
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .build();
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["httpcli"], "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -214,12 +212,11 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
     (ctx, tmp_dir)
 }
 
@@ -299,7 +296,10 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     assert_eq!(loaded.files.len(), orig_files);
     assert_eq!(loaded.index.len(), orig_tokens);
     assert_eq!(loaded.trigram.trigram_map.len(), orig_trigrams);
-    let loaded_ctx = HandlerContext { index: Arc::new(RwLock::new(loaded)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root.to_string()))), ..Default::default() };
+    let loaded_ctx = HandlerContextBuilder::new()
+        .with_content_index(loaded)
+        .with_server_dir(root.to_string())
+        .build();
     let result = dispatch_tool(&loaded_ctx, "xray_grep", &json!({"terms": ["databaseconn"], "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -487,13 +487,12 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        server_ext: "xml".to_string(),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_server_ext("xml")
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
     (ctx, tmp_dir)
 }
 
@@ -578,7 +577,12 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
     std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
     let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), threads: 1, ..Default::default() }).unwrap();
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), server_ext: "txt".to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .with_server_dir(tmp.to_string_lossy().to_string())
+        .with_server_ext("txt")
+        .with_index_base(tmp.to_path_buf())
+        .build();
     let r_all = handle_xray_grep(&ctx, &json!({"terms": ["productcatalog"]}));
     let o_all: Value = serde_json::from_str(&r_all.content[0].text).unwrap();
     assert_eq!(o_all["summary"]["totalFiles"], 2);
@@ -593,7 +597,11 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let tmp_holder = tempfile::tempdir().unwrap();
     let tmp = tmp_holder.path();
     let index = ContentIndex { root: tmp.to_string_lossy().to_string(), ..Default::default() };
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), index_base: tmp.to_path_buf(), ..Default::default() };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .with_server_dir(tmp.to_string_lossy().to_string())
+        .with_index_base(tmp.to_path_buf())
+        .build();
     // Drive-letter path Z:\… is only treated as absolute on Windows; on Unix
     // it would be interpreted as a relative path and accepted.
     let result = handle_xray_grep(&ctx, &json!({"terms": ["test"], "dir": r"Z:\some\other\path"}));
@@ -632,11 +640,10 @@ fn test_response_truncation_triggers_on_large_result() {
         ..Default::default()
     };
 
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(index)),
-        metrics: true,
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .with_metrics(true)
+        .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["common"],
@@ -680,11 +687,10 @@ fn test_response_truncation_does_not_trigger_on_small_result() {
         ..Default::default()
     };
 
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(index)),
-        metrics: true,
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .with_metrics(true)
+        .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["mytoken"], "substring": false}));
     assert!(!result.is_error);
@@ -726,12 +732,11 @@ fn test_xray_grep_response_truncation_via_small_budget() {
         ..Default::default()
     };
 
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(index)),
-        metrics: true,
-        max_response_bytes: 2_000,
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .with_metrics(true)
+        .with_max_response_bytes(2_000)
+        .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["targettoken"],
@@ -781,11 +786,10 @@ fn test_xray_grep_sql_extension_filter() {
         ..Default::default()
     };
 
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(index)),
-        server_ext: "cs,sql".to_string(),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .with_server_ext("cs,sql")
+        .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["createtable"],
@@ -847,13 +851,12 @@ fn test_xray_grep_phrase_search_with_show_lines() {
         ..Default::default()
     }).unwrap();
 
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        server_ext: "sql".to_string(),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_server_ext("sql")
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["CREATE TABLE"],
@@ -902,12 +905,9 @@ fn test_xray_grep_max_results_zero_means_unlimited() {
         ..Default::default()
     };
 
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(index)),
-        def_index: None,
-        max_response_bytes: 0,
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .build();
 
     let result_unlimited = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["commontoken"],
@@ -982,12 +982,11 @@ fn test_xray_grep_phrase_sort_by_occurrences() {
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["user service"],
@@ -1039,12 +1038,11 @@ fn test_xray_grep_phrase_sort_tie_break_by_path() {
         threads: 4, // exercise parallel candidate verification (tier-A)
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
 
     // Run the same query several times; the result order must be stable AND
     // ascending by file path among the (all-equal) occurrence groups.
@@ -1110,12 +1108,11 @@ fn test_xray_grep_multi_phrase_sort_tie_break_by_path() {
         threads: 4,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
 
     let mut prev_paths: Option<Vec<String>> = None;
     for run in 0..5 {
@@ -1176,12 +1173,11 @@ fn test_xray_grep_line_regex_sort_tie_break_by_path() {
         threads: 4,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
 
     let mut prev_paths: Option<Vec<String>> = None;
     for run in 0..5 {
@@ -1255,12 +1251,11 @@ fn test_xray_grep_phrase_line_level_pruning_same_line_vs_split_lines() {
         threads: 4,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
 
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
         "terms": ["public class"],
@@ -1318,11 +1313,9 @@ fn test_read_errors_in_substring_summary() {
         read_errors: 3, lossy_file_count: 2,
         ..Default::default()
     };
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(index)),
-        ..Default::default()
-    };
-    // Substring mode
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .build();
     let result = handle_xray_grep(&ctx, &json!({"terms": ["httpcli"], "substring": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -1585,13 +1578,12 @@ fn test_substring_space_sql_create_table() {
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        server_ext: "sql".to_string(),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_server_ext("sql")
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
 
     // "CREATE TABLE" with default substring mode — should auto-switch to phrase
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
@@ -1807,13 +1799,12 @@ fn test_multi_phrase_fn_signatures() {
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))),
-        server_ext: "rs".to_string(),
-        index_base: tmp_dir.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_server_ext("rs")
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
 
     // This was the bug scenario: comma-separated function signatures
     let result = dispatch_tool(&ctx, "xray_grep", &json!({
@@ -2020,12 +2011,11 @@ fn test_grep_dir_as_file_auto_convert_uses_exact_basename_not_substring_siblings
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))),
-        index_base: tmp.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp.to_string_lossy().to_string())
+        .with_index_base(tmp.join(".index"))
+        .build();
 
     // Baseline: token search without any file scoping must find all three files
     // (sanity check that the fixture indexed correctly).
@@ -2102,12 +2092,11 @@ fn test_grep_dir_as_file_auto_convert_does_not_match_nested_same_basename() {
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))),
-        index_base: tmp.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp.to_string_lossy().to_string())
+        .with_index_base(tmp.join(".index"))
+        .build();
 
     // Baseline: token search without scoping must find BOTH copies (proves
     // the fixture indexed the nested duplicate; otherwise the negative
@@ -2178,12 +2167,11 @@ fn test_grep_dir_as_file_auto_convert_preserves_logical_symlink_path() {
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(root.to_string_lossy().to_string()))),
-        index_base: root.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(root.to_string_lossy().to_string())
+        .with_index_base(root.join(".index"))
+        .build();
 
     let baseline = handle_xray_grep(&ctx, &json!({ "terms": ["xraySymlinkExactMarker"] }));
     assert!(!baseline.is_error, "baseline must succeed: {}", baseline.content[0].text);
@@ -2236,12 +2224,11 @@ fn test_grep_explicit_file_filter_keeps_substring_semantics() {
         threads: 1,
         ..Default::default()
     }).unwrap();
-    let ctx = HandlerContext {
-        index: Arc::new(RwLock::new(content_index)),
-        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))),
-        index_base: tmp.join(".index"),
-        ..Default::default()
-    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp.to_string_lossy().to_string())
+        .with_index_base(tmp.join(".index"))
+        .build();
 
     let result = handle_xray_grep(&ctx, &json!({
         "terms": ["xraySubstringKeepMarker"],
@@ -2275,7 +2262,12 @@ fn test_grep_with_relative_subdir_filter() {
     std::fs::write(sub_a.join("hello.txt"), "ProductCatalog usage here").unwrap();
     std::fs::write(sub_b.join("other.txt"), "ProductCatalog other usage").unwrap();
     let index = crate::build_content_index(&crate::ContentIndexArgs { dir: tmp.to_string_lossy().to_string(), ext: "txt".to_string(), threads: 1, ..Default::default() }).unwrap();
-    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp.to_string_lossy().to_string()))), server_ext: "txt".to_string(), index_base: tmp.to_path_buf(), ..Default::default() };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(index)
+        .with_server_dir(tmp.to_string_lossy().to_string())
+        .with_server_ext("txt")
+        .with_index_base(tmp.to_path_buf())
+        .build();
 
     // Use RELATIVE dir path "subA" instead of absolute
     let r_sub = handle_xray_grep(&ctx, &json!({"terms": ["productcatalog"], "dir": "subA"}));

@@ -1,12 +1,23 @@
 //! Shared test helpers for MCP handler tests.
-//! Contains functions used by multiple test modules (handlers_tests, handlers_tests_csharp, etc.)
+//!
+//! **Convention:** new tests in this module hierarchy SHOULD use
+//! [`HandlerContextBuilder`] for constructing [`HandlerContext`] and
+//! [`make_params_default`] for constructing [`GrepSearchParams`].
+//! Old tests are migrated opportunistically (Boy Scout rule).
+//!
+//! Canonical demos:
+//! - [`HandlerContextBuilder`] usage: see `test_response_truncation_triggers_on_large_result`
+//!   in `handlers_tests_grep.rs`.
+//! - [`make_params_default`] usage: see tests in `grep_tests_additional.rs`.
 
 use super::*;
+use super::grep::GrepSearchParams;
 use crate::definitions::*;
 use crate::Posting;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+use std::time::Instant;
 
 /// Remove a temporary directory used in tests.
 pub(crate) fn cleanup_tmp(tmp_dir: &std::path::Path) {
@@ -143,5 +154,101 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
         index: Arc::new(RwLock::new(content_index)),
         def_index: Some(Arc::new(RwLock::new(def_index))),
         ..Default::default()
+    }
+}
+
+/// Builder for `HandlerContext` — eliminates repetitive
+/// `Arc::new(RwLock::new(...))` wrapping in tests.
+///
+/// # Usage
+/// ```ignore
+/// let ctx = HandlerContextBuilder::new()
+///     .with_content_index(my_index)
+///     .with_metrics(true)
+///     .build();
+/// ```
+#[allow(dead_code)] // Methods used incrementally as tests are Boy-Scout-migrated.
+pub(crate) struct HandlerContextBuilder {
+    ctx: HandlerContext,
+}
+
+#[allow(dead_code)] // Methods used incrementally as tests are Boy-Scout-migrated.
+impl HandlerContextBuilder {
+    pub fn new() -> Self {
+        Self { ctx: HandlerContext::default() }
+    }
+
+    pub fn with_content_index(mut self, index: ContentIndex) -> Self {
+        self.ctx.index = Arc::new(RwLock::new(index));
+        self
+    }
+
+    pub fn with_def_index(mut self, index: DefinitionIndex) -> Self {
+        self.ctx.def_index = Some(Arc::new(RwLock::new(index)));
+        self
+    }
+
+    pub fn with_workspace(mut self, binding: WorkspaceBinding) -> Self {
+        self.ctx.workspace = Arc::new(RwLock::new(binding));
+        self
+    }
+
+    pub fn with_server_dir(mut self, dir: impl Into<String>) -> Self {
+        self.ctx.workspace = Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(dir.into()),
+        ));
+        self
+    }
+
+    pub fn with_server_ext(mut self, ext: impl Into<String>) -> Self {
+        self.ctx.server_ext = ext.into();
+        self
+    }
+
+    pub fn with_metrics(mut self, enabled: bool) -> Self {
+        self.ctx.metrics = enabled;
+        self
+    }
+
+    pub fn with_index_base(mut self, path: PathBuf) -> Self {
+        self.ctx.index_base = path;
+        self
+    }
+
+    pub fn with_max_response_bytes(mut self, bytes: usize) -> Self {
+        self.ctx.max_response_bytes = bytes;
+        self
+    }
+
+    pub fn with_current_branch(mut self, branch: impl Into<String>) -> Self {
+        self.ctx.current_branch = Some(branch.into());
+        self
+    }
+
+    pub fn build(self) -> HandlerContext {
+        self.ctx
+    }
+}
+
+/// Default `GrepSearchParams` for tests. Override individual fields via
+/// `GrepSearchParams { field: value, ..make_params_default() }`.
+pub(crate) fn make_params_default<'a>() -> GrepSearchParams<'a> {
+    GrepSearchParams {
+        ext_filter: &[],
+        show_lines: false,
+        context_lines: 0,
+        max_results: 50,
+        mode_and: false,
+        count_only: false,
+        search_start: Instant::now(),
+        dir_filter: &None,
+        file_filter: &[],
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: vec![],
+        dir_auto_converted_note: None,
+        exact_file_path: &None,
+        exact_file_path_canonical: &None,
+        auto_balance: true,
+        max_occurrences_per_term: None,
     }
 }
