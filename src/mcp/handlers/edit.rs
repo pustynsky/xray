@@ -902,6 +902,12 @@ fn handle_single_file_edit(
         // Fix 4: expose line ending so clients can reconcile tool-diff (LF) with
         // on-disk bytes (LF or CRLF). Prevents "diff disagrees with git diff" confusion.
         "lineEnding": if line_ending == "\r\n" { "CRLF" } else { "LF" },
+        // INSERT-after-EOF idiom hint: agents can read these values directly
+        // from a previous response instead of guessing from stale state.
+        "appendIdiom": {
+            "startLine": edit_result.new_line_count + 1,
+            "endLine": edit_result.new_line_count,
+        },
     });
 
     if edit_result.total_replacements > 0 {
@@ -1149,6 +1155,12 @@ fn handle_multi_file_edit(
             "linesRemoved": result.lines_removed,
             "newLineCount": result.new_line_count,
             "lineEnding": if *line_ending == "\r\n" { "CRLF" } else { "LF" },
+            // INSERT-after-EOF idiom hint: agents can read these values directly
+            // from a previous response instead of guessing from stale state.
+            "appendIdiom": {
+                "startLine": result.new_line_count + 1,
+                "endLine": result.new_line_count,
+            },
         });
         if result.total_replacements > 0 {
             file_result["totalReplacements"] = json!(result.total_replacements);
@@ -1333,14 +1345,27 @@ fn apply_line_operations(lines: &[&str], ops: Vec<LineOperation>) -> Result<(Vec
             }
             if op.start_line > line_count {
                 return Err(format!(
-                    "startLine {} out of range (file has {} lines)",
-                    op.start_line, line_count
+                    "startLine {} out of range (file has {} lines). \
+                     To append after the last line, pass startLine: {}, endLine: {} \
+                     (INSERT mode at line N+1). \
+                     To replace the last line, pass startLine: {}, endLine: {}.",
+                    op.start_line,
+                    line_count,
+                    line_count + 1,
+                    line_count,
+                    line_count,
+                    line_count,
                 ));
             }
             if op.end_line > line_count {
                 return Err(format!(
-                    "endLine {} out of range (file has {} lines)",
-                    op.end_line, line_count
+                    "endLine {} out of range (file has {} lines). \
+                     To append after the last line, pass startLine: {}, endLine: {} \
+                     (INSERT mode at line N+1).",
+                    op.end_line,
+                    line_count,
+                    line_count + 1,
+                    line_count,
                 ));
             }
         } else {

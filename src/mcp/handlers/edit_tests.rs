@@ -5272,3 +5272,80 @@ fn test_insert_out_of_range_includes_append_hint() {
         "Hint must spell out the exact append-idiom coordinates. Got: {}", text
     );
 }
+
+/// Mode A REPLACE (`endLine >= startLine`) with `startLine > line_count`
+/// must reject the op AND surface the same append-idiom hint that INSERT
+/// already carries. Without this, agents that try to append by reusing the
+/// last `newLineCount` (`startLine: N+1`) get a bare "out of range" error
+/// with no path forward and frequently fall back to overwriting line N.
+/// Closes docs/user-stories/todo_2026-04-25_xray-edit-append-and-line-staleness.md §2.1.
+#[test]
+fn test_replace_out_of_range_includes_append_hint() {
+    // 3-line file. line_count is what apply_line_operations computes; the
+    // hint must reference `line_count + 1` for the append form.
+    let (tmp, filename, _) = create_temp_file("line1\nline2\nline3\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            // Mode A REPLACE (endLine >= startLine) past EOF.
+            { "startLine": 99, "endLine": 99, "content": "x" }
+        ]
+    }));
+
+    assert!(result.is_error, "Out-of-range REPLACE must error");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("out of range"),
+        "Should mention out-of-range. Got: {}", text
+    );
+    assert!(
+        text.contains("To append after the last line"),
+        "REPLACE error must include append-idiom hint. Got: {}", text
+    );
+    assert!(
+        text.contains("INSERT mode"),
+        "Hint must explain the INSERT-mode trick. Got: {}", text
+    );
+    assert!(
+        text.contains("To replace the last line"),
+        "Hint must also document the replace-last-line form. Got: {}", text
+    );
+}
+
+/// Successful Mode A `xray_edit` response must carry an `appendIdiom` object
+/// with the canonical (startLine, endLine) values for an INSERT-after-EOF
+/// follow-up call. This eliminates the "agent guesses N+1 from stale state"
+/// failure class.
+#[test]
+fn test_edit_response_includes_append_idiom() {
+    let (tmp, filename, _) = create_temp_file("alpha\nbeta\ngamma\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 2, "endLine": 2, "content": "BETA" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let new_line_count = output["newLineCount"].as_u64()
+        .expect("newLineCount must be present");
+    let append = output["appendIdiom"].as_object()
+        .expect("appendIdiom must be present in successful response");
+    assert_eq!(
+        append["startLine"].as_u64().unwrap(),
+        new_line_count + 1,
+        "appendIdiom.startLine must equal newLineCount + 1"
+    );
+    assert_eq!(
+        append["endLine"].as_u64().unwrap(),
+        new_line_count,
+        "appendIdiom.endLine must equal newLineCount"
+    );
+}
+
