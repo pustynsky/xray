@@ -2373,3 +2373,27 @@ fn test_auto_switch_phrase_hint_is_actionable() {
 
     cleanup_tmp(&tmp);
 }
+
+/// Block B: phrase consisting only of punctuation has no indexable tokens (tokenize
+/// requires alnum sequences of length >= 2). The error message must point to
+/// `lineRegex=true` as the correct alternative for matching pure punctuation.
+#[test]
+fn test_phrase_pure_punctuation_hints_line_regex() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // Pure punctuation triggers auto-switch to phrase, then collect_phrase_matches
+    // sees zero indexable tokens after `tokenize("()", 2)` and returns Err.
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["()"]
+    }));
+    assert!(result.is_error, "Pure-punctuation phrase should error");
+    let msg = &result.content[0].text;
+    assert!(msg.contains("no indexable tokens"),
+        "error should mention indexable tokens. Got: {}", msg);
+    assert!(msg.contains("lineRegex=true"),
+        "error should point to lineRegex=true as the alternative. Got: {}", msg);
+    assert!(msg.contains("Example:"),
+        "error should include a copy-pasteable example. Got: {}", msg);
+
+    cleanup_tmp(&tmp);
+}
+

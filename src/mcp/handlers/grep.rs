@@ -1516,7 +1516,11 @@ fn collect_phrase_matches(
 
     if phrase_tokens.is_empty() {
         return Err(format!(
-            "Phrase '{}' has no indexable tokens (min length 2)", phrase
+            "Phrase '{}' has no indexable tokens (min length 2). \
+             To search for punctuation/operators, use lineRegex=true \
+             \u{2014} it bypasses the token index and matches raw line content. \
+             Example: terms=[\"{}\"], lineRegex=true.",
+            phrase, regex::escape(phrase)
         ));
     }
 
