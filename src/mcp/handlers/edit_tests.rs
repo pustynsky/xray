@@ -5450,3 +5450,115 @@ fn test_search_not_found_falls_back_to_expected_context_hint() {
         "Legacy fallback hint must still fire when no smarter hint applies. Got: {}", text);
 }
 
+
+// ─── Brace-balance warnings (2026-04-25 brace-balance story) ─────────
+
+/// Asymmetric search/replace that drops a `}` (the most common
+/// xray_edit footgun, observed multiple times in this branch alone)
+/// must surface a `braceBalanceWarnings` entry pointing at the
+/// imbalance. The warning is informational: the write still succeeds,
+/// but the agent now has a structural-sanity signal without waiting
+/// for `cargo build` to complain 30s later.
+#[test]
+fn test_brace_balance_warning_drops_closer() {
+    let original = "fn outer() {\n    if cond {\n        do_thing();\n    }\n}\n";
+    let (tmp, filename, _) = create_temp_file(original);
+    let ctx = make_ctx(tmp.path());
+
+    // search captures the closing `}` of the inner `if`; replace
+    // omits it. Resulting file has one extra orphan `}` removed
+    // from balance — net delta: '{' = 0, '}' = -1.
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "        do_thing();\n    }\n", "replace": "        do_thing();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must be present when '{' delta != '}' delta");
+    assert!(!warnings.is_empty(), "Warnings array must not be empty");
+    let joined = warnings.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join(" | ");
+    assert!(joined.contains("curly"),
+        "Warning must mention 'curly' for {{}} mismatch. Got: {}", joined);
+    assert!(joined.contains("'}' delta = -1") || joined.contains("'}' delta = -1,"),
+        "Warning must report '}}' delta = -1. Got: {}", joined);
+}
+
+/// Replace adds an unclosed `(` — round-pair imbalance must fire its
+/// own warning class.
+#[test]
+fn test_brace_balance_warning_orphan_opener() {
+    let original = "let x = foo();\n";
+    let (tmp, filename, _) = create_temp_file(original);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // foo() -> foo(bar — net delta: '(' = 0, ')' = -1
+            { "search": "foo()", "replace": "foo(bar" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must be present for round-brace mismatch");
+    let joined = warnings.iter().map(|v| v.as_str().unwrap_or("")).collect::<Vec<_>>().join(" | ");
+    assert!(joined.contains("round"),
+        "Warning must mention 'round' for () mismatch. Got: {}", joined);
+}
+
+/// Balanced edit (e.g. add an `if/else` block — equal `{` and `}`
+/// deltas) must NOT emit `braceBalanceWarnings` — false positives on
+/// language-agnostic content are unacceptable.
+#[test]
+fn test_brace_balance_no_warning_when_balanced() {
+    let original = "fn f() {\n    body();\n}\n";
+    let (tmp, filename, _) = create_temp_file(original);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            // Add an inner block — both '{' and '}' grow by 1.
+            { "search": "    body();\n", "replace": "    if cond {\n        body();\n    }\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output.get("braceBalanceWarnings").is_none(),
+        "braceBalanceWarnings must be absent when deltas agree. Got response: {}", output);
+}
+
+/// `dryRun: true` still surfaces brace warnings — agents iterating on
+/// a preview should see structural concerns before committing.
+#[test]
+fn test_brace_balance_warning_in_dry_run() {
+    let original = "fn outer() {\n    if cond {\n        do_thing();\n    }\n}\n";
+    let (tmp, filename, _) = create_temp_file(original);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "dryRun": true,
+        "edits": [
+            { "search": "        do_thing();\n    }\n", "replace": "        do_thing();\n" }
+        ]
+    }));
+    assert!(!result.is_error, "Dry-run edit must succeed: {}", result.content[0].text);
+
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    let warnings = output["braceBalanceWarnings"].as_array()
+        .expect("braceBalanceWarnings must fire on dryRun previews too");
+    assert!(!warnings.is_empty(), "Warnings array must not be empty in dry-run");
+}
+

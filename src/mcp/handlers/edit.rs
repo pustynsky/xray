@@ -484,6 +484,10 @@ struct EditResult {
     lines_added: i64,
     lines_removed: i64,
     new_line_count: usize,
+    /// Post-write structural sanity warnings about asymmetric brace deltas.
+    /// One entry per disagreeing pair class (`{}`, `()`, `[]`). Empty in the
+    /// common case. See `brace_balance_warnings` for the heuristic.
+    brace_balance_warnings: Vec<String>,
 }
 
 /// Read and validate a file, returning its content and line ending style.
@@ -660,6 +664,17 @@ fn apply_edits_to_content(
     let lines_removed = if lines_delta < 0 { -lines_delta } else { 0 };
     let lines_added = if lines_delta > 0 { lines_delta } else { 0 };
 
+    // Post-write structural sanity: asymmetric brace deltas surface the
+    // "search included a closer that replace omitted" failure class
+    // (commit a823c57 had exactly this bug — caught only by `cargo build`
+    // 30s after the write). Skip the check when the original was empty
+    // (auto-create case: there is no "delta", everything is new content).
+    let brace_balance_warnings = if normalized.is_empty() {
+        Vec::new()
+    } else {
+        brace_balance_warnings(normalized, &modified_content)
+    };
+
     Ok(EditResult {
         modified_content,
         applied,
@@ -670,6 +685,7 @@ fn apply_edits_to_content(
         lines_added,
         lines_removed,
         new_line_count,
+        brace_balance_warnings,
     })
 }
 
@@ -929,6 +945,10 @@ fn handle_single_file_edit(
         response["warnings"] = json!(edit_result.warnings);
     }
 
+    if !edit_result.brace_balance_warnings.is_empty() {
+        response["braceBalanceWarnings"] = json!(edit_result.brace_balance_warnings);
+    }
+
     if !edit_result.diff.is_empty() {
         response["diff"] = json!(edit_result.diff);
     } else {
@@ -1177,6 +1197,9 @@ fn handle_multi_file_edit(
         }
         if !result.warnings.is_empty() {
             file_result["warnings"] = json!(result.warnings);
+        }
+        if !result.brace_balance_warnings.is_empty() {
+            file_result["braceBalanceWarnings"] = json!(result.brace_balance_warnings);
         }
         if !result.diff.is_empty() {
             file_result["diff"] = json!(result.diff);
@@ -2500,6 +2523,46 @@ fn detect_diff_category(search: &str, found: &str) -> &'static str {
 }
 
 // ─── Diff generation ─────────────────────────────────────────────────
+
+/// Compute brace-balance delta warnings between original and modified
+/// content. Returns one warning per disagreeing pair class (`{}`, `()`,
+/// `[]`). Empty Vec when all three pairs are balanced (the common case).
+///
+/// The check is intentionally crude: it counts raw bytes, ignoring
+/// strings, comments, and char literals. That makes it correct for
+/// **delta** comparison (a brace that exists identically in both
+/// pre- and post-edit cancels out) and dirt-cheap to compute.
+///
+/// Caveat: an edit that adds AND removes the same number of
+/// counter-balanced braces (e.g. moves a block to a different scope)
+/// has delta = 0 and won't fire. That is the deliberate trade-off —
+/// false positives on Python/Markdown/SQL would be unacceptable.
+fn brace_balance_warnings(original: &str, modified: &str) -> Vec<String> {
+    let pairs: [(u8, u8, &str); 3] = [
+        (b'{', b'}', "curly"),
+        (b'(', b')', "round"),
+        (b'[', b']', "square"),
+    ];
+    let mut out = Vec::new();
+    for &(open, close, name) in &pairs {
+        let count_b = |s: &str, b: u8| s.as_bytes().iter().filter(|&&c| c == b).count() as isize;
+        let d_open = count_b(modified, open) - count_b(original, open);
+        let d_close = count_b(modified, close) - count_b(original, close);
+        if d_open != d_close {
+            out.push(format!(
+                "{} brace count drifted asymmetrically: \
+                 '{}' delta = {:+}, '{}' delta = {:+}. \
+                 If this was unintended (most common cause: search \
+                 included a closer that replace omitted), the file may \
+                 no longer compile — verify with cargo build / linter.",
+                name,
+                open as char, d_open,
+                close as char, d_close,
+            ));
+        }
+    }
+    out
+}
 
 /// Generate a unified diff between original and modified content.
 fn generate_unified_diff(path: &str, original: &str, modified: &str) -> String {
