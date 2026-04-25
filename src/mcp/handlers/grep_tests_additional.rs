@@ -1,28 +1,8 @@
 #![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use super::*;
+use super::super::handlers_test_utils::make_params_default;
 use std::collections::{HashMap, HashSet};
-use std::time::Instant;
 
-fn make_params_default<'a>() -> GrepSearchParams<'a> {
-    GrepSearchParams {
-        ext_filter: &[],
-        show_lines: false,
-        context_lines: 0,
-        max_results: 50,
-        mode_and: false,
-        count_only: false,
-        search_start: Instant::now(),
-        dir_filter: &None,
-        file_filter: &[],
-        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
-        exclude_lower: vec![],
-        dir_auto_converted_note: None,
-        exact_file_path: &None,
-        exact_file_path_canonical: &None,
-        auto_balance: true,
-        max_occurrences_per_term: None,
-    }
-}
 
 // ─── auto_switch_to_phrase_if_needed tests ──────────────────────
 
