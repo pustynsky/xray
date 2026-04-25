@@ -573,8 +573,8 @@ fn test_render_instructions_example_line() {
     let text = render_instructions(&["rs"]);
     assert!(text.contains("EXAMPLE: instead of reading handler.rs directly"),
         "Instructions should contain EXAMPLE line for the configured extension");
-    assert!(text.contains("xray_definitions file='handler.rs'"),
-        "EXAMPLE should show xray_definitions with the correct extension");
+    assert!(text.contains("xray_definitions file=[\"handler.rs\"]"),
+        "EXAMPLE should show xray_definitions with the correct extension (post 2026-04-25 array migration)");
 }
 
 #[test]
@@ -585,6 +585,23 @@ fn test_render_instructions_example_line_uses_first_ext() {
     // Should NOT use the second extension in the example
     assert!(!text.contains("handler.ts"),
         "EXAMPLE should use first ext only, not second");
+}
+
+/// Lock-in: the ANTI-PATTERNS block in render_instructions must use the
+/// migrated array form for migrated list-shaped params (post 2026-04-25
+/// list-params-to-arrays migration). Stale `file='<dir>'` strings here would
+/// teach LLMs the rejected scalar contract.
+#[test]
+fn test_render_instructions_anti_patterns_use_array_form() {
+    let text = render_instructions(&["rs"]);
+    // Must NOT contain stale scalar-form examples for migrated keys on
+    // migrated tools (xray_definitions, xray_grep, xray_callers).
+    assert!(!text.contains("xray_definitions file='"),
+        "ANTI-PATTERNS / instructions must not teach scalar `xray_definitions file='<X>'` (migrated to array). Got:\n{}", text);
+    assert!(!text.contains("xray_grep ext='"),
+        "ANTI-PATTERNS / instructions must not teach scalar `xray_grep ext='<X>'` (migrated to array). Got:\n{}", text);
+    assert!(!text.contains("xray_callers method='"),
+        "ANTI-PATTERNS / instructions must not teach scalar `xray_callers method='<X>'` (migrated to array). Got:\n{}", text);
 }
 
 /// Verify that tools/list from server uses ctx.def_extensions
@@ -745,8 +762,8 @@ fn test_instructions_has_intent_mapping() {
     // Core intent->tool pairs that cover the most common tool-selection failures
     assert!(text.contains("xray_grep showLines=true"),
         "INTENT -> TOOL MAPPING should map 'context around a match' to xray_grep showLines");
-    assert!(text.contains("xray_definitions name='X' includeBody=true"),
-        "INTENT -> TOOL MAPPING should map 'read source code' to xray_definitions includeBody");
+    assert!(text.contains("xray_definitions name=[\"X\"] includeBody=true"),
+        "INTENT -> TOOL MAPPING should map 'read source code' to xray_definitions includeBody (post 2026-04-25 array migration)");
     assert!(text.contains("containsLine=N"),
         "INTENT -> TOOL MAPPING should map 'method at file:line N' to xray_definitions containsLine");
     assert!(text.contains("xray_edit with multiple edits"),
