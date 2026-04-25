@@ -1672,9 +1672,13 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
                 .unwrap_or_else(|_| d.to_string())
         })
         .unwrap_or_else(|| current_dir.clone());
-    let ext = args.get("ext").and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| ctx.server_ext.clone());
+    // 2026-04-25 list-params migration: `ext` is array<string>. Bridge into a
+    // comma-joined String for downstream `build_or_load_content_index`.
+    let ext = match utils::read_string_array(args, "ext") {
+        Ok(v) if v.is_empty() => ctx.server_ext.clone(),
+        Ok(v) => v.join(","),
+        Err(e) => return ToolCallResult::error(e),
+    };
 
     // Determine if workspace is changing
     let previous_dir = current_dir.clone();
@@ -1839,9 +1843,13 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
                 .unwrap_or_else(|_| d.to_string())
         })
         .unwrap_or_else(|| current_dir.clone());
-    let ext = args.get("ext").and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| ctx.server_ext.clone());
+    // 2026-04-25 list-params migration: `ext` is array<string>. Bridge into a
+    // comma-joined String for downstream `build_definition_index`.
+    let ext = match utils::read_string_array(args, "ext") {
+        Ok(v) if v.is_empty() => ctx.server_ext.clone(),
+        Ok(v) => v.join(","),
+        Err(e) => return ToolCallResult::error(e),
+    };
 
     // Determine if workspace is changing
     let previous_dir = current_dir.clone();

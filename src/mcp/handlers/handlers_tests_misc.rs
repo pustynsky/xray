@@ -1108,3 +1108,70 @@ fn test_reindexing_allows_workspace_independent_tools() {
             "xray_reindex should not be blocked by REINDEXING status");
     }
 }
+
+
+// ─── §4.3 step 6: xray_reindex / xray_reindex_definitions `ext` array migration ───
+//
+// Regression-pair tests: array-form succeeds (with discriminating files>=1 check
+// — default server_ext="cs" yields 0 files in this repo, so without the
+// migration the array form would be silently ignored and fall back to "cs" → 0
+// files, failing the assertion); bare-string form rejected with migration-aware
+// error citing the parameter name and 2026-04-25 / array.
+
+#[test]
+fn test_xray_reindex_ext_array_form_accepted() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({ "ext": ["rs"] }));
+    assert!(!result.is_error,
+        "array-form ext must succeed; got: {}", result.content[0].text);
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["status"], "ok");
+    assert!(
+        output["files"].as_u64().unwrap() >= 1,
+        "ext=[\"rs\"] must index >=1 *.rs file (regression: pre-fix the parser \
+         ignored array form, fell back to server_ext=\"cs\" → 0 files). Got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_xray_reindex_ext_string_form_rejected() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({ "ext": "rs" }));
+    assert!(result.is_error, "Bare-string ext must be rejected post 2026-04-25 migration");
+    let msg = &result.content[0].text;
+    assert!(msg.contains("ext"),
+        "Error must mention the offending parameter name. Got: {}", msg);
+    assert!(msg.contains("array") || msg.contains("2026-04-25"),
+        "Error must explain array contract / cite migration. Got: {}", msg);
+}
+
+#[test]
+fn test_xray_reindex_definitions_ext_array_form_accepted() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({ "ext": ["rs"] }));
+    assert!(!result.is_error,
+        "array-form ext must succeed; got: {}", result.content[0].text);
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["status"], "ok");
+    assert!(
+        output["files"].as_u64().unwrap() >= 1,
+        "ext=[\"rs\"] must index >=1 *.rs file (regression: pre-fix the parser \
+         ignored array form, fell back to server_ext=\"cs\" → 0 files). Got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_xray_reindex_definitions_ext_string_form_rejected() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({ "ext": "rs" }));
+    assert!(result.is_error, "Bare-string ext must be rejected post 2026-04-25 migration");
+    let msg = &result.content[0].text;
+    assert!(msg.contains("ext"),
+        "Error must mention the offending parameter name. Got: {}", msg);
+    assert!(msg.contains("array") || msg.contains("2026-04-25"),
+        "Error must explain array contract / cite migration. Got: {}", msg);
+}
