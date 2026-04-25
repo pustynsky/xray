@@ -250,7 +250,7 @@ fn test_dispatch_grep_with_results() {
 #[test]
 fn test_xray_callers_no_def_index() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "Foo"}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": ["Foo"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("Definition index not available"));
 }
@@ -419,7 +419,7 @@ fn test_dispatch_callers_while_def_index_building() {
         }))),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "Foo"}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": ["Foo"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("being built"),
         "Expected 'being built' message, got: {}", result.content[0].text);

@@ -105,7 +105,7 @@ fn test_rust_xray_definitions_finds_method() {
 fn test_rust_xray_callers_down() {
     let (ctx, tmp) = make_rs_ctx_with_real_files();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "process",
+        "method": ["process"],
         "class": "OrderService",
         "direction": "down",
         "depth": 1

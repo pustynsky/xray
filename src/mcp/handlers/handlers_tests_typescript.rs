@@ -582,7 +582,7 @@ fn test_ts_xray_definitions_include_body() {
 fn test_ts_xray_callers_up_finds_caller() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "getUser",
+        "method": ["getUser"],
         "class": "UserService",
         "depth": 1
     }));
@@ -600,7 +600,7 @@ fn test_ts_xray_callers_up_finds_caller() {
 fn test_ts_xray_callers_down_finds_callees() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "handleOrder",
+        "method": ["handleOrder"],
         "class": "OrderProcessor",
         "direction": "down",
         "depth": 1
@@ -618,7 +618,7 @@ fn test_ts_xray_callers_down_finds_callees() {
 fn test_ts_xray_callers_nonexistent_method() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "nonExistentMethodXYZ"
+        "method": ["nonExistentMethodXYZ"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -817,7 +817,7 @@ fn test_ts_xray_callers_inject_support() {
 
     // xray_callers up: who calls getUser in UserService?
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "getUser",
+        "method": ["getUser"],
         "class": "UserService",
         "depth": 1
     }));
@@ -838,7 +838,7 @@ fn test_ts_xray_callers_arrow_fn_property() {
     // The existing ctx has handleOrder (idx 4) calling getUser (on UserService)
     // xray_callers direction=down from handleOrder should find getUser
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "handleOrder",
+        "method": ["handleOrder"],
         "class": "OrderProcessor",
         "direction": "down",
         "depth": 1
@@ -1069,7 +1069,7 @@ fn test_mixed_cs_ts_callers_ext_filter() {
 
     // Without ext filter — should find callers from both languages
     let result_all = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "getUser",
+        "method": ["getUser"],
         "class": "CsService",
         "depth": 1
     }));
@@ -1080,9 +1080,9 @@ fn test_mixed_cs_ts_callers_ext_filter() {
 
     // With ext=ts filter — should only find TS callers
     let result_ts = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "getUser",
+        "method": ["getUser"],
         "class": "CsService",
-        "ext": "ts",
+        "ext": ["ts"],
         "depth": 1
     }));
     assert!(!result_ts.is_error);
@@ -1419,7 +1419,7 @@ fn test_ts_xray_callers_di_interface_resolution() {
     // Test: xray_callers for getUser on IUserService should also
     // find handleOrder (because UserService implements IUserService)
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "getUser",
+        "method": ["getUser"],
         "class": "IUserService",
         "depth": 1
     }));
@@ -1566,7 +1566,7 @@ fn test_ts_direction_down_with_typed_local_variable() {
 
     // direction=down from Orchestrator.run() should find DataProcessor.transform()
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "run",
+        "method": ["run"],
         "class": "Orchestrator",
         "direction": "down",
         "depth": 1

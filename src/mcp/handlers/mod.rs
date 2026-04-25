@@ -1089,10 +1089,17 @@ pub fn dispatch_tool(
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-    // Count methods for multi-method budget scaling
+    // Count methods for multi-method budget scaling.
+    // 2026-04-25 list-params migration: `method` is now `array<string>`. Each
+    // entry is one method (no inner comma-split); count non-whitespace entries.
     let method_count = if tool_name == "xray_callers" {
-        arguments.get("method").and_then(|v| v.as_str())
-            .map(|m| m.split(',').filter(|s| !s.trim().is_empty()).count())
+        arguments.get("method")
+            .and_then(|v| v.as_array())
+            .map(|arr| arr.iter()
+                .filter_map(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .count())
+            .filter(|n| *n > 0)
             .unwrap_or(1)
     } else {
         1

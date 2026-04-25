@@ -760,7 +760,7 @@ fn test_xray_definitions_contains_line_zero_returns_error() {
 fn test_xray_callers_depth_zero_returns_error() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "Execute",
+        "method": ["Execute"],
         "depth": 0
     }));
     assert!(result.is_error, "depth=0 should return an error");
@@ -1026,7 +1026,7 @@ fn test_unresolved_blocks_callers() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "test"}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": ["test"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
 }
