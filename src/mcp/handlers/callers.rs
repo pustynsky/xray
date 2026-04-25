@@ -175,21 +175,24 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         ),
     };
 
-    let method_raw = match args.get("method").and_then(|v| v.as_str()) {
-        Some(m) => m.to_string(),
-        None => return ToolCallResult::error("Missing required parameter: method".to_string()),
+    // 2026-04-25 list-params migration: `method` is now `array<string>` (each entry
+    // is one method name; multi-entry array means batch-callers). Trim+empty-filter
+    // each entry to preserve prior behavior. Missing key OR empty array → error.
+    if args.get("method").is_none() {
+        return ToolCallResult::error("Missing required parameter: method".to_string());
+    }
+    let methods_raw = match super::utils::read_string_array(args, "method") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
     };
-    let class_filter = args.get("class").and_then(|v| v.as_str()).map(|s| s.to_string());
-
-    // Multi-method support: split by comma
-    let methods: Vec<String> = method_raw.split(',')
+    let methods: Vec<String> = methods_raw.into_iter()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
-
     if methods.is_empty() {
         return ToolCallResult::error("method parameter is empty after parsing".to_string());
     }
+    let class_filter = args.get("class").and_then(|v| v.as_str()).map(|s| s.to_string());
 
     // For multi-method batch, delegate to batch handler
     if methods.len() > 1 {
@@ -219,9 +222,15 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         d
     };
     let direction = direction.as_str();
-    let ext_filter = args.get("ext").and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| ctx.server_ext.clone());
+    // 2026-04-25 list-params migration: `ext` is now `array<string>` (each entry is
+    // a bare extension, e.g. ["cs","sql"]). Internally bridged to comma-joined
+    // String so existing `prepare_ext_filter` / split-based downstream consumers
+    // work unchanged. Missing or empty array → fall back to ctx.server_ext.
+    let ext_filter = match super::utils::read_string_array(args, "ext") {
+        Ok(v) if v.is_empty() => ctx.server_ext.clone(),
+        Ok(v) => v.join(","),
+        Err(e) => return ToolCallResult::error(e),
+    };
     let resolve_interfaces = args.get("resolveInterfaces").and_then(|v| v.as_bool()).unwrap_or(true);
     let max_callers_per_level = args.get("maxCallersPerLevel").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let max_total_nodes = {
@@ -620,9 +629,13 @@ fn handle_multi_method_callers(
         }
         d
     };
-    let ext_filter = args.get("ext").and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| ctx.server_ext.clone());
+    // 2026-04-25 list-params migration: `ext` is `array<string>`; bridged to
+    // comma-joined String for downstream compatibility (see handle_xray_callers).
+    let ext_filter = match super::utils::read_string_array(args, "ext") {
+        Ok(v) if v.is_empty() => ctx.server_ext.clone(),
+        Ok(v) => v.join(","),
+        Err(e) => return ToolCallResult::error(e),
+    };
     let resolve_interfaces = args.get("resolveInterfaces").and_then(|v| v.as_bool()).unwrap_or(true);
     let max_callers_per_level = args.get("maxCallersPerLevel").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
     let max_total_nodes = {

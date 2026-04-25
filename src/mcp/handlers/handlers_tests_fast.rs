@@ -29,7 +29,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_single_pattern() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["OrderProcessor"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1);
@@ -38,7 +38,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_multi_term() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor,OrderValidator,InventoryTracker,ConfigurationHelper"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["OrderProcessor","OrderValidator","InventoryTracker","ConfigurationHelper"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 4);
@@ -47,7 +47,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_with_ext_filter() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor,OtherFile", "ext": "cs"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["OrderProcessor","OtherFile"], "ext": ["cs"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1);
@@ -56,7 +56,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_no_matches() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "NonExistentClass,AnotherMissing"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["NonExistentClass","AnotherMissing"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 0);
     cleanup_tmp(&tmp);
@@ -64,7 +64,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_partial_matches() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor,NonExistent,InventoryTracker"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["OrderProcessor","NonExistent","InventoryTracker"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     cleanup_tmp(&tmp);
@@ -72,7 +72,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_with_spaces() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": " OrderProcessor , InventoryTracker "}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["OrderProcessor","InventoryTracker"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     cleanup_tmp(&tmp);
@@ -80,7 +80,7 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_count_only() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor,InventoryTracker", "countOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["OrderProcessor","InventoryTracker"], "countOnly": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
     assert!(output["files"].as_array().unwrap().is_empty());
@@ -89,9 +89,85 @@ fn make_xray_fast_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test] fn test_xray_fast_comma_separated_ignore_case() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "orderprocessor,inventorytracker", "ignoreCase": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["orderprocessor","inventorytracker"], "ignoreCase": true}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 2);
+    cleanup_tmp(&tmp);
+}
+
+// ─── 2026-04-25 list-params-to-arrays: regression coverage ─────────────
+//
+// `pattern` and `ext` were `string` (with comma-OR semantics) prior to the
+// 2026-04-25 migration. They are now `array<string>`. These tests pin the
+// new contract:
+//   1. multi-element `ext` matches ANY of the listed extensions (regression
+//      against an earlier bug where the parser joined the array into
+//      `"cs,txt"` and compared it as a single literal — matching nothing).
+//   2. bare-string forms of `pattern` and `ext` are HARD-REJECTED with a
+//      migration-aware error (no silent acceptance).
+
+#[test]
+fn test_xray_fast_ext_array_matches_any_listed_extension() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    // Fixture: 5 *.cs + 1 *.txt = 6 files total.
+    // We assert TWO things to make this discriminating against both
+    // "filter bypassed" and "filter joined into single literal" regressions:
+    //   (a) ext=["cs"]        -> 5  (proves filter is APPLIED — excludes .txt)
+    //   (b) ext=["cs","txt"]  -> 6  (proves multi-element matches ANY —
+    //                                pre-fix this returned 0 because the
+    //                                parser joined to "cs,txt" literally)
+    let dir_str = tmp.to_string_lossy().to_string();
+
+    // (a) Single-element filter must EXCLUDE the .txt file.
+    let result_cs = handle_xray_fast(&ctx, &json!({
+        "pattern": [],
+        "dir": dir_str.clone(),
+        "ext": ["cs"],
+    }));
+    assert!(!result_cs.is_error, "ext=[cs] should not error. Got: {}", result_cs.content[0].text);
+    let out_cs: Value = serde_json::from_str(&result_cs.content[0].text).unwrap();
+    assert_eq!(out_cs["summary"]["totalMatches"], 5,
+        "ext=[\"cs\"] must exclude the .txt file (proves filter is APPLIED, \
+         not bypassed by wildcard pattern). Got: {}", out_cs);
+
+    // (b) Multi-element filter must INCLUDE both — the regression case.
+    let result_both = handle_xray_fast(&ctx, &json!({
+        "pattern": [],
+        "dir": dir_str,
+        "ext": ["cs", "txt"],
+    }));
+    assert!(!result_both.is_error, "multi-ext should not error. Got: {}", result_both.content[0].text);
+    let out_both: Value = serde_json::from_str(&result_both.content[0].text).unwrap();
+    assert_eq!(out_both["summary"]["totalMatches"], 6,
+        "ext=[\"cs\",\"txt\"] must match BOTH extensions (regression: pre-fix the parser \
+         joined them into 'cs,txt' and compared as a single literal — matching nothing). Got: {}",
+        out_both);
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_xray_fast_pattern_string_form_rejected() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": "OrderProcessor"}));
+    assert!(result.is_error, "Bare-string pattern must be rejected post 2026-04-25 migration");
+    let msg = &result.content[0].text;
+    assert!(msg.contains("pattern"),
+        "Error must mention the offending parameter name. Got: {}", msg);
+    assert!(msg.contains("array") || msg.contains("2026-04-25"),
+        "Error must explain array contract / cite migration. Got: {}", msg);
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_xray_fast_ext_string_form_rejected() {
+    let (ctx, tmp) = make_xray_fast_ctx();
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["OrderProcessor"], "ext": "cs"}));
+    assert!(result.is_error, "Bare-string ext must be rejected post 2026-04-25 migration");
+    let msg = &result.content[0].text;
+    assert!(msg.contains("ext"),
+        "Error must mention the offending parameter name. Got: {}", msg);
+    assert!(msg.contains("array") || msg.contains("2026-04-25"),
+        "Error must explain array contract / cite migration. Got: {}", msg);
     cleanup_tmp(&tmp);
 }
 // ═══════════════════════════════════════════════════════════════════════
@@ -121,7 +197,7 @@ fn test_xray_fast_dirs_only_and_files_only() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
-    let result_dirs = handle_xray_fast(&ctx, &json!({"pattern": "Models", "dirsOnly": true}));
+    let result_dirs = handle_xray_fast(&ctx, &json!({"pattern": ["Models"], "dirsOnly": true}));
     assert!(!result_dirs.is_error, "dirsOnly should not error: {}", result_dirs.content[0].text);
     let output_dirs: Value = serde_json::from_str(&result_dirs.content[0].text).unwrap();
     let dir_files = output_dirs["files"].as_array().unwrap();
@@ -131,7 +207,7 @@ fn test_xray_fast_dirs_only_and_files_only() {
     assert!(output_dirs["summary"]["totalMatches"].as_u64().unwrap() >= 1,
         "Should find at least one directory matching 'Models'");
 
-    let result_files = handle_xray_fast(&ctx, &json!({"pattern": "Models", "filesOnly": true}));
+    let result_files = handle_xray_fast(&ctx, &json!({"pattern": ["Models"], "filesOnly": true}));
     assert!(!result_files.is_error);
     let output_files: Value = serde_json::from_str(&result_files.content[0].text).unwrap();
     let file_entries = output_files["files"].as_array().unwrap();
@@ -178,7 +254,7 @@ fn test_xray_fast_glob_ranking_uses_literal_prefix() {
         ..Default::default()
     };
 
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order*"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Order*"]}));
     assert!(!result.is_error, "Glob pattern should work: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -246,7 +322,7 @@ fn test_xray_fast_multi_pattern_dirs_only_filecount() {
 
     // Multi-pattern: find Storage and Redis dirs only
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "Storage,Redis",
+        "pattern": ["Storage","Redis"],
         "dirsOnly": true
     }));
     assert!(!result.is_error, "Multi-pattern dirsOnly should not error: {}", result.content[0].text);
@@ -288,7 +364,7 @@ fn test_xray_fast_dirs_only_and_files_only_mutual_exclusion() {
     };
 
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dirsOnly": true,
         "filesOnly": true
     }));
@@ -342,7 +418,7 @@ fn test_xray_fast_subdir_reuses_parent_index() {
     // Call xray_fast with dir pointing to a SUBDIRECTORY
     let subdir_str = subdir.to_string_lossy().to_string();
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": subdir_str
     }));
     assert!(!result.is_error, "xray_fast with subdir should succeed: {}", result.content[0].text);
@@ -401,7 +477,7 @@ fn test_xray_fast_outside_dir_is_rejected() {
     // Call xray_fast with dir pointing OUTSIDE server_dir — since MAJOR-14 fix,
     // this MUST be rejected (no silent disk-index build for arbitrary paths).
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": other_str
     }));
     assert!(result.is_error,
@@ -477,7 +553,7 @@ fn test_xray_fast_subdir_max_depth_relative_to_dir() {
     // Call xray_fast with dir=src, maxDepth=1
     let src_str = src.to_string_lossy().to_string();
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": src_str,
         "maxDepth": 1
     }));
@@ -504,7 +580,7 @@ fn test_xray_fast_subdir_max_depth_relative_to_dir() {
 
     // Now test maxDepth=2: should include User.cs but still exclude Deep.cs
     let result2 = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": src_str,
         "maxDepth": 2
     }));
@@ -528,7 +604,7 @@ fn test_xray_fast_subdir_max_depth_relative_to_dir() {
 fn test_xray_fast_regex_mode() {
     let (ctx, tmp) = make_xray_fast_ctx();
 
-    let result = handle_xray_fast(&ctx, &json!({"pattern": ".*Tracker\\.cs$", "regex": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": [".*Tracker\\.cs$"], "regex": true}));
     assert!(!result.is_error, "regex search should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1,
@@ -537,7 +613,7 @@ fn test_xray_fast_regex_mode() {
     assert!(files[0]["path"].as_str().unwrap().contains("InventoryTracker"),
         "Matched file should be InventoryTracker.cs");
 
-    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "Order.*\\.cs$", "regex": true}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": ["Order.*\\.cs$"], "regex": true}));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     assert_eq!(output2["summary"]["totalMatches"], 2,
@@ -551,7 +627,7 @@ fn test_xray_fast_empty_pattern() {
     let (ctx, tmp) = make_xray_fast_ctx();
 
     // Empty pattern WITHOUT dir → error
-    let result = handle_xray_fast(&ctx, &json!({"pattern": ""}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": []}));
     assert!(result.is_error, "Empty pattern without dir should return an error");
     assert!(result.content[0].text.to_lowercase().contains("empty"),
         "Error should mention 'empty', got: {}", result.content[0].text);
@@ -583,7 +659,7 @@ fn test_xray_fast_ranking_exact_stem_first() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "UserService"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["UserService"]}));
     assert!(!result.is_error, "xray_fast should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -631,7 +707,7 @@ fn test_xray_fast_ranking_shorter_stem_first() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Order"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -656,7 +732,7 @@ fn test_xray_fast_ranking_shorter_stem_first() {
 #[test]
 fn test_xray_fast_empty_pattern_returns_error() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": ""}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": []}));
     assert!(result.is_error, "Empty pattern without dir should return an error");
     assert!(result.content[0].text.to_lowercase().contains("empty"),
         "Error should mention 'empty', got: {}", result.content[0].text);
@@ -675,7 +751,7 @@ fn test_xray_fast_wildcard_star() {
     let (ctx, tmp) = make_xray_fast_ctx();
     // make_xray_fast_ctx creates 6 files: OrderProcessor.cs, OrderValidator.cs,
     // InventoryTracker.cs, ConfigurationHelper.cs, UserService.cs, OtherFile.txt
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*"]}));
     assert!(!result.is_error, "Wildcard '*' should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let matches = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -707,7 +783,7 @@ fn test_xray_fast_wildcard_star_dirs_only() {
     let content_index = ContentIndex { root: dir_str.clone(), extensions: vec!["cs".to_string()], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "dirsOnly": true}));
     assert!(!result.is_error, "Wildcard + dirsOnly should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let matches = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -747,7 +823,7 @@ fn test_xray_fast_empty_pattern_with_dir() {
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.clone()))), index_base: idx_base, ..Default::default() };
 
     // Empty pattern + dir → wildcard (not an error)
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "", "dir": dir_str}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": [], "dir": dir_str}));
     assert!(!result.is_error, "Empty pattern WITH dir should be wildcard, not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let matches = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -760,7 +836,7 @@ fn test_xray_fast_empty_pattern_with_dir() {
 #[test]
 fn test_xray_fast_empty_pattern_without_dir_still_errors() {
     let (ctx, tmp) = make_xray_fast_ctx();
-    let result = handle_xray_fast(&ctx, &json!({"pattern": ""}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": []}));
     assert!(result.is_error, "Empty pattern without dir should still be an error");
     assert!(result.content[0].text.contains("Do NOT fall back"),
         "Error should contain anti-fallback warning, got: {}", result.content[0].text);
@@ -793,7 +869,7 @@ fn test_xray_fast_dirs_only_ignores_ext_filter() {
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     // dirsOnly=true + ext="cs" should find the "Services" directory (ext is ignored for dirs)
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true, "ext": "cs"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Services"], "dirsOnly": true, "ext": ["cs"]}));
     assert!(!result.is_error, "dirsOnly + ext should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
@@ -832,7 +908,7 @@ fn test_xray_fast_dirs_only_without_ext() {
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     // dirsOnly=true without ext should work fine
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Controllers", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Controllers"], "dirsOnly": true}));
     assert!(!result.is_error, "dirsOnly without ext should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["totalMatches"].as_u64().unwrap() >= 1,
@@ -864,7 +940,7 @@ fn test_xray_fast_files_only_with_ext_still_filters() {
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir_str.to_string()))), index_base: idx_base, ..Default::default() };
 
     // filesOnly + ext="cs" should only return Report.cs, not Report.txt
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Report", "filesOnly": true, "ext": "cs"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Report"], "filesOnly": true, "ext": ["cs"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"], 1,
@@ -930,7 +1006,7 @@ fn test_xray_fast_dirsonly_wildcard_filecount() {
         ..Default::default()
     };
 
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "dirsOnly": true}));
     assert!(!result.is_error, "dirsOnly wildcard should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -1006,7 +1082,7 @@ fn test_xray_fast_dirsonly_non_wildcard_has_filecount() {
         ..Default::default()
     };
 
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Services", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Services"], "dirsOnly": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -1057,7 +1133,7 @@ fn test_xray_fast_max_depth() {
     };
 
     // maxDepth=1: only immediate children (src/)
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "dirsOnly": true, "maxDepth": 1}));
     assert!(!result.is_error, "maxDepth should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -1070,7 +1146,7 @@ fn test_xray_fast_max_depth() {
         "maxDepth=1 should NOT find 'src/controllers', got: {:?}", paths);
 
     // maxDepth=2: should find src and src/controllers, but not deep
-    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 2}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "dirsOnly": true, "maxDepth": 2}));
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     let files2 = output2["files"].as_array().unwrap();
     let paths2: Vec<&str> = files2.iter().map(|e| e["path"].as_str().unwrap()).collect();
@@ -1080,7 +1156,7 @@ fn test_xray_fast_max_depth() {
         "maxDepth=2 should NOT find 'src/controllers/deep', got: {:?}", paths2);
 
     // No maxDepth: all directories
-    let result3 = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let result3 = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "dirsOnly": true}));
     let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
     let files3 = output3["files"].as_array().unwrap();
     let paths3: Vec<&str> = files3.iter().map(|e| e["path"].as_str().unwrap()).collect();
@@ -1120,7 +1196,7 @@ fn test_xray_fast_dirsonly_truncation_hint() {
     };
 
     // Without maxDepth: should get truncation hint
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "dirsOnly": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let hint = output["summary"]["hint"].as_str().unwrap_or("");
@@ -1128,7 +1204,7 @@ fn test_xray_fast_dirsonly_truncation_hint() {
         "Should suggest maxDepth when >150 dirs. Hint: '{}'", hint);
 
     // With maxDepth: should NOT get truncation hint
-    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "dirsOnly": true, "maxDepth": 1}));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     let hint2 = output2["summary"]["hint"].as_str().unwrap_or("");
@@ -1176,7 +1252,7 @@ fn test_xray_fast_max_depth_server_dir_mismatch() {
     };
 
     // maxDepth=1 should return root + src (not 0 results)
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*", "dirsOnly": true, "maxDepth": 1}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "dirsOnly": true, "maxDepth": 1}));
     assert!(!result.is_error, "maxDepth with server_dir mismatch should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -1250,7 +1326,7 @@ fn test_xray_fast_filecount_with_subdir() {
     // dir_prefix filtering, and fileCount must still be correct.
     let src_str = src.to_string_lossy().to_string();
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": src_str,
         "dirsOnly": true
     }));
@@ -1336,7 +1412,7 @@ fn test_xray_fast_filecount_with_absolute_dir() {
     // Pass absolute path for sub directory
     let sub_str = sub.to_string_lossy().to_string();
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": sub_str,
         "dirsOnly": true
     }));
@@ -1407,7 +1483,7 @@ fn test_xray_fast_filecount_when_dir_equals_root() {
 
     // Pass absolute src path — tests that dir == index.root → dir_prefix = "" → correct counts
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": src_str,
         "dirsOnly": true
     }));
@@ -1473,13 +1549,13 @@ fn test_xray_fast_max_results_truncation() {
     };
 
     // Without maxResults: should find all 10
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "File"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["File"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalMatches"].as_u64().unwrap(), 10);
     assert!(output["summary"]["truncated"].is_null(), "Should NOT have truncated flag without maxResults");
 
     // With maxResults=3: should truncate
-    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "File", "maxResults": 3}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": ["File"], "maxResults": 3}));
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     let files2 = output2["files"].as_array().unwrap();
     assert_eq!(files2.len(), 3, "Should return exactly 3 results, got {}", files2.len());
@@ -1488,7 +1564,7 @@ fn test_xray_fast_max_results_truncation() {
     assert_eq!(output2["summary"]["maxResults"].as_u64().unwrap(), 3);
 
     // With maxResults=0 (unlimited): should return all
-    let result3 = handle_xray_fast(&ctx, &json!({"pattern": "File", "maxResults": 0}));
+    let result3 = handle_xray_fast(&ctx, &json!({"pattern": ["File"], "maxResults": 0}));
     let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
     assert_eq!(output3["files"].as_array().unwrap().len(), 10, "maxResults=0 should be unlimited");
     assert!(output3["summary"]["truncated"].is_null(), "maxResults=0 should NOT have truncated flag");
@@ -1504,7 +1580,7 @@ fn test_xray_fast_wildcard_regex_no_crash() {
     // Now it should be treated as wildcard (regex=true is silently ignored)
     let (ctx, tmp) = make_xray_fast_ctx();
     let result = dispatch_tool(&ctx, "xray_fast", &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "regex": true
     }));
     assert!(!result.is_error, "pattern='*' + regex=true should not error: {}", result.content[0].text);
@@ -1544,7 +1620,7 @@ fn test_xray_fast_relative_dir_subdir_search() {
 
     // Use RELATIVE dir path
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": "src/services"
     }));
     assert!(!result.is_error, "Relative dir should work: {}", result.content[0].text);
@@ -1589,7 +1665,7 @@ fn test_xray_fast_relative_dir_pattern_search() {
 
     // Search for "User" in src/services only (relative dir)
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "User",
+        "pattern": ["User"],
         "dir": "src/services"
     }));
     assert!(!result.is_error, "Relative dir + pattern should work: {}", result.content[0].text);
@@ -1609,7 +1685,7 @@ fn test_xray_fast_relative_dir_pattern_search() {
 fn test_xray_fast_glob_star_suffix() {
     let (ctx, tmp_dir) = make_xray_fast_ctx();
     // "Order*" should match OrderProcessor.cs and OrderValidator.cs via glob
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order*"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Order*"]}));
     assert!(!result.is_error, "Glob pattern should work: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let total = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -1631,7 +1707,7 @@ fn test_xray_fast_glob_star_suffix() {
 fn test_xray_fast_glob_star_prefix() {
     let (ctx, tmp_dir) = make_xray_fast_ctx();
     // "*Tracker*" should match InventoryTracker.cs
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*Tracker*"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*Tracker*"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -1644,7 +1720,7 @@ fn test_xray_fast_glob_star_prefix() {
 fn test_xray_fast_glob_question_mark() {
     let (ctx, tmp_dir) = make_xray_fast_ctx();
     // "Order?alidator*" should match OrderValidator.cs (? = single char)
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order?alidator*"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Order?alidator*"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -1660,7 +1736,7 @@ fn test_xray_fast_glob_question_mark() {
 fn test_xray_fast_no_glob_unchanged_behavior() {
     let (ctx, tmp_dir) = make_xray_fast_ctx();
     // "Order" without glob chars should still use substring matching
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Order"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let total = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -1672,7 +1748,7 @@ fn test_xray_fast_no_glob_unchanged_behavior() {
 fn test_xray_fast_glob_with_ext_filter() {
     let (ctx, tmp_dir) = make_xray_fast_ctx();
     // "*.cs" pattern — *.cs matches all .cs files
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*.cs"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*.cs"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let files = output["files"].as_array().unwrap();
@@ -1690,7 +1766,7 @@ fn test_xray_fast_glob_with_ext_filter() {
 fn test_xray_fast_glob_ignore_case() {
     let (ctx, tmp_dir) = make_xray_fast_ctx();
     // "order*" with ignoreCase should match OrderProcessor.cs (case-insensitive glob)
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "order*", "ignoreCase": true}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["order*"], "ignoreCase": true}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let total = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -1702,7 +1778,7 @@ fn test_xray_fast_glob_ignore_case() {
 fn test_xray_fast_glob_comma_separated_multi_term() {
     let (ctx, tmp_dir) = make_xray_fast_ctx();
     // "Order*,*Helper*" should find OrderProcessor, OrderValidator, ConfigurationHelper
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "Order*,*Helper*"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["Order*","*Helper*"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let total = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -1753,7 +1829,7 @@ fn test_xray_fast_dirty_flag_rebuild() {
     };
 
     // First call: dirty=true → builds index
-    let result1 = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    let result1 = handle_xray_fast(&ctx, &json!({"pattern": ["*"]}));
     assert!(!result1.is_error, "First call should succeed: {}", result1.content[0].text);
     let output1: Value = serde_json::from_str(&result1.content[0].text).unwrap();
     let count1 = output1["summary"]["totalMatches"].as_u64().unwrap();
@@ -1771,7 +1847,7 @@ fn test_xray_fast_dirty_flag_rebuild() {
     }
 
     // Second call: dirty=false → uses cached (stale) index, FileC NOT visible
-    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": ["*"]}));
     assert!(!result2.is_error);
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     let count2 = output2["summary"]["totalMatches"].as_u64().unwrap();
@@ -1781,7 +1857,7 @@ fn test_xray_fast_dirty_flag_rebuild() {
     ctx.file_index_dirty.store(true, Ordering::Relaxed);
 
     // Third call: dirty=true → rebuilds, FileC IS visible
-    let result3 = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    let result3 = handle_xray_fast(&ctx, &json!({"pattern": ["*"]}));
     assert!(!result3.is_error);
     let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
     let count3 = output3["summary"]["totalMatches"].as_u64().unwrap();
@@ -1817,7 +1893,7 @@ fn test_xray_fast_dirty_flag_detects_deletion() {
     };
 
     // First call: builds index with 3 files
-    let result1 = handle_xray_fast(&ctx, &json!({"pattern": "*", "filesOnly": true}));
+    let result1 = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "filesOnly": true}));
     assert!(!result1.is_error);
     let output1: Value = serde_json::from_str(&result1.content[0].text).unwrap();
     let count1 = output1["summary"]["totalMatches"].as_u64().unwrap();
@@ -1827,13 +1903,13 @@ fn test_xray_fast_dirty_flag_detects_deletion() {
     std::fs::remove_file(tmp_dir.join("Delete.cs")).unwrap();
 
     // Without dirty flag: cached, still shows 3
-    let result2 = handle_xray_fast(&ctx, &json!({"pattern": "*", "filesOnly": true}));
+    let result2 = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "filesOnly": true}));
     let output2: Value = serde_json::from_str(&result2.content[0].text).unwrap();
     assert_eq!(output2["summary"]["totalMatches"].as_u64().unwrap(), count1, "Should still show 3 (cached)");
 
     // Set dirty and rebuild
     ctx.file_index_dirty.store(true, Ordering::Relaxed);
-    let result3 = handle_xray_fast(&ctx, &json!({"pattern": "*", "filesOnly": true}));
+    let result3 = handle_xray_fast(&ctx, &json!({"pattern": ["*"], "filesOnly": true}));
     let output3: Value = serde_json::from_str(&result3.content[0].text).unwrap();
     let count3 = output3["summary"]["totalMatches"].as_u64().unwrap();
     assert!(count3 < count1, "After dirty rebuild, should find fewer files. Before: {}, after: {}", count1, count3);
@@ -1868,7 +1944,7 @@ fn test_xray_fast_invalidate_via_none() {
     };
 
     // Build initial
-    let _ = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    let _ = handle_xray_fast(&ctx, &json!({"pattern": ["*"]}));
     assert!(!ctx.file_index_dirty.load(Ordering::Relaxed));
     assert!(ctx.file_index.read().unwrap().is_some());
 
@@ -1882,7 +1958,7 @@ fn test_xray_fast_invalidate_via_none() {
     }
 
     // Even though dirty is false, None cache forces rebuild
-    let result = handle_xray_fast(&ctx, &json!({"pattern": "*"}));
+    let result = handle_xray_fast(&ctx, &json!({"pattern": ["*"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let count = output["summary"]["totalMatches"].as_u64().unwrap();
@@ -1972,7 +2048,7 @@ fn test_xray_fast_subdir_filter_through_symlinked_subdir() {
 
     // Query: list all files under the symlinked subdir.
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": symlink_dir,
         "filesOnly": true,
     }));
@@ -2026,7 +2102,7 @@ fn test_xray_fast_rejects_outside_server_dir() {
     let outside_dir = outside.path().to_string_lossy().to_string();
 
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": outside_dir,
     }));
 
@@ -2050,7 +2126,7 @@ fn test_xray_fast_rejects_relative_parent_escape() {
     let (ctx, tmp) = make_xray_fast_ctx();
 
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": "..\\..",
     }));
 
@@ -2079,7 +2155,7 @@ fn test_xray_fast_rejects_normalized_outside_equivalent() {
     let escape = format!("{}/sub/../../{}", tmp.display(), "definitely-outside-xyz");
 
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": escape,
     }));
 
@@ -2101,7 +2177,7 @@ fn test_xray_fast_in_workspace_relative_subdir_still_accepted() {
     let (ctx, tmp) = make_xray_fast_ctx();
 
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": "nonexistent-but-inside",
     }));
 
@@ -2123,7 +2199,7 @@ fn test_xray_fast_relative_dotdot_resolving_inside_accepted() {
     let inside = format!("{}/sub/..", tmp.display());
 
     let result = handle_xray_fast(&ctx, &json!({
-        "pattern": "*",
+        "pattern": ["*"],
         "dir": inside,
     }));
 

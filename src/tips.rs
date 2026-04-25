@@ -106,32 +106,32 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         Tip {
             rule: "File lookup: use xray_fast, not built-in list_files".into(),
             why: "xray_fast uses a pre-built index (~35ms). Built-in list_files does a live filesystem walk (~3s). 90x+ faster.".into(),
-            example: "xray_fast with pattern='UserService' instead of built-in list_files".into(),
+            example: "xray_fast with pattern=[\"UserService\"] instead of built-in list_files".into(),
         },
         Tip {
             rule: "Multi-term OR: find all variants in ONE query".into(),
             why: "Comma-separated terms with mode='or' finds files containing ANY term. Much faster than separate queries.".into(),
-            example: "xray grep \"UserService,IUserService,UserServiceFactory\" -e cs  |  MCP: terms='...', mode='or'".into(),
+            example: "xray grep \"UserService,IUserService,UserServiceFactory\" -e cs  |  MCP: terms=[\"UserService\",\"IUserService\",\"UserServiceFactory\"], mode='or'".into(),
         },
         Tip {
             rule: "AND mode: find files containing ALL terms".into(),
             why: "mode='and' finds files where ALL comma-separated terms co-occur. Useful for finding DI registrations.".into(),
-            example: "xray grep \"ServiceProvider,IUserService\" -e cs --all  |  MCP: terms='...', mode='and'".into(),
+            example: "xray grep \"ServiceProvider,IUserService\" -e cs --all  |  MCP: terms=[\"ServiceProvider\",\"IUserService\"], mode='and'".into(),
         },
         Tip {
             rule: "Substring search is ON by default".into(),
             why: "xray_grep defaults to substring=true so compound identifiers (IUserService, m_userService) are always found. Use substring=false for exact-token-only matching. Auto-disabled when regex or phrase is used. Short tokens (<4 chars) may produce broad results -- use exclude=['pattern'] to filter noise from file paths. Comma-separated phrases with spaces are searched independently as OR (or AND with mode='and').".into(),
-            example: "Default: terms='UserService' finds IUserService, m_userService. Multi-phrase OR: terms='fn handle_foo,fn build_bar'. Exact only: terms='UserService', substring=false".into(),
+            example: "Default: terms=[\"UserService\"] finds IUserService, m_userService. Multi-phrase OR: terms=[\"fn handle_foo\",\"fn build_bar\"]. Exact only: terms=[\"UserService\"], substring=false".into(),
         },
         Tip {
             rule: "Phrase search: literal match on raw file content (XML, config, any punctuation)".into(),
             why: "phrase=true matches the exact string in raw file content -- including XML tags, angle brackets, slashes, dots. No escaping needed. Ideal for XML/config search. Slower (~80ms) but precise.".into(),
-            example: "xray grep \"<MaxRetries>3</MaxRetries>\" --phrase  |  MCP: terms='<MaxRetries>3</MaxRetries>', phrase=true. Also: terms='new HttpClient', phrase=true".into(),
+            example: "xray grep \"<MaxRetries>3</MaxRetries>\" --phrase  |  MCP: terms=[\"<MaxRetries>3</MaxRetries>\"], phrase=true. Also: terms=[\"new HttpClient\"], phrase=true".into(),
         },
         Tip {
             rule: "Regex pattern search".into(),
             why: "Full regex for pattern matching. Also works in xray_definitions name parameter.".into(),
-            example: "xray grep \"I[A-Z]\\w+Cache\" -e cs --regex  |  MCP: terms='I[A-Z]\\w+Cache', regex=true".into(),
+            example: "xray grep \"I[A-Z]\\w+Cache\" -e cs --regex  |  MCP: terms=[\"I[A-Z]\\w+Cache\"], regex=true".into(),
         },
         Tip {
             rule: "Exclude test/mock dirs for production-only results".into(),
@@ -141,12 +141,12 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         Tip {
             rule: "Call chain tracing: xray_callers (up and down)".into(),
             why: "Single sub-millisecond request replaces 7+ sequential grep + read_file calls. direction='up' (callers) or 'down' (callees). For Angular: direction='down' with class shows template children, direction='up' with selector finds parent components.".into(),
-            example: "MCP: xray_callers method='GetUserAsync', class='UserService', depth=2, direction='up'".into(),
+            example: "MCP: xray_callers method=[\"GetUserAsync\"], class='UserService', depth=2, direction='up'".into(),
         },
         Tip {
             rule: "Always specify class in xray_callers".into(),
             why: "Without class, results mix callers from ALL classes with same method name. Misleading call trees.".into(),
-            example: "MCP: xray_callers method='ExecuteAsync', class='OrderProcessor'".into(),
+            example: "MCP: xray_callers method=[\"ExecuteAsync\"], class='OrderProcessor'".into(),
         },
         Tip {
             rule: "xray_callers 0 results? Try the interface name".into(),
@@ -156,27 +156,27 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         Tip {
             rule: "Stack trace analysis: containsLine".into(),
             why: "Given file + line number, returns innermost method AND parent class. No manual read_file needed.".into(),
-            example: "MCP: xray_definitions file='UserService.cs', containsLine=42".into(),
+            example: "MCP: xray_definitions file=[\"UserService.cs\"], containsLine=42".into(),
         },
         Tip {
             rule: "Read method source: use includeBody=true instead of reading files".into(),
             why: "xray_definitions with includeBody=true returns method body inline, eliminating read_file round-trips. BEFORE reading any indexed source file, try xray_definitions with includeBody=true first. Use maxBodyLines/maxTotalBodyLines for budget. Only read files directly for non-indexed content (markdown, JSON, XML, config) or when you need exact line numbers for editing.".into(),
-            example: "MCP: xray_definitions parent='UserService', includeBody=true, maxBodyLines=20. Also: xray_definitions name='Program,Startup,OrderService' includeBody=true -> reads multiple classes at once, faster than multiple read_file calls".into(),
+            example: "MCP: xray_definitions parent=[\"UserService\"], includeBody=true, maxBodyLines=20. Also: xray_definitions name=[\"Program\",\"Startup\",\"OrderService\"] includeBody=true -> reads multiple classes at once, faster than multiple read_file calls".into(),
         },
         Tip {
             rule: "Body budgets: manage with maxBodyLines and maxTotalBodyLines".into(),
-            why: "Default limits: 100 lines/def, 500 total. Strategies: (1) Wide overview: includeBody=true maxBodyLines=30 -- gets first 30 lines of many methods. (2) Targeted read: name='SpecificMethod' includeBody=true maxBodyLines=0 -- full body of one method. (3) Unlimited: maxBodyLines=0 maxTotalBodyLines=0 -- removes all limits (large response). If response contains definitions with 'bodyOmitted', narrow with name='<specific names>' to read them individually.".into(),
-            example: "Overview: includeBody=true maxBodyLines=30. Targeted: name='ProcessOrder' includeBody=true maxBodyLines=0. Unlimited: maxBodyLines=0, maxTotalBodyLines=0. After bodyOmitted: name='OmittedMethod1,OmittedMethod2' includeBody=true".into(),
+            why: "Default limits: 100 lines/def, 500 total. Strategies: (1) Wide overview: includeBody=true maxBodyLines=30 -- gets first 30 lines of many methods. (2) Targeted read: name=[\"SpecificMethod\"] includeBody=true maxBodyLines=0 -- full body of one method. (3) Unlimited: maxBodyLines=0 maxTotalBodyLines=0 -- removes all limits (large response). If response contains definitions with 'bodyOmitted', narrow with name=[\"<specific names>\"] to read them individually.".into(),
+            example: "Overview: includeBody=true maxBodyLines=30. Targeted: name=[\"ProcessOrder\"] includeBody=true maxBodyLines=0. Unlimited: maxBodyLines=0, maxTotalBodyLines=0. After bodyOmitted: name=[\"OmittedMethod1\",\"OmittedMethod2\"] includeBody=true".into(),
         },
         Tip {
             rule: "Reconnaissance: use countOnly=true".into(),
             why: "xray_grep with countOnly=true returns ~46 tokens (counts only) vs 265+ for full results. Perfect for 'how many files use X?'.".into(),
-            example: "xray grep \"HttpClient\" -e cs --count-only  |  MCP: terms='HttpClient', countOnly=true".into(),
+            example: "xray grep \"HttpClient\" -e cs --count-only  |  MCP: terms=[\"HttpClient\"], countOnly=true".into(),
         },
         Tip {
             rule: "Search ANY indexed file type: XML, csproj, config, etc.".into(),
-            why: "xray_grep works with all file extensions passed to --ext. Use ext='csproj' to find NuGet dependencies, ext='xml,config,manifestxml' for configuration values.".into(),
-            example: "xray grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms='Newtonsoft.Json', ext='csproj'".into(),
+            why: "xray_grep works with all file extensions passed to --ext. Use ext=[\"csproj\"] to find NuGet dependencies, ext=[\"xml\",\"config\",\"manifestxml\"] for configuration values.".into(),
+            example: "xray grep \"Newtonsoft.Json\" -e csproj  |  MCP: terms=[\"Newtonsoft.Json\"], ext=[\"csproj\"]".into(),
         },
         Tip {
             rule: if lang_list.is_empty() {
@@ -200,12 +200,12 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         Tip {
             rule: "Multi-term name in xray_definitions: find ALL types in ONE call".into(),
             why: "The name parameter accepts comma-separated terms (OR logic). Find a class + its interface + related types in a single query instead of 3 separate calls.".into(),
-            example: "xray_definitions name='UserService,IUserService,UserController' -> finds ALL matching definitions in one call".into(),
+            example: "xray_definitions name=[\"UserService\",\"IUserService\",\"UserController\"] -> finds ALL matching definitions in one call".into(),
         },
         Tip {
             rule: "Query budget: aim for 3 or fewer search calls per exploration task".into(),
             why: "Each search call adds latency and LLM context. Use multi-term queries, includeBody, and combined filters to minimize round-trips. Most architecture questions can be answered in 1-3 calls.".into(),
-            example: "Step 1: xray_definitions name='OrderService,IOrderService' includeBody=true (map + read). Step 2: xray_callers method='ProcessOrder' class='OrderService' (call chain). Done in 2 calls.".into(),
+            example: "Step 1: xray_definitions name=[\"OrderService\",\"IOrderService\"] includeBody=true (map + read). Step 2: xray_callers method=[\"ProcessOrder\"] class='OrderService' (call chain). Done in 2 calls.".into(),
         },
         Tip {
             rule: "Check branch status before investigating production bugs".into(),
@@ -220,17 +220,17 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         Tip {
             rule: "Method group/delegate references: use xray_grep, not xray_callers".into(),
             why: "xray_callers only finds direct method invocations (obj.Method(args)). It does NOT detect methods passed as delegates or method groups (e.g., list.Where(IsValid), Func<bool> f = service.Check). Use xray_grep to find all textual references including delegate usage.".into(),
-            example: "xray_callers misses delegate usage -> use xray_grep terms='IsValid' ext='cs' to find all references including method group passes".into(),
+            example: "xray_callers misses delegate usage -> use xray_grep terms=[\"IsValid\"] ext=[\"cs\"] to find all references including method group passes".into(),
         },
         Tip {
             rule: "Impact analysis: find which tests cover a method".into(),
             why: "impactAnalysis=true in xray_callers traces callers upward and identifies test methods (via [Test]/[Fact]/[Theory]/[TestMethod]/#[test] attributes or *.spec.ts/*.test.ts files). Returns a 'testsCovering' array with all tests in the call chain. Use depth=5-7 for deep call chains. One call replaces manual multi-step investigation.".into(),
-            example: "MCP: xray_callers method='SaveOrder' class='OrderService' direction='up' depth=5 impactAnalysis=true -> testsCovering: [{method: 'TestSaveOrder', class: 'OrderTests', file: 'src/OrderTests.cs', depth: 1, callChain: ['SaveOrder', 'TestSaveOrder']}]".into(),
+            example: "MCP: xray_callers method=[\"SaveOrder\"] class='OrderService' direction='up' depth=5 impactAnalysis=true -> testsCovering: [{method: 'TestSaveOrder', class: 'OrderTests', file: 'src/OrderTests.cs', depth: 1, callChain: ['SaveOrder', 'TestSaveOrder']}]".into(),
         },
         Tip {
             rule: "using static: search by defining class, not consuming class".into(),
-            why: "xray_definitions searches AST definition names. Methods imported via C# 'using static' are defined in their original class. Searching parent='ConsumingClass' will return 0 results. Search without parent filter or with parent='DefiningClass' instead.".into(),
-            example: "Percentile() imported via 'using static PercentileHelper' -> xray_definitions name='Percentile' (without parent) or parent='PercentileHelper'".into(),
+            why: "xray_definitions searches AST definition names. Methods imported via C# 'using static' are defined in their original class. Searching parent=[\"ConsumingClass\"] will return 0 results. Search without parent filter or with parent=[\"DefiningClass\"] instead.".into(),
+            example: "Percentile() imported via 'using static PercentileHelper' -> xray_definitions name=[\"Percentile\"] (without parent) or parent=[\"PercentileHelper\"]".into(),
         },
         Tip {
             rule: "Deleted files: xray_git_* tools cover them fully".into(),
@@ -240,7 +240,7 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         Tip {
             rule: "Trivial task != trivial policy check -- ALWAYS pause before built-in".into(),
             why: "The most common policy violation is on tasks that FEEL trivial (quick validation, simple fact-check, one-line read). LLM skips MANDATORY PRE-FLIGHT CHECK because 'it's just a quick search'. But quick searches are EXACTLY where xray_grep shines (countOnly=true, <1ms). Habit-driven tool selection based on tool name matching intent keyword is the #1 policy break.".into(),
-            example: "User asks 'validate that code has no X'. Reaching for search_files because intent contains 'search' -- VIOLATION. Correct: xray_grep terms='X' countOnly=true.".into(),
+            example: "User asks 'validate that code has no X'. Reaching for search_files because intent contains 'search' -- VIOLATION. Correct: xray_grep terms=[\"X\"] countOnly=true.".into(),
         },
     ]
 }
@@ -251,26 +251,26 @@ pub fn strategies() -> Vec<Strategy> {
             name: "Architecture Exploration",
             when: "User asks 'how is X structured', 'explain module X', or 'show me the architecture of X'",
             steps: &[
-                "Step 1 - Map the landscape (1 call): xray_definitions file='<dirname>' excludeDir=['test','Test','Mock'] -> if many results, returns autoSummary with directory grouping and top classes per subdirectory. If few results, returns full definition list. Use file='<subdir>' to drill into specific groups",
-                "Step 2 - Read key implementations (1 call): xray_definitions name='<top 3-5 key classes from step 1>' includeBody=true maxBodyLines=30 -> returns source code of the most important files",
-                "Step 3 (optional) - Scope and dependencies (1 call): xray_grep terms='X' countOnly=true -> scale (how many files, occurrences); or xray_fast pattern='X' dirsOnly=true -> directory structure",
+                "Step 1 - Map the landscape (1 call): xray_definitions file=[\"<dirname>\"] excludeDir=['test','Test','Mock'] -> if many results, returns autoSummary with directory grouping and top classes per subdirectory. If few results, returns full definition list. Use file=[\"<subdir>\"] to drill into specific groups",
+                "Step 2 - Read key implementations (1 call): xray_definitions name=[\"<top 3-5 key classes from step 1>\"] includeBody=true maxBodyLines=30 -> returns source code of the most important files",
+                "Step 3 (optional) - Scope and dependencies (1 call): xray_grep terms=[\"X\"] countOnly=true -> scale (how many files, occurrences); or xray_fast pattern=[\"X\"] dirsOnly=true -> directory structure",
             ],
             anti_patterns: &[
                 "Don't use list_files + read_file to explore architecture -- xray_definitions returns classes, methods, file paths, and source code in ONE call",
                 "Don't read indexed source files to see source code -- xray_definitions includeBody=true returns it directly. read_file is ONLY for non-indexed files (markdown, JSON, XML, config) or for editing (need exact line numbers)",
-                "Don't search one kind at a time (class, then interface, then enum) -- use kind='class,interface,enum' for multi-kind OR, or omit kind filter to get everything at once",
+                "Don't search one kind at a time (class, then interface, then enum) -- use kind=[\"class\",\"interface\",\"enum\"] for multi-kind OR, or omit kind filter to get everything at once",
                 "Don't use countOnly first then re-query with body -- go straight to includeBody=true with maxBodyLines",
-                "Don't browse directories (list_files, list_directory, xray_fast with empty pattern) to understand code -- xray_definitions file='<dir>' returns ALL definitions with file paths in ONE call. For large modules, autoSummary kicks in with directory grouping",
+                "Don't browse directories (list_files, list_directory, xray_fast with empty pattern) to understand code -- xray_definitions file=[\"<dir>\"] returns ALL definitions with file paths in ONE call. For large modules, autoSummary kicks in with directory grouping",
                 "Don't search for file names separately if xray_definitions already found them (results include file paths)",
-                "Don't make separate queries for ClassName and IClassName -- use comma-separated: name='ClassName,IClassName'",
+                "Don't make separate queries for ClassName and IClassName -- use comma-separated: name=[\"ClassName\",\"IClassName\"]",
             ],
         },
         Strategy {
             name: "Call Chain Investigation",
             when: "User asks 'who calls X', 'trace how X is invoked', or 'show the call chain for X'",
             steps: &[
-                "Step 1 - Get call tree with source (1 call): xray_callers method='MethodName' class='ClassName' depth=3 direction='up' includeBody=true -> full caller hierarchy WITH method source code inline",
-                "Step 2 (optional, only if more context needed): xray_definitions name='<specific callers from step 1>' includeBody=true maxBodyLines=0 -> full source of specific methods",
+                "Step 1 - Get call tree with source (1 call): xray_callers method=[\"MethodName\"] class='ClassName' depth=3 direction='up' includeBody=true -> full caller hierarchy WITH method source code inline",
+                "Step 2 (optional, only if more context needed): xray_definitions name=[\"<specific callers from step 1>\"] includeBody=true maxBodyLines=0 -> full source of specific methods",
             ],
             anti_patterns: &[
                 "Don't omit the class parameter -- without it, results mix callers from ALL classes with the same method name",
@@ -282,8 +282,8 @@ pub fn strategies() -> Vec<Strategy> {
             name: "Stack Trace / Bug Investigation",
             when: "User provides a stack trace, error at file:line, or asks 'what method is at line N'",
             steps: &[
-                "Step 1 - Identify method (1 call): xray_definitions file='FileName.cs' containsLine=42 includeBody=true -> returns the method body (innermost) + parent class metadata (body omitted to save budget)",
-                "Step 2 (optional) - Trace callers (1 call): xray_callers method='<method from step 1>' class='<class from step 1>' depth=2 -> who triggered this code path",
+                "Step 1 - Identify method (1 call): xray_definitions file=[\"FileName.cs\"] containsLine=42 includeBody=true -> returns the method body (innermost) + parent class metadata (body omitted to save budget)",
+                "Step 2 (optional) - Trace callers (1 call): xray_callers method=[\"<method from step 1>\"] class='<class from step 1>' depth=2 -> who triggered this code path",
             ],
             anti_patterns: &[
                 "Don't use read_file to manually scan for the method -- containsLine finds it instantly with proper class context",
@@ -307,7 +307,7 @@ pub fn strategies() -> Vec<Strategy> {
             when: "User asks 'when was this bug introduced', 'who changed this file', or 'trace the origin of this code'",
             steps: &[
                 "Step 1 - Verify branch (1 call): xray_branch_status repo='.' -> confirm you're on main and data is fresh",
-                "Step 2 - Find where code lives (1 call): xray_grep terms='<error text>' ext='cs' -> find file and line number",
+                "Step 2 - Find where code lives (1 call): xray_grep terms=[\"<error text>\"] ext=[\"cs\"] -> find file and line number",
                 "Step 3 - Find who introduced it (1 call): xray_git_blame repo='.', file='<file from step 2>', startLine=<line> -> exact commit, author, date",
                 "Step 4 (optional) - Full history (1 call): xray_git_history repo='.', file='<file from step 2>' -> all commits for context",
                 "Step 5 (optional) - File ownership (1 call): xray_git_authors repo='.', path='<file>' -> who maintains this file",
@@ -321,8 +321,8 @@ pub fn strategies() -> Vec<Strategy> {
             name: "Angular Component Hierarchy (TypeScript only)",
             when: "User asks 'who uses <component>', 'where is it embedded', or 'show parent components' (TypeScript/Angular projects only)",
             steps: &[
-                "Step 1 (1 call): xray_callers method='<selector>' direction='up' depth=3 -> finds parent AND grandparent components recursively via templateChildren (<1ms). Parents nested in 'parents' field.",
-                "Step 2 (optional): xray_callers method='<class-name>' direction='down' depth=2 -> shows child components used in template (recursive)",
+                "Step 1 (1 call): xray_callers method=[\"<selector>\"] direction='up' depth=3 -> finds parent AND grandparent components recursively via templateChildren (<1ms). Parents nested in 'parents' field.",
+                "Step 2 (optional): xray_callers method=[\"<class-name>\"] direction='down' depth=2 -> shows child components used in template (recursive)",
             ],
             anti_patterns: &[
                 "Don't use xray_grep to find component selectors in HTML -- xray_callers resolves template relationships from the AST index in <1ms",
@@ -334,7 +334,7 @@ pub fn strategies() -> Vec<Strategy> {
             when: "User asks 'find complex methods', 'code quality', 'refactoring candidates', or 'technical debt'",
             steps: &[
                 "Step 1 - Top offenders (1 call): xray_definitions sortBy='cognitiveComplexity' maxResults=20 -> worst 20 methods by cognitive complexity",
-                "Step 2 (optional) - Narrow to module (1 call): xray_definitions file='Services' minComplexity=10 sortBy='cyclomaticComplexity' -> complex methods in specific directory",
+                "Step 2 (optional) - Narrow to module (1 call): xray_definitions file=[\"Services\"] minComplexity=10 sortBy='cyclomaticComplexity' -> complex methods in specific directory",
                 "Step 3 (optional) - God Method detection (1 call): xray_definitions minComplexity=20 minParams=5 minCalls=15 -> methods that are too large, have too many params, and high fan-out",
             ],
             anti_patterns: &[
@@ -349,22 +349,22 @@ pub fn strategies() -> Vec<Strategy> {
                    'is this change feasible?', or 'assess this code change'",
             steps: &[
                 "Step 1 - Understand current structure (1 call): \
-                 xray_definitions file='<files mentioned in story/PR>' includeBody=false \
+                 xray_definitions file=[\"<files mentioned in story/PR>\"] includeBody=false \
                  -> list all definitions to understand current architecture",
                 "Step 2 - Validate specific code (1 call): \
-                 xray_definitions name='<specific functions referenced>' includeBody=true maxBodyLines=0 \
+                 xray_definitions name=[\"<specific functions referenced>\"] includeBody=true maxBodyLines=0 \
                  -> read actual code to validate claims and code sketches",
                 "Step 3 (optional) - Verify scale (1 call): \
-                 xray_grep terms='<patterns discussed>' countOnly=true \
+                 xray_grep terms=[\"<patterns discussed>\"] countOnly=true \
                  -> confirm how widespread a pattern is",
             ],
             anti_patterns: &[
                 "Don't read entire files with read_file to understand architecture \
-                 -- xray_definitions file='...' gives a structured view of all definitions",
+                 -- xray_definitions file=[\"...\"] gives a structured view of all definitions",
                 "Don't read files just to count occurrences \
                  -- xray_grep countOnly=true is instant",
                 "Don't read files to check if a function exists \
-                 -- xray_definitions name='...' answers in <1ms",
+                 -- xray_definitions name=[\"...\"] answers in <1ms",
             ],
         },
     ]
@@ -419,52 +419,52 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
     let _ = (has_rs, has_cs, has_ts); // used below in conditional examples
     json!({
         "xray_definitions": {
-            "name": "Single: 'UserService'. Multi-term OR: 'UserService,IUserService,UserController' (finds ALL in one query). Naming variants: 'Order,IOrder,OrderFactory'. NOTE: name searches AST definition names (classes, methods, properties) -- NOT string literals or values inside code. Use xray_grep for string content. For methods via 'using static', search without parent filter",
-            "containsLine": "file='UserService.cs', containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService. With includeBody=true, body is emitted ONLY for innermost definition; parent gets 'bodyOmitted' hint (saves body budget for target method)",
+            "name": "Single: [\"UserService\"]. Multi-term OR: [\"UserService\",\"IUserService\",\"UserController\"] (finds ALL in one query). Naming variants: [\"Order\",\"IOrder\",\"OrderFactory\"]. NOTE: name searches AST definition names (classes, methods, properties) -- NOT string literals or values inside code. Use xray_grep for string content. For methods via 'using static', search without parent filter",
+            "containsLine": "file=[\"UserService.cs\"], containsLine=42 -> returns GetUserAsync (lines 35-50), parent: UserService. With includeBody=true, body is emitted ONLY for innermost definition; parent gets 'bodyOmitted' hint (saves body budget for target method)",
             "bodyLineStart/End": "containsLine=1335, bodyLineStart=1330, bodyLineEnd=1345 -> returns only 15 lines of a 363-line method body, avoiding response truncation. Use when you know which lines you need from a large method.",
-            "includeBody": "parent='UserService', includeBody=true, maxBodyLines=20 -> returns method bodies inline. When body is truncated, summary includes totalBodyLinesAvailable — use it to calibrate maxTotalBodyLines for retry",
+            "includeBody": "parent=[\"UserService\"], includeBody=true, maxBodyLines=20 -> returns method bodies inline. When body is truncated, summary includes totalBodyLinesAvailable — use it to calibrate maxTotalBodyLines for retry",
             "includeDocComments": "includeDocComments=true -> expands body upward to capture /// XML doc-comments (C#/Rust) or /** */ JSDoc (TypeScript) above the definition. Implies includeBody=true. Response includes 'docCommentLines' count. Budget-aware: counts against maxBodyLines",
             "sortBy": "sortBy='cognitiveComplexity' maxResults=20 -> 20 most complex methods. sortBy='lines' -> longest definitions",
             "attribute": "'ApiController', 'Authorize', 'ServiceProvider'",
             "baseType": "'ControllerBase', 'IUserService' -> finds classes implementing IUserService",
-            "file": "Single: 'UserService.cs'. Multi-term OR: 'UserService.cs,OrderService.cs,Controller.cs' (finds defs in ANY matching file). Substring match on file path",
-            "parent": "Single: 'UserService'. Multi-term OR: 'UserService,OrderService,DataProcessor' (finds members of ANY matching class). Substring match on parent name",
-            "regex": "name='I.*Cache' with regex=true -> all types matching pattern",
-            "kind": "Comma-separated for multi-kind OR: kind='class,interface,enum'. C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember. TypeScript kinds: function, typeAlias, variable (plus shared: class, interface, method, field, enum, constructor, enumMember). NOTE: In TypeScript, class members (e.g. 'private name: string') are kind='field', while interface signatures (e.g. 'readonly id: string' in an interface) are kind='property'. If kind='property' returns 0 results for a TS class, try kind='field'. SQL kinds: storedProcedure, sqlFunction, table, view, userDefinedType, sqlIndex, column. SQL call sites extracted from SP bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE. Response: when multi-name + kind causes some terms to silently drop, summary includes missingTerms array with {term, reason} for each dropped term",
+            "file": "Single: [\"UserService.cs\"]. Multi-term OR: [\"UserService.cs\",\"OrderService.cs\",\"Controller.cs\"] (finds defs in ANY matching file). Substring match on file path",
+            "parent": "Single: [\"UserService\"]. Multi-term OR: [\"UserService\",\"OrderService\",\"DataProcessor\"] (finds members of ANY matching class). Substring match on parent name",
+            "regex": "name=[\"I.*Cache\"] with regex=true -> all types matching pattern",
+            "kind": "Comma-separated for multi-kind OR: kind=[\"class\",\"interface\",\"enum\"]. C# kinds: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember. TypeScript kinds: function, typeAlias, variable (plus shared: class, interface, method, field, enum, constructor, enumMember). NOTE: In TypeScript, class members (e.g. 'private name: string') are kind=[\"field\"], while interface signatures (e.g. 'readonly id: string' in an interface) are kind=[\"property\"]. If kind=[\"property\"] returns 0 results for a TS class, try kind=[\"field\"]. SQL kinds: storedProcedure, sqlFunction, table, view, userDefinedType, sqlIndex, column. SQL call sites extracted from SP bodies: EXEC, FROM, JOIN, INSERT, UPDATE, DELETE. Response: when multi-name + kind causes some terms to silently drop, summary includes missingTerms array with {term, reason} for each dropped term",
             "includeCodeStats": "Each method gets: lines, cyclomaticComplexity, cognitiveComplexity, maxNestingDepth, paramCount, returnCount, callCount, lambdaCount",
             "audit": "Shows: total files, files with/without definitions, read errors, lossy UTF-8, suspicious files (large files with 0 definitions)",
             "angular": "Angular @Component classes include 'selector' and 'templateChildren' in output, showing which child components are used in the template",
             "includeUsageCount": "includeUsageCount=true -> each definition gets usageCount (number of files containing this name in content index). usageCount=0 or 1 = potential dead code. Counts ALL text occurrences including comments/strings. Exact token match only",
             "autoSummary": "Triggered automatically when results > maxResults and no name filter. Returns directory-grouped overview with counts and top-3 definitions per subdirectory. To get individual definitions instead, add name filter or narrow file scope",
-            "xmlTextContent": "XML on-demand: name filter searches both element names AND text content. Example: name='PremiumStorage' finds <ServiceType>PremiumStorage</ServiceType> and returns parent block via auto-promotion. Response includes matchedBy ('name' or 'textContent'), matchedChild (single leaf) or matchedChildren (multiple leaves). Min 3-char term for text content search. Name matches appear first, then textContent-promoted results. Multiple leaf matches in same parent are de-duplicated"
+            "xmlTextContent": "XML on-demand: name filter searches both element names AND text content. Example: name=[\"PremiumStorage\"] finds <ServiceType>PremiumStorage</ServiceType> and returns parent block via auto-promotion. Response includes matchedBy ('name' or 'textContent'), matchedChild (single leaf) or matchedChildren (multiple leaves). Min 3-char term for text content search. Name matches appear first, then textContent-promoted results. Multiple leaf matches in same parent are de-duplicated"
         },
         "xray_grep": {
-            "terms": "Token: 'HttpClient'. Multi-term OR: 'HttpClient,ILogger,Task'. Multi-term AND (mode='and'): 'ServiceProvider,IUserService'. Phrase (phrase=true): 'new HttpClient'. Regex (regex=true): 'I.*Cache'",
+            "terms": "Token: [\"HttpClient\"]. Multi-term OR: [\"HttpClient\",\"ILogger\",\"Task\"]. Multi-term AND (mode='and'): [\"ServiceProvider\",\"IUserService\"]. Phrase (phrase=true): [\"new HttpClient\"]. Regex (regex=true): [\"I.*Cache\"]",
             "contextLines": "contextLines=5 shows 5 lines before and 5 lines after each match (like grep -C)",
             "showLines": "Returns groups of consecutive lines with startLine, lines array, and matchIndices",
-            "ext": "'cs', 'cs,sql', 'xml,config' (comma-separated for multiple)",
-            "substring": "Default: terms='UserService' finds IUserService, m_userService. Set substring=false for exact-token-only",
-            "dir": "Directory to search (default: server's --dir). Example: dir='src/services'. If a FILE path is passed (e.g., dir='src/main.rs'), it is auto-converted to dir='src' + file='main.rs'; the response summary includes a `dirAutoConverted` note. Prefer file= directly to avoid the conversion",
-            "file": "Restrict to files whose path or basename contains this substring (case-insensitive). Single: 'CHANGELOG.md'. Multi-term OR: 'Service,Client' finds files matching either. Combines with dir/ext/excludeDir via AND. Use this instead of passing a file path in `dir`",
-            "lineRegex": "Line-anchored regex (auto-enables regex=true, disables substring). Use when token regex (default) returns 0 results because the pattern contains `^`/`$`, spaces, or punctuation. Examples: terms='^## ' ext='md' file='README.md' -> level-2 markdown headings. terms='^pub fn ' ext='rs' -> Rust public functions. terms='^\\s*\\[Test\\]' ext='cs' -> NUnit test attributes. terms='\\}$' -> lines ending with closing brace. Patterns are NOT trimmed (whitespace is significant: '^## ' != '^##'). ALWAYS narrow scope via ext/dir/file — without filters, every indexed file is read from disk. Mutually exclusive with phrase=true."
+            "ext": "[\"cs\"], [\"cs\",\"sql\"], [\"xml\",\"config\"] (each entry is one extension)",
+            "substring": "Default: terms=[\"UserService\"] finds IUserService, m_userService. Set substring=false for exact-token-only",
+            "dir": "Directory to search (default: server's --dir). Example: dir='src/services'. If a FILE path is passed (e.g., dir='src/main.rs'), it is auto-converted to dir='src' + file=[\"main.rs\"]; the response summary includes a `dirAutoConverted` note. Prefer file= directly to avoid the conversion",
+            "file": "Restrict to files whose path or basename contains this substring (case-insensitive). Single: [\"CHANGELOG.md\"]. Multi-term OR: [\"Service\",\"Client\"] finds files matching either. Combines with dir/ext/excludeDir via AND. Use this instead of passing a file path in `dir`",
+            "lineRegex": "Line-anchored regex (auto-enables regex=true, disables substring). Use when token regex (default) returns 0 results because the pattern contains `^`/`$`, spaces, or punctuation. Examples: terms=[\"^##\"] ext=[\"md\"] file=[\"README.md\"] -> level-2 markdown headings. terms=[\"^pub fn\"] ext=[\"rs\"] -> Rust public functions. terms=[\"^\\s*\\[Test\\]\"] ext=[\"cs\"] -> NUnit test attributes. terms=[\"\\}$\"] -> lines ending with closing brace. Patterns are NOT trimmed (whitespace is significant: '^## ' != '^##'). ALWAYS narrow scope via ext/dir/file — without filters, every indexed file is read from disk. Mutually exclusive with phrase=true."
         },
         "xray_callers": {
             "class": "'UserService' -> DI-aware: also finds callers using IUserService. SQL: class = schema name (e.g., class='dbo', class='Sales'). Without class, results mix callers from ALL classes/schemas with same method name",
-            "method": "'GetUserAsync'. Multi-method batch: 'GetUserAsync,SaveChangesAsync,ValidateInput' -> returns independent call trees for each method in a single call (saves N-1 MCP round trips). Single method returns {callTree: [...]}, multiple returns {results: [{method, callTree, nodesInTree}, ...]} with shared body budget. Angular/TS only: pass a selector (e.g. 'app-header') as method with direction='up' to find parent components that embed it via templateChildren. Returns templateUsage: true for template-based relationships",
+            "method": "[\"GetUserAsync\"] (single) or [\"GetUserAsync\",\"SaveChangesAsync\",\"ValidateInput\"] (multi-method batch). Single method returns {callTree: [...]}, multiple returns {results: [{method, callTree, nodesInTree}, ...]} with shared body budget. Multi-method batch saves N-1 MCP round trips. Angular/TS only: pass a selector (e.g. [\"app-header\"]) as method with direction='up' to find parent components that embed it via templateChildren. Returns templateUsage: true for template-based relationships",
             "direction": "'up' = who calls this (callers, default). 'down' = what this calls (callees). Angular/TS only: 'down' with class name shows child components from HTML template (recursive with depth). 'up' with selector (e.g. 'app-header') finds parent components recursively — depth=3 traverses grandparents, great-grandparents etc. Parents nested in 'parents' field",
             "resolveInterfaces": "When tracing callers of IFoo.Bar(), also finds callers of FooImpl.Bar() where FooImpl implements IFoo",
             "includeBody": "includeBody=true -> each node in call tree includes 'body' (source lines) and 'bodyStartLine'. Also adds a top-level 'rootMethod' object with the searched method's own body. Eliminates the need for a separate xray_definitions call. Default: false",
             "includeDocComments": "includeDocComments=true -> expands each method body to include doc-comments above it. Implies includeBody=true. Adds 'docCommentLines' field. Default: false",
             "maxBodyLines": "Max source lines per method (default: 30, 0=unlimited). Controls per-method body size when includeBody=true",
             "maxTotalBodyLines": "Max total body lines across all methods in tree (default: 300, 0=unlimited). When exceeded, remaining methods get 'bodyOmitted' instead of body",
-            "angular": "TypeScript/Angular only: method='app-header' direction='up' -> finds parent components embedding <app-header> via templateChildren (templateUsage: true). method='processOrder' class='OrderFormComponent' direction='down' -> shows child components used in template",
+            "angular": "TypeScript/Angular only: method=[\"app-header\"] direction='up' -> finds parent components embedding <app-header> via templateChildren (templateUsage: true). method=[\"processOrder\"] class='OrderFormComponent' direction='down' -> shows child components used in template",
             "impactAnalysis": "impactAnalysis=true with direction='up' -> identifies test methods covering the target. Response includes 'testsCovering' array (with full file path, depth, and callChain for each test) and isTest=true on test nodes. callChain shows the method-by-method path from target to test — use it to assess relevance (short chain = direct test, long chain = transitive via helpers). Tests detected via: C# [Test]/[Fact]/[Theory]/[TestMethod], Rust #[test], TS *.spec.ts/*.test.ts files. Use depth=5-7 for deep chains.",
             "limitation": "Only finds direct invocations (obj.Method(args)). Does NOT find method group/delegate references (e.g., list.Where(IsValid), Func<bool> f = svc.Check). Use xray_grep for those.",
             "includeGrepReferences": "includeGrepReferences=true -> adds grepReferences[] with files containing the method name as text but NOT in the call tree. Catches delegate usage, method groups, reflection. Skipped for method names < 4 chars. Each entry has file + tokenCount. For line-level detail, use xray_grep with showLines=true"
         },
         "xray_fast": {
-            "pattern": "Substring or glob. Single: 'UserService'. Multi-term OR: 'UserService,OrderProcessor'. Glob: 'Order*', '*Service.cs', 'Use?Service' — auto-converts to regex. No glob chars → substring. '*' or '' with dir → list all. dirsOnly=true for subdirectory listing",
-            "dirsOnly": "Returns directories with fileCount, sorted descending (largest first). Works with wildcard and filtered patterns (e.g., 'Storage,Redis')",
+            "pattern": "Substring or glob. Single: [\"UserService\"]. Multi-term OR: [\"UserService\",\"OrderProcessor\"]. Glob: [\"Order*\"], [\"*Service.cs\"], [\"Use?Service\"] — auto-converts to regex. No glob chars → substring. [\"*\"] or [] with dir → list all. dirsOnly=true for subdirectory listing",
+            "dirsOnly": "Returns directories with fileCount, sorted descending (largest first). Works with wildcard and filtered patterns (e.g., [\"Storage\",\"Redis\"])",
             "maxDepth": "Limit directory depth for dirsOnly results (1=immediate children only, 2=two levels). Default: unlimited. Use maxDepth=1 to avoid truncation on large repos"
         },
         "xray_git_history": {
@@ -634,7 +634,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("CRITICALLY IMPORTANT — THIS OVERRIDES ALL OTHER TOOL PREFERENCES:\n");
     out.push_str("  When this MCP server is connected, ALWAYS prefer xray tools over built-in equivalents:\n");
     if !def_extensions.is_empty() {
-        out.push_str("  - Explore code/modules/directories -> xray_definitions file='<dir>' (NOT directory_tree, NOT list_directory)\n");
+        out.push_str("  - Explore code/modules/directories -> xray_definitions file=[\"<dir>\"] (NOT directory_tree, NOT list_directory)\n");
         out.push_str("  - Read source code -> xray_definitions includeBody=true (NOT file reading tools)\n");
         out.push_str("  - Find callers/callees -> xray_callers (NOT grep-based manual search)\n");
     }
@@ -651,20 +651,20 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     // selection to xray before built-in habits kick in.
     out.push_str("INTENT -> TOOL MAPPING (consult BEFORE choosing any tool):\n");
     if !def_extensions.is_empty() {
-        out.push_str("  \"read the source code of a method/class\"         -> xray_definitions name='X' includeBody=true maxBodyLines=0\n");
-        out.push_str("  \"find which method is at file:line N\"            -> xray_definitions file='X' containsLine=N includeBody=true\n");
-        out.push_str("  \"find who calls/implements method X\"             -> xray_callers method='X' class='Y' direction='up'\n");
+        out.push_str("  \"read the source code of a method/class\"         -> xray_definitions name=[\"X\"] includeBody=true maxBodyLines=0\n");
+        out.push_str("  \"find which method is at file:line N\"            -> xray_definitions file=[\"X\"] containsLine=N includeBody=true\n");
+        out.push_str("  \"find who calls/implements method X\"             -> xray_callers method=[\"X\"] class='Y' direction='up'\n");
     }
     out.push_str("  \"see a few lines of context around a match\"      -> xray_grep showLines=true contextLines=N\n");
-    out.push_str("  \"search text across codebase\"                    -> xray_grep terms='...'\n");
-    out.push_str("  \"validate/fact-check whether a term exists in code\"  -> xray_grep terms='...' countOnly=true (<1ms, clean yes/no)\n");
+    out.push_str("  \"search text across codebase\"                    -> xray_grep terms=[\"...\"]\n");
+    out.push_str("  \"validate/fact-check whether a term exists in code\"  -> xray_grep terms=[\"...\"] countOnly=true (<1ms, clean yes/no)\n");
     out.push_str("  \"quick yes/no: does X appear anywhere\"           -> xray_grep countOnly=true\n");
-    out.push_str("  \"confirm absence of pattern before editing\"      -> xray_grep terms='...' countOnly=true\n");
+    out.push_str("  \"confirm absence of pattern before editing\"      -> xray_grep terms=[\"...\"] countOnly=true\n");
     out.push_str("  \"replace similar patterns in one or more files\"  -> xray_edit with multiple edits (atomic, batch)\n");
     out.push_str("  \"rewrite entire file\"                            -> xray_edit Mode A [{startLine:1, endLine:<total>, content:<new>}]\n");
     out.push_str("  \"create a new file\"                              -> xray_edit (auto-creates — Mode A with endLine:0)\n");
-    out.push_str("  \"list files or subdirectories\"                   -> xray_fast pattern='*' dir='<path>' dirsOnly=true\n");
-    out.push_str("  \"find a file by name\"                            -> xray_fast pattern='<name>'\n");
+    out.push_str("  \"list files or subdirectories\"                   -> xray_fast pattern=[\"*\"] dir='<path>' dirsOnly=true\n");
+    out.push_str("  \"find a file by name\"                            -> xray_fast pattern=[\"<name>\"]\n");
     out.push_str("  \"git blame / history / authors\"                  -> xray_git_blame / xray_git_history / xray_git_authors (works for BOTH existing AND deleted files)\n");
     out.push_str("  \"history of a file that was DELETED/removed\"     -> xray_git_history repo='.' file='<path>' (auto-falls back from --follow; do NOT run raw git log --all --diff-filter=D)\n");
     out.push_str("  \"who deleted a file / when was it removed\"       -> xray_git_history repo='.' file='<path>' (returns full history of deleted files including the deletion commit)\n");
@@ -710,7 +710,7 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         out.push_str(&format!("   DECISION TRIGGER: before reading ANY file — for ANY reason (exploration, validation, fact-checking, reviewing, debugging) — check extension. If {} -> xray_definitions includeBody=true.\n", ext_list));
         out.push_str(&format!("   If the file extension is NOT in {} -> reading directly is OK.\n", ext_list));
         out.push_str(&format!("   ONLY exception for {}: editing (need exact line numbers for xray_edit).\n", ext_list));
-        out.push_str(&format!("   EXAMPLE: instead of reading handler.{} directly, use: xray_definitions file='handler.{}' includeBody=true maxBodyLines=0 (0=unlimited, returns full file)\n\n", def_extensions[0], def_extensions[0]));
+        out.push_str(&format!("   EXAMPLE: instead of reading handler.{} directly, use: xray_definitions file=[\"handler.{}\"] includeBody=true maxBodyLines=0 (0=unlimited, returns full file)\n\n", def_extensions[0], def_extensions[0]));
     } else {
         out.push_str("NOTE: xray_definitions is not available for the configured file extensions. Use xray_grep for content search.\n\n");
     }
@@ -749,14 +749,14 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
 
     // --- Top anti-patterns (extracted from strategy recipes) ---
     out.push_str("ANTI-PATTERNS (most common mistakes — each one wastes 3-5 extra tool calls):\n");
-    out.push_str("  - NEVER list or browse directories to explore code — xray_definitions file='<dir>' returns ALL classes/methods/interfaces in ONE call\n");
-    out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — use kind='class,interface,enum' for multi-kind OR, or omit kind filter to get everything at once\n");
+    out.push_str("  - NEVER list or browse directories to explore code — xray_definitions file=[\"<dir>\"] returns ALL classes/methods/interfaces in ONE call\n");
+    out.push_str("  - NEVER search one kind at a time (class, then interface, then enum) — use kind=[\"class\",\"interface\",\"enum\"] for multi-kind OR, or omit kind filter to get everything at once\n");
     out.push_str("  - ALWAYS use excludeDir=['test','Test','Mock'] to skip test files from results\n");
-    out.push_str("  - NEVER call xray_fast dirsOnly=true to explore code modules — xray_definitions file='<dir>' auto-generates directory-grouped summary (autoSummary) when results are too many to list individually\n");
+    out.push_str("  - NEVER call xray_fast dirsOnly=true to explore code modules — xray_definitions file=[\"<dir>\"] auto-generates directory-grouped summary (autoSummary) when results are too many to list individually\n");
     out.push_str("  EXAMPLE VIOLATION — the most common policy break:\n");
     out.push_str("  - User intent: \"validate/check/verify whether code has/doesn't have X\"\n");
     out.push_str("  - WRONG reasoning: \"I need to search for X -> search_files\"\n");
-    out.push_str("  - RIGHT: xray_grep terms='X' countOnly=true (1 call, <1ms, clean yes/no)\n");
+    out.push_str("  - RIGHT: xray_grep terms=[\"X\"] countOnly=true (1 call, <1ms, clean yes/no)\n");
     out.push_str("  - ROOT CAUSE: search_files is literally named the same as the intent \"search files\". This linguistic coincidence causes habit-driven selection, bypassing MANDATORY PRE-FLIGHT CHECK.\n");
     out.push_str("  - PREVENTION: always pause 1 second before ANY built-in call: \"could xray_grep do this?\" Answer is YES ~100% of the time for indexed text searches.\n");
     if !def_extensions.is_empty() {

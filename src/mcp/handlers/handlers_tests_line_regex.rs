@@ -78,10 +78,10 @@ fn make_line_regex_ctx() -> (HandlerContext, std::path::PathBuf) {
 fn line_regex_caret_anchor_finds_markdown_headings() {
     let (ctx, tmp) = make_line_regex_ctx();
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^## ",
+        "terms": ["^## "],
         "regex": true,
         "lineRegex": true,
-        "ext": "md",
+        "ext": ["md"],
         "showLines": true
     }));
     assert!(!result.is_error, "lineRegex with `^## ` should not error: {}", result.content[0].text);
@@ -108,10 +108,10 @@ fn line_regex_dollar_anchor_finds_lines_ending_with_brace() {
     let (ctx, tmp) = make_line_regex_ctx();
     // Match lines ending with `}` (with no trailing space).
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": r"\}$",
+        "terms": [r"\}$"],
         "regex": true,
         "lineRegex": true,
-        "ext": "rs"
+        "ext": ["rs"]
     }));
     assert!(!result.is_error, "lineRegex with `\\}}$` should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -127,10 +127,10 @@ fn line_regex_multi_pattern_or() {
     let (ctx, tmp) = make_line_regex_ctx();
     // OR mode (default): files matching EITHER `^# ` (top-level heading) OR `^### ` (subsection)
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^# ,^### ",
+        "terms": ["^#","^###"],
         "regex": true,
         "lineRegex": true,
-        "ext": "md"
+        "ext": ["md"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -147,11 +147,11 @@ fn line_regex_multi_pattern_and() {
     let (ctx, tmp) = make_line_regex_ctx();
     // AND mode: files matching BOTH `^# ` AND `^### `. Only guide.md has both.
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^# ,^### ",
+        "terms": ["^#","^###"],
         "regex": true,
         "lineRegex": true,
         "mode": "and",
-        "ext": "md"
+        "ext": ["md"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -171,10 +171,10 @@ fn line_regex_ext_filter_scopes_search() {
     let (ctx, tmp) = make_line_regex_ctx();
     // `^# ` exists in markdown only — ext=rs should yield 0 results
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^# ",
+        "terms": ["^#"],
         "regex": true,
         "lineRegex": true,
-        "ext": "rs"
+        "ext": ["rs"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -187,7 +187,7 @@ fn line_regex_dir_filter_scopes_search() {
     let (ctx, tmp) = make_line_regex_ctx();
     // dir=src restricts to src/lib.rs only — `^# ` (markdown heading) won't match
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^# ",
+        "terms": ["^#"],
         "regex": true,
         "lineRegex": true,
         "dir": tmp.join("src").to_string_lossy().to_string()
@@ -203,10 +203,10 @@ fn line_regex_file_filter_scopes_search() {
     let (ctx, tmp) = make_line_regex_ctx();
     // file=guide.md restricts to one specific file
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^## ",
+        "terms": ["^##"],
         "regex": true,
         "lineRegex": true,
-        "file": "guide.md"
+        "file": ["guide.md"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -220,7 +220,7 @@ fn line_regex_file_filter_scopes_search() {
 fn line_regex_no_matches_returns_zero() {
     let (ctx, tmp) = make_line_regex_ctx();
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^XYZ_NEVER_EXISTS_PATTERN_$",
+        "terms": ["^XYZ_NEVER_EXISTS_PATTERN_$"],
         "regex": true,
         "lineRegex": true
     }));
@@ -235,10 +235,10 @@ fn line_regex_no_matches_returns_zero() {
 fn line_regex_count_only_omits_files() {
     let (ctx, tmp) = make_line_regex_ctx();
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^## ",
+        "terms": ["^##"],
         "regex": true,
         "lineRegex": true,
-        "ext": "md",
+        "ext": ["md"],
         "countOnly": true
     }));
     assert!(!result.is_error);
@@ -252,10 +252,10 @@ fn line_regex_count_only_omits_files() {
 fn line_regex_show_lines_emits_line_content() {
     let (ctx, tmp) = make_line_regex_ctx();
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^## ",
+        "terms": ["^##"],
         "regex": true,
         "lineRegex": true,
-        "file": "guide.md",
+        "file": ["guide.md"],
         "showLines": true
     }));
     assert!(!result.is_error);
@@ -278,7 +278,7 @@ fn line_regex_show_lines_emits_line_content() {
 fn line_regex_mutex_with_phrase() {
     let (ctx, tmp) = make_line_regex_ctx();
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^## ",
+        "terms": ["^##"],
         "regex": true,
         "lineRegex": true,
         "phrase": true
@@ -295,9 +295,9 @@ fn line_regex_auto_enables_regex() {
     // lineRegex=true without explicit regex=true should still work — regex is auto-promoted.
     let (ctx, tmp) = make_line_regex_ctx();
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^## ",
+        "terms": ["^##"],
         "lineRegex": true,
-        "ext": "md"
+        "ext": ["md"]
     }));
     assert!(!result.is_error,
         "lineRegex=true should auto-enable regex (no explicit regex=true required), got: {}",
@@ -312,7 +312,7 @@ fn line_regex_auto_enables_regex() {
 fn line_regex_invalid_pattern_returns_error() {
     let (ctx, tmp) = make_line_regex_ctx();
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "[unclosed",
+        "terms": ["[unclosed"],
         "regex": true,
         "lineRegex": true
     }));
@@ -370,7 +370,7 @@ fn line_regex_show_lines_caps_content_cache() {
     };
 
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "^## hit_",
+        "terms": ["^## hit_"],
         "regex": true,
         "lineRegex": true,
         "showLines": true,
@@ -469,22 +469,23 @@ fn make_line_patterns_log_ctx() -> (HandlerContext, std::path::PathBuf) {
 
 #[test]
 fn line_patterns_literal_comma_in_log_prefix() {
-    // `^ERROR,WARN:` as a single pattern — `,` is literal, not a separator.
-    // The legacy `terms="^ERROR,WARN:"` path would split into two regexes
-    // (`^ERROR` and `WARN:`), matching far more lines than intended.
+    // `^ERROR,WARN:` as a single regex entry — `,` is literal.
+    // Pre-migration, the legacy `terms="^ERROR,WARN:"` string path would
+    // split into two regexes (`^ERROR` and `WARN:`), matching far more lines
+    // than intended. After array migration the comma is unambiguously literal.
     let (ctx, tmp) = make_line_patterns_log_ctx();
     let result = handle_xray_grep(
         &ctx,
         &json!({
-            "linePatterns": ["^ERROR,WARN:"],
+            "terms": ["^ERROR,WARN:"],
             "lineRegex": true,
-            "ext": "log",
+            "ext": ["log"],
             "showLines": true,
         }),
     );
     assert!(
         !result.is_error,
-        "linePatterns literal-comma should not error: {}",
+        "literal-comma in array entry should not error: {}",
         result.content[0].text
     );
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -500,21 +501,21 @@ fn line_patterns_literal_comma_in_log_prefix() {
 #[test]
 fn line_patterns_csv_two_columns_regex() {
     // `^[^,]+,[^,]+$` matches exactly-two-column CSV rows. The comma inside
-    // the pattern is structural (the `,` between columns), and would be
-    // mangled by `terms`-based comma-splitting.
+    // the pattern is structural (the `,` between columns), and would have
+    // been mangled by legacy comma-splitting on a string `terms`.
     let (ctx, tmp) = make_line_patterns_log_ctx();
     let result = handle_xray_grep(
         &ctx,
         &json!({
-            "linePatterns": ["^[^,]+,[^,]+$"],
+            "terms": ["^[^,]+,[^,]+$"],
             "lineRegex": true,
-            "ext": "csv",
+            "ext": ["csv"],
             "showLines": true,
         }),
     );
     assert!(
         !result.is_error,
-        "linePatterns CSV regex should not error: {}",
+        "CSV two-column regex should not error: {}",
         result.content[0].text
     );
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -530,21 +531,21 @@ fn line_patterns_csv_two_columns_regex() {
 
 #[test]
 fn line_patterns_multiple_patterns_or_semantics() {
-    // Multiple entries in `linePatterns` are independent regexes, OR-combined
-    // by default (same as `terms` comma-OR semantics).
+    // Multiple entries in `terms` are independent regexes, OR-combined
+    // by default in lineRegex mode.
     let (ctx, tmp) = make_line_patterns_log_ctx();
     let result = handle_xray_grep(
         &ctx,
         &json!({
-            "linePatterns": ["^INFO:", "^TRACE:"],
+            "terms": ["^INFO:", "^TRACE:"],
             "lineRegex": true,
-            "ext": "log",
+            "ext": ["log"],
             "showLines": true,
         }),
     );
     assert!(
         !result.is_error,
-        "linePatterns multi-OR should not error: {}",
+        "multi-term OR should not error: {}",
         result.content[0].text
     );
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -558,61 +559,6 @@ fn line_patterns_multiple_patterns_or_semantics() {
 }
 
 #[test]
-fn line_patterns_and_terms_mutually_exclusive() {
-    // Passing both `terms` and `linePatterns` is rejected with a hint that
-    // names the precise difference (`,` separator vs literal).
-    let (ctx, tmp) = make_line_patterns_log_ctx();
-    let result = handle_xray_grep(
-        &ctx,
-        &json!({
-            "terms": "^INFO:",
-            "linePatterns": ["^TRACE:"],
-            "lineRegex": true,
-            "ext": "log",
-        }),
-    );
-    assert!(
-        result.is_error,
-        "terms + linePatterns must be rejected, got success: {}",
-        result.content[0].text
-    );
-    let body = &result.content[0].text;
-    assert!(
-        body.contains("mutually exclusive") && body.contains("linePatterns"),
-        "Error must explain mutual exclusivity, got: {}",
-        body
-    );
-    cleanup_tmp(&tmp);
-}
-
-#[test]
-fn line_patterns_requires_line_regex_true() {
-    // `linePatterns` is meaningful only in line-regex mode. Passing it without
-    // `lineRegex=true` is rejected eagerly so a typo doesn't silently fall
-    // through to substring/regex modes that ignore the array.
-    let (ctx, tmp) = make_line_patterns_log_ctx();
-    let result = handle_xray_grep(
-        &ctx,
-        &json!({
-            "linePatterns": ["^INFO:"],
-            "ext": "log",
-        }),
-    );
-    assert!(
-        result.is_error,
-        "linePatterns without lineRegex must be rejected, got success: {}",
-        result.content[0].text
-    );
-    let body = &result.content[0].text;
-    assert!(
-        body.contains("lineRegex=true"),
-        "Error must point at lineRegex=true, got: {}",
-        body
-    );
-    cleanup_tmp(&tmp);
-}
-
-#[test]
 fn line_patterns_terms_comma_split_back_compat() {
     // Back-compat guard: when `linePatterns` is NOT supplied, the old
     // `terms.split(',')` behaviour for lineRegex is preserved.
@@ -620,9 +566,9 @@ fn line_patterns_terms_comma_split_back_compat() {
     let result = handle_xray_grep(
         &ctx,
         &json!({
-            "terms": "^INFO:,^TRACE:",
+            "terms": ["^INFO:","^TRACE:"],
             "lineRegex": true,
-            "ext": "log",
+            "ext": ["log"],
         }),
     );
     assert!(

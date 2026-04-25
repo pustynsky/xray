@@ -699,7 +699,7 @@ fn test_callers_deprioritize_tests_production_first() {
     // Should return: 2 production first, then 8 test callers
     let ctx = make_ctx_test_deprioritization();
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "truncate_data",
+        "method": ["truncate_data"],
         "depth": 1,
         "maxCallersPerLevel": 10,
         "resolveInterfaces": false
@@ -731,7 +731,7 @@ fn test_callers_deprioritize_tests_truncation() {
     // Should return: 2 production + 3 test (5 total)
     let ctx = make_ctx_test_deprioritization();
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "truncate_data",
+        "method": ["truncate_data"],
         "depth": 1,
         "maxCallersPerLevel": 5,
         "resolveInterfaces": false
@@ -762,7 +762,7 @@ fn test_callers_popularity_sort_within_production() {
     // process_data should come before inject_metrics
     let ctx = make_ctx_test_deprioritization();
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "truncate_data",
+        "method": ["truncate_data"],
         "depth": 1,
         "maxCallersPerLevel": 10,
         "resolveInterfaces": false
@@ -786,7 +786,7 @@ fn test_callers_impact_analysis_keeps_all_tests() {
     // With impactAnalysis: 2 prod + 8 test = 10 (all tests kept)
     let ctx = make_ctx_test_deprioritization();
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "truncate_data",
+        "method": ["truncate_data"],
         "depth": 1,
         "maxCallersPerLevel": 5,
         "impactAnalysis": true,
@@ -896,7 +896,7 @@ fn test_callers_only_tests_no_production() {
     };
 
     let result = super::super::dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "helper_fn",
+        "method": ["helper_fn"],
         "depth": 1,
         "maxCallersPerLevel": 3,
         "resolveInterfaces": false
@@ -1132,7 +1132,7 @@ mod builder_state_tests {
             &ctx,
             "xray_callers",
             &json!({
-                "method": "target_method",
+                "method": ["target_method"],
                 "depth": 3,
                 "maxCallersPerLevel": 10,
                 "impactAnalysis": true,
@@ -1292,7 +1292,7 @@ mod builder_state_tests {
             &ctx,
             "xray_callers",
             &json!({
-                "method": "method_a",
+                "method": ["method_a"],
                 "depth": 10,
                 "maxCallersPerLevel": 10,
                 "resolveInterfaces": false
@@ -1483,7 +1483,7 @@ mod builder_state_tests {
             &ctx,
             "xray_callers",
             &json!({
-                "method": "a10",
+                "method": ["a10"],
                 "depth": 10,
                 "maxCallersPerLevel": 5,
                 "includeBody": true,
@@ -1712,7 +1712,7 @@ mod builder_state_tests {
             &ctx,
             "xray_callers",
             &json!({
-                "method": "target_fn",
+                "method": ["target_fn"],
                 "depth": 1,
                 "maxCallersPerLevel": 10,
                 "includeBody": true,

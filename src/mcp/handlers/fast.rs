@@ -54,7 +54,11 @@ struct FastParams {
     pattern: String,
     is_wildcard: bool,
     dir: String,
-    ext: Option<String>,
+    /// File-extension filter. Empty = no filter. Multi-element = match ANY of
+    /// the listed extensions (post 2026-04-25 list-params-to-arrays migration:
+    /// `ext: array<string>`). Compared case-insensitive against the file's
+    /// extension via `eq_ignore_ascii_case`.
+    ext: Vec<String>,
     use_regex: bool,
     ignore_case: bool,
     dirs_only: bool,
@@ -74,31 +78,46 @@ struct SearchContext {
 
 /// Parse and validate xray_fast arguments from JSON.
 fn parse_fast_args(args: &Value, server_dir: &str) -> Result<FastParams, String> {
-    let raw_pattern = args.get("pattern").and_then(|v| v.as_str());
+    // 2026-04-25 list-params-to-arrays migration:
+    // `pattern` and `ext` are array<string> in the schema. Parser reads them via
+    // read_string_array (rejects bare-string form with a migration-aware error).
+    // `pattern` is then joined into a comma-string for `compile_search_patterns`,
+    // which already does `.split(',')` to support OR-of-patterns. `ext` is kept
+    // as a Vec because the matching loop in `handle_xray_fast` does ANY-of
+    // comparison against `entry.path.extension()` and joining would break
+    // multi-element filters (e.g. `["cs","rs"]` -> `"cs,rs"` matches nothing).
+    //
+    // `pattern` is REQUIRED — distinguish "key absent / null" from "empty array".
+    let pattern_present = matches!(args.get("pattern"), Some(v) if !v.is_null());
+    if !pattern_present {
+        return Err("Missing required parameter: pattern".to_string());
+    }
+    let pattern_vec = super::utils::read_string_array(args, "pattern")?;
+
     let dir_provided = args.get("dir").and_then(|v| v.as_str()).is_some();
 
     // Determine if this is a "list all" (wildcard) request:
-    //   pattern="*"          → wildcard
-    //   pattern="" + dir set → wildcard (convenient shortcut)
-    //   pattern="" no dir    → error
-    let is_wildcard = match raw_pattern {
-        Some("*") => true,
-        Some("") if dir_provided => true,
-        Some("") => return Err(
+    //   pattern=["*"]            → wildcard
+    //   pattern=[] + dir set     → wildcard (convenient shortcut)
+    //   pattern=[] no dir        → error
+    let is_wildcard = match pattern_vec.as_slice() {
+        [s] if s == "*" => true,
+        [] if dir_provided => true,
+        [] => return Err(
             "Empty pattern without dir. Either provide a pattern to search for, \
-             or specify dir to list all files in a directory (pattern='' or pattern='*'). \
+             or specify dir to list all files in a directory (pattern=[\"*\"] or pattern=[]). \
              Do NOT fall back to built-in list_files or list_directory.".to_string()
         ),
-        None => return Err("Missing required parameter: pattern".to_string()),
         _ => false,
     };
 
-    let pattern = raw_pattern.unwrap_or("").to_string();
+    let pattern = pattern_vec.join(",");
 
     let dir = args.get("dir").and_then(|v| v.as_str())
         .map(|s| super::utils::resolve_dir_to_absolute(s, server_dir))
         .unwrap_or_else(|| server_dir.to_string());
-    let ext = args.get("ext").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let ext_vec = super::utils::read_string_array(args, "ext")?;
+    let ext = ext_vec;
     let use_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let ignore_case = args.get("ignoreCase").and_then(|v| v.as_bool()).unwrap_or(false);
     let dirs_only = args.get("dirsOnly").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -284,7 +303,7 @@ fn format_and_sort_results(
     });
     // B2 fix: Use hints array to avoid overwriting
     let mut hints: Vec<String> = Vec::new();
-    let ext_ignored_for_dirs = params.dirs_only && params.ext.is_some();
+    let ext_ignored_for_dirs = params.dirs_only && !params.ext.is_empty();
     if ext_ignored_for_dirs {
         hints.push("ext filter ignored when dirsOnly=true (directories have no file extension)".to_string());
     }
@@ -428,7 +447,9 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     // ext filter is meaningless for directories (they have no file extension),
     // so we skip it when dirsOnly=true and emit a hint in the response.
-    let effective_ext = if params.dirs_only { &None } else { &params.ext };
+    // Empty Vec = no filter; multi-element Vec = match ANY of the listed
+    // extensions (case-insensitive).
+    let effective_ext: &[String] = if params.dirs_only { &[] } else { params.ext.as_slice() };
 
     // Compute base depth for maxDepth filtering.
     // When subdir_entry_filter is active (parent index reused for subdirectory),
@@ -469,11 +490,13 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
             }
         }
 
-        if let Some(ext_f) = effective_ext {
+        if !effective_ext.is_empty() {
             let path = Path::new(&entry.path);
             let matches_ext = path.extension()
                 .and_then(|e| e.to_str())
-                .is_some_and(|e| e.eq_ignore_ascii_case(ext_f));
+                .is_some_and(|file_ext| {
+                    effective_ext.iter().any(|wanted| file_ext.eq_ignore_ascii_case(wanted))
+                });
             if !matches_ext { continue; }
         }
 
@@ -569,7 +592,7 @@ mod fast_unit_tests {
     #[test]
     fn test_dirs_only_with_wildcard_via_context() {
         let server_dir = std::env::temp_dir().to_string_lossy().to_string();
-        let args = json!({"pattern": "*", "dirsOnly": true, "dir": server_dir.clone()});
+        let args = json!({"pattern": ["*"], "dirsOnly": true, "dir": server_dir.clone()});
         let params = parse_fast_args(&args, &server_dir).expect("parse_fast_args should accept pattern='*'");
         assert!(params.is_wildcard, "FastParams.is_wildcard must be true for pattern='*'");
         assert!(params.dirs_only, "FastParams.dirs_only must be true");
@@ -588,7 +611,7 @@ mod fast_unit_tests {
     #[test]
     fn test_dirs_only_and_files_only_mutually_exclusive() {
         let server_dir = std::env::temp_dir().to_string_lossy().to_string();
-        let args = json!({"pattern": "x", "dirsOnly": true, "filesOnly": true});
+        let args = json!({"pattern": ["x"], "dirsOnly": true, "filesOnly": true});
         let result = parse_fast_args(&args, &server_dir);
         let err = match result {
             Ok(_) => panic!("dirsOnly + filesOnly must be rejected, got Ok"),
@@ -609,7 +632,7 @@ mod fast_unit_tests {
             pattern: "x".to_string(),
             is_wildcard: false,
             dir: ".".to_string(),
-            ext: None,
+            ext: Vec::new(),
             use_regex: false,
             ignore_case: false,
             dirs_only: false,

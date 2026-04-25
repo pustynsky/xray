@@ -64,10 +64,17 @@ pub(crate) struct DefinitionSearchArgs {
     pub include_code_stats: bool,
     // Cross-index enrichment
     pub include_usage_count: bool,
-    // Pre-computed filter patterns (avoid per-item allocations)
     pub exclude_patterns: super::utils::ExcludePatterns,
     pub file_filter_terms: Option<Vec<String>>,
     pub parent_filter_terms: Option<Vec<String>>,
+    /// Raw `file=["X","Y"]` array entries WITHOUT lowercasing or slash
+    /// normalization. Always populated (empty when no `file` filter set).
+    /// Used by single-file code paths (XML on-demand parsing, containsLine
+    /// substring match) that need to open or echo the original path. The
+    /// derived `file_filter_terms` is normalized for index-side substring
+    /// matching and MUST NOT be used as a real filesystem path on case-
+    /// sensitive filesystems.
+    pub file_filter_raw: Vec<String>,
 }
 
 impl DefinitionSearchArgs {
@@ -89,15 +96,37 @@ impl DefinitionSearchArgs {
 ///
 /// Returns `Err(message)` for validation failures (invalid containsLine, invalid sortBy).
 fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
-    let name_filter = args.get("name").and_then(|v| v.as_str())
-        .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
-    let kind_filter = args.get("kind").and_then(|v| v.as_str()).map(|s| s.to_string());
+    // List-shaped params (`name`, `kind`, `file`, `parent`) accept array<string>
+    // per the 2026-04-25 list-params migration. Internally they remain stored as
+    // comma-joined `Option<String>` so existing downstream split-based consumers
+    // (kind/name/file/parent filtering throughout this module) continue to work
+    // unchanged. Cleanup of those splits is tracked separately.
+    //
+    // ACCEPTED TRADE-OFF: a literal `,` inside an array entry will still be
+    // split by downstream consumers because the join+split bridge is lossy.
+    // This is acceptable for these specific keys:
+    //   - `kind`: closed enum (no commas possible).
+    //   - `name`, `parent`: identifier-like values (commas illegal in target-
+    //     language identifiers).
+    //   - `file`: paths COULD theoretically contain `,` but it is rare; the
+    //     follow-up cleanup that removes the comma-split downstream is the
+    //     proper fix and is tracked as a separate task.
+    //
+    // `attribute` and `baseType` stay single-value strings (semantic single-
+    // value, not lists).
+    let names = super::utils::read_string_array(args, "name")?;
+    let name_filter = if names.is_empty() { None } else { Some(names.join(",")) };
+    let kinds = super::utils::read_kind_array(args)?;
+    let kind_filter = if kinds.is_empty() { None } else { Some(kinds.join(",")) };
     let attribute_filter = args.get("attribute").and_then(|v| v.as_str()).map(|s| s.to_string());
     let base_type_filter = args.get("baseType").and_then(|v| v.as_str())
         .and_then(|s| if s.is_empty() { None } else { Some(s.to_string()) });
     let base_type_transitive = args.get("baseTypeTransitive").and_then(|v| v.as_bool()).unwrap_or(false);
-    let file_filter = args.get("file").and_then(|v| v.as_str()).map(|s| s.to_string());
-    let parent_filter = args.get("parent").and_then(|v| v.as_str()).map(|s| s.to_string());
+    let files = super::utils::read_string_array(args, "file")?;
+    let file_filter_raw = files.clone();
+    let file_filter = if files.is_empty() { None } else { Some(files.join(",")) };
+    let parents = super::utils::read_string_array(args, "parent")?;
+    let parent_filter = if parents.is_empty() { None } else { Some(parents.join(",")) };
 
     let contains_line = match args.get("containsLine") {
         Some(v) if v.is_i64() || v.is_u64() => {
@@ -235,6 +264,7 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         exclude_patterns,
         file_filter_terms,
         parent_filter_terms,
+        file_filter_raw,
     })
 }
 
@@ -410,7 +440,23 @@ fn handle_contains_line_mode(
     ctx: &HandlerContext,
     content_idx: Option<&ContentIndex>,
 ) -> ToolCallResult {
-    let file_filter = match &args.file_filter {
+    // `containsLine` is conceptually "which definition contains line N in
+    // FILE F" — a single-file question. After the 2026-04-25 list-params
+    // migration `file` accepts an array, but multi-file requests are
+    // ambiguous (line 42 of which file?) and used to silently degrade into
+    // a substring match against the comma-joined bridge string. Reject
+    // explicitly with a hint so the caller fixes their query.
+    if args.file_filter_raw.len() > 1 {
+        return ToolCallResult::error(format!(
+            "containsLine requires a single file in 'file' (got {} entries: {:?}). \
+             Run xray_definitions once per file: file=[\"{}\"], containsLine={}.",
+            args.file_filter_raw.len(),
+            args.file_filter_raw,
+            args.file_filter_raw[0],
+            line_num,
+        ));
+    }
+    let file_filter = match args.file_filter_raw.first() {
         Some(f) => f,
         None => return ToolCallResult::error(
             "containsLine requires 'file' parameter to identify the file.".to_string()

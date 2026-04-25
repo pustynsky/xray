@@ -159,13 +159,13 @@ fn test_dispatch_grep_missing_terms() {
     let ctx = make_empty_ctx();
     let result = dispatch_tool(&ctx, "xray_grep", &json!({}));
     assert!(result.is_error);
-    assert!(result.content[0].text.contains("Missing required parameter: terms"));
+    assert!(result.content[0].text.contains("must contain at least one entry"));
 }
 
 #[test]
 fn test_dispatch_grep_empty_index() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 0);
@@ -182,7 +182,7 @@ fn test_dispatch_grep_unknown_arg_warning_in_summary() {
     let result = dispatch_tool(
         &ctx,
         "xray_grep",
-        &json!({"terms": "HttpClient", "isRegexp": true}),
+        &json!({"terms": ["HttpClient"], "isRegexp": true}),
     );
     assert!(!result.is_error, "default mode should not hard-fail on unknown arg");
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -204,7 +204,7 @@ fn test_dispatch_grep_unknown_arg_strict_mode_hard_errors() {
     let result = dispatch_tool(
         &ctx,
         "xray_grep",
-        &json!({"terms": "HttpClient", "includePattern": "src/**"}),
+        &json!({"terms": ["HttpClient"], "includePattern": "src/**"}),
     );
     unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
     assert!(result.is_error, "strict mode should hard-error on unknown arg");
@@ -237,7 +237,7 @@ fn test_dispatch_grep_with_results() {
         index: Arc::new(RwLock::new(index)),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient", "substring": false}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"], "substring": false}));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
@@ -250,7 +250,7 @@ fn test_dispatch_grep_with_results() {
 #[test]
 fn test_xray_callers_no_def_index() {
     let ctx = make_empty_ctx();
-    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "Foo"}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": ["Foo"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("Definition index not available"));
 }
@@ -337,7 +337,7 @@ fn test_xray_definitions_max_results_one_caps_output() {
     // Use name filter to bypass autoSummary (which triggers when results > maxResults without name filter)
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
         "maxResults": 1,
-        "name": "Service"
+        "name": ["Service"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -365,7 +365,7 @@ fn test_dispatch_grep_while_content_index_building() {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["foo"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("being built"),
         "Expected 'being built' message, got: {}", result.content[0].text);
@@ -419,7 +419,7 @@ fn test_dispatch_callers_while_def_index_building() {
         }))),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "Foo"}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": ["Foo"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("being built"),
         "Expected 'being built' message, got: {}", result.content[0].text);
@@ -492,7 +492,7 @@ fn test_dispatch_fast_while_content_index_building() {
         content_ready: Arc::new(AtomicBool::new(false)),
         ..make_empty_ctx()
     };
-    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": ["foo"]}));
     assert!(!result.is_error,
         "xray_fast should not be blocked by content_ready=false, got: {}",
         result.content[0].text);

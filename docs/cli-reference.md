@@ -169,7 +169,7 @@ xray grep "HttpClient" -d C:\Projects -e cs
 - Use `--exact` to disable substring matching and search for exact tokens only
 - CLI example: `xray grep "DatabaseConn" -d C:\Projects -e cs` (substring by default)
 - CLI exact: `xray grep "DatabaseConn" -d C:\Projects -e cs --exact` (exact tokens only)
-- MCP example: `{ "terms": "DatabaseConn" }` (substring by default; use `"substring": false` for exact-token-only)
+- MCP example: `{ "terms": ["DatabaseConn"] }` (substring by default; use `"substring": false` for exact-token-only)
 
 ### Regex search (`-r, --regex`)
 

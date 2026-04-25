@@ -51,17 +51,17 @@ Total: ~2 minutes + manual analysis
 
 ```json
 // 1. Find method at line 145 (1ms)
-{"file": "OrderManager.cs", "containsLine": 145}
+{"file": ["OrderManager.cs"], "containsLine": 145}
 → ProcessOrderAsync (lines 120-160), class: OrderManager
 
 // 2. Trace callers (~3-11ms)
-{"method": "ProcessOrderAsync", "class": "OrderManager", "depth": 3}
+{"method": ["ProcessOrderAsync"], "class": "OrderManager", "depth": 3}
 → OrderController.CreateOrder (line 56)
     └── OrderManager.ProcessOrderAsync (line 145)
         └── PaymentService.ChargeAsync (line 89)
 
 // 3. Read source inline (1ms)
-{"name": "ProcessOrderAsync", "includeBody": true}
+{"name": ["ProcessOrderAsync"], "includeBody": true}
 → full method source code returned
 ───────────────────────────────────
 Total: 3 milliseconds
@@ -80,11 +80,11 @@ Total: 3 milliseconds
 
 ```json
 // Step 1: Map all classes (1ms)
-{"name": "PaymentModule", "maxResults": 50, "includeBody": false}
+{"name": ["PaymentModule"], "maxResults": 50, "includeBody": false}
 → PaymentService, IPaymentGateway, PaymentValidator, PaymentController...
 
 // Step 2: Trace call chain from API to data layer (~3-11ms)
-{"method": "ProcessPayment", "class": "PaymentService", "depth": 5, "direction": "down"}
+{"method": ["ProcessPayment"], "class": "PaymentService", "depth": 5, "direction": "down"}
 → PaymentService.ProcessPayment
     ├── PaymentValidator.ValidateRequest
     ├── PaymentGateway.ChargeAsync
@@ -97,7 +97,7 @@ Total: 3 milliseconds
 → StripeGateway, PayPalGateway, MockPaymentGateway
 
 // Step 4: Assess scale (1ms, 46 tokens)
-{"terms": "PaymentService", "countOnly": true}
+{"terms": ["PaymentService"], "countOnly": true}
 → 23 files, 47 occurrences
 ```
 
@@ -136,7 +136,7 @@ Total: ~8 minutes
 
 ```json
 // "Who else calls this?" (~3-11ms)
-{"method": "UpdateOrder", "class": "OrderService", "depth": 2}
+{"method": ["UpdateOrder"], "class": "OrderService", "depth": 2}
 → 3 callers found in call tree
 
 // "All implementations?" (1ms)
@@ -144,7 +144,7 @@ Total: ~8 minutes
 → OrderService, OrderServiceV2, MockOrderService
 
 // "Feature flag elsewhere?" (1ms)
-{"terms": "EnableNewPricing", "substring": true}
+{"terms": ["EnableNewPricing"], "substring": true}
 → 7 files, including config + code
 ───────────────────
 Total: <3 milliseconds
@@ -162,15 +162,15 @@ Total: <3 milliseconds
 ```json
 // Find all mentions including compound names (1ms)
 // e.g., DeleteOrderCacheEntry, m_orderService, IOrderService
-{"terms": "OrderService", "substring": true, "showLines": true, "contextLines": 2}
+{"terms": ["OrderService"], "substring": true, "showLines": true, "contextLines": 2}
 → 34 files, 89 occurrences (with surrounding code)
 
 // Confirm all callers (~3-11ms)
-{"method": "ProcessOrder", "class": "OrderService", "depth": 5}
+{"method": ["ProcessOrder"], "class": "OrderService", "depth": 5}
 → full caller tree
 
 // Find DI registrations (5ms)
-{"terms": "IOrderService,OrderService", "mode": "and"}
+{"terms": ["IOrderService","OrderService"], "mode": "and"}
 → 3 files where both appear together
 ```
 
@@ -184,15 +184,15 @@ Total: <3 milliseconds
 
 ```json
 // How many files? (1ms, ~46 tokens in response)
-{"terms": "FeatureX", "countOnly": true}
+{"terms": ["FeatureX"], "countOnly": true}
 → 12 files, 31 occurrences
 
 // How complex? (1ms)
-{"parent": "FeatureXManager", "kind": "method"}
+{"parent": ["FeatureXManager"], "kind": ["method"]}
 → 14 methods
 
 // How deep? (~3-11ms)
-{"method": "ExecuteFeatureX", "class": "FeatureXManager", "depth": 5}
+{"method": ["ExecuteFeatureX"], "class": "FeatureXManager", "depth": 5}
 → call tree shows 3 layers deep, touches 2 external services
 ```
 
@@ -204,19 +204,19 @@ Total: <3 milliseconds
 
 ```json
 // Read the code under test (1ms)
-{"name": "ProcessOrder", "parent": "OrderManager", "includeBody": true}
+{"name": ["ProcessOrder"], "parent": ["OrderManager"], "includeBody": true}
 → full method source returned inline
 
 // Discover all dependencies to mock (1ms)
-{"parent": "OrderManager", "kind": "field"}
+{"parent": ["OrderManager"], "kind": ["field"]}
 → IPaymentService, IOrderRepository, ILogger, IValidator
 
 // Find existing test patterns (35ms)
-{"pattern": "OrderManagerTest"}
+{"pattern": ["OrderManagerTest"]}
 → tests/OrderManagerTest.cs, tests/OrderManagerIntegrationTest.cs
 
 // Read test examples inline (1ms)
-{"file": "OrderManagerTest.cs", "kind": "method", "includeBody": true}
+{"file": ["OrderManagerTest.cs"], "kind": ["method"], "includeBody": true}
 → all test methods with source code
 ```
 
@@ -226,13 +226,13 @@ Total: <3 milliseconds
 
 ```json
 // All NuGet packages (5ms)
-{"terms": "PackageReference", "ext": "csproj", "showLines": true}
+{"terms": ["PackageReference"], "ext": ["csproj"], "showLines": true}
 
 // All feature flags in configs (3ms)
-{"terms": "FeatureFlag", "ext": "xml,config,json"}
+{"terms": ["FeatureFlag"], "ext": ["xml","config","json"]}
 
 // Who depends on my project? (5ms)
-{"terms": "MyProject", "ext": "csproj", "mode": "and"}
+{"terms": ["MyProject"], "ext": ["csproj"], "mode": "and"}
 ```
 
 ---
@@ -247,11 +247,11 @@ Total: <3 milliseconds
 → branch=main, behindMain=0, fetchAge="2 hours ago" ✓
 
 // Step 2: Find which files contain the text (~1ms)
-{"terms": "Entry not found for tenant", "phrase": true, "showLines": true}
+{"terms": ["Entry not found for tenant"], "phrase": true, "showLines": true}
 → src/Services/EntryService.cs, line 87
 
 // Step 3: Blame the exact lines to find who introduced it (~200ms)
-{"repo": ".", "file": "src/Services/EntryService.cs", "startLine": 85, "endLine": 90}
+{"repo": ".", "file": ["src/Services/EntryService.cs"], "startLine": 85, "endLine": 90}
 → line 87: commit abc123de by Alice on 2025-01-10
 
 // Step 4: See who maintains the file (< 1ms from cache)
@@ -259,7 +259,7 @@ Total: <3 milliseconds
 → Alice (42 commits), Bob (17 commits), Carol (5 commits)
 
 // Step 5: Get full commit context (~2s)
-{"repo": ".", "file": "src/Services/EntryService.cs", "from": "2025-01-09", "to": "2025-01-11"}
+{"repo": ".", "file": ["src/Services/EntryService.cs"], "from": "2025-01-09", "to": "2025-01-11"}
 → full diff showing the exact lines added
 ```
 
@@ -329,23 +329,23 @@ Using only `xray_definitions`, `xray_callers`, and `xray_grep`:
 
 ```json
 // Find controller endpoints (1ms)
-{"parent": "ApiController", "kind": "method"}
+{"parent": ["ApiController"], "kind": ["method"]}
 → 5 endpoints: PostTrigger, GetStatus, GetResult, GetModified, GetPrerequisites
 
 // Read method bodies (1ms)
-{"name": "PostTrigger", "parent": "ApiController", "includeBody": true}
+{"name": ["PostTrigger"], "parent": ["ApiController"], "includeBody": true}
 → full source: validates input → checks throttling → creates job → schedules → returns 202
 
 // Trace who calls the worker method (~3-11ms)
-{"method": "RunScanAsync", "class": "Manager", "depth": 3, "direction": "up"}
+{"method": ["RunScanAsync"], "class": "Manager", "depth": 3, "direction": "up"}
 → WorkerService.RunScanRequest → Manager.RunScanAsync
 
 // Find all related classes (1ms)
-{"name": "DomainModule", "kind": "class", "maxResults": 50}
+{"name": ["DomainModule"], "kind": ["class"], "maxResults": 50}
 → 41 classes across controller, manager, storage, contracts layers
 
 // Read interface contract (1ms)
-{"name": "IManager", "kind": "interface", "includeBody": true}
+{"name": ["IManager"], "kind": ["interface"], "includeBody": true}
 → 7 methods: PostScan, GetStatus, GetResult, GetModified, RunScan, CheckThrottle...
 
 // Trace metadata source (1ms per hop, 3 hops)

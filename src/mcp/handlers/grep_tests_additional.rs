@@ -5,7 +5,7 @@ use std::time::Instant;
 
 fn make_params_default<'a>() -> GrepSearchParams<'a> {
     GrepSearchParams {
-        ext_filter: &None,
+        ext_filter: &[],
         show_lines: false,
         context_lines: 0,
         max_results: 50,
@@ -13,7 +13,7 @@ fn make_params_default<'a>() -> GrepSearchParams<'a> {
         count_only: false,
         search_start: Instant::now(),
         dir_filter: &None,
-        file_filter: &None,
+        file_filter: &[],
         exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
         exclude_lower: vec![],
         dir_auto_converted_note: None,
@@ -32,7 +32,8 @@ fn test_auto_switch_no_special_chars_returns_none() {
     let ctx = HandlerContext::default();
     let params = make_params_default();
     let raw_terms = vec!["hello".to_string(), "world".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "hello,world", &raw_terms, &params);
+    let terms = vec!["hello".to_string(), "world".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
     assert!(result.is_none(), "Should return None when no terms contain spaces or punctuation");
 }
 
@@ -42,7 +43,8 @@ fn test_auto_switch_with_spaces_returns_some() {
     let ctx = HandlerContext::default();
     let params = make_params_default();
     let raw_terms = vec!["create procedure".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "CREATE PROCEDURE", &raw_terms, &params);
+    let terms = vec!["CREATE PROCEDURE".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
     assert!(result.is_some(), "Should return Some when terms contain spaces");
 }
 
@@ -52,7 +54,8 @@ fn test_auto_switch_with_punctuation_returns_some() {
     let ctx = HandlerContext::default();
     let params = make_params_default();
     let raw_terms = vec!["#[cfg(test)]".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "#[cfg(test)]", &raw_terms, &params);
+    let terms = vec!["#[cfg(test)]".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
     assert!(result.is_some(), "Should return Some when terms contain punctuation like #[cfg(test)]");
 }
 
@@ -62,7 +65,8 @@ fn test_auto_switch_with_angle_brackets_returns_some() {
     let ctx = HandlerContext::default();
     let params = make_params_default();
     let raw_terms = vec!["<summary>".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "<summary>", &raw_terms, &params);
+    let terms = vec!["<summary>".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
     assert!(result.is_some(), "Should return Some when terms contain angle brackets");
 }
 
@@ -72,7 +76,8 @@ fn test_auto_switch_underscore_only_returns_none() {
     let ctx = HandlerContext::default();
     let params = make_params_default();
     let raw_terms = vec!["my_variable".to_string()];
-    let result = auto_switch_to_phrase_if_needed(&ctx, &index, "my_variable", &raw_terms, &params);
+    let terms = vec!["my_variable".to_string()];
+    let result = auto_switch_to_phrase_if_needed(&ctx, &index, &terms, &raw_terms, &params);
     assert!(result.is_none(), "Should NOT auto-switch for underscores (they are valid in tokens)");
 }
 
@@ -147,7 +152,7 @@ fn test_score_token_postings_filters_applied() {
         Posting { file_id: 1, lines: vec![1] },
     ]);
 
-    let ext = Some("cs".to_string());
+    let ext = vec!["cs".to_string()];
     let params = GrepSearchParams {
         ext_filter: &ext,
         ..make_params_default()
@@ -273,21 +278,21 @@ fn test_build_substring_response_normal() {
 
 #[test]
 fn test_parse_grep_args_mode_and() {
-    let args = json!({"terms": "hello", "mode": "and", "substring": false});
+    let args = json!({"terms": ["hello"], "mode": "and", "substring": false});
     let result = parse_grep_args(&args, "C:/project").unwrap();
     assert!(result.mode_and);
 }
 
 #[test]
 fn test_parse_grep_args_count_only() {
-    let args = json!({"terms": "hello", "countOnly": true});
+    let args = json!({"terms": ["hello"], "countOnly": true});
     let result = parse_grep_args(&args, "C:/project").unwrap();
     assert!(result.count_only);
 }
 
 #[test]
 fn test_parse_grep_args_show_lines_explicit() {
-    let args = json!({"terms": "hello", "showLines": true});
+    let args = json!({"terms": ["hello"], "showLines": true});
     let result = parse_grep_args(&args, "C:/project").unwrap();
     assert!(result.show_lines);
 }
@@ -305,7 +310,7 @@ fn test_score_normal_token_search_with_ext_filter() {
         Posting { file_id: 1, lines: vec![1] },
     ]);
 
-    let ext = Some("cs".to_string());
+    let ext = vec!["cs".to_string()];
     let params = GrepSearchParams {
         ext_filter: &ext,
         ..make_params_default()
@@ -477,7 +482,7 @@ fn test_regex_with_spaces_produces_search_mode_note() {
     let ctx = HandlerContext::default();
 
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "private.*double Percentile",
+        "terms": ["private.*double Percentile"],
         "regex": true
     }));
 
@@ -504,7 +509,7 @@ fn test_regex_without_spaces_no_search_mode_note() {
     let ctx = HandlerContext::default();
 
     let result = handle_xray_grep(&ctx, &json!({
-        "terms": "I[A-Z]\\w+Cache",
+        "terms": ["I[A-Z]\\w+Cache"],
         "regex": true
     }));
 
@@ -525,7 +530,7 @@ fn test_inject_grep_ext_hint_non_indexed_ext_adds_hint() {
 
     let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
     let mut result = ToolCallResult::success(json_text.to_string());
-    let ext_filter = Some("ps1".to_string());
+    let ext_filter = vec!["ps1".to_string()];
 
     inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
 
@@ -543,7 +548,7 @@ fn test_inject_grep_ext_hint_indexed_ext_no_hint() {
 
     let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
     let mut result = ToolCallResult::success(json_text.to_string());
-    let ext_filter = Some("rs".to_string());
+    let ext_filter = vec!["rs".to_string()];
 
     inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
 
@@ -559,7 +564,7 @@ fn test_inject_grep_ext_hint_no_ext_filter_no_hint() {
 
     let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
     let mut result = ToolCallResult::success(json_text.to_string());
-    let ext_filter: Option<String> = None;
+    let ext_filter: Vec<String> = vec![];
 
     inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
 
@@ -575,7 +580,7 @@ fn test_inject_grep_ext_hint_positive_results_no_hint() {
 
     let json_text = r#"{"files":[{"path":"test.ps1"}],"summary":{"totalFiles":1,"totalOccurrences":2}}"#;
     let mut result = ToolCallResult::success(json_text.to_string());
-    let ext_filter = Some("ps1".to_string());
+    let ext_filter = vec!["ps1".to_string()];
 
     inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
 
@@ -591,7 +596,7 @@ fn test_inject_grep_ext_hint_mixed_ext_filter() {
 
     let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
     let mut result = ToolCallResult::success(json_text.to_string());
-    let ext_filter = Some("rs,ps1".to_string()); // rs is indexed, ps1 is not
+    let ext_filter = vec!["rs".to_string(), "ps1".to_string()]; // rs is indexed, ps1 is not
 
     inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
 

@@ -510,7 +510,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "service.ts") -Value "import { OrderValidator } from './validator';`n`nexport class OrderService {`n    processOrder(): void {`n        const validator = new OrderValidator();`n        validator.check();`n    }`n}"
         & $Bin content-index -d $tmpDir -e ts 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e ts 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"processOrder","class":"OrderService","direction":"down","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["processOrder"],"class":"OrderService","direction":"down","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -536,7 +536,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "pathhelper.ts") -Value "import * as path from 'path';`n`nexport class PathHelper {`n    getFullPath(): string {`n        return path.resolve('/tmp');`n    }`n}"
         & $Bin content-index -d $tmpDir -e ts 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e ts 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["resolve"],"class":"TaskRunner","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -563,7 +563,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "consumer.ts") -Value "import { DataService } from './dataservice';`n`nexport class Consumer {`n    load(): void {`n        const svc = new DataService();`n        const result = svc.fetch();`n    }`n}"
         & $Bin content-index -d $tmpDir -e ts 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e ts 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"fetch","class":"DataService","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["fetch"],"class":"DataService","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -588,7 +588,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "consumer.ts") -Value "import { TaskRunner } from `"./task-runner`";`n`nexport class Consumer {`n    processData(): void {`n        // We need to resolve the task before proceeding`n        // The resolve method handles cleanup`n        const runner = new TaskRunner();`n        runner.resolve();`n    }`n}"
         & $Bin content-index -d $tmpDir -e ts 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e ts 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"resolve","class":"TaskRunner","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["resolve"],"class":"TaskRunner","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -615,7 +615,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "Consumer.cs") -Value "namespace TestApp`n{`n    public class Consumer`n    {`n        private NameProvider _provider;`n        public string DisplayName => _provider.GetName();`n    }`n}"
         & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e cs 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"GetName","class":"NameProvider","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["GetName"],"class":"NameProvider","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -641,7 +641,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "FalseCaller.cs") -Value "namespace TestApp`n{`n    public class FalseCaller`n    {`n        public void DoWork()`n        {`n            var msg = `"We need to Process the data`";`n            System.Console.WriteLine(msg);`n        }`n    }`n}"
         & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e cs 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Process","class":"DataService","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["Process"],"class":"DataService","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -668,7 +668,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "Processor.cs") -Value "using System;`nusing System.Collections.Generic;`nnamespace TestApp`n{`n    public class Processor`n    {`n        private Validator _validator;`n        public void ProcessAll(List<string> items)`n        {`n            items.ForEach(x => _validator.Validate(x));`n        }`n    }`n}"
         & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e cs 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["Validate"],"class":"Validator","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -693,7 +693,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "Processor.cs") -Value "namespace TestApp`n{`n    public class Processor`n    {`n        private Validator _validator;`n        public void Process(int x)`n        {`n            _validator.Validate();`n        }`n        public void Process(string s)`n        {`n            _validator.Validate();`n        }`n    }`n}"
         & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e cs 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Validate","class":"Validator","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["Validate"],"class":"Validator","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -724,7 +724,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "Consumer.cs") -Value "namespace TestApp`n{`n    public class Consumer`n    {`n        private IServiceB _serviceB;`n        public void DoWork()`n        {`n            _serviceB.Execute();`n        }`n    }`n}"
         & $Bin content-index -d $tmpDir -e cs 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e cs 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"Execute","class":"ServiceA","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["Execute"],"class":"ServiceA","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -971,7 +971,7 @@ GO
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"storedProcedure"}}}'
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":["storedProcedure"]}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext sql --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
@@ -988,7 +988,7 @@ GO
         $msgs2 = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"table"}}}'
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":["table"]}}}'
         ) -join "`n"
         $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext sql --definitions 2>$null) | Out-String
         $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
@@ -1003,7 +1003,7 @@ GO
         $msgs3 = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":"view"}}}'
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"kind":["view"]}}}'
         ) -join "`n"
         $output3 = ($msgs3 | & $Bin serve --dir $tmpDir --ext sql --definitions 2>$null) | Out-String
         $jsonLine3 = $output3 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
@@ -1097,7 +1097,7 @@ export class ChildWidgetComponent {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"AppComponent"}}}'
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":["AppComponent"]}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
@@ -1123,7 +1123,7 @@ export class ChildWidgetComponent {
         $msgs2 = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"ChildWidgetComponent"}}}'
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":["ChildWidgetComponent"]}}}'
         ) -join "`n"
         $output2 = ($msgs2 | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
         $jsonLine2 = $output2 -split "`n" | Where-Object { $_ -match '"id"\s*:\s*4' } | Select-Object -Last 1
@@ -1173,7 +1173,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"NewService"}}}'
+            '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":["NewService"]}}}'
         ) -join "`n"
 
         # Use --watch so reconciliation runs; sleep 2s to allow reconciliation to complete
@@ -1613,9 +1613,9 @@ $testBlocks += , {
 
         # Query for UpdatedService3 (definition index) and NewMethod5 (content index)
         $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
-        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"UpdatedService3"}}}')
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":["UpdatedService3"]}}}')
         Start-Sleep -Milliseconds 500
-        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"NewMethod5"}}}')
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["NewMethod5"]}}}')
         Start-Sleep -Milliseconds 500
 
         $proc.StandardInput.Close()
@@ -1746,7 +1746,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "consumer.ts") -Value "import { OrderService } from './service';`n`nexport class Consumer {`n    run(): void {`n        const svc = new OrderService();`n        svc.process();`n        svc.validate();`n    }`n}"
         & $Bin content-index -d $tmpDir -e ts 2>&1 | Out-Null
         & $Bin def-index -d $tmpDir -e ts 2>&1 | Out-Null
-        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"process,validate","class":"OrderService","direction":"up","depth":1}}}') -join "`n"
+        $msgs = @('{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}','{"jsonrpc":"2.0","method":"notifications/initialized"}','{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["process","validate"],"class":"OrderService","direction":"up","depth":1}}}') -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
         & $Bin cleanup --dir $tmpDir 2>&1 | Out-Null
@@ -1862,7 +1862,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":"*","dir":"' + $srcPath + '"}}}')
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":["*"],"dir":"' + $srcPath + '"}}}')
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext cs 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -1925,7 +1925,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"fn"}}}'
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["fn"]}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2027,7 +2027,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"file":"tree/sitter/utils"}}}'
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"file":["tree/sitter/utils"]}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2056,7 +2056,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"^## ","lineRegex":true,"showLines":true}}}'
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["^## "],"lineRegex":true,"showLines":true}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext md 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2096,7 +2096,7 @@ $testBlocks += , {
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
             ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $filePath + '","edits":[{"search":"old_token","replace":"freshtoken_zzy"}]}}}'),
-            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"freshtoken_zzy"}}}'
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["freshtoken_zzy"]}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
         $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2130,7 +2130,7 @@ $testBlocks += , {
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
             ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $filePath + '","edits":[{"search":"placeholder","replace":"sync_added_fn"}]}}}'),
-            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"sync_added_fn"}}}'
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":["sync_added_fn"]}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs --definitions 2>$null) | Out-String
         $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2166,7 +2166,7 @@ $testBlocks += , {
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
             ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"paths":["' + $pathA + '","' + $pathB + '"],"edits":[{"search":"alpha_old","replace":"alpha_new_batched"}]}}}'),
-            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"alpha_new_batched"}}}'
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["alpha_new_batched"]}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
         $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2199,7 +2199,7 @@ $testBlocks += , {
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
             ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $newPath + '","operations":[{"startLine":1,"endLine":0,"content":"fn fresh_create_marker() {}"}]}}}'),
-            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":"created_via_edit"}}}'
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":["created_via_edit"]}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
         $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2353,7 +2353,7 @@ $testBlocks += , {
         Set-Content -Path (Join-Path $tmpDir "file.rs") -Value "fn after_external_marker_xyz() {}"
         Start-Sleep -Seconds 2  # Watcher debounce 500ms + reindex
         $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","method":"notifications/initialized"}')
-        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"after_external_marker_xyz"}}}')
+        $proc.StandardInput.WriteLine('{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["after_external_marker_xyz"]}}}')
         Start-Sleep -Milliseconds 800
         $proc.StandardInput.Close()
         if (-not $proc.WaitForExit(8000)) { $proc.Kill(); $proc.WaitForExit(3000) | Out-Null }
@@ -2557,7 +2557,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":"*","dir":"' + $outsidePath + '"}}}')
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_fast","arguments":{"pattern":["*"],"dir":"' + $outsidePath + '"}}}')
         ) -join "`n"
         # Serve is pinned to $Dir (the project root) — outside $outsideDir must be rejected.
         $output = ($msgs | & $Bin serve --dir $Dir --ext $Ext 2>$null) | Out-String
@@ -2660,7 +2660,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"doIt","class":"Service","direction":"up","depth":1,"maxCallersPerLevel":1}}}'
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["doIt"],"class":"Service","direction":"up","depth":1,"maxCallersPerLevel":1}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext ts --definitions 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2702,7 +2702,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"hello","isRegexp":true}}}'
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["hello"],"isRegexp":true}}}'
         ) -join "`n"
         $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
         $jsonLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
@@ -2740,7 +2740,7 @@ $testBlocks += , {
         $msgs = @(
             '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
             '{"jsonrpc":"2.0","method":"notifications/initialized"}',
-            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"hello","isRegexp":true}}}'
+            '{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["hello"],"isRegexp":true}}}'
         ) -join "`n"
         # Set env in the child process scope for this serve invocation only.
         $env:XRAY_STRICT_ARGS = '1'

@@ -57,19 +57,64 @@ pub(crate) fn try_intercept(
     search_start: Instant,
     ctx: &HandlerContext,
 ) -> Option<ToolCallResult> {
-    // Only activate if file filter is set with XML extension
-    let file_filter = args.file_filter.as_ref()?;
-    let ext = extract_file_extension(file_filter)?;
-    if !is_xml_extension(&ext) {
+    // Activation gate. The XML on-demand path opens, parses, and reports
+    // against ONE file, so it only fires when ALL three conditions hold:
+    //   1. `file` was passed (non-empty array).
+    //   2. At least one entry has an XML-family extension. Pure non-XML
+    //      requests (`file=[A.cs,B.cs]`) fall through to the index path so
+    //      its existing hint logic can handle them.
+    //   3. The query shape is one this path can answer: `name` or
+    //      `containsLine`. Otherwise (`file` only, no name, no line) we
+    //      fall through to the index path so its Hint E ("XML extension
+    //      not indexed; use containsLine or name") can fire.
+    //
+    // Only AFTER all three gates pass do we enforce the single-file
+    // contract. Rejecting earlier (e.g. on `len > 1` alone) used to
+    // preempt the index-path Hint E for `file=[A.xml,B.xml]` requests
+    // that had no name/containsLine — see `BREAKING follow-up
+    // (file_filter_raw multi-file reject — 2026-04-25)` and the review
+    // findings that surfaced the regression.
+    //
+    // `file_filter_raw` is the un-normalized array straight from the
+    // request (no lowercasing, no `\` → `/`). Critical for the
+    // single-file branch below: case-sensitive filesystems reject
+    // lowercased paths, so we cannot reuse `file_filter_terms`.
+    if args.file_filter_raw.is_empty() {
         return None;
     }
-
-    // Only handle containsLine or name filter queries — other shapes fall
-    // through to the index-based path (which will usually return "no such
-    // extension indexed" with a hint).
+    let xml_indices: Vec<usize> = args.file_filter_raw.iter()
+        .enumerate()
+        .filter(|(_, f)| extract_file_extension(f)
+            .map(|ext| is_xml_extension(&ext))
+            .unwrap_or(false))
+        .map(|(i, _)| i)
+        .collect();
+    if xml_indices.is_empty() {
+        return None;
+    }
     if args.contains_line.is_none() && args.name_filter.is_none() {
         return None;
     }
+    if args.file_filter_raw.len() > 1 {
+        // Multi-file XML on-demand is unsupported. Build a hint that
+        // suggests the FIRST XML-looking entry — better than `[0]` which
+        // could be a non-XML file in mixed-ext arrays
+        // (`file=[A.cs,B.xml]` → suggest B.xml, not A.cs).
+        let suggestion = &args.file_filter_raw[xml_indices[0]];
+        return Some(ToolCallResult::error(format!(
+            "XML on-demand requires a single file path, but `file` has {} entries: {:?}. \
+             Run xray_definitions once per file (suggested first call: file=[\"{}\"]). \
+             XML on-demand opens and parses one file at a time; multi-file \
+             batching is not supported.",
+            args.file_filter_raw.len(),
+            args.file_filter_raw,
+            suggestion,
+        )));
+    }
+    let file_filter = &args.file_filter_raw[0];
+    // Sole entry in a 1-element array: must be XML to reach here, since
+    // `xml_indices` was non-empty and len == 1 implies index 0 is XML.
+    let _ext = extract_file_extension(file_filter)?;
 
     // Resolve file path (sandboxed to workspace, MAJOR-1/MAJOR-2 in review)
     let file_path = match resolve_xml_file_path(file_filter, ctx) {

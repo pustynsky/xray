@@ -62,7 +62,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `xray_grep`                | Search content index with TF-IDF ranking, regex, phrase, AND/OR                                                                         |
 | `xray_definitions`         | Search code definitions (classes, methods, interfaces, etc.). Supports C#, TypeScript/TSX, Rust (tree-sitter) and SQL (regex). `containsLine`, `includeBody`, `audit`. Relevance-ranked when name filter is active. Requires `--definitions` |
 | `xray_callers`             | Find callers / callees and build recursive call tree. Supports C#, TypeScript/TSX, and SQL (EXEC call chains). Requires `--definitions`  |
-| `xray_fast`                | Search pre-built file name index (instant). Supports comma-separated OR patterns. Results ranked: exact stem → prefix → contains        |
+| `xray_fast`                | Search pre-built file name index (instant). `pattern` is an array of strings (multi-pattern OR). Results ranked: exact stem → prefix → contains        |
 | `xray_info`                | Show all indexes with status, sizes, age                                                                                                |
 | `xray_reindex`             | Force rebuild + reload content index                                                                                                    |
 | `xray_reindex_definitions` | Force rebuild + reload definition index. Requires `--definitions`                                                                       |
@@ -170,7 +170,7 @@ warning-only so existing scripts don't break.
 ## `xray_grep` multi-term auto-balance
 
 Multi-term substring-OR queries (e.g.
-`terms='TODO, clearTimeout, localStorage'`) auto-balance when ONE term
+`terms=["TODO","clearTimeout","localStorage"]`) auto-balance when ONE term
 contributes ≥10× more total occurrences than the rarest matched term.
 Dominant-only files beyond an auto-derived cap (`min(100, max(20, 2 *
 second_max))`) are dropped so rare-term matches stay visible. Files matching
@@ -196,13 +196,13 @@ Substring search is **on by default** in MCP mode — compound identifiers like 
 
 | Parameter      | Type    | Default | Description                                                                                          |
 | -------------- | ------- | ------- | ---------------------------------------------------------------------------------------------------- |
-| `terms`        | string  | —       | Search terms (required). Comma-separated for multi-term OR/AND                                       |
+| `terms`        | array&lt;string&gt;  | — | Search terms (required). Multi-element array for multi-term OR/AND. **BREAKING 2026-04-25:** comma-separated string form is hard-rejected — pass `["foo", "bar"]` instead of `"foo,bar"` |
 | `dir`          | string  | server's `--dir` | Directory to search. If a **file path** is passed by mistake, it is auto-converted to its parent directory + `file` filter, and `summary.dirAutoConverted` is populated with a hint (no error) |
-| `file`         | string  | —       | Restrict results to files whose path or basename contains this substring (case-insensitive). Comma-separated for multi-term OR (e.g., `"Service,Client"`). Combines with `dir`/`ext`/`excludeDir` via AND. Prefer this over passing a file path in `dir` |
-| `ext`          | string  | all indexed | File extension filter, comma-separated                                                           |
+| `file`         | array&lt;string&gt;  | — | Restrict results to files whose path or basename contains any of these substrings (case-insensitive). Multi-element array for OR (e.g., `["Service", "Client"]`). Combines with `dir`/`ext`/`excludeDir` via AND. Prefer this over passing a file path in `dir`. **BREAKING 2026-04-25:** array required |
+| `ext`          | array&lt;string&gt;  | all indexed | File extension filter (e.g., `["rs", "toml"]`). **BREAKING 2026-04-25:** array required |
 | `mode`         | string  | `"or"` | Multi-term mode: `"or"` = ANY term, `"and"` = ALL terms (CLI: `--all`)                               |
 | `regex`        | boolean | false   | Treat terms as regex pattern                                                                         |
-| `phrase`       | boolean | false   | Literal string match on raw file content -- works with XML tags, angle brackets, slashes, no escaping needed. Example: `terms='<MaxRetries>3</MaxRetries>', phrase=true`. Comma-separated phrases are searched independently with OR/AND semantics |
+| `phrase`       | boolean | false   | Literal string match on raw file content -- works with XML tags, angle brackets, slashes, no escaping needed. Example: `terms=['<MaxRetries>3</MaxRetries>'], phrase=true`. Multi-element `terms` arrays are searched independently with OR/AND semantics |
 | `lineRegex`    | boolean | false   | Line-anchored regex search. Auto-enables `regex=true` and disables `substring`. Unlike default regex (which matches against tokenized index entries — alphanumeric+underscore only), `lineRegex` applies the pattern to each line of file content with `multi_line=true`, so `^` and `$` anchor to line boundaries and patterns may contain spaces, punctuation, brackets, etc. Required for: markdown headings (`^## `), C# attributes (`^\s*\[Test\]`), Rust function signatures (`^pub fn`), end-of-line braces (`\}$`). Whitespace inside patterns is **significant** — patterns are NOT trimmed (`'^## '` ≠ `'^##'`). ALWAYS narrow scope via `ext`/`dir`/`file` filters; otherwise every indexed file is read from disk. Mutually exclusive with `phrase=true`. |
 | `substring`    | boolean | true    | Match within tokens (finds `IUserService` when searching `UserService`). Auto-disabled for regex/phrase. (CLI: `--exact` to disable) |
 | `showLines`    | boolean | false   | Include matching source lines in results (CLI: `--show-lines`)                                       |
@@ -216,7 +216,7 @@ Substring search is **on by default** in MCP mode — compound identifiers like 
 
 ```json
 // Request
-{ "terms": "HttpClient", "maxResults": 3, "ext": "cs" }
+{ "terms": ["HttpClient"], "maxResults": 3, "ext": ["cs"] }
 
 // Response
 {
@@ -291,7 +291,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 ```json
 // Find all callers of ExecuteQueryAsync, 5 levels deep, excluding tests
 {
-  "method": "ExecuteQueryAsync",
+  "method": ["ExecuteQueryAsync"],
   "direction": "up",
   "depth": 5,
   "excludeDir": ["\\test\\", "\\Mock\\"]
@@ -326,7 +326,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 
 | Parameter            | Description                                                                                                                                         |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `method` (required)  | Method name to trace. Comma-separated for multi-method batch (e.g., `"Foo,Bar,Baz"`). Each method gets an independent call tree. Single method returns `{callTree}`, multiple returns `{results: [{method, callTree, nodesInTree}, ...]}` |
+| `method` (required)  | Method name to trace, as an array of strings. Multi-element array for multi-method batch (e.g., `["Foo", "Bar", "Baz"]`). Each method gets an independent call tree. Single-element array returns `{callTree}`, multi-element returns `{results: [{method, callTree, nodesInTree}, ...]}`. **BREAKING 2026-04-25:** array required — comma-separated string is hard-rejected |
 | `class`              | Scope to a specific class. DI-aware: `class: "UserService"` also finds callers using `IUserService`. Works for both `"up"` and `"down"` directions. |
 | `direction`          | `"up"` = find callers (default), `"down"` = find callees                                                                                            |
 | `depth`              | Max recursion depth (default: 3, max: 10)                                                                                                           |
@@ -335,7 +335,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `excludeDir`         | Directory substrings to exclude, e.g. `["\\test\\", "\\Mock\\"]`                                                                                    |
 | `excludeFile`        | File path substrings to exclude                                                                                                                     |
 | `resolveInterfaces`  | Auto-resolve interface → implementation (default: true)                                                                                             |
-| `ext`                | File extension filter (default: server's `--ext`)                                                                                                   |
+| `ext`                | array&lt;string&gt; — file extension filter (default: server's `--ext`). **BREAKING 2026-04-25:** array required                                                                                                   |
 | `includeBody`        | Include source code body of each method in the call tree (default: false). Also adds `rootMethod` with the target method's body                     |
 | `includeDocComments` | Expand body upward to include doc-comments above definitions. Implies `includeBody=true`. Adds `docCommentLines` field (default: false)             |
 | `maxBodyLines`       | Max source lines per method when `includeBody=true` (default: 30, 0=unlimited)                                                                      |
@@ -349,7 +349,7 @@ Find which tests cover a method — one call replaces manual multi-step investig
 ```json
 // Request
 {
-  "method": "SaveOrder",
+  "method": ["SaveOrder"],
   "class": "OrderService",
   "direction": "up",
   "depth": 5,
@@ -442,7 +442,7 @@ Query multiple methods in a single call to reduce MCP round trips. Each method g
 ```json
 // Request: trace callers of 3 methods at once
 {
-  "method": "GetUser,SaveOrder,ValidateInput",
+  "method": ["GetUser", "SaveOrder", "ValidateInput"],
   "class": "OrderService",
   "direction": "up",
   "depth": 2
@@ -506,13 +506,13 @@ Results are **relevance-ranked** when a `name` filter is active (non-regex): exa
 
 | Parameter           | Type    | Default | Description                                                                              |
 | ------------------- | ------- | ------- | ---------------------------------------------------------------------------------------- |
-| `name`              | string  | —       | Substring or comma-separated OR search                                                   |
-| `kind`              | string  | —       | Filter by definition kind. Comma-separated for multi-kind OR (e.g., `class,interface,enum`). Valid: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember, function, typeAlias, variable, storedProcedure, table, view, sqlFunction, userDefinedType, column, sqlIndex |
+| `name`              | array&lt;string&gt;  | —       | Substring or multi-element array OR search (e.g., `["AppComponent"]` or `["Foo", "Bar"]`). **BREAKING 2026-04-25:** array required |
+| `kind`              | array&lt;string&gt;  | —       | Filter by definition kind. Multi-element array for multi-kind OR (e.g., `["class", "interface", "enum"]`). Valid: class, interface, method, property, field, enum, struct, record, constructor, delegate, event, enumMember, function, typeAlias, variable, storedProcedure, table, view, sqlFunction, userDefinedType, column, sqlIndex, xmlElement. **BREAKING 2026-04-25:** array required |
 | `attribute`         | string  | —       | Filter by C# attribute or TypeScript decorator                                           |
 | `baseType`          | string  | —       | Filter by base type/interface (substring match — `IAccessTable` finds `IAccessTable<Model>`, etc.) |
 | `baseTypeTransitive`| boolean | false   | With `baseType`, traverses inheritance chain transitively (BFS, max depth 10). Finds classes that inherit from classes that inherit from the specified baseType |
-| `file`              | string  | —       | Filter by file path substring. Comma-separated for multi-term OR                         |
-| `parent`            | string  | —       | Filter by parent class name                                                              |
+| `file`              | array&lt;string&gt;  | —       | Filter by file path substring. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
+| `parent`            | array&lt;string&gt;  | —       | Filter by parent class name. Multi-element array for OR. **BREAKING 2026-04-25:** array required |
 | `containsLine`      | integer | —       | Find definition containing a line number (requires `file`). With `includeBody=true`, body is emitted only for innermost definition; parents get `bodyOmitted` |
 | `regex`             | boolean | false   | Treat `name` as regex                                                                    |
 | `maxResults`        | integer | 100     | Max results returned                                                                     |
@@ -541,7 +541,7 @@ With `includeBody=true`, body is emitted **only for the innermost (most specific
 
 ```json
 // Request
-{ "file": "QueryService.cs", "containsLine": 812 }
+{ "file": ["QueryService.cs"], "containsLine": 812 }
 
 // Response: definitions containing that line, sorted by specificity (innermost first)
 {
@@ -556,7 +556,7 @@ With `includeBody=true`:
 
 ```json
 // Request
-{ "file": "QueryService.cs", "containsLine": 812, "includeBody": true }
+{ "file": ["QueryService.cs"], "containsLine": 812, "includeBody": true }
 
 // Response: innermost gets body, parent gets bodyOmitted
 {
@@ -599,7 +599,7 @@ When body is truncated, the summary includes `totalBodyLinesAvailable` — the t
   "params": {
     "name": "xray_definitions",
     "arguments": {
-      "name": "GetProductEntriesAsync",
+      "name": ["GetProductEntriesAsync"],
       "includeBody": true,
       "maxBodyLines": 10
     }
@@ -760,7 +760,7 @@ If auto-correction produces 0 results, it falls through to the regular hint syst
 When a multi-name query with a `kind` filter returns results but some terms are silently dropped due to kind mismatch, the response `summary` includes a `missingTerms` array:
 
 ```json
-// Request: name="UserService,GetUser" kind="class"
+// Request: name=["UserService","GetUser"] kind=["class"]
 // UserService is a class (found), GetUser is a method (filtered out by kind)
 {
   "definitions": [
@@ -777,7 +777,7 @@ When a multi-name query with a `kind` filter returns results but some terms are 
 ```
 
 `missingTerms` is only generated when:
-- Multi-name query (2+ comma-separated terms)
+- Multi-name query (2+ array elements)
 - `kind` filter is active
 - At least one term has results (total > 0)
 - At least one term is missing from results
@@ -792,7 +792,7 @@ When `xray_definitions` finds more results than `maxResults` and **no `name` fil
 
 ```json
 // Request: explore a large service directory
-{ "file": "Services/" }
+{ "file": ["Services/"] }
 
 // Response: directory-grouped summary (instead of truncated entries)
 {
@@ -895,7 +895,7 @@ When `xray_definitions` finds more results than `maxResults` and **no `name` fil
 
 ```jsonc
 // Request
-{ "file": "App.config", "containsLine": 17 }
+{ "file": ["App.config"], "containsLine": 17 }
 
 // Response (trimmed)
 {
@@ -916,7 +916,7 @@ When `xray_definitions` finds more results than `maxResults` and **no `name` fil
 
 ```jsonc
 // Request
-{ "file": "MyApp.csproj", "name": "net8.0" }
+{ "file": ["MyApp.csproj"], "name": ["net8.0"] }
 
 // Response
 {
@@ -948,13 +948,13 @@ When `xray_definitions` finds more results than `maxResults` and **no `name` fil
 
 ## `xray_fast` — File Name Search
 
-Search pre-built file name index for instant file lookup (~35ms vs ~3s for live filesystem walk). Auto-builds index if not present. Supports comma-separated patterns for multi-file lookup (OR logic). Supports `pattern='*'` or empty pattern with `dir` for wildcard listing (all files/directories). Results are relevance-ranked: exact stem match → prefix match → contains match (ranking skipped for wildcard).
+Search pre-built file name index for instant file lookup (~35ms vs ~3s for live filesystem walk). Auto-builds index if not present. `pattern` is an array of strings (multi-pattern OR). Use `["*"]` or `[]` with `dir` for wildcard listing (all files/directories). Results are relevance-ranked: exact stem match → prefix match → contains match (ranking skipped for wildcard).
 
 ### Parameters
 
 | Parameter   | Type    | Default          | Description                                                  |
 | ----------- | ------- | ---------------- | ------------------------------------------------------------ |
-| `pattern`   | string  | —                | File name pattern (required). Comma-separated for multi-term OR. Use `'*'` to list all entries. Empty string with `dir` also lists all |
+| `pattern`   | array&lt;string&gt; | —                | File name pattern (required). Multi-element array for OR. Use `["*"]` or `[]` to list all entries. **BREAKING 2026-04-25:** array required |
 | `dir`       | string  | server's `--dir` | Directory to search                                          |
 | `ext`       | string  | —                | Filter by extension                                          |
 | `regex`     | boolean | false            | Treat as regex                                               |
@@ -967,7 +967,7 @@ Search pre-built file name index for instant file lookup (~35ms vs ~3s for live 
 
 ```json
 // Request
-{ "pattern": "UserService", "ext": "cs" }
+{ "pattern": ["UserService"], "ext": ["cs"] }
 
 // Response
 {
@@ -1067,7 +1067,7 @@ Force rebuild the content index and reload it into the server's in-memory cache.
 | Parameter | Type   | Default          | Description                       |
 | --------- | ------ | ---------------- | --------------------------------- |
 | `dir`     | string | server's `--dir` | Directory to reindex              |
-| `ext`     | string | server's `--ext` | File extensions (comma-separated) |
+| `ext`     | array&lt;string&gt; | server's `--ext` | File extensions (e.g., `["rs", "toml"]`). **BREAKING 2026-04-25:** array required |
 
 ### Response
 
@@ -1091,7 +1091,7 @@ Force rebuild the AST definition index (tree-sitter) and reload it into the serv
 | Parameter | Type   | Default          | Description                              |
 | --------- | ------ | ---------------- | ---------------------------------------- |
 | `dir`     | string | server's `--dir` | Directory to reindex                     |
-| `ext`     | string | server's `--ext` | File extensions to parse, comma-separated |
+| `ext`     | array&lt;string&gt; | server's `--ext` | File extensions to parse (e.g., `["rs"]`). **BREAKING 2026-04-25:** array required |
 
 ### Response
 
@@ -1479,9 +1479,9 @@ xray serve --dir . --ext rs --definitions
 {"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}
 {"jsonrpc":"2.0","method":"notifications/initialized"}
 {"jsonrpc":"2.0","id":2,"method":"tools/list"}
-{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":"tokenize"}}}
-{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":"ExecuteQueryAsync","depth":3}}}
-{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"file":"QueryService.cs","containsLine":812}}}
-{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":"GetProductEntriesAsync","includeBody":true,"maxBodyLines":10}}}
+{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["tokenize"]}}}
+{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"xray_callers","arguments":{"method":["ExecuteQueryAsync"],"depth":3}}}
+{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"file":["QueryService.cs"],"containsLine":812}}}
+{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_definitions","arguments":{"name":["GetProductEntriesAsync"],"includeBody":true,"maxBodyLines":10}}}
 {"jsonrpc":"2.0","id":7,"method":"tools/call","params":{"name":"xray_git_history","arguments":{"repo":".","file":"Cargo.toml","maxResults":5}}}
 ```

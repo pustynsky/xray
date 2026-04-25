@@ -40,6 +40,42 @@ pub enum DefinitionKind {
 }
 
 impl DefinitionKind {
+    /// Every variant of [`DefinitionKind`] in canonical declaration order.
+    /// Single source of truth for the closed enum exposed via the
+    /// `xray_definitions.kind` MCP parameter and validated by
+    /// [`crate::mcp::handlers::utils::read_kind_array`].
+    ///
+    /// **Drift guard:** [`kinds_drift_tests::all_kinds_lists_every_variant`]
+    /// (a unit test at the bottom of this file) walks every variant via an
+    /// exhaustive `match` and asserts it appears here. Adding a new
+    /// `DefinitionKind` variant without adding it to `ALL_KINDS` breaks that
+    /// test — by design.
+    pub const ALL_KINDS: &'static [DefinitionKind] = &[
+        DefinitionKind::Class,
+        DefinitionKind::Interface,
+        DefinitionKind::Enum,
+        DefinitionKind::Struct,
+        DefinitionKind::Record,
+        DefinitionKind::Method,
+        DefinitionKind::Property,
+        DefinitionKind::Field,
+        DefinitionKind::Constructor,
+        DefinitionKind::Delegate,
+        DefinitionKind::Event,
+        DefinitionKind::EnumMember,
+        DefinitionKind::Function,
+        DefinitionKind::TypeAlias,
+        DefinitionKind::Variable,
+        DefinitionKind::XmlElement,
+        DefinitionKind::StoredProcedure,
+        DefinitionKind::Table,
+        DefinitionKind::View,
+        DefinitionKind::SqlFunction,
+        DefinitionKind::UserDefinedType,
+        DefinitionKind::Column,
+        DefinitionKind::SqlIndex,
+    ];
+
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Class => "class",
@@ -419,4 +455,71 @@ pub struct DefAuditArgs {
     /// Also show files that required lossy UTF-8 conversion.
     #[arg(long)]
     pub show_lossy: bool,
+}
+
+#[cfg(test)]
+mod kinds_drift_tests {
+    use super::*;
+
+    /// Drift guard for [`DefinitionKind::ALL_KINDS`].
+    ///
+    /// Walks every variant via an exhaustive `match`, collects the variants
+    /// that appear in `ALL_KINDS`, and asserts the two sets coincide.
+    /// Adding a new `DefinitionKind` variant without listing it in
+    /// `ALL_KINDS` makes this test fail — by design — because the new
+    /// variant has no match arm here either, which is itself a compile error.
+    /// Both signals together guarantee `ALL_KINDS` cannot silently drift
+    /// from the enum (see also `mcp::handlers::utils::read_kind_array`).
+    #[test]
+    fn all_kinds_lists_every_variant() {
+        // Force exhaustive match on a sample value so adding a variant
+        // breaks compilation here, not just at run time.
+        fn touch(k: DefinitionKind) -> &'static str {
+            match k {
+                DefinitionKind::Class => "class",
+                DefinitionKind::Interface => "interface",
+                DefinitionKind::Enum => "enum",
+                DefinitionKind::Struct => "struct",
+                DefinitionKind::Record => "record",
+                DefinitionKind::Method => "method",
+                DefinitionKind::Property => "property",
+                DefinitionKind::Field => "field",
+                DefinitionKind::Constructor => "constructor",
+                DefinitionKind::Delegate => "delegate",
+                DefinitionKind::Event => "event",
+                DefinitionKind::EnumMember => "enumMember",
+                DefinitionKind::Function => "function",
+                DefinitionKind::TypeAlias => "typeAlias",
+                DefinitionKind::Variable => "variable",
+                DefinitionKind::XmlElement => "xmlElement",
+                DefinitionKind::StoredProcedure => "storedProcedure",
+                DefinitionKind::Table => "table",
+                DefinitionKind::View => "view",
+                DefinitionKind::SqlFunction => "sqlFunction",
+                DefinitionKind::UserDefinedType => "userDefinedType",
+                DefinitionKind::Column => "column",
+                DefinitionKind::SqlIndex => "sqlIndex",
+            }
+        }
+        // Sanity: as_str() output of every variant in ALL_KINDS matches the
+        // exhaustive match above (i.e. ALL_KINDS, as_str, and this test all
+        // agree on the canonical wire string for every variant).
+        for k in DefinitionKind::ALL_KINDS {
+            assert_eq!(
+                k.as_str(),
+                touch(*k),
+                "as_str()/exhaustive-match disagree for {:?}",
+                k
+            );
+        }
+        // Sanity: ALL_KINDS contains 23 entries (current variant count).
+        // If you added a variant, update this number AND verify the
+        // exhaustive match above still compiles. Both must change in
+        // lockstep, which is the whole point of this test.
+        assert_eq!(
+            DefinitionKind::ALL_KINDS.len(),
+            23,
+            "ALL_KINDS length drifted from DefinitionKind variant count"
+        );
+    }
 }

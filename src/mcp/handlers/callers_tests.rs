@@ -1540,7 +1540,7 @@ fn test_xray_callers_hint_when_empty_with_class_filter() {
 
     // Search for callers of a method with a class filter that yields 0 results
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process",
+        "method": ["process"],
         "class": "NonExistentClass",
         "depth": 1
     }));
@@ -1580,7 +1580,7 @@ fn test_xray_callers_no_hint_without_class_filter() {
 
     // Search without class filter — no hint expected
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "nonexistentmethod",
+        "method": ["nonexistentmethod"],
         "depth": 1
     }));
     assert!(!result.is_error);
@@ -1646,7 +1646,7 @@ fn test_xray_callers_no_hint_when_results_found() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process",
+        "method": ["process"],
         "class": "OrderService",
         "depth": 1
     }));
@@ -2411,7 +2411,7 @@ fn test_impact_analysis_rejects_direction_down() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process",
+        "method": ["process"],
         "direction": "down",
         "impactAnalysis": true
     }));
@@ -2437,7 +2437,7 @@ fn test_impact_analysis_false_no_tests_covering() {
 
     // Without impactAnalysis, response should NOT have testsCovering
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process",
+        "method": ["process"],
         "depth": 1
     }));
     assert!(!result.is_error);
@@ -2728,7 +2728,7 @@ fn test_multi_method_returns_results_array() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process,validate",
+        "method": ["process","validate"],
         "depth": 1
     }));
     assert!(!result.is_error, "Multi-method should not error: {:?}", result.content[0].text);
@@ -2769,7 +2769,7 @@ fn test_single_method_no_comma_returns_calltree_directly() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process",
+        "method": ["process"],
         "depth": 1
     }));
     assert!(!result.is_error);
@@ -2784,8 +2784,11 @@ fn test_single_method_no_comma_returns_calltree_directly() {
 }
 
 #[test]
-fn test_multi_method_with_spaces_trimmed() {
-    // Spaces around method names should be trimmed
+fn test_multi_method_array_form_each_entry_is_one_method() {
+    // 2026-04-25 list-params migration: `method` is now array<string>; each entry
+    // is one method (no inner comma-split). Replaces the legacy
+    // `" process , validate "` whitespace-trimming-around-comma test — array form
+    // has no separator. Per-entry .trim() is still applied by the parser.
     let definitions = vec![
         class_def(0, "OrderService", vec![]),
         method_def(0, "process", "OrderService", 5, 15),
@@ -2801,7 +2804,7 @@ fn test_multi_method_with_spaces_trimmed() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": " process , validate ",
+        "method": ["  process  ","  validate  "],
         "depth": 1
     }));
     assert!(!result.is_error);
@@ -2813,8 +2816,10 @@ fn test_multi_method_with_spaces_trimmed() {
 }
 
 #[test]
-fn test_multi_method_empty_after_split_returns_error() {
-    // Edge case: only commas and spaces
+fn test_multi_method_empty_array_returns_error() {
+    // 2026-04-25 list-params migration: empty array (or array of
+    // whitespace-only entries, filtered by read_string_array) → error.
+    // Replaces the legacy "comma-only string" edge case.
     let definitions = vec![
         class_def(0, "OrderService", vec![]),
     ];
@@ -2827,11 +2832,19 @@ fn test_multi_method_empty_after_split_returns_error() {
         ..Default::default()
     };
 
+    // Empty array → error.
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": " , , ",
+        "method": [],
         "depth": 1
     }));
-    assert!(result.is_error, "Empty method list should return error");
+    assert!(result.is_error, "Empty method array should return error");
+
+    // Array of whitespace-only entries → also error (filtered to empty).
+    let result_ws = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["   ", "\t"],
+        "depth": 1
+    }));
+    assert!(result_ws.is_error, "Whitespace-only entries should return error");
 }
 
 #[test]
@@ -2853,7 +2866,7 @@ fn test_multi_method_each_gets_independent_nodes() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process,validate,save",
+        "method": ["process","validate","save"],
         "depth": 1
     }));
     assert!(!result.is_error);
@@ -2885,7 +2898,7 @@ fn test_multi_method_with_class_filter() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process,validate",
+        "method": ["process","validate"],
         "class": "OrderService",
         "depth": 1
     }));
@@ -2912,7 +2925,7 @@ fn test_multi_method_direction_down() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process,validate",
+        "method": ["process","validate"],
         "direction": "down",
         "depth": 1
     }));
@@ -2987,7 +3000,7 @@ fn test_include_grep_references_finds_extra_files() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "ProcessOrder",
+        "method": ["ProcessOrder"],
         "class": "OrderService",
         "depth": 1,
         "includeGrepReferences": true
@@ -3064,7 +3077,7 @@ fn test_grep_references_excludes_definition_file() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "ProcessOrder",
+        "method": ["ProcessOrder"],
         "class": "OrderService",
         "depth": 1,
         "includeGrepReferences": true
@@ -3105,7 +3118,7 @@ fn test_include_grep_references_default_off() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "ProcessOrder",
+        "method": ["ProcessOrder"],
         "depth": 1
     }));
     assert!(!result.is_error);
@@ -3136,7 +3149,7 @@ fn test_callers_hint_nearest_method_name() {
 
     // Typo: "ProcessOrdr" instead of "ProcessOrder"
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "ProcessOrdr",
+        "method": ["ProcessOrdr"],
         "depth": 1
     }));
     assert!(!result.is_error);
@@ -3166,7 +3179,7 @@ fn test_callers_hint_nearest_class_name() {
 
     // Typo: "OrderServise" instead of "OrderService"
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "ProcessOrder",
+        "method": ["ProcessOrder"],
         "class": "OrderServise",
         "depth": 1
     }));
@@ -3233,7 +3246,7 @@ fn test_callers_hint_not_shown_when_results_exist() {
     };
 
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process",
+        "method": ["process"],
         "class": "OrderService",
         "depth": 1
     }));
@@ -3485,7 +3498,7 @@ fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
 
     let ctx = make_ctx_with_idx(def_idx);
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "UpsertMappingAsync",
+        "method": ["UpsertMappingAsync"],
         "class": "DatabaseClient",
         "depth": 1
     }));
@@ -3513,7 +3526,7 @@ fn test_advisory_interface_vias_absent_when_class_has_no_interface() {
     let def_idx = make_def_index(definitions, HashMap::new());
     let ctx = make_ctx_with_idx(def_idx);
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "DoWork",
+        "method": ["DoWork"],
         "class": "PlainClass",
         "depth": 1
     }));
@@ -3633,7 +3646,7 @@ fn test_advisory_low_count_emitted_for_few_callers() {
         ..Default::default()
     };
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process",
+        "method": ["process"],
         "class": "OrderService",
         "depth": 1
     }));
@@ -3777,7 +3790,7 @@ fn test_advisory_low_count_suppressed_when_truncated() {
     // summary has perLevelTruncated=true. Advisory must be absent.
     let ctx = build_callers_fixture_with_n_callers(5);
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process",
+        "method": ["process"],
         "class": "OrderService",
         "depth": 1,
         "maxCallersPerLevel": 2
@@ -3808,7 +3821,7 @@ fn test_advisory_low_count_emitted_in_multi_method_batch() {
     // path drift — same fixture, batched query.
     let ctx = build_callers_fixture_with_n_callers(2);
     let result = handle_xray_callers(&ctx, &serde_json::json!({
-        "method": "process,run0", // comma → batch path
+        "method": ["process","run0"], // batch path
         "depth": 1
     }));
     assert!(!result.is_error, "batch handler should not error: {:?}", result.content[0].text);

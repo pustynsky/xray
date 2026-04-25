@@ -16,7 +16,7 @@ use std::sync::{Arc, RwLock};
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["policyReminder"].as_str().is_some());
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
@@ -29,7 +29,7 @@ use std::sync::{Arc, RwLock};
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["policyReminder"].as_str().is_some());
     assert!(output["summary"]["nextStepHint"].as_str().is_some());
@@ -46,7 +46,7 @@ fn test_metrics_preserves_handler_search_time() {
     idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["C:\\test\\Program.cs".to_string()], index: idx, total_tokens: 100, extensions: vec!["cs".to_string()], file_token_counts: vec![50], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "HttpClient"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["HttpClient"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     // searchTimeMs should be present (set by handler)
     let search_time = output["summary"]["searchTimeMs"].as_f64().unwrap();
@@ -136,7 +136,7 @@ fn test_xray_reindex_definitions_has_policy_but_no_next_step_hint() {
     idx.insert("foo".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
     let index = ContentIndex { root: ".".to_string(), files: vec!["test.cs".to_string()], index: idx, total_tokens: 10, extensions: vec!["cs".to_string()], file_token_counts: vec![10], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "foo"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["foo"]}));
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"]["searchTimeMs"].as_f64().unwrap() >= 0.0);
 }
@@ -158,7 +158,7 @@ fn test_xray_reindex_definitions_has_policy_but_no_next_step_hint() {
 fn test_xray_definitions_nonexistent_name_returns_empty() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "CompletelyNonExistentDefinitionXYZ123"
+        "name": ["CompletelyNonExistentDefinitionXYZ123"]
     }));
     assert!(!result.is_error, "Non-existent name should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -173,7 +173,7 @@ fn test_xray_definitions_nonexistent_name_returns_empty() {
 fn test_xray_definitions_invalid_regex_error() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "[invalid",
+        "name": ["[invalid"],
         "regex": true
     }));
     assert!(result.is_error, "Invalid regex should produce an error");
@@ -243,14 +243,14 @@ fn test_xray_definitions_file_filter_slash_normalization() {
     };
 
     let result_backslash = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "Models\\User"
+        "file": ["Models\\User"]
     }));
     assert!(!result_backslash.is_error);
     let output_bs: Value = serde_json::from_str(&result_backslash.content[0].text).unwrap();
     let defs_bs = output_bs["definitions"].as_array().unwrap();
 
     let result_fwdslash = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "Models/User"
+        "file": ["Models/User"]
     }));
     assert!(!result_fwdslash.is_error);
     let output_fs: Value = serde_json::from_str(&result_fwdslash.content[0].text).unwrap();
@@ -269,7 +269,7 @@ fn test_xray_definitions_file_filter_slash_normalization() {
     }
 
     let result_fragment = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "User"
+        "file": ["User"]
     }));
     assert!(!result_fragment.is_error);
     let output_frag: Value = serde_json::from_str(&result_fragment.content[0].text).unwrap();
@@ -609,7 +609,7 @@ fn make_ranking_defs_ctx() -> HandlerContext {
 fn test_xray_definitions_ranking_exact_first() {
     let ctx = make_ranking_defs_ctx();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "UserService"
+        "name": ["UserService"]
     }));
     assert!(!result.is_error, "xray_definitions should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -629,7 +629,7 @@ fn test_xray_definitions_ranking_exact_first() {
 fn test_xray_definitions_ranking_prefix_before_contains() {
     let ctx = make_ranking_defs_ctx();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "UserService"
+        "name": ["UserService"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -662,7 +662,7 @@ fn test_xray_definitions_ranking_prefix_before_contains() {
 fn test_xray_definitions_ranking_kind_and_length_tiebreak() {
     let ctx = make_ranking_defs_ctx();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "UserService"
+        "name": ["UserService"]
     }));
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
@@ -688,7 +688,7 @@ fn test_xray_definitions_ranking_kind_and_length_tiebreak() {
 fn test_xray_definitions_ranking_not_applied_with_regex() {
     let ctx = make_ranking_defs_ctx();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "UserService.*",
+        "name": ["UserService.*"],
         "regex": true
     }));
     assert!(!result.is_error, "regex search should not error: {}", result.content[0].text);
@@ -701,16 +701,18 @@ fn test_xray_definitions_ranking_not_applied_with_regex() {
 // Input validation bug fix tests (BUG-1 through BUG-6)
 // ═══════════════════════════════════════════════════════════════════════
 
-/// BUG-1: xray_definitions with name="" should behave like no name filter (return all).
+/// BUG-1: xray_definitions with name=[] should behave like no name filter (return all).
+/// Pre-2026-04-25 the equivalent was `name=""`; after the array migration the
+/// "absent / no filter" sentinel is the empty array.
 #[test]
 fn test_xray_definitions_empty_name_treated_as_no_filter() {
     let ctx = make_ctx_with_defs();
-    // With name="" — should return all definitions (empty string ignored)
+    // With name=[] — should return all definitions (empty array ignored)
     let result_empty = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "name": "",
+        "name": [],
         "maxResults": 5
     }));
-    assert!(!result_empty.is_error, "name='' should not error: {}", result_empty.content[0].text);
+    assert!(!result_empty.is_error, "name=[] should not error: {}", result_empty.content[0].text);
     let output_empty: Value = serde_json::from_str(&result_empty.content[0].text).unwrap();
     let count_empty = output_empty["summary"]["totalResults"].as_u64().unwrap();
 
@@ -722,7 +724,7 @@ fn test_xray_definitions_empty_name_treated_as_no_filter() {
     let count_no_name = output_no_name["summary"]["totalResults"].as_u64().unwrap();
 
     assert_eq!(count_empty, count_no_name,
-        "name='' should behave like no name filter. Got {} vs {} results",
+        "name=[] should behave like no name filter. Got {} vs {} results",
         count_empty, count_no_name);
     assert!(count_empty > 0, "Should have some definitions in test context");
 }
@@ -732,7 +734,7 @@ fn test_xray_definitions_empty_name_treated_as_no_filter() {
 fn test_xray_definitions_contains_line_negative_returns_error() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "QueryService",
+        "file": ["QueryService"],
         "containsLine": -1
     }));
     assert!(result.is_error, "containsLine=-1 should return an error");
@@ -745,7 +747,7 @@ fn test_xray_definitions_contains_line_negative_returns_error() {
 fn test_xray_definitions_contains_line_zero_returns_error() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "QueryService",
+        "file": ["QueryService"],
         "containsLine": 0
     }));
     assert!(result.is_error, "containsLine=0 should return an error");
@@ -758,7 +760,7 @@ fn test_xray_definitions_contains_line_zero_returns_error() {
 fn test_xray_callers_depth_zero_returns_error() {
     let ctx = make_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({
-        "method": "Execute",
+        "method": ["Execute"],
         "depth": 0
     }));
     assert!(result.is_error, "depth=0 should return an error");
@@ -822,7 +824,7 @@ fn test_contains_line_sql_stored_procedure() {
 
     // Line 5 is inside the SP body (between line_start=2 and line_end=7)
     let result = dispatch_tool(&ctx, "xray_definitions", &json!({
-        "file": "schema.sql",
+        "file": ["schema.sql"],
         "containsLine": 5
     }));
     assert!(!result.is_error, "containsLine on SQL should not error: {}", result.content[0].text);
@@ -931,7 +933,7 @@ fn test_unresolved_blocks_workspace_dependent_tools() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "test"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
     assert!(result.is_error);
     let text = &result.content[0].text;
     assert!(text.contains("WORKSPACE_UNRESOLVED"), "Should contain WORKSPACE_UNRESOLVED, got: {}", text);
@@ -1013,7 +1015,7 @@ fn test_unresolved_blocks_definitions() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "test"}));
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": ["test"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
 }
@@ -1024,7 +1026,7 @@ fn test_unresolved_blocks_callers() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": "test"}));
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": ["test"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
 }
@@ -1035,7 +1037,7 @@ fn test_unresolved_blocks_fast() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": "test"}));
+    let result = dispatch_tool(&ctx, "xray_fast", &json!({"pattern": ["test"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
 }
@@ -1058,7 +1060,7 @@ fn test_unresolved_blocks_git_tools() {
         workspace: Arc::new(RwLock::new(WorkspaceBinding::unresolved(".".to_string()))),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_git_history", &json!({"repo": ".", "file": "test.rs"}));
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({"repo": ".", "file": ["test.rs"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("WORKSPACE_UNRESOLVED"));
     let result = dispatch_tool(&ctx, "xray_branch_status", &json!({"repo": "."}));
@@ -1079,7 +1081,7 @@ fn test_reindexing_blocks_workspace_dependent_tools() {
         workspace: Arc::new(RwLock::new(ws)),
         ..Default::default()
     };
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": "test"}));
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
     assert!(result.is_error);
     assert!(result.content[0].text.contains("WORKSPACE_REINDEXING"));
 }
@@ -1104,5 +1106,137 @@ fn test_reindexing_allows_workspace_independent_tools() {
     if result.is_error {
         assert!(!result.content[0].text.contains("WORKSPACE_REINDEXING"),
             "xray_reindex should not be blocked by REINDEXING status");
+    }
+}
+
+
+// ─── §4.3 step 6: xray_reindex / xray_reindex_definitions `ext` array migration ───
+//
+// Regression-pair tests: array-form succeeds (with discriminating files>=1 check
+// — default server_ext="cs" yields 0 files in this repo, so without the
+// migration the array form would be silently ignored and fall back to "cs" → 0
+// files, failing the assertion); bare-string form rejected with migration-aware
+// error citing the parameter name and 2026-04-25 / array.
+
+#[test]
+fn test_xray_reindex_ext_array_form_accepted() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({ "ext": ["rs"] }));
+    assert!(!result.is_error,
+        "array-form ext must succeed; got: {}", result.content[0].text);
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["status"], "ok");
+    assert!(
+        output["files"].as_u64().unwrap() >= 1,
+        "ext=[\"rs\"] must index >=1 *.rs file (regression: pre-fix the parser \
+         ignored array form, fell back to server_ext=\"cs\" → 0 files). Got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_xray_reindex_ext_string_form_rejected() {
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "xray_reindex", &json!({ "ext": "rs" }));
+    assert!(result.is_error, "Bare-string ext must be rejected post 2026-04-25 migration");
+    let msg = &result.content[0].text;
+    assert!(msg.contains("ext"),
+        "Error must mention the offending parameter name. Got: {}", msg);
+    assert!(msg.contains("array") || msg.contains("2026-04-25"),
+        "Error must explain array contract / cite migration. Got: {}", msg);
+}
+
+#[test]
+fn test_xray_reindex_definitions_ext_array_form_accepted() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({ "ext": ["rs"] }));
+    assert!(!result.is_error,
+        "array-form ext must succeed; got: {}", result.content[0].text);
+    let output: serde_json::Value =
+        serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["status"], "ok");
+    assert!(
+        output["files"].as_u64().unwrap() >= 1,
+        "ext=[\"rs\"] must index >=1 *.rs file (regression: pre-fix the parser \
+         ignored array form, fell back to server_ext=\"cs\" → 0 files). Got: {}",
+        output
+    );
+}
+
+#[test]
+fn test_xray_reindex_definitions_ext_string_form_rejected() {
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "xray_reindex_definitions", &json!({ "ext": "rs" }));
+    assert!(result.is_error, "Bare-string ext must be rejected post 2026-04-25 migration");
+    let msg = &result.content[0].text;
+    assert!(msg.contains("ext"),
+        "Error must mention the offending parameter name. Got: {}", msg);
+    assert!(msg.contains("array") || msg.contains("2026-04-25"),
+        "Error must explain array contract / cite migration. Got: {}", msg);
+}
+
+
+// ─── §4.6 audit: per-key array-form contract for ALL migrated MCP keys ───
+//
+// Contract (established as of step 5 round 1, 2026-04-25): every MCP tool key
+// migrated from comma-separated `string` to `array<string>` MUST have an
+// end-to-end regression test that bare-string is rejected with an error
+// citing the parameter name and ("array" OR "2026-04-25").
+//
+// Steps 5 (xray_fast.{pattern,ext}) and 6 (xray_reindex(_definitions).ext)
+// added per-handler tests inline. Earlier steps 2–4 (xray_grep.{terms,file,ext},
+// xray_definitions.{name,kind,file,parent}, xray_callers.{method,ext}) did
+// not. The helper-level tests (`read_string_array_rejects_string_form_*`)
+// prove the helper rejects, but they do NOT catch a regression where a
+// handler stops calling `read_string_array` for a specific key (e.g. someone
+// re-introduces `args.get("terms").and_then(|v| v.as_str())`).
+//
+// This single table-driven test closes the audit gap. Each (tool, key) pair
+// dispatches with a bare-string value and asserts the canonical rejection
+// shape. Adding a new migrated key WITHOUT extending this table is the
+// expected forcing function for the next reviewer.
+#[test]
+fn test_all_migrated_keys_reject_bare_string_form() {
+    // (tool, key, extra_args_to_make_call_reach_the_parser)
+    // - xray_grep needs nothing else (terms is the only required key; file/ext
+    //   are optional but should still be parsed when present).
+    // - xray_definitions needs def_index (via make_ctx_with_defs) and at least
+    //   `name` to reach the kind/file/parent parsers.
+    // - xray_callers needs def_index and `method` to reach the ext parser.
+    // - xray_fast / xray_reindex / xray_reindex_definitions are covered by
+    //   step-5 / step-6 inline tests; not duplicated here.
+    let ctx = make_ctx_with_defs();
+    let cases: &[(&str, &str, serde_json::Value)] = &[
+        // xray_grep — step 2
+        ("xray_grep", "terms", json!({ "terms": "foo" })),
+        ("xray_grep", "file",  json!({ "terms": ["foo"], "file": "a.rs" })),
+        ("xray_grep", "ext",   json!({ "terms": ["foo"], "ext": "rs" })),
+        // xray_definitions — step 3
+        ("xray_definitions", "name",   json!({ "name":   "Foo" })),
+        ("xray_definitions", "kind",   json!({ "name": ["Foo"], "kind":   "class" })),
+        ("xray_definitions", "file",   json!({ "name": ["Foo"], "file":   "a.cs" })),
+        ("xray_definitions", "parent", json!({ "name": ["Foo"], "parent": "Bar" })),
+        // xray_callers — step 4
+        ("xray_callers", "method", json!({ "method": "Foo" })),
+        ("xray_callers", "ext",    json!({ "method": ["ExecuteQueryAsync"], "ext": "cs" })),
+    ];
+
+    for (tool, key, args) in cases {
+        let result = dispatch_tool(&ctx, tool, args);
+        assert!(
+            result.is_error,
+            "({tool}, {key}): bare-string must be rejected post 2026-04-25 migration. Got non-error: {}",
+            result.content[0].text
+        );
+        let msg = &result.content[0].text;
+        assert!(
+            msg.contains(*key),
+            "({tool}, {key}): error must mention the offending parameter name. Got: {msg}"
+        );
+        assert!(
+            msg.contains("array") || msg.contains("2026-04-25"),
+            "({tool}, {key}): error must explain array contract or cite migration date. Got: {msg}"
+        );
     }
 }

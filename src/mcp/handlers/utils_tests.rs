@@ -2135,3 +2135,106 @@ fn test_resolve_dir_to_absolute_through_symlinked_subdir() {
         resolved_rel, expected_rel_norm
     );
 }
+
+// ─── §4.2 read_string_array / read_kind_array (2026-04-25 migration) ────
+
+#[test]
+fn read_string_array_absent_returns_empty() {
+    let args = json!({});
+    assert_eq!(read_string_array(&args, "terms").unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn read_string_array_null_returns_empty() {
+    let args = json!({ "terms": null });
+    assert_eq!(read_string_array(&args, "terms").unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn read_string_array_happy_path() {
+    let args = json!({ "terms": ["foo", "bar"] });
+    assert_eq!(
+        read_string_array(&args, "terms").unwrap(),
+        vec!["foo".to_string(), "bar".to_string()]
+    );
+}
+
+#[test]
+fn read_string_array_skips_empty_preserves_inner_whitespace() {
+    // Whitespace-only entries are skipped (treated as absent), but inner
+    // leading/trailing whitespace inside non-empty entries is PRESERVED —
+    // it is significant for regex patterns (e.g. `"^## "` differs
+    // semantically from `"^##"`).
+    let args = json!({ "terms": ["  foo  ", "", "   ", "bar"] });
+    assert_eq!(
+        read_string_array(&args, "terms").unwrap(),
+        vec!["  foo  ".to_string(), "bar".to_string()]
+    );
+}
+
+#[test]
+fn read_string_array_preserves_literal_comma_in_entry() {
+    // Core motivation for the migration: literal `,` inside an entry must
+    // survive untouched (regex CSV patterns, log prefixes, etc.).
+    let args = json!({ "terms": ["^[^,]+,[^,]+$"] });
+    assert_eq!(
+        read_string_array(&args, "terms").unwrap(),
+        vec!["^[^,]+,[^,]+$".to_string()]
+    );
+}
+
+#[test]
+fn read_string_array_rejects_string_form_with_actionable_message() {
+    let args = json!({ "terms": "a,b" });
+    let err = read_string_array(&args, "terms").unwrap_err();
+    assert!(err.contains("array of strings"), "err = {err}");
+    assert!(err.contains("[\"a\",\"b\"]"), "err = {err}");
+    assert!(err.contains("'terms'"), "err = {err}");
+}
+
+#[test]
+fn read_string_array_rejects_number() {
+    let args = json!({ "terms": 42 });
+    let err = read_string_array(&args, "terms").unwrap_err();
+    assert!(err.contains("array of strings"), "err = {err}");
+    assert!(err.contains("number"), "err = {err}");
+}
+
+#[test]
+fn read_string_array_rejects_non_string_element() {
+    let args = json!({ "terms": ["foo", 7, "bar"] });
+    let err = read_string_array(&args, "terms").unwrap_err();
+    assert!(err.contains("element [1]"), "err = {err}");
+    assert!(err.contains("number"), "err = {err}");
+}
+
+#[test]
+fn read_kind_array_accepts_known_kinds() {
+    let args = json!({ "kind": ["class", "interface", "enum"] });
+    assert_eq!(
+        read_kind_array(&args).unwrap(),
+        vec!["class".to_string(), "interface".to_string(), "enum".to_string()]
+    );
+}
+
+#[test]
+fn read_kind_array_rejects_unknown_kind() {
+    let args = json!({ "kind": ["class", "banana"] });
+    let err = read_kind_array(&args).unwrap_err();
+    assert!(err.contains("banana"), "err = {err}");
+    assert!(err.contains("Valid values"), "err = {err}");
+}
+
+#[test]
+fn read_kind_array_empty_when_absent() {
+    let args = json!({});
+    assert_eq!(read_kind_array(&args).unwrap(), Vec::<String>::new());
+}
+
+#[test]
+fn read_kind_array_inherits_string_form_rejection() {
+    let args = json!({ "kind": "class,interface" });
+    let err = read_kind_array(&args).unwrap_err();
+    assert!(err.contains("array of strings"), "err = {err}");
+}
+
