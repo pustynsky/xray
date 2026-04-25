@@ -446,7 +446,7 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "substring": "Default: terms=[\"UserService\"] finds IUserService, m_userService. Set substring=false for exact-token-only",
             "dir": "Directory to search (default: server's --dir). Example: dir='src/services'. If a FILE path is passed (e.g., dir='src/main.rs'), it is auto-converted to dir='src' + file=[\"main.rs\"]; the response summary includes a `dirAutoConverted` note. Prefer file= directly to avoid the conversion",
             "file": "Restrict to files whose path or basename contains this substring (case-insensitive). Single: [\"CHANGELOG.md\"]. Multi-term OR: [\"Service\",\"Client\"] finds files matching either. Combines with dir/ext/excludeDir via AND. Use this instead of passing a file path in `dir`",
-            "lineRegex": "Line-anchored regex (auto-enables regex=true, disables substring). Use when token regex (default) returns 0 results because the pattern contains `^`/`$`, spaces, or punctuation. Examples: terms=[\"^##\"] ext=[\"md\"] file=[\"README.md\"] -> level-2 markdown headings. terms=[\"^pub fn\"] ext=[\"rs\"] -> Rust public functions. terms=[\"^\\s*\\[Test\\]\"] ext=[\"cs\"] -> NUnit test attributes. terms=[\"\\}$\"] -> lines ending with closing brace. Patterns are NOT trimmed (whitespace is significant: '^## ' != '^##'). ALWAYS narrow scope via ext/dir/file — without filters, every indexed file is read from disk. Mutually exclusive with phrase=true."
+            "lineRegex": "Line-anchored regex (auto-enables regex=true, disables substring). Use when token regex (default) returns 0 results because the pattern contains `^`/`$`, spaces, or punctuation. Examples: terms=[\"^##\"] ext=[\"md\"] file=[\"README.md\"] -> level-2 markdown headings. terms=[\"^pub fn\"] ext=[\"rs\"] -> Rust public functions. terms=[\"^\\s*\\[Test\\]\"] ext=[\"cs\"] -> NUnit test attributes. terms=[\"\\}$\"] -> lines ending with closing brace. Patterns are NOT trimmed (whitespace is significant: '^## ' != '^##'). Anchors: `^` matches at logical line start, `$` at logical line end. Line endings: both `\\n` (Unix) and `\\r\\n` (Windows/CRLF) are recognized — `$` matches before the `\\r` of `\\r\\n`, so `terms=[\"\\}$\"]` works on Windows-edited files. Case sensitivity: case-SENSITIVE by default; use inline flag `(?i)` (e.g. terms=[\"(?i)^todo:\"]) to opt into case-insensitive. Multiple patterns combine via OR (default) or AND (mode='and'). ALWAYS narrow scope via ext/dir/file — without filters, every indexed file is read from disk. Mutually exclusive with phrase=true."
         },
         "xray_callers": {
             "class": "'UserService' -> DI-aware: also finds callers using IUserService. SQL: class = schema name (e.g., class='dbo', class='Sales'). Without class, results mix callers from ALL classes/schemas with same method name",
@@ -654,28 +654,28 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         out.push_str("  \"read the source code of a method/class\"         -> xray_definitions name=[\"X\"] includeBody=true maxBodyLines=0\n");
         out.push_str("  \"find which method is at file:line N\"            -> xray_definitions file=[\"X\"] containsLine=N includeBody=true\n");
         out.push_str("  \"find who calls/implements method X\"             -> xray_callers method=[\"X\"] class='Y' direction='up'\n");
-        out.push_str("  \"verify upstream reachability of helper X\"       -> xray_callers method=[\"X\"] direction='up' (audit: which arg parsers / entry points still reach this helper; add class='Y' when X is a method on a class; do NOT grep+read_file the call sites)\n");
+        out.push_str("  \"verify upstream reachability of helper X\"       -> xray_callers method=[\"X\"] direction='up' (add class='Y' for methods; do NOT grep+read_file)\n");
     }
     out.push_str("  \"see a few lines of context around a match\"      -> xray_grep showLines=true contextLines=N\n");
     out.push_str("  \"search text across codebase\"                    -> xray_grep terms=[\"...\"]\n");
-    out.push_str("  \"validate/fact-check whether a term exists in code\"  -> xray_grep terms=[\"...\"] countOnly=true (<1ms, clean yes/no)\n");
+    out.push_str("  \"validate/fact-check whether a term exists in code\"  -> xray_grep terms=[\"...\"] countOnly=true\n");
     out.push_str("  \"quick yes/no: does X appear anywhere\"           -> xray_grep countOnly=true\n");
     out.push_str("  \"confirm absence of pattern before editing\"      -> xray_grep terms=[\"...\"] countOnly=true\n");
     out.push_str("  \"replace similar patterns in one or more files\"  -> xray_edit with multiple edits (atomic, batch)\n");
     out.push_str("  \"rewrite entire file\"                            -> xray_edit Mode A [{startLine:1, endLine:<total>, content:<new>}]\n");
+    out.push_str("  \"INSERT lines (no replace)\"                      -> xray_edit Mode A empty range: startLine:N,endLine:N-1 | startLine:lineCount+1,endLine:lineCount\n");
     out.push_str("  \"create a new file\"                              -> xray_edit (auto-creates — Mode A with endLine:0)\n");
     out.push_str("  \"list files or subdirectories\"                   -> xray_fast pattern=[\"*\"] dir='<path>' dirsOnly=true\n");
     out.push_str("  \"find a file by name\"                            -> xray_fast pattern=[\"<name>\"]\n");
+
     out.push_str("  \"git blame / history / authors\"                  -> xray_git_blame / xray_git_history / xray_git_authors (works for BOTH existing AND deleted files)\n");
-    out.push_str("  \"history of a file that was DELETED/removed\"     -> xray_git_history repo='.' file='<path>' (auto-falls back from --follow; do NOT run raw git log --all --diff-filter=D)\n");
-    out.push_str("  \"who deleted a file / when was it removed\"       -> xray_git_history repo='.' file='<path>' (returns full history of deleted files including the deletion commit)\n");
+    out.push_str("  \"history of a file that was DELETED/removed\"     -> xray_git_history repo='.' file='<path>' (auto --follow)\n");
     out.push_str("  \"show activity including deleted files\"         -> xray_git_activity repo='.' from='YYYY-MM-DD' includeDeleted=true\n\n");
 
     // (TASK ROUTING removed — 100% duplicate of INTENT -> TOOL MAPPING above.
     //  All entries from TASK ROUTING are now implicit in the INTENT mapping.
     //  Fallback guidance kept inline:)
-    out.push_str("If uncertain whether a file type is supported by xray, call xray_info first. Do not default to raw file reading.\n\n");
-
+    out.push_str("If uncertain about file type/lines/encoding, call xray_info first (file=[\"X\"] -> lineCount/byteSize/lineEnding; not Get-Content/wc -l). Do not default to raw file reading.\n\n");
     // --- MANDATORY PRE-FLIGHT CHECK (procedural friction before built-in) ---
     // Rationale: even with INTENT mapping, habits can bypass the map. A 3-question
     // pre-flight in <thinking> forces a conscious justification before a built-in call.

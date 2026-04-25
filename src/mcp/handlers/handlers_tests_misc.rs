@@ -523,6 +523,251 @@ fn test_xray_info_response_structure() {
         }
     }
 }
+// ─── xray_info file=[X] per-file metadata mode (§2.3 of
+// todo_2026-04-25_xray-edit-append-and-line-staleness.md) ────────────
+//
+// `xray_info file=["path", ...]` MUST return per-file metadata
+// (lineCount/byteSize/extension/indexed/lineEnding) without putting file
+// content into the response. lineCount MUST agree with `xray_edit`'s
+// `originalLineCount`/`newLineCount` so the round-trip
+// `xray_info` -> `xray_edit` works without off-by-one.
+//
+// Notes for future maintainers:
+// - `make_info_ctx` pins the workspace to a tmp dir AND seeds `server_ext`
+//   so the `indexed` flag is computed correctly without bringing up a real
+//   ContentIndex.
+// - Tests intentionally exercise both LF and CRLF inputs, plus a
+//   relative-path call, plus the security boundary check (out-of-workspace
+//   path returns a per-file `error`, not a top-level error).
+
+fn make_info_ctx(dir: &std::path::Path, server_ext: &str) -> HandlerContext {
+    HandlerContext {
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(dir.to_string_lossy().to_string()),
+        )),
+        server_ext: server_ext.to_string(),
+        ..HandlerContext::default()
+    }
+}
+
+#[test]
+fn test_xray_info_file_mode_returns_metadata_lf() {
+    let tmp = tempfile::tempdir().unwrap();
+    // 3 logical lines (a/B/c), each terminated by LF — the trailing newline
+    // is a terminator, not a 4th line. count_lines_for_info MUST return 3,
+    // matching xray_edit's count_lines.
+    std::fs::write(tmp.path().join("sample.rs"), b"a\nB\nc\n").unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "rs,md");
+    let result = dispatch_tool(
+        &ctx,
+        "xray_info",
+        &json!({ "file": ["sample.rs"] }),
+    );
+    assert!(!result.is_error, "xray_info file=[..] must succeed: {}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = out["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 1);
+    let f = &files[0];
+    assert_eq!(f["path"].as_str().unwrap(), "sample.rs");
+    assert_eq!(f["lineCount"].as_u64().unwrap(), 3,
+        "3 LF-terminated lines must yield lineCount=3 (matches xray_edit count_lines)");
+    assert_eq!(f["byteSize"].as_u64().unwrap(), 6);
+    assert_eq!(f["extension"].as_str().unwrap(), "rs");
+    assert!(f["indexed"].as_bool().unwrap(), "`rs` is in server_ext, must be indexed=true");
+    assert_eq!(f["lineEnding"].as_str().unwrap(), "LF");
+    assert!(f.get("error").is_none(), "successful entry must NOT carry `error`");
+    // The whole point of this mode: NO file content in the response.
+    assert!(f.get("content").is_none(), "file content must not leak into xray_info response");
+    assert_eq!(out["summary"]["requested"].as_u64().unwrap(), 1);
+    assert_eq!(out["summary"]["returned"].as_u64().unwrap(), 1);
+}
+
+#[test]
+fn test_xray_info_file_mode_detects_crlf_line_ending() {
+    let tmp = tempfile::tempdir().unwrap();
+    // CRLF input mirrors a Windows-edited source file. lineEnding must be
+    // reported as "CRLF" so callers can pre-empt the line-ending mismatch
+    // class of bugs without reading the file themselves.
+    std::fs::write(tmp.path().join("win.rs"), b"line1\r\nline2\r\n").unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "rs");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["win.rs"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let f = &out["files"][0];
+    assert_eq!(f["lineCount"].as_u64().unwrap(), 2,
+        "CRLF count_lines: 'line1\\r\\nline2\\r\\n' is 2 lines");
+    assert_eq!(f["lineEnding"].as_str().unwrap(), "CRLF");
+    assert_eq!(f["byteSize"].as_u64().unwrap(), 14);
+}
+
+#[test]
+fn test_xray_info_file_mode_detects_crlf_in_utf16le_with_bom() {
+    // UTF-16LE on disk: BOM `FF FE`, then code units in little-endian.
+    // CRLF as code units is `000D 000A` => bytes `0D 00 0A 00`. The 0x0A
+    // byte is preceded by 0x00, NOT 0x0D — a byte-only scan misclassifies
+    // this as LF. lineEnding must be reported as CRLF so the contract
+    // ("reflects the file as stored on disk") holds for UTF-16 inputs the
+    // metadata mode supports via read_file_lossy.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut bytes: Vec<u8> = vec![0xFF, 0xFE];
+    for ch in "a\r\nb\r\n".encode_utf16() {
+        bytes.extend_from_slice(&ch.to_le_bytes());
+    }
+    std::fs::write(tmp.path().join("u16le.txt"), &bytes).unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "txt");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["u16le.txt"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let f = &out["files"][0];
+    assert_eq!(f["lineEnding"].as_str().unwrap(), "CRLF",
+        "UTF-16LE CRLF must be detected at code-unit granularity, not byte granularity");
+}
+
+#[test]
+fn test_xray_info_file_mode_detects_crlf_in_utf16be_with_bom() {
+    // UTF-16BE on disk: BOM `FE FF`, then code units in big-endian.
+    // CRLF as code units is `000D 000A` => bytes `00 0D 00 0A`. The 0x0A
+    // byte is preceded by 0x00, NOT 0x0D — same misclassification trap as
+    // UTF-16LE but with the opposite byte order.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut bytes: Vec<u8> = vec![0xFE, 0xFF];
+    for ch in "a\r\nb\r\n".encode_utf16() {
+        bytes.extend_from_slice(&ch.to_be_bytes());
+    }
+    std::fs::write(tmp.path().join("u16be.txt"), &bytes).unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "txt");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["u16be.txt"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let f = &out["files"][0];
+    assert_eq!(f["lineEnding"].as_str().unwrap(), "CRLF",
+        "UTF-16BE CRLF must be detected at code-unit granularity, not byte granularity");
+}
+
+#[test]
+fn test_xray_info_file_mode_indexed_false_for_unknown_extension() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("data.bin"), b"abc").unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "rs,md");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["data.bin"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let f: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &f["files"][0];
+    assert_eq!(entry["extension"].as_str().unwrap(), "bin");
+    assert!(!entry["indexed"].as_bool().unwrap(),
+        "`bin` is NOT in server_ext, must be indexed=false");
+    assert_eq!(entry["lineEnding"].as_str().unwrap(), "NONE",
+        "file with no newline byte must report lineEnding=NONE");
+    assert_eq!(entry["lineCount"].as_u64().unwrap(), 1,
+        "non-empty file with no trailing LF still has 1 logical line");
+}
+
+#[test]
+fn test_xray_info_file_mode_handles_empty_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("empty.rs"), b"").unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "rs");
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["empty.rs"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let f: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &f["files"][0];
+    // Matches xray_edit's contract: empty file -> count_lines = 0,
+    // which is the value `expectedLineCount` should carry on the next
+    // INSERT-into-empty-file edit.
+    assert_eq!(entry["lineCount"].as_u64().unwrap(), 0);
+    assert_eq!(entry["byteSize"].as_u64().unwrap(), 0);
+}
+
+#[test]
+fn test_xray_info_file_mode_rejects_path_outside_workspace() {
+    let workspace = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let outside_file = outside.path().join("escape.rs");
+    std::fs::write(&outside_file, b"x\n").unwrap();
+
+    let ctx = make_info_ctx(workspace.path(), "rs");
+    let result = dispatch_tool(
+        &ctx,
+        "xray_info",
+        &json!({ "file": [outside_file.to_string_lossy()] }),
+    );
+    // Top-level call must NOT error — per-file errors are returned in-band
+    // so a batch with one bad path still surfaces metadata for the rest.
+    assert!(!result.is_error, "per-file errors must be in-band, not top-level: {}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &out["files"][0];
+    assert!(entry.get("error").is_some(),
+        "out-of-workspace path must surface an `error` field, got: {:?}", entry);
+    let msg = entry["error"].as_str().unwrap();
+    assert!(msg.contains("outside the workspace"),
+        "error must mention workspace boundary, got: {}", msg);
+    // Crucially: NO byteSize/lineCount, the file was never read.
+    assert!(entry.get("lineCount").is_none());
+}
+
+#[test]
+fn test_xray_info_file_mode_reports_missing_file_per_entry() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("present.rs"), b"only\n").unwrap();
+
+    let ctx = make_info_ctx(tmp.path(), "rs");
+    let result = dispatch_tool(
+        &ctx,
+        "xray_info",
+        &json!({ "file": ["present.rs", "missing.rs"] }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = out["files"].as_array().unwrap();
+    assert_eq!(files.len(), 2, "batch must return one entry per requested path");
+    // Order must be preserved so callers can correlate by index.
+    assert_eq!(files[0]["path"].as_str().unwrap(), "present.rs");
+    assert!(files[0].get("error").is_none());
+    assert_eq!(files[0]["lineCount"].as_u64().unwrap(), 1);
+    assert_eq!(files[1]["path"].as_str().unwrap(), "missing.rs");
+    assert!(files[1].get("error").is_some(), "missing file must carry `error`");
+    assert!(files[1].get("lineCount").is_none());
+}
+
+#[test]
+fn test_xray_info_no_file_arg_preserves_index_summary_mode() {
+    // Regression guard: passing no `file` argument must keep the existing
+    // index-summary behaviour. Without this, the dispatch wrapper added
+    // for §2.3 could accidentally route into the per-file path on an empty
+    // array.
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(out.get("indexes").is_some(),
+        "index-summary mode must still emit `indexes`");
+    assert!(out.get("files").is_none(),
+        "index-summary mode must NOT emit per-file `files`");
+
+    // Same expectation when `file` is present but empty (read_string_array
+    // skips entirely-whitespace entries; this is the "functionally empty" form).
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": [] }));
+    assert!(!result.is_error);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(out.get("indexes").is_some(),
+        "empty `file` array must fall through to index-summary mode");
+}
+
+
 
 // ═══════════════════════════════════════════════════════════════════════
 // Relevance Ranking tests

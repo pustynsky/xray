@@ -558,3 +558,181 @@ fn line_patterns_multiple_patterns_or_semantics() {
     cleanup_tmp(&tmp);
 }
 
+// ─── CRLF / BOM line-ending regression tests ──────────────────────
+//
+// Regression for todo_2026-04-25_xray-edit-append-and-line-staleness §2.2.
+// The story flagged a suspicion that `^`-anchored `lineRegex=true` patterns
+// might silently miss matches on Windows-style CRLF input. These tests
+// pin the contract: `^` and `$` anchor at logical line boundaries
+// regardless of line-ending style (`\n`, `\r\n`) and regardless of a
+// leading UTF-8 BOM. If any of these fail, document the divergence in
+// the lineRegex tip text instead of silently degrading the contract.
+
+/// Build an isolated workspace whose files use CRLF line endings, so the
+/// `^`-anchor regex code path is exercised against the same byte shape that
+/// editors on Windows produce. We write raw bytes rather than `writeln!` so
+/// the line endings are not platform-dependent.
+fn make_crlf_line_regex_ctx() -> (HandlerContext, std::path::PathBuf) {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_line_regex_crlf_{}_{}",
+        std::process::id(),
+        id
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // CRLF-only file, no BOM. Mirrors a Windows-edited Rust source file
+    // with `#[cfg(...)]` attributes at column 0 — the failing pattern from
+    // the live agent transcript. We assemble the file as a list of (raw)
+    // lines and join with `\r\n` so the indentation we *want* is preserved
+    // (Rust string-literal `\` + newline collapses indentation, which would
+    // silently break the "indented line must NOT match" oracle below).
+    {
+        let path = tmp_dir.join("crlf_only.rs");
+        let lines: &[&str] = &[
+            "// header line",
+            "#[cfg(feature = \"lang-xml\")]",
+            "fn one() {}",
+            "",
+            "#[cfg(feature = \"lang-xml\")]",
+            "fn two() {}",
+            "    #[cfg(test)]   // indented — must NOT match ^#\\[cfg",
+            "fn three() {}",
+        ];
+        let body = lines.join("\r\n") + "\r\n";
+        std::fs::write(&path, body.as_bytes()).unwrap();
+    }
+
+    // CRLF + UTF-8 BOM. The BOM lives only on the first line; `^` must still
+    // anchor the matched pattern (the first line itself is not interesting,
+    // but the second line is — checks BOM doesn't desync line numbering).
+    {
+        let path = tmp_dir.join("crlf_bom.rs");
+        let mut bytes: Vec<u8> = vec![0xEF, 0xBB, 0xBF]; // UTF-8 BOM
+        let lines: &[&str] = &[
+            "// first line after BOM",
+            "#[cfg(feature = \"lang-xml\")]",
+            "fn alpha() {}",
+        ];
+        let body = lines.join("\r\n") + "\r\n";
+        bytes.extend_from_slice(body.as_bytes());
+        std::fs::write(&path, &bytes).unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        ext: "rs".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            tmp_dir.to_string_lossy().to_string(),
+        ))),
+        server_ext: "rs".to_string(),
+        index_base: tmp_dir.join(".index"),
+        ..Default::default()
+    };
+    (ctx, tmp_dir)
+}
+
+/// AC1 from todo §2.2: `^#\[cfg` against a CRLF file with `#[cfg(...)]` at
+/// column 0 must match every such line — proves `^` anchors at logical line
+/// start, not after-`\r`-stripping or only at file start.
+#[test]
+fn line_regex_caret_anchor_crlf_file_matches_cfg_attrs() {
+    let (ctx, tmp) = make_crlf_line_regex_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "terms": [r"^#\[cfg"],
+            "lineRegex": true,
+            "file": ["crlf_only.rs"],
+            "showLines": true,
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "CRLF lineRegex `^#\\[cfg` should not error: {}",
+        result.content[0].text
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total_files = output["summary"]["totalFiles"].as_u64().unwrap_or(0);
+    assert_eq!(
+        total_files, 1,
+        "CRLF anchor regression: expected 1 file matching `^#\\[cfg`, got {} — payload: {}",
+        total_files, result.content[0].text
+    );
+    let total_occ = output["summary"]["totalOccurrences"].as_u64().unwrap_or(0);
+    // Two cfg attrs at column 0; the indented one must NOT match `^#\[cfg`.
+    assert_eq!(
+        total_occ, 2,
+        "CRLF anchor regression: expected 2 column-0 #[cfg(..)] hits (indented one excluded), got {} — payload: {}",
+        total_occ,
+        result.content[0].text
+    );
+    cleanup_tmp(&tmp);
+}
+
+/// AC1 sibling: same contract for `$` (end-of-line anchor) under CRLF.
+/// `\}$` against CRLF-terminated lines that end in `}` must hit — verifies
+/// the `\r` is stripped before `$` is evaluated.
+#[test]
+fn line_regex_dollar_anchor_crlf_file_matches_closing_brace() {
+    let (ctx, tmp) = make_crlf_line_regex_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "terms": [r"\}$"],
+            "lineRegex": true,
+            "file": ["crlf_only.rs"],
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total_files = output["summary"]["totalFiles"].as_u64().unwrap_or(0);
+    assert_eq!(
+        total_files, 1,
+        "CRLF $-anchor regression: expected 1 file with closing braces, got {} — payload: {}",
+        total_files, result.content[0].text
+    );
+    // Three `fn ... {}` lines all end with `}` — the trailing `\r` must not
+    // block the `$` match.
+    let total_occ = output["summary"]["totalOccurrences"].as_u64().unwrap_or(0);
+    assert_eq!(
+        total_occ, 3,
+        "CRLF $-anchor regression: expected 3 lines ending in `}}`, got {} — payload: {}",
+        total_occ, result.content[0].text
+    );
+    cleanup_tmp(&tmp);
+}
+
+/// AC1 sibling: a UTF-8 BOM on the first line must not desynchronize `^`
+/// anchoring on subsequent lines.
+#[test]
+fn line_regex_caret_anchor_bom_then_crlf_does_not_desync() {
+    let (ctx, tmp) = make_crlf_line_regex_ctx();
+    let result = handle_xray_grep(
+        &ctx,
+        &json!({
+            "terms": [r"^#\[cfg"],
+            "lineRegex": true,
+            "file": ["crlf_bom.rs"],
+            "showLines": true,
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let total_occ = output["summary"]["totalOccurrences"].as_u64().unwrap_or(0);
+    assert_eq!(
+        total_occ, 1,
+        "BOM+CRLF: expected the single column-0 #[cfg(..)] line to match, got {} — payload: {}",
+        total_occ, result.content[0].text
+    );
+    cleanup_tmp(&tmp);
+}
+

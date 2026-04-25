@@ -88,7 +88,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                     },
                     "lineRegex": {
                         "type": "boolean",
-                        "description": "Line-anchored regex search (default: false). Auto-enables regex=true and disables substring. Unlike default regex (which matches against tokenized index entries — alphanumeric+underscore only), lineRegex applies the pattern to each line of file content with `multi_line=true`, so `^` and `$` anchor to line boundaries and patterns may contain spaces, punctuation, brackets, etc. Required for: markdown headings (`^## `), C# attributes (`^\\s*\\[Test\\]`), function signatures (`^pub fn`), end-of-line braces (`\\}$`). Each `terms` array entry is one regex pattern, taken verbatim — literal `,` inside a pattern is preserved (CSV-shape, log prefixes). Whitespace inside patterns is significant — patterns are NOT trimmed. File scope MUST be narrowed via ext/dir/file filters; otherwise every indexed file is read from disk (slower than token regex). Mutually exclusive with phrase=true."
+                        "description": "Line-anchored regex search (default: false). Auto-enables regex=true and disables substring. Unlike default regex (which matches against tokenized index entries — alphanumeric+underscore only), lineRegex applies the pattern to each line of file content with `multi_line=true` and `crlf=true`, so `^` and `$` anchor to logical line boundaries on BOTH `\\n` (Unix) and `\\r\\n` (Windows/CRLF) input — `terms=[\"\\}$\"]` matches lines ending in `}` even on Windows-edited files. Patterns may contain spaces, punctuation, brackets, etc. Required for: markdown headings (`^## `), C# attributes (`^\\s*\\[Test\\]`), function signatures (`^pub fn`), end-of-line braces (`\\}$`). Each `terms` array entry is one regex pattern, taken verbatim — literal `,` inside a pattern is preserved (CSV-shape, log prefixes). Whitespace inside patterns is significant — patterns are NOT trimmed. Case-SENSITIVE by default; use inline flag `(?i)` for case-insensitive (e.g. `terms=[\"(?i)^todo:\"]`). File scope MUST be narrowed via ext/dir/file filters; otherwise every indexed file is read from disk (slower than token regex). Mutually exclusive with phrase=true."
                     },
                     "showLines": {
                         "type": "boolean",
@@ -155,10 +155,16 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "xray_info".to_string(),
-            description: "Show all existing indexes with their status, sizes, and age.".to_string(),
+            description: "Show all existing indexes with their status, sizes, and age. With `file=[\"path\",...]`: returns per-file metadata (lineCount, byteSize, extension, indexed, lineEnding) WITHOUT loading file content into the response. Use this to discover the line count of a file before composing an `xray_edit` call (e.g. for the append-EOF idiom `startLine: lineCount+1, endLine: lineCount`) instead of falling back to `Get-Content | Measure-Object` or `wc -l`. lineCount uses the same semantics as `xray_edit`'s `newLineCount` / `originalLineCount` (trailing newline is a terminator, not a line) so the value can be fed directly into edit ranges.".to_string(),
             input_schema: json!({
                 "type": "object",
-                "properties": {},
+                "properties": {
+                    "file": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Optional list of files to inspect. Each entry is one path (absolute, or workspace-relative). Returns lineCount/byteSize/extension/indexed/lineEnding per file. Without this argument, the existing index-level summary is returned."
+                    }
+                },
                 "required": []
             }),
         },
@@ -494,7 +500,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                             "properties": {
                                 "startLine": {
                                     "type": "integer",
-                                    "description": "1-based start line (inclusive)"
+                                    "description": "1-based start line (inclusive). To APPEND after EOF: startLine = lineCount+1, endLine = lineCount (use xray_info file=[X] to fetch lineCount)."
                                 },
                                 "endLine": {
                                     "type": "integer",
@@ -1038,7 +1044,7 @@ pub fn dispatch_tool(
     let result = match tool_name {
         "xray_grep" => grep::handle_xray_grep(ctx, arguments),
         "xray_fast" => fast::handle_xray_fast(ctx, arguments),
-        "xray_info" => handle_xray_info(ctx),
+        "xray_info" => handle_xray_info(ctx, arguments),
         "xray_reindex" => handle_xray_reindex(ctx, arguments),
         "xray_reindex_definitions" => handle_xray_reindex_definitions(ctx, arguments),
         "xray_definitions" => definitions::handle_xray_definitions(ctx, arguments),
@@ -1142,7 +1148,20 @@ fn handle_xray_help(ctx: &HandlerContext) -> ToolCallResult {
 /// files from disk (~1.8 GB for multi-repo setups), causing a massive memory spike.
 /// This version reads stats directly from the already-loaded in-memory structures
 /// via read locks — zero additional allocations.
-fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
+fn handle_xray_info(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
+    // Per-file metadata mode: when caller passes `file=["path", ...]` we skip
+    // the index-summary aggregation and return cheap-to-compute metadata for
+    // each requested path (lineCount/byteSize/extension/indexed/lineEnding).
+    // Closes docs/user-stories/todo_2026-04-25_xray-edit-append-and-line-staleness.md §2.3
+    // — without this, agents fall back to `Get-Content | Measure-Object` to
+    // discover line count before composing an `xray_edit` call.
+    let files: Vec<String> = match utils::read_string_array(args, "file") {
+        Ok(v) => v,
+        Err(e) => return ToolCallResult::error(e),
+    };
+    if !files.is_empty() {
+        return handle_xray_info_files(ctx, &files);
+    }
     let mut indexes = Vec::new();
     let mut memory_estimate = json!({});
 
@@ -1334,6 +1353,260 @@ fn handle_xray_info(ctx: &HandlerContext) -> ToolCallResult {
 
     ToolCallResult::success(utils::json_to_string(&info))
 }
+// ─── Per-file metadata mode for `xray_info` ──────────────────────────
+//
+// Returns cheap-to-compute file metadata (lineCount/byteSize/extension/indexed/
+// lineEnding) WITHOUT putting file content into the response. The intended
+// caller is an LLM agent that needs to know the line count of a file before
+// composing an `xray_edit` call (notably for the append-EOF idiom
+// `startLine: lineCount+1, endLine: lineCount`).
+//
+// `lineCount` semantics MUST match `xray_edit`'s `count_lines` (see
+// edit.rs::count_lines): split on '\n' and subtract 1 if the file ends with
+// '\n'. This way `xray_info` -> `xray_edit` round-trips without off-by-one.
+//
+// Security: paths must resolve INSIDE the workspace root; out-of-workspace
+// paths return a per-file error instead of metadata. Oversized files
+// (>MAX_INDEX_FILE_BYTES) also return an error, mirroring `read_file_lossy`.
+fn handle_xray_info_files(ctx: &HandlerContext, files: &[String]) -> ToolCallResult {
+    let server_dir = ctx.server_dir();
+    let canonical_server_dir = ctx.canonical_server_dir();
+    let server_exts: Vec<String> = ctx
+        .server_ext
+        .split(',')
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .collect();
+
+    let mut entries: Vec<Value> = Vec::with_capacity(files.len());
+    for raw_path in files {
+        entries.push(file_metadata_entry(
+            raw_path,
+            &server_dir,
+            &canonical_server_dir,
+            &server_exts,
+        ));
+    }
+
+    let summary = json!({
+        "requested": files.len(),
+        "returned": entries.len(),
+    });
+    let output = json!({ "files": entries, "summary": summary });
+    ToolCallResult::success(utils::json_to_string(&output))
+}
+
+
+/// Compute metadata for a single file. Returns a per-file object that always
+/// contains `path` (the input string, echoed back for batch correlation) and
+/// either the metadata fields or an `error` describing why metadata could not
+/// be produced.
+fn file_metadata_entry(
+    raw_path: &str,
+    server_dir: &str,
+    canonical_server_dir: &str,
+    server_exts: &[String],
+) -> Value {
+    use std::path::{Path, PathBuf};
+
+    let p = Path::new(raw_path);
+    let resolved: PathBuf = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        Path::new(server_dir).join(p)
+    };
+    let resolved_str = crate::clean_path(&resolved.to_string_lossy());
+
+    // Workspace boundary check. Use the same logical-path comparison the edit
+    // handler uses so symlinked subdirectories within the workspace are
+    // accepted, but symlink targets outside are rejected.
+    if !crate::is_path_within(&resolved_str, server_dir)
+        && !crate::is_path_within(&resolved_str, canonical_server_dir)
+    {
+        return json!({
+            "path": raw_path,
+            "resolvedPath": resolved_str,
+            "error": "path is outside the workspace root; pass an absolute path inside the workspace or a workspace-relative path",
+        });
+    }
+
+    // Stat first to surface size / not-found errors before reading bytes.
+    let meta = match std::fs::metadata(&resolved) {
+        Ok(m) => m,
+        Err(e) => {
+            return json!({
+                "path": raw_path,
+                "resolvedPath": resolved_str,
+                "error": format!("cannot stat file: {}", e),
+            });
+        }
+    };
+    if !meta.is_file() {
+        return json!({
+            "path": raw_path,
+            "resolvedPath": resolved_str,
+            "error": "path is not a regular file (use xray_fast dir=<path> for directory listings)",
+        });
+    }
+    let byte_size = meta.len();
+    if byte_size > crate::MAX_INDEX_FILE_BYTES {
+        return json!({
+            "path": raw_path,
+            "resolvedPath": resolved_str,
+            "byteSize": byte_size,
+            "error": format!(
+                "file is {} bytes, exceeds MAX_INDEX_FILE_BYTES ({} bytes); xray refuses to read it",
+                byte_size,
+                crate::MAX_INDEX_FILE_BYTES,
+            ),
+        });
+    }
+
+    // Extension + indexed flag are derived from the resolved path so callers
+    // can ask about files outside the indexed extension set and still get a
+    // stable answer (`indexed: false`).
+    let extension = resolved
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    let indexed = !extension.is_empty() && server_exts.iter().any(|e| e == &extension);
+
+    // Read content via `read_file_lossy` so BOM detection / UTF-16 decoding
+    // matches what `xray_grep`/`xray_edit` see. lineEnding detection runs on
+    // the raw bytes (before BOM stripping) so CRLF status reflects the file
+    // on disk, not the decoded representation.
+    let raw = match std::fs::read(&resolved) {
+        Ok(b) => b,
+        Err(e) => {
+            return json!({
+                "path": raw_path,
+                "resolvedPath": resolved_str,
+                "byteSize": byte_size,
+                "extension": extension,
+                "indexed": indexed,
+                "error": format!("cannot read file: {}", e),
+            });
+        }
+    };
+    let line_ending = detect_line_ending(&raw);
+
+    let (content, was_lossy) = match crate::read_file_lossy(&resolved) {
+        Ok(pair) => pair,
+        Err(e) => {
+            return json!({
+                "path": raw_path,
+                "resolvedPath": resolved_str,
+                "byteSize": byte_size,
+                "extension": extension,
+                "indexed": indexed,
+                "lineEnding": line_ending,
+                "error": format!("cannot decode file: {}", e),
+            });
+        }
+    };
+    let line_count = count_lines_for_info(&content);
+
+    let mut entry = json!({
+        "path": raw_path,
+        "resolvedPath": resolved_str,
+        "lineCount": line_count,
+        "byteSize": byte_size,
+        "extension": extension,
+        "indexed": indexed,
+        "lineEnding": line_ending,
+    });
+    if was_lossy {
+        entry["lossyUtf8"] = json!(true);
+    }
+    entry
+}
+
+/// Mirror of `edit::count_lines` so `xray_info`'s `lineCount` matches
+/// `xray_edit`'s `originalLineCount`/`newLineCount` exactly. Trailing newline
+/// is treated as a terminator, not a line.
+fn count_lines_for_info(s: &str) -> usize {
+    if s.is_empty() {
+        0
+    } else {
+        s.split('\n').count() - usize::from(s.ends_with('\n'))
+    }
+}
+
+/// Inspect raw file bytes and report the dominant line-ending style.
+/// Returns one of: `"NONE"` (no `\n` at all), `"LF"`, `"CRLF"`, or `"MIXED"`
+/// when both LF and CRLF appear. `"MIXED"` is a useful diagnostic — agents can
+/// avoid line-based edits on such files until normalised.
+///
+/// UTF-16 (LE/BE) files are recognised by their BOM and scanned at u16-code-unit
+/// granularity so that on-disk CRLF (`00 0D 00 0A` BE / `0D 00 0A 00` LE) is
+/// reported as `"CRLF"` instead of being misclassified as `"LF"` because the
+/// 0x0A byte is not preceded by a 0x0D byte at byte granularity.
+fn detect_line_ending(bytes: &[u8]) -> &'static str {
+    // UTF-16 BOM detection — must precede the byte-oriented scan because
+    // the byte preceding 0x0A in UTF-16 CRLF is the high half of a NUL
+    // code unit, not 0x0D.
+    if bytes.len() >= 2 {
+        match (bytes[0], bytes[1]) {
+            (0xFF, 0xFE) => return detect_line_ending_utf16(&bytes[2..], false),
+            (0xFE, 0xFF) => return detect_line_ending_utf16(&bytes[2..], true),
+            _ => {}
+        }
+    }
+    let mut has_lf = false;
+    let mut has_crlf = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            if i > 0 && bytes[i - 1] == b'\r' {
+                has_crlf = true;
+            } else {
+                has_lf = true;
+            }
+        }
+        i += 1;
+    }
+    match (has_lf, has_crlf) {
+        (false, false) => "NONE",
+        (true, false) => "LF",
+        (false, true) => "CRLF",
+        (true, true) => "MIXED",
+    }
+}
+
+/// Scan UTF-16 code units (after the BOM has been stripped by the caller)
+/// looking for `\n` (U+000A) optionally preceded by `\r` (U+000D).
+/// `big_endian` selects the byte order for u16 reconstruction.
+fn detect_line_ending_utf16(body: &[u8], big_endian: bool) -> &'static str {
+    let mut has_lf = false;
+    let mut has_crlf = false;
+    let mut prev: Option<u16> = None;
+    let mut i = 0;
+    while i + 1 < body.len() {
+        let cu = if big_endian {
+            u16::from_be_bytes([body[i], body[i + 1]])
+        } else {
+            u16::from_le_bytes([body[i], body[i + 1]])
+        };
+        if cu == 0x000A {
+            if prev == Some(0x000D) {
+                has_crlf = true;
+            } else {
+                has_lf = true;
+            }
+        }
+        prev = Some(cu);
+        i += 2;
+    }
+    match (has_lf, has_crlf) {
+        (false, false) => "NONE",
+        (true, false) => "LF",
+        (false, true) => "CRLF",
+        (true, true) => "MIXED",
+    }
+}
+
+
 
 fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // Concurrent build protection: prevent two reindex calls from running simultaneously.
