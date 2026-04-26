@@ -281,61 +281,8 @@ When `responseTruncated: true` appears in the summary, narrow your query with `e
 | `returned` | Always | Number of files actually returned in the `files` array |
 | `searchTimeMs` | Always | Search duration in milliseconds |
 | `responseTruncated` | Response exceeds size limit | `true` when the result set was truncated to fit the size budget — narrow the query |
-| `literalPrefilter` | `lineRegex` mode | Diagnostic block for the literal-trigram prefilter. Always emits `used`, `candidateFiles`, `totalFiles`, `extractedFragments`. Conditional fields: `reason` (when `used: false`), `shortCircuited` (when ratio guard tripped), `hasTopLevelAlternation` (single-pattern input only — when a batch contains multiple `terms[]`, the flag is omitted because per-pattern selectivity attribution would be ambiguous). See "Top-level alternation pessimization" below |
-| `perfHint` | Slow `lineRegex` over a large index | Actionable advice for slow scans. Three variants: prefilter-applied + still slow (per-line regex is the bottleneck), prefilter-attempted-but-discarded (cites `literalPrefilter.reason`), and **alternation-split advisory** when a top-level `\|` regex kept too many candidates |
-
-#### Top-level alternation pessimization
-
-When `lineRegex` regex contains a top-level `|` alternation (e.g.
-`OrgApp.*TypeId|App.*TypeId\s*=\s*\d`), `regex-syntax` derives literals
-per branch but the resulting prefilter set is dominated by the most
-frequent shared fragment. For the example above the extracted set is
-`["app", "orgapp"]` and the `app` fragment alone matches roughly a
-third of all `.cs` files in a typical large enterprise codebase. The
-prefilter applies but barely narrows the candidate set, and the
-per-line regex pass dominates cost.
-
-**Fix**: split the alternation across separate `terms[]` entries. Each
-branch then contributes its own literal independently:
-
-```json
-// Slow: one term, top-level OR — extractor returns ["error"] (or the shared prefix)
-{ "terms": ["error|warning|fatal"], "lineRegex": true, "ext": ["cs"] }
-
-// Fast: three terms — each branch contributes its own contiguous literal
-{ "terms": ["error", "warning", "fatal"], "lineRegex": true, "ext": ["cs"] }
-```
-
-**Important caveat — the speedup depends on each branch having a
-contiguous literal of ≥3 chars.** `regex-syntax`'s literal extractor
-stops at `.*` / `.+` boundaries, so for a regex like
-`OrgApp.*TypeId|App.*TypeId\s*=\s*\d` splitting into
-`terms=["OrgApp.*TypeId", "App.*TypeId\s*=\s*\d"]` does *not* unlock
-new selectivity — both branches still extract only `app`/`orgapp` (the
-prefix before `.*`), and the candidate set stays the same. Measured on
-a 66 743-file C# repo (2026-04-26):
-
-| Rewrite | `searchTimeMs` | `candidateFiles` | Notes |
-|---|---|---|---|
-| Single OR'd term `OrgApp.*TypeId\|App.*TypeId\s*=\s*\d` | 80 053 | 22 581 | Baseline |
-| Split, semantics-preserving (`.*` in both branches) | 27 491 | 22 581 | ~2.9× — gain comes from simpler per-line regex, NOT prefilter |
-| Split, narrower second term `AppTypeId\s*=\s*\d` (drops `.*`) | ~1 000 | 598 | ~80× — but **changes match semantics**, won't match `App Foo TypeId = 1` |
-
-Take-away: the advisory is most effective for OR'd terms with
-**contiguous** literal branches (e.g. log-level filters, enum
-discriminators, fixed keyword lists). For regexes whose branches
-contain `.*` between literal anchors, splitting still helps modestly
-(simpler per-line regex) but does not change the prefilter candidate
-set; consider reformulating the regex so each branch has a longer
-contiguous literal, or accepting the modest speedup.
-
-The advisory in `summary.perfHint` will prompt this rewrite
-automatically when the trigger conditions
-(`used: true` + `candidate ratio > 20%` + top-level `|` + slow scan +
-**OR mode**) all hold. The advisory is suppressed in `mode='and'`
-because splitting `terms=["foo|bar","baz"]` into `["foo","bar","baz"]`
-would change semantics from `(foo OR bar) AND baz` to
-`foo AND bar AND baz` and silently drop matches.
+| `literalPrefilter` | `lineRegex` mode | Diagnostic block for the literal-trigram prefilter. Always emits `used`, `candidateFiles`, `totalFiles`, `extractedFragments`. Conditional fields: `reason` (when `used: false`), `shortCircuited` (when ratio guard tripped) |
+| `perfHint` | Slow `lineRegex` over a large index | Actionable advice for slow scans. Two variants: prefilter-applied + still slow (per-line regex is the bottleneck), prefilter-attempted-but-discarded (cites `literalPrefilter.reason`) |
 
 ---
 

@@ -141,15 +141,19 @@ pub(super) fn extract_required_literals(pattern: &str) -> Option<ExtractedLitera
 
 /// Returns `true` when `pattern` contains a top-level `|` alternation
 /// (also matches when the alternation is wrapped in a single capture group
-/// or anchored with `^`/`$`). Used by the alternation-split advisory:
-/// when the prefilter applied but covered too many files AND the pattern
-/// is `A|B`-shaped, splitting into separate `terms[]` lets each branch
-/// extract its own literal independently and typically yields a much
-/// more selective fragment set (see
-/// `user-story_xray-grep-alternation-split-hint_2026-04-26.md`).
+/// or anchored with `^`/`$`).
 ///
-/// Conservative on parse failure: returns `false` so we never emit the
-/// advisory for a pattern we couldn't analyse.
+/// Currently unused at call sites: the alternation-split advisory that
+/// originally consumed this helper was reverted (see CHANGELOG entry
+/// "Reverted — `xray_grep` `lineRegex` alternation-split advisory") after
+/// distributivity proofs showed splitting does not change the prefilter
+/// candidate set in our pipeline. The detector is retained because it is
+/// a correct, low-cost building block likely to be useful for a future
+/// per-line-regex complexity advisory or any other "is this regex an
+/// OR'd composite?" classifier.
+///
+/// Conservative on parse failure: returns `false`.
+#[allow(dead_code)]
 pub(super) fn regex_has_top_level_alternation(pattern: &str) -> bool {
     let Ok(hir) = ParserBuilder::new().build().parse(pattern) else {
         return false;
@@ -164,6 +168,7 @@ pub(super) fn regex_has_top_level_alternation(pattern: &str) -> bool {
 /// `foo(A|B)bar` are not the target of the advisory (the user's intent is
 /// already "match X around something" and splitting wouldn't preserve
 /// semantics cleanly).
+#[allow(dead_code)]
 fn hir_is_top_level_alternation(hir: &Hir) -> bool {
     match hir.kind() {
         HirKind::Alternation(_) => true,
