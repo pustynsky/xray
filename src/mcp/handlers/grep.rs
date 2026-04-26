@@ -18,6 +18,9 @@ use super::utils::{self,
 };
 use super::HandlerContext;
 
+#[path = "grep_literal_extract.rs"]
+mod grep_literal_extract;
+
 /// Closed enum of accepted `mode` values for `xray_grep`.
 ///
 /// Drift-guard: `test_all_grep_modes_drift_guard` pins the slice; any change
@@ -298,6 +301,9 @@ fn build_grep_base_summary(
         search_mode,
         search_elapsed.as_millis() as u64,
         index.files.len(),
+        false, // default copy assumes no prefilter; lineRegex callers may
+               // override via `apply_literal_prefilter_summary` when the
+               // prefilter actually ran.
     ) {
         // Use a dedicated `perfHint` field so a later truncation pass
         // (`truncate_large_response`, which writes `summary["hint"]`) cannot
@@ -335,10 +341,276 @@ const LINE_REGEX_LARGE_INDEX_FILES: usize = 1000;
 /// set). The actual count of files read depends on file/ext/dir filters and
 /// is not threaded through here, so the message uses upper-bound phrasing
 /// ("index of N files") rather than implying every file was read.
+/// Look up the file_id set whose tokens contain `term` as a substring.
+/// Wraps the existing trigram-intersection helper with the file_id
+/// projection that [`compute_literal_prefilter`] needs.
+fn files_containing_substring(
+    term: &str,
+    trigram_idx: &crate::TrigramIndex,
+    inverted: &HashMap<String, Vec<crate::Posting>>,
+) -> HashSet<u32> {
+    let token_ids = find_matching_tokens_for_term(term, trigram_idx);
+    let mut out = HashSet::new();
+    for tok_id in token_ids {
+        if let Some(token) = trigram_idx.tokens.get(tok_id as usize)
+            && let Some(postings) = inverted.get(token)
+        {
+            for p in postings {
+                out.insert(p.file_id);
+            }
+        }
+    }
+    out
+}
+
+
+/// Information about an attempted literal-trigram prefilter pass for
+/// `lineRegex` mode. Populated by [`compute_literal_prefilter`] and exposed
+/// by [`apply_literal_prefilter_summary`] as `summary.literalPrefilter` so
+/// clients can see whether/why the prefilter narrowed the search.
+#[derive(Debug, Clone, Default)]
+struct LiteralPrefilterInfo {
+    /// Whether the prefilter actually narrowed the iteration. `false` when
+    /// extraction failed for any required pattern, when the OR-mode contract
+    /// admitted an unprefilterable pattern, or when the candidate ratio
+    /// exceeded [`LITERAL_PREFILTER_MAX_RATIO`] (short-circuit fallback).
+    used: bool,
+    /// Number of files in the candidate set when `used == true`. When
+    /// `short_circuited` is set, this is the candidate count that *would* have
+    /// been used had the ratio guard not tripped (informational).
+    candidate_files: usize,
+    /// `index.files.len()` snapshot at the time the prefilter ran.
+    total_files: usize,
+    /// Word-shaped literal *fragments* fed into the trigram lookup, after
+    /// extraction + non-word splitting + lowercasing + dedup. NOT identical
+    /// to the raw literals returned by `regex-syntax` (e.g. `"pub fn"` becomes
+    /// the single fragment `["pub"]` because `"fn"` falls below the trigram
+    /// floor). Capped at 5 entries when serialised; full list kept here for
+    /// debug logging.
+    extracted_fragments: Vec<String>,
+    /// True iff the candidate ratio exceeded
+    /// [`LITERAL_PREFILTER_MAX_RATIO`] and we fell back to the full scan.
+    short_circuited: bool,
+    /// Human-readable explanation when `used == false`. Surfaced in the
+    /// summary so clients understand why the prefilter was skipped.
+    reason: Option<String>,
+}
+
+/// Maximum ratio of `candidate_files / total_files` at which the literal
+/// prefilter is considered worth applying. Above this threshold the trigram
+/// intersection cost is comparable to (or worse than) just reading every
+/// surviving file, so we fall back to the original full-scan path. 0.5 is
+/// an empirically chosen midpoint; refine after AC-4 measurements land.
+const LITERAL_PREFILTER_MAX_RATIO: f64 = 0.5;
+
+/// Compute the candidate file set for `handle_line_regex_search` using the
+/// required-prefix literals extracted from each compiled regex pattern.
+///
+/// Returns `(Some(set), info)` when the prefilter narrowed the search and
+/// `(None, info)` when callers must fall back to scanning every file.
+/// Fallback triggers: the index has no files, every pattern is
+/// unprefilterable, an OR-mode batch contains an unprefilterable pattern
+/// (because OR with a missing constraint is unconstrained), or the candidate
+/// ratio exceeded [`LITERAL_PREFILTER_MAX_RATIO`].
+///
+/// Correctness: the extractor returns `Kind::Prefix` literals — every regex
+/// match starts with one of them. Literals are lowercased and looked up in
+/// the (lowercased) trigram index, so the prefilter overestimates candidates
+/// (case-folded match) but never underestimates. The per-line regex remains
+/// the final arbiter on every surviving file, so false positives are dropped
+/// silently and case-sensitive patterns stay correct.
+fn compute_literal_prefilter(
+    index: &ContentIndex,
+    patterns: &[String],
+    mode_and: bool,
+) -> (Option<HashSet<u32>>, LiteralPrefilterInfo) {
+    let total_files = index.files.len();
+    let mut info = LiteralPrefilterInfo {
+        total_files,
+        ..LiteralPrefilterInfo::default()
+    };
+
+    if patterns.is_empty() || total_files == 0 {
+        info.reason = Some("empty pattern list or empty index".into());
+        return (None, info);
+    }
+
+    // Phase 1: per-pattern literal extraction. `None` = unprefilterable.
+    let per_pattern_literals: Vec<Option<Vec<String>>> = patterns
+        .iter()
+        .map(|p| {
+            grep_literal_extract::extract_required_literals(p)
+                .filter(|e| e.usable)
+                .map(|e| e.literals)
+        })
+        .collect();
+
+    let any_unprefilterable = per_pattern_literals.iter().any(|p| p.is_none());
+    let all_unprefilterable = per_pattern_literals.iter().all(|p| p.is_none());
+
+    if all_unprefilterable {
+        info.reason = Some("no pattern has extractable literals".into());
+        return (None, info);
+    }
+    if !mode_and && any_unprefilterable {
+        // OR with any unprefilterable term = unconstrained candidate set.
+        info.reason =
+            Some("OR mode contains an unprefilterable pattern".into());
+        return (None, info);
+    }
+
+    // Phase 2: per-pattern candidate file_id sets. Each Kind::Prefix literal
+    // is split into word-shaped fragments (alphanumeric/underscore runs of
+    // length ≥ MIN_LITERAL_LEN) because the trigram index is built from
+    // tokenised content — a literal containing whitespace or punctuation
+    // (`"## "`, `"pub fn"`, `"GET /api"`) cannot be looked up directly.
+    // Per-literal: INTERSECT fragment file sets (every fragment must be
+    // present in any file matching the regex via that alternative). If a
+    // literal yields zero usable fragments (e.g. "## " alone), the whole
+    // pattern becomes unprefilterable — we cannot rule out files via that
+    // alternative, so the OR-with-unprefilterable rule kicks in. Per-pattern:
+    // UNION across literal alternatives. Per-batch: AND/OR via `mode_and`.
+    let mut combined: Option<HashSet<u32>> = None;
+    let mut all_fragments_seen: Vec<String> = Vec::new();
+
+    for pat_literals in &per_pattern_literals {
+        let pat_set: Option<HashSet<u32>> = match pat_literals {
+            None => None, // unprefilterable from extraction
+            Some(literals) => {
+                let mut union: HashSet<u32> = HashSet::new();
+                let mut all_alternatives_fragmentable = true;
+                for lit in literals {
+                    let fragments: Vec<&str> = lit
+                        .split(|c: char| !c.is_alphanumeric() && c != '_')
+                        // Length in CHARACTERS (Unicode scalars), not bytes.
+                        // `generate_trigrams` slides over chars for non-ASCII
+                        // input, so a 2-char Cyrillic fragment like "яб"
+                        // produces zero trigrams — lookup would silently
+                        // return an empty file set (false negative).
+                        .filter(|s| s.chars().count() >= grep_literal_extract::MIN_LITERAL_LEN)
+                        .collect();
+                    if fragments.is_empty() {
+                        // This alternative cannot be constrained via the
+                        // trigram index; the whole literal-disjunction is
+                        // therefore unconstrained.
+                        all_alternatives_fragmentable = false;
+                        break;
+                    }
+                    // Per-literal: INTERSECT file sets across fragments
+                    // (regex match implies every fragment present).
+                    let mut alt_set: Option<HashSet<u32>> = None;
+                    for frag in &fragments {
+                        all_fragments_seen.push((*frag).to_string());
+                        let frag_files = files_containing_substring(
+                            frag,
+                            &index.trigram,
+                            &index.index,
+                        );
+                        alt_set = Some(match alt_set.take() {
+                            None => frag_files,
+                            Some(prev) => prev
+                                .intersection(&frag_files)
+                                .copied()
+                                .collect(),
+                        });
+                    }
+                    if let Some(s) = alt_set {
+                        union.extend(s);
+                    }
+                }
+                if all_alternatives_fragmentable {
+                    Some(union)
+                } else {
+                    None
+                }
+            }
+        };
+
+        // Re-evaluate the AND/OR composition rules after potentially
+        // demoting a pattern to unprefilterable above. OR with any
+        // unprefilterable pattern means the candidate set is unconstrained.
+        if !mode_and && pat_set.is_none() {
+            info.reason = Some(
+                "OR mode contains a literal whose word fragments are too short"
+                    .into(),
+            );
+            return (None, info);
+        }
+
+        combined = match (combined.take(), pat_set, mode_and) {
+            // First constrained pattern seeds the candidate set.
+            (None, Some(set), _) => Some(set),
+            // Leading unprefilterable patterns: stay unconstrained for now.
+            (None, None, _) => None,
+            // AND: intersect when both sides are constrained.
+            (Some(prev), Some(set), true) => {
+                Some(prev.intersection(&set).copied().collect())
+            }
+            // AND with an unprefilterable later pattern: that pattern adds
+            // no constraint, so the existing prev set still over-approximates
+            // matching files.
+            (Some(prev), None, true) => Some(prev),
+            // OR with both constrained: union the file sets.
+            (Some(prev), Some(set), false) => {
+                Some(prev.union(&set).copied().collect())
+            }
+            // OR with unprefilterable already bailed at the guard above.
+            (Some(_), None, false) => unreachable!(
+                "OR with unprefilterable pattern should have bailed earlier"
+            ),
+        };
+    }
+
+    all_fragments_seen.sort();
+    all_fragments_seen.dedup();
+    info.extracted_fragments = all_fragments_seen;
+
+    let candidate_set = match combined {
+        Some(s) => s,
+        None => {
+            // Reachable in AND mode when every pattern's literal-disjunction
+            // turned out to have only unfragmentable alternatives — then
+            // every pat_set above was None and `combined` never seeded.
+            info.reason =
+                Some("all patterns lacked word-shaped literal fragments".into());
+            return (None, info);
+        }
+    };
+
+    let candidate_count = candidate_set.len();
+    info.candidate_files = candidate_count;
+
+    // Short-circuit: if the prefilter does not eliminate at least half the
+    // index, the per-file regex pre-check is cheaper than maintaining the
+    // candidate hashset.
+    let ratio = candidate_count as f64 / total_files as f64;
+    if ratio > LITERAL_PREFILTER_MAX_RATIO {
+        info.short_circuited = true;
+        info.reason = Some(format!(
+            "candidate set covers {}/{} files (>{:.0}% threshold)",
+            candidate_count,
+            total_files,
+            LITERAL_PREFILTER_MAX_RATIO * 100.0
+        ));
+        return (None, info);
+    }
+
+    info.used = true;
+    debug!(
+        "[lineRegex-prefilter] extracted {} fragment(s), candidates {}/{} ({:.1}%)",
+        info.extracted_fragments.len(),
+        candidate_count,
+        total_files,
+        ratio * 100.0
+    );
+    (Some(candidate_set), info)
+}
+
 fn line_regex_perf_hint(
     search_mode: &str,
     search_elapsed_ms: u64,
     index_files: usize,
+    prefilter_used: bool,
 ) -> Option<String> {
     if !search_mode.starts_with("lineRegex") {
         return None;
@@ -349,13 +621,92 @@ fn line_regex_perf_hint(
     if index_files < LINE_REGEX_LARGE_INDEX_FILES {
         return None;
     }
+    if prefilter_used {
+        // Prefilter ran AND search was still slow. The candidate set must
+        // already be narrow, so the bottleneck is per-file regex evaluation,
+        // not the iteration count — different mitigations apply.
+        return Some(format!(
+            "lineRegex took {}ms over an index of {} files even with the literal-trigram prefilter applied. \
+             The candidate set was already narrow, so the per-line regex evaluation is the dominant cost. \
+             To speed up further: simplify the regex (drop expensive lookarounds / unicode classes / nested quantifiers), \
+             narrow scope with dir=/file=/ext=, or pre-filter by terms=[\"...\"] and re-apply the regex client-side. \
+             See `xray_help tool=\"xray_grep\"` for full guidance.",
+            search_elapsed_ms, index_files
+        ));
+    }
     Some(format!(
-        "lineRegex took {}ms over an index of {} files (no trigram prefilter -- every file that survives file/ext/dir filters is read; a whole-content precheck filters non-matching files, the rest are scanned line by line). \
+        "lineRegex took {}ms over an index of {} files (literal-trigram prefilter could not narrow the search \
+         — the regex has no extractable required-substring prefix, so every file that survives file/ext/dir filters is read; \
+         a whole-content precheck filters non-matching files, the rest are scanned line by line). \
          If the pattern reduces to a fixed substring, drop lineRegex and use terms=[\"...\"] (~1000x faster). \
-         To stay in regex: narrow scope with dir=/file=/ext=, anchor with ^ or $, or split into a substring prefilter \
-         plus a regex client-side filter. See `xray_help tool=\"xray_grep\"` for full guidance.",
+         To stay in regex: narrow scope with dir=/file=/ext=, anchor with ^ or $ + a literal prefix (e.g. `^pub fn`), \
+         or split into a substring prefilter plus a regex client-side filter. See `xray_help tool=\"xray_grep\"` for full guidance.",
         search_elapsed_ms, index_files
     ))
+}
+
+/// Cap on `extracted_fragments` entries in the serialised summary. Keeps
+/// `summary.literalPrefilter` compact for clients while debug logs retain
+/// the full list. Five is empirically enough to diagnose typical mismatches
+/// ("why didn't fragment X reach the trigram lookup?").
+const LITERAL_PREFILTER_FRAGMENT_PREVIEW: usize = 5;
+
+/// Inject `summary.literalPrefilter` describing how the AC-4 prefilter
+/// behaved for this `lineRegex` request. When the prefilter ran AND
+/// `search_elapsed_ms` is still slow, also REPLACES `summary.perfHint`
+/// with a prefilter-aware variant (the default hint emitted by
+/// [`build_grep_base_summary`] assumes no prefilter ran and tells users
+/// to do things the prefilter already did, which would mislead).
+fn apply_literal_prefilter_summary(
+    summary: &mut Value,
+    info: &LiteralPrefilterInfo,
+    search_elapsed_ms: u64,
+    search_mode: &str,
+) {
+    let Some(obj) = summary.as_object_mut() else {
+        return;
+    };
+
+    // Cap fragment list for serialisation; record overflow as a separate
+    // counter so clients know when the preview was truncated without us
+    // changing the array shape.
+    let fragments_total = info.extracted_fragments.len();
+    let fragments_preview: Vec<&String> = info
+        .extracted_fragments
+        .iter()
+        .take(LITERAL_PREFILTER_FRAGMENT_PREVIEW)
+        .collect();
+
+    let mut prefilter = json!({
+        "used": info.used,
+        "candidateFiles": info.candidate_files,
+        "totalFiles": info.total_files,
+        "extractedFragments": fragments_preview,
+    });
+    if fragments_total > LITERAL_PREFILTER_FRAGMENT_PREVIEW {
+        prefilter["extractedFragmentsTruncated"] =
+            json!(fragments_total - LITERAL_PREFILTER_FRAGMENT_PREVIEW);
+    }
+    if info.short_circuited {
+        prefilter["shortCircuited"] = json!(true);
+    }
+    if let Some(ref reason) = info.reason {
+        prefilter["reason"] = json!(reason);
+    }
+    obj.insert("literalPrefilter".into(), prefilter);
+
+    // Override the perfHint installed by `build_grep_base_summary` when the
+    // prefilter actually ran — the default copy says "no prefilter" and is
+    // wrong here. We only override on slow runs (the helper itself returns
+    // None for fast runs, so there's nothing to overwrite).
+    if info.used && let Some(hint) = line_regex_perf_hint(
+        search_mode,
+        search_elapsed_ms,
+        info.total_files,
+        true,
+    ) {
+        obj.insert("perfHint".into(), json!(hint));
+    }
 }
 
 /// Attach the `dirAutoConverted` hint to summary when dir= was a file path.
@@ -1002,7 +1353,13 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     let search_start = Instant::now();
 
-    if parsed.use_substring {
+    if parsed.use_substring || parsed.use_line_regex {
+        // lineRegex shares the substring branch's trigram dependency: AC-4
+        // adds a literal-trigram prefilter (`compute_literal_prefilter`) that
+        // reads `index.trigram` while the caller already holds a read lock
+        // below — so the trigram index must be made clean *before* that read
+        // lock is acquired (rebuilding from inside the read lock would need a
+        // write lock and deadlock).
         ensure_trigram_index(ctx);
     }
 
@@ -1927,6 +2284,21 @@ fn handle_line_regex_search(
     patterns: Vec<String>,
     params: &GrepSearchParams,
 ) -> ToolCallResult {
+    handle_line_regex_search_inner(ctx, index, patterns, params, true)
+}
+
+/// Inner implementation of [`handle_line_regex_search`]. The
+/// `prefilter_enabled` flag will be wired in step 3 of AC-4 to gate the
+/// literal-trigram prefilter (kept here in step 2 only to enable the
+/// `#[cfg(test)]` differential check added in step 5). For now both call
+/// sites pass `true` and the flag is intentionally unused.
+fn handle_line_regex_search_inner(
+    ctx: &HandlerContext,
+    index: &ContentIndex,
+    patterns: Vec<String>,
+    params: &GrepSearchParams,
+    prefilter_enabled: bool,
+) -> ToolCallResult {
     // `patterns` is supplied by the caller as one regex per array entry
     // (taken verbatim from the `terms` array — literal `,` inside an entry is
     // preserved). Unlike token regex, we do NOT lowercase — user-supplied
@@ -1976,6 +2348,26 @@ fn handle_line_regex_search(
     let mut per_pattern_matches: Vec<HashMap<String, Vec<u32>>> = vec![HashMap::new(); patterns.len()];
     let mut content_cache: HashMap<String, String> = HashMap::new();
 
+    // AC-4: literal-trigram prefilter. When enabled and the regex pattern
+    // exposes a fixed substring prefix (e.g. `App\s*=\s*\d+` -> `app`), shrink
+    // the file iteration to the trigram-derived candidate set. `None` means
+    // "no prefilter" (extraction failed, OR-mode unprefilterable, or short-
+    // circuit) — fall back to scanning every file. `_prefilter_info` is
+    // captured here for the summary observability added in step 4.
+    let (candidate_file_ids, prefilter_info): (Option<HashSet<u32>>, LiteralPrefilterInfo) =
+        if prefilter_enabled {
+            compute_literal_prefilter(index, &patterns, params.mode_and)
+        } else {
+            (
+                None,
+                LiteralPrefilterInfo {
+                    total_files: index.files.len(),
+                    reason: Some("prefilter disabled by caller".into()),
+                    ..LiteralPrefilterInfo::default()
+                },
+            )
+        };
+
     // MINOR-23: cap total bytes held in `content_cache` so a single broad query
     // (e.g. lineRegex='.*' with showLines=true on a large repo) cannot OOM the
     // server. When the cap is exceeded, matches are still recorded — only the
@@ -1990,7 +2382,16 @@ fn handle_line_regex_search(
     let mut cache_bytes_used: usize = 0;
     let mut line_content_truncated = false;
 
-    for file_path in &index.files {
+    for (file_id, file_path) in index.files.iter().enumerate() {
+        // AC-4: skip files outside the literal-prefilter candidate set when
+        // it was computed. The check runs *before* `passes_file_filters` so
+        // the cheaper hashset lookup short-circuits the path/ext/dir glob
+        // walk for the (typically) ~99% of files the prefilter eliminates.
+        if let Some(ref candidates) = candidate_file_ids
+            && !candidates.contains(&(file_id as u32))
+        {
+            continue;
+        }
         if !passes_file_filters(file_path, params) {
             continue;
         }
@@ -2103,6 +2504,12 @@ fn handle_line_regex_search(
             index, search_elapsed, ctx, true,
         );
         apply_dir_auto_converted_note(&mut summary, params);
+        apply_literal_prefilter_summary(
+            &mut summary,
+            &prefilter_info,
+            search_elapsed.as_millis() as u64,
+            search_mode,
+        );
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -2125,6 +2532,12 @@ fn handle_line_regex_search(
         index, search_elapsed, ctx, true,
     );
     apply_dir_auto_converted_note(&mut summary, params);
+    apply_literal_prefilter_summary(
+        &mut summary,
+        &prefilter_info,
+        search_elapsed.as_millis() as u64,
+        search_mode,
+    );
     if line_content_truncated {
         // MINOR-23: tell the client that lineContent previews are partial.
         // The matched line *numbers* are complete; only `lineContent` arrays
