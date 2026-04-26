@@ -281,6 +281,44 @@ When `responseTruncated: true` appears in the summary, narrow your query with `e
 | `returned` | Always | Number of files actually returned in the `files` array |
 | `searchTimeMs` | Always | Search duration in milliseconds |
 | `responseTruncated` | Response exceeds size limit | `true` when the result set was truncated to fit the size budget — narrow the query |
+| `literalPrefilter` | `lineRegex` mode | Diagnostic block for the literal-trigram prefilter. Always emits `used`, `candidateFiles`, `totalFiles`, `extractedFragments`. Conditional fields: `reason` (when `used: false`), `shortCircuited` (when ratio guard tripped), `hasTopLevelAlternation` (single-pattern input only — when a batch contains multiple `terms[]`, the flag is omitted because per-pattern selectivity attribution would be ambiguous). See "Top-level alternation pessimization" below |
+| `perfHint` | Slow `lineRegex` over a large index | Actionable advice for slow scans. Three variants: prefilter-applied + still slow (per-line regex is the bottleneck), prefilter-attempted-but-discarded (cites `literalPrefilter.reason`), and **alternation-split advisory** when a top-level `\|` regex kept too many candidates |
+
+#### Top-level alternation pessimization
+
+When `lineRegex` regex contains a top-level `|` alternation (e.g.
+`OrgApp.*TypeId|App.*TypeId\s*=\s*\d`), `regex-syntax` derives literals
+per branch but the resulting prefilter set is dominated by the most
+frequent shared fragment. For the example above the extracted set is
+`["app", "orgapp"]` and the `app` fragment alone matches roughly a
+third of all `.cs` files in a typical large enterprise codebase. The
+prefilter applies but barely narrows the candidate set, and the
+per-line regex pass dominates cost.
+
+**Fix**: split the alternation across separate `terms[]` entries. Each
+branch then contributes its own literal independently:
+
+```json
+// Slow: one term, top-level OR — extractor returns ["app", "orgapp"]
+{ "terms": ["OrgApp.*TypeId|App.*TypeId\\s*=\\s*\\d"], "lineRegex": true, "ext": ["cs"] }
+
+// Fast: two terms (semantics-preserving) — each branch contributes its own literal
+{ "terms": ["OrgApp.*TypeId", "App.*TypeId\\s*=\\s*\\d"], "lineRegex": true, "ext": ["cs"] }
+```
+
+Measured on a 66 743-file C# repo (2026-04-26) using the *narrower*
+rewrite `terms=["OrgApp.*TypeId", "AppTypeId\s*=\s*\d"]` (no `.*`
+in the second branch): warm latency dropped from **44 s** to **1 s**
+(~45×), candidate files **22 580 → 598**. The semantics-preserving form
+shown above (with `App.*TypeId\s*=\s*\d`) is expected to yield similar
+speedup based on the same per-branch literal extraction (`apptypeid` /
+`orgapp`), pending direct measurement. The advisory in `summary.perfHint` will
+prompt this rewrite automatically when the trigger conditions
+(`used: true` + `candidate ratio > 20%` + top-level `|` + slow scan +
+**OR mode**) all hold. The advisory is suppressed in `mode='and'`
+because splitting `terms=["foo|bar","baz"]` into `["foo","bar","baz"]`
+would change semantics from `(foo OR bar) AND baz` to
+`foo AND bar AND baz` and silently drop matches.
 
 ---
 

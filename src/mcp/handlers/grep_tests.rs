@@ -693,6 +693,7 @@ fn test_apply_literal_prefilter_summary_attempted_but_discarded_overrides_defaul
         extracted_fragments: vec!["app".into()],
         short_circuited: true,
         reason: Some("candidate set covers 50000/60000 files (>50% threshold)".into()),
+        has_top_level_alternation: false,
     };
     apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
     let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
@@ -719,9 +720,129 @@ fn test_apply_literal_prefilter_summary_no_reason_leaves_default_hint() {
         extracted_fragments: vec![],
         short_circuited: false,
         reason: None,
+        has_top_level_alternation: false,
     };
     apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
     assert_eq!(summary["perfHint"].as_str(), Some(original_hint),
         "perfHint must be preserved when prefilter was not attempted (reason=None)");
+}
+
+
+#[test]
+fn test_apply_literal_prefilter_summary_alternation_split_advisory_fires_when_low_selectivity() {
+    // Story AC-4 positive: prefilter applied (used=true), kept >20% of
+    // files, AND pattern has top-level alternation -> the new advisory
+    // overrides the generic "applied but slow" hint with split-terms[]
+    // guidance. Models the real Shared measurement (22580/66743 = 34%).
+    use serde_json::json;
+    let mut summary = json!({
+        "perfHint": "original generic hint from build_grep_base_summary",
+    });
+    let info = LiteralPrefilterInfo {
+        used: true,
+        candidate_files: 22_580,
+        total_files: 66_743,
+        extracted_fragments: vec!["app".into(), "orgapp".into()],
+        short_circuited: false,
+        reason: None,
+        has_top_level_alternation: true,
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 44_000, "lineRegex");
+    let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
+    assert!(hint.contains("top-level `|` alternation"),
+        "alternation-split advisory must mention the alternation; got: {}", hint);
+    assert!(hint.contains("separate `terms[]`"),
+        "advisory must suggest splitting across terms[]; got: {}", hint);
+    assert!(hint.contains("22580/66743") || hint.contains("22580 / 66743") || hint.contains("22580"),
+        "advisory must surface the candidate ratio; got: {}", hint);
+    assert!(hint.contains("34%"),
+        "advisory must show selectivity percent; got: {}", hint);
+    // The generic "applied but slow" hint must NOT survive when the
+    // alternation-split advisory fires — it would contradict the advice.
+    assert!(!hint.contains("per-line regex evaluation is the dominant cost"),
+        "generic 'applied but slow' hint must be overridden; got: {}", hint);
+    // The literalPrefilter block should also surface the flag.
+    assert_eq!(summary["literalPrefilter"]["hasTopLevelAlternation"], json!(true));
+}
+
+#[test]
+fn test_apply_literal_prefilter_summary_alternation_advisory_skipped_when_high_selectivity() {
+    // Story AC-4 negative-1: prefilter applied AND pattern has
+    // alternation BUT the candidate ratio is below the 20% threshold —
+    // splitting wouldn't help meaningfully, so we fall through to the
+    // generic "applied but slow" hint instead.
+    use serde_json::json;
+    let mut summary = json!({"perfHint": "original generic hint"});
+    let info = LiteralPrefilterInfo {
+        used: true,
+        candidate_files: 600,        // ~1% of 60k = below 20% threshold
+        total_files: 60_000,
+        extracted_fragments: vec!["apptypeid".into()],
+        short_circuited: false,
+        reason: None,
+        has_top_level_alternation: true,
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
+    let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
+    assert!(!hint.contains("top-level `|` alternation"),
+        "alternation advisory must NOT fire when ratio is below threshold; got: {}", hint);
+    assert!(hint.contains("per-line regex evaluation is the dominant cost"),
+        "generic applied-but-slow hint should fire instead; got: {}", hint);
+}
+
+#[test]
+fn test_apply_literal_prefilter_summary_alternation_advisory_skipped_when_no_alternation() {
+    // Story AC-4 negative-2: prefilter applied AND ratio is high BUT the
+    // pattern has no top-level alternation — the advisory does not apply,
+    // generic hint stands.
+    use serde_json::json;
+    let mut summary = json!({"perfHint": "original generic hint"});
+    let info = LiteralPrefilterInfo {
+        used: true,
+        candidate_files: 30_000,
+        total_files: 60_000,
+        extracted_fragments: vec!["foo".into()],
+        short_circuited: false,
+        reason: None,
+        has_top_level_alternation: false,
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
+    let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
+    assert!(!hint.contains("top-level `|` alternation"),
+        "alternation advisory must NOT fire when no alternation present; got: {}", hint);
+    assert!(hint.contains("per-line regex evaluation is the dominant cost"),
+        "generic applied-but-slow hint should fire instead; got: {}", hint);
+    assert_eq!(summary["literalPrefilter"].get("hasTopLevelAlternation"), None,
+        "hasTopLevelAlternation flag should be omitted when false");
+}
+
+
+#[test]
+fn test_apply_literal_prefilter_summary_alternation_advisory_skipped_in_and_mode() {
+    // Round-1 review fix (commit-reviewer MAJOR-1): in lineRegex AND mode
+    // splitting `terms=["foo|bar","baz"]` into `terms=["foo","bar","baz"]`
+    // would change semantics from "(foo OR bar) AND baz" to
+    // "foo AND bar AND baz" and silently drop valid matches. The advisory
+    // is OR-mode-only — in AND mode (search_mode == "lineRegex-and") we
+    // must fall through to the generic "applied but slow" hint.
+    use serde_json::json;
+    let mut summary = json!({"perfHint": "original generic hint"});
+    let info = LiteralPrefilterInfo {
+        used: true,
+        candidate_files: 22_580,
+        total_files: 66_743,
+        extracted_fragments: vec!["app".into(), "orgapp".into()],
+        short_circuited: false,
+        reason: None,
+        has_top_level_alternation: true,
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 44_000, "lineRegex-and");
+    let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
+    assert!(!hint.contains("top-level `|` alternation"),
+        "alternation advisory must NOT fire in AND mode (would change semantics); got: {}", hint);
+    assert!(!hint.contains("separate `terms[]`"),
+        "split-terms[] suggestion must NOT appear in AND mode; got: {}", hint);
+    assert!(hint.contains("per-line regex evaluation is the dominant cost"),
+        "generic applied-but-slow hint should fire instead in AND mode; got: {}", hint);
 }
 
