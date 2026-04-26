@@ -2799,3 +2799,106 @@ fn test_xray_grep_line_regex_prefilter_summary_field_always_present() {
     cleanup_tmp(&tmp_dir);
 }
 
+
+/// Round-1 review fix (commit-reviewer MAJOR-1): the
+/// `hasTopLevelAlternation` flag is intentionally set to `true` ONLY when
+/// the request has a SINGLE pattern that contains top-level `|`. In a
+/// multi-term batch the global candidate-files ratio reflects the union
+/// (or intersection) of ALL terms, so attributing low selectivity to the
+/// alternation-bearing pattern would be misleading
+/// (e.g. `terms=["foo|bar","app"]` where `app` is what kept the set
+/// big, not `foo|bar`). The advisory must NOT fire for mixed batches.
+#[test]
+fn test_xray_grep_line_regex_prefilter_alternation_flag_omitted_for_mixed_batch() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_lineregex_alt_mixed_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Two files so total_files > 0; content is irrelevant for this assertion.
+    let mut f = std::fs::File::create(tmp_dir.join("a.cs")).unwrap();
+    writeln!(f, "AlphaBeta = 1").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("b.cs")).unwrap();
+    writeln!(f, "GammaDelta = 2").unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    // First term has top-level alternation, second does not. The flag must
+    // STILL be omitted because the multi-pattern guard suppresses
+    // attribution.
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"AlphaBeta|GammaDelta", r"Beta"],
+        "regex": true,
+        "lineRegex": true,
+    }));
+    assert!(!result.is_error,
+        "mixed-batch lineRegex should not error: {}", result.content[0].text);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let prefilter = &out["summary"]["literalPrefilter"];
+    assert!(prefilter.is_object(),
+        "summary.literalPrefilter must be present; got {}", out["summary"]);
+    assert_eq!(prefilter.get("hasTopLevelAlternation"), None,
+        "hasTopLevelAlternation must be omitted for multi-pattern batches \
+         (would mis-attribute selectivity); got {}", prefilter);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Round-1 review companion: with a SINGLE alternation pattern the flag
+/// IS surfaced. This pins the contract that `hasTopLevelAlternation` is
+/// the unambiguous-attribution case.
+#[test]
+fn test_xray_grep_line_regex_prefilter_alternation_flag_set_for_single_pattern() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_lineregex_alt_single_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let mut f = std::fs::File::create(tmp_dir.join("a.cs")).unwrap();
+    writeln!(f, "AlphaBeta = 1").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("b.cs")).unwrap();
+    writeln!(f, "GammaDelta = 2").unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"AlphaBeta|GammaDelta"],
+        "regex": true,
+        "lineRegex": true,
+    }));
+    assert!(!result.is_error,
+        "single-pattern alternation lineRegex should not error: {}", result.content[0].text);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let prefilter = &out["summary"]["literalPrefilter"];
+    assert_eq!(prefilter["hasTopLevelAlternation"].as_bool(), Some(true),
+        "hasTopLevelAlternation must be true for single-pattern top-level OR; got {}", prefilter);
+
+    cleanup_tmp(&tmp_dir);
+}
+

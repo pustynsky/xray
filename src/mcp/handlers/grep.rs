@@ -394,12 +394,20 @@ struct LiteralPrefilterInfo {
     /// Human-readable explanation when `used == false`. Surfaced in the
     /// summary so clients understand why the prefilter was skipped.
     reason: Option<String>,
-    /// True iff at least one of the input regex patterns has top-level `|`
-    /// alternation (detected via `regex_has_top_level_alternation`).
-    /// Used by the alternation-split advisory: when the prefilter applied
-    /// but covered too many files AND any pattern is `A|B`-shaped, the
+    /// True iff the input is a SINGLE regex pattern that has top-level `|`
+    /// alternation (detected via `regex_has_top_level_alternation`). Used
+    /// by the alternation-split advisory: when the prefilter applied but
+    /// covered too many files AND the sole pattern is `A|B`-shaped, the
     /// advisory suggests splitting across `terms[]` for ~45× speedup
     /// (see live measurement on Shared, 66 743 .cs files, 2026-04-26).
+    ///
+    /// Restricted to single-pattern inputs on purpose: in a multi-term
+    /// batch (`terms=["foo|bar","app"]`) the global `candidate_files`
+    /// ratio reflects the union/intersection of ALL terms, so we cannot
+    /// causally attribute the low selectivity to the alternation-bearing
+    /// pattern — the advice would be misleading. Per-pattern selectivity
+    /// tracking is a future enhancement; for now we only fire when the
+    /// attribution is unambiguous.
     has_top_level_alternation: bool,
 }
 
@@ -454,13 +462,15 @@ fn compute_literal_prefilter(
     // alternation-split advisory can fire even when the prefilter applies
     // (which it usually does for `A|B` patterns — see live measurement
     // 2026-04-26 in docs/measurements/ac4-literal-extraction-bench.md).
-    // ANY pattern with top-level alternation triggers the advisory: in
-    // OR-mode any single splittable terms[] entry is a valid suggestion;
-    // in AND-mode splitting one alternation term still yields independent
-    // literal extraction for each branch and improves selectivity.
-    info.has_top_level_alternation = patterns
-        .iter()
-        .any(|p| grep_literal_extract::regex_has_top_level_alternation(p));
+    // Restricted to SINGLE-PATTERN inputs on purpose: in a multi-term
+    // batch the global candidate_files ratio reflects ALL terms combined,
+    // so we cannot causally attribute low selectivity to the
+    // alternation-bearing pattern — the advice would be misleading
+    // (e.g. `terms=["foo|bar","app"]` where `app` is what kept the set
+    // big, not `foo|bar`). Per-pattern selectivity tracking is a future
+    // enhancement; for now only fire when the attribution is unambiguous.
+    info.has_top_level_alternation = patterns.len() == 1
+        && grep_literal_extract::regex_has_top_level_alternation(&patterns[0]);
 
     // Phase 1: per-pattern literal extraction. `None` = unprefilterable.
     let per_pattern_literals: Vec<Option<Vec<String>>> = patterns
@@ -756,14 +766,21 @@ fn apply_literal_prefilter_summary(
         };
         let alternation_advisory_applies = slow_enough
             && info.has_top_level_alternation
-            && ratio > LINE_REGEX_PREFILTER_LOW_SELECTIVITY_RATIO;
+            && ratio > LINE_REGEX_PREFILTER_LOW_SELECTIVITY_RATIO
+            // Suppress in AND mode: splitting `terms=["foo|bar","baz"]` into
+            // `terms=["foo","bar","baz"]` would change semantics from
+            // "(foo OR bar) AND baz" to "foo AND bar AND baz" and silently
+            // drop valid matches. The advisory only makes sense in OR mode
+            // where each terms[] entry is independent.
+            && search_mode == "lineRegex";
         if alternation_advisory_applies {
             let hint = format!(
                 "lineRegex took {}ms over an index of {} files. The literal-trigram prefilter applied with fragments {:?} \
                  but kept {}/{} files ({:.0}%) as candidates. Your regex contains a top-level `|` alternation; \
-                 the literal extractor returns only the common prefix of OR branches \
-                 (here likely a short, frequent fragment). Splitting the alternation across separate `terms[]` \
-                 lets each branch contribute its own literal independently, often yielding a much more selective fragment set. \
+                 in this case the literal extractor could only derive a shared low-selectivity fragment from the OR branches \
+                 (each branch contributes its own literal, but the result is dominated by the most frequent one). \
+                 Splitting the alternation across separate `terms[]` lets each branch be analysed independently, \
+                 often yielding a much more selective fragment set. \
                  Example: instead of `terms=[\"A.*X|B.*X\"]`, try `terms=[\"A.*X\", \"B.*X\"]`. \
                  See `summary.literalPrefilter.extractedFragments` for the current set and \
                  `xray_help tool=\"xray_grep\"` for full guidance.",

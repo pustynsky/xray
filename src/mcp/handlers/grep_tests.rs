@@ -816,3 +816,33 @@ fn test_apply_literal_prefilter_summary_alternation_advisory_skipped_when_no_alt
         "hasTopLevelAlternation flag should be omitted when false");
 }
 
+
+#[test]
+fn test_apply_literal_prefilter_summary_alternation_advisory_skipped_in_and_mode() {
+    // Round-1 review fix (commit-reviewer MAJOR-1): in lineRegex AND mode
+    // splitting `terms=["foo|bar","baz"]` into `terms=["foo","bar","baz"]`
+    // would change semantics from "(foo OR bar) AND baz" to
+    // "foo AND bar AND baz" and silently drop valid matches. The advisory
+    // is OR-mode-only — in AND mode (search_mode == "lineRegex-and") we
+    // must fall through to the generic "applied but slow" hint.
+    use serde_json::json;
+    let mut summary = json!({"perfHint": "original generic hint"});
+    let info = LiteralPrefilterInfo {
+        used: true,
+        candidate_files: 22_580,
+        total_files: 66_743,
+        extracted_fragments: vec!["app".into(), "orgapp".into()],
+        short_circuited: false,
+        reason: None,
+        has_top_level_alternation: true,
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 44_000, "lineRegex-and");
+    let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
+    assert!(!hint.contains("top-level `|` alternation"),
+        "alternation advisory must NOT fire in AND mode (would change semantics); got: {}", hint);
+    assert!(!hint.contains("separate `terms[]`"),
+        "split-terms[] suggestion must NOT appear in AND mode; got: {}", hint);
+    assert!(hint.contains("per-line regex evaluation is the dominant cost"),
+        "generic applied-but-slow hint should fire instead in AND mode; got: {}", hint);
+}
+
