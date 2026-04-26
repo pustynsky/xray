@@ -2284,7 +2284,36 @@ fn handle_line_regex_search(
     patterns: Vec<String>,
     params: &GrepSearchParams,
 ) -> ToolCallResult {
-    handle_line_regex_search_inner(ctx, index, patterns, params, true)
+    // AC-4 differential-test toggle: production code always passes `true`,
+    // but the `cfg(test)` build honours a thread-local override so a
+    // differential test can drive the SAME entry point with the prefilter
+    // disabled and assert files+lines parity. The override is OFF by default
+    // in tests too, so existing tests keep the production-equivalent path.
+    #[cfg(test)]
+    let prefilter_enabled = !line_regex_prefilter_disabled_for_test();
+    #[cfg(not(test))]
+    let prefilter_enabled = true;
+    handle_line_regex_search_inner(ctx, index, patterns, params, prefilter_enabled)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Per-thread switch read by [`handle_line_regex_search`] in test builds.
+    /// Set via [`set_line_regex_prefilter_disabled_for_test`] for the
+    /// duration of one differential-test scope. Defaults to `false` so
+    /// untouched tests behave exactly like production.
+    static LINE_REGEX_PREFILTER_DISABLED_FOR_TEST: std::cell::Cell<bool> =
+        const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+pub(crate) fn line_regex_prefilter_disabled_for_test() -> bool {
+    LINE_REGEX_PREFILTER_DISABLED_FOR_TEST.with(|c| c.get())
+}
+
+#[cfg(test)]
+pub(crate) fn set_line_regex_prefilter_disabled_for_test(disabled: bool) {
+    LINE_REGEX_PREFILTER_DISABLED_FOR_TEST.with(|c| c.set(disabled));
 }
 
 /// Inner implementation of [`handle_line_regex_search`]. The
