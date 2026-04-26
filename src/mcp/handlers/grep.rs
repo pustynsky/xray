@@ -294,7 +294,68 @@ fn build_grep_base_summary(
         summary["lossyUtf8Files"] = json!(index.lossy_file_count);
     }
     inject_branch_warning(&mut summary, ctx);
+    if let Some(hint) = line_regex_perf_hint(
+        search_mode,
+        search_elapsed.as_millis() as u64,
+        index.files.len(),
+    ) {
+        // Use a dedicated `perfHint` field so a later truncation pass
+        // (`truncate_large_response`, which writes `summary["hint"]`) cannot
+        // overwrite this guidance. A slow lineRegex scan over a large repo is
+        // exactly the kind of response most likely to trip the byte cap, so
+        // overloading the same key would silently swallow the perf hint.
+        summary["perfHint"] = json!(hint);
+    }
     summary
+}
+
+/// Threshold (milliseconds) above which a `lineRegex` scan is considered slow
+/// enough to warrant a performance hint in the response. Patterns that reduce
+/// to a fixed substring should run via `terms=[...]` (trigram-prefiltered) and
+/// finish in well under 10 ms even on large repos.
+const LINE_REGEX_SLOW_MS: u64 = 2000;
+
+/// Lower bound on indexed file count for the slow-scan hint. On tiny repos a
+/// 2 s lineRegex scan is not actionable advice (the user already has fast
+/// feedback) — only surface the hint when the cost actually scales with
+/// repo size.
+const LINE_REGEX_LARGE_INDEX_FILES: usize = 1000;
+
+/// AC-1: returns a human-readable performance hint when a `lineRegex` query
+/// triggered a costly full-file scan. Returns `None` for non-lineRegex modes,
+/// fast scans, or small indexes — i.e. when the hint would be noise.
+///
+/// Pure function: thresholds are module-level `const`s so the helper is unit
+/// testable without spinning up a real index. Callers inject the returned
+/// string into `summary["perfHint"]` (a dedicated key, distinct from the
+/// generic `summary["hint"]` written by `truncate_large_response`, so the
+/// two pieces of guidance can coexist on a truncated response).
+///
+/// `index_files` is the size of the indexed corpus (upper bound on the scan
+/// set). The actual count of files read depends on file/ext/dir filters and
+/// is not threaded through here, so the message uses upper-bound phrasing
+/// ("index of N files") rather than implying every file was read.
+fn line_regex_perf_hint(
+    search_mode: &str,
+    search_elapsed_ms: u64,
+    index_files: usize,
+) -> Option<String> {
+    if !search_mode.starts_with("lineRegex") {
+        return None;
+    }
+    if search_elapsed_ms < LINE_REGEX_SLOW_MS {
+        return None;
+    }
+    if index_files < LINE_REGEX_LARGE_INDEX_FILES {
+        return None;
+    }
+    Some(format!(
+        "lineRegex took {}ms over an index of {} files (no trigram prefilter -- every file that survives file/ext/dir filters is read; a whole-content precheck filters non-matching files, the rest are scanned line by line). \
+         If the pattern reduces to a fixed substring, drop lineRegex and use terms=[\"...\"] (~1000x faster). \
+         To stay in regex: narrow scope with dir=/file=/ext=, anchor with ^ or $, or split into a substring prefilter \
+         plus a regex client-side filter. See `xray_help tool=\"xray_grep\"` for full guidance.",
+        search_elapsed_ms, index_files
+    ))
 }
 
 /// Attach the `dirAutoConverted` hint to summary when dir= was a file path.

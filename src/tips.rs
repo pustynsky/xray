@@ -149,6 +149,11 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
             example: "xray grep \"I[A-Z]\\w+Cache\" -e cs --regex  |  MCP: terms=[\"I[A-Z]\\w+Cache\"], regex=true".into(),
         },
         Tip {
+            rule: "lineRegex bypasses the trigram index -- use terms=[...] when possible".into(),
+            why: "lineRegex bypasses the trigram prefilter and reads every file that survives file/ext/dir filtering; for each, a whole-content precheck runs first, then a per-line scan on the files that pass. On large repos with broad filters this can take 30-80 seconds. Substring search via terms=[...] uses the trigram index and answers in <10ms -- typically ~1000x faster. lineRegex is only the right tool when anchors (^/$), char classes, or lookarounds are essential to the match. If you can express the search as one or more fixed substrings, drop lineRegex.".into(),
+            example: "BAD: terms=[\"App.*=.*\\\\d\"] lineRegex=true (full-scan, ~50s on 60k files). GOOD: terms=[\"App\"] (trigram-prefiltered, <5ms; client-side regex over the few result files). When anchors are essential: ALWAYS narrow with file=/dir=/ext=. Response includes a `perfHint` when a slow lineRegex scan is detected (helper gates on elapsed >=2s and indexed-corpus size >=1k files; actual scan set is the post-filter subset).".into(),
+        },
+        Tip {
             rule: "Exclude test/mock dirs for production-only results".into(),
             why: "Half the results are often test files. Use excludeDir to filter them out.".into(),
             example: "--exclude-dir test --exclude-dir Mock  |  MCP: excludeDir=['test','Mock','UnitTests']".into(),

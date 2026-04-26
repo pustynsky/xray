@@ -1408,3 +1408,45 @@ fn test_known_tool_names_all_have_parameter_examples() {
     }
 }
 
+
+/// AC-2 (user-story_xray-grep-lineRegex-perf-hints_2026-04-26): tips() must
+/// include the lineRegex/trigram-bypass guidance so xray_help surfaces the
+/// substring-vs-lineRegex tradeoff. The tip's body must mention BOTH the
+/// underlying mechanism (no trigram prefilter) AND the substring alternative
+/// (terms=[...]) — a tip that only describes the symptom isn't actionable.
+///
+/// Reviewer-hardening (round 3, 2026-04-26): the example MUST also pin the
+/// honest gate semantics. Earlier wording said "perfHint when a slow lineRegex
+/// scan is detected (>=2s on >=1k files)" without specifying that the file
+/// count is the indexed-corpus upper bound, which contradicted the helper's
+/// actual gate (`index.files.len() >= LINE_REGEX_LARGE_INDEX_FILES`). The
+/// regression: a narrow filter on a large repo could trigger the hint while
+/// the docs implied otherwise. Pin the word "indexed" so the wording cannot
+/// silently drift back to the surviving-set framing.
+#[test]
+fn test_tips_includes_line_regex_perf_tip() {
+    let all_tips = tips(&["rs".to_string()]);
+    let line_regex_tip = all_tips.iter().find(|t|
+        t.rule.contains("lineRegex") && t.rule.contains("trigram"));
+    let tip = line_regex_tip.unwrap_or_else(|| panic!(
+        "tips() must include a lineRegex/trigram perf tip. Rules: {:?}",
+        all_tips.iter().map(|t| t.rule.to_string()).collect::<Vec<_>>()
+    ));
+    assert!(tip.why.contains("trigram"),
+        "why= must explain the no-trigram-prefilter mechanism; got: {}", tip.why);
+    assert!(tip.example.contains("terms="),
+        "example= must show the substring alternative; got: {}", tip.example);
+    assert!(tip.example.contains("perfHint"),
+        "example= must reference the perfHint response field by its real name; got: {}", tip.example);
+    // Honest-gate pin: the example must clarify the gate is on indexed-corpus
+    // size, not post-filter "surviving" set, to stay consistent with the
+    // helper's `index.files.len()`-based threshold check.
+    assert!(tip.example.contains("indexed"),
+        "example= must clarify the gate is on indexed-corpus size (not post-filter set); got: {}", tip.example);
+    // Round-4 reviewer suggestion: drop the global "surviving files" lexical
+    // ban -- the positive pins above already encode the real invariant
+    // (`indexed`, `perfHint`, `terms=`), and a future accurate sentence like
+    // "the gate is indexed-corpus size; surviving files may be fewer" would
+    // legitimately use the word and should not fail.
+}
+
