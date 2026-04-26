@@ -781,7 +781,10 @@ fn apply_literal_prefilter_summary(
                  (each branch contributes its own literal, but the result is dominated by the most frequent one). \
                  Splitting the alternation across separate `terms[]` lets each branch be analysed independently, \
                  often yielding a much more selective fragment set. \
-                 Example: instead of `terms=[\"A.*X|B.*X\"]`, try `terms=[\"A.*X\", \"B.*X\"]`. \
+                 Example: instead of `terms=[\"error|warning|fatal\"]`, try `terms=[\"error\", \"warning\", \"fatal\"]`. \
+                 Note: speedup depends on each branch containing a contiguous literal of >=3 chars; patterns like \
+                 `A.*X|B.*X` whose branches have `.*` between literals may see a smaller speedup because the \
+                 extractor still only derives the shared `a`/`b`-style prefixes. \
                  See `summary.literalPrefilter.extractedFragments` for the current set and \
                  `xray_help tool=\"xray_grep\"` for full guidance.",
                 search_elapsed_ms,

@@ -299,21 +299,38 @@ per-line regex pass dominates cost.
 branch then contributes its own literal independently:
 
 ```json
-// Slow: one term, top-level OR — extractor returns ["app", "orgapp"]
-{ "terms": ["OrgApp.*TypeId|App.*TypeId\\s*=\\s*\\d"], "lineRegex": true, "ext": ["cs"] }
+// Slow: one term, top-level OR — extractor returns ["error"] (or the shared prefix)
+{ "terms": ["error|warning|fatal"], "lineRegex": true, "ext": ["cs"] }
 
-// Fast: two terms (semantics-preserving) — each branch contributes its own literal
-{ "terms": ["OrgApp.*TypeId", "App.*TypeId\\s*=\\s*\\d"], "lineRegex": true, "ext": ["cs"] }
+// Fast: three terms — each branch contributes its own contiguous literal
+{ "terms": ["error", "warning", "fatal"], "lineRegex": true, "ext": ["cs"] }
 ```
 
-Measured on a 66 743-file C# repo (2026-04-26) using the *narrower*
-rewrite `terms=["OrgApp.*TypeId", "AppTypeId\s*=\s*\d"]` (no `.*`
-in the second branch): warm latency dropped from **44 s** to **1 s**
-(~45×), candidate files **22 580 → 598**. The semantics-preserving form
-shown above (with `App.*TypeId\s*=\s*\d`) is expected to yield similar
-speedup based on the same per-branch literal extraction (`apptypeid` /
-`orgapp`), pending direct measurement. The advisory in `summary.perfHint` will
-prompt this rewrite automatically when the trigger conditions
+**Important caveat — the speedup depends on each branch having a
+contiguous literal of ≥3 chars.** `regex-syntax`'s literal extractor
+stops at `.*` / `.+` boundaries, so for a regex like
+`OrgApp.*TypeId|App.*TypeId\s*=\s*\d` splitting into
+`terms=["OrgApp.*TypeId", "App.*TypeId\s*=\s*\d"]` does *not* unlock
+new selectivity — both branches still extract only `app`/`orgapp` (the
+prefix before `.*`), and the candidate set stays the same. Measured on
+a 66 743-file C# repo (2026-04-26):
+
+| Rewrite | `searchTimeMs` | `candidateFiles` | Notes |
+|---|---|---|---|
+| Single OR'd term `OrgApp.*TypeId\|App.*TypeId\s*=\s*\d` | 80 053 | 22 581 | Baseline |
+| Split, semantics-preserving (`.*` in both branches) | 27 491 | 22 581 | ~2.9× — gain comes from simpler per-line regex, NOT prefilter |
+| Split, narrower second term `AppTypeId\s*=\s*\d` (drops `.*`) | ~1 000 | 598 | ~80× — but **changes match semantics**, won't match `App Foo TypeId = 1` |
+
+Take-away: the advisory is most effective for OR'd terms with
+**contiguous** literal branches (e.g. log-level filters, enum
+discriminators, fixed keyword lists). For regexes whose branches
+contain `.*` between literal anchors, splitting still helps modestly
+(simpler per-line regex) but does not change the prefilter candidate
+set; consider reformulating the regex so each branch has a longer
+contiguous literal, or accepting the modest speedup.
+
+The advisory in `summary.perfHint` will prompt this rewrite
+automatically when the trigger conditions
 (`used: true` + `candidate ratio > 20%` + top-level `|` + slow scan +
 **OR mode**) all hold. The advisory is suppressed in `mode='and'`
 because splitting `terms=["foo|bar","baz"]` into `["foo","bar","baz"]`
