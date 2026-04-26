@@ -394,7 +394,22 @@ struct LiteralPrefilterInfo {
     /// Human-readable explanation when `used == false`. Surfaced in the
     /// summary so clients understand why the prefilter was skipped.
     reason: Option<String>,
+    /// True iff at least one of the input regex patterns has top-level `|`
+    /// alternation (detected via `regex_has_top_level_alternation`).
+    /// Used by the alternation-split advisory: when the prefilter applied
+    /// but covered too many files AND any pattern is `A|B`-shaped, the
+    /// advisory suggests splitting across `terms[]` for ~45× speedup
+    /// (see live measurement on Shared, 66 743 .cs files, 2026-04-26).
+    has_top_level_alternation: bool,
 }
+
+/// Threshold ratio above which the literal-trigram prefilter is considered
+/// to have made a low-selectivity choice (kept too many candidate files).
+/// When the ratio is over this AND a pattern has top-level `|` alternation,
+/// the alternation-split advisory hint fires. 0.20 = 20% — well below the
+/// 0.50 short-circuit threshold ([`LITERAL_PREFILTER_MAX_RATIO`]) so the
+/// advisory only fires for cases where the prefilter ran but barely helped.
+const LINE_REGEX_PREFILTER_LOW_SELECTIVITY_RATIO: f64 = 0.20;
 
 /// Maximum ratio of `candidate_files / total_files` at which the literal
 /// prefilter is considered worth applying. Above this threshold the trigram
@@ -434,6 +449,18 @@ fn compute_literal_prefilter(
         info.reason = Some("empty pattern list or empty index".into());
         return (None, info);
     }
+
+    // Detect top-level alternation BEFORE literal extraction so the
+    // alternation-split advisory can fire even when the prefilter applies
+    // (which it usually does for `A|B` patterns — see live measurement
+    // 2026-04-26 in docs/measurements/ac4-literal-extraction-bench.md).
+    // ANY pattern with top-level alternation triggers the advisory: in
+    // OR-mode any single splittable terms[] entry is a valid suggestion;
+    // in AND-mode splitting one alternation term still yields independent
+    // literal extraction for each branch and improves selectivity.
+    info.has_top_level_alternation = patterns
+        .iter()
+        .any(|p| grep_literal_extract::regex_has_top_level_alternation(p));
 
     // Phase 1: per-pattern literal extraction. `None` = unprefilterable.
     let per_pattern_literals: Vec<Option<Vec<String>>> = patterns
@@ -690,6 +717,9 @@ fn apply_literal_prefilter_summary(
     if info.short_circuited {
         prefilter["shortCircuited"] = json!(true);
     }
+    if info.has_top_level_alternation {
+        prefilter["hasTopLevelAlternation"] = json!(true);
+    }
     if let Some(ref reason) = info.reason {
         prefilter["reason"] = json!(reason);
     }
@@ -714,7 +744,38 @@ fn apply_literal_prefilter_summary(
         && info.total_files >= LINE_REGEX_LARGE_INDEX_FILES
         && search_mode.starts_with("lineRegex");
     if info.used {
-        if let Some(hint) = line_regex_perf_hint(
+        // Alternation-split advisory takes precedence over the generic
+        // "applied but slow" hint when applicable: it's strictly more
+        // actionable (~45× speedup measured on production data) and the
+        // generic hint's mitigations (narrow scope, drop lookarounds)
+        // would be misleading here — the regex IS the problem.
+        let ratio = if info.total_files > 0 {
+            info.candidate_files as f64 / info.total_files as f64
+        } else {
+            0.0
+        };
+        let alternation_advisory_applies = slow_enough
+            && info.has_top_level_alternation
+            && ratio > LINE_REGEX_PREFILTER_LOW_SELECTIVITY_RATIO;
+        if alternation_advisory_applies {
+            let hint = format!(
+                "lineRegex took {}ms over an index of {} files. The literal-trigram prefilter applied with fragments {:?} \
+                 but kept {}/{} files ({:.0}%) as candidates. Your regex contains a top-level `|` alternation; \
+                 the literal extractor returns only the common prefix of OR branches \
+                 (here likely a short, frequent fragment). Splitting the alternation across separate `terms[]` \
+                 lets each branch contribute its own literal independently, often yielding a much more selective fragment set. \
+                 Example: instead of `terms=[\"A.*X|B.*X\"]`, try `terms=[\"A.*X\", \"B.*X\"]`. \
+                 See `summary.literalPrefilter.extractedFragments` for the current set and \
+                 `xray_help tool=\"xray_grep\"` for full guidance.",
+                search_elapsed_ms,
+                info.total_files,
+                info.extracted_fragments,
+                info.candidate_files,
+                info.total_files,
+                ratio * 100.0,
+            );
+            obj.insert("perfHint".into(), json!(hint));
+        } else if let Some(hint) = line_regex_perf_hint(
             search_mode,
             search_elapsed_ms,
             info.total_files,

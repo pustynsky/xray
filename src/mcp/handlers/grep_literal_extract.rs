@@ -18,6 +18,7 @@
 //! candidate file.
 
 use regex_syntax::hir::literal::Extractor;
+use regex_syntax::hir::{Hir, HirKind};
 use regex_syntax::ParserBuilder;
 
 /// Minimum literal length that yields a usable trigram. Literals shorter
@@ -136,6 +137,57 @@ pub(super) fn extract_required_literals(pattern: &str) -> Option<ExtractedLitera
     }
 
     Some(ExtractedLiterals { literals: out, usable: true })
+}
+
+/// Returns `true` when `pattern` contains a top-level `|` alternation
+/// (also matches when the alternation is wrapped in a single capture group
+/// or anchored with `^`/`$`). Used by the alternation-split advisory:
+/// when the prefilter applied but covered too many files AND the pattern
+/// is `A|B`-shaped, splitting into separate `terms[]` lets each branch
+/// extract its own literal independently and typically yields a much
+/// more selective fragment set (see
+/// `user-story_xray-grep-alternation-split-hint_2026-04-26.md`).
+///
+/// Conservative on parse failure: returns `false` so we never emit the
+/// advisory for a pattern we couldn't analyse.
+pub(super) fn regex_has_top_level_alternation(pattern: &str) -> bool {
+    let Ok(hir) = ParserBuilder::new().build().parse(pattern) else {
+        return false;
+    };
+    hir_is_top_level_alternation(&hir)
+}
+
+/// Recursive helper: peels off `^`/`$` anchors and single-capture groups
+/// (e.g. `(A|B)` and `^(A|B)$`) before checking for `Alternation` at the
+/// root. We deliberately do NOT recurse into concatenations beyond peeling
+/// pure-anchor prefixes/suffixes — deeply nested alternations like
+/// `foo(A|B)bar` are not the target of the advisory (the user's intent is
+/// already "match X around something" and splitting wouldn't preserve
+/// semantics cleanly).
+fn hir_is_top_level_alternation(hir: &Hir) -> bool {
+    match hir.kind() {
+        HirKind::Alternation(_) => true,
+        // `(A|B)` parses as a Capture wrapping an Alternation.
+        HirKind::Capture(c) => hir_is_top_level_alternation(c.sub.as_ref()),
+        // `^(A|B)$` parses as a Concat of [Look(Start), inner, Look(End)].
+        // Peel pure-anchor edges; if the only non-anchor child is itself
+        // a top-level alternation, count it.
+        HirKind::Concat(parts) => {
+            let mut non_anchors = parts
+                .iter()
+                .filter(|h| !matches!(h.kind(), HirKind::Look(_)));
+            let Some(first) = non_anchors.next() else {
+                return false;
+            };
+            if non_anchors.next().is_some() {
+                // More than one non-anchor child — e.g. `foo(A|B)`.
+                // Out of scope for the advisory.
+                return false;
+            }
+            hir_is_top_level_alternation(first)
+        }
+        _ => false,
+    }
 }
 
 #[cfg(test)]

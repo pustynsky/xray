@@ -254,3 +254,87 @@ fn extracts_concatenation_of_literals() {
         got.literals
     );
 }
+
+#[cfg(test)]
+mod top_level_alternation_tests {
+    use super::super::regex_has_top_level_alternation;
+
+    #[test]
+    fn pure_alternation_is_detected() {
+        assert!(regex_has_top_level_alternation("foo|bar"));
+    }
+
+    #[test]
+    fn alternation_in_capture_group_is_detected() {
+        assert!(regex_has_top_level_alternation("(foo|bar)"));
+    }
+
+    #[test]
+    fn alternation_with_anchors_is_detected() {
+        assert!(regex_has_top_level_alternation("^(foo|bar)$"));
+        assert!(regex_has_top_level_alternation("^foo|bar$"));
+    }
+
+    #[test]
+    fn nested_alternation_inside_capture_is_detected() {
+        // `A|(B|C)` — the OUTER level is already alternation, so this is
+        // exactly the shape the advisory targets.
+        assert!(regex_has_top_level_alternation("foo|(bar|baz)"));
+    }
+
+    #[test]
+    fn no_alternation_is_not_detected() {
+        assert!(!regex_has_top_level_alternation("foo"));
+        assert!(!regex_has_top_level_alternation("foo.*bar"));
+        assert!(!regex_has_top_level_alternation("^pub fn"));
+        assert!(!regex_has_top_level_alternation(r"\d+"));
+    }
+
+    #[test]
+    fn character_class_is_not_alternation() {
+        // `[ab]` is a single Class node, NOT an Alternation. The advisory
+        // would be misleading here (you can't "split" a char class into
+        // separate terms[] meaningfully).
+        assert!(!regex_has_top_level_alternation("[abc]+"));
+        assert!(!regex_has_top_level_alternation("[a-z]"));
+    }
+
+    #[test]
+    fn alternation_with_non_literal_branch_still_detected() {
+        // `\d|x` IS top-level alternation. The advisory still applies even
+        // though one branch is a char class — splitting into
+        // `terms=["\\d", "x"]` is still semantically valid and gives the
+        // extractor a chance to handle each branch on its own merits.
+        assert!(regex_has_top_level_alternation(r"\d|x"));
+    }
+
+    #[test]
+    fn alternation_inside_concat_is_not_top_level() {
+        // `foo(A|B)bar` — the concat has THREE non-anchor children
+        // (`foo`, `(A|B)`, `bar`). The user's intent is "foo, then A or B,
+        // then bar" — not separable into independent terms[]. Out of scope.
+        assert!(!regex_has_top_level_alternation("foo(bar|baz)quux"));
+    }
+
+    #[test]
+    fn invalid_regex_returns_false() {
+        // Conservative: never advise on a pattern we couldn't parse.
+        assert!(!regex_has_top_level_alternation("[unclosed"));
+        assert!(!regex_has_top_level_alternation("(?P<"));
+    }
+
+    #[test]
+    fn empty_pattern_returns_false() {
+        assert!(!regex_has_top_level_alternation(""));
+    }
+
+    #[test]
+    fn user_story_canonical_example_is_detected() {
+        // The exact regex from the live measurement that motivated the
+        // advisory: `OrgApp.*TypeId|App.*TypeId\s*=\s*\d`.
+        assert!(regex_has_top_level_alternation(
+            r"OrgApp.*TypeId|App.*TypeId\s*=\s*\d"
+        ));
+    }
+}
+
