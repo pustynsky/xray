@@ -2800,29 +2800,56 @@ fn test_xray_grep_line_regex_prefilter_summary_field_always_present() {
 }
 
 
-/// Round-1 review fix (commit-reviewer MAJOR-1): the
-/// `hasTopLevelAlternation` flag is intentionally set to `true` ONLY when
-/// the request has a SINGLE pattern that contains top-level `|`. In a
-/// multi-term batch the global candidate-files ratio reflects the union
-/// (or intersection) of ALL terms, so attributing low selectivity to the
-/// alternation-bearing pattern would be misleading
-/// (e.g. `terms=["foo|bar","app"]` where `app` is what kept the set
-/// big, not `foo|bar`). The advisory must NOT fire for mixed batches.
+/// Distributivity proof: prefilter candidate set is identical between
+/// `terms=["A|B"]` (single OR'd regex) and `terms=["A", "B"]` (split,
+/// OR mode). This pins the structural property that PR #222's
+/// alternation-split advisory misses: in our pipeline
+/// `compute_literal_prefilter` is *distributive* over top-level OR.
+///
+/// For one term "A|B":
+///   `extract_required_literals` returns `["a", "b"]`,
+///   pattern_set = posting(a) UNION posting(b).
+///
+/// For two terms `["A", "B"]` in OR mode:
+///   pat_set_1 = posting(a), pat_set_2 = posting(b),
+///   combined = posting(a) UNION posting(b).
+///
+/// Therefore `candidateFiles` MUST be equal. The advisory's central
+/// claim — "splitting lets each branch be analysed independently,
+/// often yielding a much more selective fragment set" — is false in
+/// our implementation: the branches *already are* analysed
+/// independently inside the single-term path.
+///
+/// If this test ever fails, either (a) the prefilter composition
+/// changed (good — review whether the advisory becomes valid), or
+/// (b) extractor behaviour drifted between regex-syntax versions for
+/// pure-literal alternations (unlikely but worth a CHANGELOG note).
 #[test]
-fn test_xray_grep_line_regex_prefilter_alternation_flag_omitted_for_mixed_batch() {
+fn test_xray_grep_prefilter_distributive_over_top_level_or_pure_literal() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!(
-        "xray_grep_lineregex_alt_mixed_{}_{}", std::process::id(), id));
+        "xray_grep_prefilter_distrib_pure_{}_{}", std::process::id(), id));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
 
-    // Two files so total_files > 0; content is irrelevant for this assertion.
-    let mut f = std::fs::File::create(tmp_dir.join("a.cs")).unwrap();
-    writeln!(f, "AlphaBeta = 1").unwrap();
-    let mut f = std::fs::File::create(tmp_dir.join("b.cs")).unwrap();
-    writeln!(f, "GammaDelta = 2").unwrap();
+    // Six files — the advisory implies split should narrow more than
+    // the single OR'd term. Distributivity says it cannot.
+    //   2 files contain "AlphaOne" only         -> posting("alpha") = {0,1}
+    //   2 files contain "BetaTwo" only          -> posting("beta")  = {2,3}
+    //   2 files contain neither (noise)         -> not in either posting
+    for (i, body) in [
+        "AlphaOne",
+        "AlphaOne and more text",
+        "BetaTwo",
+        "BetaTwo and more text",
+        "GammaThree",
+        "DeltaFour",
+    ].iter().enumerate() {
+        let mut f = std::fs::File::create(tmp_dir.join(format!("f{i}.cs"))).unwrap();
+        writeln!(f, "{}", body).unwrap();
+    }
 
     let content_index = crate::build_content_index(&crate::ContentIndexArgs {
         dir: tmp_dir.to_string_lossy().to_string(),
@@ -2835,45 +2862,105 @@ fn test_xray_grep_line_regex_prefilter_alternation_flag_omitted_for_mixed_batch(
         .with_index_base(tmp_dir.join(".index"))
         .build();
 
-    // First term has top-level alternation, second does not. The flag must
-    // STILL be omitted because the multi-pattern guard suppresses
-    // attribution.
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({
-        "terms": [r"AlphaBeta|GammaDelta", r"Beta"],
+    // Form A: single OR'd term.
+    let result_a = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"AlphaOne|BetaTwo"],
         "regex": true,
         "lineRegex": true,
     }));
-    assert!(!result.is_error,
-        "mixed-batch lineRegex should not error: {}", result.content[0].text);
-    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(!result_a.is_error,
+        "single OR'd term lineRegex should not error: {}", result_a.content[0].text);
+    let out_a: Value = serde_json::from_str(&result_a.content[0].text).unwrap();
+    let prefilter_a = &out_a["summary"]["literalPrefilter"];
+    let candidate_a = prefilter_a["candidateFiles"].as_u64()
+        .expect("candidateFiles must be present");
+    let fragments_a: Vec<String> = prefilter_a["extractedFragments"]
+        .as_array().unwrap().iter()
+        .map(|v| v.as_str().unwrap().to_string()).collect();
 
-    let prefilter = &out["summary"]["literalPrefilter"];
-    assert!(prefilter.is_object(),
-        "summary.literalPrefilter must be present; got {}", out["summary"]);
-    assert_eq!(prefilter.get("hasTopLevelAlternation"), None,
-        "hasTopLevelAlternation must be omitted for multi-pattern batches \
-         (would mis-attribute selectivity); got {}", prefilter);
+    // Form B: split, OR mode.
+    let result_b = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"AlphaOne", r"BetaTwo"],
+        "regex": true,
+        "lineRegex": true,
+        "mode": "or",
+    }));
+    assert!(!result_b.is_error,
+        "split lineRegex (OR mode) should not error: {}", result_b.content[0].text);
+    let out_b: Value = serde_json::from_str(&result_b.content[0].text).unwrap();
+    let prefilter_b = &out_b["summary"]["literalPrefilter"];
+    let candidate_b = prefilter_b["candidateFiles"].as_u64()
+        .expect("candidateFiles must be present");
+    let fragments_b: Vec<String> = prefilter_b["extractedFragments"]
+        .as_array().unwrap().iter()
+        .map(|v| v.as_str().unwrap().to_string()).collect();
+
+    // The core distributivity assertion. If this fails, PR #222's
+    // advisory premise might become valid — re-evaluate.
+    assert_eq!(
+        candidate_a, candidate_b,
+        "prefilter is distributive over top-level OR for pure-literal \
+         alternations: single term `AlphaOne|BetaTwo` must yield the same \
+         candidateFiles as split `[AlphaOne, BetaTwo]`. \
+         Got A.candidateFiles={} B.candidateFiles={}. \
+         A.fragments={:?} B.fragments={:?}. \
+         A.literalPrefilter={} B.literalPrefilter={}",
+        candidate_a, candidate_b, fragments_a, fragments_b,
+        prefilter_a, prefilter_b,
+    );
+
+    // Same fragments, regardless of which form was used (modulo order).
+    let mut fa = fragments_a.clone(); fa.sort();
+    let mut fb = fragments_b.clone(); fb.sort();
+    assert_eq!(
+        fa, fb,
+        "extractedFragments must be identical (modulo order) between A and B; \
+         splitting does not unlock new selectivity. A={:?} B={:?}",
+        fragments_a, fragments_b,
+    );
+
+    // Sanity: the prefilter is meaningfully active (non-zero, not all 6).
+    assert!(
+        candidate_a > 0 && candidate_a < 6,
+        "sanity: prefilter must narrow some files but not all of the 6; got {}",
+        candidate_a
+    );
 
     cleanup_tmp(&tmp_dir);
 }
 
-/// Round-1 review companion: with a SINGLE alternation pattern the flag
-/// IS surfaced. This pins the contract that `hasTopLevelAlternation` is
-/// the unambiguous-attribution case.
+/// Same distributivity property for `.*`-bearing alternations
+/// (the canonical "OrgApp.*TypeId|App.*TypeId\\s*=\\s*\\d" shape from
+/// the live Shared cross-validation, miniaturised). The literal
+/// extractor stops at `.*`, so both forms collapse to the same
+/// short-prefix literal set — and the candidate set is again equal.
+/// This second test pins the *measured* root cause of why the
+/// advisory's "~45x" promise materialised only when the user
+/// non-semantically-equivalent rewrite dropped `.*` from one branch.
 #[test]
-fn test_xray_grep_line_regex_prefilter_alternation_flag_set_for_single_pattern() {
+fn test_xray_grep_prefilter_distributive_over_top_level_or_dotstar_blocked() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!(
-        "xray_grep_lineregex_alt_single_{}_{}", std::process::id(), id));
+        "xray_grep_prefilter_distrib_dotstar_{}_{}", std::process::id(), id));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
 
-    let mut f = std::fs::File::create(tmp_dir.join("a.cs")).unwrap();
-    writeln!(f, "AlphaBeta = 1").unwrap();
-    let mut f = std::fs::File::create(tmp_dir.join("b.cs")).unwrap();
-    writeln!(f, "GammaDelta = 2").unwrap();
+    // Files that contain the prefixes `app` and `orgapp` (the literals
+    // the extractor derives for `App.*TypeId` / `OrgApp.*TypeId`),
+    // plus noise that should be filtered out.
+    for (i, body) in [
+        "public class AppFooTypeId = 1;",
+        "OrgAppBar.TypeId = 2;",
+        "AppQuxTypeId = 3;",
+        "OrgAppQuux.TypeId = 4;",
+        "GammaThree noise",
+        "DeltaFour noise",
+    ].iter().enumerate() {
+        let mut f = std::fs::File::create(tmp_dir.join(format!("f{i}.cs"))).unwrap();
+        writeln!(f, "{}", body).unwrap();
+    }
 
     let content_index = crate::build_content_index(&crate::ContentIndexArgs {
         dir: tmp_dir.to_string_lossy().to_string(),
@@ -2886,19 +2973,58 @@ fn test_xray_grep_line_regex_prefilter_alternation_flag_set_for_single_pattern()
         .with_index_base(tmp_dir.join(".index"))
         .build();
 
-    let result = dispatch_tool(&ctx, "xray_grep", &json!({
-        "terms": [r"AlphaBeta|GammaDelta"],
+    let result_a = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"OrgApp.*TypeId|App.*TypeId\s*=\s*\d"],
         "regex": true,
         "lineRegex": true,
     }));
-    assert!(!result.is_error,
-        "single-pattern alternation lineRegex should not error: {}", result.content[0].text);
-    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(!result_a.is_error,
+        "single OR'd .*-bearing term lineRegex should not error: {}", result_a.content[0].text);
+    let out_a: Value = serde_json::from_str(&result_a.content[0].text).unwrap();
+    let prefilter_a = &out_a["summary"]["literalPrefilter"];
+    let candidate_a = prefilter_a["candidateFiles"].as_u64().unwrap();
+    let fragments_a: Vec<String> = prefilter_a["extractedFragments"]
+        .as_array().unwrap().iter()
+        .map(|v| v.as_str().unwrap().to_string()).collect();
 
-    let prefilter = &out["summary"]["literalPrefilter"];
-    assert_eq!(prefilter["hasTopLevelAlternation"].as_bool(), Some(true),
-        "hasTopLevelAlternation must be true for single-pattern top-level OR; got {}", prefilter);
+    let result_b = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"OrgApp.*TypeId", r"App.*TypeId\s*=\s*\d"],
+        "regex": true,
+        "lineRegex": true,
+        "mode": "or",
+    }));
+    assert!(!result_b.is_error,
+        "split .*-bearing terms (OR mode) should not error: {}", result_b.content[0].text);
+    let out_b: Value = serde_json::from_str(&result_b.content[0].text).unwrap();
+    let prefilter_b = &out_b["summary"]["literalPrefilter"];
+    let candidate_b = prefilter_b["candidateFiles"].as_u64().unwrap();
+    let fragments_b: Vec<String> = prefilter_b["extractedFragments"]
+        .as_array().unwrap().iter()
+        .map(|v| v.as_str().unwrap().to_string()).collect();
+
+    assert_eq!(
+        candidate_a, candidate_b,
+        "prefilter is distributive even for `.*`-bearing branches: \
+         single OR'd term must yield same candidateFiles as split. \
+         A.candidateFiles={} B.candidateFiles={}. \
+         A.fragments={:?} B.fragments={:?}. \
+         This is the structural reason the live measurement on Shared \
+         (2026-04-26) showed 22581 candidates for both forms; \
+         the ~45x speedup the advisory implied was reachable only by \
+         dropping `.*` from one branch (semantics-changing).",
+        candidate_a, candidate_b, fragments_a, fragments_b,
+    );
+
+    let mut fa = fragments_a.clone(); fa.sort();
+    let mut fb = fragments_b.clone(); fb.sort();
+    assert_eq!(
+        fa, fb,
+        "extractedFragments must be identical: extractor stops at `.*` for \
+         both forms. A={:?} B={:?}",
+        fragments_a, fragments_b,
+    );
 
     cleanup_tmp(&tmp_dir);
 }
+
 
