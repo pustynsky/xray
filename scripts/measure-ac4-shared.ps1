@@ -35,7 +35,7 @@ param(
     [string]$Ext = "cs",
 
     [Parameter()]
-    [ValidateRange(2, 20)]
+    [ValidateRange(3, 20)]
     [int]$Runs = 3,
 
     [Parameter()]

@@ -696,15 +696,48 @@ fn apply_literal_prefilter_summary(
     obj.insert("literalPrefilter".into(), prefilter);
 
     // Override the perfHint installed by `build_grep_base_summary` when the
-    // prefilter actually ran — the default copy says "no prefilter" and is
+    // prefilter ran — the default copy says "no prefilter" and is
     // wrong here. We only override on slow runs (the helper itself returns
-    // None for fast runs, so there's nothing to overwrite).
-    if info.used && let Some(hint) = line_regex_perf_hint(
-        search_mode,
-        search_elapsed_ms,
-        info.total_files,
-        true,
-    ) {
+    // None for fast runs, so there's nothing to overwrite). Three perfHint
+    // states are distinguished:
+    //   1. `info.used == true`            → prefilter-applied copy.
+    //   2. `info.used == false` AND we have a `reason`  → attempted-but-
+    //      discarded copy that points the user at `summary.literalPrefilter`
+    //      so they understand why narrowing failed (short-circuit, OR-bail,
+    //      fragments-too-short). Without this override, the default copy
+    //      installed by `build_grep_base_summary` would falsely claim the
+    //      regex has no extractable required-substring prefix.
+    //   3. `info.used == false` AND no `reason`  → by construction the
+    //      prefilter wasn't even attempted (non-lineRegex caller); leave
+    //      the default copy untouched.
+    let slow_enough = search_elapsed_ms >= LINE_REGEX_SLOW_MS
+        && info.total_files >= LINE_REGEX_LARGE_INDEX_FILES
+        && search_mode.starts_with("lineRegex");
+    if info.used {
+        if let Some(hint) = line_regex_perf_hint(
+            search_mode,
+            search_elapsed_ms,
+            info.total_files,
+            true,
+        ) {
+            obj.insert("perfHint".into(), json!(hint));
+        }
+    } else if slow_enough && let Some(reason) = info.reason.as_deref() {
+        // Attempted-but-discarded: rewrite the default "no extractable
+        // prefix" copy so it reflects what actually happened. We compose
+        // inline rather than adding a third parameter to
+        // `line_regex_perf_hint` to keep the helper's 4-arg signature stable
+        // (15 test call sites pin the boolean shape).
+        let hint = format!(
+            "lineRegex took {}ms over an index of {} files. \
+             The literal-trigram prefilter was attempted but did not narrow the search \
+             (literalPrefilter.reason: \"{}\"). \
+             Inspect `summary.literalPrefilter` for the candidate set size and extracted fragments. \
+             Mitigations: simplify the regex so a discriminating literal of >=3 chars survives, \
+             narrow scope with dir=/file=/ext=, or pre-filter by terms=[\"...\"] and re-apply the regex client-side. \
+             See `xray_help tool=\"xray_grep\"` for full guidance.",
+            search_elapsed_ms, info.total_files, reason
+        );
         obj.insert("perfHint".into(), json!(hint));
     }
 }

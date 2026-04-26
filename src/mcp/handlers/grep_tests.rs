@@ -672,3 +672,56 @@ fn test_line_regex_perf_hint_prefilter_used_branch_message_differs() {
         "prefilter-off hint should explain why the prefilter did not help; got: {}", no_prefilter);
 }
 
+
+#[test]
+fn test_apply_literal_prefilter_summary_attempted_but_discarded_overrides_default_hint() {
+    // AC-4 round-3 (commit-reviewer R1 MINOR-1): when the prefilter was
+    // ATTEMPTED but discarded (short-circuit, OR-bail, fragments-too-short),
+    // the default "no extractable required-substring prefix" hint installed
+    // by `build_grep_base_summary` is misleading -- the regex DID have an
+    // extractable literal, the prefilter just chose not to use it.
+    // `apply_literal_prefilter_summary` must replace that copy with one that
+    // points the user at `summary.literalPrefilter.reason`.
+    use serde_json::json;
+    let mut summary = json!({
+        "perfHint": "lineRegex took 5000ms ... could not narrow the search ...",
+    });
+    let info = LiteralPrefilterInfo {
+        used: false,
+        candidate_files: 0,
+        total_files: 60_000,
+        extracted_fragments: vec!["app".into()],
+        short_circuited: true,
+        reason: Some("candidate set covers 50000/60000 files (>50% threshold)".into()),
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
+    let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
+    assert!(hint.contains("attempted but did not narrow"),
+        "discarded hint must acknowledge the attempt; got: {}", hint);
+    assert!(hint.contains("candidate set covers 50000/60000"),
+        "discarded hint must surface the actual reason; got: {}", hint);
+    assert!(!hint.contains("could not narrow the search"),
+        "default 'no extractable prefix' copy must NOT survive when prefilter was attempted; got: {}", hint);
+}
+
+#[test]
+fn test_apply_literal_prefilter_summary_no_reason_leaves_default_hint() {
+    // AC-4 round-3: third state -- prefilter not even attempted (no reason
+    // recorded). The helper must NOT clobber the default hint installed by
+    // `build_grep_base_summary`.
+    use serde_json::json;
+    let original_hint = "original hint from build_grep_base_summary";
+    let mut summary = json!({ "perfHint": original_hint });
+    let info = LiteralPrefilterInfo {
+        used: false,
+        candidate_files: 0,
+        total_files: 60_000,
+        extracted_fragments: vec![],
+        short_circuited: false,
+        reason: None,
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
+    assert_eq!(summary["perfHint"].as_str(), Some(original_hint),
+        "perfHint must be preserved when prefilter was not attempted (reason=None)");
+}
+
