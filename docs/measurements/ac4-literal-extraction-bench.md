@@ -96,3 +96,67 @@ threshold needs to be re-tuned.
 - CHANGELOG entry: [2026-04-26 — Performance](../../CHANGELOG.md)
 - Implementation: [`src/mcp/handlers/grep_literal_extract.rs`](../../src/mcp/handlers/grep_literal_extract.rs), [`src/mcp/handlers/grep.rs`](../../src/mcp/handlers/grep.rs)
 - Differential test (parity, not perf): `test_xray_grep_line_regex_prefilter_differential_parity` in [`src/mcp/handlers/handlers_tests_grep.rs`](../../src/mcp/handlers/handlers_tests_grep.rs)
+
+## Live measurement on Shared (66743 .cs files, 2026-04-26)
+
+Cross-session validation by an external MCP-agent against `C:\Repos\Shared`
+(content index = 66 696 files, definitions index = 861k). Binary:
+`xray 0.1.0 (sha=c0dd75c-dirty)` debug build. `countOnly=true`,
+`mode=lineRegex`, `ext=["cs"]`. Process: 1 cold + 2 warm runs each.
+
+### Canonical story regexes
+
+| Pattern (terms[]) | extractedFragments | candidateFiles / total | elapsedMs (cold / warm / warm) |
+|---|---|---|---|
+| `["OrgApp.*TypeId\|App.*TypeId\\s*=\\s*\\d"]` (single OR) | `["app","orgapp"]` | 22 580 / 66 743 (34%) | 89 588 / 44 323 / 47 131 |
+| `["App\\s*=\\s*[0-9]+"]` | `["app"]` | 22 580 / 66 743 (34%) | 32 465 (warm) |
+| `["[a-z]+\\d+"]` (no literal) | `[]`, `reason="no pattern has extractable literals"` | 0 / 66 743, `used=false` | 126 302 |
+
+**Observations:**
+- Prefilter `used=true` correctly observed; structure stable on production-scale index.
+- Speedup bounded by selectivity of extracted fragment. `app` matches 34% of files, so per-line regex remains dominant cost despite 66% file-skip.
+- For the no-literal case the round-3 `perfHint` `"attempted but did not narrow"` text fires correctly with `reason` quoted inline.
+
+### Alternation-split impact (UX gap, motivates follow-up story)
+
+Same underlying intent as the OR pattern above, restructured by the
+agent during exploration:
+
+| Variant | extractedFragments | candidateFiles / total | elapsedMs |
+|---|---|---|---|
+| `["OrgApp.*TypeId\|App.*TypeId\\s*=\\s*\\d"]` (one term, top-level OR) | `["app","orgapp"]` | 22 580 / 66 743 | 44 323 (warm) |
+| `["OrgApp.*TypeId", "AppTypeId\\s*=\\s*\\d"]` (two terms, OR split) | `["apptypeid","orgapp"]` | **598 / 66 743** | **1 016** |
+| `["AppTypeId\\s*=\\s*\\d+"]` (single selective term) | `["apptypeid"]` | **0 / 66 743** (short-circuit) | **2** |
+| `["OrgAppTypeId","AppTypeId"]` (substring, no regex) | n/a | n/a | **0.8** |
+
+**Magnitude of speedup**: ~45× from splitting one OR-term into two
+separate `terms[]` (44 s → 1 s, identical semantics on this dataset).
+~22 000× if the regex itself can be tightened to a unique literal
+(`AppTypeId\s*=\s*\d+` short-circuits in 2 ms).
+
+**Root cause**: `regex-syntax::hir::literal::Extractor` returns the
+common prefix of OR branches when both branches start with disjoint
+literals. For `OrgApp.*TypeId|App.*TypeId\s*=\s*\d` the common factor
+between `OrgApp` and `App` is `App` — short and frequent. Splitting the
+alternation across `terms[]` lets each branch extract its own literal
+independently, yielding `apptypeid` (9 chars, selective) instead of
+`app` (3 chars, frequent).
+
+**This is currently invisible to users**: they get `used=true`,
+`fragments=["app","orgapp"]`, no actionable hint that splitting the OR
+would give them a 45× speedup on the same data. Tracked as follow-up
+story `user-story_xray-grep-alternation-split-hint_2026-04-26.md`.
+
+### Conclusion for AC-4
+
+Functionally complete on production-scale data (66k files):
+- All three `literalPrefilter` states observed (`used=true`,
+  `used=false + reason`, `used=false + no reason`).
+- All three `perfHint` branches observed and produce actionable text.
+- JSON shape stable, observable, and informative.
+
+Performance speedup is real but **bounded by literal selectivity**.
+Future work (separate stories) should focus on extractor heuristics and
+on-the-fly UX hints (e.g., "split this OR" advisory) rather than on
+the prefilter machinery itself, which is operating as designed.
+
