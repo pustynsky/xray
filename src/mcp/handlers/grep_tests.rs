@@ -595,3 +595,63 @@ fn test_expand_regex_terms_dedups_overlapping_matches_grep014() {
     sorted.sort();
     assert_eq!(expanded, sorted);
 }
+
+// ─── line_regex_perf_hint tests (AC-1) ──────────────────────────
+
+#[test]
+fn test_line_regex_perf_hint_fires_on_slow_large_scan() {
+    let hint = line_regex_perf_hint("lineRegex", 5_000, 60_000);
+    assert!(hint.is_some(), "slow lineRegex on large index should produce a hint");
+    let h = hint.unwrap();
+    assert!(h.contains("5000ms"), "hint should report elapsed ms; got: {}", h);
+    assert!(h.contains("index of 60000 files"), "hint should report the indexed-files upper bound, not imply all were scanned; got: {}", h);
+    assert!(h.contains("trigram"), "hint should explain WHY (no trigram prefilter); got: {}", h);
+    assert!(h.contains("terms="), "hint should suggest the substring alternative; got: {}", h);
+    // Reviewer fix: must use the real xray_help parameter name (`tool=...`),
+    // not the invented `topic=...`. Pinning the literal so the contract
+    // cannot drift again.
+    assert!(h.contains("xray_help tool=\"xray_grep\""),
+        "hint must point at the real xray_help argument syntax; got: {}", h);
+}
+
+#[test]
+fn test_line_regex_perf_hint_fires_on_lineregex_and_mode() {
+    // `mode_and` lineRegex emits searchMode="lineRegex-and" — must trigger via prefix match.
+    let hint = line_regex_perf_hint("lineRegex-and", 3_000, 5_000);
+    assert!(hint.is_some(), "lineRegex-and should also trigger the hint");
+}
+
+#[test]
+fn test_line_regex_perf_hint_silent_for_substring_modes() {
+    // Negative cases: every non-lineRegex searchMode that build_grep_base_summary
+    // can emit must NOT carry a lineRegex perf hint.
+    assert!(line_regex_perf_hint("substring-or", 60_000, 100_000).is_none());
+    assert!(line_regex_perf_hint("substring-and", 60_000, 100_000).is_none());
+    assert!(line_regex_perf_hint("phrase", 60_000, 100_000).is_none());
+    assert!(line_regex_perf_hint("phrase-or", 60_000, 100_000).is_none());
+    assert!(line_regex_perf_hint("phrase-and", 60_000, 100_000).is_none());
+    assert!(line_regex_perf_hint("regex", 60_000, 100_000).is_none());
+    assert!(line_regex_perf_hint("or", 60_000, 100_000).is_none());
+    assert!(line_regex_perf_hint("and", 60_000, 100_000).is_none());
+}
+
+#[test]
+fn test_line_regex_perf_hint_silent_for_fast_scan() {
+    // Below LINE_REGEX_SLOW_MS — no hint, even on a huge index.
+    assert!(line_regex_perf_hint("lineRegex", 1_999, 100_000).is_none());
+    assert!(line_regex_perf_hint("lineRegex", 0, 100_000).is_none());
+}
+
+#[test]
+fn test_line_regex_perf_hint_silent_for_small_index() {
+    // Below LINE_REGEX_LARGE_INDEX_FILES — slow scans on tiny repos are unactionable.
+    assert!(line_regex_perf_hint("lineRegex", 10_000, 999).is_none());
+    assert!(line_regex_perf_hint("lineRegex", 10_000, 0).is_none());
+}
+
+#[test]
+fn test_line_regex_perf_hint_threshold_boundaries() {
+    // Exactly at thresholds should fire (>= comparisons).
+    assert!(line_regex_perf_hint("lineRegex", LINE_REGEX_SLOW_MS, LINE_REGEX_LARGE_INDEX_FILES).is_some());
+}
+

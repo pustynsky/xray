@@ -597,6 +597,48 @@ fn test_truncate_preserves_guidance_fields() {
     assert_eq!(summary.get("nextStepHint").and_then(|v| v.as_str()), Some("hint"));
 }
 
+/// Regression: a slow lineRegex scan emits `summary.perfHint` in
+/// `build_grep_base_summary`, and a large response also triggers
+/// `truncate_large_response` which writes its own `summary.hint`. The two
+/// fields MUST coexist — overloading the same key would silently swallow the
+/// perf guidance exactly when it matters most (broad/slow lineRegex queries
+/// are the responses most likely to trip the byte cap). See user-story
+/// `xray-grep-lineRegex-perf-hints_2026-04-26.md` AC-1 + commit-reviewer
+/// finding #1 (2026-04-26).
+#[test]
+fn test_truncate_preserves_perf_hint_distinct_from_truncation_hint() {
+    let mut files = Vec::new();
+    for i in 0..1000 {
+        files.push(json!({
+            "path": format!("/some/long/path/to/file_{}.cs", i),
+            "score": 0.001,
+            "occurrences": 1,
+            "lines": [1],
+        }));
+    }
+    let perf_hint_text = "lineRegex took 5000ms over 60000 candidate files (no trigram prefilter ...)";
+    let output = json!({
+        "files": files,
+        "summary": {
+            "totalFiles": 1000,
+            "totalOccurrences": 1000,
+            "perfHint": perf_hint_text,
+        }
+    });
+
+    let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
+    let summary = result.get("summary").unwrap();
+    assert_eq!(
+        summary.get("perfHint").and_then(|v| v.as_str()),
+        Some(perf_hint_text),
+        "perfHint must survive truncation; the truncation pass writes summary.hint and \
+         must not collide with the lineRegex perf field"
+    );
+    // Sanity: truncation's own hint is also present (proves both fields coexist).
+    assert!(summary.get("hint").is_some(),
+        "truncation should still set its own summary.hint");
+}
+
 // ─── best_match_tier relevance ranking tests ─────────────────────
 
 #[test]
