@@ -600,12 +600,12 @@ fn test_expand_regex_terms_dedups_overlapping_matches_grep014() {
 
 #[test]
 fn test_line_regex_perf_hint_fires_on_slow_large_scan() {
-    let hint = line_regex_perf_hint("lineRegex", 5_000, 60_000);
+    let hint = line_regex_perf_hint("lineRegex", 5_000, 60_000, false);
     assert!(hint.is_some(), "slow lineRegex on large index should produce a hint");
     let h = hint.unwrap();
     assert!(h.contains("5000ms"), "hint should report elapsed ms; got: {}", h);
     assert!(h.contains("index of 60000 files"), "hint should report the indexed-files upper bound, not imply all were scanned; got: {}", h);
-    assert!(h.contains("trigram"), "hint should explain WHY (no trigram prefilter); got: {}", h);
+    assert!(h.contains("trigram"), "hint should explain WHY (literal-trigram prefilter could not help); got: {}", h);
     assert!(h.contains("terms="), "hint should suggest the substring alternative; got: {}", h);
     // Reviewer fix: must use the real xray_help parameter name (`tool=...`),
     // not the invented `topic=...`. Pinning the literal so the contract
@@ -617,7 +617,7 @@ fn test_line_regex_perf_hint_fires_on_slow_large_scan() {
 #[test]
 fn test_line_regex_perf_hint_fires_on_lineregex_and_mode() {
     // `mode_and` lineRegex emits searchMode="lineRegex-and" — must trigger via prefix match.
-    let hint = line_regex_perf_hint("lineRegex-and", 3_000, 5_000);
+    let hint = line_regex_perf_hint("lineRegex-and", 3_000, 5_000, false);
     assert!(hint.is_some(), "lineRegex-and should also trigger the hint");
 }
 
@@ -625,33 +625,103 @@ fn test_line_regex_perf_hint_fires_on_lineregex_and_mode() {
 fn test_line_regex_perf_hint_silent_for_substring_modes() {
     // Negative cases: every non-lineRegex searchMode that build_grep_base_summary
     // can emit must NOT carry a lineRegex perf hint.
-    assert!(line_regex_perf_hint("substring-or", 60_000, 100_000).is_none());
-    assert!(line_regex_perf_hint("substring-and", 60_000, 100_000).is_none());
-    assert!(line_regex_perf_hint("phrase", 60_000, 100_000).is_none());
-    assert!(line_regex_perf_hint("phrase-or", 60_000, 100_000).is_none());
-    assert!(line_regex_perf_hint("phrase-and", 60_000, 100_000).is_none());
-    assert!(line_regex_perf_hint("regex", 60_000, 100_000).is_none());
-    assert!(line_regex_perf_hint("or", 60_000, 100_000).is_none());
-    assert!(line_regex_perf_hint("and", 60_000, 100_000).is_none());
+    assert!(line_regex_perf_hint("substring-or", 60_000, 100_000, false).is_none());
+    assert!(line_regex_perf_hint("substring-and", 60_000, 100_000, false).is_none());
+    assert!(line_regex_perf_hint("phrase", 60_000, 100_000, false).is_none());
+    assert!(line_regex_perf_hint("phrase-or", 60_000, 100_000, false).is_none());
+    assert!(line_regex_perf_hint("phrase-and", 60_000, 100_000, false).is_none());
+    assert!(line_regex_perf_hint("regex", 60_000, 100_000, false).is_none());
+    assert!(line_regex_perf_hint("or", 60_000, 100_000, false).is_none());
+    assert!(line_regex_perf_hint("and", 60_000, 100_000, false).is_none());
 }
 
 #[test]
 fn test_line_regex_perf_hint_silent_for_fast_scan() {
     // Below LINE_REGEX_SLOW_MS — no hint, even on a huge index.
-    assert!(line_regex_perf_hint("lineRegex", 1_999, 100_000).is_none());
-    assert!(line_regex_perf_hint("lineRegex", 0, 100_000).is_none());
+    assert!(line_regex_perf_hint("lineRegex", 1_999, 100_000, false).is_none());
+    assert!(line_regex_perf_hint("lineRegex", 0, 100_000, false).is_none());
 }
 
 #[test]
 fn test_line_regex_perf_hint_silent_for_small_index() {
     // Below LINE_REGEX_LARGE_INDEX_FILES — slow scans on tiny repos are unactionable.
-    assert!(line_regex_perf_hint("lineRegex", 10_000, 999).is_none());
-    assert!(line_regex_perf_hint("lineRegex", 10_000, 0).is_none());
+    assert!(line_regex_perf_hint("lineRegex", 10_000, 999, false).is_none());
+    assert!(line_regex_perf_hint("lineRegex", 10_000, 0, false).is_none());
 }
 
 #[test]
 fn test_line_regex_perf_hint_threshold_boundaries() {
     // Exactly at thresholds should fire (>= comparisons).
-    assert!(line_regex_perf_hint("lineRegex", LINE_REGEX_SLOW_MS, LINE_REGEX_LARGE_INDEX_FILES).is_some());
+    assert!(line_regex_perf_hint("lineRegex", LINE_REGEX_SLOW_MS, LINE_REGEX_LARGE_INDEX_FILES, false).is_some());
+}
+
+#[test]
+fn test_line_regex_perf_hint_prefilter_used_branch_message_differs() {
+    // AC-4: when the literal-trigram prefilter actually ran, a still-slow
+    // search emits a different hint copy (talks about per-line regex cost,
+    // NOT about adding a substring prefilter — the prefilter is already on).
+    let no_prefilter = line_regex_perf_hint("lineRegex", 5_000, 60_000, false).unwrap();
+    let with_prefilter = line_regex_perf_hint("lineRegex", 5_000, 60_000, true).unwrap();
+    assert_ne!(no_prefilter, with_prefilter,
+        "prefilter_used should change the hint copy");
+    assert!(with_prefilter.contains("even with the literal-trigram prefilter"),
+        "prefilter-on hint should acknowledge the prefilter ran; got: {}", with_prefilter);
+    assert!(with_prefilter.contains("per-line regex evaluation"),
+        "prefilter-on hint should point at the new bottleneck; got: {}", with_prefilter);
+    assert!(no_prefilter.contains("could not narrow the search"),
+        "prefilter-off hint should explain why the prefilter did not help; got: {}", no_prefilter);
+}
+
+
+#[test]
+fn test_apply_literal_prefilter_summary_attempted_but_discarded_overrides_default_hint() {
+    // AC-4 round-3 (commit-reviewer R1 MINOR-1): when the prefilter was
+    // ATTEMPTED but discarded (short-circuit, OR-bail, fragments-too-short),
+    // the default "no extractable required-substring prefix" hint installed
+    // by `build_grep_base_summary` is misleading -- the regex DID have an
+    // extractable literal, the prefilter just chose not to use it.
+    // `apply_literal_prefilter_summary` must replace that copy with one that
+    // points the user at `summary.literalPrefilter.reason`.
+    use serde_json::json;
+    let mut summary = json!({
+        "perfHint": "lineRegex took 5000ms ... could not narrow the search ...",
+    });
+    let info = LiteralPrefilterInfo {
+        used: false,
+        candidate_files: 0,
+        total_files: 60_000,
+        extracted_fragments: vec!["app".into()],
+        short_circuited: true,
+        reason: Some("candidate set covers 50000/60000 files (>50% threshold)".into()),
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
+    let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
+    assert!(hint.contains("attempted but did not narrow"),
+        "discarded hint must acknowledge the attempt; got: {}", hint);
+    assert!(hint.contains("candidate set covers 50000/60000"),
+        "discarded hint must surface the actual reason; got: {}", hint);
+    assert!(!hint.contains("could not narrow the search"),
+        "default 'no extractable prefix' copy must NOT survive when prefilter was attempted; got: {}", hint);
+}
+
+#[test]
+fn test_apply_literal_prefilter_summary_no_reason_leaves_default_hint() {
+    // AC-4 round-3: third state -- prefilter not even attempted (no reason
+    // recorded). The helper must NOT clobber the default hint installed by
+    // `build_grep_base_summary`.
+    use serde_json::json;
+    let original_hint = "original hint from build_grep_base_summary";
+    let mut summary = json!({ "perfHint": original_hint });
+    let info = LiteralPrefilterInfo {
+        used: false,
+        candidate_files: 0,
+        total_files: 60_000,
+        extracted_fragments: vec![],
+        short_circuited: false,
+        reason: None,
+    };
+    apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
+    assert_eq!(summary["perfHint"].as_str(), Some(original_hint),
+        "perfHint must be preserved when prefilter was not attempted (reason=None)");
 }
 

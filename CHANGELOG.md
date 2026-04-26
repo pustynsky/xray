@@ -1,5 +1,39 @@
 # Changelog
 
+## 2026-04-26
+
+### Performance — `xray_grep` `lineRegex` literal-trigram prefilter (AC-4)
+
+- **`xray_grep` `lineRegex` mode now extracts fixed-substring literals from each regex pattern via `regex-syntax` HIR `Extractor` and uses them as a trigram-prefilter pre-pass against the content index.** Files that cannot possibly contain any required literal are dropped before the per-file content read + per-line scan that previously dominated cold-cache cost (the user-story-cited 76 362 ms / 60k-file Shared-repo call set). Pure-substring searches still run through the existing trigram path with no change; the prefilter only kicks in on the `lineRegex=true regex=true` path that previously did a full corpus scan.
+- **Eligibility**: per-pattern, only patterns whose AST exposes at least one literal of `MIN_LITERAL_LEN = 3` UTF-8 chars (Unicode-safe count, NOT bytes — important for Cyrillic / CJK identifiers). For OR composition (`mode='or'`) the prefilter unions candidate sets across patterns; for AND (`mode='and'`) it intersects. If any single OR pattern is unprefilterable (`\d+`, `.*`, `\w+`, `[a-z]+` etc.), the whole call falls back to no-prefilter (cannot soundly drop files for an OR'd unprefilterable branch).
+- **Short-circuit guard**: if the candidate set still covers `> LITERAL_PREFILTER_MAX_RATIO = 50%` of the indexed corpus, the prefilter is discarded — the fixed cost of the trigram lookup + set-arithmetic outweighs the saved per-file work when most files survive anyway. Threshold chosen so the most degenerate case (universal trigram like `App` in a C# repo) gracefully degrades to today's behaviour with at most one extra <1ms trigram lookup added to the elapsed time.
+- **Observability — new `summary.literalPrefilter` field** on every `lineRegex` response. Always emits `used`, `candidateFiles`, `totalFiles`, `extractedFragments` (the lowercased word fragments that were actually fed to the trigram lookup, **not** the raw `regex-syntax` literals — `"pub fn"` becomes `["pub"]` because `"fn"` is below the 3-char trigram floor). `extractedFragmentsTruncated` is added when there are more than 5 fragments. `shortCircuited` is added only when the ratio guard tripped. `reason` is added only when the prefilter did NOT run (or short-circuited) — it explains why (`"no pattern has extractable literals"`, `"OR mode contains an unprefilterable pattern"`, `"candidate set covers N/M files (>50% threshold)"`, etc.). Two example shapes:
+  ```json
+  // applied:
+  "literalPrefilter": {
+    "used": true,
+    "candidateFiles": 142,
+    "totalFiles": 60314,
+    "extractedFragments": ["orgapptypeid", "apptype"]
+  }
+  // skipped (no extractable literal):
+  "literalPrefilter": {
+    "used": false,
+    "candidateFiles": 0,
+    "totalFiles": 60314,
+    "extractedFragments": [],
+    "reason": "no pattern has extractable literals"
+  }
+  ```
+  The pre-existing `perfHint` copy is updated to acknowledge the prefilter when fired (`"... even with the literal-trigram prefilter applied ..."`) vs. not (`"... could not narrow the search ..."`). A structured `code` discriminator (so callers don't have to parse `reason` text) is intentionally deferred to a follow-up — the current `reason` string is best-effort prose, not API contract.
+- **Differential test guarantees parity, not just speed**: `test_xray_grep_line_regex_prefilter_differential_parity` runs a 6-file fixture, dispatches the same `xray_grep` call twice — once with the prefilter, once with `set_line_regex_prefilter_disabled_for_test(true)` — normalises occurrences (basename + line numbers) and asserts equality. The toggle is `#[cfg(test)]`-only via thread-local `Cell<bool>`; the production path has no runtime branch.
+- **Bench coverage**: `benches/search_benchmarks.rs` adds `bench_line_regex_literal_extraction` with 5 representative patterns (constant_name `App\s*=\s*\d+`, anchored_word `^\s*pub\s+fn\s+\w+`, or_alternation `OrgAppTypeId|AppType\d+`, unprefilterable `\d+`, long_or_chain) — measures the dominant primitive cost (regex-syntax HIR walk + literal extraction), which is the only new per-call work added on the production hot path. Existing trigram benchmarks in the same file already cover the candidate-set lookup side.
+- **End-to-end measurement**: `scripts/measure-ac4-shared.ps1` replays the 3 canonical user-story calls (`OrgAppTypeId\s*=\s*\d+`, `App\s*=\s*[0-9]+`, `OrgApp.*TypeId|App.*TypeId\s*=\s*\d`) against any repo via MCP JSON-RPC, runs each call N times (default 3), drops the cold-cache run, reports the median of the warm runs together with `summary.searchTimeMs`, `totalFiles`, `literalPrefilter.used`, `candidateFiles`, and `perfHint` presence. Fails loudly if the response lacks `summary.literalPrefilter` (so a stale binary cannot be silently mis-measured). Compare two binaries (baseline `main` vs feature branch) by running once with each `-XrayBin` and diffing the medians; numbers belong in [docs/measurements/ac4-literal-extraction-bench.md](docs/measurements/ac4-literal-extraction-bench.md).
+- **Files**: new `src/mcp/handlers/grep_literal_extract.rs` (~143 LOC) + `grep_literal_extract_tests.rs` (22 unit tests covering basic / multi-byte / OR/AND / unprefilterable / anchored / character-class / nested groups). Wired into `src/mcp/handlers/grep.rs` via `compute_literal_prefilter` + `apply_literal_prefilter_summary`. 4 integration tests in `src/mcp/handlers/handlers_tests_grep.rs` cover OR-union, AND-intersect, short-circuit guard, and "summary field always present". `regex-syntax = "0.8"` added as an explicit dep (was already a transitive dep via `regex`).
+- **Test delta**: `cargo test --bin xray grep` 275 / 275 passing; `cargo clippy --bin xray --tests` clean. Bench harness compiles via `cargo bench --bench search_benchmarks --no-run`.
+- **Story**: [`user-story_xray-grep-lineRegex-perf-hints_2026-04-26.md`](user-story_xray-grep-lineRegex-perf-hints_2026-04-26.md) §AC-4. AC-1..AC-3 (perfHint copy & gating, lineRegex anchor CRLF fix, count-only summary) shipped 2026-04-25; AC-4 was deferred pending a measurable design.
+
+
 ## 2026-04-25
 
 ### Rename — `appendIdiom` → `appendRangeHint` in `xray_edit` response (2026-04-25)

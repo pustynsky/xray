@@ -2424,3 +2424,378 @@ fn test_search_mode_note_lists_actual_offending_chars() {
     cleanup_tmp(&tmp);
 }
 
+/// AC-4 differential test: with `lineRegex=true` the literal-trigram
+/// prefilter MUST be a pure optimisation — enabling/disabling it on the
+/// SAME index, query, and params must produce identical files+lines
+/// (only the `summary.literalPrefilter` and timing fields are allowed to
+/// differ). This is the safety net for AC-4 step 5: any future change
+/// that lets the prefilter drop a real match will trip this test.
+///
+/// Uses the per-thread `set_line_regex_prefilter_disabled_for_test`
+/// switch added in `grep.rs` so we drive the production entry point
+/// (`handle_line_regex_search`) twice with different prefilter behaviour
+/// without rebuilding params from scratch.
+#[test]
+fn test_xray_grep_line_regex_prefilter_differential_parity() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_lineregex_prefilter_diff_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Three matching files (different content, all carry the trigram "app")
+    // and three non-matching files (no "app" trigram, no `App = N`).
+    // The pattern `App\s*=\s*\d+` extracts the literal "app" — prefilter
+    // SHOULD narrow scope to the matching three. Without prefilter, the
+    // scan visits all six but the per-line regex still matches the same
+    // three. Files+lines must match between runs.
+    let mut f = std::fs::File::create(tmp_dir.join("a.cs")).unwrap();
+    writeln!(f, "public const int App = 1;").unwrap();
+    writeln!(f, "// no match here").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("b.cs")).unwrap();
+    writeln!(f, "// header").unwrap();
+    writeln!(f, "App  =  42  // spaced").unwrap();
+    writeln!(f, "App=7").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("c.cs")).unwrap();
+    writeln!(f, "App = 99").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("d.cs")).unwrap();
+    writeln!(f, "public class Foo {{}}").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("e.cs")).unwrap();
+    writeln!(f, "// nothing relevant").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("f.cs")).unwrap();
+    writeln!(f, "int x = 12345;").unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    let query = json!({
+        "terms": [r"App\s*=\s*\d+"],
+        "regex": true,
+        "lineRegex": true,
+    });
+
+    // Run 1: prefilter ENABLED (production default).
+    super::grep::set_line_regex_prefilter_disabled_for_test(false);
+    let r_on = dispatch_tool(&ctx, "xray_grep", &query);
+    assert!(!r_on.is_error,
+        "prefilter-on lineRegex run should not error: {}", r_on.content[0].text);
+    let out_on: Value = serde_json::from_str(&r_on.content[0].text).unwrap();
+
+    // Run 2: prefilter DISABLED (control).
+    super::grep::set_line_regex_prefilter_disabled_for_test(true);
+    let r_off = dispatch_tool(&ctx, "xray_grep", &query);
+    // Always reset the toggle, even if the second assert fires later, to
+    // avoid leaking the override into sibling tests on the same thread.
+    super::grep::set_line_regex_prefilter_disabled_for_test(false);
+    assert!(!r_off.is_error,
+        "prefilter-off lineRegex run should not error: {}", r_off.content[0].text);
+    let out_off: Value = serde_json::from_str(&r_off.content[0].text).unwrap();
+
+    // Normalize: extract (basename, lines) pairs sorted by basename so the
+    // diff oracle is independent of internal sort order, absolute path,
+    // searchElapsedMs, perfHint copy, and literalPrefilter shape.
+    fn normalize(out: &Value) -> Vec<(String, Vec<u64>)> {
+        let mut pairs: Vec<(String, Vec<u64>)> = out["files"].as_array().unwrap_or(&vec![])
+            .iter()
+            .map(|f| {
+                let path = f["path"].as_str().unwrap_or("").to_string();
+                let basename = std::path::Path::new(&path)
+                    .file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or(path);
+                let mut lines: Vec<u64> = f["lines"].as_array().unwrap_or(&vec![])
+                    .iter().filter_map(|v| v.as_u64()).collect();
+                lines.sort();
+                (basename, lines)
+            })
+            .collect();
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        pairs
+    }
+
+    let on_norm = normalize(&out_on);
+    let off_norm = normalize(&out_off);
+    assert_eq!(on_norm, off_norm,
+        "prefilter must be a pure optimisation: files+lines differ between runs.\n\
+         prefilter-on:  {:?}\n\
+         prefilter-off: {:?}", on_norm, off_norm);
+
+    // Sanity: the test fixture must actually reach 3 matching files (a, b, c).
+    let on_basenames: Vec<&str> = on_norm.iter().map(|(b, _)| b.as_str()).collect();
+    assert!(on_basenames.contains(&"a.cs"),
+        "a.cs should match `App\\s*=\\s*\\d+`; got {:?}", on_basenames);
+    assert!(on_basenames.contains(&"b.cs"),
+        "b.cs should match; got {:?}", on_basenames);
+    assert!(on_basenames.contains(&"c.cs"),
+        "c.cs should match; got {:?}", on_basenames);
+    assert!(!on_basenames.contains(&"d.cs"),
+        "d.cs has no `App = N`; got {:?}", on_basenames);
+
+    // Sanity: prefilter-on response carries `literalPrefilter.used: true`,
+    // prefilter-off response either omits the field or sets `used: false`.
+    let on_used = out_on["summary"]["literalPrefilter"]["used"].as_bool();
+    assert_eq!(on_used, Some(true),
+        "prefilter-on summary should report literalPrefilter.used=true; got: {}",
+        out_on["summary"]["literalPrefilter"]);
+    let off_used = out_off["summary"]["literalPrefilter"]["used"].as_bool();
+    assert!(matches!(off_used, None | Some(false)),
+        "prefilter-off summary should NOT report literalPrefilter.used=true; got: {}",
+        out_off["summary"]["literalPrefilter"]);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// AC-4 integration: OR-mode lineRegex with two prefilterable patterns must
+/// UNION the per-pattern candidate sets — a file matching ONLY one pattern
+/// is still returned, and `literalPrefilter.used=true`.
+#[test]
+fn test_xray_grep_line_regex_prefilter_or_mode_unions_candidates() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_lineregex_prefilter_or_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let mut f = std::fs::File::create(tmp_dir.join("alpha.cs")).unwrap();
+    writeln!(f, "public const string AlphaBeta = \"x\";").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("gamma.cs")).unwrap();
+    writeln!(f, "public const string GammaDelta = \"y\";").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("both.cs")).unwrap();
+    writeln!(f, "AlphaBeta = 1").unwrap();
+    writeln!(f, "GammaDelta = 2").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("none.cs")).unwrap();
+    writeln!(f, "int unrelated = 0;").unwrap();
+    // Six extra noise files so the candidate ratio (3 matching / 10 total = 30%)
+    // stays below the 50% short-circuit threshold; otherwise the prefilter
+    // bails to full scan and `used` reads false.
+    for i in 0..6 {
+        let mut nf = std::fs::File::create(
+            tmp_dir.join(format!("noise{}.cs", i))).unwrap();
+        writeln!(nf, "int unrelated_{} = {};", i, i).unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"AlphaBeta\s*=", r"GammaDelta\s*="],
+        "regex": true,
+        "lineRegex": true,
+    }));
+    assert!(!result.is_error,
+        "OR-mode lineRegex should not error: {}", result.content[0].text);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let basenames: Vec<String> = out["files"].as_array().unwrap().iter()
+        .map(|f| std::path::Path::new(f["path"].as_str().unwrap())
+            .file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert!(basenames.contains(&"alpha.cs".to_string()),
+        "alpha.cs must be in OR result; got {:?}", basenames);
+    assert!(basenames.contains(&"gamma.cs".to_string()),
+        "gamma.cs must be in OR result; got {:?}", basenames);
+    assert!(basenames.contains(&"both.cs".to_string()),
+        "both.cs must be in OR result; got {:?}", basenames);
+    assert!(!basenames.contains(&"none.cs".to_string()),
+        "none.cs must NOT be in OR result; got {:?}", basenames);
+
+    let prefilter = &out["summary"]["literalPrefilter"];
+    assert_eq!(prefilter["used"].as_bool(), Some(true),
+        "OR-mode with two prefilterable patterns should engage the prefilter; got {}", prefilter);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// AC-4 integration: AND-mode lineRegex INTERSECTS per-pattern candidate sets.
+#[test]
+fn test_xray_grep_line_regex_prefilter_and_mode_intersects_candidates() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_lineregex_prefilter_and_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let mut f = std::fs::File::create(tmp_dir.join("alpha_only.cs")).unwrap();
+    writeln!(f, "AlphaBeta = 1").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("gamma_only.cs")).unwrap();
+    writeln!(f, "GammaDelta = 2").unwrap();
+    let mut f = std::fs::File::create(tmp_dir.join("both.cs")).unwrap();
+    writeln!(f, "AlphaBeta = 1").unwrap();
+    writeln!(f, "GammaDelta = 2").unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"AlphaBeta\s*=", r"GammaDelta\s*="],
+        "regex": true,
+        "lineRegex": true,
+        "mode": "and",
+    }));
+    assert!(!result.is_error,
+        "AND-mode lineRegex should not error: {}", result.content[0].text);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let basenames: Vec<String> = out["files"].as_array().unwrap().iter()
+        .map(|f| std::path::Path::new(f["path"].as_str().unwrap())
+            .file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(basenames, vec!["both.cs".to_string()],
+        "AND-mode must return ONLY both.cs; got {:?}", basenames);
+
+    let prefilter = &out["summary"]["literalPrefilter"];
+    assert_eq!(prefilter["used"].as_bool(), Some(true),
+        "AND-mode with two prefilterable patterns should engage the prefilter; got {}", prefilter);
+    let mode = out["summary"]["searchMode"].as_str().unwrap_or("");
+    assert_eq!(mode, "lineRegex-and",
+        "summary.searchMode should reflect AND composition; got {}", mode);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// AC-4 integration: short-circuit when candidate ratio > 50% of the index.
+#[test]
+fn test_xray_grep_line_regex_prefilter_short_circuit_when_too_broad() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_lineregex_prefilter_sc_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    // Six files, every one carries the trigram "shared" — prefilter would
+    // narrow to 6/6 (100%), trip the >50% guard, fall back to full scan.
+    for i in 0..6 {
+        let mut f = std::fs::File::create(
+            tmp_dir.join(format!("file{}.cs", i))).unwrap();
+        writeln!(f, "// shared header tag").unwrap();
+        if i == 0 {
+            writeln!(f, "shared = 12345").unwrap();
+        } else {
+            writeln!(f, "shared = noop").unwrap();
+        }
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"shared\s*=\s*\d+"],
+        "regex": true,
+        "lineRegex": true,
+    }));
+    assert!(!result.is_error,
+        "short-circuit lineRegex should not error: {}", result.content[0].text);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let basenames: Vec<String> = out["files"].as_array().unwrap().iter()
+        .map(|f| std::path::Path::new(f["path"].as_str().unwrap())
+            .file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(basenames, vec!["file0.cs".to_string()],
+        "short-circuit must still surface the real match; got {:?}", basenames);
+
+    let prefilter = &out["summary"]["literalPrefilter"];
+    assert_eq!(prefilter["used"].as_bool(), Some(false),
+        "short-circuited prefilter must report used=false; got {}", prefilter);
+    assert_eq!(prefilter["shortCircuited"].as_bool(), Some(true),
+        "short-circuit branch must set shortCircuited=true; got {}", prefilter);
+    let reason = prefilter["reason"].as_str().unwrap_or("");
+    assert!(reason.contains("candidate set covers"),
+        "short-circuit reason must explain ratio; got {:?}", reason);
+    assert!(reason.contains("%"),
+        "short-circuit reason must include the threshold percent; got {:?}", reason);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// AC-4 integration: `summary.literalPrefilter` is ALWAYS emitted for
+/// `lineRegex=true` searches — even when extraction fails.
+#[test]
+fn test_xray_grep_line_regex_prefilter_summary_field_always_present() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_lineregex_prefilter_field_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+
+    let mut f = std::fs::File::create(tmp_dir.join("only.cs")).unwrap();
+    writeln!(f, "int x = 12345;").unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    // `\d+` alone has no extractable literal — prefilter cannot help.
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": [r"\d+"],
+        "regex": true,
+        "lineRegex": true,
+    }));
+    assert!(!result.is_error,
+        "unprefilterable lineRegex should not error: {}", result.content[0].text);
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let prefilter = &out["summary"]["literalPrefilter"];
+    assert!(prefilter.is_object(),
+        "summary.literalPrefilter must always be present for lineRegex; got {}", out["summary"]);
+    assert_eq!(prefilter["used"].as_bool(), Some(false),
+        "unprefilterable pattern must report used=false; got {}", prefilter);
+    assert!(prefilter["totalFiles"].is_number(),
+        "totalFiles must always be present; got {}", prefilter);
+    assert!(prefilter["reason"].as_str().is_some(),
+        "reason must accompany used=false; got {}", prefilter);
+    assert!(prefilter["extractedFragments"].is_array(),
+        "extractedFragments must always be an array (empty when no extraction); got {}", prefilter);
+
+    cleanup_tmp(&tmp_dir);
+}
+

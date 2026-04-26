@@ -855,6 +855,55 @@ fn bench_resolve_parent_substring(c: &mut Criterion) {
     group.finish();
 }
 
+// ─── AC-4 line-regex literal extraction (2026-04-26) ────────────────
+//
+// Tracks the cost of `regex_syntax::ParserBuilder + Extractor`, which is the
+// dominant primitive inside `extract_required_literals` (see
+// `src/mcp/handlers/grep_literal_extract.rs`). We replay the same call
+// surface here directly because the production helper lives in the binary
+// crate (under `mcp::handlers::grep_literal_extract`) and is not reachable
+// from the lib-only bench harness. End-to-end perf is validated separately
+// by `scripts/measure-ac4-shared.ps1` against the 66k-file Shared repo.
+//
+// What we measure here:
+//   * cold compile + extraction for the canonical patterns from the user
+//     story (constant-name lookup, anchored regex, OR alternation).
+//   * an unprefilterable pattern (`\d+`) so a future change that makes
+//     the extractor faster on the "give up" path shows up.
+// What we DO NOT measure: trigram lookup, file iteration, per-line regex.
+// Those are covered by `bench_substring_search` / `bench_regex_scan`.
+fn bench_line_regex_literal_extraction(c: &mut Criterion) {
+    use regex_syntax::hir::literal::Extractor;
+    use regex_syntax::ParserBuilder;
+
+    let patterns = [
+        ("constant_name", r"OrgAppTypeId\s*=\s*\d+"),
+        ("anchored_word", r"^\s*pub\s+fn\s+\w+"),
+        ("or_alternation", r"AlphaBeta|GammaDelta|EpsilonZeta"),
+        ("unprefilterable", r"\d+"),
+        ("long_or_chain", r"App\w+|Service\w+|Repository\w+|Factory\w+|Adapter\w+"),
+    ];
+
+    let mut group = c.benchmark_group("line_regex_literal_extraction");
+    for (label, pat) in &patterns {
+        group.bench_with_input(
+            BenchmarkId::new("parse_and_extract", label),
+            *pat,
+            |b, pattern| {
+                b.iter(|| {
+                    let hir = ParserBuilder::new()
+                        .build()
+                        .parse(black_box(pattern))
+                        .expect("bench patterns must parse");
+                    let seq = Extractor::new().extract(&hir);
+                    black_box(seq);
+                })
+            },
+        );
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_tokenize,
@@ -871,5 +920,7 @@ criterion_group!(
     bench_regex_compile,
     bench_top_authors_aggregation,
     bench_resolve_parent_substring,
+    // AC-4 ───────────────────────────────────────────────────
+    bench_line_regex_literal_extraction,
 );
 criterion_main!(benches);
