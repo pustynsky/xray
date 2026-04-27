@@ -1611,6 +1611,39 @@ fn test_sync_reindex_removed_file_purges_tokens() {
         "removed file's tokens must be purged from the inverted index");
 }
 
+#[test]
+fn test_reindex_stats_subtimings_are_non_negative() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = crate::canonicalize_test_root(tmp.path());
+    let file = dir.join("timing.cs");
+    std::fs::write(&file, "class Timing { int x; }").unwrap();
+
+    let index = Arc::new(RwLock::new(ContentIndex::default()));
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        std::slice::from_ref(&file),
+        &[],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 1);
+    assert!(stats.elapsed_ms >= 0.0, "elapsed_ms must be non-negative");
+    assert!(stats.tokenize_ms >= 0.0, "tokenize_ms must be non-negative: {}", stats.tokenize_ms);
+    assert!(stats.content_lock_wait_ms >= 0.0, "content_lock_wait_ms must be non-negative");
+    assert!(stats.content_update_ms >= 0.0, "content_update_ms must be non-negative");
+    assert!(stats.def_lock_wait_ms >= 0.0, "def_lock_wait_ms must be non-negative");
+    assert!(stats.def_update_ms >= 0.0, "def_update_ms must be non-negative");
+    // Sub-timings should roughly sum to elapsed (with rounding tolerance)
+    let sum = stats.tokenize_ms + stats.content_lock_wait_ms + stats.content_update_ms
+        + stats.def_lock_wait_ms + stats.def_update_ms;
+    assert!(
+        (sum - stats.elapsed_ms).abs() < 1.0,
+        "sub-timing sum ({:.2}) should approximately equal elapsed_ms ({:.2})",
+        sum, stats.elapsed_ms
+    );
+}
+
 // ── Regression: `wait_for_indexes_ready` (MAJOR-8) ──────────────────────
 //
 // Tiny sub-millisecond poll / cap values so these tests run in well
@@ -2412,12 +2445,12 @@ fn test_autosave_due_skipped_when_unsaved_but_below_quiet() {
 
 #[test]
 fn test_autosave_due_fires_on_quiet_interval_with_unsaved() {
-    // The bursty-edit-then-idle case (delete 50 files, idle for 30s,
+    // The bursty-edit-then-idle case (delete 50 files, idle for 5min,
     // force-kill). Pre-PR-B the legacy 10-min gate would have lost all
-    // 50; with the quiet gate we save ~30s after the last batch.
+    // 50; with the quiet gate we save ~300s after the last batch.
     assert!(autosave_due(true, AUTOSAVE_QUIET_INTERVAL));
     assert!(autosave_due(true, AUTOSAVE_QUIET_INTERVAL + Duration::from_secs(1)));
-    assert!(autosave_due(true, Duration::from_secs(120)));
+    assert!(autosave_due(true, Duration::from_secs(400)));
 }
 
 #[test]
@@ -2436,8 +2469,9 @@ fn test_autosave_due_constants_have_expected_values() {
     // Pin the chosen budget so a future tweak lands intentionally
     // (and is reviewed against the durability/perf trade-off described
     // in `user-stories/meta-checkpoint-durability.md` Hole #2).
-    assert_eq!(AUTOSAVE_QUIET_INTERVAL, Duration::from_secs(30),
-        "30s bounds force-kill data loss to ~30s of unflushed activity");
+    assert_eq!(AUTOSAVE_QUIET_INTERVAL, Duration::from_secs(300),
+        "300s bounds force-kill data loss to ~5min of unflushed activity; \
+         prevents continuous autosave on large repos where serialization exceeds 30s");
     assert_eq!(AUTOSAVE_MAX_INTERVAL, Duration::from_secs(600),
         "10min preserves legacy behavior for steady-state idle workspaces");
     assert!(AUTOSAVE_QUIET_INTERVAL < AUTOSAVE_MAX_INTERVAL,

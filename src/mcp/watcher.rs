@@ -263,9 +263,9 @@ pub fn start_watcher(
         let mut last_autosave = std::time::Instant::now();
         // MCP-WCH-007 (PR-B, Hole #2): tracks whether `process_batch` has
         // applied unsaved changes since the last save. When true, the autosave
-        // gate `autosave_due()` fires after AUTOSAVE_QUIET_INTERVAL (30s)
+        // gate `autosave_due()` fires after AUTOSAVE_QUIET_INTERVAL (5 min)
         // instead of waiting up to AUTOSAVE_MAX_INTERVAL (10 min). Bounds
-        // force-kill data loss in seconds, not events.
+        // force-kill data loss to minutes, not events.
         let mut have_unsaved = false;
 
         // MCP-WCH-006: post-reconcile checkpoint. Save iff reconcile actually
@@ -369,7 +369,7 @@ pub fn start_watcher(
                             // normally fires) may not run for many minutes,
                             // so we'd otherwise lose every incremental update
                             // on crash. With the quiet-interval gate the
-                            // first save now lands ~30s into a sustained
+                            // first save now lands ~5min into a sustained
                             // burst instead of after the legacy 10 min.
                             if autosave_due(have_unsaved, last_autosave.elapsed()) {
                                 // MCP-WCH-007: bump `last_autosave` even on
@@ -403,7 +403,7 @@ pub fn start_watcher(
                         // MCP-WCH-007: thread is about to exit — there is no
                         // "next quiet-interval tick". Persist any unsaved work
                         // (from this final flush or a prior batch that hadn't
-                        // hit the 30s mark yet) before we drop the receiver.
+                        // hit the 5min mark yet) before we drop the receiver.
                         if have_unsaved {
                             let _ = periodic_autosave(&index, &def_index, &index_base);
                         }
@@ -434,7 +434,7 @@ pub fn start_watcher(
                     // MCP-WCH-004 + MCP-WCH-007: opportunistic autosave on
                     // every successful batch flush, not only when the
                     // pending sets are empty. Quiet-interval gate makes the
-                    // first save land ~30s after the burst started.
+                    // first save land ~5min after the burst started.
                     if autosave_due(have_unsaved, last_autosave.elapsed()) {
                         let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                         last_autosave = std::time::Instant::now();
@@ -484,6 +484,31 @@ pub(crate) struct ReindexStats {
     pub content_lock_poisoned: bool,
     /// True iff def index lock was poisoned — caller should report a warning.
     pub def_lock_poisoned: bool,
+    // Sub-timings for lock-contention diagnosis:
+    /// Residual time: tokenize + parse + filtering + read-lock purge IDs.
+    pub tokenize_ms: f64,
+    /// Time waiting to acquire content index write lock.
+    pub content_lock_wait_ms: f64,
+    /// Time holding content index write lock (actual update work).
+    pub content_update_ms: f64,
+    /// Time waiting to acquire definition index write lock.
+    pub def_lock_wait_ms: f64,
+    /// Time holding definition index write lock (actual update work).
+    pub def_update_ms: f64,
+}
+
+/// Result of a single `update_content_index` call with lock-wait timing.
+struct ContentUpdateResult {
+    ok: bool,
+    lock_wait_ms: f64,
+    update_ms: f64,
+}
+
+/// Result of a single `update_definition_index` call with lock-wait timing.
+struct DefUpdateResult {
+    ok: bool,
+    lock_wait_ms: f64,
+    update_ms: f64,
 }
 
 /// Synchronously reindex a small set of paths (typically 1–20 files), bypassing
@@ -536,21 +561,28 @@ pub(crate) fn reindex_paths_sync(
     }
 
     // Apply via the same non-blocking helpers used by the watcher.
-    if !update_content_index(index, &removed_clean, &dirty_clean) {
+    let content_result = update_content_index(index, &removed_clean, &dirty_clean);
+    if !content_result.ok {
         stats.content_lock_poisoned = true;
     } else {
         stats.content_updated = dirty_clean.len();
     }
+    stats.content_lock_wait_ms = content_result.lock_wait_ms;
+    stats.content_update_ms = content_result.update_ms;
 
-    if def_index.is_some() {
-        if !update_definition_index(def_index, &removed_clean, &dirty_clean) {
-            stats.def_lock_poisoned = true;
-        } else {
-            stats.def_updated = dirty_clean.len();
-        }
+    let def_result = update_definition_index(def_index, &removed_clean, &dirty_clean);
+    if !def_result.ok {
+        stats.def_lock_poisoned = true;
+    } else if def_index.is_some() {
+        stats.def_updated = dirty_clean.len();
     }
+    stats.def_lock_wait_ms = def_result.lock_wait_ms;
+    stats.def_update_ms = def_result.update_ms;
 
     stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    stats.tokenize_ms = stats.elapsed_ms
+        - stats.content_lock_wait_ms - stats.content_update_ms
+        - stats.def_lock_wait_ms - stats.def_update_ms;
     stats
 }
 
@@ -599,12 +631,12 @@ fn process_batch(
     let batch_start = std::time::Instant::now();
 
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
-    if !update_content_index(index, &removed_clean, &dirty_clean) {
+    if !update_content_index(index, &removed_clean, &dirty_clean).ok {
         return false;
     }
 
     // Update definition index (if available)
-    if !update_definition_index(def_index, &removed_clean, &dirty_clean) {
+    if !update_definition_index(def_index, &removed_clean, &dirty_clean).ok {
         return false;
     }
 
@@ -631,7 +663,7 @@ fn update_content_index(
     index: &Arc<RwLock<ContentIndex>>,
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
-) -> bool {
+) -> ContentUpdateResult {
     // ── Phase 1: Tokenize all dirty files OUTSIDE the lock (~5ms × N) ──
     // During this phase, MCP requests work normally on the current index data.
     let tokenized: Vec<TokenizedFileResult> = dirty_clean.iter()
@@ -658,14 +690,18 @@ fn update_content_index(
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire content index read lock (poisoned)");
-            return false;
+            return ContentUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0 };
         }
     };
     // READ lock released here
 
     // ── Phase 3: Apply under WRITE LOCK (~500ms purge + ~0.1ms × N insert) ──
+    let write_wait_start = std::time::Instant::now();
     match index.write() {
         Ok(mut idx) => {
+            let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
+            let update_start = std::time::Instant::now();
+
             // Batch purge: ONE pass over inverted index removes all stale postings
             if !purge_ids.is_empty() {
                 // Subtract old token counts before purge
@@ -682,7 +718,7 @@ fn update_content_index(
 
             // Process removed files: update path_to_id, zero token counts,
             // tombstone the files[] slot. We never reuse file_id, so the slot
-            // stays in the Vec as an empty string — it's no longer counted as
+            // stays in the Vec as an empty string — it’s no longer counted as
             // a live file (see ContentIndex::live_file_count) but file_id
             // assignments remain stable.
             for path in removed_clean {
@@ -717,13 +753,15 @@ fn update_content_index(
 
             // Conditionally shrink collections after retain() to release excess capacity.
             shrink_if_oversized(&mut idx);
+
+            let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+            ContentUpdateResult { ok: true, lock_wait_ms, update_ms }
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire content index write lock (poisoned)");
-            return false;
+            ContentUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0 }
         }
     }
-    true
 }
 
 /// Update the definition index: remove deleted files, re-parse modified/new files.
@@ -737,8 +775,10 @@ fn update_definition_index(
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     removed_clean: &[PathBuf],
     dirty_clean: &[PathBuf],
-) -> bool {
-    let Some(def_idx) = def_index else { return true };
+) -> DefUpdateResult {
+    let Some(def_idx) = def_index else {
+        return DefUpdateResult { ok: true, lock_wait_ms: 0.0, update_ms: 0.0 };
+    };
 
     // ── Phase 1: Parse all dirty files OUTSIDE the lock (~30ms × N) ──
     // During this phase, MCP requests work normally on the current index data.
@@ -751,8 +791,12 @@ fn update_definition_index(
     let parsed_paths: HashSet<PathBuf> = parsed.iter().map(|r| r.path.clone()).collect();
 
     // ── Phase 2: Apply under brief WRITE LOCK (~0.1ms × N + removals) ──
+    let write_wait_start = std::time::Instant::now();
     match def_idx.write() {
         Ok(mut idx) => {
+            let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
+            let update_start = std::time::Instant::now();
+
             // Remove deleted files
             for path in removed_clean {
                 definitions::remove_file_from_def_index(&mut idx, path);
@@ -775,13 +819,15 @@ fn update_definition_index(
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or(std::time::Duration::ZERO)
                 .as_secs();
+
+            let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+            DefUpdateResult { ok: true, lock_wait_ms, update_ms }
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire definition index write lock (poisoned)");
-            return false;
+            DefUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0 }
         }
     }
-    true
 }
 
 /// Conditionally shrink collections after retain() to release excess capacity.
@@ -896,20 +942,20 @@ pub(crate) fn post_reconcile_checkpoint_needed(
 
 // MCP-WCH-007 (PR-B, Hole #2 from `user-stories/meta-checkpoint-durability.md`):
 // two-tier autosave timing in `start_watcher`'s event loop. The quiet
-// interval bounds data loss to ~30s in the bursty-edit-then-idle case
+// interval bounds data loss to ~5min in the bursty-edit-then-idle case
 // (delete 50 files → quiet for ~9 min → force-kill loses all 50 pre-PR-B;
-// post-PR-B at most ~30s of unflushed activity is lost). The max
+// post-PR-B at most ~5min of unflushed activity is lost). The max
 // interval preserves the legacy 10-minute upper bound so steady-state
 // idle workspaces still write at most once every 10 min.
-pub(crate) const AUTOSAVE_QUIET_INTERVAL: Duration = Duration::from_secs(30);
+pub(crate) const AUTOSAVE_QUIET_INTERVAL: Duration = Duration::from_secs(300);
 pub(crate) const AUTOSAVE_MAX_INTERVAL: Duration = Duration::from_secs(600);
 
 /// Two-tier autosave gate (PR-B, Hole #2). Returns `true` when the
 /// `start_watcher` event loop should run `periodic_autosave`:
 ///
 /// - `have_unsaved && since_last_save >= AUTOSAVE_QUIET_INTERVAL`: bursty
-///   activity recently completed; flush within ~30s of the last batch
-///   so a force-kill loses at most ~30s of changes.
+///   activity recently completed; flush within ~5min of the last batch
+///   so a force-kill loses at most ~5min of changes.
 /// - `since_last_save >= AUTOSAVE_MAX_INTERVAL`: hard ceiling, fires
 ///   even with `have_unsaved == false` (matches legacy behavior; on a
 ///   clean index the actual `periodic_autosave` call short-circuits via
@@ -936,7 +982,7 @@ pub(crate) fn autosave_due(have_unsaved: bool, since_last_save: Duration) -> boo
 /// or write error). Callers in `start_watcher` use the return value to
 /// decide whether the unsaved-changes flag may be cleared — on failure,
 /// the next quiet-interval tick will re-attempt the save while still
-/// throttling at ~30s instead of busy-retrying every debounce tick.
+/// throttling at ~5min instead of busy-retrying every debounce tick.
 fn periodic_autosave(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,

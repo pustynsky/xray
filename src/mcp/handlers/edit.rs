@@ -979,6 +979,7 @@ fn handle_single_file_edit(
     dry_run: bool,
     expected_line_count: Option<usize>,
 ) -> ToolCallResult {
+    let edit_start = std::time::Instant::now();
     // Read and validate. `file_existed` is captured BEFORE the write so we can
     // accurately set `fileCreated` and `fileListInvalidated` in the response.
     // Pass dry_run so a preview against a non-existent path doesn't create empty
@@ -1072,6 +1073,12 @@ fn handle_single_file_edit(
         response["fileCreated"] = json!(true);
     }
 
+    // ── Edit timing: capture before reindex ──
+    let edit_elapsed_ms = edit_start.elapsed().as_secs_f64() * 1000.0;
+    response["summary"] = json!({
+        "searchTimeMs": (edit_elapsed_ms * 100.0).round() / 100.0,
+    });
+
     // ── Synchronous reindex (only on real writes, never on dryRun) ──
     // Eliminates the 500ms FS-watcher debounce window so a follow-up xray_grep
     // or xray_definitions sees the new content immediately.
@@ -1098,6 +1105,13 @@ fn handle_single_file_edit(
                 response["contentIndexUpdated"] = json!(stats.content_updated > 0);
                 response["defIndexUpdated"] = json!(stats.def_updated > 0);
                 response["reindexElapsedMs"] = json!(format!("{:.2}", stats.elapsed_ms));
+                response["reindexDetail"] = json!({
+                    "tokenizeMs": format!("{:.2}", stats.tokenize_ms),
+                    "contentLockWaitMs": format!("{:.2}", stats.content_lock_wait_ms),
+                    "contentUpdateMs": format!("{:.2}", stats.content_update_ms),
+                    "defLockWaitMs": format!("{:.2}", stats.def_lock_wait_ms),
+                    "defUpdateMs": format!("{:.2}", stats.def_update_ms),
+                });
                 if stats.content_lock_poisoned || stats.def_lock_poisoned {
                     response["reindexWarning"] = json!(
                         "Index lock was poisoned — sync reindex partially failed; FS watcher will reconcile within 500ms."
@@ -1126,6 +1140,7 @@ fn handle_multi_file_edit(
     dry_run: bool,
     expected_line_count: Option<usize>,
 ) -> ToolCallResult {
+    let edit_start = std::time::Instant::now();
     // Validate paths array
     if paths_array.is_empty() {
         return ToolCallResult::error("'paths' array must not be empty.".to_string());
@@ -1236,6 +1251,9 @@ fn handle_multi_file_edit(
             }
         }
     }
+
+    // ── Edit timing: capture before reindex ──
+    let edit_elapsed_ms = edit_start.elapsed().as_secs_f64() * 1000.0;
 
     // Phase 3c: Sync reindex of all written files (only on real writes).
     // Batched into ONE call so the inverted-index write lock is held for ~1ms
@@ -1368,9 +1386,17 @@ fn handle_multi_file_edit(
         "filesEdited": edit_results.len(),
         "totalApplied": total_applied,
         "dryRun": dry_run,
+        "searchTimeMs": (edit_elapsed_ms * 100.0).round() / 100.0,
     });
     if let Some(stats) = batch_stats {
         summary["reindexElapsedMs"] = json!(format!("{:.2}", stats.elapsed_ms));
+        summary["reindexDetail"] = json!({
+            "tokenizeMs": format!("{:.2}", stats.tokenize_ms),
+            "contentLockWaitMs": format!("{:.2}", stats.content_lock_wait_ms),
+            "contentUpdateMs": format!("{:.2}", stats.content_update_ms),
+            "defLockWaitMs": format!("{:.2}", stats.def_lock_wait_ms),
+            "defUpdateMs": format!("{:.2}", stats.def_update_ms),
+        });
         if stats.content_lock_poisoned || stats.def_lock_poisoned {
             summary["reindexWarning"] = json!(
                 "Index lock was poisoned — sync reindex partially failed; FS watcher will reconcile within 500ms."

@@ -1,5 +1,25 @@
 # Changelog
 
+## 2026-04-28
+
+### Performance
+- **Autosave interval raised to 5 minutes** — prevents continuous autosave
+  serialization on large repositories (>500 MB index) where a single
+  autosave cycle exceeds the 30-second quiet interval. Reduces RwLock
+  contention from ~70-80% to ~30-40% of active time. Trade-off: up to
+  5 minutes of incremental index state may be lost on force-kill
+  (recovered via 10-30s reconciliation on next startup).
+
+### Diagnostics
+- **Sub-timing breakdown in `reindexElapsedMs`** — `xray_edit` response
+  now includes `reindexDetail` with `tokenizeMs`, `contentLockWaitMs`,
+  `contentUpdateMs`, `defLockWaitMs`, `defUpdateMs` for instant diagnosis
+  of lock contention vs. actual reindex work.
+- **`searchTimeMs` for `xray_edit`** — now reflects edit operation time
+  (read + apply + diff + write + verify) instead of total wall-time
+  including reindex. `totalTimeMs` remains the full dispatch-to-response
+  time.
+
 ## 2026-04-27
 
 ### Dispatch-level error pipeline — Phase 2 (BREAKING: dispatch gate errors now JSON-wrapped)
