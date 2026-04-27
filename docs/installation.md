@@ -6,7 +6,7 @@ End-to-end setup for using `xray` as an MCP server with your AI coding agent.
 
 ## Quick Setup (recommended)
 
-The `setup-xray.ps1` script automates the entire installation — download, extension detection, MCP config creation, and git protection — in one command:
+The [`setup-xray.ps1`](../scripts/setup-xray.ps1) script automates the entire installation — download, extension detection, MCP config creation, and git protection — in one command:
 
 ```powershell
 # Clone the repo (or just download the script)
