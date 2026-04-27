@@ -37,6 +37,7 @@ scripts/line_regex_test_output.txt
 # Workspace-root debug artefacts
 test-out.log
 .vscode/settings.json
+.vscode/mcp.json
 
 # Project-specific content (may contain internal names/links)
 user-stories/

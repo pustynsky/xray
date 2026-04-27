@@ -394,6 +394,19 @@ struct LiteralPrefilterInfo {
     /// Human-readable explanation when `used == false`. Surfaced in the
     /// summary so clients understand why the prefilter was skipped.
     reason: Option<String>,
+    /// Number of files in `index.files` that survive `passes_file_filters`
+    /// (i.e. respect `dir`/`file`/`ext`/`exclude` scope), regardless of the
+    /// trigram prefilter. `None` when no scope filter is set — in that case
+    /// the unscoped `total_files` already answers the question. Surfaced as
+    /// `summary.literalPrefilter.totalFilesAfterScope` so clients can tell
+    /// "prefilter narrowed" apart from "scope narrowed" (the cross-validation
+    /// finding that motivated the alternation-split advisory revert).
+    total_files_after_scope: Option<usize>,
+    /// Intersection of the candidate set with the scope-filtered file set.
+    /// `None` when no scope filter is set OR when no candidate set was
+    /// produced (`used == false`). Surfaced as
+    /// `summary.literalPrefilter.candidateFilesAfterScope`.
+    candidate_files_after_scope: Option<usize>,
 }
 
 /// Maximum ratio of `candidate_files / total_files` at which the literal
@@ -693,6 +706,12 @@ fn apply_literal_prefilter_summary(
     if let Some(ref reason) = info.reason {
         prefilter["reason"] = json!(reason);
     }
+    if let Some(t) = info.total_files_after_scope {
+        prefilter["totalFilesAfterScope"] = json!(t);
+    }
+    if let Some(c) = info.candidate_files_after_scope {
+        prefilter["candidateFilesAfterScope"] = json!(c);
+    }
     obj.insert("literalPrefilter".into(), prefilter);
 
     // Override the perfHint installed by `build_grep_base_summary` when the
@@ -895,6 +914,20 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
     }) { return false; }
 
     true
+}
+
+/// Returns true when any scoping filter (`dir`/`file`/`exact_file_path`/`ext`/
+/// `excludeDir`/`exclude`) is non-default, i.e. `passes_file_filters` may
+/// reject some indexed files. Used by the `lineRegex` flow to decide whether
+/// to emit `summary.literalPrefilter.{candidate,total}FilesAfterScope` — the
+/// counters are only informative when scope actually narrows the corpus.
+fn params_have_scope_filter(params: &GrepSearchParams) -> bool {
+    params.dir_filter.is_some()
+        || params.exact_file_path.is_some()
+        || !params.file_filter.is_empty()
+        || !params.ext_filter.is_empty()
+        || !params.exclude_patterns.is_empty()
+        || !params.exclude_lower.is_empty()
 }
 
 /// Parsed arguments for the grep handler. Extracts all parameter parsing
@@ -2416,7 +2449,7 @@ fn handle_line_regex_search_inner(
     // "no prefilter" (extraction failed, OR-mode unprefilterable, or short-
     // circuit) — fall back to scanning every file. `_prefilter_info` is
     // captured here for the summary observability added in step 4.
-    let (candidate_file_ids, prefilter_info): (Option<HashSet<u32>>, LiteralPrefilterInfo) =
+    let (candidate_file_ids, mut prefilter_info): (Option<HashSet<u32>>, LiteralPrefilterInfo) =
         if prefilter_enabled {
             compute_literal_prefilter(index, &patterns, params.mode_and)
         } else {
@@ -2429,6 +2462,35 @@ fn handle_line_regex_search_inner(
                 },
             )
         };
+
+    // Scope-aware counters: when any `dir`/`file`/`ext`/`exclude*` filter is
+    // set, do a single pass over `index.files` and count (a) how many files
+    // survive scope without the prefilter, and (b) how many candidate-set
+    // files survive scope. Both numbers are emitted as
+    // `summary.literalPrefilter.{total,candidate}FilesAfterScope` so callers
+    // can distinguish "prefilter narrowed" from "scope narrowed". Without
+    // this, scoped queries on a 60k-file index always reported the same
+    // global counts, which is the cognitive trap that motivated the
+    // alternation-split advisory revert.
+    if params_have_scope_filter(params) {
+        let mut total_after = 0usize;
+        let mut cand_after = 0usize;
+        for (file_id, file_path) in index.files.iter().enumerate() {
+            if !passes_file_filters(file_path, params) {
+                continue;
+            }
+            total_after += 1;
+            if let Some(ref candidates) = candidate_file_ids
+                && candidates.contains(&(file_id as u32))
+            {
+                cand_after += 1;
+            }
+        }
+        prefilter_info.total_files_after_scope = Some(total_after);
+        if candidate_file_ids.is_some() {
+            prefilter_info.candidate_files_after_scope = Some(cand_after);
+        }
+    }
 
     // MINOR-23: cap total bytes held in `content_cache` so a single broad query
     // (e.g. lineRegex='.*' with showLines=true on a large repo) cannot OOM the
