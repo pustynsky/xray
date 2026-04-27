@@ -78,9 +78,24 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 ### Installation
 
-**Option A — Pre-built binary (recommended for MCP users on Windows).** Download `xray.exe` from the [GitHub releases page](https://github.com/pustynsky/xray/releases) (the latest build is always at the top — [direct link](https://github.com/pustynsky/xray/releases/latest)), drop it into a folder on your `PATH`, and follow the [Installation Guide](docs/installation.md) for VS Code Copilot Chat / Roo Code / Cline setup.
+**Option A — Automated setup (recommended).** Run the setup script — it downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for VS Code Copilot (Roo Code is optional, prompted separately):
 
-**Option B — Build from source.**
+```powershell
+# From a clone of this repo, or download just the script:
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject
+```
+
+The script will:
+1. Download the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
+2. Scan the repo and suggest file extensions to index
+3. Create `.vscode/mcp.json` for Copilot (optionally `.roo/mcp.json` for Roo, prompted separately)
+4. Protect configs from accidental git push (`--skip-worktree` / `.git/info/exclude`)
+
+See the [Installation Guide](docs/installation.md) for details, manual setup, and Cline configuration.
+
+**Option B — Pre-built binary (manual).** Download `xray.exe` from the [GitHub releases page](https://github.com/pustynsky/xray/releases) ([direct link](https://github.com/pustynsky/xray/releases/latest)), drop it into a folder, and follow the [Installation Guide](docs/installation.md) for manual VS Code Copilot Chat / Roo Code / Cline setup.
+
+**Option C — Build from source.**
 
 ```bash
 git clone https://github.com/pustynsky/xray
