@@ -4608,9 +4608,12 @@ fn test_missing_path_detects_nested_path_in_operations() {
 
 // ─── Mode B (text-match) edits[] item field validation ─────────────
 
-/// Helper: assert that an aliased Mode B item produces an error pointing
-/// at the canonical name on the first attempt.
-fn assert_synonym_rejected(alias: &str, replacement_alias: &str, canonical: &str) {
+/// Helper: assert that an aliased Mode B item is silently normalized to the
+/// canonical name and the edit succeeds. Phase 1 (2026-04-27) flipped the
+/// previous "reject with hint" contract — silent normalization eliminates
+/// the round-trip cost of cross-tool muscle-memory misfires (`oldText`,
+/// `find`, `with`, etc.).
+fn assert_synonym_accepted(alias: &str, replacement_alias: &str, _canonical: &str) {
     let tmp = tempfile::tempdir().unwrap();
     let path = create_named_temp_file(tmp.path(), "f.txt", "hello\n");
     let ctx = make_ctx(tmp.path());
@@ -4621,51 +4624,48 @@ fn assert_synonym_rejected(alias: &str, replacement_alias: &str, canonical: &str
         "dryRun": true,
     }));
 
-    assert!(result.is_error, "Alias '{}' should be rejected", alias);
+    assert!(
+        !result.is_error,
+        "Alias '{}'/'{}' should be silently normalized: {}",
+        alias, replacement_alias,
+        result.content.iter().map(|c| c.text.clone()).collect::<String>()
+    );
     let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    // Sanity: the response confirms the edit was applied (dryRun: true so no write,
+    // but `applied: 1` and `totalReplacements: 1` are still emitted).
     assert!(
-        msg.contains(&format!("unknown field '{}'", alias))
-            || msg.contains(&format!("unknown field '{}'", replacement_alias)),
-        "Error should call out the alias key. alias={}, msg={}", alias, msg
-    );
-    assert!(
-        msg.contains(canonical),
-        "Error should suggest canonical '{}'. msg={}", canonical, msg
-    );
-    // Must NOT use the legacy misleading message.
-    assert!(
-        !msg.contains("missing or invalid 'search'"),
-        "Should not fall through to legacy message. msg={}", msg
+        msg.contains("\"applied\": 1") || msg.contains("\"applied\":1"),
+        "Edit should report applied=1 after alias normalization: {}", msg
     );
 }
 
 #[test]
-fn test_edits_item_oldtext_newtext_rejected_with_canonical() {
-    assert_synonym_rejected("oldText", "newText", "search");
+fn test_edits_item_oldtext_newtext_normalized_silently() {
+    assert_synonym_accepted("oldText", "newText", "search");
 }
 
 #[test]
-fn test_edits_item_old_str_new_str_rejected_with_canonical() {
-    assert_synonym_rejected("old_str", "new_str", "search");
+fn test_edits_item_old_str_new_str_normalized_silently() {
+    assert_synonym_accepted("old_str", "new_str", "search");
 }
 
 #[test]
-fn test_edits_item_oldstring_newstring_rejected_with_canonical() {
-    assert_synonym_rejected("oldString", "newString", "search");
+fn test_edits_item_oldstring_newstring_normalized_silently() {
+    assert_synonym_accepted("oldString", "newString", "search");
 }
 
 #[test]
-fn test_edits_item_find_with_rejected_with_canonical() {
-    assert_synonym_rejected("find", "with", "search");
+fn test_edits_item_find_with_normalized_silently() {
+    assert_synonym_accepted("find", "with", "search");
 }
 
 #[test]
-fn test_edits_item_pattern_replacement_rejected_with_canonical() {
-    assert_synonym_rejected("pattern", "replacement", "search");
+fn test_edits_item_pattern_replacement_normalized_silently() {
+    assert_synonym_accepted("pattern", "replacement", "search");
 }
 
 #[test]
-fn test_edits_item_after_alias_rejected_with_canonical() {
+fn test_edits_item_after_alias_normalized_silently() {
     let tmp = tempfile::tempdir().unwrap();
     let path = create_named_temp_file(tmp.path(), "f.txt", "a\nb\n");
     let ctx = make_ctx(tmp.path());
@@ -4676,10 +4676,11 @@ fn test_edits_item_after_alias_rejected_with_canonical() {
         "dryRun": true,
     }));
 
-    assert!(result.is_error);
-    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
-    assert!(msg.contains("unknown field 'after'"), "msg={}", msg);
-    assert!(msg.contains("insertAfter"), "msg={}", msg);
+    assert!(
+        !result.is_error,
+        "alias 'after' → 'insertAfter' must be silently normalized: {}",
+        result.content.iter().map(|c| c.text.clone()).collect::<String>()
+    );
 }
 
 /// Empty edit object should produce the menu-of-forms error, not a misleading
@@ -5792,5 +5793,216 @@ fn test_low_similarity_no_actual_content() {
     assert!(result.is_error);
     let text = &result.content[0].text;
     assert!(!text.contains("Actual content"), "low similarity should NOT include actual content: {text}");
+}
+
+
+// ─── Phase 1 (2026-04-27): error feedback + alias normalization ──────
+
+#[test]
+fn test_alias_old_text_new_text_normalized() {
+    // AC-1b: oldText/newText silently rewritten to canonical search/replace.
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "oldText": "world", "newText": "there" }]
+    }));
+
+    assert!(!result.is_error, "alias edit should succeed: {}", result.content[0].text);
+    let written = std::fs::read_to_string(tmp.path().join("test_file.txt")).unwrap();
+    assert!(written.contains("hello there"), "expected text replaced: {written:?}");
+}
+
+#[test]
+fn test_alias_find_with_normalized() {
+    // AC-1b: `find` / `with` aliases also normalized.
+    let (tmp, filename, _) = create_temp_file("foo bar baz\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "find": "bar", "with": "BAR" }]
+    }));
+
+    assert!(!result.is_error, "alias edit should succeed: {}", result.content[0].text);
+    let written = std::fs::read_to_string(tmp.path().join("test_file.txt")).unwrap();
+    assert!(written.contains("foo BAR baz"), "expected: {written:?}");
+}
+
+#[test]
+fn test_alias_collision_rejected() {
+    // AC-1b: alias AND canonical present → reject (do not silently drop).
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "world", "oldText": "hello", "replace": "x" }]
+    }));
+
+    assert!(result.is_error, "alias collision should error");
+    let text = &result.content[0].text;
+    assert!(text.contains("both alias") && text.contains("oldText") && text.contains("search"),
+        "expected swap-conflict diagnostic: {text}");
+}
+
+#[test]
+fn test_swap_or_already_applied_hint_fires_on_swap() {
+    // AC-1a: classic search<->replace swap. The text the caller put in `replace`
+    // is exactly the text that's already in the file → swap-detection hint must fire.
+    let (tmp, filename, _) = create_temp_file("let x = 1;\nlet y = 2;\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        // OOPS: the agent put the new text in `search` and the existing text in `replace`.
+        "edits": [{ "search": "let z = 3;", "replace": "let y = 2;" }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("swapped `search` and `replace`"),
+        "expected swap hint, got: {text}");
+}
+
+#[test]
+fn test_swap_hint_does_not_fire_when_replace_unrelated() {
+    // Negative: when `replace` is genuinely new content not in the file,
+    // the swap hint must stay silent so it doesn't drown legitimate errors.
+    let (tmp, filename, _) = create_temp_file("alpha beta\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "missing literal", "replace": "unrelated novel content xyz" }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(!text.contains("swapped `search` and `replace`"),
+        "swap hint should NOT fire when replace is not already in file: {text}");
+}
+
+#[test]
+fn test_unified_diff_hint_for_multiline_structural_mismatch() {
+    // AC-2: multi-line, lengthy, structurally-close mismatch → unified diff
+    // appears in error instead of the single-byte `First difference at byte N`.
+    let file_content = "\
+fn alpha() {\n    let x = 1;\n    let y = 2;\n    let z = 3;\n    println!(\"{}\", x + y + z);\n}\n";
+    let (tmp, filename, _) = create_temp_file(file_content);
+    let ctx = make_ctx(tmp.path());
+
+    // 5 lines, > 80 chars, ~85% similarity (numbers differ).
+    let stale_search = "fn alpha() {\n    let x = 9;\n    let y = 8;\n    let z = 7;\n    println!(\"{}\", x + y + z);\n}";
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": stale_search, "replace": "// gone\n" }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(text.contains("Unified diff"), "expected unified diff hint, got: {text}");
+    // And confirm it does NOT include the byte-offset hint for this case.
+    assert!(!text.contains("First difference at byte"),
+        "byte-offset hint should be suppressed when unified diff fires: {text}");
+}
+
+#[test]
+fn test_edit_results_array_always_present() {
+    // AC-5: editResults[] always populated for Mode B batches.
+    let (tmp, filename, _) = create_temp_file("foo\nbar\nbaz\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "foo", "replace": "FOO" },
+            { "search": "bar", "replace": "BAR" },
+        ]
+    }));
+
+    assert!(!result.is_error, "batch should succeed: {}", result.content[0].text);
+    let payload: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let arr = payload["editResults"].as_array().expect("editResults must be present");
+    assert_eq!(arr.len(), 2, "one entry per edit: {payload}");
+    assert_eq!(arr[0]["idx"], 0);
+    assert_eq!(arr[0]["matchCount"], 1);
+    assert_eq!(arr[1]["idx"], 1);
+    assert_eq!(arr[1]["matchCount"], 1);
+}
+
+#[test]
+fn test_edit_results_match_count_reflects_replace_all() {
+    // AC-5: per-edit matchCount reports actual replacement count, so a
+    // greedy edit (occurrence:0) that hit more sites than the caller
+    // intended is detectable without re-running.
+    let (tmp, filename, _) = create_temp_file("x x x x\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "x", "replace": "y", "occurrence": 0 }]
+    }));
+
+    assert!(!result.is_error);
+    let payload: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let arr = payload["editResults"].as_array().unwrap();
+    assert_eq!(arr[0]["matchCount"], 4, "replace-all matched 4 sites: {payload}");
+}
+
+
+#[test]
+fn test_unified_diff_hint_boundary_exactly_3_lines_and_over_80_bytes() {
+    // AC-2 boundary: trigger is `candidate >= 3 lines && search > 80 bytes`.
+    // Confirm the diff fires at the lower edge (3 lines) when search just
+    // crosses 80 bytes (here: 87 bytes).
+    let file_content = "alpha beta gamma delta epsilon\nzeta eta theta iota kappa\nlambda mu nu xi omicron!\n";
+    let (tmp, filename, _) = create_temp_file(file_content);
+    let ctx = make_ctx(tmp.path());
+
+    // 3 lines, 81 bytes (>80), ~95% similarity (one numeral substituted in last line).
+    let stale_search = "alpha beta gamma delta epsilon\nzeta eta theta iota kappa\nlambda mu nu xi 0micron!";
+    assert!(stale_search.len() > 80, "sanity: search must exceed 80 bytes, got {}", stale_search.len());
+    assert_eq!(stale_search.lines().count(), 3, "sanity: search must be 3 lines");
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": stale_search, "replace": "// gone\n" }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("Unified diff"),
+        "unified diff must fire at the 3-line / >80-byte boundary: {text}"
+    );
+}
+
+#[test]
+fn test_unified_diff_hint_suppressed_when_only_2_lines() {
+    // AC-2 boundary: 2-line candidate is below `>= 3 lines` gate even when
+    // search text is long enough — the terser byte-offset hint must remain.
+    let file_content = "alpha beta gamma delta epsilon zeta eta theta iota kappa\nlambda mu nu xi omicron pi rho sigma tau upsilon\n";
+    let (tmp, filename, _) = create_temp_file(file_content);
+    let ctx = make_ctx(tmp.path());
+
+    // 2 lines, > 80 bytes, high similarity — only the line-count gate is below.
+    let stale_search = "alpha beta gamma delta epsilon zeta eta theta iota kappa\nlambda mu nu xi 0micron pi rho sigma tau upsilon";
+    assert!(stale_search.len() > 80);
+    assert_eq!(stale_search.lines().count(), 2);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": stale_search, "replace": "// gone\n" }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains("Unified diff"),
+        "unified diff must NOT fire when candidate has only 2 lines: {text}"
+    );
 }
 
