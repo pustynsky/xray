@@ -2,6 +2,14 @@
 
 ## 2026-04-27
 
+### Dispatch-level error pipeline — Phase 2 (BREAKING: dispatch gate errors now JSON-wrapped)
+
+- **Refactor**: `dispatch_tool` split into `dispatch_tool` (3-line public wrapper) + `dispatch_inner` (all gate checks + handler dispatch) + `finalize_response` (guidance → unknown-args warning → metrics/truncation). `dispatch_inner` may `return` early from any gate — `finalize_response` always runs.
+- **Fix**: 6 dispatch-level early-return sites (workspace unresolved/reindexing, content/def index not ready, `XRAY_STRICT_ARGS=1`, unknown tool) previously bypassed `inject_response_guidance` and `inject_metrics`. Now all gate errors carry `policyReminder`, `serverDir`, `workspaceStatus` (unconditional) and `totalTimeMs` (with `--metrics`). Plain-text gate errors are wrapped into `{"error": "...", "summary": {}}` by `inject_response_guidance`.
+- **Bonus fix**: `truncate_response_if_needed` (utils.rs) now preserves `is_error` flag. Previously, truncation of oversized error responses silently flipped them to success (pre-existing bug, increased exposure from Phase 2 gate routing).
+- **Tests**: 6 new tests in `handlers_tests_misc.rs` (4 gate-type coverage + metrics-off guidance + truncation `is_error` regression). Full suite: 2382 passed / 0 failed.
+
+
 ### MCP error responses — now JSON-wrapped + carry timing/policy metadata (BREAKING for raw text parsers)
 
 Every **handler-level** error response from any xray MCP tool (`xray_grep`, `xray_edit`, `xray_definitions`, `xray_fast`, `xray_callers`, `xray_git_*`, ...) now flows through the same response pipeline as success responses: `inject_response_guidance` (wrap plain-text into JSON envelope + add `policyReminder` + workspace metadata) → `inject_metrics` (add `totalTimeMs` / `responseBytes` / `estimatedTokens` / `indexFiles` / `indexTokens`, **when `--metrics` is enabled**). The `policyReminder` and workspace metadata (`serverDir`, `workspaceStatus`) are injected unconditionally; `totalTimeMs` and other numeric counters require `--metrics` (the same flag that controls them on success responses).

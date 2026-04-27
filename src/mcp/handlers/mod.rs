@@ -985,13 +985,31 @@ fn requires_def_index(tool_name: &str) -> bool {
 
 /// Dispatch a tool call to the right handler.
 /// When `ctx.metrics` is true, injects performance metrics into the response summary.
+/// Public entry point for tool dispatch. Delegates to [`dispatch_inner`] for
+/// gate checks + handler invocation, then **always** runs the response pipeline
+/// ([`finalize_response`]) — even when a gate rejects the request early.
+///
+/// Phase 2 fix: before this refactor, 6 dispatch-level early-return sites
+/// (workspace gate, index gate, strict-args, unknown tool) bypassed
+/// `inject_response_guidance` / `inject_metrics`, so their error responses
+/// carried no `totalTimeMs`, `policyReminder`, or workspace metadata.
 pub fn dispatch_tool(
     ctx: &HandlerContext,
     tool_name: &str,
     arguments: &Value,
 ) -> ToolCallResult {
     let dispatch_start = Instant::now();
+    let (result, unknown_args_report) = dispatch_inner(ctx, tool_name, arguments);
+    finalize_response(result, ctx, tool_name, arguments, dispatch_start, unknown_args_report)
+}
 
+/// All gate checks + handler dispatch. May `return` early from any gate —
+/// the caller ([`dispatch_tool`]) guarantees the pipeline always runs.
+fn dispatch_inner(
+    ctx: &HandlerContext,
+    tool_name: &str,
+    arguments: &Value,
+) -> (ToolCallResult, Option<arg_validation::UnknownArgsReport>) {
     // Workspace gate: always-available tools bypass the workspace check
     let is_workspace_independent = matches!(tool_name,
         "xray_info" | "xray_help" | "xray_reindex" | "xray_reindex_definitions"
@@ -1007,7 +1025,7 @@ pub fn dispatch_tool(
                     "serverDir": ws.dir,
                     "workspaceStatus": "unresolved"
                 });
-                return ToolCallResult::error(error_msg.to_string());
+                return (ToolCallResult::error(error_msg.to_string()), None);
             }
             WorkspaceStatus::Reindexing => {
                 let error_msg = serde_json::json!({
@@ -1017,7 +1035,7 @@ pub fn dispatch_tool(
                     "serverDir": ws.dir,
                     "workspaceStatus": "reindexing"
                 });
-                return ToolCallResult::error(error_msg.to_string());
+                return (ToolCallResult::error(error_msg.to_string()), None);
             }
             WorkspaceStatus::Resolved => { /* proceed */ }
         }
@@ -1028,10 +1046,10 @@ pub fn dispatch_tool(
     // they need to run even when ready=false (e.g., after workspace switch).
     // Their concurrent build protection uses content_building/def_building flags.
     if requires_content_index(tool_name) && !ctx.content_ready.load(Ordering::Acquire) {
-        return ToolCallResult::error(INDEX_BUILDING_MSG.to_string());
+        return (ToolCallResult::error(INDEX_BUILDING_MSG.to_string()), None);
     }
     if requires_def_index(tool_name) && !ctx.def_ready.load(Ordering::Acquire) {
-        return ToolCallResult::error(DEF_INDEX_BUILDING_MSG.to_string());
+        return (ToolCallResult::error(DEF_INDEX_BUILDING_MSG.to_string()), None);
     }
 
     // Strict args validation: detect unknown/aliased keys before dispatch.
@@ -1043,7 +1061,9 @@ pub fn dispatch_tool(
     if let Some(ref rep) = unknown_args_report
         && arg_validation::strict_args_enabled()
     {
-        return arg_validation::strict_error_response(tool_name, rep);
+        // Return None for unknown_args: strict_error_response already embeds
+        // the full warning — inject_warning would duplicate it.
+        return (arg_validation::strict_error_response(tool_name, rep), None);
     }
 
     let result = match tool_name {
@@ -1060,16 +1080,25 @@ pub fn dispatch_tool(
         "xray_git_history" | "xray_git_diff" | "xray_git_authors" | "xray_git_activity" | "xray_git_blame" | "xray_branch_status" => {
             git::dispatch_git_tool(ctx, tool_name, arguments)
         }
-        _ => return ToolCallResult::error(format!("Unknown tool: {}", tool_name)),
+        _ => return (ToolCallResult::error(format!("Unknown tool: {}", tool_name)), None),
     };
 
-    // A5 fix: Apply guidance injection to ALL responses (success AND error).
-    // Previously, error responses skipped inject_response_guidance, losing
-    // policyReminder, nextStepHint, and workspace metadata — which could cause
-    // LLMs to fall back to built-in tools instead of xray tools.
+    (result, unknown_args_report)
+}
+
+/// Response pipeline: guidance → unknown-args warning → metrics/truncation.
+/// Runs on **every** response (success, handler error, AND gate error).
+fn finalize_response(
+    result: ToolCallResult,
+    ctx: &HandlerContext,
+    tool_name: &str,
+    arguments: &Value,
+    dispatch_start: Instant,
+    unknown_args_report: Option<arg_validation::UnknownArgsReport>,
+) -> ToolCallResult {
+    // Guidance injection: policyReminder, nextStepHint, workspace metadata.
     let was_error = result.is_error;
     let result = utils::inject_response_guidance(result, tool_name, &ctx.server_ext, ctx);
-    // Preserve is_error flag (inject_response_guidance returns ToolCallResult::success)
     let result = if was_error {
         ToolCallResult { is_error: true, ..result }
     } else {
@@ -1081,11 +1110,6 @@ pub fn dispatch_tool(
         Some(ref rep) => arg_validation::inject_warning(result, rep),
         None => result,
     };
-
-    // 2026-04-27: previously errors short-circuited here, skipping inject_metrics
-    // → callers couldn't tell "server spent N ms on CPU" from "transport hang".
-    // inject_response_guidance now wraps plain-text errors into a JSON envelope,
-    // so metrics injection is safe + valuable on the error path too.
 
     // Determine effective response budget:
     // - xray_help: 32KB (static reference content)
@@ -1102,8 +1126,6 @@ pub fn dispatch_tool(
             .unwrap_or(false);
 
     // Count methods for multi-method budget scaling.
-    // 2026-04-25 list-params migration: `method` is now `array<string>`. Each
-    // entry is one method (no inner comma-split); count non-whitespace entries.
     let method_count = if tool_name == "xray_callers" {
         arguments.get("method")
             .and_then(|v| v.as_array())
@@ -1120,7 +1142,6 @@ pub fn dispatch_tool(
     let effective_max = if tool_name == "xray_help" {
         ctx.max_response_bytes.max(XRAY_HELP_MIN_RESPONSE_BYTES)
     } else if tool_name == "xray_callers" && method_count > 1 {
-        // Multi-method batch: scale budget proportionally, cap at 128KB
         let scaled = MULTI_METHOD_RESPONSE_BYTES_PER * method_count;
         ctx.max_response_bytes.max(scaled.min(MULTI_METHOD_RESPONSE_MAX))
     } else if has_include_body {
@@ -1131,13 +1152,11 @@ pub fn dispatch_tool(
 
     if ctx.metrics {
         if tool_name == "xray_help" {
-            // xray_help is static content, no need for metrics injection
             utils::truncate_response_if_needed(result, effective_max)
         } else {
             utils::inject_metrics(result, ctx, dispatch_start, effective_max)
         }
     } else {
-        // Even without metrics, apply response size truncation
         utils::truncate_response_if_needed(result, effective_max)
     }
 }
