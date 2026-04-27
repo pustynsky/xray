@@ -688,7 +688,7 @@ pub fn generate_trigrams(token: &str) -> Vec<String> {
 /// Loading an index with a different version triggers a rebuild.
 pub const CONTENT_INDEX_VERSION: u32 = 3;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ContentIndex {
     pub root: String,
     /// Format version — used to detect stale indexes after schema changes.
