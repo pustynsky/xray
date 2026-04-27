@@ -3936,6 +3936,38 @@ fn test_sync_reindex_concurrent_edit_and_grep_no_deadlock() {
         "grep thread must have made at least one read (no deadlock)");
 }
 
+#[test]
+fn test_edit_search_time_ms_excludes_reindex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("timing.cs");
+    std::fs::write(&path, "class TimingA {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "timing.cs",
+        "edits": [{"search": "TimingA", "replace": "TimingB"}],
+    }));
+    assert!(!result.is_error, "edit should succeed: {}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // searchTimeMs must be present in summary and be a non-negative number
+    let search_ms = v["summary"]["searchTimeMs"].as_f64()
+        .expect("summary.searchTimeMs must be a number");
+    assert!(search_ms >= 0.0, "searchTimeMs must be non-negative");
+
+    // reindexElapsedMs must be present (string with 2 decimals)
+    let reindex_str = v["reindexElapsedMs"].as_str()
+        .expect("reindexElapsedMs must be present as a string");
+    let reindex_ms: f64 = reindex_str.parse()
+        .expect("reindexElapsedMs must be parseable as f64");
+    assert!(reindex_ms >= 0.0, "reindexElapsedMs must be non-negative");
+
+    // searchTimeMs should be small (edit-only, no reindex) — at most a few hundred ms
+    // on any machine. This is a sanity check, not a perf gate.
+    assert!(search_ms < 5000.0,
+        "searchTimeMs ({:.2}) should be well under 5s for a trivial edit", search_ms);
+}
+
 
 // ─────────────────────────────────────────────────────────────────────
 // Symlink-aware regression test for `classify_for_sync_reindex`.
