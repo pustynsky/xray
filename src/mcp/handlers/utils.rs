@@ -937,7 +937,14 @@ pub(crate) fn truncate_response_if_needed(result: ToolCallResult, max_bytes: usi
 
     if let Ok(output) = serde_json::from_str::<Value>(text) {
         let truncated = truncate_large_response(output, max_bytes);
-        ToolCallResult::success(json_to_string(&truncated))
+        // Preserve is_error flag: truncation must not flip errors into success.
+        let was_error = result.is_error;
+        let new_result = ToolCallResult::success(json_to_string(&truncated));
+        if was_error {
+            ToolCallResult { is_error: true, ..new_result }
+        } else {
+            new_result
+        }
     } else {
         result
     }

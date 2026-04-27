@@ -1394,6 +1394,145 @@ fn test_reindexing_allows_workspace_independent_tools() {
     }
 }
 
+// === Phase 2: dispatch-level gate errors now carry pipeline metadata ===
+
+#[test]
+fn test_unresolved_gate_carries_pipeline_metadata() {
+    // Phase 2 contract: workspace-unresolved error must carry policyReminder
+    // and serverDir from finalize_response (previously bypassed the pipeline).
+    let ws = WorkspaceBinding::unresolved(".".to_string());
+    let ctx = HandlerContext {
+        metrics: true,
+        workspace: Arc::new(RwLock::new(ws)),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
+    assert!(result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text)
+        .expect("gate error must be valid JSON");
+    assert_eq!(output["error"], "WORKSPACE_UNRESOLVED");
+    let summary = &output["summary"];
+    assert!(summary["policyReminder"].as_str().is_some(),
+        "policyReminder must be injected on workspace-unresolved gate error");
+    assert!(summary["totalTimeMs"].as_f64().is_some(),
+        "totalTimeMs must be injected on workspace-unresolved gate error");
+    assert!(summary["serverDir"].as_str().is_some(),
+        "serverDir must be injected on workspace-unresolved gate error");
+}
+
+#[test]
+fn test_reindexing_gate_carries_pipeline_metadata() {
+    // Phase 2 contract: workspace-reindexing error must carry policyReminder
+    // and totalTimeMs from finalize_response.
+    let ws = WorkspaceBinding {
+        canonical_dir: String::new(),
+        dir: ".".to_string(),
+        mode: WorkspaceBindingMode::ManualOverride,
+        status: WorkspaceStatus::Reindexing,
+        generation: 2,
+    };
+    let ctx = HandlerContext {
+        metrics: true,
+        workspace: Arc::new(RwLock::new(ws)),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
+    assert!(result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text)
+        .expect("gate error must be valid JSON");
+    assert_eq!(output["error"], "WORKSPACE_REINDEXING");
+    let summary = &output["summary"];
+    assert!(summary["policyReminder"].as_str().is_some(),
+        "policyReminder must be injected on workspace-reindexing gate error");
+    assert!(summary["totalTimeMs"].as_f64().is_some(),
+        "totalTimeMs must be injected on workspace-reindexing gate error");
+}
+
+#[test]
+fn test_index_building_gate_carries_pipeline_metadata() {
+    // Phase 2 contract: content-index-not-ready error (plain text) must be
+    // wrapped into JSON envelope and carry policyReminder + totalTimeMs.
+    let ctx = HandlerContext {
+        metrics: true,
+        content_ready: Arc::new(AtomicBool::new(false)),
+        ..Default::default()
+    };
+    // xray_grep requires content index
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
+    assert!(result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text)
+        .expect("plain-text gate error must be wrapped into JSON envelope");
+    assert!(output["error"].as_str().unwrap().contains("being built"),
+        "error must mention index being built");
+    let summary = &output["summary"];
+    assert!(summary["policyReminder"].as_str().is_some(),
+        "policyReminder must be injected on index-building gate error");
+    assert!(summary["totalTimeMs"].as_f64().is_some(),
+        "totalTimeMs must be injected on index-building gate error");
+}
+
+#[test]
+fn test_unknown_tool_gate_carries_pipeline_metadata() {
+    // Phase 2 contract: "Unknown tool: X" error (plain text) must be wrapped
+    // into JSON envelope and carry pipeline metadata.
+    let ctx = HandlerContext {
+        metrics: true,
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_nonexistent", &json!({}));
+    assert!(result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text)
+        .expect("unknown-tool error must be wrapped into JSON envelope");
+    assert!(output["error"].as_str().unwrap().contains("Unknown tool"),
+        "error must mention unknown tool");
+    let summary = &output["summary"];
+    assert!(summary["policyReminder"].as_str().is_some(),
+        "policyReminder must be injected on unknown-tool gate error");
+    assert!(summary["totalTimeMs"].as_f64().is_some(),
+        "totalTimeMs must be injected on unknown-tool gate error");
+}
+
+#[test]
+fn test_gate_errors_without_metrics_still_carry_guidance() {
+    // Even when --metrics is NOT enabled, gate errors should still carry
+    // policyReminder and serverDir (guidance is unconditional, only
+    // totalTimeMs requires --metrics).
+    let ws = WorkspaceBinding::unresolved(".".to_string());
+    let ctx = HandlerContext {
+        metrics: false,
+        workspace: Arc::new(RwLock::new(ws)),
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
+    assert!(result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text)
+        .expect("gate error must be valid JSON");
+    let summary = &output["summary"];
+    assert!(summary["policyReminder"].as_str().is_some(),
+        "policyReminder must be injected even without --metrics");
+    assert!(summary["serverDir"].as_str().is_some(),
+        "serverDir must be injected even without --metrics");
+    // totalTimeMs should NOT be present without --metrics
+    assert!(summary.get("totalTimeMs").is_none(),
+        "totalTimeMs must NOT be injected without --metrics flag");
+}
+
+#[test]
+fn test_truncation_preserves_is_error_flag() {
+    // Regression: truncate_response_if_needed previously returned
+    // ToolCallResult::success, flipping errors into apparent success.
+    // This matters for gate errors flowing through finalize_response
+    // with metrics=false (truncation path, not inject_metrics path).
+    let ctx = HandlerContext {
+        metrics: false,
+        max_response_bytes: 200, // deliberately tiny — forces truncation
+        ..Default::default()
+    };
+    let result = dispatch_tool(&ctx, "xray_nonexistent", &json!({}));
+    assert!(result.is_error,
+        "truncated error must retain is_error flag (was flipped to success)");
+}
+
 
 // ─── §4.3 step 6: xray_reindex / xray_reindex_definitions `ext` array migration ───
 //
