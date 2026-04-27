@@ -301,7 +301,6 @@ if ($writeVscode) {
                 type = 'stdio'
                 command = $xrayPath
                 args = $xrayArgs
-                alwaysAllow = $AllowedTools
             }
         }
     }
