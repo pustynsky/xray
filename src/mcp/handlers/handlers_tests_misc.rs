@@ -80,13 +80,53 @@ fn test_error_response_has_guidance() {
     assert!(result.is_error, "is_error flag must be preserved after guidance injection");
 }
 
-#[test] fn test_metrics_not_injected_on_error() {
+#[test] fn test_metrics_injected_on_error() {
+    // 2026-04-27: invariant change. Previously plain-text errors short-circuited
+    // the metrics pipeline (callers couldn't tell "server spent N ms on CPU"
+    // from "transport hang"). inject_response_guidance now wraps plain-text
+    // errors into a JSON envelope `{"error": "...", "summary": {}}`, and the
+    // dispatcher no longer short-circuits on `is_error`, so metrics + policy
+    // reminder land on errors too.
     let ctx = make_empty_ctx();
     let ctx = HandlerContext { metrics: true, ..ctx };
     let result = dispatch_tool(&ctx, "xray_grep", &json!({}));
+    assert!(result.is_error, "is_error flag must be preserved through metrics injection");
+    let text = &result.content[0].text;
+    let output: Value = serde_json::from_str(text)
+        .expect("plain-text error should be wrapped into JSON envelope");
+    assert!(output["error"].as_str().is_some(), "envelope must carry the original error message under .error");
+    let summary = &output["summary"];
+    assert!(summary["totalTimeMs"].as_f64().is_some(), "totalTimeMs must be injected on error path");
+    assert!(summary["policyReminder"].as_str().is_some(), "policyReminder must be injected on error path");
+    assert!(summary["serverDir"].as_str().is_some(), "workspace metadata must be injected on error path");
+}
+
+#[test] fn test_metrics_injected_on_xray_edit_error() {
+    // Per-tool variant: confirms the error-pipeline contract holds for xray_edit
+    // specifically (not just xray_grep). xray_edit is the tool whose 5-10 min
+    // hang on a 140KB file motivated the fix.
+    let ctx = make_empty_ctx();
+    let ctx = HandlerContext { metrics: true, ..ctx };
+    let result = dispatch_tool(&ctx, "xray_edit", &json!({}));
     assert!(result.is_error);
-    assert!(!result.content[0].text.contains("searchTimeMs"));
-    assert!(!result.content[0].text.contains("policyReminder"));
+    let output: Value = serde_json::from_str(&result.content[0].text)
+        .expect("xray_edit plain-text error must be wrapped into JSON envelope");
+    assert!(output["error"].as_str().is_some());
+    assert!(output["summary"]["totalTimeMs"].as_f64().is_some());
+    assert!(output["summary"]["policyReminder"].as_str().is_some());
+}
+
+#[test] fn test_metrics_injected_on_xray_definitions_error() {
+    // Per-tool variant: xray_definitions exercises a different handler path.
+    let ctx = make_empty_ctx();
+    let ctx = HandlerContext { metrics: true, ..ctx };
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({}));
+    assert!(result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text)
+        .expect("xray_definitions plain-text error must be wrapped into JSON envelope");
+    assert!(output["error"].as_str().is_some());
+    assert!(output["summary"]["totalTimeMs"].as_f64().is_some());
+    assert!(output["summary"]["policyReminder"].as_str().is_some());
 }
 
 #[test]

@@ -41,6 +41,12 @@ const NEAREST_MATCH_MAX_DISPLAY_LEN: usize = 150;
 /// (after Step 2/3 silent retries were removed).
 const NEAREST_MATCH_BYTE_DIFF_THRESHOLD: f32 = 0.80;
 
+/// Minimum `replace`-text length for [`swap_or_already_applied_hint`] to fire.
+/// Below this, the substring is too short to be a meaningful swap signal and
+/// would trivially match in any non-trivial file (e.g. `"x"`, `"//"`, `";"`)
+/// drowning out the legitimate "Text not found" diagnostic.
+const MIN_REPLACE_LEN_FOR_SWAP_HINT: usize = 8;
+
 /// Handle `xray_edit` tool call.
 pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // ── Reject unknown top-level parameters ──
@@ -150,10 +156,12 @@ const KNOWN_EDIT_OBJECT_FIELDS: &[&str] = &[
 /// Common alias names callers reach for inside `edits[]` items (carried over
 /// from Anthropic's text-editor tool, the VS Code `replace_string_in_file`
 /// tool, sed-style "find/with", or just intuitive naming). Each entry maps
-/// `(alias, canonical)`. We do NOT silently accept these — the goal is to
-/// produce an actionable error pointing at the canonical name on the very
-/// first failed attempt, so the caller does not iterate through schema
-/// guesses or fall back to a built-in tool.
+/// `(alias, canonical)`. Phase 1 (2026-04-27) flipped the contract: aliases
+/// are now silently rewritten to canonical names by
+/// [`normalize_edit_field_aliases`] before validation, eliminating the
+/// round-trip cost of cross-tool muscle-memory misfires. A conflict
+/// (BOTH alias AND canonical present in the same edit object) is still
+/// rejected so user data is never silently dropped.
 const EDIT_FIELD_SYNONYMS: &[(&str, &str)] = &[
     // search
     ("oldText", "search"),
@@ -235,6 +243,37 @@ fn lookup_edit_field_synonym(key: &str) -> Option<&'static str> {
         .map(|(_, canonical)| *canonical)
 }
 
+/// Silently rewrite alias keys (e.g. `oldText`, `find`, `with`) to their
+/// canonical names (`search`, `replace`, …) before validation. This turns
+/// the most common cross-tool muscle-memory misfires into successful edits
+/// instead of one-round-trip rejections, while a conflict (BOTH alias AND
+/// canonical present in the same edit object) is still surfaced as an error
+/// so the caller does not silently lose one of the two values.
+fn normalize_edit_field_aliases(
+    obj: &mut serde_json::Map<String, Value>,
+    edit_index: usize,
+) -> Result<(), String> {
+    // Collect alias keys first to avoid mutating the map while iterating.
+    let aliases: Vec<(String, &'static str)> = obj
+        .keys()
+        .filter_map(|k| lookup_edit_field_synonym(k.as_str()).map(|c| (k.clone(), c)))
+        .collect();
+    for (alias, canonical) in aliases {
+        if obj.contains_key(canonical) {
+            return Err(format!(
+                "edits[{}]: both alias '{}' and canonical '{}' are present. \
+                 Use only '{}'.",
+                edit_index, alias, canonical, canonical
+            ));
+        }
+        if let Some(value) = obj.remove(&alias) {
+            obj.insert(canonical.to_string(), value);
+        }
+    }
+    Ok(())
+}
+
+
 /// Validate the keys of a single `edits[]` item. Returns `Some(error)` when
 /// any unknown / aliased / mis-typed field is present, `None` when every key
 /// is recognised. This runs BEFORE per-mode validation so that the caller
@@ -265,15 +304,11 @@ fn check_unknown_edit_object_fields(
         if VALID_EDITS_ITEM_FIELDS.contains(&key.as_str()) {
             continue;
         }
-        // Surface alias → canonical mapping directly. Most common case in
-        // practice (oldText/newText, find/with, pattern/with, …).
-        if let Some(canonical) = lookup_edit_field_synonym(key) {
-            return Some(format!(
-                "edits[{i}]: unknown field '{key}'. Did you mean '{canonical}'? \
-                 xray_edit uses '{canonical}', not '{key}'. {menu}",
-                i = i, key = key, canonical = canonical, menu = EDIT_FORM_MENU
-            ));
-        }
+        // Note: alias keys (oldText/find/with/pattern/…) are silently rewritten
+        // to canonical names by `normalize_edit_field_aliases` BEFORE this
+        // function runs, so we only see them here if normalization was bypassed
+        // (which currently never happens). The alias → hint branch was removed
+        // as dead code in Phase 1 (2026-04-27).
         // Mode-A line-range fields used inside edits[] — wrong nesting level.
         if key == "startLine" || key == "endLine" {
             return Some(format!(
@@ -521,6 +556,12 @@ struct EditResult {
     modified_content: String,
     applied: usize,
     total_replacements: usize,
+    /// Per-edit replacement counts in input order. For Mode A line ops each
+    /// successful op contributes 1; for Mode B literal/regex/insert each
+    /// successful edit contributes its replacement count (0 for skipped).
+    /// AC-5 (2026-04-27): always populated so callers can detect single-edit
+    /// over-matches inside a multi-edit batch without re-running.
+    per_edit_match_counts: Vec<usize>,
     skipped_details: Vec<SkippedEditDetail>,
     warnings: Vec<String>,
     diff: String,
@@ -679,27 +720,33 @@ fn apply_edits_to_content(
         }
     }
 
-    let (modified_content, applied, total_replacements, skipped_details, warnings) = match mode {
+    let (modified_content, applied, total_replacements, per_edit_match_counts, skipped_details, warnings) = match mode {
         EditMode::Operations(ops_array) => {
             // Mode A: Line-range operations
             let ops = parse_line_operations(ops_array)?;
 
             let lines: Vec<&str> = normalized.split('\n').collect();
+            let op_count = ops.len();
 
             let (new_lines, applied_count) = apply_line_operations(&lines, ops)?;
-            (new_lines.join("\n"), applied_count, 0, Vec::new(), Vec::new())
+            // Mode A: each op contributes 1 to applied_count when successful;
+            // we don't have per-op success/skip granularity today, so synthesize
+            // 1-per-op for the first `applied_count` and 0-per-op for the rest.
+            let mut counts = vec![1usize; applied_count];
+            counts.resize(op_count, 0);
+            (new_lines.join("\n"), applied_count, 0, counts, Vec::new(), Vec::new())
         }
         EditMode::Edits(edits_array) => {
             // Mode B: Text-match edits
             let text_edits = parse_text_edits(edits_array)?;
 
-            let (new_content, replacements, skipped, edit_warnings) = apply_text_edits(normalized, &text_edits, is_regex)?;
+            let (new_content, replacements, per_edit_counts, skipped, edit_warnings) = apply_text_edits(normalized, &text_edits, is_regex)?;
             // `applied` must exclude edits that were skipped via `skipIfNotFound`
             // or deduplicated via idempotency check. Previously this counted every
             // entry in the edits array, which made the response claim success for
             // edits that never touched the file.
             let applied_count = text_edits.len().saturating_sub(skipped.len());
-            (new_content, applied_count, replacements, skipped, edit_warnings)
+            (new_content, applied_count, replacements, per_edit_counts, skipped, edit_warnings)
         }
     };
 
@@ -732,6 +779,7 @@ fn apply_edits_to_content(
         modified_content,
         applied,
         total_replacements,
+        per_edit_match_counts,
         skipped_details,
         warnings,
         diff,
@@ -994,6 +1042,18 @@ fn handle_single_file_edit(
         }).collect::<Vec<_>>());
     }
 
+    // AC-5 (2026-04-27): per-edit replacement counts, always present (when at
+    // least one edit ran) so callers can detect a single edit that hit more
+    // sites than intended without re-running the batch.
+    if !edit_result.per_edit_match_counts.is_empty() {
+        response["editResults"] = json!(
+            edit_result.per_edit_match_counts.iter().enumerate()
+                .map(|(idx, &count)| json!({ "idx": idx, "matchCount": count }))
+                .collect::<Vec<_>>()
+        );
+    }
+
+
     if !edit_result.warnings.is_empty() {
         response["warnings"] = json!(edit_result.warnings);
     }
@@ -1248,6 +1308,14 @@ fn handle_multi_file_edit(
                 })
             }).collect::<Vec<_>>());
         }
+        if !result.per_edit_match_counts.is_empty() {
+            file_result["editResults"] = json!(
+                result.per_edit_match_counts.iter().enumerate()
+                    .map(|(idx, &count)| json!({ "idx": idx, "matchCount": count }))
+                    .collect::<Vec<_>>()
+            );
+        }
+
         if !result.warnings.is_empty() {
             file_result["warnings"] = json!(result.warnings);
         }
@@ -1764,11 +1832,18 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
             ));
         };
 
-        // Validate edit-object keys: reject unknown / aliased fields with an
-        // actionable hint BEFORE per-mode validation. This catches the common
-        // case where the caller used an alias (oldText/newText, find/with,
-        // pattern/with, etc.) — instead of the misleading "missing or invalid
-        // 'search'" message, surface the alias → canonical mapping directly.
+        // Phase 1 (2026-04-27): silently rewrite alias keys (oldText/find/with/…)
+        // to their canonical names so the caller does not pay a round-trip on
+        // cross-tool muscle-memory misfires. Conflict between alias AND
+        // canonical is still rejected — we never silently drop user data.
+        let mut obj_owned = obj.clone();
+        normalize_edit_field_aliases(&mut obj_owned, i)?;
+        let obj = &obj_owned;
+
+        // Validate edit-object keys: any unknown field after alias normalization
+        // is a real typo / Mode-A leak — surface a targeted hint BEFORE per-mode
+        // validation so the caller sees the precise cause instead of the generic
+        // "missing or invalid 'search'" downstream message.
         if let Some(msg) = check_unknown_edit_object_fields(obj, i) {
             return Err(msg);
         }
@@ -2064,7 +2139,8 @@ fn apply_regex_replace(
             }), Vec::new()));
         }
         let hint = nearest_match_hint(result, search);
-        return Err(format!("Pattern not found: \"{}\"{}", truncate_for_display(search), hint));
+        let swap_hint = swap_or_already_applied_hint(result, replace);
+        return Err(format!("Pattern not found: \"{}\"{}{}", truncate_for_display(search), hint, swap_hint));
     }
 
     // Check expectedContext on first match
@@ -2135,7 +2211,8 @@ fn apply_literal_replace(
         let flex_hint = smart_search_not_found_hint(
             search, &hint, edit.expected_context.is_some(),
         );
-        return Err(format!("Text not found: \"{}\"{}{}", truncate_for_display(search), hint, flex_hint));
+        let swap_hint = swap_or_already_applied_hint(result, replace);
+        return Err(format!("Text not found: \"{}\"{}{}{}", truncate_for_display(search), hint, flex_hint, swap_hint));
     }
 
     // Validate occurrence range BEFORE evaluating `expectedContext`. The
@@ -2245,10 +2322,11 @@ fn apply_literal_replace(
     Ok((replacements, None, warnings))
 }
 
-/// Apply text edits sequentially. Returns (new_content, total_replacements, skipped_details, warnings).
-fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, Vec<SkippedEditDetail>, Vec<String>), String> {
+/// Apply text edits sequentially. Returns (new_content, total_replacements, per_edit_counts, skipped_details, warnings).
+fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, Vec<usize>, Vec<SkippedEditDetail>, Vec<String>), String> {
     let mut result = content.to_string();
     let mut total_replacements = 0;
+    let mut per_edit_counts: Vec<usize> = Vec::with_capacity(edits.len());
     let mut skipped_details: Vec<SkippedEditDetail> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
@@ -2262,13 +2340,14 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
         };
 
         total_replacements += reps;
+        per_edit_counts.push(reps);
         if let Some(s) = skipped {
             skipped_details.push(s);
         }
         warnings.append(&mut edit_warnings);
     }
 
-    Ok((result, total_replacements, skipped_details, warnings))
+    Ok((result, total_replacements, per_edit_counts, skipped_details, warnings))
 }
 
 /// Find all occurrences of a literal string, returning their start positions.
@@ -2323,18 +2402,29 @@ fn truncate_for_display(s: &str) -> String {
     }
 }
 
-/// Find the nearest matching line/window in `content` for the given `search_text`.
-/// Returns a hint string to append to the error message, or empty string if no good match.
+/// A single nearest-match candidate located inside a file. Carried
+/// out of `find_nearest_match` so multiple downstream hint builders
+/// (`nearest_match_hint`, swap-detection) can re-use one similarity scan.
+struct NearestMatch {
+    /// 1-based line number where the candidate starts.
+    line: usize,
+    /// Char-level similarity in `0.0..=1.0` (output of `similar::TextDiff`).
+    similarity: f32,
+    /// The actual on-disk text of the candidate (single line or sliding window).
+    text: String,
+}
+
+/// Locate the nearest matching line / multi-line window in `content` for
+/// `search_text`. Pure scan — returns the raw candidate without formatting,
+/// so callers can emit error hints, run swap detection, or both off one pass.
 ///
 /// Algorithm:
-/// - For single-line search: compare each line with char-level similarity
-/// - For multi-line search: use sliding window of N lines, join and compare
-/// - Uses `similar::TextDiff::ratio()` for similarity scoring
-/// - Skips files > 500KB for performance
-fn nearest_match_hint(content: &str, search_text: &str) -> String {
-    // Skip for large files
+/// - Single-line search: compare against each line with char-level similarity.
+/// - Multi-line search: sliding window of N lines, joined and compared.
+/// - Skips files > 500KB for performance.
+fn find_nearest_match(content: &str, search_text: &str) -> Option<NearestMatch> {
     if content.len() > NEAREST_MATCH_MAX_FILE_SIZE {
-        return String::new();
+        return None;
     }
 
     let search_lines: Vec<&str> = search_text.split('\n').collect();
@@ -2342,50 +2432,88 @@ fn nearest_match_hint(content: &str, search_text: &str) -> String {
     let content_lines: Vec<&str> = content.split('\n').collect();
 
     if content_lines.is_empty() || search_text.is_empty() {
-        return String::new();
+        return None;
     }
 
-    let mut best_similarity: f32 = 0.0;
-    let mut best_line_num: usize = 0; // 1-based
-    let mut best_text = String::new();
+    let mut best = NearestMatch { line: 0, similarity: 0.0, text: String::new() };
 
     if search_line_count <= 1 {
-        // Single-line search: compare against each line
         for (i, line) in content_lines.iter().enumerate() {
             let ratio = similar::TextDiff::from_chars(search_text, line).ratio();
-            if ratio > best_similarity {
-                best_similarity = ratio;
-                best_line_num = i + 1;
-                best_text = line.to_string();
+            if ratio > best.similarity {
+                best = NearestMatch { line: i + 1, similarity: ratio, text: (*line).to_string() };
             }
         }
-    } else {
-        // Multi-line search: sliding window of search_line_count lines
-        if content_lines.len() >= search_line_count {
-            for i in 0..=(content_lines.len() - search_line_count) {
-                let window = content_lines[i..i + search_line_count].join("\n");
-                let ratio = similar::TextDiff::from_chars(search_text, &window).ratio();
-                if ratio > best_similarity {
-                    best_similarity = ratio;
-                    best_line_num = i + 1;
-                    best_text = window;
-                }
+    } else if content_lines.len() >= search_line_count {
+        for i in 0..=(content_lines.len() - search_line_count) {
+            let window = content_lines[i..i + search_line_count].join("\n");
+            let ratio = similar::TextDiff::from_chars(search_text, &window).ratio();
+            if ratio > best.similarity {
+                best = NearestMatch { line: i + 1, similarity: ratio, text: window };
             }
         }
     }
 
-    if best_similarity < NEAREST_MATCH_MIN_SIMILARITY as f32 {
+    if best.similarity < NEAREST_MATCH_MIN_SIMILARITY as f32 {
+        return None;
+    }
+    Some(best)
+}
+
+/// Find the nearest matching line/window in `content` for the given `search_text`.
+/// Returns a hint string to append to the error message, or empty string if no good match.
+fn nearest_match_hint(content: &str, search_text: &str) -> String {
+    let Some(best) = find_nearest_match(content, search_text) else {
         return String::new();
-    }
+    };
+    format_nearest_match_hint(&best, search_text)
+}
 
-    let pct = (best_similarity * 100.0).round() as u32;
-    let display_text = truncate_for_display(&best_text);
+/// Format an already-located `NearestMatch` into the human-readable hint
+/// suffix appended to `Text/Anchor/Pattern not found` errors. Pure formatter
+/// so the same scan result feeds both the standard hint and swap detection.
+fn format_nearest_match_hint(best: &NearestMatch, search_text: &str) -> String {
+    let pct = (best.similarity * 100.0).round() as u32;
+    let display_text = truncate_for_display(&best.text);
+
+    // Phase 1 / AC-2 (2026-04-27): for multi-line, lengthy, structurally-close
+    // mismatches, a unified diff is far more actionable than the single-byte
+    // "First difference at byte N" hint — the byte hint pinpoints ONE delta
+    // even when six lines differ. Gates on (search.lines() >= 3 AND
+    // len > 80 AND 0.80 <= sim < 1.0) so single-line / tiny / exact-match
+    // cases keep the existing terser format.
+    let use_unified_diff = best.text.lines().count() >= 3
+        && search_text.len() > 80
+        && best.similarity >= NEAREST_MATCH_BYTE_DIFF_THRESHOLD
+        && best.similarity < 1.0;
+
+    if use_unified_diff {
+        let diff = similar::TextDiff::from_lines(best.text.as_str(), search_text)
+            .unified_diff()
+            .context_radius(1)
+            .header("file content", "your search")
+            .to_string();
+        let lines: Vec<&str> = diff.lines().collect();
+        // Cap at 20 lines for readability inside MCP error messages — beyond
+        // that the diff stops being a hint and starts being noise. The
+        // truncation footer ("… (N more lines)") signals the cut so the
+        // caller knows to inspect the file directly.
+        let truncated = if lines.len() > 20 {
+            format!("{}\n\u{2026} ({} more lines)", lines[..20].join("\n"), lines.len() - 20)
+        } else {
+            lines.join("\n")
+        };
+        return format!(
+            ". Nearest match at line {} (similarity {}%). Unified diff (file \u{2192} search):\n{}",
+            best.line, pct, truncated
+        );
+    }
 
     // Part C: When similarity is high enough (≥ NEAREST_MATCH_BYTE_DIFF_THRESHOLD),
     // add byte-level diff diagnostic plus a category tag for common drift classes.
-    let byte_diff_hint = if best_similarity >= NEAREST_MATCH_BYTE_DIFF_THRESHOLD {
-        let byte_hint = byte_level_diff_hint(search_text, &best_text);
-        let category = detect_diff_category(search_text, &best_text);
+    let byte_diff_hint = if best.similarity >= NEAREST_MATCH_BYTE_DIFF_THRESHOLD {
+        let byte_hint = byte_level_diff_hint(search_text, &best.text);
+        let category = detect_diff_category(search_text, &best.text);
         if !category.is_empty() && !byte_hint.is_empty() {
             format!("{} (category: {})", byte_hint, category)
         } else if !category.is_empty() {
@@ -2402,15 +2530,15 @@ fn nearest_match_hint(content: &str, search_text: &str) -> String {
     // the exact content into its corrected `search` without having to
     // re-read the file or guess at whitespace/punctuation differences.
     // Gate on raw float (not rounded pct) to avoid the 89.5%→90% rounding band.
-    let actual_content_hint = if best_similarity >= 0.90 {
+    let actual_content_hint = if best.similarity >= 0.90 {
         let cap = 800;
-        if best_text.len() <= cap {
-            format!(" Actual content (copy-pastable): `{}`", best_text)
+        if best.text.len() <= cap {
+            format!(" Actual content (copy-pastable): `{}`", best.text)
         } else {
             format!(
                 " Actual content (truncated to {} bytes): `{}`",
                 cap,
-                &best_text[..best_text.floor_char_boundary(cap)]
+                &best.text[..best.text.floor_char_boundary(cap)]
             )
         }
     } else {
@@ -2419,9 +2547,46 @@ fn nearest_match_hint(content: &str, search_text: &str) -> String {
 
     format!(
         ". Nearest match at line {} (similarity {}%): \"{}\"{}{}",
-        best_line_num, pct, display_text, byte_diff_hint, actual_content_hint
+        best.line, pct, display_text, byte_diff_hint, actual_content_hint
     )
 }
+
+/// Detect the classic search↔replace swap (and the closely-related
+/// "already-applied" idempotent retry). Triggered when the text the caller
+/// supplied as `replace` already appears verbatim in the file — strong
+/// evidence that either (a) the two fields are inverted, or (b) the edit
+/// was already applied in a previous batch.
+///
+/// Phase 1 follow-up (2026-04-27): switched from O(N·L) fuzzy similarity
+/// (`find_nearest_match` + `≥0.97` threshold) to O(N+L) exact substring
+/// (`str::contains`). The fuzzy variant added ~7s per failed edit on
+/// 100KB+ files (each call ran the full diff scan, on top of the pre-existing
+/// `nearest_match_hint` scan that runs on the same path). Exact substring
+/// covers the realistic swap and idempotent-retry shapes; near-miss cases
+/// (1–2 char drift in `replace_text`) no longer trigger the targeted swap
+/// phrasing — a narrow, intentional regression vs the fuzzy variant. The
+/// common case where `search_text` (not `replace_text`) has 1–2-char drift
+/// is still surfaced via `nearest_match_hint`, which runs on the same path
+/// at the broader 0.80 similarity threshold. Locked in by
+/// `test_swap_hint_silent_for_near_miss_replace_text`.
+///
+/// Returns an empty string if `replace_text` is shorter than
+/// [`MIN_REPLACE_LEN_FOR_SWAP_HINT`] (avoiding noise on trivial substrings
+/// like `"x"` or `"//"`) or no exact match exists.
+fn swap_or_already_applied_hint(content: &str, replace_text: &str) -> &'static str {
+    if replace_text.len() < MIN_REPLACE_LEN_FOR_SWAP_HINT {
+        return "";
+    }
+    if !content.contains(replace_text) {
+        return "";
+    }
+    ". Hint: the text you put in `replace` already appears in the file. \
+     Most likely either (a) you swapped `search` and `replace` \
+     (the `search` field must contain text CURRENTLY in the file = OLD; \
+     `replace` is what to write = NEW), or (b) this edit was already applied \
+     in a previous batch — set `skipIfNotFound: true` to make it idempotent."
+}
+
 
 
 /// Pick the most useful hint to append to a `Text not found` /

@@ -613,13 +613,21 @@ fn next_step_hint(tool_name: &str) -> Option<&'static str> {
 }
 
 pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, indexed_ext: &str, ctx: &super::HandlerContext) -> ToolCallResult {
+    let was_error = result.is_error;
     let text = match result.content.first() {
-        Some(c) => &c.text,
+        Some(c) => c.text.clone(),
         None => return result,
     };
 
-    let mut output = match serde_json::from_str::<Value>(text) {
+    let mut output = match serde_json::from_str::<Value>(&text) {
         Ok(v) => v,
+        // 2026-04-27: wrap plain-text errors into a JSON envelope so the rest of
+        // the response pipeline (guidance + metrics) can inject diagnostics. Before
+        // this, plain-text errors (e.g. xray_edit "File 'X': Text not found")
+        // skipped totalTimeMs/policyReminder, leaving callers unable to tell
+        // "server spent 5min on CPU" from "transport hang". Plain-text SUCCESS
+        // responses still pass through unchanged (no current tool emits them).
+        Err(_) if was_error => json!({ "error": text, "summary": {} }),
         Err(_) => return result,
     };
 
@@ -943,6 +951,7 @@ pub(crate) fn truncate_response_if_needed(result: ToolCallResult, max_bytes: usi
 /// Also applies response size truncation to keep output within LLM context budgets.
 pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start: Instant, max_bytes: usize) -> ToolCallResult {
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let was_error = result.is_error;
 
     // Get the text from the first content item
     let text = match result.content.first() {
@@ -979,7 +988,7 @@ pub(crate) fn inject_metrics(result: ToolCallResult, ctx: &HandlerContext, start
             summary["estimatedTokens"] = json!(bytes / 4);
         }
 
-        ToolCallResult::success(json_to_string(&output))
+        ToolCallResult { is_error: was_error, ..ToolCallResult::success(json_to_string(&output)) }
     } else {
         // Not valid JSON or no summary -- return as-is
         result
