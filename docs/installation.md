@@ -2,7 +2,62 @@
 
 End-to-end setup for using `xray` as an MCP server with your AI coding agent.
 
-This guide covers the **pre-built binary** path, which is the recommended option for users who only want to run the MCP server (no Rust toolchain required). If you want to build from source instead, see the [Quick Start in README](../README.md#installation).
+---
+
+## Quick Setup (recommended)
+
+The `setup-xray.ps1` script automates the entire installation — download, extension detection, MCP config creation, and git protection — in one command:
+
+```powershell
+# Clone the repo (or just download the script)
+git clone https://github.com/pustynsky/xray
+cd xray
+
+# Run setup for your target project
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject
+```
+
+**What it does:**
+
+1. Downloads the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
+2. Scans the target repository and detects file extensions (shows top-20, auto-suggests based on frequency)
+3. Creates MCP configuration:
+   - `.vscode/mcp.json` — for **VS Code GitHub Copilot Chat** (agent mode)
+   - `.roo/mcp.json` — for **Roo Code** (optional, prompted with default N)
+4. Protects configs from accidental git push:
+   - Tracked files → `git update-index --skip-worktree` (local edits invisible to git)
+   - Untracked files → `.git/info/exclude` (local gitignore)
+
+All xray tools are enabled by default **except** `xray_edit` (opt-in for safety).
+
+**Options:**
+
+```powershell
+# Interactive mode (prompts for repo path)
+.\scripts\setup-xray.ps1
+
+# Skip download if xray.exe is already installed
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -SkipDownload
+
+# Custom install location
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -InstallDir C:\Tools
+
+# Overwrite existing configs without asking
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Force
+
+# Use existing xray from a specific location
+.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -InstallDir "$HOME\.cargo\bin" -SkipDownload
+```
+
+After setup, **reopen the repo folder in VS Code / Roo** to activate the MCP server.
+
+> **Cline / Roo users:** the script creates a config for Copilot by default. Roo is prompted separately (or pass `-EnableRoo`). For Cline, see [Section 3c](#3c-cline-vs-code-extension--global-config-with-workspace-auto-detection) below for the global config format.
+
+---
+
+## Manual Setup
+
+If you prefer to set things up by hand, or need to configure Cline, follow the steps below.
 
 > **Platform note:** Pre-built releases are currently published for **Windows x64** only. For Linux / macOS, build from source — `cargo build --release` (see README).
 
@@ -13,7 +68,7 @@ This guide covers the **pre-built binary** path, which is the recommended option
 
 ---
 
-## 1. Download the pre-built binary
+### 1. Download the pre-built binary
 
 1. Open the [GitHub releases page](https://github.com/pustynsky/xray/releases) — the newest build is always at the top. (Permalink to the latest: <https://github.com/pustynsky/xray/releases/latest>.)
 2. Download `xray.exe`.
