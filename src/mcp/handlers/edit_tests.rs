@@ -6006,3 +6006,110 @@ fn test_unified_diff_hint_suppressed_when_only_2_lines() {
     );
 }
 
+
+#[test]
+fn test_swap_hint_substring_based_fast_on_large_file() {
+    // Phase 1 follow-up (2026-04-27): swap detection used to run an
+    // O(N·L) fuzzy similarity scan, adding ~7s per failed edit on 100KB+
+    // files. Switched to O(N+L) exact substring (`str::contains`).
+    // Lock-in: substring path on a ~70KB file must complete well under
+    // 2s end-to-end (debug build, even under parallel test contention).
+    // The remaining cost is the unrelated pre-existing
+    // `nearest_match_hint` fuzzy scan; substring-only adds <1ms.
+    use std::time::Instant;
+    let big_content = "alpha beta gamma delta\n".repeat(3_000); // ~70KB / 3000 lines
+    let (tmp, filename, _) = create_temp_file(&big_content);
+    let ctx = make_ctx(tmp.path());
+
+    let start = Instant::now();
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        // search is absent (long-enough literal not in file). replace is
+        // a long substring that IS in the file → swap hint must fire.
+        "edits": [{ "search": "missing-needle-XYZ-12345-NOT-PRESENT", "replace": "alpha beta gamma delta" }]
+    }));
+    let elapsed_ms = start.elapsed().as_millis();
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("swapped `search` and `replace`"),
+        "swap hint must fire when replace text is in file: {text}"
+    );
+    assert!(
+        elapsed_ms < 5000,
+        "swap-detection on 70KB file took {elapsed_ms}ms; expected <5s. \
+         If regressed, the fuzzy similarity scan likely returned to \
+         swap_or_already_applied_hint — see the substring-vs-fuzzy decision. \
+         Budget intentionally loose to absorb parallel-test contention; \
+         substring path itself is sub-10ms."
+    );
+}
+
+#[test]
+fn test_swap_hint_skipped_for_short_replace_text() {
+    // MIN_REPLACE_LEN_FOR_SWAP_HINT (= 8) guard: short replace strings
+    // would trivially match in any non-trivial file ("x", "//", ";"),
+    // drowning the legitimate "Text not found" diagnostic.
+    let (tmp, filename, _) = create_temp_file("hello world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{ "search": "missing", "replace": "hello" }]  // 5 chars < 8
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains("swapped `search` and `replace`"),
+        "swap hint must NOT fire for replace text shorter than MIN_REPLACE_LEN_FOR_SWAP_HINT: {text}"
+    );
+}
+
+
+#[test]
+fn test_swap_hint_silent_for_near_miss_replace_text() {
+    // Phase 1 follow-up (2026-04-27): substring-only swap detection means
+    // a `replace` with 1–2-char drift from existing content does NOT trigger
+    // the targeted swap phrasing (the previous fuzzy 0.97 threshold would
+    // have caught it). This is an intentional, narrow regression vs the
+    // fuzzy variant — traded for a ~7s→<10ms perf win on the failure path.
+    //
+    // The realistic case where the swap-with-drift occurs is rare (the
+    // agent must both (a) swap search↔replace AND (b) introduce a typo).
+    // The common case — search has 1–2-char drift — is still surfaced via
+    // `nearest_match_hint` (which scans search_text against the file with
+    // the broader 0.80 threshold). This test locks in the substring-only
+    // contract so a future revert to fuzzy detection would be caught.
+    let (tmp, filename, _) = create_temp_file("hello beautiful world\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        // search is fully absent. replace has a 1-char drift from "hello
+        // beautiful world" ("hello beauiful world" - 1 char missing) so
+        // `str::contains` returns false even though similarity is ~95%.
+        "edits": [{
+            "search": "completely-missing-needle-XYZ",
+            "replace": "hello beauiful world"
+        }]
+    }));
+
+    assert!(result.is_error);
+    let text = &result.content[0].text;
+    assert!(
+        !text.contains("swapped `search` and `replace`"),
+        "swap hint must NOT fire on near-miss replace (substring-only \
+         contract): {text}"
+    );
+    // And confirm SOMETHING useful is still in the error message — either
+    // a nearest-match diagnostic from `nearest_match_hint` (if search is
+    // close to anything in the file) or at minimum the bare "Text not
+    // found" line. Either way, the user has actionable info.
+    assert!(
+        text.contains("not found"),
+        "failure-path error must still surface 'not found' baseline: {text}"
+    );
+}
+

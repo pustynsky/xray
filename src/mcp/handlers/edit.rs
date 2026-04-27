@@ -41,13 +41,11 @@ const NEAREST_MATCH_MAX_DISPLAY_LEN: usize = 150;
 /// (after Step 2/3 silent retries were removed).
 const NEAREST_MATCH_BYTE_DIFF_THRESHOLD: f32 = 0.80;
 
-/// Similarity threshold for [`swap_or_already_applied_hint`]. At ≥ 0.97 the
-/// text the caller put in `replace` is essentially identical to existing file
-/// content — strong evidence of either a `search`/`replace` swap or an
-/// already-applied idempotent retry. Kept distinct from
-/// [`NEAREST_MATCH_BYTE_DIFF_THRESHOLD`] (which gates a much broader diagnostic
-/// surface) so each can be tuned independently.
-const SWAP_DETECTION_SIMILARITY_THRESHOLD: f32 = 0.97;
+/// Minimum `replace`-text length for [`swap_or_already_applied_hint`] to fire.
+/// Below this, the substring is too short to be a meaningful swap signal and
+/// would trivially match in any non-trivial file (e.g. `"x"`, `"//"`, `";"`)
+/// drowning out the legitimate "Text not found" diagnostic.
+const MIN_REPLACE_LEN_FOR_SWAP_HINT: usize = 8;
 
 /// Handle `xray_edit` tool call.
 pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -158,10 +156,12 @@ const KNOWN_EDIT_OBJECT_FIELDS: &[&str] = &[
 /// Common alias names callers reach for inside `edits[]` items (carried over
 /// from Anthropic's text-editor tool, the VS Code `replace_string_in_file`
 /// tool, sed-style "find/with", or just intuitive naming). Each entry maps
-/// `(alias, canonical)`. We do NOT silently accept these — the goal is to
-/// produce an actionable error pointing at the canonical name on the very
-/// first failed attempt, so the caller does not iterate through schema
-/// guesses or fall back to a built-in tool.
+/// `(alias, canonical)`. Phase 1 (2026-04-27) flipped the contract: aliases
+/// are now silently rewritten to canonical names by
+/// [`normalize_edit_field_aliases`] before validation, eliminating the
+/// round-trip cost of cross-tool muscle-memory misfires. A conflict
+/// (BOTH alias AND canonical present in the same edit object) is still
+/// rejected so user data is never silently dropped.
 const EDIT_FIELD_SYNONYMS: &[(&str, &str)] = &[
     // search
     ("oldText", "search"),
@@ -304,15 +304,11 @@ fn check_unknown_edit_object_fields(
         if VALID_EDITS_ITEM_FIELDS.contains(&key.as_str()) {
             continue;
         }
-        // Surface alias → canonical mapping directly. Most common case in
-        // practice (oldText/newText, find/with, pattern/with, …).
-        if let Some(canonical) = lookup_edit_field_synonym(key) {
-            return Some(format!(
-                "edits[{i}]: unknown field '{key}'. Did you mean '{canonical}'? \
-                 xray_edit uses '{canonical}', not '{key}'. {menu}",
-                i = i, key = key, canonical = canonical, menu = EDIT_FORM_MENU
-            ));
-        }
+        // Note: alias keys (oldText/find/with/pattern/…) are silently rewritten
+        // to canonical names by `normalize_edit_field_aliases` BEFORE this
+        // function runs, so we only see them here if normalization was bypassed
+        // (which currently never happens). The alias → hint branch was removed
+        // as dead code in Phase 1 (2026-04-27).
         // Mode-A line-range fields used inside edits[] — wrong nesting level.
         if key == "startLine" || key == "endLine" {
             return Some(format!(
@@ -2557,25 +2553,35 @@ fn format_nearest_match_hint(best: &NearestMatch, search_text: &str) -> String {
 
 /// Detect the classic search↔replace swap (and the closely-related
 /// "already-applied" idempotent retry). Triggered when the text the caller
-/// supplied as `replace` already lives in the file with similarity ≥ 0.97 —
-/// strong evidence that either (a) the two fields are inverted, or (b) the
-/// edit was already applied in a previous batch.
+/// supplied as `replace` already appears verbatim in the file — strong
+/// evidence that either (a) the two fields are inverted, or (b) the edit
+/// was already applied in a previous batch.
 ///
-/// Returns an empty string if `replace_text` is empty or no high-similarity
-/// match exists. Reuses `find_nearest_match` so behaviour stays consistent
-/// with the standard nearest-match hint.
+/// Phase 1 follow-up (2026-04-27): switched from O(N·L) fuzzy similarity
+/// (`find_nearest_match` + `≥0.97` threshold) to O(N+L) exact substring
+/// (`str::contains`). The fuzzy variant added ~7s per failed edit on
+/// 100KB+ files (each call ran the full diff scan, on top of the pre-existing
+/// `nearest_match_hint` scan that runs on the same path). Exact substring
+/// covers the realistic swap and idempotent-retry shapes; near-miss cases
+/// (1–2 char drift in `replace_text`) no longer trigger the targeted swap
+/// phrasing — a narrow, intentional regression vs the fuzzy variant. The
+/// common case where `search_text` (not `replace_text`) has 1–2-char drift
+/// is still surfaced via `nearest_match_hint`, which runs on the same path
+/// at the broader 0.80 similarity threshold. Locked in by
+/// `test_swap_hint_silent_for_near_miss_replace_text`.
+///
+/// Returns an empty string if `replace_text` is shorter than
+/// [`MIN_REPLACE_LEN_FOR_SWAP_HINT`] (avoiding noise on trivial substrings
+/// like `"x"` or `"//"`) or no exact match exists.
 fn swap_or_already_applied_hint(content: &str, replace_text: &str) -> &'static str {
-    if replace_text.is_empty() {
+    if replace_text.len() < MIN_REPLACE_LEN_FOR_SWAP_HINT {
         return "";
     }
-    let Some(near) = find_nearest_match(content, replace_text) else {
-        return "";
-    };
-    if near.similarity < SWAP_DETECTION_SIMILARITY_THRESHOLD {
+    if !content.contains(replace_text) {
         return "";
     }
-    ". Hint: the text you put in `replace` already appears in the file at high \
-     similarity. Most likely either (a) you swapped `search` and `replace` \
+    ". Hint: the text you put in `replace` already appears in the file. \
+     Most likely either (a) you swapped `search` and `replace` \
      (the `search` field must contain text CURRENTLY in the file = OLD; \
      `replace` is what to write = NEW), or (b) this edit was already applied \
      in a previous batch — set `skipIfNotFound: true` to make it idempotent."
