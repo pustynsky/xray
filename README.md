@@ -78,7 +78,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 ### Installation
 
-**Option A — Automated setup (recommended).** Run the setup script — it downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for VS Code Copilot (Roo Code is optional, prompted separately):
+**Option A — Automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1) — it downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for VS Code Copilot (Roo Code is optional, prompted separately):
 
 ```powershell
 # From a clone of this repo, or download just the script:
