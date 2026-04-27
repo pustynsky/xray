@@ -693,6 +693,8 @@ fn test_apply_literal_prefilter_summary_attempted_but_discarded_overrides_defaul
         extracted_fragments: vec!["app".into()],
         short_circuited: true,
         reason: Some("candidate set covers 50000/60000 files (>50% threshold)".into()),
+        total_files_after_scope: None,
+        candidate_files_after_scope: None,
     };
     apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
     let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
@@ -719,6 +721,8 @@ fn test_apply_literal_prefilter_summary_no_reason_leaves_default_hint() {
         extracted_fragments: vec![],
         short_circuited: false,
         reason: None,
+        total_files_after_scope: None,
+        candidate_files_after_scope: None,
     };
     apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
     assert_eq!(summary["perfHint"].as_str(), Some(original_hint),

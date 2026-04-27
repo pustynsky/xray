@@ -3028,3 +3028,279 @@ fn test_xray_grep_prefilter_distributive_over_top_level_or_dotstar_blocked() {
 }
 
 
+
+/// Scope-aware counters: when the query is scoped via `dir=`, the response
+/// must surface BOTH the global `candidateFiles`/`totalFiles` (computed by the
+/// trigram prefilter against the whole indexed corpus) AND the scope-aware
+/// counters `candidateFilesAfterScope`/`totalFilesAfterScope` so callers can
+/// distinguish "prefilter narrowed" from "scope narrowed". This is the
+/// observability gap that motivated the alternation-split advisory revert
+/// (cross-validation 2026-04-26): a scoped query reported the same
+/// `candidateFiles=22581/totalFiles=66764` as its unscoped sibling, even
+/// though only ~hundreds of files were ultimately scanned under the dir
+/// prefix.
+#[test]
+fn test_xray_grep_literal_prefilter_scope_aware_counters_with_dir_scope() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_scope_aware_dir_{}_{}",
+        std::process::id(),
+        id
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let inside = tmp_dir.join("inside");
+    let outside = tmp_dir.join("outside");
+    std::fs::create_dir_all(&inside).unwrap();
+    std::fs::create_dir_all(&outside).unwrap();
+
+    // 4 files under `inside/` — 2 contain the literal, 2 do not.
+    // 6 files under `outside/` — 2 contain the literal, 4 do not.
+    // The literal-trigram prefilter sees all 4 matching files globally
+    // (candidateFiles=4, totalFiles=10 — ratio 0.4, comfortably below the
+    // 0.5 short-circuit threshold). Under `dir=inside` scope, only
+    // 2 of those candidates and 4 total files are reachable.
+    for (path, body) in [
+        (inside.join("a.cs"),  "AlphaScopeMarker present"),
+        (inside.join("b.cs"),  "AlphaScopeMarker present"),
+        (inside.join("c.cs"),  "unrelated"),
+        (inside.join("d.cs"),  "unrelated"),
+        (outside.join("e.cs"), "AlphaScopeMarker present"),
+        (outside.join("f.cs"), "AlphaScopeMarker present"),
+        (outside.join("g.cs"), "unrelated"),
+        (outside.join("h.cs"), "unrelated"),
+        (outside.join("i.cs"), "unrelated"),
+        (outside.join("j.cs"), "unrelated"),
+    ] {
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(f, "{}", body).unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    // Scoped query.
+    let result = dispatch_tool(
+        &ctx,
+        "xray_grep",
+        &json!({
+            "terms": ["AlphaScopeMarker"],
+            "regex": true,
+            "lineRegex": true,
+            "dir": inside.to_string_lossy().to_string(),
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "scoped lineRegex must not error: {}",
+        result.content[0].text
+    );
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let prefilter = &out["summary"]["literalPrefilter"];
+
+    // Global counters reflect the full corpus (unchanged by scope).
+    let total_global = prefilter["totalFiles"]
+        .as_u64()
+        .expect("totalFiles must be present");
+    let candidate_global = prefilter["candidateFiles"]
+        .as_u64()
+        .expect("candidateFiles must be present");
+    assert_eq!(total_global, 10, "global totalFiles must be the full corpus");
+    assert_eq!(
+        candidate_global, 4,
+        "global candidateFiles must reflect ALL files containing the literal"
+    );
+
+    // New scope-aware counters.
+    let total_after = prefilter["totalFilesAfterScope"]
+        .as_u64()
+        .expect("totalFilesAfterScope must be emitted for scoped queries");
+    let candidate_after = prefilter["candidateFilesAfterScope"]
+        .as_u64()
+        .expect("candidateFilesAfterScope must be emitted for scoped queries");
+    assert_eq!(
+        total_after, 4,
+        "totalFilesAfterScope must count only files under `inside/`; \
+         got {} of expected 4",
+        total_after
+    );
+    assert_eq!(
+        candidate_after, 2,
+        "candidateFilesAfterScope must count only candidate files \
+         that survive scope; got {} of expected 2",
+        candidate_after
+    );
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Negative case: when the query carries no scoping filter at all,
+/// the new fields must be omitted (lean JSON for the common
+/// unscoped path). `ext` is also a scoping filter, so to truly
+/// exercise the no-scope path we use neither `dir`, `file`, nor
+/// `ext`. The legacy fields (`candidateFiles`, `totalFiles`) are
+/// still present and unchanged.
+#[test]
+fn test_xray_grep_literal_prefilter_scope_aware_counters_omitted_when_unscoped() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_scope_aware_unscoped_{}_{}",
+        std::process::id(),
+        id
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    for i in 0..3 {
+        let mut f = std::fs::File::create(tmp_dir.join(format!("f{i}.cs"))).unwrap();
+        writeln!(f, "BetaScopelessMarker {i}").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    let result = dispatch_tool(
+        &ctx,
+        "xray_grep",
+        &json!({
+            "terms": ["BetaScopelessMarker"],
+            "regex": true,
+            "lineRegex": true,
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "unscoped lineRegex must not error: {}",
+        result.content[0].text
+    );
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let prefilter = &out["summary"]["literalPrefilter"];
+    assert!(
+        prefilter["totalFilesAfterScope"].is_null(),
+        "totalFilesAfterScope must be omitted when no scope filter is set; \
+         got {}",
+        prefilter
+    );
+    assert!(
+        prefilter["candidateFilesAfterScope"].is_null(),
+        "candidateFilesAfterScope must be omitted when no scope filter is set; \
+         got {}",
+        prefilter
+    );
+    // Legacy fields remain present.
+    assert!(prefilter["candidateFiles"].is_u64());
+    assert!(prefilter["totalFiles"].is_u64());
+
+    cleanup_tmp(&tmp_dir);
+}
+
+/// `ext` filter alone (no `dir`/`file`) MUST also trip the scope-aware
+/// counters. This is the most common real-world scoping shape (every
+/// query that pins the language family does this) and was the exact
+/// case that surfaced the cognitive trap in cross-validation — the
+/// `ext=["cs"]` scoped query reported the same global counts as the
+/// unscoped corpus.
+#[test]
+fn test_xray_grep_literal_prefilter_scope_aware_counters_with_ext_scope() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_grep_scope_aware_ext_{}_{}",
+        std::process::id(),
+        id
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    // 3 .cs containing literal, 2 .md containing literal, plus noise. We need the
+    // prefilter ratio to stay BELOW the short-circuit threshold so a real
+    // candidate set is produced — otherwise `candidate_file_ids` is None and
+    // `candidateFilesAfterScope` cannot be computed (correct semantics, but
+    // would make this test redundant with the unscoped one).
+    // Layout (11 files total):
+    //   3 .cs WITH literal     (idx 0..2)
+    //   2 .md WITH literal     (idx 3..4)
+    //   4 .cs noise            (idx 5..8)
+    //   2 .md noise            (idx 9..10)
+    // -> ratio 5/11 ≈ 0.45 (< 0.50 short-circuit threshold).
+    // With ext=["cs"]: 7 .cs survive scope; of those, 3 are candidates.
+    let layout: &[(&str, bool)] = &[
+        ("cs", true),  ("cs", true),  ("cs", true),
+        ("md", true),  ("md", true),
+        ("cs", false), ("cs", false), ("cs", false), ("cs", false),
+        ("md", false), ("md", false),
+    ];
+    for (i, (ext, has_literal)) in layout.iter().enumerate() {
+        let mut f = std::fs::File::create(tmp_dir.join(format!("f{i}.{ext}"))).unwrap();
+        if *has_literal {
+            writeln!(f, "GammaExtMarker hit").unwrap();
+        } else {
+            writeln!(f, "unrelated content").unwrap();
+        }
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    let result = dispatch_tool(
+        &ctx,
+        "xray_grep",
+        &json!({
+            "terms": ["GammaExtMarker"],
+            "regex": true,
+            "lineRegex": true,
+            "ext": ["cs"],
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "ext-scoped lineRegex must not error: {}",
+        result.content[0].text
+    );
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let prefilter = &out["summary"]["literalPrefilter"];
+
+    let total_after = prefilter["totalFilesAfterScope"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("ext scope must trip totalFilesAfterScope; prefilter={}", prefilter));
+    let candidate_after = prefilter["candidateFilesAfterScope"]
+        .as_u64()
+        .unwrap_or_else(|| panic!("ext scope must trip candidateFilesAfterScope; prefilter={}", prefilter));
+    assert_eq!(total_after, 7,
+        "7 .cs files survive ext scope (3 with literal + 4 noise); got {}", total_after);
+    assert_eq!(candidate_after, 3,
+        "3 .cs candidates survive ext scope; got {}", candidate_after);
+
+    cleanup_tmp(&tmp_dir);
+}
+

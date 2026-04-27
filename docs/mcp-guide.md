@@ -281,8 +281,19 @@ When `responseTruncated: true` appears in the summary, narrow your query with `e
 | `returned` | Always | Number of files actually returned in the `files` array |
 | `searchTimeMs` | Always | Search duration in milliseconds |
 | `responseTruncated` | Response exceeds size limit | `true` when the result set was truncated to fit the size budget — narrow the query |
-| `literalPrefilter` | `lineRegex` mode | Diagnostic block for the literal-trigram prefilter. Always emits `used`, `candidateFiles`, `totalFiles`, `extractedFragments`. Conditional fields: `reason` (when `used: false`), `shortCircuited` (when ratio guard tripped) |
+| `literalPrefilter` | `lineRegex` mode | Diagnostic block for the literal-trigram prefilter. Always emits `used`, `candidateFiles`, `totalFiles`, `extractedFragments`. Conditional fields: `reason` (when `used: false`), `shortCircuited` (when ratio guard tripped), `totalFilesAfterScope` and `candidateFilesAfterScope` (when any `dir`/`file`/`ext`/`exclude*` filter is set — see note below) |
 | `perfHint` | Slow `lineRegex` over a large index | Actionable advice for slow scans. Two variants: prefilter-applied + still slow (per-line regex is the bottleneck), prefilter-attempted-but-discarded (cites `literalPrefilter.reason`) |
+
+### `literalPrefilter` scope-aware vs. global counters
+
+`candidateFiles` and `totalFiles` always describe the **indexed corpus pre-scope**: the trigram-prefilter computes its candidate set against the entire content index, then `passes_file_filters` (which honours `dir` / `file` / `ext` / `excludeDir` / `exclude`) is applied per file inside the scan loop. As a result, a `dir`-scoped query and its unscoped sibling will report **identical** `candidateFiles` and `totalFiles` even though the scoped query touches far fewer files.
+
+When any scope filter is set, `summary.literalPrefilter` additionally emits:
+
+- `totalFilesAfterScope` — number of indexed files that survive the scope filters (without considering the prefilter).
+- `candidateFilesAfterScope` — intersection of the prefilter candidate set with `totalFilesAfterScope`. Omitted when the prefilter did not produce a candidate set (`used: false`, e.g. ratio-guard short-circuit).
+
+Use the `*AfterScope` pair to judge per-query selectivity (“did the prefilter help *for the files I actually care about?*”). Use the global pair to gauge selectivity of the literal extraction across the whole corpus.
 
 ---
 

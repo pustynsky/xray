@@ -1,5 +1,15 @@
 # Changelog
 
+## 2026-04-27
+
+### Observability — `xray_grep` `lineRegex` `summary.literalPrefilter` scope-aware counters
+
+- **New optional fields `totalFilesAfterScope` and `candidateFilesAfterScope`** in `summary.literalPrefilter`. Emitted only when the request carries any scope filter (`dir` / `file` / `ext` / `excludeDir` / `exclude`). Address the cognitive trap exposed during PR #222 cross-validation: a `dir`-scoped query and its unscoped sibling reported the **same** `candidateFiles` / `totalFiles` (because the trigram prefilter operates on the indexed corpus pre-scope, then `passes_file_filters` is applied per file inside the scan loop), masking the fact that scope had already done the heavy lifting and the prefilter was no longer the bottleneck. Now callers can compare `candidateFilesAfterScope` / `totalFilesAfterScope` to judge per-query selectivity.
+- **`candidateFilesAfterScope`** is omitted when the prefilter did not produce a candidate set (`used: false`, e.g. ratio-guard short-circuit) — there is nothing to intersect with the scope.
+- **Backward compatible**: existing fields (`used`, `candidateFiles`, `totalFiles`, `extractedFragments`, `reason`, `shortCircuited`, `extractedFragmentsTruncated`) keep their semantics; the JSON shape for unscoped queries is unchanged. Cost: one extra O(N) pass over `index.files` per scoped `lineRegex` call (microseconds even on 60k-file indices), gated by a single `params_have_scope_filter` check.
+- **Tests**: 3 new integration tests in `handlers_tests_grep.rs` cover (a) `dir`-scope path with explicit candidate-vs-scope arithmetic, (b) `ext`-only scope path (the most common real-world shape), and (c) negative case asserting the new fields are omitted when no scope filter is set.
+- **Documentation**: new "`literalPrefilter` scope-aware vs. global counters" subsection in `docs/mcp-guide.md` explains the pre-scope vs. post-scope distinction.
+
 ## 2026-04-26
 
 ### Reverted — `xray_grep` `lineRegex` alternation-split advisory (PR #222)
