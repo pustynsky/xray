@@ -992,45 +992,70 @@ fn periodic_autosave(
     let mut saved = Vec::new();
     let mut all_ok = true;
 
-    // Save content index.
+    // ── Content index: snapshot under brief read lock, serialize without lock ──
     // Gate: `idx.files.is_empty()` — allocator-capacity check, NOT live count.
     // Rationale: if all files were removed during this session, `live_file_count() == 0`
     // but the index is still dirty (the on-disk copy holds stale entries). We MUST
     // checkpoint that "now empty" state so a forced kill doesn't resurrect them.
     // We only skip when the index has never held any file (allocator never grew).
-    match index.read() {
+    let content_snapshot = match index.read() {
         Ok(idx) => {
-            if !idx.files.is_empty() {
-                if let Err(e) = crate::save_content_index(&idx, index_base) {
-                    warn!(error = %e, "Periodic autosave: failed to save content index");
-                    all_ok = false;
-                } else {
-                    saved.push(format!("content({} files)", idx.live_file_count()));
-                }
+            if idx.files.is_empty() { None }
+            else {
+                let clone_start = std::time::Instant::now();
+                let snapshot = idx.clone();
+                let clone_ms = clone_start.elapsed().as_secs_f64() * 1000.0;
+                Some((snapshot, clone_ms))
             }
         }
         Err(e) => {
             warn!(error = %e, "Periodic autosave: failed to read content index");
             all_ok = false;
+            None
+        }
+    };
+    // READ lock released — clone took ~1-2s for large indexes, not ~79s serialization.
+
+    if let Some((snapshot, clone_ms)) = content_snapshot {
+        let serialize_start = std::time::Instant::now();
+        if let Err(e) = crate::save_content_index(&snapshot, index_base) {
+            warn!(error = %e, "Periodic autosave: failed to save content index");
+            all_ok = false;
+        } else {
+            let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
+            saved.push(format!("content({} files, cloneMs={:.0}, serializeMs={:.0})",
+                snapshot.live_file_count(), clone_ms, serialize_ms));
         }
     }
 
-    // Save definition index — same allocator-capacity gate as above.
+    // ── Definition index: same snapshot-then-serialize pattern ──
     if let Some(def_idx) = def_index {
-        match def_idx.read() {
+        let def_snapshot = match def_idx.read() {
             Ok(idx) => {
-                if !idx.files.is_empty() {
-                    if let Err(e) = crate::definitions::save_definition_index(&idx, index_base) {
-                        warn!(error = %e, "Periodic autosave: failed to save definition index");
-                        all_ok = false;
-                    } else {
-                        saved.push(format!("def({} defs)", idx.definitions.len()));
-                    }
+                if idx.files.is_empty() { None }
+                else {
+                    let clone_start = std::time::Instant::now();
+                    let snapshot = idx.clone();
+                    let clone_ms = clone_start.elapsed().as_secs_f64() * 1000.0;
+                    Some((snapshot, clone_ms))
                 }
             }
             Err(e) => {
                 warn!(error = %e, "Periodic autosave: failed to read definition index");
                 all_ok = false;
+                None
+            }
+        };
+
+        if let Some((snapshot, clone_ms)) = def_snapshot {
+            let serialize_start = std::time::Instant::now();
+            if let Err(e) = crate::definitions::save_definition_index(&snapshot, index_base) {
+                warn!(error = %e, "Periodic autosave: failed to save definition index");
+                all_ok = false;
+            } else {
+                let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
+                saved.push(format!("def({} defs, cloneMs={:.0}, serializeMs={:.0})",
+                    snapshot.definitions.len(), clone_ms, serialize_ms));
             }
         }
     }

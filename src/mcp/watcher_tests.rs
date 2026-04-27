@@ -2536,6 +2536,68 @@ fn test_periodic_autosave_returns_false_on_poisoned_lock() {
          so the caller retries instead of clearing `have_unsaved`");
 }
 
+#[test]
+fn test_periodic_autosave_clone_snapshot_is_independent() {
+    // Verify that clone-then-serialize produces a snapshot independent
+    // of the original: mutations to the live index after clone must NOT
+    // appear in the saved file. This guards the correctness of the
+    // lock-free serialization path.
+    let tmp = tempfile::tempdir().unwrap();
+    let index_base = tmp.path();
+
+    let content_index = Arc::new(RwLock::new(ContentIndex {
+        root: tmp.path().to_string_lossy().to_string(),
+        format_version: code_xray::CONTENT_INDEX_VERSION,
+        files: vec!["original.cs".to_string()],
+        index: {
+            let mut m = HashMap::new();
+            m.insert("original_token".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+            m
+        },
+        total_tokens: 1,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![1],
+        ..Default::default()
+    }));
+
+    // Take a snapshot (simulating what periodic_autosave does)
+    let snapshot = content_index.read().unwrap().clone();
+
+    // Mutate the live index AFTER the snapshot was taken
+    {
+        let mut idx = content_index.write().unwrap();
+        idx.files.push("mutated.cs".to_string());
+        idx.index.insert("mutated_token".to_string(), vec![Posting { file_id: 1, lines: vec![2] }]);
+        idx.total_tokens = 2;
+        idx.file_token_counts.push(1);
+    }
+
+    // Save the snapshot (should contain only the ORIGINAL state)
+    crate::save_content_index(&snapshot, index_base).unwrap();
+
+    // Load back and verify it matches the snapshot, not the mutated live index
+    let content_path = crate::index::content_index_path_for(
+        &tmp.path().to_string_lossy(), "cs", index_base
+    );
+    assert!(content_path.exists(), "saved index file must exist");
+
+    let loaded = crate::load_content_index(
+        &tmp.path().to_string_lossy(), "cs", index_base
+    ).unwrap();
+    assert_eq!(loaded.files.len(), 1, "snapshot must have 1 file (original), not 2 (mutated)");
+    assert!(loaded.index.contains_key("original_token"),
+        "snapshot must contain original_token");
+    assert!(!loaded.index.contains_key("mutated_token"),
+        "snapshot must NOT contain mutated_token (added after clone)");
+    assert_eq!(loaded.total_tokens, 1, "snapshot total_tokens must be 1 (original)");
+
+    // Verify the live index has the mutation
+    let live = content_index.read().unwrap();
+    assert_eq!(live.files.len(), 2, "live index must have 2 files after mutation");
+    assert!(live.index.contains_key("mutated_token"),
+        "live index must contain mutated_token");
+}
+
 
 
 #[test]

@@ -222,7 +222,7 @@ pub struct CallSite {
 /// Loading an index with a different version triggers a rebuild.
 pub const DEFINITION_INDEX_VERSION: u32 = 3;
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(Default)]
 pub struct DefinitionIndex {
     pub root: String,

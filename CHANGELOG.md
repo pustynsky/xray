@@ -9,6 +9,16 @@
   contention from ~70-80% to ~30-40% of active time. Trade-off: up to
   5 minutes of incremental index state may be lost on force-kill
   (recovered via 10-30s reconciliation on next startup).
+- **Lock-free autosave serialization** — `periodic_autosave` now clones
+  the index snapshot under a brief read lock (~1-2s) and serializes
+  without any lock held. Previously, serialization of a 593 MB
+  content-index held the read lock for 79-102 seconds, blocking all
+  writers (edit sync-reindex, watcher batch, reconciliation) for the
+  entire duration. Combined with the 30-second autosave interval, this
+  caused near-continuous lock contention (~70-80% of active time) on
+  large repositories. After this fix, read lock is held for ~1-2s
+  regardless of index size. Peak memory increases by ~600 MB during
+  autosave (snapshot lifetime).
 
 ### Diagnostics
 - **Sub-timing breakdown in `reindexElapsedMs`** — `xray_edit` response
