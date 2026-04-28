@@ -1515,6 +1515,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
         max_age_secs: args.max_age_hours * 3600,
         files,
         index,
+        file_tokens: Vec::new(),
         total_tokens,
         extensions: extensions.to_vec(),
         file_token_counts,

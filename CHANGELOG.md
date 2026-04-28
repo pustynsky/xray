@@ -23,6 +23,14 @@
   watcher thread when indexes are mutated via `reindex_paths_sync`.
   Prevents the watcher from clearing its `have_unsaved` flag when the
   just-saved snapshot is already stale from a concurrent edit.
+- **Targeted content-index purge in watcher updates** — mutable watcher paths now
+  maintain a derived per-file token reverse index (`file_id -> tokens`) so
+  single-file edit/reindex purge touches only that file's token posting lists
+  instead of scanning the entire inverted index. The reverse map is skipped on
+  disk and rebuilt only for watch-mode mutation paths, while autosave snapshots
+  deliberately omit it to avoid cloning hundreds of MB of derived state. Dirty
+  files that fail retokenization now keep their old postings/counts until a later
+  successful update, preserving index consistency.
 
 ### Performance
 - **Skip trigram rebuild for narrow-scope grep** — after `xray_edit` sets

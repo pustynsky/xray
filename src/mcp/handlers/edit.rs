@@ -2369,8 +2369,10 @@ fn apply_literal_replace(
     Ok((replacements, None, warnings))
 }
 
+type ApplyTextEditsResult = (String, usize, Vec<usize>, Vec<SkippedEditDetail>, Vec<String>);
+
 /// Apply text edits sequentially. Returns (new_content, total_replacements, per_edit_counts, skipped_details, warnings).
-fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<(String, usize, Vec<usize>, Vec<SkippedEditDetail>, Vec<String>), String> {
+fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result<ApplyTextEditsResult, String> {
     let mut result = content.to_string();
     let mut total_replacements = 0;
     let mut per_edit_counts: Vec<usize> = Vec::with_capacity(edits.len());

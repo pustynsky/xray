@@ -291,7 +291,14 @@ fn test_batch_purge_files_removes_multiple_files() {
     let mut ids = HashSet::new();
     ids.insert(0);
     ids.insert(2);
-    batch_purge_files(&mut inverted, &ids);
+    let mut file_tokens = vec![
+        vec!["token_a".to_string(), "token_b".to_string()],
+        vec!["token_a".to_string(), "token_c".to_string()],
+        vec!["token_a".to_string(), "token_b".to_string()],
+    ];
+    let file_token_counts = vec![1, 1, 1];
+    let touched_tokens = batch_purge_files(&mut inverted, &mut file_tokens, &file_token_counts, &ids);
+    assert_eq!(touched_tokens, vec!["token_a".to_string(), "token_b".to_string()]);
 
     // token_a should only have file_id 1
     let token_a = inverted.get("token_a").unwrap();
@@ -313,7 +320,10 @@ fn test_batch_purge_files_empty_set() {
         Posting { file_id: 0, lines: vec![1] },
     ]);
 
-    batch_purge_files(&mut inverted, &HashSet::new());
+    let mut file_tokens = vec![vec!["token".to_string()]];
+    let file_token_counts = vec![1];
+    let touched_tokens = batch_purge_files(&mut inverted, &mut file_tokens, &file_token_counts, &HashSet::new());
+    assert!(touched_tokens.is_empty());
 
     // Should be a no-op
     assert_eq!(inverted.len(), 1);
@@ -340,7 +350,13 @@ fn test_batch_purge_files_single_file_equivalent_to_purge_single() {
     // Batch purge with 1 element
     let mut ids = HashSet::new();
     ids.insert(0);
-    batch_purge_files(&mut inverted2, &ids);
+    let mut file_tokens = vec![
+        vec!["token_a".to_string(), "token_b".to_string()],
+        vec!["token_a".to_string()],
+    ];
+    let file_token_counts = vec![1, 1];
+    let touched_tokens = batch_purge_files(&mut inverted2, &mut file_tokens, &file_token_counts, &ids);
+    assert_eq!(touched_tokens, vec!["token_a".to_string(), "token_b".to_string()]);
 
     // Results should be identical
     assert_eq!(inverted1.len(), inverted2.len());
@@ -353,6 +369,173 @@ fn test_batch_purge_files_single_file_equivalent_to_purge_single() {
         }
     }
 }
+
+fn make_purge_test_index() -> ContentIndex {
+    let mut inverted = HashMap::new();
+    inverted.insert("shared".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 1, lines: vec![2] },
+        Posting { file_id: 2, lines: vec![3] },
+    ]);
+    inverted.insert("exclusive_a".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+    inverted.insert("exclusive_b".to_string(), vec![Posting { file_id: 1, lines: vec![1] }]);
+    inverted.insert("exclusive_c".to_string(), vec![Posting { file_id: 2, lines: vec![1] }]);
+
+    let mut index = ContentIndex {
+        root: "test".to_string(),
+        files: vec!["a.cs".to_string(), "b.cs".to_string(), "c.cs".to_string()],
+        index: inverted,
+        total_tokens: 9,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![3, 3, 3],
+        ..Default::default()
+    };
+    index.rebuild_file_tokens();
+    index
+}
+
+fn assert_inverted_eq(
+    left: &HashMap<String, Vec<Posting>>,
+    right: &HashMap<String, Vec<Posting>>,
+) {
+    assert_eq!(left.len(), right.len());
+    for (token, left_postings) in left {
+        let right_postings = right.get(token).unwrap_or_else(|| panic!("missing token {token}"));
+        assert_eq!(left_postings.len(), right_postings.len(), "postings len for {token}");
+        for (left_posting, right_posting) in left_postings.iter().zip(right_postings.iter()) {
+            assert_eq!(left_posting.file_id, right_posting.file_id, "file_id for {token}");
+            assert_eq!(left_posting.lines, right_posting.lines, "lines for {token}");
+        }
+    }
+}
+
+#[test]
+fn test_targeted_purge_matches_full_scan() {
+    let mut targeted = make_purge_test_index();
+    let mut full_scan = targeted.clone();
+    full_scan.file_tokens.clear();
+
+    let ids = HashSet::from([0u32, 2u32]);
+    let targeted_counts = targeted.file_token_counts.clone();
+    let full_scan_counts = full_scan.file_token_counts.clone();
+    let touched_tokens = batch_purge_files(
+        &mut targeted.index,
+        &mut targeted.file_tokens,
+        &targeted_counts,
+        &ids,
+    );
+    batch_purge_files(&mut full_scan.index, &mut full_scan.file_tokens, &full_scan_counts, &ids);
+
+    assert_eq!(touched_tokens, vec![
+        "exclusive_a".to_string(),
+        "exclusive_c".to_string(),
+        "shared".to_string(),
+    ]);
+    assert_inverted_eq(&targeted.index, &full_scan.index);
+    assert!(targeted.file_tokens[0].is_empty());
+    assert!(targeted.file_tokens[2].is_empty());
+}
+
+#[test]
+fn test_rebuild_file_tokens_roundtrip() {
+    let mut index = make_purge_test_index();
+    let expected = index.file_tokens.clone();
+
+    index.file_tokens.clear();
+    index.rebuild_file_tokens();
+
+    assert_eq!(index.file_tokens, expected);
+}
+
+#[test]
+fn test_file_tokens_cleared_after_purge() {
+    let mut index = make_purge_test_index();
+    let ids = HashSet::from([1u32]);
+
+    let file_token_counts = index.file_token_counts.clone();
+    batch_purge_files(&mut index.index, &mut index.file_tokens, &file_token_counts, &ids);
+
+    assert!(index.file_tokens[1].is_empty());
+    assert!(!index.index.contains_key("exclusive_b"));
+    assert!(index.index["shared"].iter().all(|posting| posting.file_id != 1));
+}
+
+#[test]
+fn test_fallback_when_file_tokens_empty() {
+    let mut index = make_purge_test_index();
+    index.file_tokens.clear();
+    let ids = HashSet::from([1u32]);
+
+    let file_token_counts = index.file_token_counts.clone();
+    let touched_tokens = batch_purge_files(&mut index.index, &mut index.file_tokens, &file_token_counts, &ids);
+
+    assert_eq!(touched_tokens, vec![
+        "exclusive_a".to_string(),
+        "exclusive_b".to_string(),
+        "exclusive_c".to_string(),
+        "shared".to_string(),
+    ]);
+    assert!(!index.index.contains_key("exclusive_b"));
+    assert!(index.index["shared"].iter().all(|posting| posting.file_id != 1));
+}
+
+#[test]
+#[should_panic(expected = "file_tokens missing entry for file_id 1")]
+fn test_partial_file_tokens_is_bug_not_fallback() {
+    let mut index = make_purge_test_index();
+    index.file_tokens.truncate(1);
+    let ids = HashSet::from([1u32]);
+
+    let file_token_counts = index.file_token_counts.clone();
+    batch_purge_files(&mut index.index, &mut index.file_tokens, &file_token_counts, &ids);
+}
+
+#[test]
+#[should_panic(expected = "file_tokens empty for file_id 1")]
+fn test_empty_file_tokens_slot_with_count_is_bug_not_noop() {
+    // Regression for the dangerous partial-map shape where the vector length is
+    // correct but one live slot is empty. Targeted purge would otherwise skip
+    // that file silently and leave stale postings searchable.
+    let mut index = make_purge_test_index();
+    index.file_tokens[1].clear();
+    let ids = HashSet::from([1u32]);
+
+    let file_token_counts = index.file_token_counts.clone();
+    batch_purge_files(&mut index.index, &mut index.file_tokens, &file_token_counts, &ids);
+}
+
+#[test]
+fn test_file_tokens_maintained_after_insert() {
+    let mut tokens = HashMap::new();
+    tokens.insert("beta".to_string(), vec![1, 2]);
+    tokens.insert("alpha".to_string(), vec![1]);
+    let result = TokenizedFileResult {
+        path: PathBuf::from("new.cs"),
+        tokens,
+        total_tokens: 3,
+    };
+    let mut index = ContentIndex {
+        root: "test".to_string(),
+        path_to_id: Some(HashMap::new()),
+        ..Default::default()
+    };
+
+    let touched_tokens = apply_tokenized_file(&mut index, result);
+
+    assert_eq!(touched_tokens, vec!["alpha".to_string(), "beta".to_string()]);
+    assert_eq!(index.file_tokens[0], touched_tokens);
+}
+
+#[test]
+fn test_content_index_clone_skips_file_tokens() {
+    let index = make_purge_test_index();
+
+    let cloned = index.clone();
+
+    assert!(cloned.file_tokens.is_empty());
+    assert_inverted_eq(&cloned.index, &index.index);
+}
+
 
 #[test]
 fn test_total_tokens_decremented_on_update() {
@@ -523,7 +706,7 @@ fn make_batch_test_setup()
         Posting { file_id: 1, lines: vec![1] },
     ]);
 
-    let index = ContentIndex {
+    let mut index = ContentIndex {
         root: dir.to_string_lossy().to_string(),
         files: vec![clean_a.clone(), clean_b.clone()],
         index: inverted,
@@ -538,6 +721,7 @@ fn make_batch_test_setup()
         }),
         ..Default::default()
     };
+    index.rebuild_file_tokens();
 
     (tmp, dir, Arc::new(RwLock::new(index)))
 }
@@ -1272,6 +1456,59 @@ fn test_nonblocking_update_content_index_tokens_consistent() {
 }
 
 #[test]
+fn test_nonblocking_update_content_index_dirty_tokenize_failure_preserves_old_postings() {
+    // Simulate a dirty event for a file that becomes unreadable before the
+    // watcher tokenizes it. The safe behavior is stale-but-consistent: keep the
+    // old postings/counts, and let a later watcher/rescan event repair it.
+    let (_tmp, root, index) = make_batch_test_setup();
+    let file_a = root.join("a.cs");
+    let clean_a = crate::clean_path(&file_a.to_string_lossy());
+    std::fs::remove_file(&file_a).unwrap();
+
+    let before = {
+        let idx = index.read().unwrap();
+        (idx.created_at, idx.trigram_dirty)
+    };
+
+    let mut dirty = HashSet::new();
+    dirty.insert(PathBuf::from(&clean_a));
+    let mut removed = HashSet::new();
+
+    process_batch(&index, &None, &mut dirty, &mut removed);
+
+    let idx = index.read().unwrap();
+    assert!(idx.index.contains_key("alpha"), "failed dirty retokenize must leave old postings intact");
+    assert!(idx.index["class"].iter().any(|posting| posting.file_id == 0));
+    assert_eq!(idx.file_token_counts[0], 10);
+    assert_eq!(idx.created_at, before.0, "failed retokenize must not advance retry watermark");
+    assert_eq!(idx.trigram_dirty, before.1, "failed retokenize must not mark trigram dirty");
+    let sum: u64 = idx.file_token_counts.iter().map(|&count| count as u64).sum();
+    assert_eq!(idx.total_tokens, sum);
+}
+
+#[test]
+fn test_reindex_paths_sync_dirty_tokenize_failure_reports_no_content_update() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let file_a = root.join("a.cs");
+    let clean_a = crate::clean_path(&file_a.to_string_lossy());
+    std::fs::remove_file(&file_a).unwrap();
+
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        &[PathBuf::from(&clean_a)],
+        &[],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 0, "failed dirty tokenization is not an applied content update");
+    assert!(!stats.content_lock_poisoned);
+    let idx = index.read().unwrap();
+    assert!(idx.index.contains_key("alpha"));
+    assert_eq!(idx.file_token_counts[0], 10);
+}
+
+#[test]
 fn test_nonblocking_update_content_index_new_file_tokens_consistent() {
     let (tmp, _root, index) = make_batch_test_setup();
 
@@ -1986,6 +2223,175 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
 }
 
 #[test]
+fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let file_a = root.join("a.cs");
+    let file_b = root.join("b.cs");
+    let clean_a = crate::clean_path(&file_a.to_string_lossy());
+    let clean_b = crate::clean_path(&file_b.to_string_lossy());
+
+    // Reduce the fixture to a single indexed file so the rescan has exactly one
+    // content drift: a modified a.cs. That keeps the assertion sharp; no added
+    // or removed file should be able to set autosave_dirty on its own.
+    std::fs::remove_file(&file_b).unwrap();
+    {
+        let mut idx = index.write().unwrap();
+        idx.files.truncate(1);
+        idx.file_token_counts.truncate(1);
+        idx.total_tokens = idx.file_token_counts.iter().map(|&count| count as u64).sum();
+        if let Some(ref mut p2id) = idx.path_to_id {
+            p2id.remove(&PathBuf::from(&clean_b));
+        }
+        for postings in idx.index.values_mut() {
+            postings.retain(|posting| posting.file_id == 0);
+        }
+        idx.index.retain(|_, postings| !postings.is_empty());
+        idx.rebuild_file_tokens();
+        idx.created_at = 0;
+        idx.trigram_dirty = false;
+    }
+
+    // Make a.cs too large to index. scan_dir_state still sees a real modified
+    // .cs file, but tokenize_file_standalone returns None via read_file_lossy's
+    // MAX_INDEX_FILE_BYTES guard. This models the reviewer-found path where
+    // drift is detected but reconcile applies zero content changes.
+    let oversized = std::fs::OpenOptions::new().write(true).open(&file_a).unwrap();
+    oversized.set_len(crate::MAX_INDEX_FILE_BYTES + 1).unwrap();
+    drop(oversized);
+
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(None));
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
+    let outcome = super::periodic_rescan_once(
+        &index, &None, &file_index, &file_index_dirty,
+        &root.to_string_lossy(),
+        &["cs".to_string()],
+        &stats,
+        false,
+        &autosave_dirty,
+    );
+
+    assert!(outcome.drift_detected, "oversized dirty file must still be detected as drift");
+    assert_eq!(outcome.content_added, 0);
+    assert_eq!(outcome.content_removed, 0);
+    assert_eq!(outcome.content_modified, 1);
+    assert_eq!(stats.periodic_rescan_drift_events.load(Ordering::Relaxed), 1);
+    assert!(file_index_dirty.load(Ordering::Relaxed),
+        "file-list invalidation is still detection-based so xray_fast can rebuild");
+    assert!(!autosave_dirty.load(Ordering::Relaxed),
+        "failed content apply must not checkpoint the stale content snapshot");
+
+    let idx = index.read().unwrap();
+    assert!(idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_a)));
+    assert!(idx.index.contains_key("alpha"), "old postings stay searchable until a later successful retry");
+    assert_eq!(idx.file_token_counts[0], 10);
+    assert_eq!(idx.created_at, 0, "failed apply must leave the retry watermark untouched");
+    assert!(!idx.trigram_dirty, "failed apply must not mark derived trigram state dirty");
+}
+
+#[test]
+fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let file_a = root.join("a.cs");
+    let file_b = root.join("b.cs");
+    let clean_a = crate::clean_path(&file_a.to_string_lossy());
+    let clean_b = crate::clean_path(&file_b.to_string_lossy());
+
+    // Isolate one dirty file exactly like the content-only regression above.
+    // Content reconcile will apply zero changes, while definition reconcile will
+    // remove stale definitions for the same file after parsing fails.
+    std::fs::remove_file(&file_b).unwrap();
+    {
+        let mut idx = index.write().unwrap();
+        idx.files.truncate(1);
+        idx.file_token_counts.truncate(1);
+        idx.total_tokens = idx.file_token_counts.iter().map(|&count| count as u64).sum();
+        if let Some(ref mut p2id) = idx.path_to_id {
+            p2id.remove(&PathBuf::from(&clean_b));
+        }
+        for postings in idx.index.values_mut() {
+            postings.retain(|posting| posting.file_id == 0);
+        }
+        idx.index.retain(|_, postings| !postings.is_empty());
+        idx.rebuild_file_tokens();
+        idx.created_at = 0;
+        idx.trigram_dirty = false;
+    }
+
+    let mut name_index = HashMap::new();
+    name_index.insert("alpha".to_string(), vec![0]);
+    let mut kind_index = HashMap::new();
+    kind_index.insert(crate::definitions::DefinitionKind::Class, vec![0]);
+    let mut file_def_index = HashMap::new();
+    file_def_index.insert(0u32, vec![0]);
+    let mut path_to_id = HashMap::new();
+    path_to_id.insert(PathBuf::from(&clean_a), 0u32);
+    let def_index = Arc::new(RwLock::new(crate::definitions::DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec![clean_a.clone()],
+        definitions: vec![crate::definitions::DefinitionEntry {
+            file_id: 0,
+            name: "Alpha".to_string(),
+            kind: crate::definitions::DefinitionKind::Class,
+            line_start: 1,
+            line_end: 1,
+            parent: None,
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }],
+        name_index,
+        kind_index,
+        file_index: file_def_index,
+        path_to_id,
+        ..Default::default()
+    }));
+
+    let oversized = std::fs::OpenOptions::new().write(true).open(&file_a).unwrap();
+    oversized.set_len(crate::MAX_INDEX_FILE_BYTES + 1).unwrap();
+    drop(oversized);
+
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(None));
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
+    let outcome = super::periodic_rescan_once(
+        &index, &Some(Arc::clone(&def_index)), &file_index, &file_index_dirty,
+        &root.to_string_lossy(),
+        &["cs".to_string()],
+        &stats,
+        false,
+        &autosave_dirty,
+    );
+
+    assert!(outcome.drift_detected);
+    assert_eq!(outcome.content_modified, 1);
+    assert!(autosave_dirty.load(Ordering::Relaxed),
+        "definition parse failure removes stale defs and must be checkpointed");
+
+    let idx = index.read().unwrap();
+    assert!(idx.index.contains_key("alpha"),
+        "content index keeps old postings because content tokenization failed");
+    assert_eq!(idx.created_at, 0,
+        "content watermark must remain retryable even though def index changed");
+    drop(idx);
+
+    let def_idx = def_index.read().unwrap();
+    assert!(!def_idx.file_index.contains_key(&0),
+        "definition reconcile removes stale definitions when dirty parse fails");
+    assert!(!def_idx.name_index.contains_key("alpha"));
+    assert!(def_idx.path_to_id.contains_key(&PathBuf::from(&clean_a)),
+        "dirty parse failure is not a deletion; path mapping stays for retry");
+    assert!(def_idx.created_at > 0,
+        "definition reconcile advances its own watermark and needs autosave");
+}
+
+
+#[test]
 fn periodic_rescan_detects_removed_file_and_reconciles_content() {
     let (_tmp, root, index) = make_batch_test_setup();
     let stats = Arc::new(super::WatcherStats::new());
@@ -2492,6 +2898,61 @@ fn test_autosave_due_constants_have_expected_values() {
         "10min preserves legacy behavior for steady-state idle workspaces");
     assert!(AUTOSAVE_QUIET_INTERVAL < AUTOSAVE_MAX_INTERVAL,
         "quiet interval must be tighter than max ceiling, otherwise have_unsaved gate is dead");
+}
+
+#[test]
+fn test_autosave_success_clears_consumed_external_dirty_without_rearming() {
+    let autosave_dirty = AtomicBool::new(true);
+    let mut have_unsaved = false;
+
+    let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
+    assert!(had_autosave_dirty);
+    assert!(!autosave_dirty.load(Ordering::Relaxed));
+
+    finish_autosave_attempt(true, had_autosave_dirty, &mut have_unsaved);
+
+    assert!(!have_unsaved,
+        "successful autosave must not copy the pre-save external dirty bit back into have_unsaved");
+    assert!(!autosave_due(
+        have_unsaved || autosave_dirty.load(Ordering::Relaxed),
+        AUTOSAVE_QUIET_INTERVAL,
+    ));
+}
+
+#[test]
+fn test_autosave_success_preserves_external_dirty_set_during_save() {
+    let autosave_dirty = AtomicBool::new(true);
+    let mut have_unsaved = false;
+
+    let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
+    autosave_dirty.store(true, Ordering::Relaxed);
+
+    finish_autosave_attempt(true, had_autosave_dirty, &mut have_unsaved);
+
+    assert!(!have_unsaved,
+        "post-swap external dirty stays in the atomic channel, not the local one");
+    assert!(autosave_dirty.load(Ordering::Relaxed),
+        "external dirty set during serialization must survive for the next save");
+    assert!(autosave_due(
+        have_unsaved || autosave_dirty.load(Ordering::Relaxed),
+        AUTOSAVE_QUIET_INTERVAL,
+    ));
+}
+
+#[test]
+fn test_autosave_failure_preserves_consumed_external_dirty_for_retry() {
+    let autosave_dirty = AtomicBool::new(true);
+    let mut have_unsaved = false;
+
+    let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
+    finish_autosave_attempt(false, had_autosave_dirty, &mut have_unsaved);
+
+    assert!(have_unsaved,
+        "failed save must preserve retry pressure after consuming the external dirty bit");
+    assert!(autosave_due(
+        have_unsaved || autosave_dirty.load(Ordering::Relaxed),
+        AUTOSAVE_QUIET_INTERVAL,
+    ));
 }
 
 #[test]

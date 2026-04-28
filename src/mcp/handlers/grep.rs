@@ -1919,7 +1919,6 @@ fn handle_substring_search(
     let mut file_matched_terms: HashMap<u32, HashSet<usize>> = HashMap::new();
 
     for (term_idx, term) in raw_terms.iter().enumerate() {
-        let trigram_start = Instant::now();
         // When trigram is stale (rebuild skipped for narrow scope), fall back
         // to brute-force token matching to avoid false negatives from missing
         // trigram entries for newly-added tokens.
