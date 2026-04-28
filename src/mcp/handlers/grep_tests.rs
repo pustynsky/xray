@@ -639,6 +639,85 @@ fn sample_line_regex_scan(
 }
 
 #[test]
+fn test_line_regex_scan_summary_separates_wall_scaled_and_sum_timings() {
+    let mut telemetry = sample_line_regex_scan(80, 40, 80, 0);
+    telemetry.parallel_scan = true;
+    telemetry.worker_threads = 4;
+    telemetry.scan_duration = std::time::Duration::from_millis(100);
+
+    let summary = telemetry.to_json();
+
+    assert_eq!(summary["scanWallMs"], json!(100));
+    assert_eq!(summary["readMs"], json!(40));
+    assert_eq!(summary["readSumMs"], json!(80));
+    assert_eq!(summary["wholeFilePrecheckMs"], json!(20));
+    assert_eq!(summary["wholeFilePrecheckSumMs"], json!(40));
+    assert_eq!(summary["lineEvalMs"], json!(40));
+    assert_eq!(summary["lineEvalSumMs"], json!(80));
+}
+
+#[test]
+fn test_line_regex_file_scan_single_file_match() {
+    use std::io::Write;
+
+    let tmp_holder = tempfile::tempdir().unwrap();
+    let tmp_dir = crate::canonicalize_test_root(tmp_holder.path());
+    let file_path = tmp_dir.join("match.cs");
+    let mut file_handle = std::fs::File::create(&file_path).unwrap();
+    writeln!(file_handle, "public class Alpha {{}}").unwrap();
+    writeln!(file_handle, "private class Beta {{}}").unwrap();
+
+    let file_path_string = file_path.to_string_lossy().to_string();
+    let compiled = vec![regex::RegexBuilder::new("^public class")
+        .multi_line(true)
+        .crlf(true)
+        .build()
+        .unwrap()];
+    let empty_filters: Vec<String> = Vec::new();
+    let no_path: Option<String> = None;
+    let params = GrepSearchParams {
+        ext_filter: &empty_filters,
+        show_lines: false,
+        context_lines: 0,
+        max_results: 0,
+        mode_and: false,
+        count_only: false,
+        search_start: Instant::now(),
+        dir_filter: &no_path,
+        file_filter: &empty_filters,
+        exact_file_path: &no_path,
+        exact_file_path_canonical: &no_path,
+        exclude_patterns: super::utils::ExcludePatterns::from_dirs(&[]),
+        exclude_lower: Vec::new(),
+        dir_auto_converted_note: None,
+        auto_balance: true,
+        max_occurrences_per_term: None,
+        lock_wait_ms: 0.0,
+        trigram_stale: false,
+    };
+
+    let output = scan_line_regex_file(
+        0,
+        &file_path_string,
+        None,
+        &compiled,
+        &params,
+    );
+
+    assert_eq!(output.path.as_deref(), Some(file_path_string.as_str()));
+    assert_eq!(output.counters.files_visited, 1);
+    assert_eq!(output.counters.files_read, 1);
+    assert_eq!(output.counters.whole_file_precheck_files, 1);
+    assert_eq!(output.counters.whole_file_precheck_matched_files, 1);
+    assert_eq!(output.counters.line_eval_files, 1);
+    assert_eq!(output.counters.line_eval_lines, 2);
+    assert_eq!(output.matched_lines_by_pattern.len(), 1);
+    assert_eq!(output.matched_lines_by_pattern[0].0, 0);
+    assert_eq!(output.matched_lines_by_pattern[0].1, vec![1]);
+}
+
+
+#[test]
 fn test_line_regex_perf_hint_fires_on_slow_large_scan() {
     let hint = perf_hint("lineRegex", 5_000, 60_000, false);
     assert!(hint.is_some(), "slow lineRegex on large index should produce a hint");

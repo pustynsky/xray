@@ -342,6 +342,14 @@ const LINE_REGEX_SLOW_MS: u64 = 2000;
 const LINE_REGEX_LARGE_INDEX_FILES: usize = 1000;
 
 const LINE_REGEX_DOMINANT_PHASE_MIN_MS: u64 = 100;
+const LINE_REGEX_PARALLEL_SCAN_MIN_FILES: usize = 512;
+const LINE_REGEX_PARALLEL_SCAN_MAX_THREADS: usize = 8;
+
+#[cfg(not(test))]
+const LINE_REGEX_MAX_CONTENT_CACHE_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
+#[cfg(test)]
+const LINE_REGEX_MAX_CONTENT_CACHE_BYTES: usize = 4 * 1024; // 4 KiB
+
 const LINE_REGEX_RESPONSE_FINALIZE_PLACEHOLDER_MS: u64 = 9_999_999_999_999;
 const LINE_REGEX_PERF_HINT_PLACEHOLDER: &str = "__xray_line_regex_perf_hint_placeholder__";
 
@@ -444,6 +452,8 @@ struct LineRegexScanTelemetry {
     rank_truncate_duration: Duration,
     response_build_duration: Duration,
     response_finalize_duration: Duration,
+    parallel_scan: bool,
+    worker_threads: usize,
     files_visited: usize,
     files_skipped_by_prefilter: usize,
     files_skipped_by_scope: usize,
@@ -456,7 +466,60 @@ struct LineRegexScanTelemetry {
     matched_files: usize,
 }
 
+#[derive(Debug, Clone, Default)]
+struct LineRegexFileCounters {
+    files_visited: usize,
+    files_skipped_by_prefilter: usize,
+    files_skipped_by_scope: usize,
+    files_read: usize,
+    bytes_read: usize,
+    whole_file_precheck_files: usize,
+    whole_file_precheck_matched_files: usize,
+    line_eval_files: usize,
+    line_eval_lines: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LineRegexFileTimings {
+    candidate_filter_duration: Duration,
+    scope_filter_duration: Duration,
+    read_duration: Duration,
+    whole_file_precheck_duration: Duration,
+    line_eval_duration: Duration,
+    match_bookkeeping_duration: Duration,
+}
+
+#[derive(Debug, Clone, Default)]
+struct LineRegexFileScanOutput {
+    path: Option<String>,
+    matched_lines_by_pattern: Vec<(usize, Vec<u32>)>,
+    counters: LineRegexFileCounters,
+    timings: LineRegexFileTimings,
+}
+
 impl LineRegexScanTelemetry {
+    fn add_file_scan_output(&mut self, output: &LineRegexFileScanOutput) {
+        self.candidate_filter_duration += output.timings.candidate_filter_duration;
+        self.scope_filter_duration += output.timings.scope_filter_duration;
+        self.read_duration += output.timings.read_duration;
+        self.whole_file_precheck_duration += output.timings.whole_file_precheck_duration;
+        self.line_eval_duration += output.timings.line_eval_duration;
+        self.match_bookkeeping_duration += output.timings.match_bookkeeping_duration;
+        self.files_visited = self.files_visited.saturating_add(output.counters.files_visited);
+        self.files_skipped_by_prefilter = self.files_skipped_by_prefilter
+            .saturating_add(output.counters.files_skipped_by_prefilter);
+        self.files_skipped_by_scope = self.files_skipped_by_scope
+            .saturating_add(output.counters.files_skipped_by_scope);
+        self.files_read = self.files_read.saturating_add(output.counters.files_read);
+        self.bytes_read = self.bytes_read.saturating_add(output.counters.bytes_read);
+        self.whole_file_precheck_files = self.whole_file_precheck_files
+            .saturating_add(output.counters.whole_file_precheck_files);
+        self.whole_file_precheck_matched_files = self.whole_file_precheck_matched_files
+            .saturating_add(output.counters.whole_file_precheck_matched_files);
+        self.line_eval_files = self.line_eval_files.saturating_add(output.counters.line_eval_files);
+        self.line_eval_lines = self.line_eval_lines.saturating_add(output.counters.line_eval_lines);
+    }
+
     fn compile_ms(&self) -> u64 {
         duration_ms_u64(self.compile_duration)
     }
@@ -526,6 +589,42 @@ impl LineRegexScanTelemetry {
             .saturating_add(self.match_bookkeeping_ms())
     }
 
+    fn scan_bottleneck_ms(&self, phase_ms: u64) -> u64 {
+        let scan_wall_ms = self.scan_ms();
+        let measured_scan_ms = self.measured_scan_phase_ms();
+        if !self.parallel_scan || scan_wall_ms == 0 || measured_scan_ms <= scan_wall_ms {
+            return phase_ms;
+        }
+        let scaled = u128::from(phase_ms)
+            .saturating_mul(u128::from(scan_wall_ms))
+            / u128::from(measured_scan_ms);
+        scaled.min(u128::from(u64::MAX)) as u64
+    }
+
+    fn candidate_filter_bottleneck_ms(&self) -> u64 {
+        self.scan_bottleneck_ms(self.candidate_filter_ms())
+    }
+
+    fn scope_filter_bottleneck_ms(&self) -> u64 {
+        self.scan_bottleneck_ms(self.scope_filter_ms())
+    }
+
+    fn read_bottleneck_ms(&self) -> u64 {
+        self.scan_bottleneck_ms(self.read_ms())
+    }
+
+    fn whole_file_precheck_bottleneck_ms(&self) -> u64 {
+        self.scan_bottleneck_ms(self.whole_file_precheck_ms())
+    }
+
+    fn line_eval_bottleneck_ms(&self) -> u64 {
+        self.scan_bottleneck_ms(self.line_eval_ms())
+    }
+
+    fn match_bookkeeping_bottleneck_ms(&self) -> u64 {
+        self.scan_bottleneck_ms(self.match_bookkeeping_ms())
+    }
+
     fn observed_total_ms(&self) -> u64 {
         self.scan_ms()
             .saturating_add(self.merge_ms())
@@ -545,12 +644,21 @@ impl LineRegexScanTelemetry {
             "literalPrefilterMs": self.literal_prefilter_ms(),
             "scopeCountMs": self.scope_count_ms(),
             "scanMs": self.scan_ms(),
-            "readMs": self.read_ms(),
-            "wholeFilePrecheckMs": self.whole_file_precheck_ms(),
-            "lineEvalMs": self.line_eval_ms(),
-            "candidateFilterMs": self.candidate_filter_ms(),
-            "scopeFilterMs": self.scope_filter_ms(),
-            "matchBookkeepingMs": self.match_bookkeeping_ms(),
+            "parallelScan": self.parallel_scan,
+            "workerThreads": self.worker_threads,
+            "scanWallMs": self.scan_ms(),
+            "readMs": self.read_bottleneck_ms(),
+            "readSumMs": self.read_ms(),
+            "wholeFilePrecheckMs": self.whole_file_precheck_bottleneck_ms(),
+            "wholeFilePrecheckSumMs": self.whole_file_precheck_ms(),
+            "lineEvalMs": self.line_eval_bottleneck_ms(),
+            "lineEvalSumMs": self.line_eval_ms(),
+            "candidateFilterMs": self.candidate_filter_bottleneck_ms(),
+            "candidateFilterSumMs": self.candidate_filter_ms(),
+            "scopeFilterMs": self.scope_filter_bottleneck_ms(),
+            "scopeFilterSumMs": self.scope_filter_ms(),
+            "matchBookkeepingMs": self.match_bookkeeping_bottleneck_ms(),
+            "matchBookkeepingSumMs": self.match_bookkeeping_ms(),
             "mergeMs": self.merge_ms(),
             "sortDedupMs": self.sort_dedup_ms(),
             "rankTruncateMs": self.rank_truncate_ms(),
@@ -596,19 +704,19 @@ fn classify_line_regex_bottleneck(telemetry: &LineRegexScanTelemetry) -> LineReg
         .saturating_add(telemetry.response_build_ms())
         .saturating_add(telemetry.response_finalize_ms());
     let filtering_ms = telemetry
-        .candidate_filter_ms()
-        .saturating_add(telemetry.scope_filter_ms());
+        .candidate_filter_bottleneck_ms()
+        .saturating_add(telemetry.scope_filter_bottleneck_ms());
     let phases = [
-        (LineRegexBottleneck::FileRead, telemetry.read_ms()),
+        (LineRegexBottleneck::FileRead, telemetry.read_bottleneck_ms()),
         (
             LineRegexBottleneck::WholeFilePrecheck,
-            telemetry.whole_file_precheck_ms(),
+            telemetry.whole_file_precheck_bottleneck_ms(),
         ),
-        (LineRegexBottleneck::LineEvaluation, telemetry.line_eval_ms()),
+        (LineRegexBottleneck::LineEvaluation, telemetry.line_eval_bottleneck_ms()),
         (LineRegexBottleneck::Filtering, filtering_ms),
         (
             LineRegexBottleneck::MatchBookkeeping,
-            telemetry.match_bookkeeping_ms(),
+            telemetry.match_bookkeeping_bottleneck_ms(),
         ),
         (LineRegexBottleneck::MergeSortOrResponse, merge_sort_or_response_ms),
         (LineRegexBottleneck::ScanResidual, telemetry.scan_residual_ms()),
@@ -2922,6 +3030,195 @@ pub(crate) fn set_line_regex_prefilter_disabled_for_test(disabled: bool) {
 /// literal-trigram prefilter (kept here in step 2 only to enable the
 /// `#[cfg(test)]` differential check added in step 5). For now both call
 /// sites pass `true` and the flag is intentionally unused.
+fn line_regex_candidate_count(
+    index: &ContentIndex,
+    candidate_file_ids: Option<&HashSet<u32>>,
+) -> usize {
+    candidate_file_ids.map_or(index.files.len(), HashSet::len)
+}
+
+fn line_regex_scan_worker_threads(candidate_count: usize) -> usize {
+    if candidate_count < LINE_REGEX_PARALLEL_SCAN_MIN_FILES {
+        return 1;
+    }
+    let available_threads = std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(1);
+    available_threads.min(LINE_REGEX_PARALLEL_SCAN_MAX_THREADS)
+}
+
+fn scan_line_regex_file(
+    file_id: usize,
+    file_path: &str,
+    candidate_file_ids: Option<&HashSet<u32>>,
+    compiled: &[regex::Regex],
+    params: &GrepSearchParams,
+) -> LineRegexFileScanOutput {
+    let mut output = LineRegexFileScanOutput::default();
+    output.counters.files_visited = 1;
+
+    let candidate_filter_start = Instant::now();
+    if let Some(candidates) = candidate_file_ids
+        && !candidates.contains(&(file_id as u32))
+    {
+        output.timings.candidate_filter_duration = candidate_filter_start.elapsed();
+        output.counters.files_skipped_by_prefilter = 1;
+        return output;
+    }
+    output.timings.candidate_filter_duration = candidate_filter_start.elapsed();
+
+    let scope_filter_start = Instant::now();
+    if !passes_file_filters(file_path, params) {
+        output.timings.scope_filter_duration = scope_filter_start.elapsed();
+        output.counters.files_skipped_by_scope = 1;
+        return output;
+    }
+    output.timings.scope_filter_duration = scope_filter_start.elapsed();
+
+    let read_start = Instant::now();
+    let content = match read_file_lossy(std::path::Path::new(file_path)) {
+        Ok((content, _lossy)) => content,
+        Err(_) => return output,
+    };
+    output.timings.read_duration = read_start.elapsed();
+    output.counters.files_read = 1;
+    output.counters.bytes_read = content.len();
+
+    output.counters.whole_file_precheck_files = 1;
+    let precheck_start = Instant::now();
+    let any_pattern_matches = compiled.iter().any(|regex| regex.is_match(&content));
+    output.timings.whole_file_precheck_duration = precheck_start.elapsed();
+    if !any_pattern_matches {
+        return output;
+    }
+    output.counters.whole_file_precheck_matched_files = 1;
+    output.counters.line_eval_files = 1;
+
+    for (pattern_index, regex) in compiled.iter().enumerate() {
+        let line_eval_start = Instant::now();
+        let mut matching_lines: Vec<u32> = Vec::new();
+        for (line_number, line) in content.lines().enumerate() {
+            output.counters.line_eval_lines = output.counters.line_eval_lines.saturating_add(1);
+            if regex.is_match(line) {
+                matching_lines.push((line_number + 1) as u32);
+            }
+        }
+        output.timings.line_eval_duration += line_eval_start.elapsed();
+
+        let match_bookkeeping_start = Instant::now();
+        if !matching_lines.is_empty() {
+            output.matched_lines_by_pattern.push((pattern_index, matching_lines));
+        }
+        output.timings.match_bookkeeping_duration += match_bookkeeping_start.elapsed();
+    }
+
+    if !output.matched_lines_by_pattern.is_empty() {
+        output.path = Some(file_path.to_string());
+    }
+
+    output
+}
+
+fn collect_line_regex_scan_outputs(
+    index: &ContentIndex,
+    candidate_file_ids: Option<&HashSet<u32>>,
+    compiled: &[regex::Regex],
+    params: &GrepSearchParams,
+) -> Result<(Vec<LineRegexFileScanOutput>, bool, usize, Duration), String> {
+    let candidate_count = line_regex_candidate_count(index, candidate_file_ids);
+    let worker_threads = line_regex_scan_worker_threads(candidate_count);
+    let parallel_scan = worker_threads > 1;
+    let scan_start = Instant::now();
+
+    if !parallel_scan {
+        let outputs = index.files.iter().enumerate()
+            .map(|(file_id, file_path)| {
+                scan_line_regex_file(
+                    file_id,
+                    file_path,
+                    candidate_file_ids,
+                    compiled,
+                    params,
+                )
+            })
+            .collect();
+        return Ok((outputs, false, 1, scan_start.elapsed()));
+    }
+
+    let chunk_size = (index.files.len() + worker_threads - 1) / worker_threads;
+    let mut outputs: Vec<LineRegexFileScanOutput> = Vec::with_capacity(index.files.len());
+    let mut worker_panicked = false;
+
+    std::thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for (chunk_index, file_chunk) in index.files.chunks(chunk_size).enumerate() {
+            let first_file_id = chunk_index * chunk_size;
+            handles.push(scope.spawn(move || {
+                file_chunk.iter().enumerate()
+                    .map(|(offset, file_path)| {
+                        scan_line_regex_file(
+                            first_file_id + offset,
+                            file_path,
+                            candidate_file_ids,
+                            compiled,
+                            params,
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }));
+        }
+
+        for handle in handles {
+            match handle.join() {
+                Ok(mut chunk_outputs) => outputs.append(&mut chunk_outputs),
+                Err(_) => worker_panicked = true,
+            }
+        }
+    });
+
+    if worker_panicked {
+        return Err("lineRegex parallel scan worker panicked".to_string());
+    }
+
+    Ok((outputs, true, worker_threads, scan_start.elapsed()))
+}
+
+fn aggregate_line_regex_scan_outputs(
+    scan_outputs: Vec<LineRegexFileScanOutput>,
+    pattern_count: usize,
+    telemetry: &mut LineRegexScanTelemetry,
+) -> Vec<HashMap<String, Vec<u32>>> {
+    let mut per_pattern_matches: Vec<HashMap<String, Vec<u32>>> = vec![HashMap::new(); pattern_count];
+    for output in scan_outputs {
+        telemetry.add_file_scan_output(&output);
+        let Some(file_path) = output.path else {
+            continue;
+        };
+        for (pattern_index, matching_lines) in output.matched_lines_by_pattern {
+            per_pattern_matches[pattern_index].insert(file_path.clone(), matching_lines);
+        }
+    }
+    per_pattern_matches
+}
+
+fn attach_line_regex_content_previews(results: &mut [PhraseFileMatch]) -> bool {
+    let mut cache_bytes_used: usize = 0;
+    let mut line_content_truncated = false;
+    for result in results.iter_mut() {
+        let content = match read_file_lossy(std::path::Path::new(&result.file_path)) {
+            Ok((content, _lossy)) => content,
+            Err(_) => continue,
+        };
+        if cache_bytes_used.saturating_add(content.len()) > LINE_REGEX_MAX_CONTENT_CACHE_BYTES {
+            line_content_truncated = true;
+            continue;
+        }
+        cache_bytes_used = cache_bytes_used.saturating_add(content.len());
+        result.content = Some(content);
+    }
+    line_content_truncated
+}
+
 fn handle_line_regex_search_inner(
     ctx: &HandlerContext,
     index: &ContentIndex,
@@ -2938,7 +3235,7 @@ fn handle_line_regex_search_inner(
     // also match `^### `).
     let patterns: Vec<String> = patterns
         .into_iter()
-        .filter(|s| !s.is_empty())
+        .filter(|pattern| !pattern.is_empty())
         .collect();
 
     if patterns.is_empty() {
@@ -2963,24 +3260,17 @@ fn handle_line_regex_search_inner(
 
     let compile_start = Instant::now();
     let mut compiled: Vec<regex::Regex> = Vec::with_capacity(patterns.len());
-    for pat in &patterns {
-        match regex::RegexBuilder::new(pat)
+    for pattern in &patterns {
+        match regex::RegexBuilder::new(pattern)
             .multi_line(true)
             .crlf(true)
             .build()
         {
-            Ok(re) => compiled.push(re),
-            Err(e) => return ToolCallResult::error(format!("Invalid regex '{}': {}", pat, e)),
+            Ok(regex) => compiled.push(regex),
+            Err(error) => return ToolCallResult::error(format!("Invalid regex '{}': {}", pattern, error)),
         }
     }
     scan_telemetry.compile_duration = compile_start.elapsed();
-
-    // Iterate ALL indexed files, apply file/ext/dir filters, then run line regex.
-    // No token pre-filter: regex with anchors/whitespace cannot be reduced to a
-    // safe literal substring without a regex AST analyzer (would risk false
-    // negatives). Filters keep the candidate set manageable in practice.
-    let mut per_pattern_matches: Vec<HashMap<String, Vec<u32>>> = vec![HashMap::new(); patterns.len()];
-    let mut content_cache: HashMap<String, String> = HashMap::new();
 
     // AC-4: literal-trigram prefilter. When enabled and the regex pattern
     // exposes a fixed substring prefix (e.g. `App\s*=\s*\d+` -> `app`), shrink
@@ -3035,116 +3325,32 @@ fn handle_line_regex_search_inner(
         scan_telemetry.scope_count_duration = scope_count_start.elapsed();
     }
 
-    // MINOR-23: cap total bytes held in `content_cache` so a single broad query
-    // (e.g. lineRegex='.*' with showLines=true on a large repo) cannot OOM the
-    // server. When the cap is exceeded, matches are still recorded — only the
-    // `lineContent` previews for files inserted past the cap are dropped, and
-    // the response surfaces a `lineContentTruncated` hint in the summary.
-    // The cap is lowered for `cfg(test)` so a regression test can exercise the
-    // truncation branch without allocating real megabytes of fixtures.
-    #[cfg(not(test))]
-    const MAX_CONTENT_CACHE_BYTES: usize = 256 * 1024 * 1024; // 256 MiB
-    #[cfg(test)]
-    const MAX_CONTENT_CACHE_BYTES: usize = 4 * 1024; // 4 KiB
-    let mut cache_bytes_used: usize = 0;
-    let mut line_content_truncated = false;
+    let (scan_outputs, parallel_scan, worker_threads, scan_duration) = match collect_line_regex_scan_outputs(
+        index,
+        candidate_file_ids.as_ref(),
+        &compiled,
+        params,
+    ) {
+        Ok(scan_result) => scan_result,
+        Err(error) => return ToolCallResult::error(error),
+    };
+    scan_telemetry.parallel_scan = parallel_scan;
+    scan_telemetry.worker_threads = worker_threads;
+    scan_telemetry.scan_duration = scan_duration;
 
-    let scan_start = Instant::now();
-    for (file_id, file_path) in index.files.iter().enumerate() {
-        scan_telemetry.files_visited += 1;
-        // AC-4: skip files outside the literal-prefilter candidate set when
-        // it was computed. The check runs *before* `passes_file_filters` so
-        // the cheaper hashset lookup short-circuits the path/ext/dir glob
-        // walk for the (typically) ~99% of files the prefilter eliminates.
-        let candidate_filter_start = Instant::now();
-        if let Some(ref candidates) = candidate_file_ids
-            && !candidates.contains(&(file_id as u32))
-        {
-            scan_telemetry.candidate_filter_duration += candidate_filter_start.elapsed();
-            scan_telemetry.files_skipped_by_prefilter += 1;
-            continue;
-        }
-        scan_telemetry.candidate_filter_duration += candidate_filter_start.elapsed();
-
-        let scope_filter_start = Instant::now();
-        if !passes_file_filters(file_path, params) {
-            scan_telemetry.scope_filter_duration += scope_filter_start.elapsed();
-            scan_telemetry.files_skipped_by_scope += 1;
-            continue;
-        }
-        scan_telemetry.scope_filter_duration += scope_filter_start.elapsed();
-
-        // Read file once per candidate; cache for show_lines reuse.
-        let read_start = Instant::now();
-        let content = match read_file_lossy(std::path::Path::new(file_path)) {
-            Ok((c, _lossy)) => c,
-            Err(_) => continue,
-        };
-        scan_telemetry.read_duration += read_start.elapsed();
-        scan_telemetry.files_read += 1;
-        scan_telemetry.bytes_read = scan_telemetry.bytes_read.saturating_add(content.len());
-
-        // Pre-check: does ANY pattern match anywhere in the file?
-        // This is a fast-rejection optimization for files that don't match any pattern.
-        scan_telemetry.whole_file_precheck_files += 1;
-        let precheck_start = Instant::now();
-        let any_pattern_matches = compiled.iter().any(|re| re.is_match(&content));
-        scan_telemetry.whole_file_precheck_duration += precheck_start.elapsed();
-        if !any_pattern_matches {
-            continue;
-        }
-        scan_telemetry.whole_file_precheck_matched_files += 1;
-
-        scan_telemetry.line_eval_files += 1;
-        let mut matched_any_pattern = false;
-        let mut file_pattern_matches: Vec<(usize, Vec<u32>)> = Vec::new();
-        for (pat_idx, re) in compiled.iter().enumerate() {
-            let line_eval_start = Instant::now();
-            let mut matching_lines: Vec<u32> = Vec::new();
-            for (line_num, line) in content.lines().enumerate() {
-                scan_telemetry.line_eval_lines = scan_telemetry.line_eval_lines.saturating_add(1);
-                if re.is_match(line) {
-                    matching_lines.push((line_num + 1) as u32);
-                }
-            }
-            scan_telemetry.line_eval_duration += line_eval_start.elapsed();
-
-            let match_bookkeeping_start = Instant::now();
-            if !matching_lines.is_empty() {
-                file_pattern_matches.push((pat_idx, matching_lines));
-                matched_any_pattern = true;
-            }
-            scan_telemetry.match_bookkeeping_duration += match_bookkeeping_start.elapsed();
-        }
-
-        let match_bookkeeping_start = Instant::now();
-        for (pat_idx, matching_lines) in file_pattern_matches {
-            per_pattern_matches[pat_idx].insert(file_path.clone(), matching_lines);
-        }
-        if matched_any_pattern && params.show_lines {
-            // Reserve cache budget before insertion. If this file would push us
-            // past the cap, skip caching its content — matched line numbers are
-            // still emitted, only the source preview is dropped (and we set the
-            // `lineContentTruncated` flag so the client knows previews are
-            // partial). Files already cached stay cached; cap is monotone.
-            if cache_bytes_used.saturating_add(content.len()) > MAX_CONTENT_CACHE_BYTES {
-                line_content_truncated = true;
-            } else {
-                cache_bytes_used = cache_bytes_used.saturating_add(content.len());
-                content_cache.insert(file_path.clone(), content);
-            }
-        }
-        scan_telemetry.match_bookkeeping_duration += match_bookkeeping_start.elapsed();
-    }
-    scan_telemetry.scan_duration = scan_start.elapsed();
+    let per_pattern_matches = aggregate_line_regex_scan_outputs(
+        scan_outputs,
+        patterns.len(),
+        &mut scan_telemetry,
+    );
 
     // Merge per-pattern matches with OR or AND semantics.
     let merge_start = Instant::now();
     let merged_files: HashMap<String, Vec<u32>> = if params.mode_and {
         // Files appearing in ALL pattern result sets.
         let mut common: Option<HashSet<String>> = None;
-        for pm in &per_pattern_matches {
-            let files: HashSet<String> = pm.keys().cloned().collect();
+        for pattern_matches in &per_pattern_matches {
+            let files: HashSet<String> = pattern_matches.keys().cloned().collect();
             common = Some(match common {
                 None => files,
                 Some(prev) => prev.intersection(&files).cloned().collect(),
@@ -3152,8 +3358,8 @@ fn handle_line_regex_search_inner(
         }
         let common = common.unwrap_or_default();
         let mut merged: HashMap<String, Vec<u32>> = HashMap::new();
-        for pm in &per_pattern_matches {
-            for (path, lines) in pm {
+        for pattern_matches in &per_pattern_matches {
+            for (path, lines) in pattern_matches {
                 if common.contains(path) {
                     merged.entry(path.clone()).or_default().extend_from_slice(lines);
                 }
@@ -3163,8 +3369,8 @@ fn handle_line_regex_search_inner(
     } else {
         // OR: union of all files.
         let mut merged: HashMap<String, Vec<u32>> = HashMap::new();
-        for pm in &per_pattern_matches {
-            for (path, lines) in pm {
+        for pattern_matches in &per_pattern_matches {
+            for (path, lines) in pattern_matches {
                 merged.entry(path.clone()).or_default().extend_from_slice(lines);
             }
         }
@@ -3179,8 +3385,7 @@ fn handle_line_regex_search_inner(
         .map(|(file_path, mut lines)| {
             lines.sort();
             lines.dedup();
-            let content = content_cache.remove(&file_path);
-            PhraseFileMatch { file_path, lines, content }
+            PhraseFileMatch { file_path, lines, content: None }
         })
         .collect();
     scan_telemetry.sort_dedup_duration = sort_dedup_start.elapsed();
@@ -3188,14 +3393,14 @@ fn handle_line_regex_search_inner(
     let rank_truncate_start = Instant::now();
     let total_files = results.len();
     scan_telemetry.matched_files = total_files;
-    let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();
+    let total_occurrences: usize = results.iter().map(|result| result.lines.len()).sum();
 
     // Sort by occurrences descending (most matches first), like phrase search.
     // Tie-break by file path ascending for deterministic truncated output.
-    results.sort_by(|a, b| {
-        b.lines.len()
-            .cmp(&a.lines.len())
-            .then_with(|| a.file_path.cmp(&b.file_path))
+    results.sort_by(|left, right| {
+        right.lines.len()
+            .cmp(&left.lines.len())
+            .then_with(|| left.file_path.cmp(&right.file_path))
     });
 
     if params.max_results > 0 {
@@ -3243,15 +3448,20 @@ fn handle_line_regex_search_inner(
     }
 
     let response_build_start = Instant::now();
-    let files_json: Vec<Value> = results.iter().map(|r| {
+    let line_content_truncated = if params.show_lines {
+        attach_line_regex_content_previews(&mut results)
+    } else {
+        false
+    };
+    let files_json: Vec<Value> = results.iter().map(|result| {
         let mut file_obj = json!({
-            "path": r.file_path,
-            "occurrences": r.lines.len(),
-            "lines": r.lines,
+            "path": result.file_path,
+            "occurrences": result.lines.len(),
+            "lines": result.lines,
         });
         if params.show_lines
-            && let Some(ref content) = r.content {
-                file_obj["lineContent"] = build_line_content_from_matches(content, &r.lines, params.context_lines);
+            && let Some(ref content) = result.content {
+                file_obj["lineContent"] = build_line_content_from_matches(content, &result.lines, params.context_lines);
             }
         file_obj
     }).collect();
@@ -3274,7 +3484,7 @@ fn handle_line_regex_search_inner(
                 "lineContentTruncationReason".into(),
                 json!(format!(
                     "showLines content cache exceeded {} MiB cap; line numbers are complete but some files lack `lineContent` previews.",
-                    MAX_CONTENT_CACHE_BYTES / (1024 * 1024)
+                    LINE_REGEX_MAX_CONTENT_CACHE_BYTES / (1024 * 1024)
                 )),
             );
         }
