@@ -250,5 +250,7 @@ pub(crate) fn make_params_default<'a>() -> GrepSearchParams<'a> {
         exact_file_path_canonical: &None,
         auto_balance: true,
         max_occurrences_per_term: None,
+        lock_wait_ms: 0.0,
+        trigram_stale: false,
     }
 }

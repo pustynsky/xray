@@ -1132,6 +1132,17 @@ fn handle_single_file_edit(
         }
     }
 
+
+    let total_ms = edit_start.elapsed().as_secs_f64() * 1000.0;
+    tracing::info!(
+        path = %path_str,
+        edit_ms = format_args!("{:.1}", edit_elapsed_ms),
+        total_ms = format_args!("{:.1}", total_ms),
+        reindex_ms = format_args!("{:.1}", total_ms - edit_elapsed_ms),
+        dry_run = dry_run,
+        "[edit-trace] handle_single_file_edit complete"
+    );
+
     ToolCallResult::success(json_to_string(&response))
 }
 

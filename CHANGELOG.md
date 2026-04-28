@@ -24,6 +24,13 @@
   Prevents the watcher from clearing its `have_unsaved` flag when the
   just-saved snapshot is already stale from a concurrent edit.
 
+### Performance
+- **Skip trigram rebuild for narrow-scope grep** — after `xray_edit` sets
+  `trigram_dirty=true`, scoped grep (`file=` or auto-phrase) no longer
+  triggers a full trigram rebuild (~40-70s on large repos). Substring and
+  lineRegex fall back to direct token/file scan when trigram is stale.
+  Phrase: 43s→0.6s, lineRegex with `file=`: 68s→0.4s, memory stable.
+
 ### Diagnostics
 - **Sub-timing breakdown in `reindexElapsedMs`** — `xray_edit` response
   now includes `reindexDetail` with `tokenizeMs`, `contentLockWaitMs`,
