@@ -139,6 +139,7 @@ pub fn start_watcher(
     my_generation: u64,
     stats: Arc<WatcherStats>,
     respect_git_exclude: bool,
+    autosave_dirty: Arc<AtomicBool>,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -371,7 +372,7 @@ pub fn start_watcher(
                             // on crash. With the quiet-interval gate the
                             // first save now lands ~5min into a sustained
                             // burst instead of after the legacy 10 min.
-                            if autosave_due(have_unsaved, last_autosave.elapsed()) {
+                            if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
                                 // MCP-WCH-007: bump `last_autosave` even on
                                 // failure so a transient write error doesn't
                                 // busy-retry every debounce tick — the next
@@ -381,7 +382,7 @@ pub fn start_watcher(
                                 let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                                 last_autosave = std::time::Instant::now();
                                 if saved_ok {
-                                    have_unsaved = false;
+                                    have_unsaved = autosave_dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
                                 }
                             }
                         }
@@ -404,7 +405,7 @@ pub fn start_watcher(
                         // "next quiet-interval tick". Persist any unsaved work
                         // (from this final flush or a prior batch that hadn't
                         // hit the 5min mark yet) before we drop the receiver.
-                        if have_unsaved {
+                        if have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed) {
                             let _ = periodic_autosave(&index, &def_index, &index_base);
                         }
                         break;
@@ -414,11 +415,11 @@ pub fn start_watcher(
                         // Check periodic autosave (idle-tick path: quiet
                         // interval flushes the tail of a recent burst,
                         // max interval is the unconditional ceiling).
-                        if autosave_due(have_unsaved, last_autosave.elapsed()) {
+                        if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
                             let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                             last_autosave = std::time::Instant::now();
                             if saved_ok {
-                                have_unsaved = false;
+                                have_unsaved = autosave_dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
                             }
                         }
                         continue;
@@ -435,11 +436,11 @@ pub fn start_watcher(
                     // every successful batch flush, not only when the
                     // pending sets are empty. Quiet-interval gate makes the
                     // first save land ~5min after the burst started.
-                    if autosave_due(have_unsaved, last_autosave.elapsed()) {
+                    if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
                         let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                         last_autosave = std::time::Instant::now();
                         if saved_ok {
-                            have_unsaved = false;
+                            have_unsaved = autosave_dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
                         }
                     }
                 }
@@ -456,7 +457,7 @@ pub fn start_watcher(
                     // MCP-WCH-007: thread is about to exit — see matching
                     // note on the generation-change path. Persist any
                     // unsaved work before the receiver is dropped.
-                    if have_unsaved {
+                    if have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed) {
                         let _ = periodic_autosave(&index, &def_index, &index_base);
                     }
                     break;
@@ -1507,6 +1508,7 @@ pub(crate) fn periodic_rescan_once(
     extensions: &[String],
     stats: &Arc<WatcherStats>,
     respect_git_exclude: bool,
+    autosave_dirty: &Arc<AtomicBool>,
 ) -> RescanOutcome {
     let start = Instant::now();
     stats.periodic_rescan_total.fetch_add(1, Ordering::Relaxed);
@@ -1539,6 +1541,7 @@ pub(crate) fn periodic_rescan_once(
         if let Some(di) = def_index {
             definitions::reconcile_definition_index_nonblocking(di, dir, extensions, respect_git_exclude);
         }
+        autosave_dirty.store(true, Ordering::Relaxed);
     }
 
     if drift_detected {
@@ -1609,6 +1612,7 @@ pub fn start_periodic_rescan(
     my_generation: u64,
     stats: Arc<WatcherStats>,
     respect_git_exclude: bool,
+    autosave_dirty: Arc<AtomicBool>,
 ) {
     let effective = interval_sec.max(MIN_RESCAN_INTERVAL_SEC);
     if effective != interval_sec {
@@ -1653,6 +1657,7 @@ pub fn start_periodic_rescan(
                 &extensions,
                 &stats,
                 respect_git_exclude,
+                &autosave_dirty,
             );
         }
     });

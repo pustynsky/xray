@@ -87,6 +87,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let watcher_generation = Arc::new(AtomicU64::new(0));
     let watcher_stats = Arc::new(mcp::watcher::WatcherStats::new());
     let file_index = Arc::new(RwLock::new(None));
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
     if args.watch && !is_unresolved {
         let watch_dir = std::fs::canonicalize(&dir_str)
             .unwrap_or_else(|_| PathBuf::from(&dir_str));
@@ -105,6 +106,7 @@ pub fn cmd_serve(args: ServeArgs) {
             0, // initial generation
             Arc::clone(&watcher_stats),
             effective_respect_git_exclude,
+            Arc::clone(&autosave_dirty),
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
@@ -126,6 +128,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 0,
                 Arc::clone(&watcher_stats),
                 effective_respect_git_exclude,
+                Arc::clone(&autosave_dirty),
             );
         }
     }
@@ -176,6 +179,7 @@ pub fn cmd_serve(args: ServeArgs) {
         rescan_interval_sec: args.rescan_interval_sec,
         branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         file_index_build_gate: Arc::new(crate::mcp::handlers::utils::FileIndexBuildGate::new()),
+        autosave_dirty: Arc::clone(&autosave_dirty),
     };
     mcp::server::run_server(ctx);
     crate::index::log_memory("serve: event loop exited");

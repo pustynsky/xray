@@ -885,6 +885,15 @@ pub struct HandlerContext {
     /// see `file_index` still `None`, and one of them retakes the
     /// build slot.
     pub file_index_build_gate: Arc<utils::FileIndexBuildGate>,
+    /// Cross-thread dirty flag: set by `xray_edit` (handler thread) after
+    /// `reindex_paths_sync` mutates the in-memory indexes. Read by the
+    /// watcher thread to prevent clearing `have_unsaved` when the snapshot
+    /// that was just saved is already stale. Without this, a force-kill
+    /// after edit-then-autosave loses the edit's index mutations.
+    ///
+    /// **Ordering:** `Relaxed` — same rationale as `file_index_dirty`.
+    /// Pure signal, not a happens-before edge for data.
+    pub autosave_dirty: Arc<AtomicBool>,
 }
 
 impl HandlerContext {
@@ -930,6 +939,7 @@ impl Default for HandlerContext {
             rescan_interval_sec: 300,
             branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             file_index_build_gate: Arc::new(utils::FileIndexBuildGate::new()),
+            autosave_dirty: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -1886,6 +1896,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
         new_gen,
         Arc::clone(&ctx.watcher_stats),
         ctx.respect_git_exclude,
+        Arc::clone(&ctx.autosave_dirty),
     ) {
         warn!(error = %e, "Failed to restart file watcher for new workspace");
     } else {
@@ -1912,6 +1923,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
             new_gen,
             Arc::clone(&ctx.watcher_stats),
             ctx.respect_git_exclude,
+            Arc::clone(&ctx.autosave_dirty),
         );
     }
 }
