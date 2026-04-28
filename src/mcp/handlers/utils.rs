@@ -575,17 +575,22 @@ where
 /// Maximum number of line numbers to include per file entry.
 const MAX_LINES_PER_FILE: usize = 10;
 
+/// Maximum number of preview source lines to keep per file before dropping `lineContent`.
+const MAX_LINE_CONTENT_LINES_PER_FILE: usize = MAX_LINES_PER_FILE * 5;
+
 /// Maximum number of matched tokens to include in substring search summary.
 const MAX_MATCHED_TOKENS: usize = 20;
 
 /// Truncate a JSON response to fit within the response size budget.
 ///
 /// Progressive truncation strategy:
-/// 1. Cap `lines` arrays in each file entry (keep first N, add `linesOmitted`)
+/// 1. Cap per-file `lines` arrays and bounded `lineContent` previews
 /// 2. Cap `matchedTokens` in summary (keep first N, add `matchedTokensOmitted`)
-/// 3. Remove `lines` arrays entirely from file entries
-/// 4. Remove file entries from the tail until under budget
-/// 5. **Generic fallback**: truncate any top-level array (e.g. `definitions`,
+/// 3. Remove file entries from the tail until under budget
+/// 4. Remove `lines` arrays entirely from file entries
+/// 5. Strip large body fields while preserving signatures and metadata
+/// 6. Remove `lineContent` previews only if capped previews still exceed budget
+/// 7. **Generic fallback**: truncate any top-level array (e.g. `definitions`,
 ///    `containingDefinitions`, `callTree`) — covers non-grep response formats
 ///
 /// `max_bytes` = 0 disables truncation entirely.
@@ -687,8 +692,11 @@ fn measure_json_size(output: &Value) -> usize {
     serde_json::to_string(output).map(|s| s.len()).unwrap_or(0)
 }
 
-/// Phase 1: Cap `lines` arrays per file to MAX_LINES_PER_FILE and remove lineContent.
+/// Phase 1: Cap per-file line metadata while preserving a bounded `lineContent` preview.
 fn phase_cap_lines_per_file(output: &mut Value, reasons: &mut Vec<String>) {
+    let mut capped_lines = false;
+    let mut capped_line_content = false;
+
     if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
         for file_entry in files.iter_mut() {
             if let Some(lines) = file_entry.get_mut("lines").and_then(|l| l.as_array_mut())
@@ -696,14 +704,96 @@ fn phase_cap_lines_per_file(output: &mut Value, reasons: &mut Vec<String>) {
                     let omitted = lines.len() - MAX_LINES_PER_FILE;
                     lines.truncate(MAX_LINES_PER_FILE);
                     file_entry["linesOmitted"] = json!(omitted);
+                    capped_lines = true;
                 }
-            // Remove lineContent entirely if present — it's the biggest space consumer
-            if file_entry.get("lineContent").is_some() {
-                file_entry.as_object_mut().map(|o| o.remove("lineContent"));
-                file_entry["lineContentOmitted"] = json!(true);
-            }
+            capped_line_content |= cap_line_content_preview(file_entry);
         }
-        reasons.push(format!("capped lines per file to {}, removed lineContent", MAX_LINES_PER_FILE));
+    }
+
+    if capped_lines {
+        reasons.push(format!("capped lines per file to {}", MAX_LINES_PER_FILE));
+    }
+    if capped_line_content {
+        reasons.push(format!(
+            "capped lineContent preview per file to {} source lines",
+            MAX_LINE_CONTENT_LINES_PER_FILE
+        ));
+    }
+}
+
+fn cap_line_content_preview(file_entry: &mut Value) -> bool {
+    let omitted_source_lines = {
+        let Some(groups) = file_entry.get_mut("lineContent").and_then(|v| v.as_array_mut()) else {
+            return false;
+        };
+
+        let mut remaining_source_lines = MAX_LINE_CONTENT_LINES_PER_FILE;
+        let mut remaining_match_indices = MAX_LINES_PER_FILE;
+        let mut groups_to_keep = groups.len();
+        let mut omitted_source_lines = 0usize;
+
+        for group_index in 0..groups.len() {
+            let group_line_count = groups[group_index]
+                .get("lines")
+                .and_then(|v| v.as_array())
+                .map(|lines| lines.len())
+                .unwrap_or(0);
+
+            if remaining_source_lines == 0 {
+                omitted_source_lines += group_line_count;
+                groups_to_keep = groups_to_keep.min(group_index);
+                continue;
+            }
+
+            let keep_line_count = group_line_count.min(remaining_source_lines);
+            if keep_line_count < group_line_count {
+                omitted_source_lines += group_line_count - keep_line_count;
+                groups_to_keep = groups_to_keep.min(group_index + 1);
+            }
+
+            if let Some(lines) = groups[group_index].get_mut("lines").and_then(|v| v.as_array_mut()) {
+                lines.truncate(keep_line_count);
+            }
+            remaining_source_lines = remaining_source_lines.saturating_sub(keep_line_count);
+
+            let remove_match_indices = if let Some(group_obj) = groups[group_index].as_object_mut() {
+                if let Some(match_indices) = group_obj.get_mut("matchIndices").and_then(|v| v.as_array_mut()) {
+                    match_indices.retain(|index| {
+                        let Some(index) = index.as_u64().map(|idx| idx as usize) else {
+                            return false;
+                        };
+                        if index >= keep_line_count || remaining_match_indices == 0 {
+                            return false;
+                        }
+                        remaining_match_indices -= 1;
+                        true
+                    });
+                    match_indices.is_empty()
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+
+            if remove_match_indices
+                && let Some(group_obj) = groups[group_index].as_object_mut() {
+                    group_obj.remove("matchIndices");
+                }
+        }
+
+        if groups_to_keep < groups.len() {
+            groups.truncate(groups_to_keep);
+        }
+
+        omitted_source_lines
+    };
+
+    if omitted_source_lines > 0 {
+        file_entry["lineContentLinesOmitted"] = json!(omitted_source_lines);
+        true
+    } else {
+        false
     }
 }
 
@@ -812,7 +902,24 @@ fn phase_strip_body_fields(output: &mut Value, reasons: &mut Vec<String>) {
     }
 }
 
-/// Phase 5b: Generic fallback — truncate the largest top-level array (not "files"/"summary").
+/// Phase 5b: Remove lineContent previews only after cheaper caps still exceed the budget.
+fn phase_remove_line_content(output: &mut Value, reasons: &mut Vec<String>) {
+    let mut removed = false;
+    if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
+        for file_entry in files.iter_mut() {
+            if let Some(file_obj) = file_entry.as_object_mut()
+                && file_obj.remove("lineContent").is_some() {
+                    file_obj.insert("lineContentOmitted".to_string(), json!(true));
+                    removed = true;
+                }
+        }
+    }
+    if removed {
+        reasons.push("removed lineContent previews".to_string());
+    }
+}
+
+/// Phase 5c: Generic fallback — truncate the largest top-level array (not "files"/"summary").
 fn phase_truncate_largest_array(output: &mut Value, max_bytes: usize, reasons: &mut Vec<String>) {
     let current_size = measure_json_size(output);
     if current_size <= max_bytes {
@@ -878,19 +985,25 @@ pub(crate) fn truncate_large_response(mut output: Value, max_bytes: usize) -> Va
         return output;
     }
 
-    phase_remove_lines_arrays(&mut output, &mut reasons);
-    if measure_json_size(&output) <= max_bytes {
-        inject_truncation_metadata(&mut output, &reasons, initial_size);
-        return output;
-    }
-
     phase_reduce_file_count(&mut output, max_bytes, &mut reasons);
     if measure_json_size(&output) <= max_bytes {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;
     }
 
+    phase_remove_lines_arrays(&mut output, &mut reasons);
+    if measure_json_size(&output) <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
     phase_strip_body_fields(&mut output, &mut reasons);
+    if measure_json_size(&output) <= max_bytes {
+        inject_truncation_metadata(&mut output, &reasons, initial_size);
+        return output;
+    }
+
+    phase_remove_line_content(&mut output, &mut reasons);
     if measure_json_size(&output) <= max_bytes {
         inject_truncation_metadata(&mut output, &reasons, initial_size);
         return output;

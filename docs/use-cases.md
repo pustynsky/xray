@@ -6,7 +6,7 @@
 ![Call Sites](https://img.shields.io/badge/call_sites-2.4M-blue)
 ![Languages](https://img.shields.io/badge/languages-C%23_%7C_TypeScript-orange)
 
-Real-world use cases, future ideas, and a case study demonstrating deep architecture exploration in minutes.
+Real-world use cases, future ideas, and a case study showing how xray helps GenAI work faster, deeper, and more accurately in large repositories through structural search, code history, call graphs, impact analysis, and safe edits.
 
 ---
 

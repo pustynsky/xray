@@ -281,35 +281,66 @@ fn test_truncate_caps_matched_tokens() {
 }
 
 #[test]
-fn test_truncate_removes_line_content() {
-    // Build a response with lineContent (large)
-    let mut files = Vec::new();
-    for i in 0..50 {
-        files.push(json!({
-            "path": format!("/path/file_{}.cs", i),
-            "lines": [1, 2, 3],
+fn test_truncate_preserves_capped_line_content_preview_when_budget_allows() {
+    let output = json!({
+        "files": [{
+            "path": "/path/file.cs",
+            "lines": (1..=120).collect::<Vec<_>>(),
             "lineContent": [{
                 "startLine": 1,
-                "lines": (0..100).map(|j| format!("    some code line {} in file {}", j, i)).collect::<Vec<_>>(),
+                "lines": (0..120)
+                    .map(|j| format!("    some long preview source line {:03} with enough text to exceed the original budget", j))
+                    .collect::<Vec<_>>(),
+                "matchIndices": (0..120).collect::<Vec<_>>(),
             }],
-        }));
-    }
-    let output = json!({
-        "files": files,
-        "summary": {"totalFiles": 50}
+        }],
+        "summary": {"totalFiles": 1}
     });
 
+    let budget = DEFAULT_MAX_RESPONSE_BYTES / 2;
     let initial_size = serde_json::to_string(&output).unwrap().len();
-    if initial_size > DEFAULT_MAX_RESPONSE_BYTES {
-        let result = truncate_large_response(output, DEFAULT_MAX_RESPONSE_BYTES);
-        // lineContent should be removed
-        if let Some(files) = result.get("files").and_then(|f| f.as_array()) {
-            for file in files {
-                assert!(file.get("lineContent").is_none(),
-                    "lineContent should be removed during truncation");
-            }
-        }
-    }
+    assert!(initial_size > budget, "test response must start over budget");
+
+    let result = truncate_large_response(output, budget);
+    let files = result.get("files").and_then(|f| f.as_array()).unwrap();
+    let file = &files[0];
+
+    assert!(file.get("lineContent").is_some(), "lineContent preview should be preserved");
+    assert!(file.get("lineContentOmitted").is_none(), "lineContent should not be dropped when capped preview fits");
+    assert!(file["lineContentLinesOmitted"].as_u64().unwrap() > 0,
+        "lineContentLinesOmitted should record the preview cap");
+
+    let line_content = file["lineContent"].as_array().unwrap();
+    let preview_lines = line_content[0]["lines"].as_array().unwrap();
+    assert!(preview_lines.len() <= MAX_LINE_CONTENT_LINES_PER_FILE,
+        "lineContent preview should be capped to {} source lines", MAX_LINE_CONTENT_LINES_PER_FILE);
+    let match_indices = line_content[0]["matchIndices"].as_array().unwrap();
+    assert!(match_indices.len() <= MAX_LINES_PER_FILE,
+        "lineContent match indices should stay aligned with capped match lines");
+}
+
+#[test]
+fn test_truncate_removes_line_content_only_when_capped_preview_exceeds_budget() {
+    let output = json!({
+        "files": [{
+            "path": "/path/file.cs",
+            "lines": (1..=200).collect::<Vec<_>>(),
+            "lineContent": [{
+                "startLine": 1,
+                "lines": (0..200).map(|_| "x".repeat(1024)).collect::<Vec<_>>(),
+                "matchIndices": (0..200).collect::<Vec<_>>(),
+            }],
+        }],
+        "summary": {"totalFiles": 1}
+    });
+
+    let result = truncate_large_response(output, 1024);
+    let files = result.get("files").and_then(|f| f.as_array()).unwrap();
+    let file = &files[0];
+
+    assert!(file.get("lineContent").is_none(),
+        "lineContent should be removed only as a final fallback");
+    assert_eq!(file["lineContentOmitted"], true);
 }
 
 #[test]
@@ -1259,7 +1290,15 @@ fn test_phase_cap_lines_per_file_truncates() {
     let many_lines: Vec<u32> = (1..=200).collect();
     let mut output = json!({
         "files": [
-            {"path": "a.cs", "lines": many_lines, "lineContent": [{"startLine": 1, "lines": ["code"]}]}
+            {
+                "path": "a.cs",
+                "lines": many_lines,
+                "lineContent": [{
+                    "startLine": 1,
+                    "lines": (0..200).map(|j| format!("code line {}", j)).collect::<Vec<_>>(),
+                    "matchIndices": (0..200).collect::<Vec<_>>(),
+                }]
+            }
         ],
         "summary": {"totalFiles": 1}
     });
@@ -1273,9 +1312,59 @@ fn test_phase_cap_lines_per_file_truncates() {
         "Lines should be capped to {}, got {}", MAX_LINES_PER_FILE, lines.len());
     assert!(files[0]["linesOmitted"].as_u64().unwrap() > 0,
         "linesOmitted should be set");
-    assert!(files[0].get("lineContent").is_none(),
-        "lineContent should be removed");
-    assert_eq!(files[0]["lineContentOmitted"], true);
+    assert!(files[0].get("lineContent").is_some(),
+        "lineContent should be preserved as a capped preview");
+    assert!(files[0].get("lineContentOmitted").is_none(),
+        "lineContentOmitted should only be set when preview is fully removed");
+    assert!(files[0]["lineContentLinesOmitted"].as_u64().unwrap() > 0,
+        "lineContentLinesOmitted should be set");
+    let preview_lines = files[0]["lineContent"][0]["lines"].as_array().unwrap();
+    assert!(preview_lines.len() <= MAX_LINE_CONTENT_LINES_PER_FILE,
+        "lineContent preview should be capped");
+    assert!(!reasons.is_empty(), "Should add a reason");
+}
+
+#[test]
+fn test_phase_cap_lines_per_file_truncates_line_content_across_groups() {
+    let many_lines: Vec<u32> = (1..=200).collect();
+    let mut output = json!({
+        "files": [{
+            "path": "a.cs",
+            "lines": many_lines,
+            "lineContent": [
+                {
+                    "startLine": 1,
+                    "lines": (0..30).map(|j| format!("group 1 line {}", j)).collect::<Vec<_>>(),
+                    "matchIndices": [0, 10, 20],
+                },
+                {
+                    "startLine": 100,
+                    "lines": (0..30).map(|j| format!("group 2 line {}", j)).collect::<Vec<_>>(),
+                    "matchIndices": [0, 10, 20],
+                },
+                {
+                    "startLine": 200,
+                    "lines": (0..30).map(|j| format!("group 3 line {}", j)).collect::<Vec<_>>(),
+                    "matchIndices": [0, 10, 20],
+                }
+            ]
+        }],
+        "summary": {"totalFiles": 1}
+    });
+    let mut reasons = Vec::new();
+
+    phase_cap_lines_per_file(&mut output, &mut reasons);
+
+    let file = &output["files"][0];
+    let line_content = file["lineContent"].as_array().unwrap();
+    assert_eq!(line_content.len(), 2, "third preview group should be dropped");
+    assert_eq!(line_content[0]["lines"].as_array().unwrap().len(), 30);
+    assert_eq!(line_content[1]["lines"].as_array().unwrap().len(), 20,
+        "second preview group should be partially kept");
+    assert_eq!(line_content[1]["matchIndices"], json!([0, 10]),
+        "match indices beyond the kept source lines should be pruned");
+    assert_eq!(file["lineContentLinesOmitted"], json!(40));
+    assert!(file.get("lineContentOmitted").is_none());
     assert!(!reasons.is_empty(), "Should add a reason");
 }
 

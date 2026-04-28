@@ -2676,6 +2676,70 @@ fn test_search_mode_note_lists_actual_offending_chars() {
 /// (`handle_line_regex_search`) twice with different prefilter behaviour
 /// without rebuilding params from scratch.
 #[test]
+fn test_xray_grep_line_regex_large_scan_reports_parallel_path() {
+    use std::io::Write;
+
+    let tmp_holder = tempfile::tempdir().unwrap();
+    let tmp_dir = crate::canonicalize_test_root(tmp_holder.path());
+    let file_count = 520usize;
+    for file_index in 0..file_count {
+        let mut file_handle = std::fs::File::create(
+            tmp_dir.join(format!("class_{:04}.cs", file_index))).unwrap();
+        writeln!(file_handle, "public class Class{} {{}}", file_index).unwrap();
+        writeln!(file_handle, "// body").unwrap();
+    }
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 4,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["^public class"],
+        "regex": true,
+        "lineRegex": true,
+        "countOnly": true,
+    }));
+    assert!(!result.is_error,
+        "large lineRegex countOnly scan should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let scan = &output["summary"]["lineRegexScan"];
+
+    assert_eq!(output["summary"]["totalFiles"].as_u64(), Some(file_count as u64),
+        "large scan should count every matching file before response truncation; got: {}", output);
+    assert_eq!(output["summary"]["totalOccurrences"].as_u64(), Some(file_count as u64),
+        "large scan should count every matching line; got: {}", output);
+    assert_eq!(scan["matchedFiles"].as_u64(), Some(file_count as u64),
+        "lineRegexScan.matchedFiles should stay full-count; got: {}", scan);
+    let available_threads = std::thread::available_parallelism()
+        .map(|threads| threads.get())
+        .unwrap_or(1);
+    let expected_worker_threads = available_threads.min(8);
+    if expected_worker_threads > 1 {
+        assert_eq!(scan["parallelScan"].as_bool(), Some(true),
+            "large scan should use bounded parallel workers; got: {}", scan);
+    } else {
+        assert_eq!(scan["parallelScan"].as_bool(), Some(false),
+            "single-worker hosts should stay on the sequential path; got: {}", scan);
+    }
+    assert_eq!(scan["workerThreads"].as_u64(), Some(expected_worker_threads as u64),
+        "large scan should report min(available_parallelism, 8) workers after threshold; got: {}", scan);
+    assert!(scan["scanWallMs"].as_u64().is_some(),
+        "parallel telemetry should include scanWallMs; got: {}", scan);
+    assert!(scan["readSumMs"].as_u64().is_some(),
+        "parallel telemetry should include summed read worker time; got: {}", scan);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+
+#[test]
 fn test_xray_grep_line_regex_prefilter_differential_parity() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2759,12 +2823,18 @@ fn test_xray_grep_line_regex_prefilter_differential_parity() {
             "literalPrefilterMs",
             "scopeCountMs",
             "scanMs",
+            "workerThreads",
+            "scanWallMs",
             "readMs",
+            "readSumMs",
             "wholeFilePrecheckMs",
+            "wholeFilePrecheckSumMs",
             "lineEvalMs",
+            "lineEvalSumMs",
             "candidateFilterMs",
             "scopeFilterMs",
             "matchBookkeepingMs",
+            "matchBookkeepingSumMs",
             "mergeMs",
             "sortDedupMs",
             "rankTruncateMs",
@@ -2786,12 +2856,19 @@ fn test_xray_grep_line_regex_prefilter_differential_parity() {
             assert!(scan[key].as_u64().is_some(),
                 "lineRegexScan.{} should be a numeric field; got scan={}", key, scan);
         }
+        assert!(scan["parallelScan"].as_bool().is_some(),
+            "lineRegexScan.parallelScan should be a boolean field; got scan={}", scan);
         assert_ne!(scan["responseFinalizeMs"].as_u64(), Some(9_999_999_999_999),
             "lineRegexScan.responseFinalizeMs placeholder must not be emitted; got scan={}", scan);
     }
 
     assert_line_regex_scan_schema(scan_on);
     assert_line_regex_scan_schema(scan_off);
+
+    assert_eq!(scan_on["parallelScan"].as_bool(), Some(false),
+        "small prefilter-on scan should stay sequential; got: {}", scan_on);
+    assert_eq!(scan_off["parallelScan"].as_bool(), Some(false),
+        "small prefilter-off scan should stay sequential; got: {}", scan_off);
 
     assert!(scan_on["filesSkippedByPrefilter"].as_u64().unwrap_or(0) > 0,
         "prefilter-on scan should skip files before disk reads; got: {}", scan_on);
