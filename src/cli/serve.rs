@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
 
@@ -46,6 +46,8 @@ pub fn cmd_serve(args: ServeArgs) {
     let content_building = Arc::new(AtomicBool::new(false));
     let def_building = Arc::new(AtomicBool::new(false));
 
+    let primary_build_lock = acquire_or_wait_primary_build_lock(&dir_str, &idx_base, is_unresolved);
+
     // ─── Content index: load from disk or build in background ───
     // Returns the effective `respect_git_exclude` resolved against any persisted
     // value on disk — see `resolve_respect_git_exclude` in `super`. This must be
@@ -82,6 +84,13 @@ pub fn cmd_serve(args: ServeArgs) {
             "Content and definition indexes have different persisted respect_git_exclude values; using the stricter (true) for watcher / reindex paths. Run `xray index-content` and `xray index-definitions` to align them explicitly.",
         );
     }
+
+    release_primary_build_lock_when_ready(
+        primary_build_lock,
+        Arc::clone(&content_ready),
+        Arc::clone(&def_ready),
+        args.definitions,
+    );
 
     // ─── File watcher ───
     let watcher_generation = Arc::new(AtomicU64::new(0));
@@ -134,7 +143,14 @@ pub fn cmd_serve(args: ServeArgs) {
     }
 
     // ─── Git history cache: background build ───
-    let (git_cache, git_cache_ready) = build_git_cache_background(&dir_str, &idx_base, is_unresolved);
+    let (git_cache, git_cache_ready) = build_git_cache_background(
+        &dir_str,
+        &idx_base,
+        is_unresolved,
+        Arc::clone(&content_ready),
+        Arc::clone(&def_ready),
+        args.definitions,
+    );
 
     // ─── Detect current branch ───
     let current_branch = std::process::Command::new("git")
@@ -214,6 +230,133 @@ fn init_logging(args: &ServeArgs, dir_str: &str, exts_for_load: &str, idx_base: 
     info!(target: "xray::startup", dir = ?dir_str, cwd = %cwd, canonical = %canonical_dir, "server starting");
 }
 
+const PRIMARY_BUILD_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const PRIMARY_BUILD_LOCK_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+
+struct PrimaryBuildLock {
+    path: PathBuf,
+}
+
+impl Drop for PrimaryBuildLock {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_file(&self.path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(path = %self.path.display(), error = %e, "Failed to remove primary build lock");
+        }
+    }
+}
+
+// The gate is root-scoped rather than extension-scoped: duplicate MCP clients
+// cold-starting the same workspace contend for the same disk and CPU budget.
+fn primary_build_lock_path(dir_str: &str, idx_base: &Path) -> PathBuf {
+    let mut path = crate::index::index_path_for(dir_str, idx_base);
+    path.set_extension("primary-build.lock");
+    path
+}
+
+fn try_create_primary_build_lock(path: &Path) -> std::io::Result<Option<PrimaryBuildLock>> {
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+            let _ = writeln!(file, "pid={}", std::process::id());
+            let _ = writeln!(file, "createdAt={:?}", std::time::SystemTime::now());
+            Ok(Some(PrimaryBuildLock { path: path.to_path_buf() }))
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+fn remove_stale_primary_build_lock(path: &Path) -> bool {
+    let Ok(metadata) = std::fs::metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = metadata.modified() else {
+        return false;
+    };
+    let Ok(age) = modified.elapsed() else {
+        return false;
+    };
+    if age < PRIMARY_BUILD_LOCK_STALE_AFTER {
+        return false;
+    }
+
+    match std::fs::remove_file(path) {
+        Ok(()) => {
+            warn!(path = %path.display(), age_secs = age.as_secs(), "Removed stale primary build lock");
+            true
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => {
+            warn!(path = %path.display(), error = %e, "Failed to remove stale primary build lock");
+            false
+        }
+    }
+}
+
+fn acquire_or_wait_primary_build_lock(
+    dir_str: &str,
+    idx_base: &Path,
+    is_unresolved: bool,
+) -> Option<PrimaryBuildLock> {
+    if is_unresolved {
+        return None;
+    }
+
+    let lock_path = primary_build_lock_path(dir_str, idx_base);
+    loop {
+        match try_create_primary_build_lock(&lock_path) {
+            Ok(Some(lock)) => {
+                crate::index::log_memory("serve: primary build lock acquired");
+                return Some(lock);
+            }
+            Ok(None) => {
+                crate::index::log_memory("serve: waiting for peer primary build lock");
+                while lock_path.exists() {
+                    if remove_stale_primary_build_lock(&lock_path) {
+                        break;
+                    }
+                    std::thread::sleep(PRIMARY_BUILD_LOCK_POLL_INTERVAL);
+                }
+                crate::index::log_memory("serve: peer primary build lock released");
+            }
+            Err(e) => {
+                warn!(path = %lock_path.display(), error = %e, "Failed to create primary build lock; continuing without interprocess build gate");
+                return None;
+            }
+        }
+    }
+}
+
+fn release_primary_build_lock_when_ready(
+    lock: Option<PrimaryBuildLock>,
+    content_ready: Arc<AtomicBool>,
+    def_ready: Arc<AtomicBool>,
+    wait_for_def_ready: bool,
+) {
+    let Some(lock) = lock else {
+        return;
+    };
+
+    std::thread::spawn(move || {
+        while !primary_indexes_ready_for_git_cache_rebuild(
+            &content_ready,
+            &def_ready,
+            wait_for_def_ready,
+        ) {
+            std::thread::sleep(PRIMARY_BUILD_LOCK_POLL_INTERVAL);
+        }
+        drop(lock);
+        crate::index::log_memory("serve: primary build lock released");
+    });
+}
+
+
 #[allow(clippy::too_many_arguments)]
 fn load_or_build_content_index(
     dir_str: &str,
@@ -258,7 +401,16 @@ fn load_or_build_content_index(
     // Skip if workspace is Unresolved — no point loading/building indexes for wrong directory.
     let start = Instant::now();
     let direct_load = if is_unresolved { None } else {
-        load_content_index(dir_str, exts_for_load, idx_base).ok()
+        match load_content_index(dir_str, exts_for_load, idx_base) {
+            Ok(idx) => Some(idx),
+            Err(e) => {
+                crate::index::log_memory(&format!(
+                    "serve: content direct load miss; trying fallback ({})",
+                    e
+                ));
+                None
+            }
+        }
     };
     let load_method;
     let loaded = if direct_load.is_some() {
@@ -266,7 +418,11 @@ fn load_or_build_content_index(
         direct_load
     } else {
         load_method = "fallback";
-        if is_unresolved { None } else { find_content_index_for_dir(dir_str, idx_base, extensions) }
+        let fallback = if is_unresolved { None } else { find_content_index_for_dir(dir_str, idx_base, extensions) };
+        if fallback.is_none() && !is_unresolved {
+            crate::index::log_memory("serve: content fallback load miss; building");
+        }
+        fallback
     };
 
     if let Some(idx) = loaded {
@@ -518,7 +674,16 @@ fn load_or_build_definition_index(
         let def_start = Instant::now();
         let def_ext_vec: Vec<String> = def_exts.split(',').map(|s| s.to_string()).collect();
         let def_direct = if is_unresolved { None } else {
-            definitions::load_definition_index(dir_str, &def_exts, idx_base).ok()
+            match definitions::load_definition_index(dir_str, &def_exts, idx_base) {
+                Ok(idx) => Some(idx),
+                Err(e) => {
+                    crate::index::log_memory(&format!(
+                        "serve: def direct load miss; trying fallback ({})",
+                        e
+                    ));
+                    None
+                }
+            }
         };
         let def_load_method;
         let def_loaded = if def_direct.is_some() {
@@ -526,7 +691,11 @@ fn load_or_build_definition_index(
             def_direct
         } else {
             def_load_method = "fallback";
-            if is_unresolved { None } else { definitions::find_definition_index_for_dir(dir_str, idx_base, &def_ext_vec) }
+            let fallback = if is_unresolved { None } else { definitions::find_definition_index_for_dir(dir_str, idx_base, &def_ext_vec) };
+            if fallback.is_none() && !is_unresolved {
+                crate::index::log_memory("serve: def fallback load miss; building");
+            }
+            fallback
         };
 
         if let Some(idx) = def_loaded {
@@ -632,6 +801,9 @@ fn build_git_cache_background(
     dir_str: &str,
     idx_base: &Path,
     is_unresolved: bool,
+    content_ready: Arc<AtomicBool>,
+    def_ready: Arc<AtomicBool>,
+    wait_for_def_ready: bool,
 ) -> (Arc<RwLock<Option<GitHistoryCache>>>, Arc<AtomicBool>) {
     let git_cache: Arc<RwLock<Option<GitHistoryCache>>> = Arc::new(RwLock::new(None));
     let git_cache_ready = Arc::new(AtomicBool::new(false));
@@ -733,10 +905,16 @@ fn build_git_cache_background(
                 None
             };
 
-            // If we got a valid cache from disk, publish it; otherwise build from scratch
+            // If we got a valid cache from disk, publish it immediately; otherwise
+            // defer the expensive cold rebuild until primary indexes are ready.
             let cache = match cache {
                 Some(c) => c,
                 None => {
+                    wait_for_primary_indexes_before_git_cache_rebuild(
+                        &content_ready,
+                        &def_ready,
+                        wait_for_def_ready,
+                    );
                     eprintln!("[git-cache] Building cache for branch '{}' (this may take a few minutes for large repos)...", branch);
                     match GitHistoryCache::build(&repo_path, &branch) {
                         Ok(new_cache) => {
@@ -775,6 +953,34 @@ fn build_git_cache_background(
 
     (git_cache, git_cache_ready)
 }
+
+fn primary_indexes_ready_for_git_cache_rebuild(
+    content_ready: &AtomicBool,
+    def_ready: &AtomicBool,
+    wait_for_def_ready: bool,
+) -> bool {
+    content_ready.load(Ordering::Acquire)
+        && (!wait_for_def_ready || def_ready.load(Ordering::Acquire))
+}
+
+fn wait_for_primary_indexes_before_git_cache_rebuild(
+    content_ready: &AtomicBool,
+    def_ready: &AtomicBool,
+    wait_for_def_ready: bool,
+) {
+    if primary_indexes_ready_for_git_cache_rebuild(content_ready, def_ready, wait_for_def_ready) {
+        return;
+    }
+
+    info!("Git cache cold rebuild deferred until primary indexes are ready");
+    // Only cold rebuilds wait here. A valid persisted git cache is loaded earlier,
+    // so this removes cold-start contention without delaying cache hits.
+    while !primary_indexes_ready_for_git_cache_rebuild(content_ready, def_ready, wait_for_def_ready) {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    info!("Primary indexes ready; starting deferred git cache cold rebuild");
+}
+
 
 /// Format a cache age as a human-readable string (e.g., "2h 15m", "5m", "3d 1h").
 /// `created_at` is seconds since UNIX epoch.
@@ -858,6 +1064,83 @@ mod serve_format_cache_age_tests {
             "Future timestamps must clamp to '0s' (regression: integer underflow on now - future)");
     }
 }
+
+
+#[cfg(test)]
+mod serve_git_cache_startup_tests {
+    use super::primary_indexes_ready_for_git_cache_rebuild;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use super::{primary_build_lock_path, try_create_primary_build_lock};
+
+
+    #[test]
+    fn primary_build_lock_is_exclusive_until_dropped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("workspace.primary-build.lock");
+
+        let first_lock = try_create_primary_build_lock(&lock_path)
+            .expect("first lock create should succeed")
+            .expect("first caller should acquire lock");
+        assert!(lock_path.exists(), "lock file should exist while guard is alive");
+
+        let second_lock = try_create_primary_build_lock(&lock_path)
+            .expect("second lock attempt should not fail");
+        assert!(second_lock.is_none(), "second caller must not acquire existing lock");
+
+        drop(first_lock);
+        assert!(!lock_path.exists(), "dropping guard should remove lock file");
+
+        let third_lock = try_create_primary_build_lock(&lock_path)
+            .expect("third lock create should succeed")
+            .expect("lock should be acquirable after guard drop");
+        drop(third_lock);
+    }
+
+    #[test]
+    fn primary_build_lock_path_is_root_scoped() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let first = primary_build_lock_path(&root.to_string_lossy(), tmp.path());
+        let second = primary_build_lock_path(&root.to_string_lossy(), tmp.path());
+
+        assert_eq!(first, second, "same root must map to one primary build lock");
+        assert_eq!(first.extension().and_then(|e| e.to_str()), Some("lock"));
+        assert!(
+            first.file_name().and_then(|n| n.to_str()).unwrap().ends_with(".primary-build.lock"),
+            "lock name should be recognizable for diagnostics: {}",
+            first.display()
+        );
+    }
+
+
+    #[test]
+    fn git_cache_cold_rebuild_waits_for_content_and_def_when_definitions_enabled() {
+        let content_ready = AtomicBool::new(false);
+        let def_ready = AtomicBool::new(false);
+
+        assert!(!primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, true));
+
+        content_ready.store(true, Ordering::Release);
+        assert!(!primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, true));
+
+        def_ready.store(true, Ordering::Release);
+        assert!(primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, true));
+    }
+
+    #[test]
+    fn git_cache_cold_rebuild_waits_only_for_content_when_definitions_disabled() {
+        let content_ready = AtomicBool::new(false);
+        let def_ready = AtomicBool::new(false);
+
+        assert!(!primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, false));
+
+        content_ready.store(true, Ordering::Release);
+        assert!(primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, false));
+    }
+}
+
 
 
 #[cfg(test)]
