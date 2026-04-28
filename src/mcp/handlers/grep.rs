@@ -812,9 +812,13 @@ fn finalize_grep_results(
 fn ensure_trigram_index(ctx: &HandlerContext) {
     let trigram_check_start = Instant::now();
     let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
+    let dirty_check_ms = trigram_check_start.elapsed().as_secs_f64() * 1000.0;
     if needs_rebuild {
-        debug!("[substring-trace] Trigram dirty, rebuilding...");
         let rebuild_start = Instant::now();
+        info!(
+            dirty_check_ms = format_args!("{:.3}", dirty_check_ms),
+            "[grep-trace] trigram dirty; rebuilding before wide trigram-dependent search"
+        );
         // Build trigram index under READ lock (doesn't block other readers)
         let new_trigram = ctx.index.read().ok().and_then(|idx| {
             if idx.trigram_dirty {
@@ -823,18 +827,38 @@ fn ensure_trigram_index(ctx: &HandlerContext) {
                 None
             }
         });
-        // Swap in under brief WRITE lock (microseconds, not ~200ms)
-        if let Some(trigram) = new_trigram
-            && let Ok(mut idx) = ctx.index.write()
+        if let Some(trigram) = new_trigram {
+            let token_count = trigram.tokens.len();
+            let trigram_count = trigram.trigram_map.len();
+            let build_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
+            let swap_start = Instant::now();
+            let mut swapped = false;
+            // Swap in under brief WRITE lock (microseconds, not ~200ms)
+            if let Ok(mut idx) = ctx.index.write()
                 && idx.trigram_dirty {  // double-check after acquiring write lock
-                    debug!("[substring] Rebuilt trigram index: {} tokens, {} trigrams",
-                        trigram.tokens.len(), trigram.trigram_map.len());
                     idx.trigram = trigram;
                     idx.trigram_dirty = false;
+                    swapped = true;
                 }
-        debug!("[substring-trace] Trigram rebuild: {:.3}ms", rebuild_start.elapsed().as_secs_f64() * 1000.0);
+            let swap_ms = swap_start.elapsed().as_secs_f64() * 1000.0;
+            let total_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
+            info!(
+                token_count,
+                trigram_count,
+                build_ms = format_args!("{:.3}", build_ms),
+                swap_ms = format_args!("{:.3}", swap_ms),
+                total_ms = format_args!("{:.3}", total_ms),
+                swapped,
+                "[grep-trace] trigram rebuild finished"
+            );
+        } else {
+            info!(
+                total_ms = format_args!("{:.3}", rebuild_start.elapsed().as_secs_f64() * 1000.0),
+                "[grep-trace] trigram rebuild skipped after recheck; index already clean"
+            );
+        }
     } else {
-        debug!("[substring-trace] Trigram dirty check: clean in {:.3}ms", trigram_check_start.elapsed().as_secs_f64() * 1000.0);
+        debug!("[substring-trace] Trigram dirty check: clean in {:.3}ms", dirty_check_ms);
     }
 }
 
@@ -1472,6 +1496,16 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         info!(lock_wait_ms = format_args!("{:.1}", lock_wait_ms),
             "[grep-trace] slow read-lock acquisition on content index");
     }
+    let trigram_stale = trigram_skipped && index.trigram_dirty;
+    let stale_safe_search_enabled = trigram_stale && !will_auto_switch_to_phrase;
+    if stale_safe_search_enabled {
+        info!(
+            scope_already_narrow,
+            file_filter_count = parsed.file_filter.len(),
+            exact_file_path = parsed.exact_file_path.is_some(),
+            "[grep-trace] trigram rebuild skipped; stale-safe search path enabled"
+        );
+    }
 
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&parsed.exclude_dir);
     let exclude_lower: Vec<String> = parsed.exclude.iter()
@@ -1495,7 +1529,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         auto_balance: parsed.auto_balance,
         max_occurrences_per_term: parsed.max_occurrences_per_term,
         lock_wait_ms,
-        trigram_stale: trigram_skipped && index.trigram_dirty,
+        trigram_stale,
     };
 
     // --- Substring search mode
@@ -1904,6 +1938,13 @@ fn handle_substring_search(
     let trigram_idx = &index.trigram;
     let total_docs = index.files.len() as f64;
     let search_mode = if params.mode_and { "and" } else { "or" };
+    if params.trigram_stale {
+        debug!(
+            terms_count = raw_terms.len(),
+            indexed_tokens = index.index.len(),
+            "[substring-trace] using direct token scan because trigram index is stale"
+        );
+    }
 
     let mut warnings: Vec<String> = Vec::new();
     if raw_terms.iter().any(|t| t.len() < 4) {
