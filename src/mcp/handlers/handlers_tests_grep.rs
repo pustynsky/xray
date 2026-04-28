@@ -1232,6 +1232,8 @@ fn test_xray_grep_phrase_sort_by_occurrences() {
     }));
     assert!(!result.is_error, "Phrase search should not error: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("lineRegexScan").is_none(),
+        "non-lineRegex search must not emit lineRegexScan; got: {}", output["summary"]);
     let files = output["files"].as_array().unwrap();
 
     assert!(files.len() >= 2, "Should find at least 2 files with 'user service' phrase, got {}", files.len());
@@ -2739,6 +2741,118 @@ fn test_xray_grep_line_regex_prefilter_differential_parity() {
         "prefilter-off lineRegex run should not error: {}", r_off.content[0].text);
     let out_off: Value = serde_json::from_str(&r_off.content[0].text).unwrap();
 
+    let scan_on = &out_on["summary"]["lineRegexScan"];
+    let scan_off = &out_off["summary"]["lineRegexScan"];
+    assert!(scan_on.is_object(),
+        "prefilter-on lineRegex summary should include lineRegexScan; got: {}", out_on["summary"]);
+    assert!(scan_off.is_object(),
+        "prefilter-off lineRegex summary should include lineRegexScan; got: {}", out_off["summary"]);
+
+    fn assert_line_regex_scan_schema(scan: &Value) {
+        let expected_keys = [
+            "compileMs",
+            "literalPrefilterMs",
+            "scopeCountMs",
+            "scanMs",
+            "readMs",
+            "wholeFilePrecheckMs",
+            "lineEvalMs",
+            "filesVisited",
+            "filesSkippedByPrefilter",
+            "filesSkippedByScope",
+            "filesRead",
+            "bytesRead",
+            "wholeFilePrecheckFiles",
+            "wholeFilePrecheckMatchedFiles",
+            "lineEvalFiles",
+            "lineEvalLines",
+            "matchedFiles",
+        ];
+        for key in expected_keys {
+            assert!(scan[key].as_u64().is_some(),
+                "lineRegexScan.{} should be a numeric field; got scan={}", key, scan);
+        }
+    }
+
+    assert_line_regex_scan_schema(scan_on);
+    assert_line_regex_scan_schema(scan_off);
+
+    assert!(scan_on["filesSkippedByPrefilter"].as_u64().unwrap_or(0) > 0,
+        "prefilter-on scan should skip files before disk reads; got: {}", scan_on);
+    assert_eq!(scan_off["filesSkippedByPrefilter"].as_u64(), Some(0),
+        "prefilter-off scan must not skip files by prefilter; got: {}", scan_off);
+    assert!(scan_on["filesRead"].as_u64().unwrap_or(u64::MAX)
+        < scan_off["filesRead"].as_u64().unwrap_or(0),
+        "prefilter-on should read fewer files than disabled control; on={}, off={}",
+        scan_on, scan_off);
+    assert_eq!(scan_on["wholeFilePrecheckFiles"].as_u64(), scan_on["filesRead"].as_u64(),
+        "whole-file precheck should run once per read file; got: {}", scan_on);
+    assert_eq!(scan_off["wholeFilePrecheckFiles"].as_u64(), scan_off["filesRead"].as_u64(),
+        "whole-file precheck should run once per read file; got: {}", scan_off);
+    assert_eq!(scan_on["matchedFiles"].as_u64(), Some(3),
+        "prefilter-on telemetry should report three final matched files; got: {}", scan_on);
+    assert_eq!(scan_off["matchedFiles"].as_u64(), Some(3),
+        "prefilter-off telemetry should report three final matched files; got: {}", scan_off);
+
+    let count_query = json!({
+        "terms": [r"App\s*=\s*\d+"],
+        "regex": true,
+        "lineRegex": true,
+        "countOnly": true,
+    });
+    let r_count = dispatch_tool(&ctx, "xray_grep", &count_query);
+    assert!(!r_count.is_error,
+        "countOnly lineRegex run should not error: {}", r_count.content[0].text);
+    let out_count: Value = serde_json::from_str(&r_count.content[0].text).unwrap();
+    assert!(out_count.get("files").is_none(), "countOnly response should omit files: {}", out_count);
+    assert!(out_count["summary"]["lineRegexScan"].is_object(),
+        "countOnly lineRegex summary should include lineRegexScan; got: {}", out_count["summary"]);
+    assert_eq!(out_count["summary"]["lineRegexScan"]["matchedFiles"].as_u64(), Some(3),
+        "countOnly telemetry should report final matched files; got: {}",
+        out_count["summary"]["lineRegexScan"]);
+    assert_line_regex_scan_schema(&out_count["summary"]["lineRegexScan"]);
+
+    let capped_query = json!({
+        "terms": [r"App\s*=\s*\d+"],
+        "regex": true,
+        "lineRegex": true,
+        "maxResults": 2,
+    });
+    let r_capped = dispatch_tool(&ctx, "xray_grep", &capped_query);
+    assert!(!r_capped.is_error,
+        "maxResults lineRegex run should not error: {}", r_capped.content[0].text);
+    let out_capped: Value = serde_json::from_str(&r_capped.content[0].text).unwrap();
+    assert_eq!(out_capped["files"].as_array().map(|files| files.len()), Some(2),
+        "maxResults should cap emitted files but not summary counts; got: {}", out_capped);
+    assert_eq!(out_capped["summary"]["totalFiles"].as_u64(), Some(3),
+        "lineRegex summary.totalFiles should stay full-count before maxResults truncation; got: {}",
+        out_capped["summary"]);
+    assert_eq!(out_capped["summary"]["lineRegexScan"]["matchedFiles"].as_u64(), Some(3),
+        "lineRegexScan.matchedFiles should stay full-count before maxResults truncation; got: {}",
+        out_capped["summary"]["lineRegexScan"]);
+    assert_line_regex_scan_schema(&out_capped["summary"]["lineRegexScan"]);
+
+    let capped_count_query = json!({
+        "terms": [r"App\s*=\s*\d+"],
+        "regex": true,
+        "lineRegex": true,
+        "countOnly": true,
+        "maxResults": 2,
+    });
+    let r_capped_count = dispatch_tool(&ctx, "xray_grep", &capped_count_query);
+    assert!(!r_capped_count.is_error,
+        "countOnly maxResults lineRegex run should not error: {}", r_capped_count.content[0].text);
+    let out_capped_count: Value = serde_json::from_str(&r_capped_count.content[0].text).unwrap();
+    assert!(out_capped_count.get("files").is_none(),
+        "countOnly capped response should omit files: {}", out_capped_count);
+    assert_eq!(out_capped_count["summary"]["totalFiles"].as_u64(), Some(3),
+        "countOnly lineRegex summary.totalFiles should stay full-count with maxResults; got: {}",
+        out_capped_count["summary"]);
+    assert_eq!(out_capped_count["summary"]["lineRegexScan"]["matchedFiles"].as_u64(), Some(3),
+        "countOnly lineRegexScan.matchedFiles should stay full-count with maxResults; got: {}",
+        out_capped_count["summary"]["lineRegexScan"]);
+    assert_line_regex_scan_schema(&out_capped_count["summary"]["lineRegexScan"]);
+
     // Normalize: extract (basename, lines) pairs sorted by basename so the
     // diff oracle is independent of internal sort order, absolute path,
     // searchElapsedMs, perfHint copy, and literalPrefilter shape.
@@ -2982,6 +3096,16 @@ fn test_xray_grep_line_regex_prefilter_short_circuit_when_too_broad() {
         "short-circuit reason must explain ratio; got {:?}", reason);
     assert!(reason.contains("%"),
         "short-circuit reason must include the threshold percent; got {:?}", reason);
+
+    let scan = &out["summary"]["lineRegexScan"];
+    assert!(scan.is_object(),
+        "lineRegex summary should include scan telemetry; got: {}", out["summary"]);
+    assert_eq!(scan["filesSkippedByPrefilter"].as_u64(), Some(0),
+        "short-circuited prefilter should fall back to full scan; got: {}", scan);
+    assert_eq!(scan["filesRead"].as_u64(), Some(6),
+        "short-circuited scan should read all six files; got: {}", scan);
+    assert_eq!(scan["matchedFiles"].as_u64(), Some(1),
+        "short-circuited scan should report one final matched file; got: {}", scan);
 
     cleanup_tmp(&tmp_dir);
 }
@@ -3379,6 +3503,18 @@ fn test_xray_grep_literal_prefilter_scope_aware_counters_with_dir_scope() {
          that survive scope; got {} of expected 2",
         candidate_after
     );
+
+    let scan = &out["summary"]["lineRegexScan"];
+    assert!(scan.is_object(),
+        "scoped lineRegex summary should include scan telemetry; got: {}", out["summary"]);
+    assert_eq!(scan["filesSkippedByPrefilter"].as_u64(), Some(6),
+        "prefilter should skip the six non-candidate files before scope checks; got: {}", scan);
+    assert_eq!(scan["filesSkippedByScope"].as_u64(), Some(2),
+        "scope should reject the two outside candidate files; got: {}", scan);
+    assert_eq!(scan["filesRead"].as_u64(), Some(2),
+        "scoped query should read only the two inside candidate files; got: {}", scan);
+    assert_eq!(scan["matchedFiles"].as_u64(), Some(2),
+        "scoped query should report two final matched files; got: {}", scan);
 
     cleanup_tmp(&tmp_dir);
 }
