@@ -1,6 +1,6 @@
 # Xray — High-Performance Code Intelligence Engine
 
-Inverted index + AST-based code intelligence engine for large-scale codebases. Millisecond content search, structural code navigation (classes, methods, call trees), and native MCP server for AI agent integration — in a single statically-linked Rust binary.
+Inverted index + AST-based code intelligence engine for large-scale codebases. Millisecond content search, structural code navigation (classes, methods, call trees), code history analysis, and native MCP server for AI agent integration — in a single statically-linked Rust binary. Designed to make GenAI workflows faster, deeper, and more precise by giving agents direct structural access to the codebase instead of relying on shallow text search and slow multi-tool orchestration.
 
 **Measured on a real production codebase with 66K files, 878K definitions ([full benchmarks](docs/benchmarks.md)):**
 
@@ -61,6 +61,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **Respects `.gitignore`** — automatically skips ignored files
 - **Extension filtering** — limit search to specific file types
 - **MCP Server** — native Model Context Protocol server for AI agents (Roo Code, Cline, or any MCP-compatible client) with async startup, named `XRAY_POLICY` initialization guidance, and per-response policy reminders to reduce tool-selection drift
+- **GenAI grounding** — gives agents direct structural access to code, history, call trees, and safe edit workflows, enabling deeper and more accurate conclusions than generic tool-by-tool orchestration
 - **Synchronous reindex after `xray_edit`** — file-edit responses now refresh the in-memory inverted-content and definition indexes before returning, so a follow-up `xray_grep` / `xray_definitions` / `xray_callers` / `xray_fast` call sees the new content with zero latency (no 500ms FS-watcher debounce wait)
 - **`xray_edit` is workspace-scope-agnostic by design** — unlike read/index tools, `xray_edit` accepts both relative paths (resolved against `--dir`) and absolute paths anywhere on disk. This is intentional: it lets one server instance handle edits across multiple workspaces, scratch dirs, or tooling configs without re-launching. Read-only tools (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`) remain workspace-bound to keep the in-memory indexes scoped and avoid leaking workspace topology to disk.
 - **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*, regex-based parsing for *SQL* (.sql files: stored procedures, tables, views, functions, types, indexes, columns, and call sites from SP bodies). Angular components enriched with template metadata (selector, child components from HTML templates)
