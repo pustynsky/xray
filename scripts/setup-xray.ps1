@@ -284,10 +284,31 @@ $vscodeMcpDir = Join-Path $RepoPath ".vscode"
 $vscodeMcpPath = Join-Path $vscodeMcpDir "mcp.json"
 
 $writeVscode = $true
-if ((Test-Path $vscodeMcpPath) -and -not $Force) {
-    Write-Warning "$vscodeMcpPath already exists"
-    $ow = Read-Host "Overwrite? (y/N)"
-    if ($ow -ne 'y') { $writeVscode = $false }
+$vscodeAction = 'create'  # create | merge | skip
+if (Test-Path $vscodeMcpPath) {
+    try {
+        $existingVscode = Get-Content -Path $vscodeMcpPath -Raw | ConvertFrom-Json
+    } catch {
+        $existingVscode = $null
+    }
+    if ($existingVscode -and $existingVscode.servers -and $existingVscode.servers.xray) {
+        if (-not $Force) {
+            Write-Warning "$vscodeMcpPath already has an 'xray' server entry"
+            $ow = Read-Host "Update it? (y/N)"
+            if ($ow -ne 'y') { $writeVscode = $false }
+        }
+        $vscodeAction = 'merge'
+    } elseif ($existingVscode -and $existingVscode.servers) {
+        # File exists with other servers but no xray — merge silently
+        $vscodeAction = 'merge'
+    } else {
+        # File exists but not valid MCP config — ask before overwriting
+        if (-not $Force) {
+            Write-Warning "$vscodeMcpPath exists but has no 'servers' key"
+            $ow = Read-Host "Overwrite? (y/N)"
+            if ($ow -ne 'y') { $writeVscode = $false }
+        }
+    }
 }
 
 if ($writeVscode) {
@@ -295,17 +316,26 @@ if ($writeVscode) {
         New-Item -ItemType Directory -Path $vscodeMcpDir -Force | Out-Null
     }
 
-    $vscodeConfig = [ordered]@{
-        servers = [ordered]@{
-            xray = [ordered]@{
-                type = 'stdio'
-                command = $xrayPath
-                args = $xrayArgs
+    $xrayEntry = [ordered]@{
+        type    = 'stdio'
+        command = $xrayPath
+        args    = $xrayArgs
+    }
+
+    if ($vscodeAction -eq 'merge' -and $existingVscode) {
+        # Preserve existing servers, add/update xray
+        $existingVscode.servers | Add-Member -NotePropertyName 'xray' -NotePropertyValue $xrayEntry -Force
+        $existingVscode | ConvertTo-Json -Depth 10 | Set-Content -Path $vscodeMcpPath -Encoding UTF8
+        Write-Host "Updated xray entry in $vscodeMcpPath (other servers preserved)" -ForegroundColor Green
+    } else {
+        $vscodeConfig = [ordered]@{
+            servers = [ordered]@{
+                xray = $xrayEntry
             }
         }
+        $vscodeConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $vscodeMcpPath -Encoding UTF8
+        Write-Host "Created $vscodeMcpPath" -ForegroundColor Green
     }
-    $vscodeConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $vscodeMcpPath -Encoding UTF8
-    Write-Host "Created $vscodeMcpPath" -ForegroundColor Green
 }
 
 # ── Step 6: Write .roo/mcp.json (Roo) ────────────────────────────────
@@ -320,10 +350,31 @@ if ($EnableRoo) {
     if ($installRoo -eq 'y') { $writeRoo = $true }
 }
 
-if ($writeRoo -and (Test-Path $rooMcpPath) -and -not $Force) {
-    Write-Warning "$rooMcpPath already exists"
-    $ow = Read-Host "Overwrite? (y/N)"
-    if ($ow -ne 'y') { $writeRoo = $false }
+if ($writeRoo -and (Test-Path $rooMcpPath)) {
+    try {
+        $existingRoo = Get-Content -Path $rooMcpPath -Raw | ConvertFrom-Json
+    } catch {
+        $existingRoo = $null
+    }
+    if ($existingRoo -and $existingRoo.mcpServers -and $existingRoo.mcpServers.xray) {
+        if (-not $Force) {
+            Write-Warning "$rooMcpPath already has an 'xray' server entry"
+            $ow = Read-Host "Update it? (y/N)"
+            if ($ow -ne 'y') { $writeRoo = $false }
+        }
+        $rooAction = 'merge'
+    } elseif ($existingRoo -and $existingRoo.mcpServers) {
+        $rooAction = 'merge'
+    } else {
+        if (-not $Force) {
+            Write-Warning "$rooMcpPath exists but has no 'mcpServers' key"
+            $ow = Read-Host "Overwrite? (y/N)"
+            if ($ow -ne 'y') { $writeRoo = $false }
+        }
+        $rooAction = 'create'
+    }
+} else {
+    $rooAction = 'create'
 }
 
 if ($writeRoo) {
@@ -331,19 +382,27 @@ if ($writeRoo) {
         New-Item -ItemType Directory -Path $rooMcpDir -Force | Out-Null
     }
 
-    $rooConfig = [ordered]@{
-        mcpServers = [ordered]@{
-            xray = [ordered]@{
-                command = $xrayPath
-                args = $xrayArgs
-                alwaysAllow = $AllowedTools
-                disabled = $false
-                timeout = 300
+    $rooXrayEntry = [ordered]@{
+        command    = $xrayPath
+        args       = $xrayArgs
+        alwaysAllow = $AllowedTools
+        disabled   = $false
+        timeout    = 300
+    }
+
+    if ($rooAction -eq 'merge' -and $existingRoo) {
+        $existingRoo.mcpServers | Add-Member -NotePropertyName 'xray' -NotePropertyValue $rooXrayEntry -Force
+        $existingRoo | ConvertTo-Json -Depth 10 | Set-Content -Path $rooMcpPath -Encoding UTF8
+        Write-Host "Updated xray entry in $rooMcpPath (other servers preserved)" -ForegroundColor Green
+    } else {
+        $rooConfig = [ordered]@{
+            mcpServers = [ordered]@{
+                xray = $rooXrayEntry
             }
         }
+        $rooConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $rooMcpPath -Encoding UTF8
+        Write-Host "Created $rooMcpPath" -ForegroundColor Green
     }
-    $rooConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $rooMcpPath -Encoding UTF8
-    Write-Host "Created $rooMcpPath" -ForegroundColor Green
 }
 
 # ── Step 7: Protect MCP configs from accidental git push ─────────────
