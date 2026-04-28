@@ -600,9 +600,47 @@ fn test_expand_regex_terms_dedups_overlapping_matches_grep014() {
 
 // ─── line_regex_perf_hint tests (AC-1) ──────────────────────────
 
+fn perf_hint(
+    search_mode: &str,
+    search_elapsed_ms: u64,
+    index_files: usize,
+    prefilter_used: bool,
+) -> Option<String> {
+    line_regex_perf_hint(
+        search_mode,
+        search_elapsed_ms,
+        index_files,
+        prefilter_used,
+        None,
+        None,
+    )
+}
+
+fn sample_line_regex_scan(
+    read_ms: u64,
+    whole_file_precheck_ms: u64,
+    line_eval_ms: u64,
+    residual_ms: u64,
+) -> LineRegexScanTelemetry {
+    let measured_scan_ms = read_ms
+        .saturating_add(whole_file_precheck_ms)
+        .saturating_add(line_eval_ms)
+        .saturating_add(residual_ms);
+    LineRegexScanTelemetry {
+        scan_duration: std::time::Duration::from_millis(measured_scan_ms),
+        read_duration: std::time::Duration::from_millis(read_ms),
+        whole_file_precheck_duration: std::time::Duration::from_millis(whole_file_precheck_ms),
+        line_eval_duration: std::time::Duration::from_millis(line_eval_ms),
+        files_visited: 60_000,
+        files_skipped_by_prefilter: 59_900,
+        files_read: 100,
+        ..LineRegexScanTelemetry::default()
+    }
+}
+
 #[test]
 fn test_line_regex_perf_hint_fires_on_slow_large_scan() {
-    let hint = line_regex_perf_hint("lineRegex", 5_000, 60_000, false);
+    let hint = perf_hint("lineRegex", 5_000, 60_000, false);
     assert!(hint.is_some(), "slow lineRegex on large index should produce a hint");
     let h = hint.unwrap();
     assert!(h.contains("5000ms"), "hint should report elapsed ms; got: {}", h);
@@ -619,7 +657,7 @@ fn test_line_regex_perf_hint_fires_on_slow_large_scan() {
 #[test]
 fn test_line_regex_perf_hint_fires_on_lineregex_and_mode() {
     // `mode_and` lineRegex emits searchMode="lineRegex-and" — must trigger via prefix match.
-    let hint = line_regex_perf_hint("lineRegex-and", 3_000, 5_000, false);
+    let hint = perf_hint("lineRegex-and", 3_000, 5_000, false);
     assert!(hint.is_some(), "lineRegex-and should also trigger the hint");
 }
 
@@ -627,34 +665,34 @@ fn test_line_regex_perf_hint_fires_on_lineregex_and_mode() {
 fn test_line_regex_perf_hint_silent_for_substring_modes() {
     // Negative cases: every non-lineRegex searchMode that build_grep_base_summary
     // can emit must NOT carry a lineRegex perf hint.
-    assert!(line_regex_perf_hint("substring-or", 60_000, 100_000, false).is_none());
-    assert!(line_regex_perf_hint("substring-and", 60_000, 100_000, false).is_none());
-    assert!(line_regex_perf_hint("phrase", 60_000, 100_000, false).is_none());
-    assert!(line_regex_perf_hint("phrase-or", 60_000, 100_000, false).is_none());
-    assert!(line_regex_perf_hint("phrase-and", 60_000, 100_000, false).is_none());
-    assert!(line_regex_perf_hint("regex", 60_000, 100_000, false).is_none());
-    assert!(line_regex_perf_hint("or", 60_000, 100_000, false).is_none());
-    assert!(line_regex_perf_hint("and", 60_000, 100_000, false).is_none());
+    assert!(perf_hint("substring-or", 60_000, 100_000, false).is_none());
+    assert!(perf_hint("substring-and", 60_000, 100_000, false).is_none());
+    assert!(perf_hint("phrase", 60_000, 100_000, false).is_none());
+    assert!(perf_hint("phrase-or", 60_000, 100_000, false).is_none());
+    assert!(perf_hint("phrase-and", 60_000, 100_000, false).is_none());
+    assert!(perf_hint("regex", 60_000, 100_000, false).is_none());
+    assert!(perf_hint("or", 60_000, 100_000, false).is_none());
+    assert!(perf_hint("and", 60_000, 100_000, false).is_none());
 }
 
 #[test]
 fn test_line_regex_perf_hint_silent_for_fast_scan() {
     // Below LINE_REGEX_SLOW_MS — no hint, even on a huge index.
-    assert!(line_regex_perf_hint("lineRegex", 1_999, 100_000, false).is_none());
-    assert!(line_regex_perf_hint("lineRegex", 0, 100_000, false).is_none());
+    assert!(perf_hint("lineRegex", 1_999, 100_000, false).is_none());
+    assert!(perf_hint("lineRegex", 0, 100_000, false).is_none());
 }
 
 #[test]
 fn test_line_regex_perf_hint_silent_for_small_index() {
     // Below LINE_REGEX_LARGE_INDEX_FILES — slow scans on tiny repos are unactionable.
-    assert!(line_regex_perf_hint("lineRegex", 10_000, 999, false).is_none());
-    assert!(line_regex_perf_hint("lineRegex", 10_000, 0, false).is_none());
+    assert!(perf_hint("lineRegex", 10_000, 999, false).is_none());
+    assert!(perf_hint("lineRegex", 10_000, 0, false).is_none());
 }
 
 #[test]
 fn test_line_regex_perf_hint_threshold_boundaries() {
     // Exactly at thresholds should fire (>= comparisons).
-    assert!(line_regex_perf_hint("lineRegex", LINE_REGEX_SLOW_MS, LINE_REGEX_LARGE_INDEX_FILES, false).is_some());
+    assert!(perf_hint("lineRegex", LINE_REGEX_SLOW_MS, LINE_REGEX_LARGE_INDEX_FILES, false).is_some());
 }
 
 #[test]
@@ -662,18 +700,100 @@ fn test_line_regex_perf_hint_prefilter_used_branch_message_differs() {
     // AC-4: when the literal-trigram prefilter actually ran, a still-slow
     // search emits a different hint copy (talks about per-line regex cost,
     // NOT about adding a substring prefilter — the prefilter is already on).
-    let no_prefilter = line_regex_perf_hint("lineRegex", 5_000, 60_000, false).unwrap();
-    let with_prefilter = line_regex_perf_hint("lineRegex", 5_000, 60_000, true).unwrap();
+    let no_prefilter = perf_hint("lineRegex", 5_000, 60_000, false).unwrap();
+    let with_prefilter = perf_hint("lineRegex", 5_000, 60_000, true).unwrap();
     assert_ne!(no_prefilter, with_prefilter,
         "prefilter_used should change the hint copy");
     assert!(with_prefilter.contains("even with the literal-trigram prefilter"),
         "prefilter-on hint should acknowledge the prefilter ran; got: {}", with_prefilter);
-    assert!(with_prefilter.contains("per-line regex evaluation"),
-        "prefilter-on hint should point at the new bottleneck; got: {}", with_prefilter);
     assert!(no_prefilter.contains("could not narrow the search"),
         "prefilter-off hint should explain why the prefilter did not help; got: {}", no_prefilter);
 }
 
+
+#[test]
+fn test_line_regex_perf_hint_prefilter_used_uses_measured_file_read_phase() {
+    let telemetry = sample_line_regex_scan(500, 10, 5, 0);
+    let hint = line_regex_perf_hint(
+        "lineRegex",
+        5_000,
+        60_000,
+        true,
+        Some(&telemetry),
+        None,
+    ).unwrap();
+    assert!(hint.contains("literal-trigram prefilter narrowed"),
+        "prefilter-on hint should acknowledge the prefilter ran; got: {}", hint);
+    assert!(hint.contains("file reads dominate"),
+        "hint should report the measured file-read bottleneck; got: {}", hint);
+    assert!(!hint.contains("per-line regex evaluation is the dominant phase"),
+        "hint must not claim line evaluation dominates when readMs dominates; got: {}", hint);
+}
+
+#[test]
+fn test_line_regex_perf_hint_reports_line_eval_only_when_measured() {
+    let telemetry = sample_line_regex_scan(5, 10, 500, 0);
+    let hint = line_regex_perf_hint(
+        "lineRegex",
+        5_000,
+        60_000,
+        true,
+        Some(&telemetry),
+        None,
+    ).unwrap();
+    assert!(hint.contains("per-line regex evaluation is the dominant phase"),
+        "hint should report line evaluation only when telemetry supports it; got: {}", hint);
+}
+
+#[test]
+fn test_line_regex_perf_hint_reports_scan_residual_phase() {
+    let telemetry = sample_line_regex_scan(5, 10, 5, 500);
+    let hint = line_regex_perf_hint(
+        "lineRegex",
+        5_000,
+        60_000,
+        false,
+        Some(&telemetry),
+        Some("candidate set covers 50000/60000 files (>50% threshold)"),
+    ).unwrap();
+    assert!(hint.contains("attempted but did not narrow"),
+        "hint should preserve attempted-prefilter context; got: {}", hint);
+    assert!(hint.contains("residual scan-loop overhead"),
+        "hint should report residual scan overhead when named phases do not explain scanMs; got: {}", hint);
+}
+
+#[test]
+fn test_line_regex_perf_hint_reports_response_build_phase() {
+    let mut telemetry = sample_line_regex_scan(5, 10, 5, 0);
+    telemetry.response_build_duration = std::time::Duration::from_millis(500);
+    telemetry.response_finalize_duration = std::time::Duration::from_millis(100);
+    let hint = line_regex_perf_hint(
+        "lineRegex",
+        5_000,
+        60_000,
+        true,
+        Some(&telemetry),
+        None,
+    ).unwrap();
+    assert!(hint.contains("merge/sort/truncation/response building dominates"),
+        "hint should report response construction when that phase dominates; got: {}", hint);
+}
+
+#[test]
+fn test_line_regex_perf_hint_reports_response_finalize_phase() {
+    let mut telemetry = sample_line_regex_scan(5, 10, 5, 0);
+    telemetry.response_finalize_duration = std::time::Duration::from_millis(500);
+    let hint = line_regex_perf_hint(
+        "lineRegex",
+        5_000,
+        60_000,
+        true,
+        Some(&telemetry),
+        None,
+    ).unwrap();
+    assert!(hint.contains("merge/sort/truncation/response building dominates"),
+        "hint should report response finalization in the response bucket; got: {}", hint);
+}
 
 #[test]
 fn test_apply_literal_prefilter_summary_attempted_but_discarded_overrides_default_hint() {
@@ -698,7 +818,8 @@ fn test_apply_literal_prefilter_summary_attempted_but_discarded_overrides_defaul
         total_files_after_scope: None,
         candidate_files_after_scope: None,
     };
-    apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
+    let telemetry = sample_line_regex_scan(500, 10, 5, 0);
+    apply_literal_prefilter_summary(&mut summary, &info, &telemetry, 5_000, "lineRegex");
     let hint = summary["perfHint"].as_str().expect("perfHint should be a string");
     assert!(hint.contains("attempted but did not narrow"),
         "discarded hint must acknowledge the attempt; got: {}", hint);
@@ -726,7 +847,8 @@ fn test_apply_literal_prefilter_summary_no_reason_leaves_default_hint() {
         total_files_after_scope: None,
         candidate_files_after_scope: None,
     };
-    apply_literal_prefilter_summary(&mut summary, &info, 5_000, "lineRegex");
+    let telemetry = sample_line_regex_scan(500, 10, 5, 0);
+    apply_literal_prefilter_summary(&mut summary, &info, &telemetry, 5_000, "lineRegex");
     assert_eq!(summary["perfHint"].as_str(), Some(original_hint),
         "perfHint must be preserved when prefilter was not attempted (reason=None)");
 }

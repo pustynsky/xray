@@ -2,6 +2,13 @@
 
 ## 2026-04-28
 
+### Diagnostics
+- **lineRegex phase telemetry** — `xray_grep` now reports phase-level
+  `summary.lineRegexScan` timings for candidate filtering, scope filtering,
+  match bookkeeping, merge, sort/dedup, rank/truncate, response build,
+  response finalization, and residual scan work. `perfHint` now names the
+  measured bottleneck phase when phase telemetry is available.
+
 ### Performance
 - **Autosave interval raised to 5 minutes** — prevents continuous autosave
   serialization on large repositories (>500 MB index) where a single
