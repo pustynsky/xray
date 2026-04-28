@@ -2741,6 +2741,11 @@ fn test_xray_grep_line_regex_prefilter_differential_parity() {
         "prefilter-off lineRegex run should not error: {}", r_off.content[0].text);
     let out_off: Value = serde_json::from_str(&r_off.content[0].text).unwrap();
 
+    for response_text in [&r_on.content[0].text, &r_off.content[0].text] {
+        assert!(!response_text.contains("__xray_line_regex_perf_hint_placeholder__"),
+            "lineRegex response must not leak perfHint placeholder: {}", response_text);
+    }
+
     let scan_on = &out_on["summary"]["lineRegexScan"];
     let scan_off = &out_off["summary"]["lineRegexScan"];
     assert!(scan_on.is_object(),
@@ -2757,6 +2762,15 @@ fn test_xray_grep_line_regex_prefilter_differential_parity() {
             "readMs",
             "wholeFilePrecheckMs",
             "lineEvalMs",
+            "candidateFilterMs",
+            "scopeFilterMs",
+            "matchBookkeepingMs",
+            "mergeMs",
+            "sortDedupMs",
+            "rankTruncateMs",
+            "responseBuildMs",
+            "responseFinalizeMs",
+            "scanResidualMs",
             "filesVisited",
             "filesSkippedByPrefilter",
             "filesSkippedByScope",
@@ -2772,6 +2786,8 @@ fn test_xray_grep_line_regex_prefilter_differential_parity() {
             assert!(scan[key].as_u64().is_some(),
                 "lineRegexScan.{} should be a numeric field; got scan={}", key, scan);
         }
+        assert_ne!(scan["responseFinalizeMs"].as_u64(), Some(9_999_999_999_999),
+            "lineRegexScan.responseFinalizeMs placeholder must not be emitted; got scan={}", scan);
     }
 
     assert_line_regex_scan_schema(scan_on);
@@ -2804,6 +2820,10 @@ fn test_xray_grep_line_regex_prefilter_differential_parity() {
     assert!(!r_count.is_error,
         "countOnly lineRegex run should not error: {}", r_count.content[0].text);
     let out_count: Value = serde_json::from_str(&r_count.content[0].text).unwrap();
+
+    assert!(!r_count.content[0].text.contains("__xray_line_regex_perf_hint_placeholder__"),
+        "countOnly lineRegex response must not leak perfHint placeholder: {}", r_count.content[0].text);
+
     assert!(out_count.get("files").is_none(), "countOnly response should omit files: {}", out_count);
     assert!(out_count["summary"]["lineRegexScan"].is_object(),
         "countOnly lineRegex summary should include lineRegexScan; got: {}", out_count["summary"]);
