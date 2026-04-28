@@ -160,9 +160,9 @@ if (-not $SkipDownload) {
         exit 1
     }
 
-    $tag = gh release list --repo $GithubRepo --limit 1 --json tagName --jq '.[0].tagName'
+    $tag = (gh api "repos/$GithubRepo/releases/latest" --jq '.tag_name') 2>$null
     if (-not $tag) {
-        Write-Error "No releases found in $GithubRepo"
+        Write-Error "No releases found in $GithubRepo (check gh auth status and repo name)"
         exit 1
     }
 
