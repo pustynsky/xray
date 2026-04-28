@@ -280,7 +280,9 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     let start = Instant::now();
 
     // ─── Collect all matching source files ─────────────────────
+    let collect_start = Instant::now();
     let files = collect_source_files(&dir, &extensions, args.threads, args.respect_git_exclude);
+    let collect_elapsed = collect_start.elapsed();
     let total_files = files.len();
     eprintln!("[def-index] Found {} files to parse", total_files);
     crate::index::log_memory(&format!("def-build: after file walk ({} files)", total_files));
@@ -300,6 +302,16 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     #[cfg(feature = "lang-rust")]
     let need_rs = extensions.iter().any(|e| e == "rs");
 
+    let bytes_parsed = std::sync::atomic::AtomicU64::new(0);
+    let read_nanos = std::sync::atomic::AtomicU64::new(0);
+    let parse_nanos = std::sync::atomic::AtomicU64::new(0);
+
+    crate::index::log_phase("definitionsCollectFiles", &[
+        ("definitionsCollectFilesMs", crate::index::format_duration_ms(collect_elapsed)),
+        ("definitionsFilesDiscovered", total_files.to_string()),
+        ("definitionsThreadCount", num_threads.to_string()),
+    ]);
+
     // ─── Initialize index BEFORE chunked parsing ─────────────
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::with_capacity(files.len());
     for (file_id, file_path) in files.iter().enumerate() {
@@ -317,6 +329,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     };
 
     let mut total_call_sites = 0usize;
+    let mut merge_elapsed = Duration::ZERO;
 
     // ─── Chunked parallel parsing + streaming merge ──────────
     // Outer loop splits files into macro-chunks of 4096.
@@ -342,6 +355,9 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
         let num_sub_chunks = sub_chunks.len();
 
         std::thread::scope(|s| {
+            let bytes_parsed = &bytes_parsed;
+            let read_nanos = &read_nanos;
+            let parse_nanos = &parse_nanos;
             let handles: Vec<_> = sub_chunks.into_iter().map(|sub_chunk| {
                 s.spawn(move || {
                     #[cfg(feature = "lang-csharp")]
@@ -367,21 +383,31 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                     let mut empty_files: Vec<(u32, u64)> = Vec::new();
 
                     for (file_id, file_path) in sub_chunk {
+                        let read_start = Instant::now();
                         let (content, was_lossy) = match read_file_lossy(Path::new(file_path)) {
-                            Ok(r) => r,
-                            Err(_) => { errors += 1; continue; }
+                            Ok(r) => {
+                                read_nanos.fetch_add(read_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                                r
+                            }
+                            Err(_) => {
+                                read_nanos.fetch_add(read_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                                errors += 1;
+                                continue;
+                            }
                         };
                         if was_lossy {
                             lossy_files.push(file_path.clone());
                         }
 
                         let content_len = content.len() as u64;
+                        bytes_parsed.fetch_add(content_len, std::sync::atomic::Ordering::Relaxed);
 
                         let ext = Path::new(file_path.as_str())
                             .extension()
                             .and_then(|e| e.to_str())
                             .unwrap_or("");
 
+                        let parse_start = Instant::now();
                         let (file_defs, file_calls, file_stats) = match ext.to_lowercase().as_str() {
                             #[cfg(feature = "lang-csharp")]
                             "cs" => {
@@ -427,6 +453,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                             }
                             _ => (Vec::new(), Vec::new(), Vec::new()),
                         };
+                        parse_nanos.fetch_add(parse_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
 
                         if !file_defs.is_empty() {
                             chunk_defs.push((*file_id, file_defs, file_calls, file_stats));
@@ -451,9 +478,12 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
                         (Vec::new(), 0, Vec::new(), Vec::new(), HashMap::new())
                     });
 
-                total_call_sites += merge_chunk_result(
+                let merge_start = Instant::now();
+                let chunk_call_sites = merge_chunk_result(
                     &mut index, chunk_defs, errors, lossy_files, empty_files, chunk_ext_methods,
                 );
+                merge_elapsed = merge_elapsed.saturating_add(merge_start.elapsed());
+                total_call_sites += chunk_call_sites;
 
                 crate::index::log_memory(&format!(
                     "def-build: merged sub-chunk {}/{} of macro-chunk {}/{} ({} defs so far)",
@@ -473,11 +503,13 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     }
 
     // ─── Angular template enrichment ──────────────────────────
+    let enrich_start = Instant::now();
     #[cfg(feature = "lang-typescript")]
     enrich_angular_templates(
         &index.definitions, &index.files,
         &mut index.name_index, &mut index.selector_index, &mut index.template_children,
     );
+    let enrich_elapsed = enrich_start.elapsed();
 
     // ─── Report and finalize ──────────────────────────────────
     let suspicious_threshold = 500u64;
@@ -493,6 +525,27 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
 
     let elapsed = start.elapsed();
     let files_with_defs = total_files - index.empty_file_ids.len() - index.parse_errors;
+    let files_parsed = total_files.saturating_sub(index.parse_errors);
+    let bytes_parsed = bytes_parsed.load(std::sync::atomic::Ordering::Relaxed);
+    let read_elapsed = Duration::from_nanos(read_nanos.load(std::sync::atomic::Ordering::Relaxed));
+    let parse_elapsed = Duration::from_nanos(parse_nanos.load(std::sync::atomic::Ordering::Relaxed));
+    crate::index::log_phase("definitionsBuildComplete", &[
+        ("definitionsCollectFilesMs", crate::index::format_duration_ms(collect_elapsed)),
+        ("definitionsFilesDiscovered", total_files.to_string()),
+        ("definitionsFilesParsed", files_parsed.to_string()),
+        ("definitionsBytesParsed", bytes_parsed.to_string()),
+        ("definitionsReadMs", crate::index::format_duration_ms(read_elapsed)),
+        ("definitionsParseExtractMs", crate::index::format_duration_ms(parse_elapsed)),
+        ("definitionsMergeMs", crate::index::format_duration_ms(merge_elapsed)),
+        ("definitionsEnrichMs", crate::index::format_duration_ms(enrich_elapsed)),
+        ("definitionsTotalBuildMs", crate::index::format_duration_ms(elapsed)),
+        ("definitionsThreadCount", num_threads.to_string()),
+        ("definitionsParseErrors", index.parse_errors.to_string()),
+        ("definitionsWorkerPanics", index.worker_panics.to_string()),
+        ("definitionsExtracted", index.definitions.len().to_string()),
+        ("definitionsCallSites", total_call_sites.to_string()),
+        ("definitionsCodeStats", index.code_stats.len().to_string()),
+    ]);
     eprintln!(
         "[def-index] Parsed {} files in {:.1}s: {} with definitions, {} empty, {} read errors, {} lossy-utf8, {} threads",
         total_files,

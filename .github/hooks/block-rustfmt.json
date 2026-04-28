@@ -1,0 +1,12 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "command": "pwsh -NoProfile -ExecutionPolicy Bypass -File .github/hooks/block-rustfmt.ps1",
+        "timeout": 5
+      }
+    ]
+  }
+}
+

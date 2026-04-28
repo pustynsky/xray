@@ -127,6 +127,60 @@ fn append_to_debug_log(line: &str) {
         }
 }
 
+fn debug_elapsed_secs() -> f64 {
+    DEBUG_LOG_START
+        .get()
+        .map(|s| s.elapsed().as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+pub fn debug_elapsed_ms() -> Option<f64> {
+    DEBUG_LOG_START
+        .get()
+        .map(|s| s.elapsed().as_secs_f64() * 1000.0)
+}
+
+pub fn format_duration_ms(duration: Duration) -> String {
+    format!("{:.1}", duration.as_secs_f64() * 1000.0)
+}
+
+pub fn format_debug_path(path: &std::path::Path) -> String {
+    if let Some(debug_dir) = DEBUG_LOG_PATH.get().and_then(|path| path.parent())
+        && let Ok(relative) = path.strip_prefix(debug_dir) {
+            return clean_path(&relative.to_string_lossy());
+        }
+
+    path.file_name()
+        .map(|name| clean_path(&name.to_string_lossy()))
+        .unwrap_or_else(|| "<unknown>".to_string())
+}
+
+fn format_phase_fields(fields: &[(&str, String)]) -> String {
+    fields
+        .iter()
+        .map(|(key, value)| {
+            let value = value.replace('\r', "\\r").replace('\n', "\\n");
+            format!("{}={}", key, value)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+pub fn log_phase(label: &str, fields: &[(&str, String)]) {
+    if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let details = format_phase_fields(fields);
+    let line = if details.is_empty() {
+        format!("{:8.2} | PHASE | {}", debug_elapsed_secs(), label)
+    } else {
+        format!("{:8.2} | PHASE | {} | {}", debug_elapsed_secs(), label, details)
+    };
+    eprintln!("[debug-log] {}", line);
+    append_to_debug_log(&line);
+}
+
 /// Log an MCP tool request to the debug log file.
 /// Format: "2026-02-24T09:28:20Z | REQ  | xray_grep | {"terms":"HttpClient","ext":"cs"}"
 /// No-op when `--debug-log` is not passed (single AtomicBool check).
@@ -688,6 +742,12 @@ pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, la
     })?;
 
     let elapsed = start.elapsed();
+    log_phase("indexSave", &[
+        ("indexLabel", label.to_string()),
+        ("indexSaveMs", format_duration_ms(elapsed)),
+        ("compressedBytes", compressed_size.to_string()),
+        ("path", format_debug_path(path)),
+    ]);
 
     eprintln!("[{}] Saved {:.1} MB (compressed) in {:.2}s to {}",
         label,
@@ -762,6 +822,12 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
     };
 
     let elapsed = start.elapsed();
+    log_phase("indexLoad", &[
+        ("indexLabel", label.to_string()),
+        ("indexLoadMs", format_duration_ms(elapsed)),
+        ("compressedBytes", compressed_size.to_string()),
+        ("path", format_debug_path(path)),
+    ]);
     eprintln!("[{}] Loaded {:.1} MB in {:.3}s",
         label,
         compressed_size as f64 / 1_048_576.0,
@@ -1239,6 +1305,7 @@ pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
 
     let entries: Mutex<Vec<FileEntry>> = Mutex::new(Vec::new());
 
+    let walk_start = Instant::now();
     builder.build_parallel().run(|| {
         let entries = &entries;
         Box::new(move |result| {
@@ -1271,6 +1338,7 @@ pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
     });
 
     let entries = recover_mutex(entries, "file-index");
+    let walk_elapsed = walk_start.elapsed();
     let count = entries.len();
 
     let now = SystemTime::now()
@@ -1288,6 +1356,12 @@ pub fn build_index(args: &IndexArgs) -> Result<FileIndex, SearchError> {
     };
 
     let elapsed = start.elapsed();
+    log_phase("fileListBuild", &[
+        ("fileListWalkMs", format_duration_ms(walk_elapsed)),
+        ("fileListEntries", count.to_string()),
+        ("fileListTotalBuildMs", format_duration_ms(elapsed)),
+        ("fileListThreadCount", thread_count.to_string()),
+    ]);
     eprintln!(
         "Indexed {} entries in {:.3}s",
         count,
@@ -1333,12 +1407,19 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     let read_errors = std::sync::atomic::AtomicUsize::new(0);
     let lossy_file_count = std::sync::atomic::AtomicUsize::new(0);
     let worker_panic_count = std::sync::atomic::AtomicUsize::new(0);
+    let files_discovered = std::sync::atomic::AtomicUsize::new(0);
+    let bytes_read = std::sync::atomic::AtomicU64::new(0);
+    let read_nanos = std::sync::atomic::AtomicU64::new(0);
 
+    let walk_start = Instant::now();
     builder.build_parallel().run(|| {
         let extensions = Arc::clone(&extensions);
         let file_data = &file_data;
         let read_errors = &read_errors;
         let lossy_file_count = &lossy_file_count;
+        let files_discovered = &files_discovered;
+        let bytes_read = &bytes_read;
+        let read_nanos = &read_nanos;
         Box::new(move |result| {
             if let Ok(entry) = result {
                 if !entry.file_type().is_some_and(|ft| ft.is_file()) {
@@ -1352,9 +1433,13 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
                 if !ext_match {
                     return ignore::WalkState::Continue;
                 }
+                files_discovered.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let path = clean_path(&entry.path().to_string_lossy());
+                let read_start = Instant::now();
                 match read_file_lossy(entry.path()) {
                     Ok((content, was_lossy)) => {
+                        read_nanos.fetch_add(read_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
+                        bytes_read.fetch_add(content.len() as u64, std::sync::atomic::Ordering::Relaxed);
                         if was_lossy {
                             lossy_file_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             warn!(target: "xray::index", path = %path, "content-index: lossy UTF-8 conversion");
@@ -1362,6 +1447,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
                         file_data.lock().unwrap_or_else(|e| e.into_inner()).push((path, content));
                     }
                     Err(e) => {
+                        read_nanos.fetch_add(read_start.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
                         read_errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         warn!(target: "xray::index", path = %path, error = %e, "content-index: failed to read file");
                     }
@@ -1372,10 +1458,24 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     });
 
     let mut file_data = recover_mutex(file_data, "content-index");
+    let walk_elapsed = walk_start.elapsed();
     let file_count = file_data.len();
+    let files_discovered = files_discovered.load(std::sync::atomic::Ordering::Relaxed);
     let read_errors = read_errors.load(std::sync::atomic::Ordering::Relaxed);
     let lossy_file_count = lossy_file_count.load(std::sync::atomic::Ordering::Relaxed);
+    let bytes_read = bytes_read.load(std::sync::atomic::Ordering::Relaxed);
+    let read_elapsed = Duration::from_nanos(read_nanos.load(std::sync::atomic::Ordering::Relaxed));
     let min_len = args.min_token_len;
+    log_phase("contentBuildWalk", &[
+        ("contentWalkMs", format_duration_ms(walk_elapsed)),
+        ("contentFilesDiscovered", files_discovered.to_string()),
+        ("contentFilesRead", file_count.to_string()),
+        ("contentBytesRead", bytes_read.to_string()),
+        ("contentReadMs", format_duration_ms(read_elapsed)),
+        ("contentReadErrors", read_errors.to_string()),
+        ("contentLossyUtf8", lossy_file_count.to_string()),
+        ("contentThreadCount", thread_count.to_string()),
+    ]);
     log_memory(&format!("content-build: after file walk ({} files)", file_count));
 
     // ─── Chunked parallel tokenization ─────────────────────────
@@ -1394,6 +1494,8 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
 
     const CONTENT_CHUNK_SIZE: usize = 4096;
     let total_chunks = file_count.div_ceil(CONTENT_CHUNK_SIZE).max(1);
+    let tokenize_start = Instant::now();
+    let mut merge_elapsed = Duration::ZERO;
 
     for chunk_idx in 0..total_chunks {
         let drain_count = file_data.len().min(CONTENT_CHUNK_SIZE);
@@ -1458,6 +1560,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
         });
 
         // Merge this chunk's results into global accumulators
+        let merge_start = Instant::now();
         for (local_files, local_counts, local_index, local_total) in chunk_results {
             files.extend(local_files);
             file_token_counts.extend(local_counts);
@@ -1466,6 +1569,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
                 index.entry(token).or_default().extend(postings);
             }
         }
+        merge_elapsed = merge_elapsed.saturating_add(merge_start.elapsed());
         // chunk + chunk_results are DROPPED here — memory freed
 
         log_memory(&format!(
@@ -1476,6 +1580,8 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     }
     // file_data is now empty (all entries drained)
     drop(file_data);
+    let tokenize_elapsed = tokenize_start.elapsed();
+    let tokenize_only_elapsed = tokenize_elapsed.checked_sub(merge_elapsed).unwrap_or(Duration::ZERO);
 
     let unique_tokens = index.len();
     log_memory(&format!("content-build: after all chunks ({} tokens)", unique_tokens));
@@ -1487,7 +1593,9 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     let worker_panics = worker_panic_count.load(std::sync::atomic::Ordering::Relaxed);
 
     // Build trigram index from inverted index tokens
+    let trigram_start = Instant::now();
     let trigram = build_trigram_index(&index);
+    let trigram_elapsed = trigram_start.elapsed();
     eprintln!(
         "Trigram index: {} trigrams, {} tokens",
         trigram.trigram_map.len(),
@@ -1496,6 +1604,22 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
     log_memory("content-build: after trigram build");
 
     let elapsed = start.elapsed();
+    log_phase("contentBuildComplete", &[
+        ("contentWalkMs", format_duration_ms(walk_elapsed)),
+        ("contentFilesDiscovered", files_discovered.to_string()),
+        ("contentFilesRead", file_count.to_string()),
+        ("contentBytesRead", bytes_read.to_string()),
+        ("contentReadMs", format_duration_ms(read_elapsed)),
+        ("contentTokenizeMs", format_duration_ms(tokenize_only_elapsed)),
+        ("contentTokenCount", total_tokens.to_string()),
+        ("contentMergeMs", format_duration_ms(merge_elapsed)),
+        ("contentTrigramBuildMs", format_duration_ms(trigram_elapsed)),
+        ("contentTotalBuildMs", format_duration_ms(elapsed)),
+        ("contentThreadCount", thread_count.to_string()),
+        ("contentReadErrors", read_errors.to_string()),
+        ("contentLossyUtf8", lossy_file_count.to_string()),
+        ("contentWorkerPanics", worker_panics.to_string()),
+    ]);
 
     eprintln!(
         "Indexed {} files, {} unique tokens ({} total) in {:.3}s ({} read errors, {} lossy-utf8)",

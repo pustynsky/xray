@@ -1,5 +1,7 @@
 /target
 *.ps1
+# Copilot pre-tool-use hook script; must remain tracked despite the ps1 ignore.
+!.github/hooks/block-rustfmt.ps1
 !e2e-test.ps1
 !scripts/setup-xray.ps1
 todo*.md

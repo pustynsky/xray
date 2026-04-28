@@ -68,6 +68,25 @@ pub fn cmd_serve(args: ServeArgs) {
         args.respect_git_exclude,
     );
 
+    let cache_hit_content = content_ready.load(Ordering::Acquire);
+    let cache_hit_definitions = args.definitions && def_ready.load(Ordering::Acquire);
+    let startup_mode = if is_unresolved {
+        "unresolved"
+    } else if cache_hit_content && (!args.definitions || cache_hit_definitions) {
+        "hotLoad"
+    } else if cache_hit_content || cache_hit_definitions {
+        "mixed"
+    } else {
+        "coldBuild"
+    };
+    crate::index::log_phase("serveStartup", &[
+        ("startupMode", startup_mode.to_string()),
+        ("cacheHitContent", cache_hit_content.to_string()),
+        ("cacheHitDefinitions", cache_hit_definitions.to_string()),
+        ("definitionsEnabled", args.definitions.to_string()),
+        ("watchEnabled", args.watch.to_string()),
+    ]);
+
     // Pick the canonical effective value for watcher / periodic rescan /
     // HandlerContext. Content and definition indexes are normally built with
     // the same flag value; if they differ (exotic mixed-state on disk),
@@ -235,6 +254,7 @@ const PRIMARY_BUILD_LOCK_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
 
 struct PrimaryBuildLock {
     path: PathBuf,
+    acquired_at: Instant,
 }
 
 impl Drop for PrimaryBuildLock {
@@ -265,7 +285,7 @@ fn try_create_primary_build_lock(path: &Path) -> std::io::Result<Option<PrimaryB
             use std::io::Write;
             let _ = writeln!(file, "pid={}", std::process::id());
             let _ = writeln!(file, "createdAt={:?}", std::time::SystemTime::now());
-            Ok(Some(PrimaryBuildLock { path: path.to_path_buf() }))
+            Ok(Some(PrimaryBuildLock { path: path.to_path_buf(), acquired_at: Instant::now() }))
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
         Err(e) => Err(e),
@@ -309,13 +329,21 @@ fn acquire_or_wait_primary_build_lock(
     }
 
     let lock_path = primary_build_lock_path(dir_str, idx_base);
+    let wait_start = Instant::now();
+    let mut waited_on_peer = false;
     loop {
         match try_create_primary_build_lock(&lock_path) {
             Ok(Some(lock)) => {
                 crate::index::log_memory("serve: primary build lock acquired");
+                crate::index::log_phase("primaryBuildLockAcquired", &[
+                    ("primaryBuildLockWaitMs", crate::index::format_duration_ms(wait_start.elapsed())),
+                    ("waitedOnPeer", waited_on_peer.to_string()),
+                    ("path", crate::index::format_debug_path(&lock_path)),
+                ]);
                 return Some(lock);
             }
             Ok(None) => {
+                waited_on_peer = true;
                 crate::index::log_memory("serve: waiting for peer primary build lock");
                 while lock_path.exists() {
                     if remove_stale_primary_build_lock(&lock_path) {
@@ -351,6 +379,14 @@ fn release_primary_build_lock_when_ready(
         ) {
             std::thread::sleep(PRIMARY_BUILD_LOCK_POLL_INTERVAL);
         }
+        let held_elapsed = lock.acquired_at.elapsed();
+        let primary_ready_at = crate::index::debug_elapsed_ms().unwrap_or(0.0);
+        crate::index::log_phase("primaryIndexesReady", &[
+            ("primaryReadyAtMs", format!("{:.1}", primary_ready_at)),
+            ("primaryBuildLockHeldMs", crate::index::format_duration_ms(held_elapsed)),
+            ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
+            ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
+        ]);
         drop(lock);
         crate::index::log_memory("serve: primary build lock released");
     });
@@ -428,6 +464,9 @@ fn load_or_build_content_index(
     if let Some(idx) = loaded {
         let load_elapsed = start.elapsed();
         let cache_age = format_cache_age(idx.created_at);
+        let loaded_file_count = idx.live_file_count();
+        let loaded_token_count = idx.index.len();
+        let loaded_trigram_count = idx.trigram.trigram_map.len();
         // Resolve effective `respect_git_exclude` against persisted value:
         // prefer persisted (warn on mismatch) so long-running paths (watcher,
         // periodic rescan, MCP reindex) cannot silently flip the policy.
@@ -455,6 +494,16 @@ fn load_or_build_content_index(
         };
         idx.shrink_maps();
         *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
+        crate::index::log_phase("contentReady", &[
+            ("cacheHitContent", "true".to_string()),
+            ("contentLoadMs", crate::index::format_duration_ms(load_elapsed)),
+            ("contentReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+            ("contentFilesRead", loaded_file_count.to_string()),
+            ("contentTokenCount", loaded_token_count.to_string()),
+            ("contentTrigrams", loaded_trigram_count.to_string()),
+            ("loadMethod", load_method.to_string()),
+            ("cacheAge", cache_age),
+        ]);
         content_ready.store(true, Ordering::Release);
         crate::index::log_memory("serve: content ready");
 
@@ -471,6 +520,9 @@ fn load_or_build_content_index(
             crate::index::log_memory("serve: trigram warm-up done");
         });
     } else if !is_unresolved {
+        crate::index::log_phase("contentBuildQueued", &[
+            ("cacheHitContent", "false".to_string()),
+        ]);
         // Build in background — don't block the event loop
         let bg_index = Arc::clone(&index);
         let bg_ready = Arc::clone(content_ready);
@@ -484,6 +536,7 @@ fn load_or_build_content_index(
             info!("Building content index in background...");
             crate::index::log_memory("content-build: starting");
             let build_start = Instant::now();
+            let index_build_start = Instant::now();
             let new_idx = match build_content_index(&ContentIndexArgs {
                 dir: bg_dir.clone(),
                 ext: bg_ext.clone(),
@@ -496,13 +549,21 @@ fn load_or_build_content_index(
                 Ok(idx) => idx,
                 Err(e) => {
                     warn!(error = %e, "Failed to build content index");
+                    crate::index::log_phase("contentBuildFailed", &[
+                        ("contentTotalBuildMs", crate::index::format_duration_ms(build_start.elapsed())),
+                        ("error", e.to_string()),
+                    ]);
                     bg_building.store(false, Ordering::Release);
                     bg_ready.store(true, Ordering::Release);
                     return;
                 }
             };
+            let index_build_elapsed = index_build_start.elapsed();
             crate::index::log_memory("content-build: finished");
-            if let Err(e) = save_content_index(&new_idx, &bg_idx_base) {
+            let save_start = Instant::now();
+            let save_result = save_content_index(&new_idx, &bg_idx_base);
+            let save_elapsed = save_start.elapsed();
+            if let Err(e) = save_result {
                 warn!(error = %e, "Failed to save content index to disk");
             } else {
                 // Clean up old content indexes for the same root with different extensions
@@ -516,6 +577,7 @@ fn load_or_build_content_index(
             // that fragment the heap; reloading gives compact contiguous memory.
             let file_count = new_idx.files.len();
             let token_count = new_idx.index.len();
+            let drop_reload_start = Instant::now();
             drop(new_idx);
             crate::index::log_memory("serve: after drop(content build)");
             crate::index::force_mimalloc_collect();
@@ -539,6 +601,7 @@ fn load_or_build_content_index(
                     }
                 }
             };
+            let drop_reload_elapsed = drop_reload_start.elapsed();
 
             crate::index::log_memory("serve: after reload content from disk");
             let mut new_idx = if watch {
@@ -556,6 +619,16 @@ fn load_or_build_content_index(
             );
             *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
             bg_building.store(false, Ordering::Release);
+            crate::index::log_phase("contentReady", &[
+                ("cacheHitContent", "false".to_string()),
+                ("contentBuildMs", crate::index::format_duration_ms(index_build_elapsed)),
+                ("contentSaveMs", crate::index::format_duration_ms(save_elapsed)),
+                ("contentDropReloadMs", crate::index::format_duration_ms(drop_reload_elapsed)),
+                ("contentTotalBuildMs", crate::index::format_duration_ms(elapsed)),
+                ("contentReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                ("contentFilesRead", file_count.to_string()),
+                ("contentUniqueTokens", token_count.to_string()),
+            ]);
             bg_ready.store(true, Ordering::Release);
             crate::index::log_memory("serve: content ready");
 
@@ -703,6 +776,7 @@ fn load_or_build_definition_index(
             let cache_age = format_cache_age(idx.created_at);
             let def_file_count = idx.live_file_count();
             let def_count = idx.definitions.len();
+            let def_call_count: usize = idx.method_calls.values().map(Vec::len).sum();
             effective_respect_git_exclude = super::resolve_respect_git_exclude(
                 "serve/definitions",
                 Some(idx.respect_git_exclude),
@@ -718,13 +792,26 @@ fn load_or_build_definition_index(
             crate::index::log_memory(&format!(
                 "serve: def loaded [{}] (files={}, defs={}, calls={}, age={})",
                 def_load_method, def_file_count, def_count,
-                idx.method_calls.len(), cache_age
+                def_call_count, cache_age
             ));
             let mut idx = idx;
             idx.shrink_maps();
             *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
+            crate::index::log_phase("definitionsReady", &[
+                ("cacheHitDefinitions", "true".to_string()),
+                ("definitionsLoadMs", crate::index::format_duration_ms(def_elapsed)),
+                ("definitionsReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                ("definitionsFilesParsed", def_file_count.to_string()),
+                ("definitionsExtracted", def_count.to_string()),
+                ("definitionsCallSites", def_call_count.to_string()),
+                ("loadMethod", def_load_method.to_string()),
+                ("cacheAge", cache_age),
+            ]);
             def_ready.store(true, Ordering::Release);
         } else if !is_unresolved {
+            crate::index::log_phase("definitionsBuildQueued", &[
+                ("cacheHitDefinitions", "false".to_string()),
+            ]);
             // Build in background
             let bg_def = Arc::clone(&def_arc);
             let bg_def_ready = Arc::clone(def_ready);
@@ -738,14 +825,19 @@ fn load_or_build_definition_index(
                 info!("Building definition index in background...");
                 crate::index::log_memory("def-build: starting");
                 let build_start = Instant::now();
+                let index_build_start = Instant::now();
                 let new_idx = definitions::build_definition_index(&definitions::DefIndexArgs {
                     dir: bg_dir.clone(),
                     ext: bg_def_exts.clone(),
                     threads: 0,
                     respect_git_exclude,
                 });
+                let index_build_elapsed = index_build_start.elapsed();
                 crate::index::log_memory("def-build: finished");
-                if let Err(e) = definitions::save_definition_index(&new_idx, &bg_idx_base) {
+                let save_start = Instant::now();
+                let save_result = definitions::save_definition_index(&new_idx, &bg_idx_base);
+                let save_elapsed = save_start.elapsed();
+                if let Err(e) = save_result {
                     warn!(error = %e, "Failed to save definition index to disk");
                 } else {
                     // Clean up old definition indexes for the same root with different extensions
@@ -757,6 +849,8 @@ fn load_or_build_definition_index(
                 // Drop + reload to eliminate allocator fragmentation (same pattern)
                 let def_count = new_idx.definitions.len();
                 let file_count = new_idx.files.len();
+                let call_count: usize = new_idx.method_calls.values().map(Vec::len).sum();
+                let drop_reload_start = Instant::now();
                 drop(new_idx);
                 crate::index::log_memory("serve: after drop(def build)");
                 crate::index::force_mimalloc_collect();
@@ -769,6 +863,7 @@ fn load_or_build_definition_index(
                             respect_git_exclude,
                         })
                     });
+                let drop_reload_elapsed = drop_reload_start.elapsed();
 
                 crate::index::log_memory("serve: after reload def from disk");
                 let elapsed = build_start.elapsed();
@@ -782,6 +877,17 @@ fn load_or_build_definition_index(
                 new_idx.shrink_maps();
                 *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
                 bg_def_building.store(false, Ordering::Release);
+                crate::index::log_phase("definitionsReady", &[
+                    ("cacheHitDefinitions", "false".to_string()),
+                    ("definitionsBuildMs", crate::index::format_duration_ms(index_build_elapsed)),
+                    ("definitionsSaveMs", crate::index::format_duration_ms(save_elapsed)),
+                    ("definitionsDropReloadMs", crate::index::format_duration_ms(drop_reload_elapsed)),
+                    ("definitionsTotalBuildMs", crate::index::format_duration_ms(elapsed)),
+                    ("definitionsReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                    ("definitionsFilesParsed", file_count.to_string()),
+                    ("definitionsExtracted", def_count.to_string()),
+                    ("definitionsCallSites", call_count.to_string()),
+                ]);
                 bg_def_ready.store(true, Ordering::Release);
                 crate::index::log_memory("serve: def ready");
             });
@@ -817,6 +923,9 @@ fn build_git_cache_background(
         std::thread::spawn(move || {
             let start = Instant::now();
             crate::index::log_memory("git-cache: starting");
+            crate::index::log_phase("gitCacheStarted", &[
+                ("gitCacheStartedAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+            ]);
             eprintln!("[git-cache] Initializing for {}...", bg_dir);
 
             // Determine repo path — check if it's a git repository
@@ -825,6 +934,13 @@ fn build_git_cache_background(
             if !git_dir.exists() {
                 eprintln!("[git-cache] No .git directory found, skipping");
                 bg_git_ready.store(true, Ordering::Release);
+                crate::index::log_phase("gitCacheReady", &[
+                    ("cacheHitGit", "false".to_string()),
+                    ("gitCacheSkipped", "true".to_string()),
+                    ("gitCacheReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                    ("gitCacheTotalMs", crate::index::format_duration_ms(start.elapsed())),
+                    ("reason", "noGitDirectory".to_string()),
+                ]);
                 return;
             }
 
@@ -837,11 +953,19 @@ fn build_git_cache_background(
                 Err(e) => {
                     warn!(error = %e, "Failed to detect default branch, skipping git cache");
                     bg_git_ready.store(true, Ordering::Release);
+                    crate::index::log_phase("gitCacheReady", &[
+                        ("cacheHitGit", "false".to_string()),
+                        ("gitCacheSkipped", "true".to_string()),
+                        ("gitCacheReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                        ("gitCacheTotalMs", crate::index::format_duration_ms(start.elapsed())),
+                        ("reason", "defaultBranchDetectionFailed".to_string()),
+                    ]);
                     return;
                 }
             };
 
             let cache_path = GitHistoryCache::cache_path_for(&bg_dir, &bg_idx_base);
+            let mut cache_hit = false;
 
             // Try to load cache from disk
             let cache = if cache_path.exists() {
@@ -862,6 +986,7 @@ fn build_git_cache_background(
                                     let current_head = String::from_utf8_lossy(&output.stdout).trim().to_string();
                                     if disk_cache.is_valid_for(&current_head) {
                                         // Cache is up to date
+                                        cache_hit = true;
                                         let elapsed = start.elapsed();
                                         info!(
                                             elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
@@ -916,8 +1041,14 @@ fn build_git_cache_background(
                         wait_for_def_ready,
                     );
                     eprintln!("[git-cache] Building cache for branch '{}' (this may take a few minutes for large repos)...", branch);
+                    let git_build_start = Instant::now();
                     match GitHistoryCache::build(&repo_path, &branch) {
                         Ok(new_cache) => {
+                            crate::index::log_phase("gitCacheColdBuild", &[
+                                ("gitCacheColdBuildMs", crate::index::format_duration_ms(git_build_start.elapsed())),
+                                ("commits", new_cache.commits.len().to_string()),
+                                ("files", new_cache.file_commits.len().to_string()),
+                            ]);
                             // Save to disk
                             if let Err(e) = new_cache.save_to_disk(&cache_path) {
                                 warn!(error = %e, "Failed to save git cache to disk");
@@ -927,6 +1058,14 @@ fn build_git_cache_background(
                         Err(e) => {
                             warn!(error = %e, "Failed to build git cache");
                             bg_git_ready.store(true, Ordering::Release);
+                            crate::index::log_phase("gitCacheReady", &[
+                                ("cacheHitGit", "false".to_string()),
+                                ("gitCacheSkipped", "true".to_string()),
+                                ("gitCacheReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                                ("gitCacheTotalMs", crate::index::format_duration_ms(start.elapsed())),
+                                ("gitCacheColdBuildMs", crate::index::format_duration_ms(git_build_start.elapsed())),
+                                ("reason", "buildFailed".to_string()),
+                            ]);
                             return;
                         }
                     }
@@ -943,6 +1082,13 @@ fn build_git_cache_background(
             bg_git_ready.store(true, Ordering::Release);
 
             let elapsed = start.elapsed();
+            crate::index::log_phase("gitCacheReady", &[
+                ("cacheHitGit", cache_hit.to_string()),
+                ("gitCacheReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                ("gitCacheTotalMs", crate::index::format_duration_ms(elapsed)),
+                ("commits", commit_count.to_string()),
+                ("files", file_count.to_string()),
+            ]);
             crate::index::log_memory("git-cache: ready");
             eprintln!(
                 "[git-cache] Ready: {} commits, {} files in {:.1}s",
@@ -968,16 +1114,32 @@ fn wait_for_primary_indexes_before_git_cache_rebuild(
     def_ready: &AtomicBool,
     wait_for_def_ready: bool,
 ) {
+    let wait_start = Instant::now();
     if primary_indexes_ready_for_git_cache_rebuild(content_ready, def_ready, wait_for_def_ready) {
+        crate::index::log_phase("gitCachePrimaryWait", &[
+            ("gitCachePrimaryWaitMs", "0.0".to_string()),
+            ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
+            ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
+        ]);
         return;
     }
 
     info!("Git cache cold rebuild deferred until primary indexes are ready");
+    crate::index::log_phase("gitCachePrimaryWaitStart", &[
+        ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
+        ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
+        ("waitForDefinitions", wait_for_def_ready.to_string()),
+    ]);
     // Only cold rebuilds wait here. A valid persisted git cache is loaded earlier,
     // so this removes cold-start contention without delaying cache hits.
     while !primary_indexes_ready_for_git_cache_rebuild(content_ready, def_ready, wait_for_def_ready) {
         std::thread::sleep(Duration::from_millis(100));
     }
+    crate::index::log_phase("gitCachePrimaryWait", &[
+        ("gitCachePrimaryWaitMs", crate::index::format_duration_ms(wait_start.elapsed())),
+        ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
+        ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
+    ]);
     info!("Primary indexes ready; starting deferred git cache cold rebuild");
 }
 
