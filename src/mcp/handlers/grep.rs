@@ -421,6 +421,67 @@ struct LiteralPrefilterInfo {
     candidate_files_after_scope: Option<usize>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct LineRegexScanTelemetry {
+    compile_ms: u64,
+    literal_prefilter_ms: u64,
+    scope_count_ms: u64,
+    scan_ms: u64,
+    read_ms: u64,
+    whole_file_precheck_ms: u64,
+    line_eval_ms: u64,
+    files_visited: usize,
+    files_skipped_by_prefilter: usize,
+    files_skipped_by_scope: usize,
+    files_read: usize,
+    bytes_read: usize,
+    whole_file_precheck_files: usize,
+    whole_file_precheck_matched_files: usize,
+    line_eval_files: usize,
+    line_eval_lines: usize,
+    matched_files: usize,
+}
+
+impl LineRegexScanTelemetry {
+    fn to_json(&self) -> Value {
+        json!({
+            "compileMs": self.compile_ms,
+            "literalPrefilterMs": self.literal_prefilter_ms,
+            "scopeCountMs": self.scope_count_ms,
+            "scanMs": self.scan_ms,
+            "readMs": self.read_ms,
+            "wholeFilePrecheckMs": self.whole_file_precheck_ms,
+            "lineEvalMs": self.line_eval_ms,
+            "filesVisited": self.files_visited,
+            "filesSkippedByPrefilter": self.files_skipped_by_prefilter,
+            "filesSkippedByScope": self.files_skipped_by_scope,
+            "filesRead": self.files_read,
+            "bytesRead": self.bytes_read,
+            "wholeFilePrecheckFiles": self.whole_file_precheck_files,
+            "wholeFilePrecheckMatchedFiles": self.whole_file_precheck_matched_files,
+            "lineEvalFiles": self.line_eval_files,
+            "lineEvalLines": self.line_eval_lines,
+            "matchedFiles": self.matched_files,
+        })
+    }
+}
+
+fn duration_ms_u64(duration: std::time::Duration) -> u64 {
+    let millis = duration.as_millis();
+    millis.min(u128::from(u64::MAX)) as u64
+}
+
+fn elapsed_ms_u64(start: Instant) -> u64 {
+    duration_ms_u64(start.elapsed())
+}
+
+fn apply_line_regex_scan_summary(summary: &mut Value, telemetry: &LineRegexScanTelemetry) {
+    if let Some(obj) = summary.as_object_mut() {
+        obj.insert("lineRegexScan".to_string(), telemetry.to_json());
+    }
+}
+
+
 /// Maximum ratio of `candidate_files / total_files` at which the literal
 /// prefilter is considered worth applying. Above this threshold the trigram
 /// intersection cost is comparable to (or worse than) just reading every
@@ -2635,6 +2696,9 @@ fn handle_line_regex_search_inner(
     // line terminator, matching how `str::lines()` splits content for the
     // per-line scan below. Regression test:
     // `tests_line_regex::line_regex_dollar_anchor_crlf_file_matches_closing_brace`.
+    let mut scan_telemetry = LineRegexScanTelemetry::default();
+
+    let compile_start = Instant::now();
     let mut compiled: Vec<regex::Regex> = Vec::with_capacity(patterns.len());
     for pat in &patterns {
         match regex::RegexBuilder::new(pat)
@@ -2646,6 +2710,7 @@ fn handle_line_regex_search_inner(
             Err(e) => return ToolCallResult::error(format!("Invalid regex '{}': {}", pat, e)),
         }
     }
+    scan_telemetry.compile_ms = elapsed_ms_u64(compile_start);
 
     // Iterate ALL indexed files, apply file/ext/dir filters, then run line regex.
     // No token pre-filter: regex with anchors/whitespace cannot be reduced to a
@@ -2660,6 +2725,7 @@ fn handle_line_regex_search_inner(
     // "no prefilter" (extraction failed, OR-mode unprefilterable, or short-
     // circuit) — fall back to scanning every file. `_prefilter_info` is
     // captured here for the summary observability added in step 4.
+    let literal_prefilter_start = Instant::now();
     let (candidate_file_ids, mut prefilter_info): (Option<HashSet<u32>>, LiteralPrefilterInfo) =
         if prefilter_enabled {
             compute_literal_prefilter(index, &patterns, params.mode_and)
@@ -2673,6 +2739,7 @@ fn handle_line_regex_search_inner(
                 },
             )
         };
+    scan_telemetry.literal_prefilter_ms = elapsed_ms_u64(literal_prefilter_start);
 
     // Scope-aware counters: when any `dir`/`file`/`ext`/`exclude*` filter is
     // set, do a single pass over `index.files` and count (a) how many files
@@ -2684,6 +2751,7 @@ fn handle_line_regex_search_inner(
     // global counts, which is the cognitive trap that motivated the
     // alternation-split advisory revert.
     if params_have_scope_filter(params) {
+        let scope_count_start = Instant::now();
         let mut total_after = 0usize;
         let mut cand_after = 0usize;
         for (file_id, file_path) in index.files.iter().enumerate() {
@@ -2701,6 +2769,7 @@ fn handle_line_regex_search_inner(
         if candidate_file_ids.is_some() {
             prefilter_info.candidate_files_after_scope = Some(cand_after);
         }
+        scan_telemetry.scope_count_ms = elapsed_ms_u64(scope_count_start);
     }
 
     // MINOR-23: cap total bytes held in `content_cache` so a single broad query
@@ -2717,7 +2786,9 @@ fn handle_line_regex_search_inner(
     let mut cache_bytes_used: usize = 0;
     let mut line_content_truncated = false;
 
+    let scan_start = Instant::now();
     for (file_id, file_path) in index.files.iter().enumerate() {
+        scan_telemetry.files_visited += 1;
         // AC-4: skip files outside the literal-prefilter candidate set when
         // it was computed. The check runs *before* `passes_file_filters` so
         // the cheaper hashset lookup short-circuits the path/ext/dir glob
@@ -2725,29 +2796,46 @@ fn handle_line_regex_search_inner(
         if let Some(ref candidates) = candidate_file_ids
             && !candidates.contains(&(file_id as u32))
         {
+            scan_telemetry.files_skipped_by_prefilter += 1;
             continue;
         }
         if !passes_file_filters(file_path, params) {
+            scan_telemetry.files_skipped_by_scope += 1;
             continue;
         }
 
         // Read file once per candidate; cache for show_lines reuse.
+        let read_start = Instant::now();
         let content = match read_file_lossy(std::path::Path::new(file_path)) {
             Ok((c, _lossy)) => c,
             Err(_) => continue,
         };
+        scan_telemetry.read_ms = scan_telemetry
+            .read_ms
+            .saturating_add(elapsed_ms_u64(read_start));
+        scan_telemetry.files_read += 1;
+        scan_telemetry.bytes_read = scan_telemetry.bytes_read.saturating_add(content.len());
 
         // Pre-check: does ANY pattern match anywhere in the file?
         // This is a fast-rejection optimization for files that don't match any pattern.
+        scan_telemetry.whole_file_precheck_files += 1;
+        let precheck_start = Instant::now();
         let any_pattern_matches = compiled.iter().any(|re| re.is_match(&content));
+        scan_telemetry.whole_file_precheck_ms = scan_telemetry
+            .whole_file_precheck_ms
+            .saturating_add(elapsed_ms_u64(precheck_start));
         if !any_pattern_matches {
             continue;
         }
+        scan_telemetry.whole_file_precheck_matched_files += 1;
 
+        scan_telemetry.line_eval_files += 1;
+        let line_eval_start = Instant::now();
         let mut matched_any_pattern = false;
         for (pat_idx, re) in compiled.iter().enumerate() {
             let mut matching_lines: Vec<u32> = Vec::new();
             for (line_num, line) in content.lines().enumerate() {
+                scan_telemetry.line_eval_lines = scan_telemetry.line_eval_lines.saturating_add(1);
                 if re.is_match(line) {
                     matching_lines.push((line_num + 1) as u32);
                 }
@@ -2757,6 +2845,9 @@ fn handle_line_regex_search_inner(
                 matched_any_pattern = true;
             }
         }
+        scan_telemetry.line_eval_ms = scan_telemetry
+            .line_eval_ms
+            .saturating_add(elapsed_ms_u64(line_eval_start));
 
         if matched_any_pattern && params.show_lines {
             // Reserve cache budget before insertion. If this file would push us
@@ -2772,6 +2863,7 @@ fn handle_line_regex_search_inner(
             }
         }
     }
+    scan_telemetry.scan_ms = elapsed_ms_u64(scan_start);
 
     // Merge per-pattern matches with OR or AND semantics.
     let merged_files: HashMap<String, Vec<u32>> = if params.mode_and {
@@ -2816,6 +2908,7 @@ fn handle_line_regex_search_inner(
         .collect();
 
     let total_files = results.len();
+    scan_telemetry.matched_files = total_files;
     let total_occurrences: usize = results.iter().map(|r| r.lines.len()).sum();
 
     // Sort by occurrences descending (most matches first), like phrase search.
@@ -2845,6 +2938,7 @@ fn handle_line_regex_search_inner(
             search_elapsed.as_millis() as u64,
             search_mode,
         );
+        apply_line_regex_scan_summary(&mut summary, &scan_telemetry);
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -2873,6 +2967,7 @@ fn handle_line_regex_search_inner(
         search_elapsed.as_millis() as u64,
         search_mode,
     );
+    apply_line_regex_scan_summary(&mut summary, &scan_telemetry);
     if line_content_truncated {
         // MINOR-23: tell the client that lineContent previews are partial.
         // The matched line *numbers* are complete; only `lineContent` arrays

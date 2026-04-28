@@ -52,6 +52,10 @@
   (read + apply + diff + write + verify) instead of total wall-time
   including reindex. `totalTimeMs` remains the full dispatch-to-response
   time.
+- **`xray_grep lineRegex` scan telemetry** — successful `lineRegex=true` summaries
+  now include `lineRegexScan` with compile, literal-prefilter, scope-count, read,
+  whole-file precheck, per-line evaluation, and scan-loop counters/timings for
+  diagnosing wide-scope latency without changing search semantics.
 
 ## 2026-04-27
 
