@@ -233,6 +233,7 @@ fn load_or_build_content_index(
         max_age_secs: 86400,
         files: Vec::new(),
         index: HashMap::new(),
+        file_tokens: Vec::new(),
         total_tokens: 0,
         extensions: extensions.to_vec(),
         file_token_counts: Vec::new(),

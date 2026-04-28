@@ -379,11 +379,10 @@ pub fn start_watcher(
                                 // attempt is throttled to AUTOSAVE_QUIET_INTERVAL.
                                 // Only clear `have_unsaved` on success so the
                                 // retry actually happens.
+                                let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
                                 let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                                 last_autosave = std::time::Instant::now();
-                                if saved_ok {
-                                    have_unsaved = autosave_dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
-                                }
+                                finish_autosave_attempt(saved_ok, had_autosave_dirty, &mut have_unsaved);
                             }
                         }
                 }
@@ -416,11 +415,10 @@ pub fn start_watcher(
                         // interval flushes the tail of a recent burst,
                         // max interval is the unconditional ceiling).
                         if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
+                            let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
                             let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                             last_autosave = std::time::Instant::now();
-                            if saved_ok {
-                                have_unsaved = autosave_dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
-                            }
+                            finish_autosave_attempt(saved_ok, had_autosave_dirty, &mut have_unsaved);
                         }
                         continue;
                     }
@@ -437,11 +435,10 @@ pub fn start_watcher(
                     // pending sets are empty. Quiet-interval gate makes the
                     // first save land ~5min after the burst started.
                     if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
+                        let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
                         let saved_ok = periodic_autosave(&index, &def_index, &index_base);
                         last_autosave = std::time::Instant::now();
-                        if saved_ok {
-                            have_unsaved = autosave_dirty.swap(false, std::sync::atomic::Ordering::Relaxed);
-                        }
+                        finish_autosave_attempt(saved_ok, had_autosave_dirty, &mut have_unsaved);
                     }
                 }
                 Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
@@ -503,6 +500,7 @@ struct ContentUpdateResult {
     ok: bool,
     lock_wait_ms: f64,
     update_ms: f64,
+    applied_dirty: usize,
 }
 
 /// Result of a single `update_definition_index` call with lock-wait timing.
@@ -510,6 +508,7 @@ struct DefUpdateResult {
     ok: bool,
     lock_wait_ms: f64,
     update_ms: f64,
+    applied_dirty: usize,
 }
 
 /// Synchronously reindex a small set of paths (typically 1–20 files), bypassing
@@ -566,7 +565,7 @@ pub(crate) fn reindex_paths_sync(
     if !content_result.ok {
         stats.content_lock_poisoned = true;
     } else {
-        stats.content_updated = dirty_clean.len();
+        stats.content_updated = content_result.applied_dirty;
     }
     stats.content_lock_wait_ms = content_result.lock_wait_ms;
     stats.content_update_ms = content_result.update_ms;
@@ -575,7 +574,7 @@ pub(crate) fn reindex_paths_sync(
     if !def_result.ok {
         stats.def_lock_poisoned = true;
     } else if def_index.is_some() {
-        stats.def_updated = dirty_clean.len();
+        stats.def_updated = def_result.applied_dirty;
     }
     stats.def_lock_wait_ms = def_result.lock_wait_ms;
     stats.def_update_ms = def_result.update_ms;
@@ -683,6 +682,18 @@ fn update_content_index(
     let tokenized: Vec<TokenizedFileResult> = dirty_clean.iter()
         .filter_map(|path| tokenize_file_standalone(path))
         .collect();
+    // Only successfully tokenized dirty files are safe to purge. If a dirty
+    // file becomes temporarily unreadable between the fs event and tokenization,
+    // dropping its old postings would make search lose a still-known file and
+    // break total_tokens == sum(file_token_counts). The watcher/rescan can retry
+    // on a later event; until then the old index entry is safer than deletion.
+    let tokenized_paths: HashSet<PathBuf> = tokenized.iter()
+        .map(|result| result.path.clone())
+        .collect();
+    // This drives sync-reindex response booleans and autosave scheduling. It is
+    // deliberately the number of dirty files actually tokenized, not the number
+    // of dirty paths requested.
+    let applied_dirty_count = tokenized.len();
 
     // ── Phase 2: Determine purge IDs (READ LOCK — instant) ──
     let purge_ids: HashSet<u32> = match index.read() {
@@ -694,7 +705,10 @@ fn update_content_index(
                         ids.insert(fid);
                     }
                 }
-                for path in dirty_clean {
+                // Dirty paths that failed tokenization are deliberately absent
+                // here; see `tokenized_paths` above for the stale-but-consistent
+                // fallback contract.
+                for path in &tokenized_paths {
                     if let Some(&fid) = p2id.get(path) {
                         ids.insert(fid);
                     }
@@ -704,22 +718,36 @@ fn update_content_index(
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire content index read lock (poisoned)");
-            return ContentUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0 };
+            return ContentUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0 };
         }
     };
     // READ lock released here
 
-    // ── Phase 3: Apply under WRITE LOCK (~500ms purge + ~0.1ms × N insert) ──
+    // ── Phase 3: Apply under WRITE LOCK (targeted purge + ~0.1ms × N insert) ──
     let write_wait_start = std::time::Instant::now();
     match index.write() {
         Ok(mut idx) => {
             let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
             let update_start = std::time::Instant::now();
+            let idx = &mut *idx;
+            if idx.path_to_id.is_some() && idx.file_tokens.is_empty() {
+                // Disk-loaded indexes do not persist `file_tokens`. Rebuild at
+                // the first mutable watch update instead of on every read-only
+                // CLI load, so `xray grep` never pays reverse-map memory/cpu.
+                idx.rebuild_file_tokens();
+            }
+            let mut touched_tokens = Vec::new();
 
-            // Batch purge: ONE pass over inverted index removes all stale postings
+            // Batch purge: touch only stale files' token posting lists when
+            // `file_tokens` is available. This is the hot path this change is
+            // protecting: a one-file edit should scale with tokens in that file,
+            // not with every posting in a monorepo-sized inverted index.
             let purge_start = std::time::Instant::now();
             if !purge_ids.is_empty() {
-                // Subtract old token counts before purge
+                // Counts are adjusted only for files we are actually purging:
+                // deleted files and dirty files with a successful replacement
+                // tokenization. Failed dirty tokenizations keep their old count
+                // and old postings until a later successful update.
                 for &fid in &purge_ids {
                     let old_count = if (fid as usize) < idx.file_token_counts.len() {
                         idx.file_token_counts[fid as usize] as u64
@@ -728,7 +756,12 @@ fn update_content_index(
                     };
                     idx.total_tokens = idx.total_tokens.saturating_sub(old_count);
                 }
-                batch_purge_files(&mut idx.index, &purge_ids);
+                touched_tokens = batch_purge_files(
+                    &mut idx.index,
+                    &mut idx.file_tokens,
+                    &idx.file_token_counts,
+                    &purge_ids,
+                );
             }
             let purge_ms = purge_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -753,24 +786,31 @@ fn update_content_index(
                 }
             }
 
-            // Apply pre-tokenized results (just insert pre-computed postings)
+            let applied_changes = !purge_ids.is_empty() || !tokenized.is_empty();
+
+            // Apply pre-tokenized results after purge. New files get a fresh
+            // file_id; existing dirty files reuse the same file_id whose old
+            // postings were removed above.
             let insert_start = std::time::Instant::now();
             for result in tokenized {
-                apply_tokenized_file(&mut idx, result);
+                touched_tokens.extend(apply_tokenized_file(idx, result));
             }
             let insert_ms = insert_start.elapsed().as_secs_f64() * 1000.0;
 
-            // Mark trigram index as dirty — will be rebuilt lazily on next substring search
-            idx.trigram_dirty = true;
-
-            // Update created_at — watcher detects subsequent changes via fsnotify, so now() is safe
-            idx.created_at = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or(std::time::Duration::ZERO)
-                .as_secs();
+            if applied_changes {
+                // Advance the content watermark only after the in-memory index
+                // actually changed. If every dirty file failed tokenization, the
+                // old postings are still present and the old mtime must remain
+                // eligible for a later watcher/rescan retry.
+                idx.trigram_dirty = true;
+                idx.created_at = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or(std::time::Duration::ZERO)
+                    .as_secs();
+            }
 
             // Conditionally shrink collections after retain() to release excess capacity.
-            shrink_if_oversized(&mut idx);
+            shrink_if_oversized_targeted(idx, &touched_tokens);
 
             let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
             if update_ms > 100.0 {
@@ -783,11 +823,11 @@ fn update_content_index(
                     "[reindex-trace] update_content_index write lock breakdown"
                 );
             }
-            ContentUpdateResult { ok: true, lock_wait_ms, update_ms }
+            ContentUpdateResult { ok: true, lock_wait_ms, update_ms, applied_dirty: applied_dirty_count }
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire content index write lock (poisoned)");
-            ContentUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0 }
+            ContentUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0 }
         }
     }
 }
@@ -805,7 +845,7 @@ fn update_definition_index(
     dirty_clean: &[PathBuf],
 ) -> DefUpdateResult {
     let Some(def_idx) = def_index else {
-        return DefUpdateResult { ok: true, lock_wait_ms: 0.0, update_ms: 0.0 };
+        return DefUpdateResult { ok: true, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0 };
     };
 
     // ── Phase 1: Parse all dirty files OUTSIDE the lock (~30ms × N) ──
@@ -815,8 +855,10 @@ fn update_definition_index(
         .filter_map(|(i, path)| definitions::parse_file_standalone(path, i as u32))
         .collect();
 
-    // Track which dirty paths produced a ParsedFileResult
+    // Track which dirty paths produced a ParsedFileResult. Sync response fields
+    // should report applied parser work, not just paths that were requested.
     let parsed_paths: HashSet<PathBuf> = parsed.iter().map(|r| r.path.clone()).collect();
+    let applied_dirty = parsed_paths.len();
 
     // ── Phase 2: Apply under brief WRITE LOCK (~0.1ms × N + removals) ──
     let write_wait_start = std::time::Instant::now();
@@ -849,22 +891,27 @@ fn update_definition_index(
                 .as_secs();
 
             let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
-            DefUpdateResult { ok: true, lock_wait_ms, update_ms }
+            DefUpdateResult { ok: true, lock_wait_ms, update_ms, applied_dirty }
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire definition index write lock (poisoned)");
-            DefUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0 }
+            DefUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0 }
         }
     }
 }
 
 /// Conditionally shrink collections after retain() to release excess capacity.
 /// Only shrinks when capacity > 2 × len to avoid unnecessary realloc storms.
-fn shrink_if_oversized(idx: &mut ContentIndex) {
-    for postings in idx.index.values_mut() {
-        if postings.capacity() > postings.len() * 2 {
-            postings.shrink_to_fit();
-        }
+fn shrink_if_oversized_targeted(idx: &mut ContentIndex, touched_tokens: &[String]) {
+    // The old shrink path walked every posting list after every purge. That was
+    // small in test repos and expensive in monorepos. We already know exactly
+    // which posting lists were retained/inserted, so only those can need Vec
+    // capacity cleanup.
+    for token in touched_tokens {
+        if let Some(postings) = idx.index.get_mut(token)
+            && postings.capacity() > postings.len() * 2 {
+                postings.shrink_to_fit();
+            }
     }
     if idx.index.capacity() > idx.index.len() * 2 {
         idx.index.shrink_to_fit();
@@ -873,6 +920,12 @@ fn shrink_if_oversized(idx: &mut ContentIndex) {
         && p2id.capacity() > p2id.len() * 2 {
             p2id.shrink_to_fit();
         }
+}
+
+#[cfg(test)]
+fn shrink_if_oversized(idx: &mut ContentIndex) {
+    let touched_tokens: Vec<String> = idx.index.keys().cloned().collect();
+    shrink_if_oversized_targeted(idx, &touched_tokens);
 }
 
 /// Result of tokenizing a file outside the ContentIndex lock.
@@ -908,7 +961,10 @@ fn tokenize_file_standalone(path: &Path) -> Option<TokenizedFileResult> {
 ///
 /// For existing files (already in path_to_id), assumes old postings have been
 /// purged via `batch_purge_files`. For new files, assigns a new file_id.
-fn apply_tokenized_file(index: &mut ContentIndex, result: TokenizedFileResult) {
+fn apply_tokenized_file(index: &mut ContentIndex, result: TokenizedFileResult) -> Vec<String> {
+    // Watch mode is the only caller that can mutate a ContentIndex in place, and
+    // watch mode always has path_to_id. If this helper is accidentally called on
+    // a read-only index, do nothing rather than inventing unstable file_ids.
     let file_id = if let Some(ref mut p2id) = index.path_to_id {
         if let Some(&fid) = p2id.get(&result.path) {
             fid  // existing file (already purged via batch_purge)
@@ -921,21 +977,36 @@ fn apply_tokenized_file(index: &mut ContentIndex, result: TokenizedFileResult) {
             fid
         }
     } else {
-        return;
+        return Vec::new();
     };
 
-    // Insert pre-computed postings into inverted index
+    let mut token_names = Vec::with_capacity(result.tokens.len());
+
+    // Collect the token name while consuming the token map. The same token list
+    // becomes the reverse-map entry used by the next targeted purge.
     for (token, lines) in result.tokens {
         index.total_tokens += lines.len() as u64;
+        token_names.push(token.clone());
         index.index.entry(token)
             .or_default()
             .push(Posting { file_id, lines });
     }
+    token_names.sort_unstable();
+
+    let file_slot = file_id as usize;
+    // New files append dense file_ids; resizing keeps file_tokens indexed by the
+    // same file_id namespace as files[] and file_token_counts[].
+    if index.file_tokens.len() <= file_slot {
+        index.file_tokens.resize_with(file_slot + 1, Vec::new);
+    }
+    index.file_tokens[file_slot] = token_names.clone();
 
     // Update file token count
     if (file_id as usize) < index.file_token_counts.len() {
         index.file_token_counts[file_id as usize] = result.total_tokens;
     }
+
+    token_names
 }
 
 /// Decide whether the post-reconcile checkpoint must run.
@@ -990,6 +1061,31 @@ pub(crate) const AUTOSAVE_MAX_INTERVAL: Duration = Duration::from_secs(600);
 ///   its existing `!idx.files.is_empty()` allocator-capacity gate).
 ///
 /// Pure function for unit testability (no `Instant`, no I/O).
+fn begin_autosave_attempt(autosave_dirty: &AtomicBool) -> bool {
+    // Clear the external dirty channel before taking snapshots. Any mutation that
+    // set this bit before the swap is about to be included in this save attempt;
+    // any mutation that sets it after the swap happened during serialization and
+    // must remain visible for the next attempt.
+    autosave_dirty.swap(false, Ordering::Relaxed)
+}
+
+fn finish_autosave_attempt(saved_ok: bool, had_autosave_dirty: bool, have_unsaved: &mut bool) {
+    if saved_ok {
+        // A successful save covers all local watcher batches flushed before the
+        // attempt plus any external dirty bit consumed by begin_autosave_attempt.
+        // Do not copy `had_autosave_dirty` back into have_unsaved: that was the
+        // pre-save bit and would keep the watcher re-armed forever after a
+        // reconcile-only save.
+        *have_unsaved = false;
+    } else if had_autosave_dirty {
+        // The attempt consumed an external dirty bit but failed before it became
+        // durable. Preserve retry pressure through the local channel; concurrent
+        // external mutations after the swap remain in the atomic channel.
+        *have_unsaved = true;
+    }
+}
+
+
 pub(crate) fn autosave_due(have_unsaved: bool, since_last_save: Duration) -> bool {
     (have_unsaved && since_last_save >= AUTOSAVE_QUIET_INTERVAL)
         || since_last_save >= AUTOSAVE_MAX_INTERVAL
@@ -1132,6 +1228,7 @@ pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
     }
 
     index.path_to_id = Some(path_to_id);
+    index.rebuild_file_tokens();
     index
 }
 
@@ -1218,24 +1315,92 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
     }
 }
 
-/// Remove all postings for a SET of file_ids from the inverted index in ONE pass.
+/// Batch purge multiple files from the inverted index.
 ///
-/// O(total_postings) regardless of how many file_ids — replaces N sequential calls
-/// to `purge_file_from_inverted_index` which was O(N × total_postings).
+/// With a populated `file_tokens` reverse map, this is targeted:
+/// O(tokens_in_purged_files * affected_posting_len) instead of walking every
+/// token/posting list in the index. That is the difference between a one-file
+/// edit blocking readers for milliseconds and blocking them for seconds on a
+/// monorepo-sized content index.
 ///
-/// For git pull with 300 files: ~500ms single pass vs ~30s sequential.
-/// For git checkout with 10K files: ~500ms single pass vs ~120s sequential.
+/// If `file_tokens` is empty, the index has not entered mutable watch mode yet
+/// (or a test is intentionally exercising the legacy path), so we fall back to
+/// the old full scan. If `file_tokens` is non-empty but inconsistent, panic: a
+/// partial reverse map is corruption and silently degrading would leave stale
+/// postings in search results.
 fn batch_purge_files(
     inverted: &mut std::collections::HashMap<String, Vec<Posting>>,
+    file_tokens: &mut [Vec<String>],
+    file_token_counts: &[u32],
     file_ids: &HashSet<u32>,
-) {
+) -> Vec<String> {
     if file_ids.is_empty() {
-        return;
+        return Vec::new();
     }
-    inverted.retain(|_token, postings| {
-        postings.retain(|p| !file_ids.contains(&p.file_id));
-        !postings.is_empty()
-    });
+
+    if file_tokens.is_empty() {
+        // Compatibility path for cold/deserialized indexes before
+        // `rebuild_file_tokens()` has run. It is slower, but correct because it
+        // inspects every posting instead of trusting absent reverse data.
+        let mut touched_tokens = Vec::with_capacity(inverted.len());
+        inverted.retain(|token, postings| {
+            touched_tokens.push(token.clone());
+            postings.retain(|p| !file_ids.contains(&p.file_id));
+            !postings.is_empty()
+        });
+        touched_tokens.sort_unstable();
+        return touched_tokens;
+    }
+
+    // A non-empty reverse map is an all-or-bug contract: every live file_id in
+    // the mutable index must have a slot. Truncation would otherwise make the
+    // targeted path skip stale postings without noticing.
+    let max_file_id = file_ids.iter().copied().max().unwrap_or(0) as usize;
+    assert!(
+        max_file_id < file_tokens.len(),
+        "file_tokens missing entry for file_id {}",
+        max_file_id
+    );
+
+    let mut touched_tokens = Vec::new();
+    for &file_id in file_ids {
+        let file_slot = file_id as usize;
+        let token_count = file_token_counts.get(file_slot).copied().unwrap_or(0);
+        // An empty slot is valid only for tombstoned/zero-token files. For a live
+        // file with tokens, an empty reverse entry means the targeted purge would
+        // touch nothing while old postings remained searchable.
+        assert!(
+            token_count == 0 || !file_tokens[file_slot].is_empty(),
+            "file_tokens empty for file_id {} with {} indexed tokens",
+            file_id,
+            token_count
+        );
+        touched_tokens.extend(file_tokens[file_slot].iter().cloned());
+    }
+    // Multiple files commonly share hot tokens such as `class`; dedup before
+    // retaining so each posting list is scanned once per batch.
+    touched_tokens.sort_unstable();
+    touched_tokens.dedup();
+
+    for token in &touched_tokens {
+        let remove_token = if let Some(postings) = inverted.get_mut(token) {
+            postings.retain(|p| !file_ids.contains(&p.file_id));
+            postings.is_empty()
+        } else {
+            false
+        };
+        if remove_token {
+            inverted.remove(token);
+        }
+    }
+
+    for &file_id in file_ids {
+        // Keep the reverse map aligned with the forward index: after purge, this
+        // file_id has no postings until apply_tokenized_file inserts new ones.
+        file_tokens[file_id as usize].clear();
+    }
+
+    touched_tokens
 }
 
 
@@ -1564,11 +1729,23 @@ pub(crate) fn periodic_rescan_once(
         // their own walk today (acceptable on a 5-min cadence;
         // collapsing to a single walk is a follow-up). Bailing out
         // when nothing changed is their internal fast path.
-        reconcile_content_index(index, dir, extensions, respect_git_exclude);
+        let (applied_added, applied_modified, applied_removed) =
+            reconcile_content_index(index, dir, extensions, respect_git_exclude);
+        let mut definition_changed = false;
         if let Some(di) = def_index {
-            definitions::reconcile_definition_index_nonblocking(di, dir, extensions, respect_git_exclude);
+            let (def_added, def_modified, def_removed) =
+                definitions::reconcile_definition_index_nonblocking(di, dir, extensions, respect_git_exclude);
+            definition_changed = def_added + def_modified + def_removed > 0;
         }
-        autosave_dirty.store(true, Ordering::Relaxed);
+        // Schedule autosave from applied content changes, not merely detected
+        // content drift. If content tokenization failed, the old content snapshot
+        // is intentionally kept in memory and should not be checkpointed as the
+        // new baseline. Definition reconcile is different: a dirty file that
+        // fails to parse can still remove stale definitions and advance the def
+        // watermark, so any reported def delta must also be persisted.
+        if applied_added + applied_modified + applied_removed > 0 || definition_changed {
+            autosave_dirty.store(true, Ordering::Relaxed);
+        }
     }
 
     if drift_detected {
@@ -1742,11 +1919,13 @@ fn reconcile_content_index(
             if let Some(ref p2id) = idx.path_to_id {
                 // Check for new and modified files
                 for (path, mtime) in disk_files {
-                    if let Some(&fid) = p2id.get(path) {
-                        // Existing file — check if modified
+                    if p2id.contains_key(path) {
+                        // Existing file: decide whether it should be retokenized.
+                        // Do not add its file_id to purge_ids here; purge is safe
+                        // only after Phase 3 successfully produces replacement
+                        // tokens for this path.
                         if *mtime > threshold {
                             to_tokenize.push(path.clone());
-                            purge_ids.insert(fid);
                             modified += 1;
                         }
                     } else {
@@ -1792,10 +1971,38 @@ fn reconcile_content_index(
         .filter_map(|path| tokenize_file_standalone(path))
         .collect();
 
-    // ── Phase 4: Apply under WRITE LOCK (~500ms purge + ~0.1ms × N insert) ──
+    // ── Phase 4: Apply under WRITE LOCK (targeted purge + ~0.1ms × N insert) ──
+    let mut applied_added = 0usize;
+    let mut applied_modified = 0usize;
     match index.write() {
         Ok(mut idx) => {
-            // Batch purge stale postings
+            let idx = &mut *idx;
+            if idx.path_to_id.is_some() && idx.file_tokens.is_empty() {
+                // Reconciliation can run immediately after startup on an index
+                // loaded from disk. Build the derived reverse map at this mutable
+                // gateway instead of in generic read-only load paths.
+                idx.rebuild_file_tokens();
+            }
+            let mut purge_ids = purge_ids;
+            if let Some(ref p2id) = idx.path_to_id {
+                // Modified files are added to purge_ids only after tokenization
+                // succeeds. If read/tokenize fails, keep old postings/counts so
+                // the index remains internally consistent and future rescans can
+                // retry without having hidden a known file from search.
+                for result in &tokenized {
+                    if let Some(&fid) = p2id.get(&result.path) {
+                        purge_ids.insert(fid);
+                        applied_modified += 1;
+                    } else {
+                        applied_added += 1;
+                    }
+                }
+            }
+            let mut touched_tokens = Vec::new();
+
+            // Batch purge stale postings through file_tokens when available.
+            // The set contains deleted files plus modified files that have a
+            // successful replacement tokenization ready to insert.
             if !purge_ids.is_empty() {
                 for &fid in &purge_ids {
                     let old_count = if (fid as usize) < idx.file_token_counts.len() {
@@ -1805,7 +2012,12 @@ fn reconcile_content_index(
                     };
                     idx.total_tokens = idx.total_tokens.saturating_sub(old_count);
                 }
-                batch_purge_files(&mut idx.index, &purge_ids);
+                touched_tokens = batch_purge_files(
+                    &mut idx.index,
+                    &mut idx.file_tokens,
+                    &idx.file_token_counts,
+                    &purge_ids,
+                );
             }
 
             // Process removed files: update path_to_id, zero token counts,
@@ -1826,27 +2038,43 @@ fn reconcile_content_index(
                 }
             }
 
-            // Apply pre-tokenized results
+            // Apply pre-tokenized results after purge. New files append file_ids;
+            // modified files reuse the file_id whose stale postings were purged.
             for result in tokenized {
-                apply_tokenized_file(&mut idx, result);
+                touched_tokens.extend(apply_tokenized_file(idx, result));
             }
 
-            // Mark trigram as dirty and update created_at if anything changed
-            if added > 0 || modified > 0 || removed > 0 {
+            shrink_if_oversized_targeted(idx, &touched_tokens);
+
+            // Advance the reconciliation watermark only for changes that were
+            // actually applied. Detected-but-failed tokenizations must remain
+            // visible to the next periodic rescan, and startup reconcile must
+            // not checkpoint that stale snapshot as the new baseline.
+            if applied_added > 0 || applied_modified > 0 || removed > 0 {
                 idx.created_at = walk_start;
                 idx.trigram_dirty = true;
             }
 
             let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-            if added > 0 || modified > 0 || removed > 0 {
+            if applied_added > 0 || applied_modified > 0 || removed > 0 {
                 info!(
                     scanned,
-                    added,
-                    modified,
+                    added = applied_added,
+                    modified = applied_modified,
                     removed,
+                    detected_added = added,
+                    detected_modified = modified,
                     elapsed_ms = format_args!("{:.1}", elapsed_ms),
                     "Content index reconciliation complete (non-blocking)"
+                );
+            } else if added > 0 || modified > 0 {
+                info!(
+                    scanned,
+                    detected_added = added,
+                    detected_modified = modified,
+                    elapsed_ms = format_args!("{:.1}", elapsed_ms),
+                    "Content index reconciliation: changes detected but no files tokenized"
                 );
             } else {
                 info!(
@@ -1857,8 +2085,8 @@ fn reconcile_content_index(
             }
 
             crate::index::log_memory(&format!(
-                "watcher: content reconciliation non-blocking (scanned={}, added={}, modified={}, removed={}, {:.0}ms)",
-                scanned, added, modified, removed, elapsed_ms
+                "watcher: content reconciliation non-blocking (scanned={}, added={}, modified={}, removed={}, detected_added={}, detected_modified={}, {:.0}ms)",
+                scanned, applied_added, applied_modified, removed, added, modified, elapsed_ms
             ));
         }
         Err(e) => {
@@ -1867,7 +2095,7 @@ fn reconcile_content_index(
         }
     }
 
-    (added, modified, removed)
+    (applied_added, applied_modified, removed)
 }
 
 #[cfg(test)]

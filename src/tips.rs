@@ -9,6 +9,7 @@ use serde_json::{json, Value};
 ///   - `xray_edit` rejection-error hints (when caller sends an invented
 ///     top-level wrapper like `files` / `batch` / `targets`),
 ///   - the per-tool `xray_help tool="xray_edit"` payload.
+///
 /// Keeping both consumers on this constant prevents the help text and the
 /// error hint from drifting apart.
 pub const CANONICAL_MODE_A_EXAMPLE: &str =

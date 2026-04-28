@@ -688,7 +688,7 @@ pub fn generate_trigrams(token: &str) -> Vec<String> {
 /// Loading an index with a different version triggers a rebuild.
 pub const CONTENT_INDEX_VERSION: u32 = 3;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Debug)]
 pub struct ContentIndex {
     pub root: String,
     /// Format version — used to detect stale indexes after schema changes.
@@ -702,6 +702,19 @@ pub struct ContentIndex {
     pub files: Vec<String>,
     /// token (lowercased) → postings
     pub index: HashMap<String, Vec<Posting>>,
+    /// Reverse index: file_id -> unique token names in that file.
+    ///
+    /// This is derived data from `index` and intentionally not persisted:
+    /// persisting it would duplicate millions of token strings, force an index
+    /// format bump, and make read-only CLI loads pay memory for data they never
+    /// use. Mutable watch-mode paths rebuild it once when they need fast purge.
+    ///
+    /// Keep this in sync with every mutation of `index` in watcher code. A stale
+    /// or partially-filled reverse map can leave old postings behind, so purge
+    /// code treats inconsistent populated maps as a bug instead of silently
+    /// falling back.
+    #[serde(skip)]
+    pub file_tokens: Vec<Vec<String>>,
     /// total tokens indexed
     pub total_tokens: u64,
     /// extensions that were indexed
@@ -735,7 +748,64 @@ pub struct ContentIndex {
     pub respect_git_exclude: bool,
 }
 
+// `ContentIndex::clone()` is used by periodic autosave to take a snapshot
+// under a read lock before serializing without the lock. `file_tokens` can be
+// hundreds of MB on large repositories and is skipped by serde anyway, so cloning
+// it would extend autosave lock-hold time while producing bytes that are thrown
+// away. The clone is therefore a persistence snapshot, not a full in-memory
+// working copy.
+impl Clone for ContentIndex {
+    fn clone(&self) -> Self {
+        Self {
+            root: self.root.clone(),
+            format_version: self.format_version,
+            created_at: self.created_at,
+            max_age_secs: self.max_age_secs,
+            files: self.files.clone(),
+            index: self.index.clone(),
+            // See the impl-level comment: reverse purge state is rebuilt when a
+            // cloned/deserialized index enters watch mode, never serialized.
+            file_tokens: Vec::new(),
+            total_tokens: self.total_tokens,
+            extensions: self.extensions.clone(),
+            file_token_counts: self.file_token_counts.clone(),
+            trigram: self.trigram.clone(),
+            trigram_dirty: self.trigram_dirty,
+            path_to_id: self.path_to_id.clone(),
+            read_errors: self.read_errors,
+            lossy_file_count: self.lossy_file_count,
+            worker_panics: self.worker_panics,
+            respect_git_exclude: self.respect_git_exclude,
+        }
+    }
+}
+
 impl ContentIndex {
+    pub fn rebuild_file_tokens(&mut self) {
+        let file_count = self.files.len();
+        let mut file_tokens = vec![Vec::new(); file_count];
+
+        // Rebuild from the forward index because that is the persisted source of
+        // truth. This costs O(total_postings), but only when an index enters a
+        // mutable/watch path; read-only grep/fast callers should not pay it.
+        for (token, postings) in &self.index {
+            for posting in postings {
+                let file_id = posting.file_id as usize;
+                if file_id < file_count {
+                    file_tokens[file_id].push(token.clone());
+                }
+            }
+        }
+
+        // A token should appear at most once per file in the reverse map. Sorting
+        // also makes tests and corruption diagnostics deterministic.
+        for tokens in &mut file_tokens {
+            tokens.sort_unstable();
+            tokens.dedup();
+        }
+        self.file_tokens = file_tokens;
+    }
+
     /// Check if the index is older than its configured max age.
     pub fn is_stale(&self) -> bool {
         let now = SystemTime::now()
@@ -823,6 +893,13 @@ impl ContentIndex {
         for postings in self.index.values_mut() {
             postings.shrink_to_fit();
         }
+        // `file_tokens` is derived but can be large in watch mode; shrink it
+        // alongside the persisted maps so explicit memory compaction covers the
+        // whole in-memory index shape.
+        self.file_tokens.shrink_to_fit();
+        for tokens in &mut self.file_tokens {
+            tokens.shrink_to_fit();
+        }
         self.trigram.trigram_map.shrink_to_fit();
         for list in self.trigram.trigram_map.values_mut() {
             list.shrink_to_fit();
@@ -842,6 +919,7 @@ impl Default for ContentIndex {
             max_age_secs: 3600,
             files: Vec::new(),
             index: HashMap::new(),
+            file_tokens: Vec::new(),
             total_tokens: 0,
             extensions: Vec::new(),
             file_token_counts: Vec::new(),
