@@ -1926,12 +1926,14 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
         respect_git_exclude: false,
     })));
 
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
         false,
+        &autosave_dirty,
     );
 
     assert!(!outcome.drift_detected, "no drift expected, got {:?}", outcome);
@@ -1940,6 +1942,8 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
         "drift counter must NOT bump when state is clean");
     assert!(!file_index_dirty.load(Ordering::Relaxed),
         "file_index_dirty must stay false on clean rescan");
+    assert!(!autosave_dirty.load(Ordering::Relaxed),
+        "autosave_dirty must stay false when no content drift detected");
 }
 
 #[test]
@@ -1954,12 +1958,14 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
     let new_file = root.join("c_added.cs");
     std::fs::write(&new_file, "class Gamma { Logger log; }").unwrap();
 
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
         false,
+        &autosave_dirty,
     );
 
     assert!(outcome.drift_detected, "added file must trigger drift");
@@ -1967,6 +1973,8 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
         "exactly one new file should be flagged, got outcome={:?}", outcome);
     assert_eq!(stats.periodic_rescan_drift_events.load(Ordering::Relaxed), 1,
         "drift counter must bump once for the recovered event");
+    assert!(autosave_dirty.load(Ordering::Relaxed),
+        "autosave_dirty must be set when content drift triggers reconcile");
 
     // Verify the reconciler actually inserted the file into path_to_id.
     let clean_new = crate::clean_path(&new_file.to_string_lossy());
@@ -1987,12 +1995,14 @@ fn periodic_rescan_detects_removed_file_and_reconciles_content() {
     // Delete b.cs directly from disk.
     std::fs::remove_file(root.join("b.cs")).unwrap();
 
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
         &["cs".to_string()],
         &stats,
         false,
+        &autosave_dirty,
     );
 
     assert!(outcome.drift_detected);
@@ -2034,12 +2044,14 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
 
     std::fs::write(root.join("config.json"), "{}").unwrap();
 
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
         &["cs".to_string()], // .json is OUTSIDE --ext on purpose
         &stats,
         false,
+        &autosave_dirty,
     );
 
     assert!(outcome.drift_detected, "file-list drift must be detected");
@@ -2071,6 +2083,7 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
     let generation = Arc::new(AtomicU64::new(0));
 
     // Use the minimum interval so the test takes ≤ ~12 s instead of 5 min.
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
     super::start_periodic_rescan(
         Arc::clone(&index),
         None,
@@ -2083,6 +2096,7 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
         0,
         Arc::clone(&stats),
         false,
+        autosave_dirty,
     );
 
     // Wait for the first tick (interval + small slack for thread scheduling).
@@ -2145,6 +2159,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
     let file_index = Arc::new(RwLock::new(None));
     let generation = Arc::new(AtomicU64::new(0));
 
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
     super::start_periodic_rescan(
         Arc::clone(&index),
         None,
@@ -2157,6 +2172,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
         0,
         Arc::clone(&stats),
         false,
+        autosave_dirty,
     );
 
     // Drop a new .cs file directly on disk *without* notifying any

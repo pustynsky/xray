@@ -19,6 +19,10 @@
   large repositories. After this fix, read lock is held for ~1-2s
   regardless of index size. Peak memory increases by ~600 MB during
   autosave (snapshot lifetime).
+- **Cross-thread autosave dirty flag** — `xray_edit` now signals the
+  watcher thread when indexes are mutated via `reindex_paths_sync`.
+  Prevents the watcher from clearing its `have_unsaved` flag when the
+  just-saved snapshot is already stale from a concurrent edit.
 
 ### Diagnostics
 - **Sub-timing breakdown in `reindexElapsedMs`** — `xray_edit` response

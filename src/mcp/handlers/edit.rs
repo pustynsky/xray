@@ -1104,6 +1104,10 @@ fn handle_single_file_edit(
                 );
                 response["contentIndexUpdated"] = json!(stats.content_updated > 0);
                 response["defIndexUpdated"] = json!(stats.def_updated > 0);
+                // Signal watcher thread that indexes were mutated outside its event loop.
+                if stats.content_updated > 0 || stats.def_updated > 0 {
+                    ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
                 response["reindexElapsedMs"] = json!(format!("{:.2}", stats.elapsed_ms));
                 response["reindexDetail"] = json!({
                     "tokenizeMs": format!("{:.2}", stats.tokenize_ms),
@@ -1292,6 +1296,12 @@ fn handle_multi_file_edit(
     };
     if !dry_run && any_file_created_eligible {
         ctx.file_index_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    // Signal watcher thread that indexes were mutated outside its event loop.
+    if let Some(ref stats) = batch_stats
+        && (stats.content_updated > 0 || stats.def_updated > 0)
+    {
+        ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     }
 
     // Phase 4: Build response with per-file results
