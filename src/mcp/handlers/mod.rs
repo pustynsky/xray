@@ -885,6 +885,8 @@ pub struct HandlerContext {
     /// see `file_index` still `None`, and one of them retakes the
     /// build slot.
     pub file_index_build_gate: Arc<utils::FileIndexBuildGate>,
+    /// Single-flight gate for trigram rebuilds after content-index mutations.
+    pub trigram_build_gate: Arc<utils::TrigramRebuildGate>,
     /// Cross-thread dirty flag: set by `xray_edit` (handler thread) after
     /// `reindex_paths_sync` mutates the in-memory indexes. Read by the
     /// watcher thread to prevent clearing `have_unsaved` when the snapshot
@@ -939,6 +941,7 @@ impl Default for HandlerContext {
             rescan_interval_sec: 300,
             branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
             file_index_build_gate: Arc::new(utils::FileIndexBuildGate::new()),
+            trigram_build_gate: Arc::new(utils::TrigramRebuildGate::new()),
             autosave_dirty: Arc::new(AtomicBool::new(false)),
         }
     }

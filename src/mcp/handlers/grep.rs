@@ -1,14 +1,15 @@
 //! xray_grep handler: token search, substring search, phrase search.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use serde_json::{json, Value};
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
 
 use crate::mcp::protocol::ToolCallResult;
 use crate::{read_file_lossy, tokenize, ContentIndex};
-use crate::index::build_trigram_index;
+use crate::index::build_trigram_index_from_tokens;
 use code_xray::generate_trigrams;
 
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
@@ -810,55 +811,104 @@ fn finalize_grep_results(
 /// Ensure the trigram index is up-to-date. Called before substring search.
 /// If `trigram_dirty` is set, rebuilds the trigram index with minimal write-lock time.
 fn ensure_trigram_index(ctx: &HandlerContext) {
-    let trigram_check_start = Instant::now();
-    let needs_rebuild = ctx.index.read().map(|idx| idx.trigram_dirty).unwrap_or(false);
-    let dirty_check_ms = trigram_check_start.elapsed().as_secs_f64() * 1000.0;
-    if needs_rebuild {
+    rebuild_trigram_index_singleflight(&ctx.index, &ctx.trigram_build_gate, true);
+}
+
+pub(crate) fn schedule_trigram_rebuild_after_edit(ctx: &HandlerContext) {
+    let index = Arc::clone(&ctx.index);
+    let gate = Arc::clone(&ctx.trigram_build_gate);
+
+    if let Err(error) = std::thread::Builder::new()
+        .name("xray-trigram-rebuild".to_string())
+        .spawn(move || rebuild_trigram_index_singleflight(&index, &gate, false))
+    {
+        warn!(error = %error, "[grep-trace] failed to spawn background trigram rebuild");
+    }
+}
+
+fn rebuild_trigram_index_singleflight(
+    index: &Arc<RwLock<ContentIndex>>,
+    gate: &Arc<utils::TrigramRebuildGate>,
+    wait_for_inflight: bool,
+) {
+    let wait_start = Instant::now();
+    let mut building = gate.building.lock().unwrap_or_else(|e| e.into_inner());
+    while *building {
+        if !wait_for_inflight {
+            debug!("[grep-trace] trigram rebuild already in progress; background duplicate skipped");
+            return;
+        }
+        info!("[grep-trace] waiting for in-flight trigram rebuild before wide trigram-dependent search");
+        building = gate.done.wait(building).unwrap_or_else(|e| e.into_inner());
+    }
+    *building = true;
+    drop(building);
+
+    let _guard = TrigramBuildGuard { gate: Arc::clone(gate) };
+
+    loop {
+        let trigram_check_start = Instant::now();
+        let mut idx = index.write().unwrap_or_else(|e| e.into_inner());
+        let dirty_check_ms = trigram_check_start.elapsed().as_secs_f64() * 1000.0;
+        if !idx.trigram_dirty {
+            debug!(
+                wait_ms = format_args!("{:.3}", wait_start.elapsed().as_secs_f64() * 1000.0),
+                dirty_check_ms = format_args!("{:.3}", dirty_check_ms),
+                "[substring-trace] trigram dirty check clean"
+            );
+            return;
+        }
+
+        let tokens: Vec<String> = idx.index.keys().cloned().collect();
+        idx.trigram_dirty = false;
+        drop(idx);
+
         let rebuild_start = Instant::now();
         info!(
             dirty_check_ms = format_args!("{:.3}", dirty_check_ms),
-            "[grep-trace] trigram dirty; rebuilding before wide trigram-dependent search"
+            token_count = tokens.len(),
+            "[grep-trace] trigram dirty; rebuilding before trigram-dependent search"
         );
-        // Build trigram index under READ lock (doesn't block other readers)
-        let new_trigram = ctx.index.read().ok().and_then(|idx| {
-            if idx.trigram_dirty {
-                Some(build_trigram_index(&idx.index))
-            } else {
-                None
-            }
-        });
-        if let Some(trigram) = new_trigram {
-            let token_count = trigram.tokens.len();
-            let trigram_count = trigram.trigram_map.len();
-            let build_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
-            let swap_start = Instant::now();
-            let mut swapped = false;
-            // Swap in under brief WRITE lock (microseconds, not ~200ms)
-            if let Ok(mut idx) = ctx.index.write()
-                && idx.trigram_dirty {  // double-check after acquiring write lock
-                    idx.trigram = trigram;
-                    idx.trigram_dirty = false;
-                    swapped = true;
-                }
-            let swap_ms = swap_start.elapsed().as_secs_f64() * 1000.0;
-            let total_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
-            info!(
-                token_count,
-                trigram_count,
-                build_ms = format_args!("{:.3}", build_ms),
-                swap_ms = format_args!("{:.3}", swap_ms),
-                total_ms = format_args!("{:.3}", total_ms),
-                swapped,
-                "[grep-trace] trigram rebuild finished"
-            );
-        } else {
-            info!(
-                total_ms = format_args!("{:.3}", rebuild_start.elapsed().as_secs_f64() * 1000.0),
-                "[grep-trace] trigram rebuild skipped after recheck; index already clean"
-            );
+
+        let trigram = build_trigram_index_from_tokens(tokens);
+        let token_count = trigram.tokens.len();
+        let trigram_count = trigram.trigram_map.len();
+        let build_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
+        let swap_start = Instant::now();
+
+        let mut idx = index.write().unwrap_or_else(|e| e.into_inner());
+        idx.trigram = trigram;
+        let dirty_after_swap = idx.trigram_dirty;
+        drop(idx);
+
+        let swap_ms = swap_start.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
+        info!(
+            token_count,
+            trigram_count,
+            build_ms = format_args!("{:.3}", build_ms),
+            swap_ms = format_args!("{:.3}", swap_ms),
+            total_ms = format_args!("{:.3}", total_ms),
+            dirty_after_swap,
+            "[grep-trace] trigram rebuild finished"
+        );
+
+        if !dirty_after_swap {
+            return;
         }
-    } else {
-        debug!("[substring-trace] Trigram dirty check: clean in {:.3}ms", dirty_check_ms);
+        info!("[grep-trace] trigram dirtied during rebuild; rebuilding again before releasing gate");
+    }
+}
+
+struct TrigramBuildGuard {
+    gate: Arc<utils::TrigramRebuildGate>,
+}
+
+impl Drop for TrigramBuildGuard {
+    fn drop(&mut self) {
+        let mut building = self.gate.building.lock().unwrap_or_else(|e| e.into_inner());
+        *building = false;
+        self.gate.done.notify_all();
     }
 }
 
@@ -1496,7 +1546,8 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         info!(lock_wait_ms = format_args!("{:.1}", lock_wait_ms),
             "[grep-trace] slow read-lock acquisition on content index");
     }
-    let trigram_stale = trigram_skipped && index.trigram_dirty;
+    let trigram_rebuild_in_flight = ctx.trigram_build_gate.is_building();
+    let trigram_stale = trigram_skipped && (index.trigram_dirty || trigram_rebuild_in_flight);
     let stale_safe_search_enabled = trigram_stale && !will_auto_switch_to_phrase;
     if stale_safe_search_enabled {
         info!(

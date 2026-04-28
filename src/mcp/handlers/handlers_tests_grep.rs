@@ -284,6 +284,137 @@ fn test_scoped_grep_finds_new_token_despite_stale_trigram() {
         "trigram_dirty must remain true — rebuild was skipped for narrow scope");
 }
 
+#[test]
+fn test_narrow_substring_treats_inflight_trigram_rebuild_as_stale() {
+    let ctx = make_substring_ctx(
+        vec![("newneedle", 0, vec![1])],
+        vec!["C:\\test\\Edited.cs"],
+    );
+    {
+        let mut idx = ctx.index.write().unwrap();
+        idx.trigram = Default::default();
+        idx.trigram_dirty = false;
+    }
+    {
+        let mut building = ctx.trigram_build_gate.building.lock().unwrap();
+        *building = true;
+    }
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["newneedle"],
+        "file": ["Edited.cs"],
+        "substring": true,
+    }));
+
+    {
+        let mut building = ctx.trigram_build_gate.building.lock().unwrap();
+        *building = false;
+        ctx.trigram_build_gate.done.notify_all();
+    }
+
+    assert!(!result.is_error, "grep should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 1);
+}
+
+#[test]
+fn test_wide_substring_waits_for_inflight_trigram_rebuild() {
+    let ctx = make_substring_ctx(
+        vec![("newneedle", 0, vec![1])],
+        vec!["C:\\test\\Edited.cs"],
+    );
+    {
+        let mut idx = ctx.index.write().unwrap();
+        idx.trigram = Default::default();
+        idx.trigram_dirty = false;
+    }
+    {
+        let mut building = ctx.trigram_build_gate.building.lock().unwrap();
+        *building = true;
+    }
+
+    let index = Arc::clone(&ctx.index);
+    let gate = Arc::clone(&ctx.trigram_build_gate);
+    let worker = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let trigram = {
+            let idx = index.read().unwrap();
+            build_trigram_index(&idx.index)
+        };
+        {
+            let mut idx = index.write().unwrap();
+            idx.trigram = trigram;
+        }
+        let mut building = gate.building.lock().unwrap();
+        *building = false;
+        gate.done.notify_all();
+    });
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["newneedle"],
+        "substring": true,
+    }));
+    worker.join().unwrap();
+
+    assert!(!result.is_error, "grep should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 1);
+}
+
+#[test]
+fn test_xray_edit_schedules_background_trigram_rebuild() {
+    let temp_dir = tempfile::tempdir().unwrap();
+    let file_path = temp_dir.path().join("Edited.cs");
+    std::fs::write(&file_path, "public class BeforeNeedle {}\n").unwrap();
+
+    let file_path_string = file_path.to_string_lossy().to_string();
+    let clean_file_path = clean_path(&file_path_string);
+    let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
+    index_map.insert("beforeneedle".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+    let trigram = build_trigram_index(&index_map);
+    let mut path_to_id = HashMap::new();
+    path_to_id.insert(std::path::PathBuf::from(clean_file_path.clone()), 0);
+    let content_index = ContentIndex {
+        root: clean_path(&temp_dir.path().to_string_lossy()),
+        files: vec![clean_file_path],
+        index: index_map,
+        total_tokens: 1,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![1],
+        file_tokens: vec![vec!["beforeneedle".to_string()]],
+        trigram,
+        path_to_id: Some(path_to_id),
+        ..Default::default()
+    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(temp_dir.path().to_string_lossy().to_string())
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_edit", &json!({
+        "path": file_path_string,
+        "edits": [{"search": "BeforeNeedle", "replace": "AfterNeedle"}],
+    }));
+    assert!(!result.is_error, "edit should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["contentIndexUpdated"], true);
+
+    let mut rebuilt = false;
+    for _ in 0..100 {
+        {
+            let idx = ctx.index.read().unwrap();
+            rebuilt = !idx.trigram_dirty && idx.trigram.tokens.iter().any(|token| token == "afterneedle");
+            if rebuilt {
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+
+    assert!(rebuilt, "background rebuild should publish a clean trigram containing the edited token");
+}
+
+
 // --- E2E tests ---
 
 fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {

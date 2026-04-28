@@ -394,6 +394,31 @@ impl Default for FileIndexBuildGate {
     }
 }
 
+/// Single-flight gate for trigram rebuilds.
+pub struct TrigramRebuildGate {
+    pub(crate) building: std::sync::Mutex<bool>,
+    pub(crate) done: std::sync::Condvar,
+}
+
+impl TrigramRebuildGate {
+    pub fn new() -> Self {
+        Self {
+            building: std::sync::Mutex::new(false),
+            done: std::sync::Condvar::new(),
+        }
+    }
+
+    pub fn is_building(&self) -> bool {
+        self.building.lock().map(|building| *building).unwrap_or(false)
+    }
+}
+
+impl Default for TrigramRebuildGate {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Single-flight wrapper around the `xray_fast` file-index rebuild.
 ///
 /// Contract:

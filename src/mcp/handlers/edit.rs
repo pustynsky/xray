@@ -1104,6 +1104,9 @@ fn handle_single_file_edit(
                 );
                 response["contentIndexUpdated"] = json!(stats.content_updated > 0);
                 response["defIndexUpdated"] = json!(stats.def_updated > 0);
+                if stats.content_updated > 0 {
+                    super::grep::schedule_trigram_rebuild_after_edit(ctx);
+                }
                 // Signal watcher thread that indexes were mutated outside its event loop.
                 if stats.content_updated > 0 || stats.def_updated > 0 {
                     ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -1313,6 +1316,11 @@ fn handle_multi_file_edit(
         && (stats.content_updated > 0 || stats.def_updated > 0)
     {
         ctx.autosave_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    if let Some(ref stats) = batch_stats
+        && stats.content_updated > 0
+    {
+        super::grep::schedule_trigram_rebuild_after_edit(ctx);
     }
 
     // Phase 4: Build response with per-file results

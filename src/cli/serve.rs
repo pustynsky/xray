@@ -179,6 +179,7 @@ pub fn cmd_serve(args: ServeArgs) {
         rescan_interval_sec: args.rescan_interval_sec,
         branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         file_index_build_gate: Arc::new(crate::mcp::handlers::utils::FileIndexBuildGate::new()),
+        trigram_build_gate: Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new()),
         autosave_dirty: Arc::clone(&autosave_dirty),
     };
     mcp::server::run_server(ctx);
