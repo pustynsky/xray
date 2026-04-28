@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use serde_json::{json, Value};
-use tracing::debug;
+use tracing::{debug, info};
 
 use crate::mcp::protocol::ToolCallResult;
 use crate::{read_file_lossy, tokenize, ContentIndex};
@@ -75,6 +75,13 @@ pub(crate) struct GrepSearchParams<'a> {
     /// auto-balance triggers. `None` lets [`apply_auto_balance`] derive it from
     /// `2 * second_max` clamped to `[20, 100]`.
     pub max_occurrences_per_term: Option<usize>,
+    /// Time spent waiting for read lock on content index (ms).
+    /// Non-zero indicates lock contention from concurrent writers.
+    pub lock_wait_ms: f64,
+    /// When true, trigram rebuild was skipped (scope narrow or auto-phrase).
+    /// Trigram-backed prefilters must be disabled to avoid false negatives
+    /// from stale trigram data.
+    pub trigram_stale: bool,
 }
 
 pub(crate) struct FileScoreEntry {
@@ -277,6 +284,7 @@ fn build_grep_base_summary(
     search_elapsed: std::time::Duration,
     ctx: &HandlerContext,
     include_index_stats: bool,
+    lock_wait_ms: f64,
 ) -> Value {
     let mut summary = json!({
         "totalFiles": total_files,
@@ -289,6 +297,9 @@ fn build_grep_base_summary(
         summary["indexTokens"] = json!(index.index.len());
         summary["searchTimeMs"] = json!(search_elapsed.as_secs_f64() * 1000.0);
         summary["indexLoadTimeMs"] = json!(0.0);
+        if lock_wait_ms > 0.5 {
+            summary["lockWaitMs"] = json!(format!("{:.1}", lock_wait_ms));
+        }
     }
     if index.read_errors > 0 {
         summary["readErrors"] = json!(index.read_errors);
@@ -1299,7 +1310,7 @@ fn build_grep_response(
     if params.count_only {
         let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &json!(terms), search_mode,
-            index, search_elapsed, ctx, true,
+            index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
         let output = json!({ "summary": summary });
@@ -1325,7 +1336,7 @@ fn build_grep_response(
 
     let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!(terms), search_mode,
-        index, search_elapsed, ctx, true,
+        index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
 
@@ -1419,7 +1430,29 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     let search_start = Instant::now();
 
-    if parsed.use_substring || parsed.use_line_regex {
+    // Log entry for dispatch-level timing correlation
+    info!(mode = if parsed.use_phrase { "phrase" } else if parsed.use_substring { "substring" }
+        else if parsed.use_line_regex { "lineRegex" } else { "token" },
+        terms_count = parsed.terms.len(),
+        "[grep-trace] handle_xray_grep entered");
+
+    // Skip trigram rebuild when ALL terms contain non-token chars (spaces,
+    // punctuation) — substring search will return 0 results and auto-switch
+    // to phrase, which doesn't use trigrams. Avoids a ~40s full trigram
+    // rebuild on large repos after xray_edit sets trigram_dirty=true.
+    let will_auto_switch_to_phrase = parsed.use_substring
+        && parsed.terms.iter().all(|t| has_non_token_chars(t));
+    // Also skip trigram rebuild when scope is already narrow (file= or
+    // exact_file_path set) — the literal prefilter would just confirm what
+    // the file filter already guarantees. Rebuilding 3.8M-token trigrams
+    // for a 2-file scope is pure waste (~40-70s on large repos).
+    let scope_already_narrow = !parsed.file_filter.is_empty()
+        || parsed.exact_file_path.is_some();
+    let trigram_skipped = will_auto_switch_to_phrase || scope_already_narrow;
+    if (parsed.use_substring || parsed.use_line_regex)
+        && !will_auto_switch_to_phrase
+        && !scope_already_narrow
+    {
         // lineRegex shares the substring branch's trigram dependency: AC-4
         // adds a literal-trigram prefilter (`compute_literal_prefilter`) that
         // reads `index.trigram` while the caller already holds a read lock
@@ -1429,10 +1462,16 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         ensure_trigram_index(ctx);
     }
 
+    let lock_wait_start = Instant::now();
     let index = match ctx.index.read() {
         Ok(idx) => idx,
         Err(e) => return ToolCallResult::error(format!("Failed to acquire index lock: {}", e)),
     };
+    let lock_wait_ms = lock_wait_start.elapsed().as_secs_f64() * 1000.0;
+    if lock_wait_ms > 100.0 {
+        info!(lock_wait_ms = format_args!("{:.1}", lock_wait_ms),
+            "[grep-trace] slow read-lock acquisition on content index");
+    }
 
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&parsed.exclude_dir);
     let exclude_lower: Vec<String> = parsed.exclude.iter()
@@ -1455,6 +1494,8 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         dir_auto_converted_note: parsed.dir_auto_converted_note.clone(),
         auto_balance: parsed.auto_balance,
         max_occurrences_per_term: parsed.max_occurrences_per_term,
+        lock_wait_ms,
+        trigram_stale: trigram_skipped && index.trigram_dirty,
     };
 
     // --- Substring search mode
@@ -1777,7 +1818,7 @@ fn build_substring_response(
     if params.count_only {
         let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &json!(raw_terms),
-            &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false,
+            &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false, params.lock_wait_ms,
         );
         // Don't include matchedTokens in countOnly mode — the caller only needs
         // totalFiles/totalOccurrences. Including tokens wastes bytes and can trigger
@@ -1813,7 +1854,7 @@ fn build_substring_response(
 
     let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!(raw_terms),
-        &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false,
+        &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false, params.lock_wait_ms,
     );
     summary["matchedTokens"] = json!(all_matched_tokens);
     if !warnings.is_empty() {
@@ -1879,14 +1920,20 @@ fn handle_substring_search(
 
     for (term_idx, term) in raw_terms.iter().enumerate() {
         let trigram_start = Instant::now();
-        let matched_token_indices = find_matching_tokens_for_term(term, trigram_idx);
-
-        debug!("[substring-trace] Trigram intersection for '{}': {} candidates in {:.3}ms",
-            term, matched_token_indices.len(), trigram_start.elapsed().as_secs_f64() * 1000.0);
-
-        let matched_tokens: Vec<String> = matched_token_indices.iter()
-            .filter_map(|&idx| trigram_idx.tokens.get(idx as usize).cloned())
-            .collect();
+        // When trigram is stale (rebuild skipped for narrow scope), fall back
+        // to brute-force token matching to avoid false negatives from missing
+        // trigram entries for newly-added tokens.
+        let matched_tokens: Vec<String> = if params.trigram_stale {
+            index.index.keys()
+                .filter(|k| k.contains(term.as_str()))
+                .cloned()
+                .collect()
+        } else {
+            let matched_token_indices = find_matching_tokens_for_term(term, trigram_idx);
+            matched_token_indices.iter()
+                .filter_map(|&idx| trigram_idx.tokens.get(idx as usize).cloned())
+                .collect()
+        };
 
         score_token_postings(
             &matched_tokens, term_idx, index, params, total_docs,
@@ -1944,7 +1991,7 @@ fn handle_phrase_search(
 
     // C1 refactor: Delegate tokenization, candidate search, and phrase verification
     // to collect_phrase_matches() — eliminating ~85 lines of duplicated logic.
-    let mut results = match collect_phrase_matches(index, phrase, params) {
+    let (mut results, diag) = match collect_phrase_matches(index, phrase, params) {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
@@ -1973,9 +2020,10 @@ fn handle_phrase_search(
     if count_only {
         let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &json!([phrase]), "phrase",
-            index, search_elapsed, ctx, true,
+            index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
+        summary["phraseDetail"] = diag.to_json();
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -1999,9 +2047,10 @@ fn handle_phrase_search(
 
     let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!([phrase]), "phrase",
-        index, search_elapsed, ctx, true,
+        index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
+    summary["phraseDetail"] = diag.to_json();
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -2010,14 +2059,44 @@ fn handle_phrase_search(
     ToolCallResult::success(json_to_string(&output))
 }
 
+/// Diagnostic counters for phrase search sub-timings.
+#[derive(Debug, Default, Clone)]
+pub(crate) struct PhraseSearchDiag {
+    pub token_count: usize,
+    pub per_token: Vec<(String, usize, usize, f64)>,
+    pub posting_scan_ms: f64,
+    pub intersection_ms: f64,
+    pub candidates_after_intersection: usize,
+    pub file_verify_ms: f64,
+    pub files_read: usize,
+    pub result_count: usize,
+}
+
+impl PhraseSearchDiag {
+    fn to_json(&self) -> Value {
+        json!({
+            "tokenCount": self.token_count,
+            "postingScanMs": format!("{:.1}", self.posting_scan_ms),
+            "intersectionMs": format!("{:.1}", self.intersection_ms),
+            "candidatesAfterIntersection": self.candidates_after_intersection,
+            "fileVerifyMs": format!("{:.1}", self.file_verify_ms),
+            "filesRead": self.files_read,
+            "perToken": self.per_token.iter().map(|(t, postings, passed, ms)| json!({
+                "token": t, "postings": postings, "passed": passed, "ms": format!("{:.1}", ms)
+            })).collect::<Vec<_>>(),
+        })
+    }
+}
+
 /// Core phrase-matching logic: finds files containing the given phrase.
 /// Extracted to allow reuse by both single-phrase and multi-phrase search.
 fn collect_phrase_matches(
     index: &ContentIndex,
     phrase: &str,
     params: &GrepSearchParams,
-) -> Result<Vec<PhraseFileMatch>, String> {
+) -> Result<(Vec<PhraseFileMatch>, PhraseSearchDiag), String> {
     let show_lines = params.show_lines;
+    let mut diag = PhraseSearchDiag::default();
 
     let phrase_lower = phrase.to_lowercase();
     let phrase_tokens = tokenize(&phrase_lower, 2);
@@ -2059,14 +2138,18 @@ fn collect_phrase_matches(
     // file count typically drops from hundreds to ~the result count itself,
     // eliminating most of the disk I/O that dominated phrase search runtime.
     // Backward compatible: no index format change.
+    diag.token_count = phrase_tokens.len();
+    let posting_scan_start = Instant::now();
     let mut per_token_file_lines: Vec<HashMap<u32, Vec<u32>>> =
         Vec::with_capacity(phrase_tokens.len());
     for token in &phrase_tokens {
+        let token_start = Instant::now();
         let postings = match index.index.get(token.as_str()) {
             Some(p) => p,
-            // A token has no postings at all -> intersection is empty -> no matches.
-            None => return Ok(Vec::new()),
+            None => return Ok((Vec::new(), diag)),
         };
+        let posting_count = postings.len();
+        let mut pass_count = 0usize;
         let mut map: HashMap<u32, Vec<u32>> = HashMap::with_capacity(postings.len());
         for p in postings {
             let path = match index.files.get(p.file_id as usize) {
@@ -2082,12 +2165,16 @@ fn collect_phrase_matches(
             lines.sort_unstable();
             lines.dedup();
             map.insert(p.file_id, lines);
+            pass_count += 1;
         }
         if map.is_empty() {
-            return Ok(Vec::new());
+            return Ok((Vec::new(), diag));
         }
+        diag.per_token.push((token.clone(), posting_count, pass_count,
+            token_start.elapsed().as_secs_f64() * 1000.0));
         per_token_file_lines.push(map);
     }
+    diag.posting_scan_ms = posting_scan_start.elapsed().as_secs_f64() * 1000.0;
 
     // Start the intersection from the smallest per-token map -- minimises
     // outer-loop iterations and the size of `current_lines` we carry forward.
@@ -2099,6 +2186,7 @@ fn collect_phrase_matches(
         .unwrap_or(0);
     let smallest = per_token_file_lines.swap_remove(smallest_idx);
     let other_maps: &[HashMap<u32, Vec<u32>>] = &per_token_file_lines;
+    let intersection_start = Instant::now();
 
     let mut candidates: Vec<(u32, Vec<u32>)> = Vec::new();
     for (file_id, mut current_lines) in smallest {
@@ -2127,6 +2215,8 @@ fn collect_phrase_matches(
     // When phrase contains punctuation, use raw substring match to avoid
     // false positives from tokenizer stripping non-alphanumeric characters.
     let phrase_has_punctuation = phrase.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace());
+    diag.intersection_ms = intersection_start.elapsed().as_secs_f64() * 1000.0;
+    diag.candidates_after_intersection = candidates.len();
 
     // PERF (tier-A): parallelize file I/O + per-file scan across the
     // surviving (post-line-intersection) candidates. Even after tier-B's
@@ -2139,6 +2229,7 @@ fn collect_phrase_matches(
         .unwrap_or(4)
         .clamp(1, 8);
     let chunk_size = candidates.len().div_ceil(num_threads).max(1);
+    let file_verify_start = Instant::now();
 
     let results: Vec<PhraseFileMatch> = std::thread::scope(|scope| {
         let mut handles = Vec::new();
@@ -2210,7 +2301,32 @@ fn collect_phrase_matches(
         all
     });
 
-    Ok(results)
+    diag.file_verify_ms = file_verify_start.elapsed().as_secs_f64() * 1000.0;
+    diag.files_read = results.len();
+    diag.result_count = results.iter().map(|r| r.lines.len()).sum();
+
+    info!(
+        phrase = %phrase,
+        tokens = diag.token_count,
+        posting_scan_ms = format_args!("{:.1}", diag.posting_scan_ms),
+        intersection_ms = format_args!("{:.1}", diag.intersection_ms),
+        candidates = diag.candidates_after_intersection,
+        file_verify_ms = format_args!("{:.1}", diag.file_verify_ms),
+        files_read = diag.files_read,
+        results = diag.result_count,
+        "[phrase-trace] collect_phrase_matches complete"
+    );
+    for (token, postings, passed, ms) in &diag.per_token {
+        info!(
+            token = %token,
+            postings = postings,
+            passed = passed,
+            ms = format_args!("{:.1}", ms),
+            "[phrase-trace] per-token posting scan"
+        );
+    }
+
+    Ok((results, diag))
 }
 
 /// Intersection of two sorted-unique `Vec<u32>` lists, in O(n + m).
@@ -2256,10 +2372,12 @@ fn handle_multi_phrase_search(
     // Collect matches for each phrase independently
     let mut per_phrase_results: Vec<Vec<PhraseFileMatch>> = Vec::new();
     let mut searched_terms: Vec<&str> = Vec::new();
+    let mut last_diag = PhraseSearchDiag::default();
 
     for phrase in phrases {
         match collect_phrase_matches(index, phrase, params) {
-            Ok(matches) => {
+            Ok((matches, diag)) => {
+                last_diag = diag;
                 per_phrase_results.push(matches);
                 searched_terms.push(phrase);
             }
@@ -2296,9 +2414,10 @@ fn handle_multi_phrase_search(
     if count_only {
         let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &json!(searched_terms), search_mode,
-            index, search_elapsed, ctx, true,
+            index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
+        summary["phraseDetail"] = last_diag.to_json();
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -2318,9 +2437,10 @@ fn handle_multi_phrase_search(
 
     let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!(searched_terms), search_mode,
-        index, search_elapsed, ctx, true,
+        index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
+    summary["phraseDetail"] = last_diag.to_json();
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -2358,7 +2478,7 @@ fn handle_line_regex_search(
     #[cfg(test)]
     let prefilter_enabled = !line_regex_prefilter_disabled_for_test();
     #[cfg(not(test))]
-    let prefilter_enabled = true;
+    let prefilter_enabled = !params.trigram_stale;
     handle_line_regex_search_inner(ctx, index, patterns, params, prefilter_enabled)
 }
 
@@ -2625,7 +2745,7 @@ fn handle_line_regex_search_inner(
     if params.count_only {
         let mut summary = build_grep_base_summary(
             total_files, total_occurrences, &json!(patterns), search_mode,
-            index, search_elapsed, ctx, true,
+            index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
         apply_literal_prefilter_summary(
@@ -2653,7 +2773,7 @@ fn handle_line_regex_search_inner(
 
     let mut summary = build_grep_base_summary(
         total_files, total_occurrences, &json!(patterns), search_mode,
-        index, search_elapsed, ctx, true,
+        index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
     apply_literal_prefilter_summary(

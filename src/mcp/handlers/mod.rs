@@ -1009,6 +1009,7 @@ pub fn dispatch_tool(
     arguments: &Value,
 ) -> ToolCallResult {
     let dispatch_start = Instant::now();
+    tracing::info!(tool = tool_name, "[dispatch-trace] dispatch entered");
     let (result, unknown_args_report) = dispatch_inner(ctx, tool_name, arguments);
     finalize_response(result, ctx, tool_name, arguments, dispatch_start, unknown_args_report)
 }

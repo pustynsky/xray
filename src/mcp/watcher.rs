@@ -584,6 +584,19 @@ pub(crate) fn reindex_paths_sync(
     stats.tokenize_ms = stats.elapsed_ms
         - stats.content_lock_wait_ms - stats.content_update_ms
         - stats.def_lock_wait_ms - stats.def_update_ms;
+
+    info!(
+        content_updated = stats.content_updated,
+        def_updated = stats.def_updated,
+        elapsed_ms = format_args!("{:.1}", stats.elapsed_ms),
+        tokenize_ms = format_args!("{:.1}", stats.tokenize_ms),
+        content_lock_wait_ms = format_args!("{:.1}", stats.content_lock_wait_ms),
+        content_update_ms = format_args!("{:.1}", stats.content_update_ms),
+        def_lock_wait_ms = format_args!("{:.1}", stats.def_lock_wait_ms),
+        def_update_ms = format_args!("{:.1}", stats.def_update_ms),
+        "[reindex-trace] reindex_paths_sync complete"
+    );
+
     stats
 }
 
@@ -704,6 +717,7 @@ fn update_content_index(
             let update_start = std::time::Instant::now();
 
             // Batch purge: ONE pass over inverted index removes all stale postings
+            let purge_start = std::time::Instant::now();
             if !purge_ids.is_empty() {
                 // Subtract old token counts before purge
                 for &fid in &purge_ids {
@@ -716,6 +730,7 @@ fn update_content_index(
                 }
                 batch_purge_files(&mut idx.index, &purge_ids);
             }
+            let purge_ms = purge_start.elapsed().as_secs_f64() * 1000.0;
 
             // Process removed files: update path_to_id, zero token counts,
             // tombstone the files[] slot. We never reuse file_id, so the slot
@@ -739,9 +754,11 @@ fn update_content_index(
             }
 
             // Apply pre-tokenized results (just insert pre-computed postings)
+            let insert_start = std::time::Instant::now();
             for result in tokenized {
                 apply_tokenized_file(&mut idx, result);
             }
+            let insert_ms = insert_start.elapsed().as_secs_f64() * 1000.0;
 
             // Mark trigram index as dirty — will be rebuilt lazily on next substring search
             idx.trigram_dirty = true;
@@ -756,6 +773,16 @@ fn update_content_index(
             shrink_if_oversized(&mut idx);
 
             let update_ms = update_start.elapsed().as_secs_f64() * 1000.0;
+            if update_ms > 100.0 {
+                info!(
+                    purge_ms = format_args!("{:.1}", purge_ms),
+                    insert_ms = format_args!("{:.1}", insert_ms),
+                    update_ms = format_args!("{:.1}", update_ms),
+                    purge_ids = purge_ids.len(),
+                    dirty_files = dirty_clean.len(),
+                    "[reindex-trace] update_content_index write lock breakdown"
+                );
+            }
             ContentUpdateResult { ok: true, lock_wait_ms, update_ms }
         }
         Err(e) => {

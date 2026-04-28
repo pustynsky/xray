@@ -26,6 +26,8 @@ fn make_params<'a>(
         exact_file_path_canonical: &None,
         auto_balance: true,
         max_occurrences_per_term: None,
+        lock_wait_ms: 0.0,
+        trigram_stale: false,
     }
 }
 
@@ -165,7 +167,7 @@ fn test_summary_basic_fields() {
     let elapsed = Duration::from_millis(5);
 
     let summary = build_grep_base_summary(
-        10, 42, &json!(["term1"]), "or", &index, elapsed, &ctx, false,
+        10, 42, &json!(["term1"]), "or", &index, elapsed, &ctx, false, 0.0,
     );
     assert_eq!(summary["totalFiles"], 10);
     assert_eq!(summary["totalOccurrences"], 42);
@@ -181,7 +183,7 @@ fn test_summary_with_index_stats() {
     let elapsed = Duration::from_millis(5);
 
     let summary = build_grep_base_summary(
-        10, 42, &json!(["term1"]), "or", &index, elapsed, &ctx, true,
+        10, 42, &json!(["term1"]), "or", &index, elapsed, &ctx, true, 0.0,
     );
     assert!(summary.get("indexFiles").is_some());
     assert!(summary.get("indexTokens").is_some());
@@ -195,7 +197,7 @@ fn test_summary_with_read_errors() {
     let elapsed = Duration::from_millis(1);
 
     let summary = build_grep_base_summary(
-        0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false,
+        0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false, 0.0,
     );
     assert_eq!(summary["readErrors"], 3);
     assert_eq!(summary["lossyUtf8Files"], 2);
@@ -208,7 +210,7 @@ fn test_summary_no_read_errors_when_zero() {
     let elapsed = Duration::from_millis(1);
 
     let summary = build_grep_base_summary(
-        0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false,
+        0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false, 0.0,
     );
     assert!(summary.get("readErrors").is_none());
     assert!(summary.get("lossyUtf8Files").is_none());
@@ -224,7 +226,7 @@ fn test_summary_branch_warning_on_feature_branch() {
     let elapsed = Duration::from_millis(1);
 
     let summary = build_grep_base_summary(
-        0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false,
+        0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false, 0.0,
     );
     assert!(summary.get("branchWarning").is_some());
 }
@@ -239,7 +241,7 @@ fn test_summary_no_branch_warning_on_main() {
     let elapsed = Duration::from_millis(1);
 
     let summary = build_grep_base_summary(
-        0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false,
+        0, 0, &json!(["x"]), "or", &index, elapsed, &ctx, false, 0.0,
     );
     assert!(summary.get("branchWarning").is_none());
 }

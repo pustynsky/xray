@@ -177,6 +177,113 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
     assert!(!idx.trigram.tokens.is_empty());
 }
 
+#[test]
+fn test_trigram_rebuild_skipped_when_file_filter_narrows_scope() {
+    // When file= is set, trigram prefilter adds no value (scope is already
+    // narrow). The fix skips ensure_trigram_index, so trigram_dirty stays
+    // true — the rebuild is deferred to a future unscoped query.
+    let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
+    index_map.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["C:\\test\\Program.cs".to_string()], index: index_map,
+        total_tokens: 1, extensions: vec!["cs".to_string()], file_token_counts: vec![1],
+        trigram_dirty: true,
+        ..Default::default()
+    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .build();
+    // lineRegex with file= filter — should NOT trigger trigram rebuild
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["httpclient"],
+        "lineRegex": true,
+        "file": ["Program.cs"],
+    }));
+    assert!(!result.is_error, "grep should succeed: {}", result.content[0].text);
+    // trigram_dirty must still be true — rebuild was skipped
+    assert!(ctx.index.read().unwrap().trigram_dirty,
+        "trigram_dirty must remain true when file= narrows scope");
+}
+
+#[test]
+fn test_trigram_rebuild_skipped_when_auto_phrase_switch_predictable() {
+    // When ALL terms contain non-token chars (spaces, dots), substring
+    // will return 0 and auto-switch to phrase. Trigram rebuild is wasted
+    // because phrase doesn't use it. The fix skips ensure_trigram_index.
+    let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
+    index_map.insert("namespace".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+    index_map.insert("contoso".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["C:\\test\\Program.cs".to_string()], index: index_map,
+        total_tokens: 2, extensions: vec!["cs".to_string()], file_token_counts: vec![2],
+        trigram_dirty: true,
+        ..Default::default()
+    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .build();
+    // Term with dots → auto-switch to phrase is predictable
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["namespace Contoso.Test"],
+    }));
+    assert!(!result.is_error, "grep should succeed: {}", result.content[0].text);
+    // trigram_dirty must still be true — rebuild was skipped
+    assert!(ctx.index.read().unwrap().trigram_dirty,
+        "trigram_dirty must remain true when auto-phrase switch is predictable");
+    // Verify it actually ran as phrase mode
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["searchMode"], "phrase",
+        "search must auto-switch to phrase mode");
+}
+
+#[test]
+fn test_scoped_grep_finds_new_token_despite_stale_trigram() {
+    // Regression test: after xray_edit adds a NEW token to the index and
+    // sets trigram_dirty=true, a scoped grep (file=) must still find the
+    // new token. Previously, the stale trigram prefilter could reject it.
+    let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
+    index_map.insert("existingtoken".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+    // Simulate a token added by edit (in inverted index but NOT in trigram)
+    index_map.insert("brandnewtoken".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["C:\\test\\Edited.cs".to_string()], index: index_map,
+        total_tokens: 2, extensions: vec!["cs".to_string()], file_token_counts: vec![2],
+        trigram_dirty: true, // simulates post-edit state
+        // trigram is DEFAULT (empty) — simulates "stale" trigram
+        ..Default::default()
+    };
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .build();
+
+    // Scoped substring grep for the new token — must find it
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["brandnewtoken"],
+        "file": ["Edited.cs"],
+        "substring": true,
+    }));
+    assert!(!result.is_error, "grep should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 1,
+        "scoped substring must find the new token despite stale trigram");
+
+    // Scoped lineRegex grep — must also find it
+    let result2 = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["brandnewtoken"],
+        "lineRegex": true,
+        "file": ["Edited.cs"],
+    }));
+    assert!(!result2.is_error);
+    // lineRegex reads file from disk — file doesn't exist in test, so 0 results
+    // is acceptable. The key assertion is that it didn't ERROR and trigram_dirty
+    // stayed true (trigram rebuild was skipped).
+    assert!(ctx.index.read().unwrap().trigram_dirty,
+        "trigram_dirty must remain true — rebuild was skipped for narrow scope");
+}
+
 // --- E2E tests ---
 
 fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
