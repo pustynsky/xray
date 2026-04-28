@@ -1531,7 +1531,10 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
 
 /// Build a trigram index from the inverted index's token keys.
 pub fn build_trigram_index(inverted: &HashMap<String, Vec<Posting>>) -> TrigramIndex {
-    let mut tokens: Vec<String> = inverted.keys().cloned().collect();
+    build_trigram_index_from_tokens(inverted.keys().cloned().collect())
+}
+
+pub fn build_trigram_index_from_tokens(mut tokens: Vec<String>) -> TrigramIndex {
     tokens.sort();
 
     let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();

@@ -38,6 +38,10 @@
   triggers a full trigram rebuild (~40-70s on large repos). Substring and
   lineRegex fall back to direct token/file scan when trigram is stale.
   Phrase: 43s→0.6s, lineRegex with `file=`: 68s→0.4s, memory stable.
+- **Async trigram rebuild after `xray_edit`** — content-index updates now
+  schedule trigram rebuild on a single-flight background thread. Wide
+  trigram-dependent grep waits for an in-flight rebuild, while narrow grep
+  keeps immediate correctness through the stale-safe direct scan path.
 
 ### Diagnostics
 - **Sub-timing breakdown in `reindexElapsedMs`** — `xray_edit` response
