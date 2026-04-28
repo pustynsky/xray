@@ -1579,3 +1579,28 @@ fn estimate_definition_index_memory_uses_live_count_with_tombstones() {
         "fileCount in memory estimate MUST be live count, not Vec capacity");
 }
 
+
+#[test]
+fn phase_field_formatting_escapes_line_breaks() {
+    let fields = super::format_phase_fields(&[
+        ("startupMode", "coldBuild".to_string()),
+        ("note", "first\r\nsecond".to_string()),
+    ]);
+
+    assert_eq!(fields, "startupMode=coldBuild note=first\\r\\nsecond");
+}
+
+#[test]
+fn format_debug_path_falls_back_to_filename_only() {
+    let rendered = super::format_debug_path(std::path::Path::new("/secret/acme/repos_xray_123.word-search"));
+
+    assert_eq!(rendered, "repos_xray_123.word-search");
+}
+
+#[test]
+fn duration_ms_format_uses_one_decimal_place() {
+    let rendered = crate::index::format_duration_ms(std::time::Duration::from_micros(1234));
+
+    assert_eq!(rendered, "1.2");
+}
+
