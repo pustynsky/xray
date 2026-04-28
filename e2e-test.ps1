@@ -2116,6 +2116,42 @@ $testBlocks += , {
     }
 }
 
+# T-SYNC-NARROW-GREP: edit-then-scoped-grep sees a newly-added token without trigram rebuild
+$testBlocks += , {
+    param($Bin, $Dir, $Ext)
+    $name = "T-SYNC-NARROW-GREP scoped-grep-stale-trigram-zero-wait"
+    try {
+        $tmpDir = Join-Path $env:TEMP "search_par_sync_narrow_grep_$PID"
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir }
+        New-Item -ItemType Directory -Path $tmpDir | Out-Null
+        Set-Content -Path (Join-Path $tmpDir "src.rs") -Value "fn old_token() {}"
+        $filePath = ($tmpDir -replace '\\', '/') + '/src.rs'
+        $msgs = @(
+            '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"test","version":"1.0"}}}',
+            '{"jsonrpc":"2.0","method":"notifications/initialized"}',
+            ('{"jsonrpc":"2.0","id":5,"method":"tools/call","params":{"name":"xray_edit","arguments":{"path":"' + $filePath + '","edits":[{"search":"old_token","replace":"scopedfresh_token_xyz"}]}}}'),
+            '{"jsonrpc":"2.0","id":6,"method":"tools/call","params":{"name":"xray_grep","arguments":{"terms":["scopedfresh_token_xyz"],"file":["src.rs"],"substring":true}}}'
+        ) -join "`n"
+        $output = ($msgs | & $Bin serve --dir $tmpDir --ext rs 2>$null) | Out-String
+        $editLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*5' } | Select-Object -Last 1
+        $grepLine = $output -split "`n" | Where-Object { $_ -match '"id"\s*:\s*6' } | Select-Object -Last 1
+        Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue
+        $errors = @()
+        if (-not $editLine) { $errors += "no edit response" }
+        if ($editLine -and $editLine -match '"isError"\s*:\s*true') { $errors += "edit returned error" }
+        if ($editLine -notmatch 'contentIndexUpdated') { $errors += "missing contentIndexUpdated" }
+        if (-not $grepLine) { $errors += "no grep response" }
+        if ($grepLine -and $grepLine -match '"isError"\s*:\s*true') { $errors += "scoped grep returned error" }
+        if ($grepLine -notmatch 'scopedfresh_token_xyz') { $errors += "new token not found by scoped grep" }
+        if ($errors.Count -gt 0) { return @{ Name = $name; Passed = $false; Output = "FAILED ($($errors -join '; '))" } }
+        return @{ Name = $name; Passed = $true; Output = "OK (edit -> scoped grep sees new token via stale-safe path)" }
+    } catch {
+        if (Test-Path $tmpDir) { Remove-Item -Recurse -Force $tmpDir -ErrorAction SilentlyContinue }
+        return @{ Name = $name; Passed = $false; Output = "FAILED (exception: $_)" }
+    }
+}
+
+
 # T-SYNC-DEFS: edit-then-definitions sees new symbol with NO wait
 $testBlocks += , {
     param($Bin, $Dir, $Ext)
