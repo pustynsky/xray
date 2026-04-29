@@ -133,6 +133,8 @@ pub fn cmd_serve(args: ServeArgs) {
     // ─── Async startup flags ───
     let content_ready = Arc::new(AtomicBool::new(false));
     let def_ready = Arc::new(AtomicBool::new(false));
+    let content_build_terminal = Arc::new(AtomicBool::new(false));
+    let def_build_terminal = Arc::new(AtomicBool::new(false));
     let file_index_dirty = Arc::new(AtomicBool::new(true));
     let content_building = Arc::new(AtomicBool::new(false));
     let def_building = Arc::new(AtomicBool::new(false));
@@ -157,7 +159,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let (index, effective_respect_content) = load_or_build_content_index(
         &dir_str, &exts_for_load, &extensions, &idx_base,
         is_unresolved, args.watch, args.respect_git_exclude,
-        &content_ready, &content_building,
+        &content_ready, &content_build_terminal, &content_building,
         content_thread_budget,
     );
 
@@ -165,7 +167,7 @@ pub fn cmd_serve(args: ServeArgs) {
     let (def_index, def_extensions_vec, effective_respect_def) = load_or_build_definition_index(
         &dir_str, &extensions, &idx_base, &exts_for_load,
         is_unresolved, args.definitions,
-        &def_ready, &def_building,
+        &def_ready, &def_build_terminal, &def_building,
         args.respect_git_exclude,
         def_thread_budget,
     );
@@ -206,8 +208,10 @@ pub fn cmd_serve(args: ServeArgs) {
         );
     }
 
-    release_primary_build_lock_when_ready(
+    release_primary_build_lock_when_terminal(
         primary_build_lock,
+        Arc::clone(&content_build_terminal),
+        Arc::clone(&def_build_terminal),
         Arc::clone(&content_ready),
         Arc::clone(&def_ready),
         args.definitions,
@@ -268,6 +272,8 @@ pub fn cmd_serve(args: ServeArgs) {
         &dir_str,
         &idx_base,
         is_unresolved,
+        Arc::clone(&content_build_terminal),
+        Arc::clone(&def_build_terminal),
         Arc::clone(&content_ready),
         Arc::clone(&def_ready),
         args.definitions,
@@ -369,6 +375,97 @@ impl Drop for PrimaryBuildLock {
     }
 }
 
+struct BackgroundBuildStateGuard {
+    building: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    terminal: Arc<AtomicBool>,
+    completed: bool,
+}
+
+impl BackgroundBuildStateGuard {
+    fn start(
+        building: Arc<AtomicBool>,
+        ready: Arc<AtomicBool>,
+        terminal: Arc<AtomicBool>,
+    ) -> Self {
+        building.store(true, Ordering::Release);
+        Self {
+            building,
+            ready,
+            terminal,
+            completed: false,
+        }
+    }
+
+    fn mark_not_building(&self) {
+        self.building.store(false, Ordering::Release);
+    }
+
+    fn complete_ready(&mut self) {
+        self.mark_not_building();
+        self.ready.store(true, Ordering::Release);
+        self.terminal.store(true, Ordering::Release);
+        self.completed = true;
+    }
+
+    fn complete_failed(&mut self) {
+        self.mark_not_building();
+        self.terminal.store(true, Ordering::Release);
+        self.completed = true;
+    }
+}
+
+impl Drop for BackgroundBuildStateGuard {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.complete_failed();
+        }
+    }
+}
+
+fn spawn_background_build<F>(
+    panic_phase_name: &'static str,
+    building: Arc<AtomicBool>,
+    ready: Arc<AtomicBool>,
+    terminal: Arc<AtomicBool>,
+    build: F,
+) where
+    F: FnOnce(&mut BackgroundBuildStateGuard) + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let panic_start = Instant::now();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut build_state = BackgroundBuildStateGuard::start(building, ready, terminal);
+            build(&mut build_state);
+        }));
+
+        if let Err(payload) = result {
+            log_background_build_panic(panic_phase_name, payload.as_ref(), panic_start.elapsed());
+        }
+    });
+}
+
+fn log_background_build_panic(
+    phase_name: &'static str,
+    payload: &(dyn std::any::Any + Send),
+    elapsed: Duration,
+) {
+    let panic_message = if let Some(message) = payload.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = payload.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "non-string panic payload".to_string()
+    };
+
+    warn!(phase = phase_name, panic = %panic_message, "Background index build panicked");
+    crate::index::log_phase(phase_name, &[
+        ("panic", "true".to_string()),
+        ("panicMessage", panic_message),
+        ("elapsedMs", crate::index::format_duration_ms(elapsed)),
+    ]);
+}
+
 // The gate is root-scoped rather than extension-scoped: duplicate MCP clients
 // cold-starting the same workspace contend for the same disk and CPU budget.
 fn primary_build_lock_path(dir_str: &str, idx_base: &Path) -> PathBuf {
@@ -463,31 +560,35 @@ fn acquire_or_wait_primary_build_lock(
     }
 }
 
-fn release_primary_build_lock_when_ready(
+fn release_primary_build_lock_when_terminal(
     lock: Option<PrimaryBuildLock>,
+    content_terminal: Arc<AtomicBool>,
+    def_terminal: Arc<AtomicBool>,
     content_ready: Arc<AtomicBool>,
     def_ready: Arc<AtomicBool>,
-    wait_for_def_ready: bool,
+    wait_for_def_terminal: bool,
 ) {
     let Some(lock) = lock else {
         return;
     };
 
     std::thread::spawn(move || {
-        while !primary_indexes_ready_for_git_cache_rebuild(
-            &content_ready,
-            &def_ready,
-            wait_for_def_ready,
+        while !primary_indexes_terminal_for_git_cache_rebuild(
+            &content_terminal,
+            &def_terminal,
+            wait_for_def_terminal,
         ) {
             std::thread::sleep(PRIMARY_BUILD_LOCK_POLL_INTERVAL);
         }
         let held_elapsed = lock.acquired_at.elapsed();
-        let primary_ready_at = crate::index::debug_elapsed_ms().unwrap_or(0.0);
-        crate::index::log_phase("primaryIndexesReady", &[
-            ("primaryReadyAtMs", format!("{:.1}", primary_ready_at)),
+        let primary_terminal_at = crate::index::debug_elapsed_ms().unwrap_or(0.0);
+        crate::index::log_phase("primaryIndexesTerminal", &[
+            ("primaryTerminalAtMs", format!("{:.1}", primary_terminal_at)),
             ("primaryBuildLockHeldMs", crate::index::format_duration_ms(held_elapsed)),
             ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
             ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
+            ("contentTerminal", content_terminal.load(Ordering::Acquire).to_string()),
+            ("definitionsTerminal", def_terminal.load(Ordering::Acquire).to_string()),
         ]);
         drop(lock);
         crate::index::log_memory("serve: primary build lock released");
@@ -505,6 +606,7 @@ fn load_or_build_content_index(
     watch: bool,
     respect_git_exclude: bool,
     content_ready: &Arc<AtomicBool>,
+    content_build_terminal: &Arc<AtomicBool>,
     content_building: &Arc<AtomicBool>,
     build_threads: usize,
 ) -> (Arc<RwLock<ContentIndex>>, bool) {
@@ -608,6 +710,7 @@ fn load_or_build_content_index(
             ("cacheAge", cache_age),
         ]);
         content_ready.store(true, Ordering::Release);
+        content_build_terminal.store(true, Ordering::Release);
         crate::index::log_memory("serve: content ready");
 
         // Pre-warm trigram index in background to eliminate cold-start penalty
@@ -629,13 +732,13 @@ fn load_or_build_content_index(
         // Build in background — don't block the event loop
         let bg_index = Arc::clone(&index);
         let bg_ready = Arc::clone(content_ready);
+        let bg_terminal = Arc::clone(content_build_terminal);
         let bg_building = Arc::clone(content_building);
         let bg_dir = dir_str.to_string();
         let bg_ext = exts_for_load.to_string();
         let bg_idx_base = idx_base.to_path_buf();
 
-        std::thread::spawn(move || {
-            bg_building.store(true, Ordering::Release);
+        spawn_background_build("contentBuildPanicked", bg_building, bg_ready, bg_terminal, move |build_state| {
             info!("Building content index in background...");
             crate::index::log_memory("content-build: starting");
             let build_start = Instant::now();
@@ -656,8 +759,7 @@ fn load_or_build_content_index(
                         ("contentTotalBuildMs", crate::index::format_duration_ms(build_start.elapsed())),
                         ("error", e.to_string()),
                     ]);
-                    bg_building.store(false, Ordering::Release);
-                    bg_ready.store(true, Ordering::Release);
+                    build_state.complete_failed();
                     return;
                 }
             };
@@ -697,8 +799,7 @@ fn load_or_build_content_index(
                         Ok(idx) => idx,
                         Err(e2) => {
                             warn!(error = %e2, "Failed to rebuild content index from scratch");
-                            bg_building.store(false, Ordering::Release);
-                            bg_ready.store(true, Ordering::Release);
+                            build_state.complete_failed();
                             return;
                         }
                     }
@@ -721,7 +822,7 @@ fn load_or_build_content_index(
                 "Content index ready (background build complete)"
             );
             *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
-            bg_building.store(false, Ordering::Release);
+            build_state.mark_not_building();
             crate::index::log_phase("contentReady", &[
                 ("cacheHitContent", "false".to_string()),
                 ("contentBuildMs", crate::index::format_duration_ms(index_build_elapsed)),
@@ -732,7 +833,7 @@ fn load_or_build_content_index(
                 ("contentFilesRead", file_count.to_string()),
                 ("contentUniqueTokens", token_count.to_string()),
             ]);
-            bg_ready.store(true, Ordering::Release);
+            build_state.complete_ready();
             crate::index::log_memory("serve: content ready");
 
             // Pre-warm trigram index after background build
@@ -744,6 +845,8 @@ fn load_or_build_content_index(
             eprintln!("[warmup] Trigram pre-warm completed in {:.1}ms ({} trigrams, {} tokens)",
                 warmup_start.elapsed().as_secs_f64() * 1000.0, trigrams, tokens);
         });
+    } else {
+        content_build_terminal.store(true, Ordering::Release);
     }
 
     (index, effective_respect_git_exclude)
@@ -758,6 +861,7 @@ fn load_or_build_definition_index(
     is_unresolved: bool,
     definitions_enabled: bool,
     def_ready: &Arc<AtomicBool>,
+    def_build_terminal: &Arc<AtomicBool>,
     def_building: &Arc<AtomicBool>,
     respect_git_exclude: bool,
     build_threads: usize,
@@ -912,6 +1016,7 @@ fn load_or_build_definition_index(
                 ("cacheAge", cache_age),
             ]);
             def_ready.store(true, Ordering::Release);
+            def_build_terminal.store(true, Ordering::Release);
         } else if !is_unresolved {
             crate::index::log_phase("definitionsBuildQueued", &[
                 ("cacheHitDefinitions", "false".to_string()),
@@ -919,13 +1024,13 @@ fn load_or_build_definition_index(
             // Build in background
             let bg_def = Arc::clone(&def_arc);
             let bg_def_ready = Arc::clone(def_ready);
+            let bg_def_terminal = Arc::clone(def_build_terminal);
             let bg_def_building = Arc::clone(def_building);
             let bg_dir = dir_str.to_string();
             let bg_def_exts = def_exts.clone();
             let bg_idx_base = idx_base.to_path_buf();
 
-            std::thread::spawn(move || {
-                bg_def_building.store(true, Ordering::Release);
+            spawn_background_build("definitionsBuildPanicked", bg_def_building, bg_def_ready, bg_def_terminal, move |build_state| {
                 info!("Building definition index in background...");
                 crate::index::log_memory("def-build: starting");
                 let build_start = Instant::now();
@@ -980,7 +1085,7 @@ fn load_or_build_definition_index(
                 let mut new_idx = new_idx;
                 new_idx.shrink_maps();
                 *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
-                bg_def_building.store(false, Ordering::Release);
+                build_state.mark_not_building();
                 crate::index::log_phase("definitionsReady", &[
                     ("cacheHitDefinitions", "false".to_string()),
                     ("definitionsBuildMs", crate::index::format_duration_ms(index_build_elapsed)),
@@ -992,15 +1097,18 @@ fn load_or_build_definition_index(
                     ("definitionsExtracted", def_count.to_string()),
                     ("definitionsCallSites", call_count.to_string()),
                 ]);
-                bg_def_ready.store(true, Ordering::Release);
+                build_state.complete_ready();
                 crate::index::log_memory("serve: def ready");
             });
+        } else {
+            def_build_terminal.store(true, Ordering::Release);
         }
 
         Some(def_arc)
     } else {
         // No --definitions flag: mark as ready (N/A)
         def_ready.store(true, Ordering::Release);
+        def_build_terminal.store(true, Ordering::Release);
         None
     };
 
@@ -1011,9 +1119,11 @@ fn build_git_cache_background(
     dir_str: &str,
     idx_base: &Path,
     is_unresolved: bool,
+    content_terminal: Arc<AtomicBool>,
+    def_terminal: Arc<AtomicBool>,
     content_ready: Arc<AtomicBool>,
     def_ready: Arc<AtomicBool>,
-    wait_for_def_ready: bool,
+    wait_for_def_terminal: bool,
 ) -> (Arc<RwLock<Option<GitHistoryCache>>>, Arc<AtomicBool>) {
     let git_cache: Arc<RwLock<Option<GitHistoryCache>>> = Arc::new(RwLock::new(None));
     let git_cache_ready = Arc::new(AtomicBool::new(false));
@@ -1140,9 +1250,11 @@ fn build_git_cache_background(
                 Some(c) => c,
                 None => {
                     wait_for_primary_indexes_before_git_cache_rebuild(
+                        &content_terminal,
+                        &def_terminal,
                         &content_ready,
                         &def_ready,
-                        wait_for_def_ready,
+                        wait_for_def_terminal,
                     );
                     eprintln!("[git-cache] Building cache for branch '{}' (this may take a few minutes for large repos)...", branch);
                     let git_build_start = Instant::now();
@@ -1204,47 +1316,55 @@ fn build_git_cache_background(
     (git_cache, git_cache_ready)
 }
 
-fn primary_indexes_ready_for_git_cache_rebuild(
-    content_ready: &AtomicBool,
-    def_ready: &AtomicBool,
-    wait_for_def_ready: bool,
+fn primary_indexes_terminal_for_git_cache_rebuild(
+    content_terminal: &AtomicBool,
+    def_terminal: &AtomicBool,
+    wait_for_def_terminal: bool,
 ) -> bool {
-    content_ready.load(Ordering::Acquire)
-        && (!wait_for_def_ready || def_ready.load(Ordering::Acquire))
+    content_terminal.load(Ordering::Acquire)
+        && (!wait_for_def_terminal || def_terminal.load(Ordering::Acquire))
 }
 
 fn wait_for_primary_indexes_before_git_cache_rebuild(
+    content_terminal: &AtomicBool,
+    def_terminal: &AtomicBool,
     content_ready: &AtomicBool,
     def_ready: &AtomicBool,
-    wait_for_def_ready: bool,
+    wait_for_def_terminal: bool,
 ) {
     let wait_start = Instant::now();
-    if primary_indexes_ready_for_git_cache_rebuild(content_ready, def_ready, wait_for_def_ready) {
+    if primary_indexes_terminal_for_git_cache_rebuild(content_terminal, def_terminal, wait_for_def_terminal) {
         crate::index::log_phase("gitCachePrimaryWait", &[
             ("gitCachePrimaryWaitMs", "0.0".to_string()),
             ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
             ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
+            ("contentTerminal", content_terminal.load(Ordering::Acquire).to_string()),
+            ("definitionsTerminal", def_terminal.load(Ordering::Acquire).to_string()),
         ]);
         return;
     }
 
-    info!("Git cache cold rebuild deferred until primary indexes are ready");
+    info!("Git cache cold rebuild deferred until primary index builds finish");
     crate::index::log_phase("gitCachePrimaryWaitStart", &[
         ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
         ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
-        ("waitForDefinitions", wait_for_def_ready.to_string()),
+        ("contentTerminal", content_terminal.load(Ordering::Acquire).to_string()),
+        ("definitionsTerminal", def_terminal.load(Ordering::Acquire).to_string()),
+        ("waitForDefinitions", wait_for_def_terminal.to_string()),
     ]);
     // Only cold rebuilds wait here. A valid persisted git cache is loaded earlier,
     // so this removes cold-start contention without delaying cache hits.
-    while !primary_indexes_ready_for_git_cache_rebuild(content_ready, def_ready, wait_for_def_ready) {
+    while !primary_indexes_terminal_for_git_cache_rebuild(content_terminal, def_terminal, wait_for_def_terminal) {
         std::thread::sleep(Duration::from_millis(100));
     }
     crate::index::log_phase("gitCachePrimaryWait", &[
         ("gitCachePrimaryWaitMs", crate::index::format_duration_ms(wait_start.elapsed())),
         ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
         ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
+        ("contentTerminal", content_terminal.load(Ordering::Acquire).to_string()),
+        ("definitionsTerminal", def_terminal.load(Ordering::Acquire).to_string()),
     ]);
-    info!("Primary indexes ready; starting deferred git cache cold rebuild");
+    info!("Primary index builds reached terminal state; starting deferred git cache cold rebuild");
 }
 
 
@@ -1334,9 +1454,13 @@ mod serve_format_cache_age_tests {
 
 #[cfg(test)]
 mod serve_git_cache_startup_tests {
-    use super::primary_indexes_ready_for_git_cache_rebuild;
+    use super::{
+        primary_build_lock_path, primary_indexes_terminal_for_git_cache_rebuild,
+        try_create_primary_build_lock, BackgroundBuildStateGuard,
+    };
+    use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use super::{primary_build_lock_path, try_create_primary_build_lock};
+    use std::sync::Arc;
 
 
     #[test]
@@ -1382,28 +1506,115 @@ mod serve_git_cache_startup_tests {
 
 
     #[test]
-    fn git_cache_cold_rebuild_waits_for_content_and_def_when_definitions_enabled() {
-        let content_ready = AtomicBool::new(false);
-        let def_ready = AtomicBool::new(false);
+    fn background_build_state_guard_marks_terminal_not_ready_on_drop() {
+        let building = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(AtomicBool::new(false));
+        let terminal = Arc::new(AtomicBool::new(false));
 
-        assert!(!primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, true));
+        {
+            let _guard = BackgroundBuildStateGuard::start(
+                Arc::clone(&building),
+                Arc::clone(&ready),
+                Arc::clone(&terminal),
+            );
+            assert!(building.load(Ordering::Acquire));
+            assert!(!ready.load(Ordering::Acquire));
+            assert!(!terminal.load(Ordering::Acquire));
+        }
 
-        content_ready.store(true, Ordering::Release);
-        assert!(!primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, true));
-
-        def_ready.store(true, Ordering::Release);
-        assert!(primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, true));
+        assert!(!building.load(Ordering::Acquire));
+        assert!(!ready.load(Ordering::Acquire));
+        assert!(terminal.load(Ordering::Acquire));
     }
 
     #[test]
-    fn git_cache_cold_rebuild_waits_only_for_content_when_definitions_disabled() {
-        let content_ready = AtomicBool::new(false);
-        let def_ready = AtomicBool::new(false);
+    fn background_build_state_guard_complete_ready_marks_ready_and_terminal() {
+        let building = Arc::new(AtomicBool::new(false));
+        let ready = Arc::new(AtomicBool::new(false));
+        let terminal = Arc::new(AtomicBool::new(false));
 
-        assert!(!primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, false));
+        let mut guard = BackgroundBuildStateGuard::start(
+            Arc::clone(&building),
+            Arc::clone(&ready),
+            Arc::clone(&terminal),
+        );
+        guard.complete_ready();
 
-        content_ready.store(true, Ordering::Release);
-        assert!(primary_indexes_ready_for_git_cache_rebuild(&content_ready, &def_ready, false));
+        assert!(!building.load(Ordering::Acquire));
+        assert!(ready.load(Ordering::Acquire));
+        assert!(terminal.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn background_build_state_guard_unwind_unblocks_primary_waits_without_ready() {
+        let content_building = Arc::new(AtomicBool::new(false));
+        let content_ready = Arc::new(AtomicBool::new(false));
+        let content_terminal = Arc::new(AtomicBool::new(false));
+        let def_building = Arc::new(AtomicBool::new(false));
+        let def_ready = Arc::new(AtomicBool::new(false));
+        let def_terminal = Arc::new(AtomicBool::new(false));
+
+        let content_result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = BackgroundBuildStateGuard::start(
+                Arc::clone(&content_building),
+                Arc::clone(&content_ready),
+                Arc::clone(&content_terminal),
+            );
+            panic!("simulated content build panic");
+        }));
+        assert!(content_result.is_err());
+        assert!(!content_building.load(Ordering::Acquire));
+        assert!(!content_ready.load(Ordering::Acquire));
+        assert!(content_terminal.load(Ordering::Acquire));
+        assert!(!primary_indexes_terminal_for_git_cache_rebuild(
+            content_terminal.as_ref(),
+            def_terminal.as_ref(),
+            true,
+        ));
+
+        let def_result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = BackgroundBuildStateGuard::start(
+                Arc::clone(&def_building),
+                Arc::clone(&def_ready),
+                Arc::clone(&def_terminal),
+            );
+            panic!("simulated definition build panic");
+        }));
+        assert!(def_result.is_err());
+        assert!(!def_building.load(Ordering::Acquire));
+        assert!(!def_ready.load(Ordering::Acquire));
+        assert!(def_terminal.load(Ordering::Acquire));
+        assert!(primary_indexes_terminal_for_git_cache_rebuild(
+            content_terminal.as_ref(),
+            def_terminal.as_ref(),
+            true,
+        ));
+    }
+
+
+    #[test]
+    fn git_cache_cold_rebuild_waits_for_content_and_def_terminal_when_definitions_enabled() {
+        let content_terminal = AtomicBool::new(false);
+        let def_terminal = AtomicBool::new(false);
+
+        assert!(!primary_indexes_terminal_for_git_cache_rebuild(&content_terminal, &def_terminal, true));
+
+        content_terminal.store(true, Ordering::Release);
+        assert!(!primary_indexes_terminal_for_git_cache_rebuild(&content_terminal, &def_terminal, true));
+
+        def_terminal.store(true, Ordering::Release);
+        assert!(primary_indexes_terminal_for_git_cache_rebuild(&content_terminal, &def_terminal, true));
+    }
+
+    #[test]
+    fn git_cache_cold_rebuild_waits_only_for_content_terminal_when_definitions_disabled() {
+        let content_terminal = AtomicBool::new(false);
+        let def_terminal = AtomicBool::new(false);
+
+        assert!(!primary_indexes_terminal_for_git_cache_rebuild(&content_terminal, &def_terminal, false));
+
+        content_terminal.store(true, Ordering::Release);
+        assert!(primary_indexes_terminal_for_git_cache_rebuild(&content_terminal, &def_terminal, false));
     }
 }
 
@@ -1469,6 +1680,7 @@ mod serve_respect_git_exclude_tests {
         // Now simulate `xray serve` WITHOUT --respect-git-exclude (CLI = false).
         let extensions = vec!["cs".to_string()];
         let content_ready = Arc::new(AtomicBool::new(false));
+        let content_build_terminal = Arc::new(AtomicBool::new(false));
         let content_building = Arc::new(AtomicBool::new(false));
 
         let (_index, effective) = load_or_build_content_index(
@@ -1480,6 +1692,7 @@ mod serve_respect_git_exclude_tests {
             false, // watch
             false, // CLI flag — was true at build time, now false
             &content_ready,
+            &content_build_terminal,
             &content_building,
             1,     // build_threads (unused — cache hit path)
         );
@@ -1491,6 +1704,10 @@ mod serve_respect_git_exclude_tests {
         assert!(
             content_ready.load(Ordering::Acquire),
             "content_ready must be set after a synchronous load"
+        );
+        assert!(
+            content_build_terminal.load(Ordering::Acquire),
+            "content terminal state must be set after a synchronous load"
         );
     }
 
@@ -1520,6 +1737,7 @@ mod serve_respect_git_exclude_tests {
 
         let extensions = vec!["cs".to_string()];
         let def_ready = Arc::new(AtomicBool::new(false));
+        let def_build_terminal = Arc::new(AtomicBool::new(false));
         let def_building = Arc::new(AtomicBool::new(false));
 
         let (_def_index, _def_extensions, effective) = load_or_build_definition_index(
@@ -1530,6 +1748,7 @@ mod serve_respect_git_exclude_tests {
             false, // is_unresolved
             true,  // definitions_enabled
             &def_ready,
+            &def_build_terminal,
             &def_building,
             false, // CLI flag — was true at build time, now false
             1,     // build_threads (unused — cache hit path)
@@ -1542,6 +1761,10 @@ mod serve_respect_git_exclude_tests {
         assert!(
             def_ready.load(Ordering::Acquire),
             "def_ready must be set after a synchronous load"
+        );
+        assert!(
+            def_build_terminal.load(Ordering::Acquire),
+            "definition terminal state must be set after a synchronous load"
         );
     }
 
@@ -1561,6 +1784,7 @@ mod serve_respect_git_exclude_tests {
 
         let extensions = vec!["cs".to_string()];
         let content_ready = Arc::new(AtomicBool::new(false));
+        let content_build_terminal = Arc::new(AtomicBool::new(false));
         let content_building = Arc::new(AtomicBool::new(false));
 
         let (_index, effective) = load_or_build_content_index(
@@ -1572,6 +1796,7 @@ mod serve_respect_git_exclude_tests {
             false, // watch
             true,  // CLI flag
             &content_ready,
+            &content_build_terminal,
             &content_building,
             1,     // build_threads
         );
