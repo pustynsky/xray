@@ -1,5 +1,16 @@
 # Changelog
 
+## Serve background build failure handling
+
+- **Unblock startup waiters after detached index build failure or panic.**
+  Background content/definition builds now mark a terminal build state when
+  they fail or unwind, so the primary build lock and deferred git-cache rebuild
+  do not wait forever on `*_building=true` with `*_ready=false`.
+- **Keep `ready` reserved for usable indexes.** Failure and panic paths clear
+  the building flag and mark terminal completion without setting
+  `content_ready`/`def_ready`, preventing empty placeholder indexes from being
+  served or persisted.
+
 ## Parallel trigram index build
 
 - **Parallelize trigram index construction during cold build.** The trigram
