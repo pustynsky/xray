@@ -272,11 +272,13 @@ pub fn cmd_serve(args: ServeArgs) {
         &dir_str,
         &idx_base,
         is_unresolved,
-        Arc::clone(&content_build_terminal),
-        Arc::clone(&def_build_terminal),
-        Arc::clone(&content_ready),
-        Arc::clone(&def_ready),
-        args.definitions,
+        GitCacheReadiness {
+            content_terminal: Arc::clone(&content_build_terminal),
+            def_terminal: Arc::clone(&def_build_terminal),
+            content_ready: Arc::clone(&content_ready),
+            def_ready: Arc::clone(&def_ready),
+            wait_for_def_terminal: args.definitions,
+        },
     );
 
     // ─── Detect current branch ───
@@ -1115,15 +1117,19 @@ fn load_or_build_definition_index(
     (def_index, def_extensions_vec, effective_respect_git_exclude)
 }
 
-fn build_git_cache_background(
-    dir_str: &str,
-    idx_base: &Path,
-    is_unresolved: bool,
+struct GitCacheReadiness {
     content_terminal: Arc<AtomicBool>,
     def_terminal: Arc<AtomicBool>,
     content_ready: Arc<AtomicBool>,
     def_ready: Arc<AtomicBool>,
     wait_for_def_terminal: bool,
+}
+
+fn build_git_cache_background(
+    dir_str: &str,
+    idx_base: &Path,
+    is_unresolved: bool,
+    readiness: GitCacheReadiness,
 ) -> (Arc<RwLock<Option<GitHistoryCache>>>, Arc<AtomicBool>) {
     let git_cache: Arc<RwLock<Option<GitHistoryCache>>> = Arc::new(RwLock::new(None));
     let git_cache_ready = Arc::new(AtomicBool::new(false));
@@ -1250,11 +1256,11 @@ fn build_git_cache_background(
                 Some(c) => c,
                 None => {
                     wait_for_primary_indexes_before_git_cache_rebuild(
-                        &content_terminal,
-                        &def_terminal,
-                        &content_ready,
-                        &def_ready,
-                        wait_for_def_terminal,
+                        &readiness.content_terminal,
+                        &readiness.def_terminal,
+                        &readiness.content_ready,
+                        &readiness.def_ready,
+                        readiness.wait_for_def_terminal,
                     );
                     eprintln!("[git-cache] Building cache for branch '{}' (this may take a few minutes for large repos)...", branch);
                     let git_build_start = Instant::now();

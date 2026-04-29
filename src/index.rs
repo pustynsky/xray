@@ -1656,6 +1656,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
 /// Build a trigram index from the inverted index's token keys.
 /// Uses `max_threads=0` (auto) — callers with a thread budget should use
 /// `build_trigram_index_from_tokens` directly.
+#[cfg(test)]
 pub fn build_trigram_index(inverted: &HashMap<String, Vec<Posting>>) -> TrigramIndex {
     build_trigram_index_from_tokens(inverted.keys().cloned().collect(), 0)
 }

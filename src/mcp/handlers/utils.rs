@@ -162,11 +162,17 @@ pub(crate) fn validate_search_dir(requested_dir: &str, server_dir: &str) -> Resu
 pub(crate) fn is_under_dir(file_path: &str, dir_prefix: &str) -> bool {
     let file_norm = normalize_path_sep(file_path).to_lowercase();
     let mut dir_norm = normalize_path_sep(dir_prefix).to_lowercase();
-    // Ensure dir prefix ends with '/' for proper boundary matching
+    let file_trim = file_norm.trim_end_matches('/');
+    let dir_trim = dir_norm.trim_end_matches('/');
+    if file_trim == dir_trim {
+        return false;
+    }
+
+    // Ensure dir prefix ends with '/' for proper boundary matching.
     if !dir_norm.ends_with('/') {
         dir_norm.push('/');
     }
-    file_norm.starts_with(&dir_norm)
+    file_norm.starts_with(&dir_norm) || code_xray::is_path_within(file_path, dir_prefix)
 }
 
 /// Heuristic: if path ends with a known source/config extension, it's likely a file path.
@@ -732,8 +738,8 @@ fn cap_line_content_preview(file_entry: &mut Value) -> bool {
         let mut groups_to_keep = groups.len();
         let mut omitted_source_lines = 0usize;
 
-        for group_index in 0..groups.len() {
-            let group_line_count = groups[group_index]
+        for (group_index, group) in groups.iter_mut().enumerate() {
+            let group_line_count = group
                 .get("lines")
                 .and_then(|v| v.as_array())
                 .map(|lines| lines.len())
@@ -751,12 +757,12 @@ fn cap_line_content_preview(file_entry: &mut Value) -> bool {
                 groups_to_keep = groups_to_keep.min(group_index + 1);
             }
 
-            if let Some(lines) = groups[group_index].get_mut("lines").and_then(|v| v.as_array_mut()) {
+            if let Some(lines) = group.get_mut("lines").and_then(|v| v.as_array_mut()) {
                 lines.truncate(keep_line_count);
             }
             remaining_source_lines = remaining_source_lines.saturating_sub(keep_line_count);
 
-            let remove_match_indices = if let Some(group_obj) = groups[group_index].as_object_mut() {
+            let remove_match_indices = if let Some(group_obj) = group.as_object_mut() {
                 if let Some(match_indices) = group_obj.get_mut("matchIndices").and_then(|v| v.as_array_mut()) {
                     match_indices.retain(|index| {
                         let Some(index) = index.as_u64().map(|idx| idx as usize) else {
@@ -777,7 +783,7 @@ fn cap_line_content_preview(file_entry: &mut Value) -> bool {
             };
 
             if remove_match_indices
-                && let Some(group_obj) = groups[group_index].as_object_mut() {
+                && let Some(group_obj) = group.as_object_mut() {
                     group_obj.remove("matchIndices");
                 }
         }

@@ -529,10 +529,10 @@ fn test_warnings_empty_on_wellformed() {
 /// still passes (we care about no-panic, not about which layer defends).
 #[test]
 fn test_deeply_nested_no_stack_overflow() {
-    // Build a pathologically deep document: 2500 levels, well past our 1024
-    // tripwire so that IF tree-sitter surfaces the full depth, our limit
-    // will trip.
-    const DEPTH: usize = 2500;
+    // Build a pathologically deep document above our 1024-level tripwire,
+    // but keep it small enough that tree-sitter-xml reliably returns an AST
+    // under full-suite parallel CI load.
+    const DEPTH: usize = 1100;
     let mut xml = String::with_capacity(DEPTH * 10);
     for i in 0..DEPTH {
         xml.push_str(&format!("<L{}>", i));

@@ -1191,17 +1191,20 @@ fn apply_literal_prefilter_summary(
     let slow_enough = search_elapsed_ms >= LINE_REGEX_SLOW_MS
         && info.total_files >= LINE_REGEX_LARGE_INDEX_FILES
         && search_mode.starts_with("lineRegex");
-    if info.used || (slow_enough && info.reason.is_some()) {
-        if let Some(hint) = line_regex_perf_hint(
+    let perf_hint = if info.used || (slow_enough && info.reason.is_some()) {
+        line_regex_perf_hint(
             search_mode,
             search_elapsed_ms,
             info.total_files,
             info.used,
             Some(telemetry),
             info.reason.as_deref(),
-        ) {
-            obj.insert("perfHint".into(), json!(hint));
-        }
+        )
+    } else {
+        None
+    };
+    if let Some(hint) = perf_hint {
+        obj.insert("perfHint".into(), json!(hint));
     }
 }
 
@@ -3145,7 +3148,7 @@ fn collect_line_regex_scan_outputs(
         return Ok((outputs, false, 1, scan_start.elapsed()));
     }
 
-    let chunk_size = (index.files.len() + worker_threads - 1) / worker_threads;
+    let chunk_size = index.files.len().div_ceil(worker_threads);
     let mut outputs: Vec<LineRegexFileScanOutput> = Vec::with_capacity(index.files.len());
     let mut worker_panicked = false;
 
