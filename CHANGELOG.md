@@ -1,5 +1,19 @@
 # Changelog
 
+## Parallel trigram index build
+
+- **Parallelize trigram index construction during cold build.** The trigram
+  index (used for substring search) is now built using multiple threads via
+  `std::thread::scope`. Tokens are split into chunks, each thread builds a
+  local trigram map, and the results are merged. On large repos (3.8M tokens)
+  this reduces trigram build time from ~8s to ~2-3s.
+- Small indexes (<2000 tokens) use the serial path to avoid thread overhead.
+- The same parallel path benefits `rebuild_trigram_index_singleflight` (lazy
+  rebuild after watcher mutations).
+- Deterministic output: tokens are sorted before chunking, and chunk indices
+  are monotonically increasing, so merged posting lists remain sorted without
+  an extra sort pass.
+
 ## Thread budget for serve cold start
 
 - **Prevent oversubscription during cold start.** When `xray serve` needs to
