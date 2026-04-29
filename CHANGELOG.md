@@ -1,5 +1,25 @@
 # Changelog
 
+## Thread budget for serve cold start
+
+- **Prevent oversubscription during cold start.** When `xray serve` needs to
+  cold-build both content and definition indexes simultaneously, the combined
+  worker thread count is now capped at `available_parallelism()` instead of
+  each build independently taking the full core count (previously 2×N threads
+  on an N-core machine).
+- Default split: content build gets N/2 threads, definition build gets the
+  remainder. Content walk is I/O-bound and benefits less from extra CPU;
+  definition parsing is CPU-bound.
+- Standalone CLI commands (`xray content-index --threads`, `xray def-index
+  --threads`) are not affected — only the `serve` cold-start path.
+- New env overrides for diagnostics: `XRAY_CONTENT_THREADS` and
+  `XRAY_DEFINITION_THREADS` set explicit thread counts (≥1), bypassing the
+  automatic split.
+- New `threadBudget` phase in debug telemetry shows chosen thread counts,
+  available parallelism, and env override status.
+- 12 new unit tests for budget computation.
+
+
 ## 2026-04-28
 
 ### Diagnostics

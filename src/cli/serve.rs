@@ -18,6 +18,97 @@ use crate::mcp;
 
 use super::args::{ServeArgs, ContentIndexArgs};
 
+/// Compute thread budgets for content and definition cold builds during `serve`.
+///
+/// Without env overrides, the total budget equals `available_parallelism()`.
+/// When both content and definitions need cold building simultaneously,
+/// the budget is split so that the combined worker count does not substantially
+/// exceed the number of logical cores.
+///
+/// Content walk is I/O-bound (benefits from many threads for async reads),
+/// while definition parsing is CPU-bound (tree-sitter). The split favours
+/// definitions slightly since content walk parallelism is usually limited
+/// by disk throughput rather than core count.
+///
+/// Env overrides (values ≥ 1):
+///   XRAY_CONTENT_THREADS  — override content build thread count
+///   XRAY_DEFINITION_THREADS — override definition build thread count
+///
+/// When only one index needs a cold build, the other gets 0 (unused)
+/// and the active one gets the full budget.
+/// Pure budget computation — no I/O, no env reads, no logging.
+/// Testable with arbitrary inputs.
+fn compute_budget_split(
+    total: usize,
+    env_content: Option<usize>,
+    env_def: Option<usize>,
+    need_content_build: bool,
+    need_def_build: bool,
+) -> (usize, usize) {
+    let content_threads = if !need_content_build {
+        0
+    } else if let Some(n) = env_content {
+        n
+    } else if need_def_build && env_def.is_none() {
+        // Both need building — split the budget.
+        // Content walk is I/O-bound; give it roughly half.
+        // Definitions (CPU-bound parsing) get the rest.
+        total.max(2) / 2
+    } else {
+        // Only content needs building, or def has explicit override — full budget.
+        total
+    };
+
+    let def_threads = if !need_def_build {
+        0
+    } else if let Some(n) = env_def {
+        n
+    } else if need_content_build && env_content.is_none() {
+        // Both need building — definitions get the remainder.
+        let content_share = total.max(2) / 2;
+        (total.saturating_sub(content_share)).max(1)
+    } else {
+        // Only def needs building, or content has explicit override — full budget.
+        total
+    };
+
+    (content_threads, def_threads)
+}
+
+/// Read env overrides, compute budget, and log the result.
+fn compute_thread_budget(
+    need_content_build: bool,
+    need_def_build: bool,
+) -> (usize, usize) {
+    let total = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+
+    let env_content = std::env::var("XRAY_CONTENT_THREADS").ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1);
+    let env_def = std::env::var("XRAY_DEFINITION_THREADS").ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1);
+
+    let (content_threads, def_threads) = compute_budget_split(
+        total, env_content, env_def, need_content_build, need_def_build,
+    );
+
+    crate::index::log_phase("threadBudget", &[
+        ("availableParallelism", total.to_string()),
+        ("contentThreads", content_threads.to_string()),
+        ("definitionThreads", def_threads.to_string()),
+        ("budgetAssumedContentBuild", need_content_build.to_string()),
+        ("budgetAssumedDefBuild", need_def_build.to_string()),
+        ("envContentThreads", env_content.map(|n| n.to_string()).unwrap_or_else(|| "auto".to_string())),
+        ("envDefThreads", env_def.map(|n| n.to_string()).unwrap_or_else(|| "auto".to_string())),
+    ]);
+
+    (content_threads, def_threads)
+}
+
+
 pub fn cmd_serve(args: ServeArgs) {
     let dir_str = args.dir.clone();
     // Flatten multi-value --ext: supports both ["rs", "md"] and ["rs,md"]
@@ -48,6 +139,15 @@ pub fn cmd_serve(args: ServeArgs) {
 
     let primary_build_lock = acquire_or_wait_primary_build_lock(&dir_str, &idx_base, is_unresolved);
 
+    // ─── Thread budget for cold builds ───
+    // Compute BEFORE spawning build threads so both get a coordinated budget.
+    // If a cache hit occurs, the budget is simply unused.
+    let (content_thread_budget, def_thread_budget) = if is_unresolved {
+        (0, 0)
+    } else {
+        compute_thread_budget(true, args.definitions)
+    };
+
     // ─── Content index: load from disk or build in background ───
     // Returns the effective `respect_git_exclude` resolved against any persisted
     // value on disk — see `resolve_respect_git_exclude` in `super`. This must be
@@ -58,6 +158,7 @@ pub fn cmd_serve(args: ServeArgs) {
         &dir_str, &exts_for_load, &extensions, &idx_base,
         is_unresolved, args.watch, args.respect_git_exclude,
         &content_ready, &content_building,
+        content_thread_budget,
     );
 
     // ─── Definition index: same async pattern ───
@@ -66,6 +167,7 @@ pub fn cmd_serve(args: ServeArgs) {
         is_unresolved, args.definitions,
         &def_ready, &def_building,
         args.respect_git_exclude,
+        def_thread_budget,
     );
 
     let cache_hit_content = content_ready.load(Ordering::Acquire);
@@ -404,6 +506,7 @@ fn load_or_build_content_index(
     respect_git_exclude: bool,
     content_ready: &Arc<AtomicBool>,
     content_building: &Arc<AtomicBool>,
+    build_threads: usize,
 ) -> (Arc<RwLock<ContentIndex>>, bool) {
     // ─── Async startup: create empty indexes, start event loop immediately ───
     let empty_index = ContentIndex {
@@ -543,7 +646,7 @@ fn load_or_build_content_index(
                 max_age_hours: 24,
                 hidden: false,
                 no_ignore: false, respect_git_exclude,
-                threads: 0,
+                threads: build_threads,
                 min_token_len: DEFAULT_MIN_TOKEN_LEN,
             }) {
                 Ok(idx) => idx,
@@ -589,7 +692,7 @@ fn load_or_build_content_index(
                     match build_content_index(&ContentIndexArgs {
                         dir: bg_dir, ext: bg_ext,
                         max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
-                        threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                        threads: build_threads, min_token_len: DEFAULT_MIN_TOKEN_LEN,
                     }) {
                         Ok(idx) => idx,
                         Err(e2) => {
@@ -657,6 +760,7 @@ fn load_or_build_definition_index(
     def_ready: &Arc<AtomicBool>,
     def_building: &Arc<AtomicBool>,
     respect_git_exclude: bool,
+    build_threads: usize,
 ) -> (Option<Arc<RwLock<definitions::DefinitionIndex>>>, Vec<String>, bool) {
     // Use compile-time definition extensions based on enabled Cargo features
     let supported_def_langs = definitions::definition_extensions();
@@ -829,7 +933,7 @@ fn load_or_build_definition_index(
                 let new_idx = definitions::build_definition_index(&definitions::DefIndexArgs {
                     dir: bg_dir.clone(),
                     ext: bg_def_exts.clone(),
-                    threads: 0,
+                    threads: build_threads,
                     respect_git_exclude,
                 });
                 let index_build_elapsed = index_build_start.elapsed();
@@ -859,7 +963,7 @@ fn load_or_build_definition_index(
                     .unwrap_or_else(|e| {
                         warn!(error = %e, "Failed to reload definition index from disk, rebuilding");
                         definitions::build_definition_index(&definitions::DefIndexArgs {
-                            dir: bg_dir, ext: bg_def_exts, threads: 0,
+                            dir: bg_dir, ext: bg_def_exts, threads: build_threads,
                             respect_git_exclude,
                         })
                     });
@@ -1377,6 +1481,7 @@ mod serve_respect_git_exclude_tests {
             false, // CLI flag — was true at build time, now false
             &content_ready,
             &content_building,
+            1,     // build_threads (unused — cache hit path)
         );
 
         assert!(
@@ -1427,6 +1532,7 @@ mod serve_respect_git_exclude_tests {
             &def_ready,
             &def_building,
             false, // CLI flag — was true at build time, now false
+            1,     // build_threads (unused — cache hit path)
         );
 
         assert!(
@@ -1467,9 +1573,106 @@ mod serve_respect_git_exclude_tests {
             true,  // CLI flag
             &content_ready,
             &content_building,
+            1,     // build_threads
         );
 
         assert!(effective, "cold start: CLI flag passes through unchanged");
+    }
+}
+
+#[cfg(test)]
+mod serve_thread_budget_tests {
+    use super::compute_budget_split;
+
+    #[test]
+    fn neither_needs_build() {
+        let (c, d) = compute_budget_split(24, None, None, false, false);
+        assert_eq!(c, 0);
+        assert_eq!(d, 0);
+    }
+
+    #[test]
+    fn only_content_needs_build() {
+        let (c, d) = compute_budget_split(24, None, None, true, false);
+        assert_eq!(c, 24, "content gets full budget when def doesn't need build");
+        assert_eq!(d, 0);
+    }
+
+    #[test]
+    fn only_def_needs_build() {
+        let (c, d) = compute_budget_split(24, None, None, false, true);
+        assert_eq!(c, 0);
+        assert_eq!(d, 24, "def gets full budget when content doesn't need build");
+    }
+
+    #[test]
+    fn both_need_build_splits_budget() {
+        let (c, d) = compute_budget_split(24, None, None, true, true);
+        assert_eq!(c, 12, "content gets half");
+        assert_eq!(d, 12, "def gets the remainder");
+        assert_eq!(c + d, 24, "sum equals total");
+    }
+
+    #[test]
+    fn both_need_build_odd_total() {
+        let (c, d) = compute_budget_split(7, None, None, true, true);
+        assert_eq!(c, 3, "content gets floor(7/2)");
+        assert_eq!(d, 4, "def gets ceiling");
+        assert_eq!(c + d, 7);
+    }
+
+    #[test]
+    fn both_need_build_small_total() {
+        let (c, d) = compute_budget_split(2, None, None, true, true);
+        assert!(c >= 1);
+        assert!(d >= 1);
+        assert!(c + d <= 3, "no oversubscription on 2-core machine");
+    }
+
+    #[test]
+    fn both_need_build_single_core() {
+        // On a 1-core machine both get 1 thread (sum=2). This is intentional:
+        // serializing would double wall time. Content walk is mostly I/O-bound
+        // and does not compete heavily with CPU-bound def parsing.
+        let (c, d) = compute_budget_split(1, None, None, true, true);
+        assert!(c >= 1, "content gets at least 1");
+        assert!(d >= 1, "def gets at least 1");
+    }
+
+    #[test]
+    fn env_override_content_threads() {
+        let (c, d) = compute_budget_split(24, Some(6), None, true, true);
+        assert_eq!(c, 6, "env override sets content threads");
+        assert_eq!(d, 24, "def gets full budget when content has explicit override");
+    }
+
+    #[test]
+    fn env_override_def_threads() {
+        let (c, d) = compute_budget_split(24, None, Some(4), true, true);
+        assert_eq!(c, 24, "content gets full budget when def has explicit override");
+        assert_eq!(d, 4, "env override sets def threads");
+    }
+
+    #[test]
+    fn env_override_both() {
+        let (c, d) = compute_budget_split(24, Some(3), Some(5), true, true);
+        assert_eq!(c, 3);
+        assert_eq!(d, 5);
+    }
+
+    #[test]
+    fn env_override_not_needed_ignored() {
+        // Even if env says 6, if content doesn't need build, result is 0.
+        let (c, d) = compute_budget_split(24, Some(6), Some(4), false, false);
+        assert_eq!(c, 0);
+        assert_eq!(d, 0);
+    }
+
+    #[test]
+    fn env_override_content_only_build() {
+        let (c, d) = compute_budget_split(24, Some(8), None, true, false);
+        assert_eq!(c, 8);
+        assert_eq!(d, 0);
     }
 }
 
