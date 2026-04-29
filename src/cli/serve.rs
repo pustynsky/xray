@@ -1,6 +1,7 @@
 //! MCP server startup and configuration.
 
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -361,6 +362,7 @@ fn init_logging(args: &ServeArgs, dir_str: &str, exts_for_load: &str, idx_base: 
 
 const PRIMARY_BUILD_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const PRIMARY_BUILD_LOCK_STALE_AFTER: Duration = Duration::from_secs(60 * 60);
+const PRIMARY_BUILD_LOCK_OWNER_RECHECK_INTERVAL: Duration = Duration::from_secs(5);
 
 struct PrimaryBuildLock {
     path: PathBuf,
@@ -493,31 +495,248 @@ fn try_create_primary_build_lock(path: &Path) -> std::io::Result<Option<PrimaryB
     }
 }
 
-fn remove_stale_primary_build_lock(path: &Path) -> bool {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrimaryBuildLockRemovalReason {
+    AbandonedOwner { owner_pid: u32 },
+    StaleAge,
+}
+
+impl PrimaryBuildLockRemovalReason {
+    fn owner_pid(self) -> Option<u32> {
+        match self {
+            PrimaryBuildLockRemovalReason::AbandonedOwner { owner_pid } => Some(owner_pid),
+            PrimaryBuildLockRemovalReason::StaleAge => None,
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            PrimaryBuildLockRemovalReason::AbandonedOwner { .. } => "abandonedOwner",
+            PrimaryBuildLockRemovalReason::StaleAge => "staleAge",
+        }
+    }
+}
+
+#[derive(Default)]
+struct PrimaryBuildLockStaleChecker {
+    last_owner_probe: Option<PrimaryBuildLockOwnerProbe>,
+}
+
+#[derive(Clone, Copy)]
+struct PrimaryBuildLockOwnerProbe {
+    owner_pid: u32,
+    lock_generation: PrimaryBuildLockGeneration,
+    checked_at: Instant,
+    result: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PrimaryBuildLockGeneration {
+    modified: Option<std::time::SystemTime>,
+    len: u64,
+    contents_hash: u64,
+}
+
+impl PrimaryBuildLockStaleChecker {
+    fn remove_if_stale_with_liveness(
+        &mut self,
+        path: &Path,
+        mut owner_is_alive: impl FnMut(u32) -> Option<bool>,
+    ) -> bool {
+        let removed = remove_stale_primary_build_lock_with_liveness(path, |owner_pid, lock_generation| {
+            self.cached_owner_liveness(owner_pid, lock_generation, &mut owner_is_alive)
+        });
+        if removed {
+            self.clear_owner_probe();
+        }
+        removed
+    }
+
+    fn clear_owner_probe(&mut self) {
+        self.last_owner_probe = None;
+    }
+
+    fn cached_owner_liveness(
+        &mut self,
+        owner_pid: u32,
+        lock_generation: PrimaryBuildLockGeneration,
+        owner_is_alive: &mut impl FnMut(u32) -> Option<bool>,
+    ) -> Option<bool> {
+        if let Some(probe) = self.last_owner_probe
+            && probe.owner_pid == owner_pid
+            && probe.lock_generation == lock_generation
+            && probe.checked_at.elapsed() < PRIMARY_BUILD_LOCK_OWNER_RECHECK_INTERVAL
+        {
+            return probe.result;
+        }
+
+        let result = owner_is_alive(owner_pid);
+        self.last_owner_probe = Some(PrimaryBuildLockOwnerProbe {
+            owner_pid,
+            lock_generation,
+            checked_at: Instant::now(),
+            result,
+        });
+        result
+    }
+}
+
+fn primary_build_lock_generation(
+    metadata: &std::fs::Metadata,
+    contents: Option<&str>,
+) -> PrimaryBuildLockGeneration {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    contents.hash(&mut hasher);
+    PrimaryBuildLockGeneration {
+        modified: metadata.modified().ok(),
+        len: metadata.len(),
+        contents_hash: hasher.finish(),
+    }
+}
+
+fn parse_primary_build_lock_owner_pid(contents: &str) -> Option<u32> {
+    contents.lines().find_map(|line| {
+        let value = line.strip_prefix("pid=")?.trim();
+        value.parse::<u32>().ok()
+    })
+}
+
+fn primary_build_lock_removal_reason(
+    contents: Option<&str>,
+    age: Option<Duration>,
+    mut owner_is_alive: impl FnMut(u32) -> Option<bool>,
+) -> Option<PrimaryBuildLockRemovalReason> {
+    if let Some(owner_pid) = contents.and_then(parse_primary_build_lock_owner_pid)
+        && owner_is_alive(owner_pid) == Some(false)
+    {
+        return Some(PrimaryBuildLockRemovalReason::AbandonedOwner { owner_pid });
+    }
+
+    // Keep the age fallback as a conservative last resort for pre-PID, corrupt,
+    // or otherwise unverifiable lock files.
+    match age {
+        Some(age) if age >= PRIMARY_BUILD_LOCK_STALE_AFTER => {
+            Some(PrimaryBuildLockRemovalReason::StaleAge)
+        }
+        _ => None,
+    }
+}
+
+fn primary_build_lock_owner_is_alive(pid: u32) -> Option<bool> {
+    if pid == std::process::id() {
+        return Some(true);
+    }
+
+    platform_process_is_alive(pid)
+}
+
+#[cfg(windows)]
+fn platform_process_is_alive(pid: u32) -> Option<bool> {
+    let filter = format!("PID eq {}", pid);
+    let output = std::process::Command::new("tasklist")
+        .args(["/FI", filter.as_str(), "/FO", "CSV", "/NH"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Some(stdout.lines().any(|line| tasklist_csv_line_has_pid(line, pid)))
+}
+
+#[cfg(windows)]
+fn tasklist_csv_line_has_pid(line: &str, pid: u32) -> bool {
+    let Some(pid_field) = line.split("\",\"").nth(1) else {
+        return false;
+    };
+    pid_field.trim_matches('"').trim() == pid.to_string()
+}
+
+#[cfg(unix)]
+fn platform_process_is_alive(pid: u32) -> Option<bool> {
+    if pid == 0 {
+        return None;
+    }
+
+    let proc_dir = Path::new("/proc");
+    if proc_dir.exists() {
+        return Some(proc_dir.join(pid.to_string()).exists());
+    }
+
+    let pid_arg = pid.to_string();
+    let status = std::process::Command::new("kill")
+        .args(["-0", pid_arg.as_str()])
+        .status()
+        .ok()?;
+    Some(status.success())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn platform_process_is_alive(_pid: u32) -> Option<bool> {
+    None
+}
+
+fn remove_stale_primary_build_lock_with_liveness(
+    path: &Path,
+    mut owner_is_alive: impl FnMut(u32, PrimaryBuildLockGeneration) -> Option<bool>,
+) -> bool {
     let Ok(metadata) = std::fs::metadata(path) else {
         return false;
     };
-    let Ok(modified) = metadata.modified() else {
+    let age = metadata.modified().ok().and_then(|modified| modified.elapsed().ok());
+    let contents = std::fs::read_to_string(path).ok();
+    let lock_generation = primary_build_lock_generation(&metadata, contents.as_deref());
+    let Some(reason) = primary_build_lock_removal_reason(contents.as_deref(), age, |owner_pid| {
+        owner_is_alive(owner_pid, lock_generation)
+    })
+    else {
         return false;
     };
-    let Ok(age) = modified.elapsed() else {
-        return false;
-    };
-    if age < PRIMARY_BUILD_LOCK_STALE_AFTER {
-        return false;
-    }
 
     match std::fs::remove_file(path) {
         Ok(()) => {
-            warn!(path = %path.display(), age_secs = age.as_secs(), "Removed stale primary build lock");
+            warn!(
+                path = %path.display(),
+                age_secs = ?age.map(|age| age.as_secs()),
+                owner_pid = ?reason.owner_pid(),
+                reason = reason.as_str(),
+                "Removed primary build lock"
+            );
             true
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
         Err(e) => {
-            warn!(path = %path.display(), error = %e, "Failed to remove stale primary build lock");
+            warn!(path = %path.display(), error = %e, "Failed to remove primary build lock");
             false
         }
     }
+}
+
+
+fn wait_for_peer_primary_build_lock_release(
+    lock_path: &Path,
+    stale_lock_checker: &mut PrimaryBuildLockStaleChecker,
+) {
+    wait_for_peer_primary_build_lock_release_with_liveness(
+        lock_path,
+        stale_lock_checker,
+        primary_build_lock_owner_is_alive,
+    )
+}
+
+fn wait_for_peer_primary_build_lock_release_with_liveness(
+    lock_path: &Path,
+    stale_lock_checker: &mut PrimaryBuildLockStaleChecker,
+    mut owner_is_alive: impl FnMut(u32) -> Option<bool>,
+) {
+    while lock_path.exists() {
+        if stale_lock_checker.remove_if_stale_with_liveness(lock_path, &mut owner_is_alive) {
+            break;
+        }
+        std::thread::sleep(PRIMARY_BUILD_LOCK_POLL_INTERVAL);
+    }
+    stale_lock_checker.clear_owner_probe();
 }
 
 fn acquire_or_wait_primary_build_lock(
@@ -532,6 +751,7 @@ fn acquire_or_wait_primary_build_lock(
     let lock_path = primary_build_lock_path(dir_str, idx_base);
     let wait_start = Instant::now();
     let mut waited_on_peer = false;
+    let mut stale_lock_checker = PrimaryBuildLockStaleChecker::default();
     loop {
         match try_create_primary_build_lock(&lock_path) {
             Ok(Some(lock)) => {
@@ -546,12 +766,7 @@ fn acquire_or_wait_primary_build_lock(
             Ok(None) => {
                 waited_on_peer = true;
                 crate::index::log_memory("serve: waiting for peer primary build lock");
-                while lock_path.exists() {
-                    if remove_stale_primary_build_lock(&lock_path) {
-                        break;
-                    }
-                    std::thread::sleep(PRIMARY_BUILD_LOCK_POLL_INTERVAL);
-                }
+                wait_for_peer_primary_build_lock_release(&lock_path, &mut stale_lock_checker);
                 crate::index::log_memory("serve: peer primary build lock released");
             }
             Err(e) => {
@@ -1461,12 +1676,17 @@ mod serve_format_cache_age_tests {
 #[cfg(test)]
 mod serve_git_cache_startup_tests {
     use super::{
-        primary_build_lock_path, primary_indexes_terminal_for_git_cache_rebuild,
-        try_create_primary_build_lock, BackgroundBuildStateGuard,
+        parse_primary_build_lock_owner_pid, primary_build_lock_path,
+        primary_build_lock_removal_reason, primary_indexes_terminal_for_git_cache_rebuild,
+        remove_stale_primary_build_lock_with_liveness, try_create_primary_build_lock,
+        BackgroundBuildStateGuard, PrimaryBuildLockRemovalReason, PrimaryBuildLockStaleChecker,
+        PRIMARY_BUILD_LOCK_STALE_AFTER, wait_for_peer_primary_build_lock_release_with_liveness,
     };
+    use std::cell::{Cell, RefCell};
     use std::panic::{catch_unwind, AssertUnwindSafe};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
+    use std::time::Duration;
 
 
     #[test]
@@ -1490,6 +1710,180 @@ mod serve_git_cache_startup_tests {
             .expect("third lock create should succeed")
             .expect("lock should be acquirable after guard drop");
         drop(third_lock);
+    }
+
+
+    #[test]
+    fn primary_build_lock_owner_pid_is_parsed_from_lock_file() {
+        assert_eq!(parse_primary_build_lock_owner_pid("pid=42240\ncreatedAt=now\n"), Some(42_240));
+        assert_eq!(parse_primary_build_lock_owner_pid("createdAt=now\n"), None);
+        assert_eq!(parse_primary_build_lock_owner_pid("pid=not-a-pid\n"), None);
+    }
+
+    #[test]
+    fn primary_build_lock_with_dead_owner_is_removed_immediately() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("workspace.primary-build.lock");
+        std::fs::write(&lock_path, "pid=42240\ncreatedAt=now\n").unwrap();
+
+        let removed = remove_stale_primary_build_lock_with_liveness(&lock_path, |pid, _| {
+            assert_eq!(pid, 42_240);
+            Some(false)
+        });
+
+        assert!(removed, "dead owner lock should be removed without waiting for age fallback");
+        assert!(!lock_path.exists(), "dead owner lock file should be gone");
+    }
+
+    #[test]
+    fn primary_build_lock_with_live_or_unknown_owner_is_kept_below_age_fallback() {
+        for (suffix, owner_state) in [("live", Some(true)), ("unknown", None)] {
+            let tmp = tempfile::tempdir().unwrap();
+            let lock_path = tmp.path().join(format!("workspace-{suffix}.primary-build.lock"));
+            std::fs::write(&lock_path, "pid=42240\ncreatedAt=now\n").unwrap();
+
+            let removed = remove_stale_primary_build_lock_with_liveness(&lock_path, |pid, _| {
+                assert_eq!(pid, 42_240);
+                owner_state
+            });
+
+            assert!(!removed, "{suffix} owner lock should wait for age fallback");
+            assert!(lock_path.exists(), "{suffix} owner lock should remain below age fallback");
+        }
+    }
+
+    #[test]
+    fn primary_build_lock_live_owner_probe_is_cached_between_wait_polls() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("workspace.primary-build.lock");
+        std::fs::write(&lock_path, "pid=42240\ncreatedAt=now\n").unwrap();
+        let mut checker = PrimaryBuildLockStaleChecker::default();
+        let probe_calls = Cell::new(0);
+
+        for _ in 0..2 {
+            let removed = checker.remove_if_stale_with_liveness(&lock_path, |pid| {
+                assert_eq!(pid, 42_240);
+                probe_calls.set(probe_calls.get() + 1);
+                Some(true)
+            });
+            assert!(!removed, "live owner lock should stay in place");
+            assert!(lock_path.exists(), "live owner lock should remain below age fallback");
+        }
+
+        assert_eq!(probe_calls.get(), 1, "live owner liveness should not be rechecked every poll");
+    }
+
+    #[test]
+    fn primary_build_lock_probe_cache_is_keyed_by_lock_generation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("workspace.primary-build.lock");
+        let mut checker = PrimaryBuildLockStaleChecker::default();
+        let probe_calls = Cell::new(0);
+
+        std::fs::write(&lock_path, "pid=42240\ncreatedAt=old\n").unwrap();
+        let removed = checker.remove_if_stale_with_liveness(&lock_path, |pid| {
+            assert_eq!(pid, 42_240);
+            probe_calls.set(probe_calls.get() + 1);
+            Some(true)
+        });
+        assert!(!removed, "first live owner lock should remain");
+
+        std::fs::write(&lock_path, "pid=42240\ncreatedAt=new\n").unwrap();
+        let removed = checker.remove_if_stale_with_liveness(&lock_path, |pid| {
+            assert_eq!(pid, 42_240);
+            probe_calls.set(probe_calls.get() + 1);
+            Some(true)
+        });
+
+        assert!(!removed, "same-pid lock with new generation should remain");
+        assert!(lock_path.exists(), "new live lock should remain");
+        assert_eq!(probe_calls.get(), 2, "new lock generation must force a fresh liveness probe");
+    }
+
+    #[test]
+    fn primary_build_lock_probe_cache_clears_after_lock_removal() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("workspace.primary-build.lock");
+        let mut checker = PrimaryBuildLockStaleChecker::default();
+        let probe_calls = Cell::new(0);
+
+        std::fs::write(&lock_path, "pid=42240\ncreatedAt=old\n").unwrap();
+        let removed = checker.remove_if_stale_with_liveness(&lock_path, |pid| {
+            assert_eq!(pid, 42_240);
+            probe_calls.set(probe_calls.get() + 1);
+            Some(false)
+        });
+        assert!(removed, "dead owner lock should be removed");
+        assert!(!lock_path.exists(), "removed lock should be gone before turnover");
+
+        std::fs::write(&lock_path, "pid=42240\ncreatedAt=new\n").unwrap();
+        let removed = checker.remove_if_stale_with_liveness(&lock_path, |pid| {
+            assert_eq!(pid, 42_240);
+            probe_calls.set(probe_calls.get() + 1);
+            Some(true)
+        });
+
+        assert!(!removed, "new live lock with reused pid must not inherit dead-owner cache");
+        assert!(lock_path.exists(), "new live lock should remain");
+        assert_eq!(probe_calls.get(), 2, "lock turnover must force a fresh liveness probe");
+    }
+
+    #[test]
+    fn primary_build_lock_peer_release_clears_probe_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lock_path = tmp.path().join("workspace.primary-build.lock");
+        std::fs::write(&lock_path, "pid=42240\ncreatedAt=old\n").unwrap();
+        let mut checker = PrimaryBuildLockStaleChecker::default();
+        let probe_calls = Cell::new(0);
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let release_tx = RefCell::new(Some(release_tx));
+        let lock_path_for_releaser = lock_path.clone();
+        let releaser = std::thread::spawn(move || {
+            release_rx.recv().unwrap();
+            std::fs::remove_file(lock_path_for_releaser).unwrap();
+        });
+
+        wait_for_peer_primary_build_lock_release_with_liveness(&lock_path, &mut checker, |pid| {
+            assert_eq!(pid, 42_240);
+            probe_calls.set(probe_calls.get() + 1);
+            if let Some(tx) = release_tx.borrow_mut().take() {
+                tx.send(()).unwrap();
+            }
+            Some(true)
+        });
+        releaser.join().unwrap();
+        assert!(!lock_path.exists(), "peer should release the first lock normally");
+
+        std::fs::write(&lock_path, "pid=42240\ncreatedAt=new\n").unwrap();
+        let removed = checker.remove_if_stale_with_liveness(&lock_path, |pid| {
+            assert_eq!(pid, 42_240);
+            probe_calls.set(probe_calls.get() + 1);
+            Some(true)
+        });
+
+        assert!(!removed, "new live lock with reused pid must not inherit peer-release cache");
+        assert!(lock_path.exists(), "new live lock should remain after peer-release turnover");
+        assert_eq!(probe_calls.get(), 2, "peer-release turnover must force a fresh liveness probe");
+    }
+
+    #[test]
+    fn primary_build_lock_age_fallback_handles_ambiguous_locks() {
+        assert_eq!(
+            primary_build_lock_removal_reason(
+                Some("createdAt=before-pid-format\n"),
+                Some(PRIMARY_BUILD_LOCK_STALE_AFTER),
+                |_| panic!("missing pid should not query owner liveness"),
+            ),
+            Some(PrimaryBuildLockRemovalReason::StaleAge)
+        );
+        assert_eq!(
+            primary_build_lock_removal_reason(
+                Some("pid=42240\ncreatedAt=now\n"),
+                Some(Duration::from_secs(1)),
+                |_| None,
+            ),
+            None
+        );
     }
 
     #[test]
