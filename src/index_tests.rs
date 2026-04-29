@@ -88,6 +88,45 @@ fn test_build_trigram_index_deduplicates() {
     assert_eq!(abc_list.len(), deduped.len());
 }
 
+#[test]
+fn test_build_trigram_index_repeated_trigram_within_single_token() {
+    // Token "01010" generates trigram "010" at two positions (offset 0 and 2).
+    // The posting list for "010" must contain the token's index exactly once.
+    let mut inverted: HashMap<String, Vec<Posting>> = HashMap::new();
+    inverted.insert("01010".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+    inverted.insert("zzzzz".to_string(), vec![Posting { file_id: 1, lines: vec![2] }]);
+
+    let ti = build_trigram_index(&inverted);
+    let list = ti.trigram_map.get("010").unwrap();
+    assert_eq!(list.len(), 1, "trigram '010' should have exactly 1 entry, got {:?}", list);
+}
+
+#[test]
+fn test_build_trigram_parallel_matches_serial() {
+    // Generate >2000 tokens to exceed the parallel threshold.
+    // Build with max_threads=1 (forced serial) and max_threads=4 (forced parallel).
+    // Results must be identical.
+    use crate::index::build_trigram_index_from_tokens;
+
+    let tokens: Vec<String> = (0..3000)
+        .map(|i| format!("token_{:05}_suffix", i))
+        .collect();
+
+    let serial = build_trigram_index_from_tokens(tokens.clone(), 1);
+    let parallel = build_trigram_index_from_tokens(tokens, 4);
+
+    assert_eq!(serial.tokens, parallel.tokens, "tokens must be identical");
+    assert_eq!(serial.trigram_map.len(), parallel.trigram_map.len(),
+        "trigram_map size must match");
+
+    for (trigram, serial_list) in &serial.trigram_map {
+        let parallel_list = parallel.trigram_map.get(trigram)
+            .unwrap_or_else(|| panic!("trigram '{}' missing from parallel result", trigram));
+        assert_eq!(serial_list, parallel_list,
+            "posting list for trigram '{}' differs", trigram);
+    }
+}
+
 // ─── LZ4 compression tests ──────────────────────────────
 
 #[test]

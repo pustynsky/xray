@@ -1594,7 +1594,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
 
     // Build trigram index from inverted index tokens
     let trigram_start = Instant::now();
-    let trigram = build_trigram_index(&index);
+    let trigram = build_trigram_index_from_tokens(index.keys().cloned().collect(), thread_count);
     let trigram_elapsed = trigram_start.elapsed();
     eprintln!(
         "Trigram index: {} trigrams, {} tokens",
@@ -1654,25 +1654,75 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
 }
 
 /// Build a trigram index from the inverted index's token keys.
+/// Uses `max_threads=0` (auto) — callers with a thread budget should use
+/// `build_trigram_index_from_tokens` directly.
 pub fn build_trigram_index(inverted: &HashMap<String, Vec<Posting>>) -> TrigramIndex {
-    build_trigram_index_from_tokens(inverted.keys().cloned().collect())
+    build_trigram_index_from_tokens(inverted.keys().cloned().collect(), 0)
 }
 
-pub fn build_trigram_index_from_tokens(mut tokens: Vec<String>) -> TrigramIndex {
+/// Build a trigram index from a list of tokens.
+/// `max_threads`: 0 = auto (available_parallelism), >0 = cap thread count.
+pub fn build_trigram_index_from_tokens(mut tokens: Vec<String>, max_threads: usize) -> TrigramIndex {
     tokens.sort();
 
-    let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+    let auto_threads = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    let capped = if max_threads > 0 { auto_threads.min(max_threads) } else { auto_threads };
+    let num_threads = capped.min(tokens.len().div_ceil(1000).max(1)); // at least 1000 tokens per thread
 
-    for (idx, token) in tokens.iter().enumerate() {
-        let trigrams = generate_trigrams(token);
-        for trigram in trigrams {
-            trigram_map.entry(trigram).or_default().push(idx as u32);
+    if num_threads <= 1 || tokens.len() < 2000 {
+        // Small index — serial path (avoids thread spawn overhead)
+        let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+        for (idx, token) in tokens.iter().enumerate() {
+            for trigram in generate_trigrams(token) {
+                trigram_map.entry(trigram).or_default().push(idx as u32);
+            }
         }
+        // A token like "01010" generates trigram "010" twice, pushing the same
+        // idx consecutively. Dedup removes these adjacent duplicates.
+        for list in trigram_map.values_mut() {
+            list.dedup();
+        }
+        return TrigramIndex { tokens, trigram_map };
     }
 
-    // Sort and dedup posting lists
+    // Parallel: split tokens into chunks, build local trigram maps, merge.
+    let chunk_size = tokens.len().div_ceil(num_threads).max(1);
+    let local_maps: Vec<HashMap<String, Vec<u32>>> = std::thread::scope(|s| {
+        let handles: Vec<_> = tokens
+            .chunks(chunk_size)
+            .enumerate()
+            .map(|(chunk_idx, chunk)| {
+                let base = chunk_idx * chunk_size;
+                s.spawn(move || {
+                    let mut local: HashMap<String, Vec<u32>> = HashMap::new();
+                    for (i, token) in chunk.iter().enumerate() {
+                        let global_idx = (base + i) as u32;
+                        for trigram in generate_trigrams(token) {
+                            local.entry(trigram).or_default().push(global_idx);
+                        }
+                    }
+                    local
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("trigram worker panicked")).collect()
+    });
+
+    // Merge local maps. Each local map has sorted indices (tokens were sorted,
+    // chunk indices are monotonically increasing within each chunk).
+    // Merging N sorted sublists preserves sorted order.
+    let mut trigram_map: HashMap<String, Vec<u32>> = HashMap::new();
+    for local in local_maps {
+        for (trigram, indices) in local {
+            trigram_map.entry(trigram).or_default().extend(indices);
+        }
+    }
+    // Indices are already in sorted order (each chunk processes a contiguous
+    // range of the globally-sorted tokens array, and chunks are merged in
+    // order), so dedup without re-sorting.
     for list in trigram_map.values_mut() {
-        list.sort();
         list.dedup();
     }
 

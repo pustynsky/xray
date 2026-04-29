@@ -637,6 +637,11 @@ pub struct TrigramIndex {
 /// Generate trigrams (3-char sliding windows) from a token.
 /// Uses char-based windows for Unicode correctness.
 /// Returns empty vec for tokens shorter than 3 chars.
+///
+/// **Note:** A token can produce the same trigram more than once when the
+/// pattern repeats (e.g. `"01010"` → `["010", "101", "010"]`).  Callers
+/// that build posting lists must `dedup()` to avoid duplicate entries per
+/// token index.
 #[must_use]
 pub fn generate_trigrams(token: &str) -> Vec<String> {
     // PERF-05: ASCII fast-path. The vast majority of tokens fed into the

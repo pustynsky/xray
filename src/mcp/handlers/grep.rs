@@ -1302,7 +1302,7 @@ fn rebuild_trigram_index_singleflight(
             "[grep-trace] trigram dirty; rebuilding before trigram-dependent search"
         );
 
-        let trigram = build_trigram_index_from_tokens(tokens);
+        let trigram = build_trigram_index_from_tokens(tokens, 0);
         let token_count = trigram.tokens.len();
         let trigram_count = trigram.trigram_map.len();
         let build_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
