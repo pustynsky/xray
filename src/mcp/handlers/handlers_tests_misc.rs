@@ -2,12 +2,71 @@
 //! extracted from handlers_tests.rs.
 
 use super::*;
+use super::arg_validation::STRICT_ARGS_ENV_LOCK;
+
 use super::utils::validate_search_dir;
 use super::handlers_test_utils::{make_ctx_with_defs, make_empty_ctx};
 use crate::Posting;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
+
+struct EnvVarGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl EnvVarGuard {
+    fn remove(key: &'static str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe { std::env::remove_var(key) };
+        Self { key, previous }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
+
+
+struct GuidancePrefixOverrideGuard {
+    previous: Option<bool>,
+}
+
+impl GuidancePrefixOverrideGuard {
+    fn set(value: Option<bool>) -> Self {
+        Self {
+            previous: utils::set_guidance_prefix_override_for_test(value),
+        }
+    }
+}
+
+impl Drop for GuidancePrefixOverrideGuard {
+    fn drop(&mut self) {
+        utils::set_guidance_prefix_override_for_test(self.previous);
+    }
+}
+
+
+fn split_guidance_prefixed_response(text: &str) -> (&str, Value) {
+    let (prefix, suffix) = text
+        .split_once("\n\n")
+        .expect("prefix mode should separate guidance and JSON suffix");
+    let output = serde_json::from_str(suffix).expect("JSON suffix should parse");
+    (prefix, output)
+}
+
+fn assert_json_without_guidance_prefix(text: &str) -> Value {
+    assert!(!text.starts_with("=== XRAY AGENT GUIDANCE ==="));
+    serde_json::from_str(text).expect("response should parse directly as JSON")
+}
 
 // --- Metrics injection tests ---
 
@@ -37,6 +96,160 @@ use std::sync::{Arc, RwLock};
     assert!(output["summary"]["responseBytes"].as_u64().is_some());
     assert!(output["summary"]["estimatedTokens"].as_u64().is_some());
 }
+
+#[test]
+fn test_guidance_prefix_dispatch_runs_after_warnings_and_metrics() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+    let _strict_env = EnvVarGuard::remove("XRAY_STRICT_ARGS");
+
+    let mut idx = HashMap::new();
+    idx.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![5] }]);
+    let index = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["C:\\test\\Program.cs".to_string()],
+        index: idx,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50],
+        ..Default::default()
+    };
+    let ctx = HandlerContext { index: Arc::new(RwLock::new(index)), metrics: true, ..Default::default() };
+
+    let result = dispatch_tool(
+        &ctx,
+        "xray_grep",
+        &json!({"terms": ["HttpClient"], "includePattern": "*.cs"}),
+    );
+    assert!(!result.is_error);
+
+    let text = &result.content[0].text;
+    let (prefix, suffix) = text
+        .split_once("\n\n")
+        .expect("prefix mode should separate guidance and JSON suffix");
+    assert!(prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
+    assert!(prefix.contains("→ Next: use xray_definitions for AST structure or xray_callers for call trees"));
+    assert!(prefix.contains("Use xray_* MCP tools for indexed files; built-in read/search/edit equivalents are policy violations."));
+
+    let output: Value = serde_json::from_str(suffix).unwrap();
+    let summary = output["summary"].as_object().unwrap();
+    assert!(!summary.contains_key("nextStepHint"));
+    assert!(!summary.contains_key("policyReminder"));
+    assert!(summary["unknownArgsWarning"].as_str().unwrap().contains("includePattern"));
+    assert_eq!(summary["unknownArgs"][0]["key"], "includePattern");
+    assert!(summary["searchTimeMs"].as_f64().is_some());
+    assert_eq!(summary["responseBytes"].as_u64().unwrap(), text.len() as u64);
+    assert_eq!(summary["estimatedTokens"].as_u64().unwrap(), text.len() as u64 / 4);
+}
+
+
+#[test]
+fn test_guidance_prefix_plain_text_error_dispatch_preserves_json_contract_and_warning() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _strict_env = EnvVarGuard::remove("XRAY_STRICT_ARGS");
+    let ctx = HandlerContext { metrics: true, ..make_empty_ctx() };
+
+    {
+        let _prefix = GuidancePrefixOverrideGuard::set(Some(false));
+        let result = dispatch_tool(&ctx, "xray_grep", &json!({"includePattern": "*.cs"}));
+        assert!(result.is_error);
+        let output = assert_json_without_guidance_prefix(&result.content[0].text);
+        assert!(output["error"].as_str().is_some());
+        let summary = output["summary"].as_object().unwrap();
+        assert!(summary["policyReminder"].as_str().is_some());
+        assert!(summary["nextStepHint"].as_str().is_some());
+        assert!(summary["unknownArgsWarning"].as_str().unwrap().contains("includePattern"));
+        assert_eq!(summary["unknownArgs"][0]["key"], "includePattern");
+    }
+
+    {
+        let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+        let result = dispatch_tool(&ctx, "xray_grep", &json!({"includePattern": "*.cs"}));
+        assert!(result.is_error);
+        let (prefix, output) = split_guidance_prefixed_response(&result.content[0].text);
+        assert!(prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
+        assert!(prefix.contains("Use xray_* MCP tools for indexed files"));
+        assert!(output["error"].as_str().is_some());
+        let summary = output["summary"].as_object().unwrap();
+        assert!(!summary.contains_key("policyReminder"));
+        assert!(!summary.contains_key("nextStepHint"));
+        assert!(summary["unknownArgsWarning"].as_str().unwrap().contains("includePattern"));
+        assert_eq!(summary["unknownArgs"][0]["key"], "includePattern");
+        assert!(summary["totalTimeMs"].as_f64().is_some());
+    }
+}
+
+#[test]
+fn test_guidance_prefix_excluded_tools_stay_json_only_through_dispatch() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+
+    let cases = vec![
+        ("xray_info", make_empty_ctx(), json!({})),
+        ("xray_help", make_empty_ctx(), json!({})),
+        ("xray_reindex", make_empty_ctx(), json!({ "ext": "rs" })),
+        ("xray_reindex_definitions", make_ctx_with_defs(), json!({ "ext": "rs" })),
+    ];
+
+    for (tool_name, ctx, arguments) in cases {
+        let result = dispatch_tool(&ctx, tool_name, &arguments);
+        let output = assert_json_without_guidance_prefix(&result.content[0].text);
+        assert!(output["summary"].is_object(), "{tool_name} should keep a JSON summary");
+    }
+}
+
+#[test]
+fn test_guidance_prefix_dispatch_after_truncation_recomputes_wire_metrics() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+
+    let mut idx = HashMap::new();
+    let mut files = Vec::new();
+    let mut file_token_counts = Vec::new();
+    for i in 0..100 {
+        files.push(format!("C:\\Projects\\Module_{:03}\\Component_{:03}Service.cs", i / 10, i));
+        file_token_counts.push(100u32);
+        let lines: Vec<u32> = (1..=20).collect();
+        idx.entry("targettoken".to_string())
+            .or_insert_with(Vec::new)
+            .push(Posting { file_id: i as u32, lines });
+    }
+
+    let index = ContentIndex {
+        root: ".".to_string(),
+        files,
+        index: idx,
+        total_tokens: 10_000,
+        extensions: vec!["cs".to_string()],
+        file_token_counts,
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(index)),
+        metrics: true,
+        max_response_bytes: 2_000,
+        ..Default::default()
+    };
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["targettoken"],
+        "maxResults": 0,
+        "substring": false
+    }));
+    assert!(!result.is_error);
+
+    let text = &result.content[0].text;
+    let (_prefix, output) = split_guidance_prefixed_response(text);
+    let summary = output["summary"].as_object().unwrap();
+    assert!(!summary.contains_key("policyReminder"));
+    assert!(!summary.contains_key("nextStepHint"));
+    assert_eq!(summary["responseTruncated"], true);
+    assert!(summary["truncationReason"].as_str().is_some());
+    assert_eq!(summary["responseBytes"].as_u64().unwrap(), text.len() as u64);
+    assert_eq!(summary["estimatedTokens"].as_u64().unwrap(), text.len() as u64 / 4);
+    assert!(output["files"].as_array().unwrap().len() < 100);
+}
+
 
 #[test]
 fn test_metrics_preserves_handler_search_time() {
