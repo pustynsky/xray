@@ -180,7 +180,11 @@ fn test_guidance_prefix_plain_text_error_dispatch_preserves_json_contract_and_wa
 }
 
 #[test]
-fn test_guidance_prefix_excluded_tools_stay_json_only_through_dispatch() {
+fn test_guidance_prefix_applies_to_previously_excluded_tools_through_dispatch() {
+    // 2026-04-30: previously these four tools short-circuited the guidance-prefix
+    // pipeline and leaked summary.policyReminder into JSON. Contract is now
+    // uniform: with XRAY_GUIDANCE_PREFIX=1 every JSON-producing tool moves
+    // guidance fields into the raw prefix.
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
     let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
 
@@ -193,8 +197,27 @@ fn test_guidance_prefix_excluded_tools_stay_json_only_through_dispatch() {
 
     for (tool_name, ctx, arguments) in cases {
         let result = dispatch_tool(&ctx, tool_name, &arguments);
-        let output = assert_json_without_guidance_prefix(&result.content[0].text);
-        assert!(output["summary"].is_object(), "{tool_name} should keep a JSON summary");
+        let text = &result.content[0].text;
+        let (prefix, output) = split_guidance_prefixed_response(text);
+        assert!(
+            prefix.starts_with("=== XRAY AGENT GUIDANCE ==="),
+            "{tool_name} must emit guidance prefix"
+        );
+        assert!(
+            prefix.contains("Use xray_* MCP tools for indexed files"),
+            "{tool_name} prefix must include compact policy guidance"
+        );
+        let summary = output["summary"].as_object().unwrap_or_else(|| {
+            panic!("{tool_name} JSON suffix must keep a summary object")
+        });
+        assert!(
+            !summary.contains_key("policyReminder"),
+            "{tool_name} JSON suffix must not contain policyReminder"
+        );
+        assert!(
+            !summary.contains_key("nextStepHint"),
+            "{tool_name} JSON suffix must not contain nextStepHint"
+        );
     }
 }
 
