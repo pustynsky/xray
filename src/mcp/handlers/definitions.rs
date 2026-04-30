@@ -19,7 +19,7 @@ use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind, CodeS
 use crate::ContentIndex;
 use crate::mcp::lock_order;
 
-use super::utils::{inject_body_into_obj, inject_branch_warning, inject_index_degraded, best_match_tier, json_to_string, name_similarity, read_enum_string_opt, read_string};
+use super::utils::{add_collection_accounting, attach_result_status, build_result_status, inject_body_into_obj, inject_branch_warning, inject_index_degraded, best_match_tier, json_to_string, name_similarity, read_enum_string_opt, read_string};
 use super::HandlerContext;
 use super::advisory_hints::value_source_hint;
 
@@ -80,6 +80,8 @@ pub(crate) struct DefinitionSearchArgs {
     pub include_code_stats: bool,
     // Cross-index enrichment
     pub include_usage_count: bool,
+    pub exact_name_only: bool,
+    pub auto_correct: bool,
     pub exclude_patterns: super::utils::ExcludePatterns,
     pub file_filter_terms: Option<Vec<String>>,
     pub parent_filter_terms: Option<Vec<String>>,
@@ -219,6 +221,8 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         || has_stats;
 
     let include_usage_count = args.get("includeUsageCount").and_then(|v| v.as_bool()).unwrap_or(false);
+    let exact_name_only = args.get("exactNameOnly").and_then(|v| v.as_bool()).unwrap_or(false);
+    let auto_correct = args.get("autoCorrect").and_then(|v| v.as_bool()).unwrap_or(true);
 
     // Pre-compute filter patterns to avoid per-item allocations
     let exclude_patterns = super::utils::ExcludePatterns::from_dirs(&exclude_dir);
@@ -264,6 +268,8 @@ fn parse_definition_args(args: &Value) -> Result<DefinitionSearchArgs, String> {
         min_calls,
         include_code_stats,
         include_usage_count,
+        exact_name_only,
+        auto_correct,
         exclude_patterns,
         file_filter_terms,
         parent_filter_terms,
@@ -681,7 +687,7 @@ fn collect_candidates(
 
     // Filter by name
     if let Some(ref name) = args.name_filter {
-        if args.use_regex {
+        if args.use_regex && !args.exact_name_only {
             // DEF-H-003: bound regex compile + match memory and reject overlong
             // patterns. Without these caps, an attacker-controlled pattern such as
             // `(a*)*b` or `(.*a){30}b` pinned a CPU thread for tens of seconds
@@ -721,14 +727,18 @@ fn collect_candidates(
                 None => matching_indices.into_iter().cloned().collect(),
             });
         } else {
-            // Comma-separated OR search with substring matching
             let terms: Vec<String> = name.split(',')
                 .map(|s| s.trim().to_lowercase())
                 .filter(|s| !s.is_empty())
                 .collect();
             let mut matching_indices = Vec::new();
             for (n, indices) in &index.name_index {
-                if let Some(term_idx) = terms.iter().position(|t| n.contains(t)) {
+                let matched_term = if args.exact_name_only {
+                    terms.iter().position(|t| n == t)
+                } else {
+                    terms.iter().position(|t| n.contains(t))
+                };
+                if let Some(term_idx) = matched_term {
                     for idx in indices {
                         def_to_term.entry(*idx).or_insert(term_idx);
                     }
@@ -1023,6 +1033,292 @@ fn sort_results(
 // ─── Output formatting ──────────────────────────────────────────────
 
 /// Format the final JSON output from filtered, sorted results.
+#[derive(Debug, Clone)]
+struct ParsedVersionedName {
+    base: String,
+    version: String,
+}
+
+fn trim_version_base(base: &str) -> String {
+    base.trim_end_matches(|ch: char| ch == '_' || ch == '-' || ch == '.')
+        .to_lowercase()
+}
+
+fn parse_versioned_name(name: &str) -> Option<ParsedVersionedName> {
+    let trimmed = name.trim();
+    if trimmed.len() < 3 {
+        return None;
+    }
+
+    let digit_start = trimmed
+        .char_indices()
+        .rev()
+        .find(|(_, ch)| !ch.is_ascii_digit())
+        .map(|(idx, ch)| idx + ch.len_utf8())
+        .unwrap_or(0);
+    if digit_start < trimmed.len() {
+        let digit_count = trimmed[digit_start..].chars().count();
+        if digit_count >= 4 {
+            let base = trim_version_base(&trimmed[..digit_start]);
+            if !base.is_empty() {
+                return Some(ParsedVersionedName {
+                    base,
+                    version: trimmed[digit_start..].to_string(),
+                });
+            }
+        }
+        if digit_start > 0 {
+            let prefix = &trimmed[..digit_start];
+            if let Some((v_idx, v_ch)) = prefix.char_indices().next_back()
+                && (v_ch == 'v' || v_ch == 'V')
+            {
+                let base = trim_version_base(&trimmed[..v_idx]);
+                if !base.is_empty() {
+                    return Some(ParsedVersionedName {
+                        base,
+                        version: trimmed[v_idx..].to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn is_versioned_name_mismatch(requested: &str, candidate: &str) -> bool {
+    match (parse_versioned_name(requested), parse_versioned_name(candidate)) {
+        (Some(requested), Some(candidate)) => {
+            requested.base == candidate.base && requested.version != candidate.version
+        }
+        _ => false,
+    }
+}
+
+fn canonical_name_for_key(index: &DefinitionIndex, key: &str) -> String {
+    index
+        .name_index
+        .get(key)
+        .and_then(|indices| indices.first())
+        .and_then(|idx| index.definitions.get(*idx as usize))
+        .map(|def| def.name.clone())
+        .unwrap_or_else(|| key.to_string())
+}
+
+fn requested_name_terms(args: &DefinitionSearchArgs) -> Vec<String> {
+    if args.use_regex {
+        return Vec::new();
+    }
+    args.name_filter
+        .as_deref()
+        .map(|name| {
+            name.split(',')
+                .map(|part| part.trim().to_lowercase())
+                .filter(|part| !part.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn suggested_name_matches(index: &DefinitionIndex, args: &DefinitionSearchArgs) -> Vec<Value> {
+    let terms = requested_name_terms(args);
+    if terms.is_empty() {
+        return Vec::new();
+    }
+
+    let mut suggestions: Vec<(bool, f64, Value)> = Vec::new();
+    for term in terms {
+        for index_name in index.name_index.keys() {
+            if index_name == &term {
+                continue;
+            }
+            let versioned_mismatch = is_versioned_name_mismatch(&term, index_name);
+            let score = name_similarity(&term, index_name);
+            if !versioned_mismatch && score < AUTO_CORRECT_NAME_THRESHOLD {
+                continue;
+            }
+            let reason = if versioned_mismatch {
+                "same base name with different version suffix"
+            } else {
+                "nearest name match"
+            };
+            suggestions.push((
+                versioned_mismatch,
+                score,
+                json!({
+                    "requested": term.clone(),
+                    "name": canonical_name_for_key(index, index_name),
+                    "similarity": format!("{:.0}%", score * 100.0),
+                    "reason": reason,
+                    "versionedName": versioned_mismatch,
+                }),
+            ));
+        }
+    }
+
+    suggestions.sort_by(|left, right| {
+        right.0
+            .cmp(&left.0)
+            .then_with(|| right.1.partial_cmp(&left.1).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    suggestions.dedup_by(|left, right| left.2.get("name") == right.2.get("name"));
+    suggestions
+        .into_iter()
+        .take(5)
+        .map(|(_, _, suggestion)| suggestion)
+        .collect()
+}
+
+fn definitions_evidence_level(
+    args: &DefinitionSearchArgs,
+    total_body_lines_emitted: usize,
+    total_body_lines_available: usize,
+) -> &'static str {
+    if !args.include_body {
+        "index_map"
+    } else if total_body_lines_emitted >= total_body_lines_available {
+        "full_body"
+    } else {
+        "truncated_body"
+    }
+}
+
+fn build_definitions_result_status(
+    args: &DefinitionSearchArgs,
+    returned: usize,
+    total_results: usize,
+    total_body_lines_emitted: usize,
+    total_body_lines_available: usize,
+) -> Value {
+    let body_complete = !args.include_body || total_body_lines_emitted >= total_body_lines_available;
+    let complete = returned == total_results && body_complete;
+    let status = if total_results == 0 {
+        "not_found"
+    } else if complete {
+        "complete"
+    } else {
+        "partial"
+    };
+    let mut reasons = Vec::new();
+    if total_results == 0 {
+        reasons.push("no_matches".to_string());
+    }
+    if returned < total_results {
+        reasons.push("max_results_limit".to_string());
+    }
+    if args.include_body && !body_complete {
+        reasons.push("body_line_budget".to_string());
+    }
+
+    let exact_semantics_safe = args.include_body
+        && body_complete
+        && !args.use_regex
+        && args.file_filter.is_none()
+        && args.parent_filter.is_none()
+        && args.base_type_filter.is_none()
+        && (args.name_filter.is_none() || args.exact_name_only);
+    let mut result_status = build_result_status(
+        status,
+        complete,
+        complete,
+        exact_semantics_safe,
+        definitions_evidence_level(args, total_body_lines_emitted, total_body_lines_available),
+        reasons,
+    );
+    let shown = if args.include_body {
+        json!({ "definitions": returned, "bodyLines": total_body_lines_emitted })
+    } else {
+        json!({ "definitions": returned })
+    };
+    let total = if args.include_body {
+        json!({ "definitions": total_results, "bodyLines": total_body_lines_available })
+    } else {
+        json!({ "definitions": total_results })
+    };
+    add_collection_accounting(&mut result_status, shown, total);
+    result_status["request"] = json!({
+        "exactNameOnly": args.exact_name_only,
+        "autoCorrect": args.auto_correct,
+    });
+    result_status
+}
+
+fn push_unique_query(queries: &mut Vec<Value>, query: Value) {
+    if !queries.iter().any(|existing| existing == &query) {
+        queries.push(query);
+    }
+}
+
+fn add_definitions_next_queries(
+    output: &mut Value,
+    args: &DefinitionSearchArgs,
+    result_status: &Value,
+    suggestions: &[Value],
+) {
+    let mut queries = Vec::new();
+    let complete = result_status
+        .get("complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    if !args.include_body || !complete {
+        if let Some(ref name) = args.name_filter {
+            push_unique_query(
+                &mut queries,
+                json!({
+                    "tool": "xray_definitions",
+                    "args": {
+                        "name": name,
+                        "includeBody": true,
+                        "maxBodyLines": 0,
+                        "exactNameOnly": true,
+                        "autoCorrect": false,
+                    },
+                    "reason": "verify exact semantics with full bodies",
+                }),
+            );
+        }
+        if let Some(ref file) = args.file_filter {
+            push_unique_query(
+                &mut queries,
+                json!({
+                    "tool": "xray_definitions",
+                    "args": {
+                        "file": file,
+                        "includeBody": true,
+                        "maxBodyLines": 0,
+                    },
+                    "reason": "inspect complete definitions in the scoped file or directory",
+                }),
+            );
+        }
+    }
+
+    for suggestion in suggestions.iter().take(3) {
+        if let Some(name) = suggestion.get("name").and_then(Value::as_str) {
+            push_unique_query(
+                &mut queries,
+                json!({
+                    "tool": "xray_definitions",
+                    "args": {
+                        "name": name,
+                        "exactNameOnly": true,
+                        "autoCorrect": false,
+                        "includeBody": true,
+                        "maxBodyLines": 0,
+                    },
+                    "reason": "suggested exact-name follow-up",
+                }),
+            );
+        }
+    }
+
+    if !queries.is_empty() {
+        output["recommendedNextQueries"] = Value::Array(queries);
+    }
+}
+
+
 #[allow(clippy::too_many_arguments)]
 fn format_search_output(
     index: &DefinitionIndex,
@@ -1071,10 +1367,46 @@ fn format_search_output(
         total_body_lines_available, search_elapsed, ctx, content_idx,
     );
 
-    let output = json!({
-        "definitions": defs_json,
-        "summary": summary,
-    });
+    let suggestions = if total_results == 0 {
+        suggested_name_matches(index, args)
+    } else {
+        Vec::new()
+    };
+    let mut result_status = build_definitions_result_status(
+        args,
+        defs_json.len(),
+        total_results,
+        total_body_lines_emitted,
+        total_body_lines_available,
+    );
+    if !suggestions.is_empty()
+        && suggestions.iter().any(|suggestion| {
+            suggestion
+                .get("versionedName")
+                .and_then(Value::as_bool)
+                .unwrap_or(false)
+        })
+    {
+        if let Some(reasons) = result_status.get_mut("reasons").and_then(Value::as_array_mut) {
+            reasons.push(json!("versioned_name_exact_miss"));
+        }
+    }
+
+    let suggested_for_queries = suggestions.clone();
+    let mut output = if suggestions.is_empty() {
+        json!({
+            "definitions": defs_json,
+            "summary": summary,
+        })
+    } else {
+        json!({
+            "suggestedMatches": suggestions,
+            "definitions": defs_json,
+            "summary": summary,
+        })
+    };
+    add_definitions_next_queries(&mut output, args, &result_status, &suggested_for_queries);
+    let output = attach_result_status(output, result_status);
 
     ToolCallResult::success(json_to_string(&output))
 }
@@ -1520,7 +1852,7 @@ fn collect_transitive_base_type_indices(
 /// A. Kind mismatch — remove kind filter, find the correct kind, re-run
 /// B. Nearest name match — fix name to nearest match (≥85% similarity), re-run
 ///
-/// Returns `Some(ToolCallResult)` with corrected results + `autoCorrection` metadata,
+/// Returns `Some(ToolCallResult)` with corrected results + resultStatus correction metadata,
 /// or `None` if no correction produced results.
 fn attempt_auto_correction(
     index: &DefinitionIndex,
@@ -1529,6 +1861,10 @@ fn attempt_auto_correction(
     ctx: &HandlerContext,
     content_idx: Option<&ContentIndex>,
 ) -> Option<ToolCallResult> {
+    if !original_args.auto_correct || original_args.exact_name_only {
+        return None;
+    }
+
     // A. Kind mismatch: kind filter is set + name/file filter exists
     if let Some(ref original_kind) = original_args.kind_filter
         && (original_args.name_filter.is_some() || original_args.file_filter.is_some())
@@ -1567,7 +1903,7 @@ fn try_kind_correction(
         return None;
     }
 
-    // Summarize available kinds for the autoCorrection message
+    // Summarize available kinds for the correction message
     let mut kind_counts: HashMap<&str, usize> = HashMap::new();
     for (_, def) in &filtered {
         *kind_counts.entry(def.kind.as_str()).or_insert(0) += 1;
@@ -1624,6 +1960,9 @@ fn try_name_correction(
             if length_ratio < AUTO_CORRECT_MIN_LENGTH_RATIO {
                 continue;
             }
+            if is_versioned_name_mismatch(&search_lower, index_name) {
+                continue;
+            }
             best_score = score;
             best_name = Some(index_name.clone());
         }
@@ -1646,7 +1985,7 @@ fn try_name_correction(
     }))
 }
 
-/// Execute the full search pipeline with corrected args and inject autoCorrection metadata.
+/// Execute the full search pipeline with corrected args and resultStatus correction metadata.
 /// Returns `Some(ToolCallResult)` if the corrected search produces results, `None` otherwise.
 fn run_corrected_search(
     index: &DefinitionIndex,
@@ -1681,11 +2020,20 @@ fn run_corrected_search(
         &term_breakdown, search_elapsed, ctx, content_idx,
     );
 
-    // Inject autoCorrection into the response summary
     if let Some(content) = tool_result.content.first()
         && let Ok(mut output) = serde_json::from_str::<Value>(&content.text) {
-            if let Some(summary) = output.get_mut("summary") {
-                summary["autoCorrection"] = auto_correction;
+            if let Some(result_status) = output.get_mut("resultStatus") {
+                result_status["status"] = json!("corrected");
+                result_status["safeForExhaustiveClaims"] = json!(false);
+                result_status["safeForExactSemantics"] = json!(false);
+                result_status["correction"] = auto_correction.clone();
+                if let Some(reasons) = result_status.get_mut("reasons").and_then(Value::as_array_mut) {
+                    let reason = auto_correction
+                        .get("type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("autoCorrected");
+                    reasons.push(json!(reason));
+                }
             }
             return Some(ToolCallResult::success(json_to_string(&output)));
         }
@@ -2131,6 +2479,19 @@ fn build_auto_summary(
     inject_branch_warning(&mut summary, ctx);
     inject_index_degraded(&mut summary, ctx);
 
+    let mut result_status = build_result_status(
+        "summary_only",
+        false,
+        false,
+        false,
+        "index_map",
+        vec!["auto_summary_threshold".to_string()],
+    );
+    add_collection_accounting(
+        &mut result_status,
+        json!({ "definitions": 0, "groups": sorted_groups.len() }),
+        json!({ "definitions": total_results, "groups": sorted_groups.len() }),
+    );
     let output = json!({
         "autoSummary": {
             "groups": groups_json,
@@ -2139,7 +2500,15 @@ fn build_auto_summary(
             "hint": hint,
         },
         "summary": summary,
+        "recommendedNextQueries": [
+            {
+                "tool": "xray_definitions",
+                "args": { "file": file_filter_base, "maxResults": 100 },
+                "reason": "narrow the auto-summary to a smaller file or directory scope"
+            }
+        ]
     });
+    let output = attach_result_status(output, result_status);
 
     ToolCallResult::success(json_to_string(&output))
 }

@@ -15,7 +15,7 @@ use code_xray::generate_trigrams;
 use super::HandlerContext;
 use super::advisory_hints::{interface_vias_caveat, low_count_caveat};
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
-use super::utils::{self, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, read_enum_string_with_default, read_string, sorted_intersect};
+use super::utils::{self, add_collection_accounting, attach_result_status, build_result_status, count_tree_nodes, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, read_enum_string_with_default, read_string, sorted_intersect};
 
 /// Closed enum of accepted `direction` values for `xray_callers`.
 ///
@@ -64,6 +64,84 @@ fn compute_body_lines_from_tree(tree: &[Value], root_method: Option<&Value>) -> 
     }
     (emitted, available)
 }
+
+fn callers_evidence_level(include_body: bool, body_complete: bool, template_navigation: bool) -> &'static str {
+    if include_body && body_complete {
+        "full_body"
+    } else if include_body {
+        "truncated_body"
+    } else if template_navigation {
+        "template_index"
+    } else {
+        "ast_call_graph"
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_callers_result_status(
+    shown_nodes: usize,
+    total_nodes: usize,
+    truncated: bool,
+    per_level_dropped: usize,
+    include_body: bool,
+    body_lines_emitted: usize,
+    body_lines_available: usize,
+    production_only: bool,
+    template_navigation: bool,
+) -> Value {
+    let body_complete = !include_body || body_lines_emitted >= body_lines_available;
+    let complete = !truncated && per_level_dropped == 0 && body_complete;
+    let status = if shown_nodes == 0 {
+        "not_found"
+    } else if complete {
+        "complete"
+    } else {
+        "partial"
+    };
+    let mut reasons = Vec::new();
+    if shown_nodes == 0 {
+        reasons.push("no_call_graph_matches".to_string());
+    }
+    if truncated {
+        reasons.push("max_total_nodes_limit".to_string());
+    }
+    if per_level_dropped > 0 {
+        reasons.push("max_callers_per_level_limit".to_string());
+    }
+    if include_body && !body_complete {
+        reasons.push("body_line_budget".to_string());
+    }
+    if production_only {
+        reasons.push("production_only_scope".to_string());
+    }
+
+    let mut result_status = build_result_status(
+        status,
+        complete,
+        complete,
+        false,
+        callers_evidence_level(include_body, body_complete, template_navigation),
+        reasons,
+    );
+    let shown = if include_body {
+        json!({ "nodes": shown_nodes, "bodyLines": body_lines_emitted })
+    } else {
+        json!({ "nodes": shown_nodes })
+    };
+    let total = if include_body {
+        json!({ "nodes": total_nodes, "bodyLines": body_lines_available })
+    } else {
+        json!({ "nodes": total_nodes })
+    };
+    add_collection_accounting(&mut result_status, shown, total);
+    result_status["scope"] = json!({
+        "productionOnly": production_only,
+        "includesTests": !production_only,
+        "builtInExcludes": if production_only { json!(["test files", "test methods"]) } else { Value::Array(Vec::new()) },
+    });
+    result_status
+}
+
 
 /// Test attribute markers (lowercase) used to identify test methods.
 /// Covers: NUnit [Test], xUnit [Fact]/[Theory], MSTest [TestMethod],
@@ -377,6 +455,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
     // Impact analysis parameter
     let impact_analysis = args.get("impactAnalysis").and_then(|v| v.as_bool()).unwrap_or(false);
+    let production_only = args.get("productionOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     if impact_analysis && direction != "up" {
         return ToolCallResult::error(
             "impactAnalysis only works with direction='up'. It traces callers upward to find test methods covering the target.".to_string()
@@ -440,6 +519,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         }
         inject_branch_warning(&mut summary, ctx);
         inject_index_degraded(&mut summary, ctx);
+        let template_node_count = count_tree_nodes(&template_results);
         let mut output = json!({
             "callTree": template_results,
             "query": {
@@ -447,12 +527,25 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
                 "direction": direction,
                 "depth": max_depth,
                 "templateNavigation": true,
+                "productionOnly": production_only,
             },
             "summary": summary
         });
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
+        let result_status = build_callers_result_status(
+            template_node_count,
+            template_node_count,
+            false,
+            0,
+            false,
+            0,
+            0,
+            production_only,
+            true,
+        );
+        let output = attach_result_status(output, result_status);
         return ToolCallResult::success(json_to_string(&output));
     }
     // ─── End Angular template tree ───────────────────────────────────
@@ -478,6 +571,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         exclude_file_lower,
         ext_filter_list,
         extension_methods_lower,
+        production_only,
     };
 
     // Mutable state for body injection (shared across recursive calls)
@@ -563,6 +657,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
                 "depth": max_depth,
                 "maxCallersPerLevel": max_callers_per_level,
                 "maxTotalNodes": max_total_nodes,
+                "productionOnly": production_only,
             },
             "summary": summary
         });
@@ -649,6 +744,23 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
+        let body_lines_available = if include_body {
+            compute_body_lines_from_tree(&tree, root_method.as_ref()).1
+        } else {
+            0
+        };
+        let result_status = build_callers_result_status(
+            count_tree_nodes(&tree),
+            total_nodes,
+            result_truncated,
+            builder.per_level_dropped,
+            include_body,
+            builder.total_body_lines_emitted,
+            body_lines_available,
+            production_only,
+            false,
+        );
+        let output = attach_result_status(output, result_status);
         ToolCallResult::success(json_to_string(&output))
     } else {
         let mut builder = CalleeTreeBuilder {
@@ -687,6 +799,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
                 "depth": max_depth,
                 "maxCallersPerLevel": max_callers_per_level,
                 "maxTotalNodes": max_total_nodes,
+                "productionOnly": production_only,
             },
             "summary": summary
         });
@@ -720,6 +833,23 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
         if let Some(ref cls) = class_filter {
             output["query"]["class"] = json!(cls);
         }
+        let body_lines_available = if include_body {
+            compute_body_lines_from_tree(&tree, root_method.as_ref()).1
+        } else {
+            0
+        };
+        let result_status = build_callers_result_status(
+            count_tree_nodes(&tree),
+            total_nodes,
+            total_nodes > max_total_nodes,
+            0,
+            include_body,
+            builder.total_body_lines_emitted,
+            body_lines_available,
+            production_only,
+            false,
+        );
+        let output = attach_result_status(output, result_status);
         ToolCallResult::success(json_to_string(&output))
     }
 }
@@ -779,6 +909,7 @@ fn handle_multi_method_callers(
     let body_line_start = args.get("bodyLineStart").and_then(|v| v.as_u64()).map(|v| v as u32);
     let body_line_end = args.get("bodyLineEnd").and_then(|v| v.as_u64()).map(|v| v as u32);
     let impact_analysis = args.get("impactAnalysis").and_then(|v| v.as_bool()).unwrap_or(false);
+    let production_only = args.get("productionOnly").and_then(|v| v.as_bool()).unwrap_or(false);
     if impact_analysis && direction != "up" {
         return ToolCallResult::error(
             "impactAnalysis only works with direction='up'.".to_string()
@@ -841,6 +972,7 @@ fn handle_multi_method_callers(
             exclude_file_lower: exclude_file_lower.clone(),
             ext_filter_list: ext_filter_list.clone(),
             extension_methods_lower: extension_methods_lower.clone(),
+            production_only,
         };
 
         let method_lower = method_name.to_lowercase();
@@ -970,7 +1102,7 @@ fn handle_multi_method_callers(
 
             method_result["callTree"] = json!(tree);
             method_result["nodesInTree"] = json!(method_nodes);
-            let method_truncated = method_nodes >= max_total_nodes;
+            let method_truncated = method_nodes > max_total_nodes;
             method_result["truncated"] = json!(method_truncated);
 
             if let Some(root) = &root_method {
@@ -1008,22 +1140,30 @@ fn handle_multi_method_callers(
         summary["perLevelTruncated"] = json!(true);
         summary["callersDroppedPerLevel"] = json!(total_per_level_dropped);
     }
+    let mut total_body_lines_available: usize = 0;
     if include_body {
         summary["totalBodyLinesReturned"] = json!(total_body_lines_emitted);
-        // Compute available from all result trees
-        let mut total_available: usize = 0;
         for result in &results {
             let tree = result["callTree"].as_array().map(|a| a.as_slice()).unwrap_or(&[]);
             let root = result.get("rootMethod");
             let (_, avail) = compute_body_lines_from_tree(tree, root);
-            total_available += avail;
+            total_body_lines_available += avail;
         }
-        if total_body_lines_emitted < total_available {
-            summary["totalBodyLinesAvailable"] = json!(total_available);
+        if total_body_lines_emitted < total_body_lines_available {
+            summary["totalBodyLinesAvailable"] = json!(total_body_lines_available);
         }
     }
     inject_branch_warning(&mut summary, ctx);
     inject_index_degraded(&mut summary, ctx);
+    let shown_nodes: usize = results
+        .iter()
+        .map(|result| {
+            result["callTree"]
+                .as_array()
+                .map(|nodes| count_tree_nodes(nodes))
+                .unwrap_or(0)
+        })
+        .sum();
 
     let mut output = json!({
         "results": results,
@@ -1033,6 +1173,7 @@ fn handle_multi_method_callers(
             "depth": max_depth,
             "maxCallersPerLevel": max_callers_per_level,
             "maxTotalNodes": max_total_nodes,
+            "productionOnly": production_only,
         },
         "summary": summary,
     });
@@ -1048,6 +1189,19 @@ fn handle_multi_method_callers(
             );
         }
     }
+
+    let result_status = build_callers_result_status(
+        shown_nodes,
+        total_nodes_all,
+        any_truncated,
+        total_per_level_dropped,
+        include_body,
+        total_body_lines_emitted,
+        total_body_lines_available,
+        production_only,
+        false,
+    );
+    let output = attach_result_status(output, result_status);
 
     ToolCallResult::success(json_to_string(&output))
 }
@@ -1346,6 +1500,7 @@ struct CallerTreeContext<'a> {
     /// clones `exclude_patterns`/`ext_filter_list` per method, and the
     /// per-iteration cost is small (≤5 ms on a 5 k-extension index).
     extension_methods_lower: HashMap<String, Vec<String>>,
+    production_only: bool,
 }
 
 #[cfg(test)]
@@ -1377,6 +1532,7 @@ impl CallerTreeContext<'_> {
             exclude_file_lower: vec![],
             ext_filter_list: super::utils::prepare_ext_filter("cs"),
             extension_methods_lower: build_extension_methods_lower(def_idx),
+            production_only: false,
         }
     }
 }
@@ -1384,6 +1540,10 @@ impl CallerTreeContext<'_> {
 impl CallerTreeContext<'_> {
     /// Optimized file filter using pre-computed patterns.
     fn passes_file_filters(&self, file_path: &str) -> bool {
+        if self.production_only && is_test_file(file_path) {
+            return false;
+        }
+
         let matches_ext = std::path::Path::new(file_path)
             .extension()
             .and_then(|e| e.to_str())
@@ -1876,6 +2036,7 @@ fn build_root_method_info(
 
         let file_path = def_idx.files.get(def.file_id as usize)?;
         let mut node = json!({
+            "nodeKind": "root",
             "method": def.name,
             "line": def.line_start,
         });
@@ -1966,6 +2127,7 @@ fn build_caller_node(
 ) -> Value {
     let first_call_site = call_site_lines.first().copied().unwrap_or(0);
     let mut node = json!({
+        "nodeKind": "caller",
         "method": caller_name,
         "line": caller_line,
         "callSite": first_call_site,
@@ -2089,6 +2251,10 @@ impl CallerTreeBuilder<'_> {
                         Some(v) => v,
                         None => continue,
                     };
+
+                if self.ctx.production_only && is_test_caller(self.ctx.def_idx, caller_di, file_path) {
+                    continue;
+                }
 
                 // Verify the call on this line actually targets the expected class
                 if parent_class.is_some()
@@ -2228,6 +2394,7 @@ impl CallerTreeBuilder<'_> {
                         &info.file_path,
                         vec![], // no sub-callers — test is a leaf
                     );
+                    node["nodeKind"] = json!("test");
                     node["isTest"] = json!(true);
 
                     if self.ctx.include_body {
@@ -2345,7 +2512,7 @@ fn build_template_callee_tree(
                 if !visited.insert(child_selector.clone()) {
                     continue;
                 }
-                let mut node = json!({ "selector": child_selector, "templateUsage": true });
+                let mut node = json!({ "nodeKind": "template_callee", "selector": child_selector, "templateUsage": true });
 
                 // Resolve child selector → class for recursion
                 if let Some(child_def_indices) = def_idx.selector_index.get(child_selector)
@@ -2399,6 +2566,7 @@ fn find_template_parents(
         if children.iter().any(|c| c == selector)
             && let Some(parent_def) = def_idx.definitions.get(*parent_di as usize) {
                 let mut node = json!({
+                    "nodeKind": "template_parent",
                     "class": parent_def.name,
                     "line": parent_def.line_start,
                     "templateUsage": true,
@@ -2550,6 +2718,9 @@ impl CalleeTreeBuilder<'_> {
                     if !self.ctx.passes_file_filters(callee_file) {
                         continue;
                     }
+                    if self.ctx.production_only && is_test_method(callee_def, callee_file) {
+                        continue;
+                    }
 
                     let callee_key = format!("{}.{}.{}",
                         callee_def.parent.as_deref().unwrap_or("?"),
@@ -2569,6 +2740,7 @@ impl CalleeTreeBuilder<'_> {
                     );
 
                     let mut node = json!({
+                        "nodeKind": "callee",
                         "method": callee_def.name,
                         "line": callee_def.line_start,
                         "callSiteLine": call.line,

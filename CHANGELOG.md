@@ -1,5 +1,11 @@
 # Changelog
 
+## MCP result completeness contract
+
+- **Expose machine-readable result status.** `xray_grep`, `xray_definitions`, and `xray_callers` now return top-level `resultStatus` metadata describing completeness, exactness safety, evidence level, reasons, and collection accounting.
+- **Report execution and scope decisions.** `xray_grep` includes top-level execution metadata, `xray_definitions` supports explicit exact-name and auto-correction controls, and `xray_callers` can mark production-only scope with node kinds.
+- **Preserve result metadata during truncation.** Oversized responses now keep handler-specific `resultStatus` details such as definition requests, auto-correction data, and caller scope while marking the response as partial.
+
 ## Grep phrase missing-token diagnostics
 
 - **Explain phrase short-circuits on missing index tokens.** `xray_grep phrase=true` now records missing phrase tokens in `summary.phraseDetail.missingTokens`, keeps a `perToken` entry with zero postings, and adds a `searchModeNote` that suggests `substring=true` or `lineRegex=true` instead of returning an ambiguous zero-result response.

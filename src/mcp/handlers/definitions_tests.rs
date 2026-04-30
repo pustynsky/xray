@@ -2501,9 +2501,9 @@ fn test_auto_correct_kind_method_to_function() {
     assert!(defs.iter().any(|d| d["name"] == "GetUser"),
         "Should include GetUser in corrected results");
 
-    // Should have autoCorrection in summary
-    let auto = &v["summary"]["autoCorrection"];
-    assert!(auto.is_object(), "Should have autoCorrection in summary");
+    // Should have correction in resultStatus
+    let auto = &v["resultStatus"]["correction"];
+    assert!(auto.is_object(), "Should have correction in resultStatus");
     assert_eq!(auto["type"], "kindCorrected");
     assert_eq!(auto["original"]["kind"], "function");
     assert!(auto["corrected"]["kind"].is_null(), "Corrected kind should be null (kind filter removed)");
@@ -2525,8 +2525,8 @@ fn test_auto_correct_kind_with_file_filter() {
     let defs = v["definitions"].as_array().unwrap();
     assert!(!defs.is_empty(), "Should return corrected results after kind auto-correction");
 
-    let auto = &v["summary"]["autoCorrection"];
-    assert!(auto.is_object(), "Should have autoCorrection");
+    let auto = &v["resultStatus"]["correction"];
+    assert!(auto.is_object(), "Should have correction");
     assert_eq!(auto["type"], "kindCorrected");
 }
 
@@ -2541,8 +2541,8 @@ fn test_auto_correct_kind_no_trigger_without_name_or_file() {
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = v["definitions"].as_array().unwrap();
     assert_eq!(defs.len(), 0, "No functions exist, no auto-correction without name/file");
-    assert!(v["summary"].get("autoCorrection").is_none(),
-        "No autoCorrection without name/file filter");
+    assert!(v["resultStatus"].get("correction").is_none(),
+        "No correction without name/file filter");
 }
 
 #[test]
@@ -2559,8 +2559,8 @@ fn test_auto_correct_name_typo() {
     assert!(defs.iter().any(|d| d["name"].as_str().unwrap() == "GetUser"),
         "Should find GetUser after name correction");
 
-    let auto = &v["summary"]["autoCorrection"];
-    assert!(auto.is_object(), "Should have autoCorrection in summary");
+    let auto = &v["resultStatus"]["correction"];
+    assert!(auto.is_object(), "Should have correction in resultStatus");
     assert_eq!(auto["type"], "nameCorrected");
     assert_eq!(auto["original"]["name"], "GetUsr");
     assert!(auto["corrected"]["name"].as_str().unwrap().contains("getuser"),
@@ -2580,8 +2580,8 @@ fn test_auto_correct_name_below_threshold_no_correction() {
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = v["definitions"].as_array().unwrap();
     assert_eq!(defs.len(), 0, "Too different name should return 0 results");
-    assert!(v["summary"].get("autoCorrection").is_none(),
-        "No autoCorrection when similarity is below threshold");
+    assert!(v["resultStatus"].get("correction").is_none(),
+        "No correction when similarity is below threshold");
 }
 
 #[test]
@@ -2593,7 +2593,7 @@ fn test_auto_correct_name_not_triggered_for_regex() {
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    assert!(v["summary"].get("autoCorrection").is_none(),
+    assert!(v["resultStatus"].get("correction").is_none(),
         "Regex queries should NOT trigger name auto-correction");
 }
 
@@ -2610,8 +2610,8 @@ fn test_auto_correct_kind_takes_priority_over_name() {
     let defs = v["definitions"].as_array().unwrap();
     assert!(defs.iter().any(|d| d["name"] == "GetUser"),
         "Should find GetUser after kind correction");
-    let auto = &v["summary"]["autoCorrection"];
-    assert!(auto.is_object(), "Should have autoCorrection");
+    let auto = &v["resultStatus"]["correction"];
+    assert!(auto.is_object(), "Should have correction");
     assert_eq!(auto["type"], "kindCorrected",
         "Kind correction should take priority over name correction");
 }
@@ -2625,9 +2625,117 @@ fn test_auto_correct_no_correction_when_results_found() {
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(!v["definitions"].as_array().unwrap().is_empty());
-    assert!(v["summary"].get("autoCorrection").is_none(),
-        "No autoCorrection when results are found normally");
+    assert!(v["resultStatus"].get("correction").is_none(),
+        "No correction when results are found normally");
 }
+
+#[test]
+fn test_auto_correct_false_keeps_typo_not_found() {
+    let ctx = make_auto_correction_ctx();
+    let result = handle_xray_definitions(&ctx, &json!({
+        "name": ["GetUsr"],
+        "autoCorrect": false
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(v["definitions"].as_array().unwrap().len(), 0);
+    assert_eq!(v["resultStatus"]["status"], "not_found");
+    assert_eq!(v["resultStatus"]["request"]["autoCorrect"], false);
+    assert!(v["resultStatus"].get("correction").is_none());
+}
+
+#[test]
+fn test_versioned_name_mismatch_suggested_but_not_auto_corrected() {
+    let mut index = make_test_def_index();
+    let def_idx = index.definitions.len() as u32;
+    index.definitions.push(DefinitionEntry {
+        name: "ProcessOrderV2".to_string(), kind: DefinitionKind::Method,
+        file_id: 1, line_start: 40, line_end: 50,
+        signature: None, parent: Some("OrderService".to_string()), modifiers: vec![],
+        attributes: vec![], base_types: vec![],
+    });
+    index.name_index.entry("processorderv2".to_string()).or_default().push(def_idx);
+    index.kind_index.entry(DefinitionKind::Method).or_default().push(def_idx);
+    index.file_index.entry(1).or_default().push(def_idx);
+
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(index))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(&ctx, &json!({
+        "name": ["ProcessOrderV3"]
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(v["definitions"].as_array().unwrap().len(), 0);
+    assert_eq!(v["resultStatus"]["status"], "not_found");
+    assert!(v["resultStatus"].get("correction").is_none());
+    assert!(v["resultStatus"]["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("versioned_name_exact_miss")));
+
+    let suggestions = v["suggestedMatches"].as_array().unwrap();
+    let suggestion = suggestions.iter()
+        .find(|suggestion| suggestion["name"].as_str() == Some("ProcessOrderV2"))
+        .expect("versioned match should be suggested");
+    assert_eq!(suggestion["requested"], "processorderv3");
+    assert_eq!(suggestion["versionedName"], true);
+    assert_eq!(suggestion["reason"], "same base name with different version suffix");
+}
+
+
+#[test]
+fn test_exact_name_only_does_not_substring_match() {
+    let ctx = make_auto_correction_ctx();
+    let result = handle_xray_definitions(&ctx, &json!({
+        "name": ["User"],
+        "exactNameOnly": true,
+        "autoCorrect": false
+    }));
+    assert!(!result.is_error);
+    let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(v["definitions"].as_array().unwrap().len(), 0);
+    assert_eq!(v["resultStatus"]["status"], "not_found");
+    assert_eq!(v["resultStatus"]["request"]["exactNameOnly"], true);
+    assert!(v["resultStatus"].get("correction").is_none());
+}
+
+#[test]
+fn test_exact_semantics_false_for_fuzzy_file_and_parent_filters() {
+    let exact_args = parse_definition_args(&json!({
+        "name": ["GetUser"],
+        "exactNameOnly": true,
+        "includeBody": true
+    })).unwrap();
+    let exact_status = build_definitions_result_status(&exact_args, 1, 1, 10, 10);
+    assert_eq!(exact_status["safeForExactSemantics"], true);
+
+    let file_args = parse_definition_args(&json!({
+        "name": ["GetUser"],
+        "exactNameOnly": true,
+        "file": ["Service"],
+        "includeBody": true
+    })).unwrap();
+    let file_status = build_definitions_result_status(&file_args, 1, 1, 10, 10);
+    assert_eq!(file_status["safeForExactSemantics"], false);
+
+    let parent_args = parse_definition_args(&json!({
+        "name": ["GetUser"],
+        "exactNameOnly": true,
+        "parent": ["User"],
+        "includeBody": true
+    })).unwrap();
+    let parent_status = build_definitions_result_status(&parent_args, 1, 1, 10, 10);
+    assert_eq!(parent_status["safeForExactSemantics"], false);
+}
+
+
 
 #[test]
 fn test_auto_correct_preserves_other_filters() {
@@ -2672,9 +2780,9 @@ fn test_auto_correct_name_blocked_by_length_ratio() {
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
     let defs = v["definitions"].as_array().unwrap();
     assert_eq!(defs.len(), 0, "Should return 0 results (length ratio too low for auto-correction)");
-    // Should NOT have autoCorrection — should have hint instead
-    let auto = &v["summary"]["autoCorrection"];
-    assert!(auto.is_null(), "Should NOT have autoCorrection when length ratio is below threshold. Got: {}", auto);
+    // Should NOT have correction — should have hint instead
+    let auto = &v["resultStatus"]["correction"];
+    assert!(auto.is_null(), "Should NOT have correction when length ratio is below threshold. Got: {}", auto);
 }
 
 #[test]
@@ -2687,7 +2795,7 @@ fn test_auto_correct_name_typo_passes_length_ratio() {
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let auto = &v["summary"]["autoCorrection"];
+    let auto = &v["resultStatus"]["correction"];
     assert!(auto.is_object(), "Short typo should trigger auto-correction (length ratio OK)");
     assert_eq!(auto["type"], "nameCorrected");
 }
@@ -2703,7 +2811,7 @@ fn test_auto_correct_name_typo_passes_length_ratio_similar_length() {
     }));
     assert!(!result.is_error);
     let v: Value = serde_json::from_str(&result.content[0].text).unwrap();
-    let auto = &v["summary"]["autoCorrection"];
+    let auto = &v["resultStatus"]["correction"];
     assert!(auto.is_object(), "Typo with similar length should trigger auto-correction (length ratio OK)");
     assert_eq!(auto["type"], "nameCorrected");
     assert!(auto["corrected"]["name"].as_str().unwrap().contains("userservice"),

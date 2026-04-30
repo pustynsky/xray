@@ -2698,6 +2698,7 @@ fn test_impact_analysis_finds_test_methods() {
     assert_eq!(callers.len(), 1, "Should find 1 caller");
     assert_eq!(callers[0]["method"].as_str().unwrap(), "testProcess");
     assert_eq!(callers[0]["isTest"].as_bool(), Some(true), "Node should be marked isTest=true");
+    assert_eq!(callers[0]["nodeKind"].as_str(), Some("test"));
 
     // tests_found collector should have the test info with full path, depth, callChain
     assert_eq!(tests_found.len(), 1, "Should find 1 test method");
@@ -2711,6 +2712,36 @@ fn test_impact_analysis_finds_test_methods() {
     assert_eq!(chain.len(), 2, "callChain should be [target, test]");
     assert_eq!(chain[0].as_str().unwrap(), "process");
     assert_eq!(chain[1].as_str().unwrap(), "testProcess");
+
+    let production_node_count = AtomicUsize::new(0);
+    let production_impact_truncated = AtomicBool::new(false);
+    let production_ctx = CallerTreeContext {
+        resolve_interfaces: false,
+        impact_analysis: true,
+        production_only: true,
+        ..CallerTreeContext::test_default(
+            &content_index,
+            &def_idx,
+            &limits,
+            &production_node_count,
+            &production_impact_truncated,
+        )
+    };
+    let mut production_builder = CallerTreeBuilder {
+        ctx: &production_ctx,
+        max_depth: 5,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+    };
+    let production_callers = production_builder.build(
+        "process", Some("OrderService"), 0, &initial_chain,
+    );
+    assert!(production_callers.is_empty(), "productionOnly should exclude test callers");
+    assert!(production_builder.tests_found.is_empty(), "productionOnly should not collect test coverage nodes");
+
 
     // No sub-callers on test nodes (leaf)
     assert!(callers[0].get("callers").is_none(),
@@ -2929,6 +2960,40 @@ fn test_single_method_no_comma_returns_calltree_directly() {
     // Query should have "method" (string), not "methods" (array)
     assert!(v["query"]["method"].is_string(), "Query should have method string");
 }
+
+#[test]
+fn test_callers_production_only_result_status_scope() {
+    let definitions = vec![
+        class_def(0, "OrderService", vec![]),
+        method_def(0, "process", "OrderService", 5, 15),
+    ];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let content_index = crate::ContentIndex::default();
+
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    let result = handle_xray_callers(&ctx, &serde_json::json!({
+        "method": ["process"],
+        "depth": 1,
+        "productionOnly": true
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let result_status = &v["resultStatus"];
+
+    assert_eq!(result_status["scope"]["productionOnly"], true);
+    assert_eq!(result_status["scope"]["includesTests"], false);
+    assert_eq!(result_status["scope"]["builtInExcludes"].as_array().unwrap().len(), 2);
+    assert_eq!(result_status["scope"]["builtInExcludes"][0], "test files");
+    assert_eq!(result_status["scope"]["builtInExcludes"][1], "test methods");
+    assert!(result_status["reasons"].as_array().unwrap().iter()
+        .any(|reason| reason.as_str() == Some("production_only_scope")));
+}
+
 
 #[test]
 fn test_multi_method_array_form_each_entry_is_one_method() {

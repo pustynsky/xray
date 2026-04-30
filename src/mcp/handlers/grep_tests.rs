@@ -28,6 +28,7 @@ fn make_params<'a>(
         max_occurrences_per_term: None,
         lock_wait_ms: 0.0,
         trigram_stale: false,
+        requested_mode: "token",
     }
 }
 
@@ -508,9 +509,33 @@ fn test_build_grep_response_count_only() {
     assert!(!result.is_error);
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(v.get("summary").is_some());
+    assert_eq!(v["resultStatus"]["status"], "counts_only");
+    assert_eq!(v["resultStatus"]["total"]["occurrences"], 2);
+    assert_eq!(v["execution"]["requestedMode"], "token");
+    assert_eq!(v["execution"]["effectiveMode"], "token");
+    assert_eq!(v["execution"]["modeChanged"], false);
     // count_only → no files array
     assert!(v.get("files").is_none());
 }
+
+#[test]
+fn test_build_grep_response_zero_results_not_found() {
+    let index = ContentIndex::default();
+    let ctx = HandlerContext::default();
+    let params = make_params(&None, &[], &[], &[]);
+    let results: Vec<FileScoreEntry> = Vec::new();
+    let terms = vec!["missing".to_string()];
+
+    let result = build_grep_response(&results, &terms, 0, 0, "or", &index, &ctx, &params);
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(v["resultStatus"]["status"], "not_found");
+    assert_eq!(v["resultStatus"]["complete"], true);
+    assert_eq!(v["resultStatus"]["reasons"].as_array().unwrap()[0], "no_matches");
+    assert_eq!(v["resultStatus"]["total"]["files"], 0);
+    assert_eq!(v["files"].as_array().unwrap().len(), 0);
+}
+
 
 #[test]
 fn test_build_grep_response_with_files() {
@@ -533,6 +558,10 @@ fn test_build_grep_response_with_files() {
     let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(v.get("files").is_some());
     assert!(v.get("summary").is_some());
+    assert_eq!(v["resultStatus"]["status"], "complete");
+    assert_eq!(v["resultStatus"]["shown"]["files"], 1);
+    assert_eq!(v["resultStatus"]["shown"]["occurrences"], 1);
+    assert_eq!(v["execution"]["costClass"], "normal");
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -694,6 +723,7 @@ fn test_line_regex_file_scan_single_file_match() {
         max_occurrences_per_term: None,
         lock_wait_ms: 0.0,
         trigram_stale: false,
+        requested_mode: "substring",
     };
 
     let output = scan_line_regex_file(
