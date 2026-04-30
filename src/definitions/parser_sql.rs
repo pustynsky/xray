@@ -21,8 +21,8 @@ static CREATE_RE: LazyLock<Regex> = LazyLock::new(|| {
     ).unwrap()
 });
 
-static PARAM_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?m)^\s*(@[\w]+)").unwrap()
+static DECL_PARAM_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?m)(?:^|[\s,(])(@[\w]+)\b").unwrap()
 });
 
 static CREATE_TABLE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -201,12 +201,13 @@ fn parse_batch(
     code_stats: &mut Vec<(usize, CodeStats)>,
 ) {
     let batch_text = batch.lines.join("\n");
-    let batch_upper = batch_text.to_uppercase();
+    let search_text = mask_sql_comments_preserve_offsets(&batch_text);
+    let search_upper = search_text.to_uppercase();
 
     // Try to match CREATE statements
-    if let Some(m) = CREATE_RE.find(&batch_text) {
+    if let Some(m) = CREATE_RE.find(&search_text) {
         let after_keyword = &batch_text[m.end()..];
-        let keyword = extract_keyword_from_match(&batch_upper[m.start()..m.end()]);
+        let keyword = extract_keyword_from_match(&search_upper[m.start()..m.end()]);
 
         match keyword.as_str() {
             "PROCEDURE" | "PROC" => {
@@ -304,6 +305,259 @@ fn compute_code_stats_for_lines(lines: &[&str]) -> CodeStats {
 
 // ─── CREATE PROCEDURE / FUNCTION parsing ────────────────────────────
 
+fn extract_signature_params(
+    batch_text: &str,
+    declaration_start: usize,
+    kind: DefinitionKind,
+) -> Vec<String> {
+    // Body statements can start with @ too, so signature params must come from
+    // the declaration only.
+    let declaration_text = declaration_text_before_body(&batch_text[declaration_start..], kind);
+    let declaration_for_params = mask_sql_comments_and_literals_preserve_offsets(declaration_text);
+    let mut seen = HashSet::new();
+    DECL_PARAM_RE.captures_iter(&declaration_for_params)
+        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
+        .filter(|param| seen.insert(param.to_ascii_lowercase()))
+        .take(5)
+        .collect()
+}
+
+fn mask_sql_comments_preserve_offsets(text: &str) -> String {
+    mask_sql_non_code_preserve_offsets(text, false)
+}
+
+fn mask_sql_comments_and_literals_preserve_offsets(text: &str) -> String {
+    mask_sql_non_code_preserve_offsets(text, true)
+}
+
+fn mask_sql_non_code_preserve_offsets(text: &str, mask_literals: bool) -> String {
+    let mut bytes = text.as_bytes().to_vec();
+    let mut idx = 0;
+
+    while idx < bytes.len() {
+        if bytes[idx] == b'\'' {
+            idx = skip_sql_single_quoted_literal(&mut bytes, idx, mask_literals);
+            continue;
+        }
+
+        if bytes[idx] == b'[' {
+            idx = skip_sql_bracketed_identifier(&bytes, idx);
+            continue;
+        }
+
+        if bytes[idx] == b'-' && bytes.get(idx + 1) == Some(&b'-') {
+            mask_sql_byte(&mut bytes, idx);
+            mask_sql_byte(&mut bytes, idx + 1);
+            idx += 2;
+
+            while idx < bytes.len() && bytes[idx] != b'\n' {
+                mask_sql_byte(&mut bytes, idx);
+                idx += 1;
+            }
+            continue;
+        }
+
+        if bytes[idx] == b'/' && bytes.get(idx + 1) == Some(&b'*') {
+            mask_sql_byte(&mut bytes, idx);
+            mask_sql_byte(&mut bytes, idx + 1);
+            idx += 2;
+
+            while idx < bytes.len() {
+                let closes_comment = bytes[idx] == b'*' && bytes.get(idx + 1) == Some(&b'/');
+                mask_sql_byte(&mut bytes, idx);
+                if closes_comment {
+                    mask_sql_byte(&mut bytes, idx + 1);
+                    idx += 2;
+                    break;
+                }
+                idx += 1;
+            }
+            continue;
+        }
+
+        idx += 1;
+    }
+
+    String::from_utf8(bytes).unwrap()
+}
+
+fn skip_sql_single_quoted_literal(bytes: &mut [u8], start: usize, mask_literal: bool) -> usize {
+    if mask_literal {
+        mask_sql_byte(bytes, start);
+    }
+
+    let mut idx = start + 1;
+    while idx < bytes.len() {
+        let current = bytes[idx];
+        if mask_literal {
+            mask_sql_byte(bytes, idx);
+        }
+        idx += 1;
+
+        if current == b'\'' {
+            if bytes.get(idx) == Some(&b'\'') {
+                if mask_literal {
+                    mask_sql_byte(bytes, idx);
+                }
+                idx += 1;
+            } else {
+                break;
+            }
+        }
+    }
+
+    idx
+}
+
+fn skip_sql_bracketed_identifier(bytes: &[u8], start: usize) -> usize {
+    let mut idx = start + 1;
+    while idx < bytes.len() {
+        if bytes[idx] == b']' {
+            if bytes.get(idx + 1) == Some(&b']') {
+                idx += 2;
+            } else {
+                return idx + 1;
+            }
+        } else {
+            idx += 1;
+        }
+    }
+
+    idx
+}
+
+fn mask_sql_byte(bytes: &mut [u8], idx: usize) {
+    if bytes[idx] != b'\r' && bytes[idx] != b'\n' {
+        bytes[idx] = b' ';
+    }
+}
+
+fn declaration_text_before_body(text: &str, kind: DefinitionKind) -> &str {
+    let boundary_text = mask_sql_comments_and_literals_preserve_offsets(text);
+    let mut offset = 0;
+
+    for line_with_ending in boundary_text.split_inclusive('\n') {
+        let line = strip_line_ending(line_with_ending);
+        if let Some(boundary) = find_signature_body_boundary(line, kind) {
+            return &text[..offset + boundary];
+        }
+        offset += line_with_ending.len();
+    }
+
+    text
+}
+
+fn strip_line_ending(line: &str) -> &str {
+    let line = line.strip_suffix('\n').unwrap_or(line);
+    line.strip_suffix('\r').unwrap_or(line)
+}
+
+fn find_signature_body_boundary(line: &str, kind: DefinitionKind) -> Option<usize> {
+    let leading_whitespace = line.len() - line.trim_start().len();
+    let trimmed = &line[leading_whitespace..];
+
+    if kind == DefinitionKind::SqlFunction {
+        if let Some(returns_idx) = find_sql_keyword(trimmed, "RETURNS") {
+            return Some(leading_whitespace + returns_idx);
+        }
+    }
+
+    if let Some(as_idx) = find_proc_body_as(trimmed) {
+        return Some(leading_whitespace + as_idx);
+    }
+
+    let upper_trimmed = trimmed.to_ascii_uppercase();
+    if starts_with_body_keyword(&upper_trimmed) {
+        return Some(leading_whitespace);
+    }
+
+    None
+}
+
+fn find_proc_body_as(line: &str) -> Option<usize> {
+    let upper = line.to_ascii_uppercase();
+
+    for (idx, _) in upper.match_indices("AS") {
+        if !is_keyword_boundary(&upper, idx, "AS") {
+            continue;
+        }
+
+        let after = upper[idx + "AS".len()..].trim_start();
+        if after.is_empty()
+            || after.starts_with("--")
+            || after.starts_with("/*")
+            || after.starts_with(';')
+            || starts_with_body_keyword(after)
+        {
+            return Some(idx);
+        }
+    }
+
+    None
+}
+
+fn find_sql_keyword(line: &str, keyword: &str) -> Option<usize> {
+    let upper = line.to_ascii_uppercase();
+    upper.match_indices(keyword)
+        .find(|(idx, _)| is_keyword_boundary(&upper, *idx, keyword))
+        .map(|(idx, _)| idx)
+}
+
+fn is_keyword_boundary(upper: &str, idx: usize, keyword: &str) -> bool {
+    let before_ok = match upper[..idx].chars().next_back() {
+        Some(ch) => !is_sql_identifier_char(ch),
+        None => true,
+    };
+    let after_idx = idx + keyword.len();
+    let after_ok = match upper[after_idx..].chars().next() {
+        Some(ch) => !is_sql_identifier_char(ch),
+        None => true,
+    };
+
+    before_ok && after_ok
+}
+
+fn starts_with_body_keyword(upper_trimmed: &str) -> bool {
+    [
+        "BEGIN", "DECLARE", "DELETE", "EXEC", "EXECUTE", "INSERT", "MERGE",
+        "RETURN", "SELECT", "SET", "UPDATE", "WITH",
+    ].iter().any(|keyword| starts_with_sql_keyword(upper_trimmed, keyword))
+}
+
+fn starts_with_sql_keyword(upper: &str, keyword: &str) -> bool {
+    let Some(rest) = upper.strip_prefix(keyword) else {
+        return false;
+    };
+
+    match rest.chars().next() {
+        Some(ch) => !is_sql_identifier_char(ch),
+        None => true,
+    }
+}
+
+fn is_sql_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || ch == '_' || ch == '@'
+}
+
+fn first_signature_line(
+    batch_text: &str,
+    create_start: usize,
+    kind: DefinitionKind,
+) -> String {
+    let line = batch_text[create_start..]
+        .lines()
+        .next()
+        .map(str::trim)
+        .unwrap_or("");
+    let boundary_line = mask_sql_comments_and_literals_preserve_offsets(line);
+
+    let end = match find_signature_body_boundary(&boundary_line, kind) {
+        Some(boundary) => boundary,
+        None => mask_sql_comments_preserve_offsets(line).trim_end().len(),
+    };
+    line[..end].trim_end().to_string()
+}
+
 fn parse_procedure_or_function(
     batch: &Batch,
     file_id: u32,
@@ -319,10 +573,12 @@ fn parse_procedure_or_function(
         kw
     )).unwrap();
 
-    let caps = match re.captures(batch_text) {
+    let search_text = mask_sql_comments_preserve_offsets(batch_text);
+    let caps = match re.captures(&search_text) {
         Some(c) => c,
         None => return,
     };
+    let create_match = caps.get(0).unwrap();
 
     let (schema, name) = match extract_schema_name(&caps, 2, 3, 4) {
         Some(pair) => pair,
@@ -331,26 +587,39 @@ fn parse_procedure_or_function(
 
     if name.is_empty() { return; }
 
-    // Build signature: first meaningful line (containing CREATE) + first ~5 parameters
-    let first_line = batch.lines.iter()
-        .map(|l| l.trim())
-        .find(|l| {
-            let upper = l.to_uppercase();
-            upper.contains("CREATE") && (upper.contains("PROC") || upper.contains("FUNCTION"))
-        })
-        .unwrap_or_else(|| batch.lines.first().map(|l| l.trim()).unwrap_or(""));
-    let mut sig = first_line.to_string();
+    let mut sig = first_signature_line(batch_text, create_match.start(), kind);
 
-    // Extract parameters (lines starting with @)
-    let params: Vec<String> = PARAM_RE.captures_iter(batch_text)
-        .take(5)
-        .filter_map(|c| c.get(1).map(|m| m.as_str().to_string()))
-        .collect();
+    let params = extract_signature_params(batch_text, create_match.end(), kind);
 
     if !params.is_empty() {
-        let param_str = params.join(", ");
-        if !sig.contains(&param_str) {
-            sig = format!("{} ({})", sig.trim_end(), param_str);
+        let sig_for_params = mask_sql_comments_and_literals_preserve_offsets(&sig);
+        let mut existing_params = HashSet::new();
+        let mut first_existing_param_start = None;
+        for capture in DECL_PARAM_RE.captures_iter(&sig_for_params) {
+            if let Some(param) = capture.get(1) {
+                first_existing_param_start.get_or_insert(param.start());
+                existing_params.insert(param.as_str().to_ascii_lowercase());
+            }
+        }
+
+        let missing_params: Vec<&str> = params.iter()
+            .map(String::as_str)
+            .filter(|param| !existing_params.contains(&param.to_ascii_lowercase()))
+            .collect();
+
+        if !missing_params.is_empty() {
+            let trimmed_sig = sig.trim_end();
+            let (prefix, params_to_append) = if let Some(param_start) = first_existing_param_start {
+                (sig[..param_start].trim_end(), params.join(", "))
+            } else {
+                (trimmed_sig, missing_params.join(", "))
+            };
+
+            if prefix.ends_with('(') {
+                sig = format!("{}{})", prefix, params_to_append);
+            } else {
+                sig = format!("{} ({})", prefix, params_to_append);
+            }
         }
     }
 
