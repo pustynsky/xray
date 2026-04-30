@@ -634,21 +634,156 @@ fn build_policy_reminder(indexed_ext: &str) -> String {
     )
 }
 
-fn next_step_hint(tool_name: &str) -> Option<&'static str> {
-    match tool_name {
-        "xray_definitions" => Some("Next: use xray_callers for call chains or xray_grep for text patterns"),
-        "xray_grep" => Some("Next: use xray_definitions for AST structure or xray_callers for call trees"),
-        "xray_callers" => Some("Next: use xray_definitions includeBody=true for source or xray_grep for text refs"),
-        "xray_fast" => Some("Next: use xray_definitions for code structure or xray_grep for content"),
-        "xray_edit" => Some("Next: use xray_definitions to verify or xray_grep to check related files"),
+struct ResponseGuidanceContext<'a> {
+    tool_name: &'a str,
+    output: &'a Value,
+    handler_ctx: &'a HandlerContext,
+    invocation_args: Option<&'a Value>,
+}
+
+fn next_step_hint(context: &ResponseGuidanceContext<'_>) -> Option<String> {
+    match context.tool_name {
+        "xray_grep" => grep_or_fast_next_step(context, "grep")
+            .or_else(|| Some("Next: narrow content results with xray_grep filters, or use xray_definitions when a parser-active target file is known".to_string())),
+        "xray_fast" => grep_or_fast_next_step(context, "fast")
+            .or_else(|| Some("Next: use xray_definitions file=[\"<match>\"] to inspect parser-active files, or xray_grep for content".to_string())),
+        "xray_definitions" => Some("Next: use xray_callers for call chains or xray_grep for text patterns".to_string()),
+        "xray_callers" => Some("Next: use xray_definitions includeBody=true for source or xray_grep for text refs".to_string()),
+        "xray_edit" => Some("Next: use xray_definitions to verify or xray_grep to check related files".to_string()),
         "xray_git_history" | "xray_git_diff" | "xray_git_authors" | "xray_git_activity" | "xray_git_blame" | "xray_branch_status" => {
-            Some("Next: use xray_definitions for code context or xray_callers for impact")
+            Some("Next: use xray_definitions for code context or xray_callers for impact".to_string())
         }
         _ => None,
     }
 }
 
+fn grep_or_fast_next_step(context: &ResponseGuidanceContext<'_>, source: &str) -> Option<String> {
+    let path = top_result_path(context.output)?;
+    let extension = extension_for_path(path)?;
+    let definition_parser_active = definition_parser_active(context.handler_ctx, &extension);
+    if !definition_parser_active {
+        if extension == "html" && has_typescript_parser(context.handler_ctx)
+            && let Some(selector) = selector_from_invocation_args(context.invocation_args) {
+                return Some(format!(
+                    "Template hint: if this is an Angular selector, run xray_callers method=[\"{}\"] direction='up' to find parent components.",
+                    selector
+                ));
+        }
+        return None;
+    }
+
+    let hint_path = workspace_relative_hint_path(path, context.handler_ctx);
+    let mut hint = match source {
+        "fast" => format!(
+            "Next: xray_definitions file=[\"{hint_path}\"] (no includeBody) to list its symbols, then xray_definitions file=[\"{hint_path}\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0 for the chosen body."
+        ),
+        _ => format!(
+            "Next: xray_definitions file=[\"{hint_path}\"] (no includeBody) to list symbols, then xray_definitions file=[\"{hint_path}\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0 to read the target body."
+        ),
+    };
+
+    if extension == "sql" && definition_parser_active {
+        hint.push_str(" SQL hint: kind=[\"storedProcedure\"] returns SP bodies; verify parameters from the body header (signature is a summary).")
+    }
+
+    if extension == "html" && has_typescript_parser(context.handler_ctx)
+        && let Some(selector) = selector_from_invocation_args(context.invocation_args) {
+            hint.push_str(&format!(
+                " Template hint: if this is an Angular selector, run xray_callers method=[\"{}\"] direction='up' to find parent components.",
+                selector
+            ));
+    }
+
+    Some(hint)
+}
+
+fn top_result_path(output: &Value) -> Option<&str> {
+    output
+        .get("files")?
+        .as_array()?
+        .first()?
+        .get("path")?
+        .as_str()
+}
+
+fn extension_for_path(path: &str) -> Option<String> {
+    std::path::Path::new(path)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.to_ascii_lowercase())
+}
+
+fn definition_parser_active(ctx: &HandlerContext, extension: &str) -> bool {
+    ctx.def_extensions
+        .iter()
+        .any(|ext| ext.eq_ignore_ascii_case(extension))
+}
+
+fn has_typescript_parser(ctx: &HandlerContext) -> bool {
+    ctx.def_extensions
+        .iter()
+        .any(|ext| ext.eq_ignore_ascii_case("ts") || ext.eq_ignore_ascii_case("tsx"))
+}
+
+fn workspace_relative_hint_path(path: &str, ctx: &HandlerContext) -> String {
+    let normalized = normalize_path_sep(path);
+    if !(std::path::Path::new(path).is_absolute() || normalized.contains(':')) {
+        return normalized;
+    }
+
+    let server_dir = normalize_path_sep(&ctx.server_dir());
+    let server_dir = server_dir.trim_end_matches('/');
+    let normalized_lower = normalized.to_ascii_lowercase();
+    let server_lower = server_dir.to_ascii_lowercase();
+    let prefix = format!("{}/", server_lower);
+    if normalized_lower.starts_with(&prefix) {
+        normalized[server_dir.len() + 1..].to_string()
+    } else {
+        normalized
+    }
+}
+
+fn selector_from_invocation_args(invocation_args: Option<&Value>) -> Option<String> {
+    let terms = invocation_args?.get("terms")?.as_array()?;
+    terms
+        .iter()
+        .filter_map(|value| value.as_str())
+        .find_map(selector_from_text)
+}
+
+fn selector_from_text(text: &str) -> Option<String> {
+    let trimmed = text.trim();
+    let tag_body = trimmed
+        .strip_prefix("</")
+        .or_else(|| trimmed.strip_prefix('<'))?;
+    let selector: String = tag_body
+        .chars()
+        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '-')
+        .collect();
+    if selector.contains('-')
+        && selector
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_alphabetic())
+    {
+        Some(selector)
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
 pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, indexed_ext: &str, ctx: &super::HandlerContext) -> ToolCallResult {
+    inject_response_guidance_with_args(result, tool_name, indexed_ext, ctx, None)
+}
+
+pub(crate) fn inject_response_guidance_with_args(
+    result: ToolCallResult,
+    tool_name: &str,
+    indexed_ext: &str,
+    ctx: &super::HandlerContext,
+    invocation_args: Option<&Value>,
+) -> ToolCallResult {
     let was_error = result.is_error;
     let text = match result.content.first() {
         Some(c) => c.text.clone(),
@@ -667,17 +802,31 @@ pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, 
         Err(_) => return result,
     };
 
-    let Some(obj) = output.as_object_mut() else {
-        return result;
-    };
+    {
+        let Some(obj) = output.as_object_mut() else {
+            return result;
+        };
 
-    if !obj.contains_key("summary") {
-        obj.insert("summary".to_string(), json!({}));
+        if !obj.contains_key("summary") {
+            obj.insert("summary".to_string(), json!({}));
+        }
     }
 
-    if let Some(summary) = obj.get_mut("summary").and_then(|v| v.as_object_mut()) {
+    let context_hint = if output.pointer("/summary/nextStepHint").is_none() {
+        let guidance_context = ResponseGuidanceContext {
+            tool_name,
+            output: &output,
+            handler_ctx: ctx,
+            invocation_args,
+        };
+        next_step_hint(&guidance_context)
+    } else {
+        None
+    };
+
+    if let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) {
         summary.insert("policyReminder".to_string(), json!(build_policy_reminder(indexed_ext)));
-        if let Some(hint) = next_step_hint(tool_name) {
+        if let Some(hint) = context_hint {
             // Tool handlers may set a more specific nextStepHint; use the generic
             // guidance only when the response did not already provide one.
             summary.entry("nextStepHint".to_string()).or_insert(json!(hint));

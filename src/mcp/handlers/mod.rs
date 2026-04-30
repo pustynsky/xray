@@ -42,7 +42,16 @@ pub(crate) static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new
 /// `def_extensions` — file extensions with definition parser support (e.g., ["cs", "rs"]).
 /// Used to dynamically generate language lists in xray_definitions and xray_callers descriptions.
 pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
+    tool_definitions_with_runtime(def_extensions, false)
+}
+
+pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_available: bool) -> Vec<ToolDefinition> {
     let lang_list = crate::tips::format_supported_languages(def_extensions);
+    let xml_definition_note = if xml_on_demand_available {
+        " XML on-demand: for .xml, .config, .csproj, .vbproj, .fsproj, .vcxproj, .nuspec, .vsixmanifest, .manifestxml, .appxmanifest, .props, .targets, .resx files, use file='<path>' with containsLine=<N> or name='<element>' to parse XML on-the-fly and get structural context with parent promotion (leaf elements are auto-promoted to parent block). The name filter searches both element names AND text content of leaf elements (e.g., name='PremiumStorage' finds <ServiceType>PremiumStorage</ServiceType> and returns the parent block with matchedBy='textContent', matchedChild='ServiceType'). Text content search requires term >= 3 chars. Multiple leaf matches in same parent are de-duplicated into one result with matchedChildren array. Name matches take priority over textContent matches. Passing a directory path returns a clear error with guidance to use xray_fast."
+    } else {
+        ""
+    };
     // Single source of truth for the closed `kind` enum exposed via
     // `xray_definitions.kind`. Derived from `DefinitionKind::ALL_KINDS` so the
     // schema and the runtime validator (`utils::read_kind_array`) cannot drift.
@@ -158,14 +167,14 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: "xray_info".to_string(),
-            description: "Show all existing indexes with their status, sizes, and age. With `file=[\"path\",...]`: returns per-file metadata (lineCount, byteSize, extension, indexed, lineEnding) WITHOUT loading file content into the response. Use this to discover the line count of a file before composing an `xray_edit` call (e.g. for the append-EOF idiom `startLine: lineCount+1, endLine: lineCount`) instead of falling back to `Get-Content | Measure-Object` or `wc -l`. lineCount uses the same semantics as `xray_edit`'s `newLineCount` / `originalLineCount` (trailing newline is a terminator, not a line) so the value can be fed directly into edit ranges.".to_string(),
+            description: "Show all existing indexes with their status, sizes, and age. With `file=[\"path\",...]`: returns per-file metadata (lineCount, byteSize, extension, indexed, lineEnding, definitionParserActive, xmlOnDemandActive, symbolReadableViaDefinitions, optional hint) WITHOUT loading file content into the response. Use this to discover the line count of a file before composing an `xray_edit` call (e.g. for the append-EOF idiom `startLine: lineCount+1, endLine: lineCount`) instead of falling back to `Get-Content | Measure-Object` or `wc -l`. lineCount uses the same semantics as `xray_edit`'s `newLineCount` / `originalLineCount` (trailing newline is a terminator, not a line) so the value can be fed directly into edit ranges.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "file": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Optional list of files to inspect. Each entry is one path (absolute, or workspace-relative). Returns lineCount/byteSize/extension/indexed/lineEnding per file. Without this argument, the existing index-level summary is returned."
+                        "description": "Optional list of files to inspect. Each entry is one path (absolute, or workspace-relative). Returns lineCount/byteSize/extension/indexed/lineEnding plus parser/on-demand readability metadata per file. Without this argument, the existing index-level summary is returned."
                     }
                 },
                 "required": []
@@ -217,7 +226,14 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
         ToolDefinition {
             name: "xray_definitions".to_string(),
             description: if def_extensions.is_empty() {
-                "Definition index not available for current file extensions. Use xray_grep for content search.".to_string()
+                if xml_on_demand_available {
+                    format!(
+                        "Definition parsers are not active for ordinary source files, but XML on-demand parsing is available.{} Requires server started with --definitions flag. Use xray_grep for content search over indexed extensions.",
+                        xml_definition_note
+                    )
+                } else {
+                    "Definition index not available for current file extensions. Use xray_grep for content search.".to_string()
+                }
             } else {
                 format!(
                     "PREFERRED for code exploration AND module structure discovery. \
@@ -226,7 +242,7 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                      REPLACES read_file for indexed source files — use includeBody=true maxBodyLines=0 to get full file content. \
                      Search code definitions — classes, interfaces, methods, properties, enums. \
                      Uses pre-built AST index for instant results (~0.001s). \
-                     LANGUAGE-SPECIFIC: Supports {}. Only these extensions are indexed — for other file types (JSON, config, MD) use xray_grep. XML on-demand: for .xml, .config, .csproj, .manifestxml, .props, .targets, .resx files, use file='<path>' with containsLine=<N> or name='<element>' to parse XML on-the-fly and get structural context with parent promotion (leaf elements are auto-promoted to parent block). The name filter searches both element names AND text content of leaf elements (e.g., name='PremiumStorage' finds <ServiceType>PremiumStorage</ServiceType> and returns the parent block with matchedBy='textContent', matchedChild='ServiceType'). Text content search requires term >= 3 chars. Multiple leaf matches in same parent are de-duplicated into one result with matchedChildren array. Name matches take priority over textContent matches. Passing a directory path returns a clear error with guidance to use xray_fast. \
+                     LANGUAGE-SPECIFIC: Supports {}. Only these extensions are indexed — for other file types (JSON, config, MD) use xray_grep.{} \
                      Requires server started with --definitions flag. \
                      Supports 'containsLine' to find which method/class contains a given line number. \
                      Supports 'includeBody' to return actual source code inline. \
@@ -239,7 +255,8 @@ pub fn tool_definitions(def_extensions: &[String]) -> Vec<ToolDefinition> {
                      literals as ready-to-grep keys for external config files (manifest, appsettings, env, \
                      secrets). Shape-based: it does NOT classify the attribute as a binder, only frames \
                      'if any attribute binds to external configuration, search here'.",
-                    lang_list
+                    lang_list,
+                    xml_definition_note,
                 )
             },
             input_schema: json!({
@@ -1115,7 +1132,7 @@ fn finalize_response(
 ) -> ToolCallResult {
     // Guidance injection: policyReminder, nextStepHint, workspace metadata.
     let was_error = result.is_error;
-    let result = utils::inject_response_guidance(result, tool_name, &ctx.server_ext, ctx);
+    let result = utils::inject_response_guidance_with_args(result, tool_name, &ctx.server_ext, ctx, Some(arguments));
     let result = if was_error {
         ToolCallResult { is_error: true, ..result }
     } else {
@@ -1434,6 +1451,8 @@ fn handle_xray_info_files(ctx: &HandlerContext, files: &[String]) -> ToolCallRes
         .map(|s| s.trim().to_ascii_lowercase())
         .filter(|s| !s.is_empty())
         .collect();
+    let def_exts = ctx.def_extensions.clone();
+    let xml_on_demand_available = cfg!(feature = "lang-xml") && ctx.def_index.is_some();
 
     let mut entries: Vec<Value> = Vec::with_capacity(files.len());
     for raw_path in files {
@@ -1442,6 +1461,8 @@ fn handle_xray_info_files(ctx: &HandlerContext, files: &[String]) -> ToolCallRes
             &server_dir,
             &canonical_server_dir,
             &server_exts,
+            &def_exts,
+            xml_on_demand_available,
         ));
     }
 
@@ -1463,6 +1484,8 @@ fn file_metadata_entry(
     server_dir: &str,
     canonical_server_dir: &str,
     server_exts: &[String],
+    def_exts: &[String],
+    xml_on_demand_available: bool,
 ) -> Value {
     use std::path::{Path, PathBuf};
 
@@ -1528,6 +1551,10 @@ fn file_metadata_entry(
         .unwrap_or("")
         .to_ascii_lowercase();
     let indexed = !extension.is_empty() && server_exts.iter().any(|e| e == &extension);
+    let definition_parser_active = !extension.is_empty()
+        && def_exts.iter().any(|e| e.eq_ignore_ascii_case(&extension));
+    let xml_on_demand_active = xml_on_demand_available && xml_on_demand_active_for_extension(&extension);
+    let symbol_readable_via_definitions = definition_parser_active || xml_on_demand_active;
 
     // Read content via `read_file_lossy` so BOM detection / UTF-16 decoding
     // matches what `xray_grep`/`xray_edit` see. lineEnding detection runs on
@@ -1542,6 +1569,9 @@ fn file_metadata_entry(
                 "byteSize": byte_size,
                 "extension": extension,
                 "indexed": indexed,
+                "definitionParserActive": definition_parser_active,
+                "xmlOnDemandActive": xml_on_demand_active,
+                "symbolReadableViaDefinitions": symbol_readable_via_definitions,
                 "error": format!("cannot read file: {}", e),
             });
         }
@@ -1558,6 +1588,9 @@ fn file_metadata_entry(
                 "extension": extension,
                 "indexed": indexed,
                 "lineEnding": line_ending,
+                "definitionParserActive": definition_parser_active,
+                "xmlOnDemandActive": xml_on_demand_active,
+                "symbolReadableViaDefinitions": symbol_readable_via_definitions,
                 "error": format!("cannot decode file: {}", e),
             });
         }
@@ -1571,12 +1604,38 @@ fn file_metadata_entry(
         "byteSize": byte_size,
         "extension": extension,
         "indexed": indexed,
+        "definitionParserActive": definition_parser_active,
+        "xmlOnDemandActive": xml_on_demand_active,
+        "symbolReadableViaDefinitions": symbol_readable_via_definitions,
         "lineEnding": line_ending,
     });
     if was_lossy {
         entry["lossyUtf8"] = json!(true);
     }
+    if definition_parser_active {
+        entry["hint"] = json!(format!(
+            "{} has an active definition parser. Prefer xray_definitions file=[\"{}\"] includeBody=true maxBodyLines=0 over read_file for symbol-level reads.",
+            raw_path, raw_path
+        ));
+    } else if xml_on_demand_active {
+        entry["hint"] = json!(format!(
+            "{} is XML-on-demand parseable. Use xray_definitions file=[\"{}\"] containsLine=N or name=[\"ElementOrText\"] instead of raw read_file scans.",
+            raw_path, raw_path
+        ));
+    }
     entry
+}
+
+fn xml_on_demand_active_for_extension(extension: &str) -> bool {
+    #[cfg(feature = "lang-xml")]
+    {
+        crate::definitions::parser_xml::is_xml_extension(extension)
+    }
+    #[cfg(not(feature = "lang-xml"))]
+    {
+        let _ = extension;
+        false
+    }
 }
 
 /// Mirror of `edit::count_lines` so `xray_info`'s `lineCount` matches

@@ -406,6 +406,127 @@ fn test_inject_response_guidance_preserves_existing_next_step_hint() {
     assert!(output["summary"]["policyReminder"].as_str().is_some());
 }
 
+#[test]
+fn test_inject_response_guidance_grep_parser_active_file_hint() {
+    let ctx = HandlerContext {
+        server_ext: "cs,md".to_string(),
+        def_extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    let result = ToolCallResult::success(json!({
+        "files": [{"path": "src/UserService.cs", "occurrences": 1}],
+        "summary": {"totalFiles": 1}
+    }).to_string());
+
+    let result = inject_response_guidance(result, "xray_grep", &ctx.server_ext, &ctx);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
+    assert!(hint.contains("xray_definitions file=[\"src/UserService.cs\"]"), "{hint}");
+    assert!(hint.contains("no includeBody"), "{hint}");
+    assert!(hint.contains("xray_definitions file=[\"src/UserService.cs\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0"), "{hint}");
+}
+
+#[test]
+fn test_inject_response_guidance_grep_sql_hint() {
+    let ctx = HandlerContext {
+        server_ext: "sql".to_string(),
+        def_extensions: vec!["sql".to_string()],
+        ..Default::default()
+    };
+    let result = ToolCallResult::success(json!({
+        "files": [{"path": "db/usp_Foo.sql", "occurrences": 1}],
+        "summary": {"totalFiles": 1}
+    }).to_string());
+
+    let result = inject_response_guidance(result, "xray_grep", &ctx.server_ext, &ctx);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
+    assert!(hint.contains("kind=[\"storedProcedure\"]"), "{hint}");
+    assert!(hint.contains("body header"), "{hint}");
+    assert!(hint.contains("signature is a summary"), "{hint}");
+}
+
+#[test]
+fn test_inject_response_guidance_grep_html_selector_with_ts_hint() {
+    let ctx = HandlerContext {
+        server_ext: "ts,html".to_string(),
+        def_extensions: vec!["ts".to_string()],
+        ..Default::default()
+    };
+    let args = json!({"terms": ["<app-foo"], "phrase": true, "ext": ["html"]});
+    let result = ToolCallResult::success(json!({
+        "files": [{"path": "src/foo.component.html", "occurrences": 1}],
+        "summary": {"totalFiles": 1}
+    }).to_string());
+
+    let result = inject_response_guidance_with_args(result, "xray_grep", &ctx.server_ext, &ctx, Some(&args));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
+    assert!(hint.contains("Angular selector"), "{hint}");
+    assert!(hint.contains("xray_callers method=[\"app-foo\"] direction='up'"), "{hint}");
+    assert!(!hint.contains("xray_definitions file=[\"src/foo.component.html\"]"), "{hint}");
+}
+
+#[test]
+fn test_inject_response_guidance_grep_html_hyphenated_attribute_not_selector_hint() {
+    let ctx = HandlerContext {
+        server_ext: "ts,html".to_string(),
+        def_extensions: vec!["ts".to_string()],
+        ..Default::default()
+    };
+    let args = json!({"terms": ["data-test=\"app-foo\""], "phrase": true, "ext": ["html"]});
+    let result = ToolCallResult::success(json!({
+        "files": [{"path": "src/foo.component.html", "occurrences": 1}],
+        "summary": {"totalFiles": 1}
+    }).to_string());
+
+    let result = inject_response_guidance_with_args(result, "xray_grep", &ctx.server_ext, &ctx, Some(&args));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
+    assert!(!hint.contains("xray_callers"), "{hint}");
+    assert!(!hint.contains("Angular selector"), "{hint}");
+}
+
+#[test]
+fn test_inject_response_guidance_grep_html_without_ts_no_selector_hint() {
+    let ctx = HandlerContext {
+        server_ext: "cs,html".to_string(),
+        def_extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    let args = json!({"terms": ["<app-foo"], "phrase": true, "ext": ["html"]});
+    let result = ToolCallResult::success(json!({
+        "files": [{"path": "src/foo.component.html", "occurrences": 1}],
+        "summary": {"totalFiles": 1}
+    }).to_string());
+
+    let result = inject_response_guidance_with_args(result, "xray_grep", &ctx.server_ext, &ctx, Some(&args));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
+    assert!(!hint.contains("xray_callers"), "{hint}");
+    assert!(!hint.contains("selector"), "{hint}");
+}
+
+#[test]
+fn test_inject_response_guidance_fast_parser_active_file_hint() {
+    let ctx = HandlerContext {
+        server_ext: "rs".to_string(),
+        def_extensions: vec!["rs".to_string()],
+        ..Default::default()
+    };
+    let result = ToolCallResult::success(json!({
+        "files": [{"path": "src/lib.rs", "size": 10, "isDir": false}],
+        "summary": {"totalMatches": 1}
+    }).to_string());
+
+    let result = inject_response_guidance(result, "xray_fast", &ctx.server_ext, &ctx);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["nextStepHint"].as_str().unwrap();
+    assert!(hint.contains("xray_definitions file=[\"src/lib.rs\"]"), "{hint}");
+    assert!(hint.contains("list its symbols"), "{hint}");
+    assert!(hint.contains("xray_definitions file=[\"src/lib.rs\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0"), "{hint}");
+}
+
 
 #[test]
 fn test_inject_response_guidance_skips_non_json_success() {

@@ -450,13 +450,25 @@ fn handle_request(
             // Use ctx.def_extensions (computed once in serve.rs) to ensure
             // initialize instructions are consistent with tools/list descriptions.
             // Both must use the same def_extensions source.
+            let content_ext_refs: Vec<&str> = ctx
+                .server_ext
+                .split(',')
+                .map(str::trim)
+                .filter(|ext| !ext.is_empty())
+                .collect();
             let def_ext_refs: Vec<&str> = ctx.def_extensions.iter().map(|s| s.as_str()).collect();
-            let result = InitializeResult::new(&def_ext_refs);
+            let xml_on_demand_available = cfg!(feature = "lang-xml") && ctx.def_index.is_some();
+            let result = InitializeResult::new_with_extensions_and_xml_on_demand(
+                &content_ext_refs,
+                &def_ext_refs,
+                xml_on_demand_available,
+            );
             let result_val = safe_to_value(result, &id);
             safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)
         }
         "tools/list" => {
-            let tools = handlers::tool_definitions(&ctx.def_extensions);
+            let xml_on_demand_available = cfg!(feature = "lang-xml") && ctx.def_index.is_some();
+            let tools = handlers::tool_definitions_with_runtime(&ctx.def_extensions, xml_on_demand_available);
             let result = ToolsListResult { tools };
             let result_val = safe_to_value(result, &id);
             safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)
