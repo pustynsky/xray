@@ -1,5 +1,13 @@
 # Changelog
 
+## Language-aware xray guidance
+
+- **Render guidance from active language capabilities.** MCP initialize instructions now distinguish content-indexed extensions from definition-parser extensions, so SQL, TypeScript/Angular, C#, Rust, and XML-on-demand guidance only appears when the corresponding runtime capability is available.
+- **Guide known-symbol reads toward `xray_definitions`.** `xray_help` and initialize instructions now include an investigation decision tree and known-symbol shortcuts that prefer `xray_definitions includeBody=true` over raw file reads once a class, method, function, or stored procedure is known.
+- **Make follow-up hints contextual.** Shared MCP response guidance now uses result paths, parser-active extensions, and invocation args to suggest scoped `xray_definitions` reads, SQL stored-procedure validation, and Angular selector parent lookups without overwriting handler-specific `nextStepHint` values.
+- **Expose per-file readability metadata in `xray_info`.** File metadata now reports `definitionParserActive`, `xmlOnDemandActive`, and `symbolReadableViaDefinitions`, with hints for parser-backed source files and XML-on-demand files.
+- **Clarify `xray_edit` tool choice.** `xray_help tool="xray_edit"` now includes a decision card for when to use `xray_edit` versus built-in whole-file writes.
+
 ## Guidance prefix for MCP responses
 
 - **Add opt-in agent guidance prefix.** When `XRAY_GUIDANCE_PREFIX` is truthy, MCP tool responses move `summary.nextStepHint` and `summary.policyReminder` into a compact text prefix before the JSON payload, while default output remains JSON-only.
