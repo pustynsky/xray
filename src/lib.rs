@@ -720,6 +720,11 @@ pub struct ContentIndex {
     /// falling back.
     #[serde(skip)]
     pub file_tokens: Vec<Vec<String>>,
+    /// Whether `file_tokens` is complete and should be maintained on mutation.
+    /// Plain sync-reindex paths may initialize `path_to_id` without opting into
+    /// the watch-mode reverse map's memory cost.
+    #[serde(skip)]
+    pub file_tokens_authoritative: bool,
     /// total tokens indexed
     pub total_tokens: u64,
     /// extensions that were indexed
@@ -771,6 +776,7 @@ impl Clone for ContentIndex {
             // See the impl-level comment: reverse purge state is rebuilt when a
             // cloned/deserialized index enters watch mode, never serialized.
             file_tokens: Vec::new(),
+            file_tokens_authoritative: false,
             total_tokens: self.total_tokens,
             extensions: self.extensions.clone(),
             file_token_counts: self.file_token_counts.clone(),
@@ -925,6 +931,7 @@ impl Default for ContentIndex {
             files: Vec::new(),
             index: HashMap::new(),
             file_tokens: Vec::new(),
+            file_tokens_authoritative: false,
             total_tokens: 0,
             extensions: Vec::new(),
             file_token_counts: Vec::new(),

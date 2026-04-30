@@ -344,6 +344,7 @@ fn init_logging(args: &ServeArgs, dir_str: &str, exts_for_load: &str, idx_base: 
         .with_max_level(log_level)
         .with_target(true)
         .with_writer(std::io::stderr)
+        .with_ansi(false)
         .init();
 
     info!(dir = %dir_str, ext = %exts_for_load, "Starting MCP server");
@@ -836,6 +837,7 @@ fn load_or_build_content_index(
         files: Vec::new(),
         index: HashMap::new(),
         file_tokens: Vec::new(),
+        file_tokens_authoritative: false,
         total_tokens: 0,
         extensions: extensions.to_vec(),
         file_token_counts: Vec::new(),

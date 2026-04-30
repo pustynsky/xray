@@ -35,6 +35,7 @@ fn test_build_watch_index_has_path_to_id() {
     let watch_index = build_watch_index_from(index);
 
     assert!(watch_index.path_to_id.is_some());
+    assert!(watch_index.file_tokens_authoritative);
 }
 
 #[test]
@@ -520,7 +521,7 @@ fn test_file_tokens_maintained_after_insert() {
         ..Default::default()
     };
 
-    let touched_tokens = apply_tokenized_file(&mut index, result);
+    let touched_tokens = apply_tokenized_file(&mut index, result, true);
 
     assert_eq!(touched_tokens, vec!["alpha".to_string(), "beta".to_string()]);
     assert_eq!(index.file_tokens[0], touched_tokens);
@@ -1367,7 +1368,7 @@ fn test_apply_tokenized_file_new_file() {
         total_tokens: 3,
     };
 
-    apply_tokenized_file(&mut index, result);
+    apply_tokenized_file(&mut index, result, true);
 
     assert_eq!(index.files.len(), 2, "should have 2 files");
     assert_eq!(index.files[1], "new_file.cs");
@@ -1406,7 +1407,7 @@ fn test_apply_tokenized_file_existing_file() {
         total_tokens: 1,
     };
 
-    apply_tokenized_file(&mut index, result);
+    apply_tokenized_file(&mut index, result, true);
 
     assert_eq!(index.files.len(), 1, "should still have 1 file (existing)");
     assert_eq!(index.total_tokens, 1, "total_tokens should be updated");
@@ -1429,7 +1430,7 @@ fn test_apply_tokenized_file_no_path_to_id() {
     };
 
     // Should not panic — just return early
-    apply_tokenized_file(&mut index, result);
+    apply_tokenized_file(&mut index, result, true);
     assert_eq!(index.total_tokens, 0);
 }
 
@@ -1620,6 +1621,70 @@ fn test_sync_reindex_existing_file_updates_content() {
     assert!(!idx.index.contains_key("oldfieldq"), "stale token oldfieldq should be purged");
     assert!(idx.index.contains_key("newthingz"), "new token newthingz should be present");
     assert!(idx.index.contains_key("newfieldp"), "new token newfieldp should be present");
+}
+
+#[test]
+fn test_sync_reindex_initializes_path_lookup_for_plain_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("plain.rs");
+    std::fs::write(&file, "fn old_plain_token() {}").unwrap();
+    let clean = crate::clean_path(&file.to_string_lossy());
+
+    let mut inverted = HashMap::new();
+    inverted.insert("old_plain_token".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
+    let index = Arc::new(RwLock::new(ContentIndex {
+        root: crate::clean_path(&tmp.path().to_string_lossy()),
+        files: vec![clean],
+        index: inverted,
+        total_tokens: 1,
+        extensions: vec!["rs".to_string()],
+        file_token_counts: vec![1],
+        path_to_id: None,
+        file_tokens: Vec::new(),
+        ..Default::default()
+    }));
+
+    std::fs::write(&file, "fn new_plain_token() {}").unwrap();
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        std::slice::from_ref(&file),
+        &[],
+        &["rs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 1);
+    let idx = index.read().unwrap();
+    assert!(idx.path_to_id.is_some(), "sync reindex should initialize path lookup");
+    assert!(!idx.file_tokens_authoritative, "plain sync reindex should not enable watch reverse-map mode");
+    assert!(idx.file_tokens.is_empty(), "plain sync reindex should not build the reverse map");
+    assert!(!idx.index.contains_key("old_plain_token"));
+    assert!(idx.index.contains_key("new_plain_token"));
+    assert_eq!(
+        idx.total_tokens,
+        idx.file_token_counts.iter().map(|&count| count as u64).sum::<u64>()
+    );
+    drop(idx);
+
+    std::fs::write(&file, "fn newer_plain_token() {}").unwrap();
+    let stats = reindex_paths_sync(
+        &index,
+        &None,
+        std::slice::from_ref(&file),
+        &[],
+        &["rs".to_string()],
+    );
+
+    assert_eq!(stats.content_updated, 1);
+    let idx = index.read().unwrap();
+    assert!(!idx.file_tokens_authoritative, "repeated plain sync reindex should stay out of watch reverse-map mode");
+    assert!(idx.file_tokens.is_empty(), "repeated plain sync reindex should keep using fallback purge");
+    assert!(!idx.index.contains_key("new_plain_token"));
+    assert!(idx.index.contains_key("newer_plain_token"));
+    assert_eq!(
+        idx.total_tokens,
+        idx.file_token_counts.iter().map(|&count| count as u64).sum::<u64>()
+    );
 }
 
 #[test]

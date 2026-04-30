@@ -156,6 +156,7 @@ fn test_content_index_field_count_guard() {
         extensions: Vec::new(),
         file_token_counts: Vec::new(),
         file_tokens: Vec::new(),
+        file_tokens_authoritative: false,
         trigram: TrigramIndex::default(),
         trigram_dirty: false,
         path_to_id: None,
