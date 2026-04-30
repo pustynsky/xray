@@ -1,5 +1,13 @@
 # Changelog
 
+## Language-aware xray guidance
+
+- **Render guidance from active language capabilities.** MCP initialize instructions now distinguish content-indexed extensions from definition-parser extensions, so SQL, TypeScript/Angular, C#, Rust, and XML-on-demand guidance only appears when the corresponding runtime capability is available.
+- **Guide known-symbol reads toward `xray_definitions`.** `xray_help` and initialize instructions now include an investigation decision tree and known-symbol shortcuts that prefer `xray_definitions includeBody=true` over raw file reads once a class, method, function, or stored procedure is known.
+- **Make follow-up hints contextual.** Shared MCP response guidance now uses result paths, parser-active extensions, and invocation args to suggest scoped `xray_definitions` reads, SQL stored-procedure validation, and Angular selector parent lookups without overwriting handler-specific `nextStepHint` values.
+- **Expose per-file readability metadata in `xray_info`.** File metadata now reports `definitionParserActive`, `xmlOnDemandActive`, and `symbolReadableViaDefinitions`, with hints for parser-backed source files and XML-on-demand files.
+- **Clarify `xray_edit` tool choice.** `xray_help tool="xray_edit"` now includes a decision card for when to use `xray_edit` versus built-in whole-file writes.
+
 ## SQL procedure/function signature parameters
 
 - **Scope SQL signature params to declarations.** `xray_definitions` now builds stored procedure and function signatures from declaration headers only, preserving comma-leading and multiline params while excluding body locals and `EXEC` arguments.

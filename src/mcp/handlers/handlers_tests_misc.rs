@@ -128,7 +128,7 @@ fn test_guidance_prefix_dispatch_runs_after_warnings_and_metrics() {
         .split_once("\n\n")
         .expect("prefix mode should separate guidance and JSON suffix");
     assert!(prefix.starts_with("=== XRAY AGENT GUIDANCE ==="));
-    assert!(prefix.contains("→ Next: use xray_definitions for AST structure or xray_callers for call trees"));
+    assert!(prefix.contains("→ Next: narrow content results with xray_grep filters"));
     assert!(prefix.contains("Use xray_* MCP tools for indexed files; built-in read/search/edit equivalents are policy violations."));
 
     let output: Value = serde_json::from_str(suffix).unwrap();
@@ -689,8 +689,8 @@ fn test_xray_help_response_structure() {
     // Verify counts match the source of truth
     assert_eq!(practices.len(), crate::tips::tips(&[]).len(),
         "bestPractices count should match tips::tips()");
-    assert_eq!(recipes.len(), crate::tips::strategies().len(),
-        "strategyRecipes count should match tips::strategies()");
+    assert_eq!(recipes.len(), crate::tips::strategies_for_extensions(&[]).len(),
+        "strategyRecipes count should match active tips::strategies_for_extensions()");
     assert_eq!(priority.len(), crate::tips::tool_priority(&[]).len(),
         "toolPriority count should match tips::tool_priority()");
 }
@@ -826,6 +826,17 @@ fn make_info_ctx(dir: &std::path::Path, server_ext: &str) -> HandlerContext {
     }
 }
 
+fn make_info_ctx_with_defs(dir: &std::path::Path, server_ext: &str, def_exts: &[&str]) -> HandlerContext {
+    HandlerContext {
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(dir.to_string_lossy().to_string()),
+        )),
+        server_ext: server_ext.to_string(),
+        def_extensions: def_exts.iter().map(|ext| ext.to_string()).collect(),
+        ..HandlerContext::default()
+    }
+}
+
 #[test]
 fn test_xray_info_file_mode_returns_metadata_lf() {
     let tmp = tempfile::tempdir().unwrap();
@@ -858,6 +869,85 @@ fn test_xray_info_file_mode_returns_metadata_lf() {
     assert!(f.get("content").is_none(), "file content must not leak into xray_info response");
     assert_eq!(out["summary"]["requested"].as_u64().unwrap(), 1);
     assert_eq!(out["summary"]["returned"].as_u64().unwrap(), 1);
+}
+
+#[test]
+fn test_xray_info_file_mode_marks_definition_parser_active() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("UserService.cs"), b"class UserService {}\n").unwrap();
+
+    let ctx = make_info_ctx_with_defs(tmp.path(), "cs,html", &["cs"]);
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["UserService.cs"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &out["files"][0];
+    assert_eq!(entry["extension"].as_str().unwrap(), "cs");
+    assert!(entry["indexed"].as_bool().unwrap());
+    assert!(entry["definitionParserActive"].as_bool().unwrap());
+    assert!(!entry["xmlOnDemandActive"].as_bool().unwrap());
+    assert!(entry["symbolReadableViaDefinitions"].as_bool().unwrap());
+    let hint = entry["hint"].as_str().unwrap();
+    assert!(hint.contains("xray_definitions file=[\"UserService.cs\"] includeBody=true maxBodyLines=0"), "{hint}");
+}
+
+#[test]
+fn test_xray_info_file_mode_html_has_no_definition_body_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("foo.component.html"), b"<app-foo></app-foo>\n").unwrap();
+
+    let ctx = make_info_ctx_with_defs(tmp.path(), "ts,html", &["ts"]);
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["foo.component.html"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &out["files"][0];
+    assert!(entry["indexed"].as_bool().unwrap());
+    assert!(!entry["definitionParserActive"].as_bool().unwrap());
+    assert!(!entry["symbolReadableViaDefinitions"].as_bool().unwrap());
+    assert!(entry.get("hint").is_none(), "content-only HTML should not get a body-read hint: {entry:?}");
+}
+
+#[cfg(feature = "lang-xml")]
+#[test]
+fn test_xray_info_file_mode_xml_on_demand_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("app.config"), b"<configuration/>\n").unwrap();
+
+    let mut ctx = make_info_ctx_with_defs(tmp.path(), "config", &[]);
+    ctx.def_index = Some(Arc::new(RwLock::new(crate::definitions::DefinitionIndex::default())));
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["app.config"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &out["files"][0];
+    assert!(entry["indexed"].as_bool().unwrap());
+    assert!(!entry["definitionParserActive"].as_bool().unwrap());
+    assert!(entry["xmlOnDemandActive"].as_bool().unwrap());
+    assert!(entry["symbolReadableViaDefinitions"].as_bool().unwrap());
+    let hint = entry["hint"].as_str().unwrap();
+    assert!(hint.contains("XML-on-demand parseable"), "{hint}");
+    assert!(hint.contains("containsLine=N"), "{hint}");
+    assert!(hint.contains("name=[\"ElementOrText\"]"), "{hint}");
+}
+
+#[cfg(feature = "lang-xml")]
+#[test]
+fn test_xray_info_file_mode_xml_without_def_index_has_no_on_demand_hint() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("app.config"), b"<configuration/>\n").unwrap();
+
+    let ctx = make_info_ctx_with_defs(tmp.path(), "config", &[]);
+    let result = dispatch_tool(&ctx, "xray_info", &json!({ "file": ["app.config"] }));
+    assert!(!result.is_error, "{}", result.content[0].text);
+
+    let out: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let entry = &out["files"][0];
+    assert!(entry["indexed"].as_bool().unwrap());
+    assert!(!entry["definitionParserActive"].as_bool().unwrap());
+    assert!(!entry["xmlOnDemandActive"].as_bool().unwrap());
+    assert!(!entry["symbolReadableViaDefinitions"].as_bool().unwrap());
+    assert!(entry.get("hint").is_none(), "XML hint should require runtime definition index: {entry:?}");
 }
 
 #[test]

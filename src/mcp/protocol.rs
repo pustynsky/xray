@@ -149,7 +149,36 @@ impl InitializeResult {
     ///
     /// `def_extensions` — the file extensions that have definition parser support
     /// in the current server configuration (intersection of --ext and definition_extensions()).
+    #[cfg(test)]
     pub fn new(def_extensions: &[&str]) -> Self {
+        Self::new_with_extensions(def_extensions, def_extensions)
+    }
+
+    /// Create a new InitializeResult with content-index and definition-parser
+    /// extension sets kept separate for language-aware instructions.
+    #[cfg(test)]
+    pub fn new_with_extensions(content_extensions: &[&str], def_extensions: &[&str]) -> Self {
+        let profile = crate::tips::LanguageProfile::new(content_extensions, def_extensions);
+        Self::new_with_profile(&profile)
+    }
+
+    /// Create a new InitializeResult with explicit XML on-demand availability.
+    /// XML on-demand can answer exact file requests even when XML extensions are
+    /// not part of the content index, so server startup passes the runtime flag.
+    pub fn new_with_extensions_and_xml_on_demand(
+        content_extensions: &[&str],
+        def_extensions: &[&str],
+        xml_on_demand_available: bool,
+    ) -> Self {
+        let profile = crate::tips::LanguageProfile::new_with_xml_on_demand(
+            content_extensions,
+            def_extensions,
+            xml_on_demand_available,
+        );
+        Self::new_with_profile(&profile)
+    }
+
+    fn new_with_profile(profile: &crate::tips::LanguageProfile) -> Self {
         Self {
             protocol_version: "2025-03-26".to_string(),
             capabilities: ServerCapabilities {
@@ -161,7 +190,7 @@ impl InitializeResult {
                 name: "xray".to_string(),
                 version: env!("CARGO_PKG_VERSION").to_string(),
             },
-            instructions: Some(crate::tips::render_instructions(def_extensions)),
+            instructions: Some(crate::tips::render_instructions_for_profile(profile)),
         }
     }
 

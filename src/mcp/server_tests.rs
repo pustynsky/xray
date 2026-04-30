@@ -133,9 +133,9 @@ fn test_initialize_def_extension_filtering() {
     assert!(!instructions.contains(".xml FILES DIRECTLY"),
         "instructions should NOT have .xml in file reading rule");
 
-    // def_extensions=[] → no definition extensions at all (no --definitions flag)
+    // def_extensions=[] and no XML-on-demand content extension -> no definition reads.
     let mut ctx2 = make_ctx();
-    ctx2.server_ext = "xml".to_string();
+    ctx2.server_ext = "txt".to_string();
     ctx2.def_extensions = vec![]; // no --definitions
     let result2 = handle_request(&ctx2, "initialize", &None, json!(2));
     let instructions2 = result2["result"]["instructions"].as_str().unwrap();
@@ -143,6 +143,28 @@ fn test_initialize_def_extension_filtering() {
         "empty def_extensions should NOT have NEVER READ block");
     assert!(instructions2.contains("xray_definitions is not available"),
         "empty def_extensions should have fallback note");
+
+    // XML on-demand is a runtime definitions capability; exact file requests
+    // can work even when XML-family extensions are not content-indexed.
+    #[cfg(feature = "lang-xml")]
+    {
+        let mut ctx_xml = make_ctx();
+        ctx_xml.server_ext = "txt".to_string();
+        ctx_xml.def_extensions = vec![];
+        ctx_xml.def_index = Some(std::sync::Arc::new(std::sync::RwLock::new(
+            crate::definitions::DefinitionIndex::default(),
+        )));
+        let result_xml = handle_request(&ctx_xml, "initialize", &None, json!(22));
+        let instructions_xml = result_xml["result"]["instructions"].as_str().unwrap();
+        assert!(!instructions_xml.contains("NEVER READ"),
+            "XML on-demand should not be listed in source-code NEVER READ rule");
+        assert!(instructions_xml.contains("XML / CSPROJ ON-DEMAND PARSING"),
+            "runtime XML on-demand availability should render XML guidance");
+        assert!(!instructions_xml.contains("xray_definitions is not available"),
+            "runtime XML on-demand availability should not claim xray_definitions is unavailable");
+        assert!(!instructions_xml.contains("Raw XML phrase search"),
+            "raw XML grep guidance should require XML-like content extensions in --ext");
+    }
 
     // def_extensions=["cs","ts","sql"] → all three mentioned
     let mut ctx3 = make_ctx();
@@ -154,6 +176,27 @@ fn test_initialize_def_extension_filtering() {
     assert!(instructions3.contains(".ts"), "should contain .ts");
     assert!(instructions3.contains(".sql"), "should contain .sql");
     assert!(instructions3.contains("NEVER READ"), "should have NEVER READ block");
+}
+
+#[cfg(feature = "lang-xml")]
+#[test]
+fn test_tools_list_advertises_xml_on_demand_when_runtime_available() {
+    let mut ctx = make_ctx();
+    ctx.server_ext = "txt".to_string();
+    ctx.def_extensions = vec![];
+    ctx.def_index = Some(std::sync::Arc::new(std::sync::RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+
+    let result = handle_request(&ctx, "tools/list", &None, json!(44));
+    let tools = result["result"]["tools"].as_array().unwrap();
+    let definitions_tool = tools
+        .iter()
+        .find(|tool| tool["name"].as_str() == Some("xray_definitions"))
+        .expect("tools/list should include xray_definitions");
+    let description = definitions_tool["description"].as_str().unwrap();
+    assert!(description.contains("XML on-demand parsing is available"), "{description}");
+    assert!(!description.contains("Definition index not available for current file extensions"), "{description}");
 }
 
 /// Verify that tools/list response includes dynamic language descriptions

@@ -41,7 +41,7 @@ fn test_render_json_has_best_practices() {
 fn test_render_json_has_strategy_recipes() {
     let json = render_json(&[]);
     let recipes = json["strategyRecipes"].as_array().unwrap();
-    assert_eq!(recipes.len(), strategies().len());
+    assert_eq!(recipes.len(), strategies_for_extensions(&[]).len());
     // Each recipe has required fields
     for recipe in recipes {
         assert!(recipe["name"].is_string(), "recipe must have name");
@@ -49,6 +49,46 @@ fn test_render_json_has_strategy_recipes() {
         assert!(recipe["steps"].is_array(), "recipe must have steps");
         assert!(recipe["antiPatterns"].is_array(), "recipe must have antiPatterns");
     }
+}
+
+#[test]
+fn test_render_json_filters_language_specific_strategy_recipes() {
+    let exts = vec!["cs".to_string()];
+    let json = render_json(&exts);
+    let recipes = json["strategyRecipes"].as_array().unwrap();
+    let names: Vec<&str> = recipes.iter().filter_map(|recipe| recipe["name"].as_str()).collect();
+    assert!(!names.contains(&"SQL Stored Procedure Investigation"), "SQL recipe should require sql parser: {names:?}");
+    assert!(!names.contains(&"Rust Code Flow Investigation"), "Rust recipe should require rs parser: {names:?}");
+    assert!(!names.contains(&"Angular Component Hierarchy (TypeScript only)"), "Angular recipe should require ts/tsx parser: {names:?}");
+
+    let sql_exts = vec!["sql".to_string()];
+    let sql_json = render_json(&sql_exts);
+    let sql_names: Vec<&str> = sql_json["strategyRecipes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|recipe| recipe["name"].as_str())
+        .collect();
+    assert!(sql_names.contains(&"SQL Stored Procedure Investigation"), "SQL recipe should appear when sql parser is active: {sql_names:?}");
+
+    let rust_exts = vec!["rs".to_string()];
+    let rust_json = render_json(&rust_exts);
+    let rust_names: Vec<&str> = rust_json["strategyRecipes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|recipe| recipe["name"].as_str())
+        .collect();
+    assert!(rust_names.contains(&"Rust Code Flow Investigation"), "Rust recipe should appear when rs parser is active: {rust_names:?}");
+}
+
+#[test]
+fn test_render_cli_filters_language_specific_strategy_recipes() {
+    let exts = vec!["cs".to_string()];
+    let output = render_cli(&exts);
+    assert!(!output.contains("[SQL Stored Procedure Investigation]"), "SQL recipe should require sql parser");
+    assert!(!output.contains("[Rust Code Flow Investigation]"), "Rust recipe should require rs parser");
+    assert!(!output.contains("[Angular Component Hierarchy (TypeScript only)]"), "Angular recipe should require ts/tsx parser");
 }
 
 #[cfg(all(feature = "lang-csharp", feature = "lang-typescript"))]
@@ -413,11 +453,13 @@ fn test_instructions_token_budget() {
     //     Cut 4 — 2 duplicate ANTI-PATTERNS removed (search_files dup, extension-based edit dup).
     //     Cut 5 — TERMS block condensed from 8 lines to 3.
     //     Cut 6 — PRE-FLIGHT Q2 consolidated from 3 lines (READ/SEARCH/EDIT) to 1.
-    //   Measured after cuts: ~2100 tokens. Budget set to 2250 with ~150-token headroom.
+    //   v4 (language-aware guidance): <3600 -- adds decision tree, known-symbol
+    //     triggers, and compact SQL/TS/C#/XML/Rust blocks. Keep this guardrail
+    //     below 3600 so future additions still have to pay for themselves.
     assert!(
-        approx_tokens < 2250,
+        approx_tokens < 3600,
         "Instructions exceed token budget: ~{} tokens ({} words). \
-         Target: <2250 (Part 4 slimming baseline). If a legitimate addition is needed, \
+         Target: <3600 (language-aware guidance budget). If a legitimate addition is needed, \
          first look for redundancy to cut; only raise the budget as a last resort.",
         approx_tokens, word_count
     );
@@ -450,11 +492,11 @@ fn test_all_renderers_consistent_tip_count() {
     }
 
     // Verify strategy recipes are consistent across renderers
-    let strategy_count = strategies().len();
+    let active_strategies = strategies_for_extensions(&exts);
     let recipes = json["strategyRecipes"].as_array().unwrap();
-    assert_eq!(recipes.len(), strategy_count, "JSON and strategies() count mismatch");
+    assert_eq!(recipes.len(), active_strategies.len(), "JSON and active strategies count mismatch");
 
-    for strat in strategies() {
+    for strat in active_strategies {
         assert!(cli.contains(strat.name), "CLI output missing strategy: {}", strat.name);
     }
 }
@@ -606,20 +648,126 @@ fn test_tool_definitions_cs_ts_tsx() {
 #[test]
 fn test_render_instructions_example_line() {
     let text = render_instructions(&["rs"]);
-    assert!(text.contains("EXAMPLE: instead of reading handler.rs directly"),
-        "Instructions should contain EXAMPLE line for the configured extension");
-    assert!(text.contains("xray_definitions file=[\"handler.rs\"]"),
-        "EXAMPLE should show xray_definitions with the correct extension (post 2026-04-25 array migration)");
+    assert!(text.contains("EXAMPLES:"),
+        "Instructions should contain per-language EXAMPLES block");
+    assert!(text.contains("Rust: xray_definitions file=[\"src/lib.rs\"] name=[\"parse\"] includeBody=true maxBodyLines=0"),
+        "EXAMPLES should include the Rust-specific known-symbol read pattern");
 }
 
 #[test]
-fn test_render_instructions_example_line_uses_first_ext() {
-    let text = render_instructions(&["cs", "ts"]);
-    assert!(text.contains("handler.cs"),
-        "EXAMPLE should use the first configured extension (cs)");
-    // Should NOT use the second extension in the example
-    assert!(!text.contains("handler.ts"),
-        "EXAMPLE should use first ext only, not second");
+fn test_render_instructions_examples_per_language() {
+    let text = render_instructions(&["cs", "ts", "sql", "rs"]);
+    assert!(text.contains("C#: xray_definitions file=[\"UserService.cs\"] includeBody=true maxBodyLines=0"),
+        "EXAMPLES should include C#");
+    assert!(text.contains("TS: xray_definitions file=[\"user.service.ts\"] includeBody=true maxBodyLines=0"),
+        "EXAMPLES should include TypeScript");
+    assert!(text.contains("SQL: xray_definitions file=[\"usp_GetUser.sql\"] kind=[\"storedProcedure\"] includeBody=true maxBodyLines=0"),
+        "EXAMPLES should include SQL stored procedure pattern");
+    assert!(text.contains("Rust: xray_definitions file=[\"src/lib.rs\"] name=[\"parse\"] includeBody=true maxBodyLines=0"),
+        "EXAMPLES should include Rust");
+}
+
+#[test]
+fn test_instructions_has_decision_tree() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("INVESTIGATION DECISION TREE"));
+    for step in ["1. LOCATE", "2. STRUCTURE", "3. READ BODY", "4. TRACE", "5. WIDER FILE CONTEXT"] {
+        assert!(text.contains(step), "decision tree should contain {step}");
+    }
+}
+
+#[test]
+fn test_instructions_has_known_symbol_rule() {
+    let text = render_instructions(&["rs"]);
+    assert!(text.contains("I already know the class/method/procedure/function name and want its body"));
+    assert!(text.contains("parent=[\"Y\"] includeBody=true maxBodyLines=0"));
+    assert!(text.contains("file=[\"known/path.ext\"] name=[\"X\"] includeBody=true maxBodyLines=0"));
+}
+
+#[test]
+fn test_language_profile_uses_content_and_definition_extensions() {
+    let with_html = LanguageProfile::new(&["ts", "html"], &["ts"]);
+    let text = render_instructions_for_profile(&with_html);
+    assert!(text.contains("Search HTML templates directly"),
+        "html in content_extensions should enable HTML grep guidance");
+
+    let without_html = LanguageProfile::new(&["ts"], &["ts"]);
+    let text = render_instructions_for_profile(&without_html);
+    assert!(text.contains("HTML is not content-indexed"),
+        "missing html content extension should render config nudge");
+}
+
+#[test]
+fn test_instructions_sql_block_present_when_sql_indexed() {
+    let profile = LanguageProfile::new(&["sql"], &["sql"]);
+    let text = render_instructions_for_profile(&profile);
+    assert!(text.contains("SQL INVESTIGATION"));
+    assert!(text.contains("kind=[\"storedProcedure\"]"));
+    assert!(text.contains("bodyLineStart=<line_start>"));
+    assert!(text.contains("xray_reindex_definitions ext=[\"sql\"]"));
+}
+
+#[test]
+fn test_instructions_sql_block_absent_when_sql_not_indexed() {
+    let profile = LanguageProfile::new(&["rs"], &["rs"]);
+    let text = render_instructions_for_profile(&profile);
+    assert!(!text.contains("SQL INVESTIGATION"));
+}
+
+#[test]
+fn test_instructions_ts_block_present_when_ts_indexed() {
+    let profile = LanguageProfile::new(&["ts", "html"], &["ts"]);
+    let text = render_instructions_for_profile(&profile);
+    assert!(text.contains("app-foo"));
+    assert!(text.contains("templateChildren"));
+    assert!(text.contains("templateUrl"));
+    assert!(text.contains("kind=[\"field\"]"));
+    assert!(text.contains("kind=[\"property\"]"));
+}
+
+#[test]
+fn test_instructions_xml_block_present_when_xml_on_demand_active() {
+    let profile = LanguageProfile::new(&["csproj", "config"], &[]);
+    let text = render_instructions_for_profile(&profile);
+    if cfg!(feature = "lang-xml") {
+        assert!(text.contains("XML / CSPROJ ON-DEMAND PARSING"));
+        assert!(text.contains("containsLine=42"));
+        assert!(text.contains("PremiumStorage"));
+    } else {
+        assert!(!text.contains("XML / CSPROJ ON-DEMAND PARSING"));
+    }
+}
+
+#[test]
+fn test_instructions_xml_block_uses_runtime_xml_extension_set() {
+    let profile = LanguageProfile::new(&["vbproj", "fsproj", "vcxproj", "nuspec", "vsixmanifest", "appxmanifest"], &[]);
+    let text = render_instructions_for_profile(&profile);
+    if cfg!(feature = "lang-xml") {
+        assert!(text.contains("XML / CSPROJ ON-DEMAND PARSING"));
+    } else {
+        assert!(!text.contains("XML / CSPROJ ON-DEMAND PARSING"));
+    }
+}
+
+#[test]
+fn test_instructions_xml_on_demand_only_omits_raw_grep() {
+    let profile = LanguageProfile::new_with_xml_on_demand(&["txt"], &[], true);
+    let text = render_instructions_for_profile(&profile);
+    if cfg!(feature = "lang-xml") {
+        assert!(text.contains("XML / CSPROJ ON-DEMAND PARSING"));
+        assert!(!text.contains("Raw XML phrase search"));
+    } else {
+        assert!(!text.contains("XML / CSPROJ ON-DEMAND PARSING"));
+    }
+}
+
+#[test]
+fn test_instructions_rust_block_present_when_rs_indexed() {
+    let profile = LanguageProfile::new(&["rs"], &["rs"]);
+    let text = render_instructions_for_profile(&profile);
+    assert!(text.contains("RUST INVESTIGATION"));
+    assert!(text.contains("parent=[\"TypeName\"]"));
+    assert!(text.contains("new/from/fmt/default/parse/handle"));
 }
 
 /// Lock-in: the ANTI-PATTERNS block in render_instructions must use the
@@ -1350,6 +1498,26 @@ fn test_tool_help_xray_edit_includes_canonical_examples() {
     let mode_b = examples.get("modeB_textMatch").and_then(|v| v.as_str()).unwrap();
     assert_eq!(mode_a, CANONICAL_MODE_A_EXAMPLE);
     assert_eq!(mode_b, CANONICAL_MODE_B_EXAMPLE);
+}
+
+#[test]
+fn test_tool_help_xray_edit_includes_decision_card() {
+    let ext = vec!["rs".to_string()];
+    let val = tool_help("xray_edit", &ext).expect("xray_edit should be known");
+    let card = val.get("decisionCard").expect("xray_edit help should have decisionCard");
+    let rule = card["ruleOfThumb"].as_str().expect("ruleOfThumb should be a string");
+    assert!(rule.contains("Existing text file -> xray_edit"), "{rule}");
+    assert!(rule.contains("full rewrite >200 lines"), "{rule}");
+
+    let use_xray = card["useXrayEditFor"].as_array().expect("useXrayEditFor should be an array");
+    assert!(use_xray.iter().any(|item| item.as_str().unwrap_or("").contains("any existing text file")),
+        "decision card should route existing text-file edits to xray_edit: {card:?}");
+
+    let built_in = card["builtInOkFor"].as_array().expect("builtInOkFor should be an array");
+    assert!(built_in.iter().any(|item| item.as_str().unwrap_or("").contains("brand-new large file")),
+        "decision card should allow built-in whole-file write for large new files: {card:?}");
+    assert!(built_in.iter().any(|item| item.as_str().unwrap_or("").contains("byte-exact preservation")),
+        "decision card should mention byte-exact exceptions: {card:?}");
 }
 
 #[test]

@@ -4,6 +4,118 @@
 use std::borrow::Cow;
 use serde_json::{json, Value};
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LanguageProfile {
+    pub content_extensions: Vec<String>,
+    pub definition_extensions: Vec<String>,
+    pub has_csharp_defs: bool,
+    pub has_typescript_defs: bool,
+    pub has_rust_defs: bool,
+    pub has_sql_defs: bool,
+    pub has_html_content: bool,
+    pub has_scss_content: bool,
+    pub has_xml_content: bool,
+    pub has_xml_on_demand: bool,
+}
+
+impl LanguageProfile {
+    #[cfg(test)]
+    pub fn new(content_extensions: &[&str], definition_extensions: &[&str]) -> Self {
+        let content_extensions = normalize_extensions(content_extensions.iter().copied());
+        let definition_extensions = normalize_extensions(definition_extensions.iter().copied());
+        let has_xml_on_demand = content_extensions
+            .iter()
+            .any(|ext| xml_on_demand_extension_supported(ext));
+        Self::from_normalized(content_extensions, definition_extensions, has_xml_on_demand)
+    }
+
+    pub fn new_with_xml_on_demand(
+        content_extensions: &[&str],
+        definition_extensions: &[&str],
+        xml_on_demand_available: bool,
+    ) -> Self {
+        let content_extensions = normalize_extensions(content_extensions.iter().copied());
+        let definition_extensions = normalize_extensions(definition_extensions.iter().copied());
+        Self::from_normalized(
+            content_extensions,
+            definition_extensions,
+            xml_on_demand_enabled(xml_on_demand_available),
+        )
+    }
+
+    fn from_normalized(
+        content_extensions: Vec<String>,
+        definition_extensions: Vec<String>,
+        has_xml_on_demand: bool,
+    ) -> Self {
+        let has_csharp_defs = has_ext(&definition_extensions, "cs");
+        let has_typescript_defs = has_ext(&definition_extensions, "ts") || has_ext(&definition_extensions, "tsx");
+        let has_rust_defs = has_ext(&definition_extensions, "rs");
+        let has_sql_defs = has_ext(&definition_extensions, "sql");
+        let has_html_content = has_ext(&content_extensions, "html");
+        let has_scss_content = has_ext(&content_extensions, "scss") || has_ext(&content_extensions, "css");
+        let has_xml_content = content_extensions
+            .iter()
+            .any(|ext| xml_on_demand_extension_supported(ext));
+
+        Self {
+            content_extensions,
+            definition_extensions,
+            has_csharp_defs,
+            has_typescript_defs,
+            has_rust_defs,
+            has_sql_defs,
+            has_html_content,
+            has_scss_content,
+            has_xml_content,
+            has_xml_on_demand,
+        }
+    }
+
+    fn definition_extension_refs(&self) -> Vec<&str> {
+        self.definition_extensions.iter().map(String::as_str).collect()
+    }
+}
+
+fn normalize_extensions<'a>(extensions: impl Iterator<Item = &'a str>) -> Vec<String> {
+    let mut normalized = Vec::new();
+    for ext in extensions {
+        let ext = ext.trim().trim_start_matches('.').to_ascii_lowercase();
+        if !ext.is_empty() && !normalized.iter().any(|existing| existing == &ext) {
+            normalized.push(ext);
+        }
+    }
+    normalized
+}
+
+fn has_ext(extensions: &[String], wanted: &str) -> bool {
+    extensions.iter().any(|ext| ext == wanted)
+}
+
+fn xml_on_demand_extension_supported(extension: &str) -> bool {
+    #[cfg(feature = "lang-xml")]
+    {
+        crate::definitions::parser_xml::is_xml_extension(extension)
+    }
+    #[cfg(not(feature = "lang-xml"))]
+    {
+        let _ = extension;
+        false
+    }
+}
+
+fn xml_on_demand_enabled(available: bool) -> bool {
+    #[cfg(feature = "lang-xml")]
+    {
+        available
+    }
+    #[cfg(not(feature = "lang-xml"))]
+    {
+        let _ = available;
+        false
+    }
+}
+
 /// Canonical Mode A example (line-range splice) for `xray_edit`. Single source
 /// of truth shared by:
 ///   - `xray_edit` rejection-error hints (when caller sends an invented
@@ -118,7 +230,8 @@ pub struct Strategy {
 // of INTENT -> TOOL MAPPING in render_instructions — merged into the mapping.
 pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
     let lang_list = format_supported_languages(def_extensions);
-    vec![
+    let has_sql = def_extensions.iter().any(|ext| ext == "sql");
+    let mut all = vec![
         Tip {
             rule: "File lookup: use xray_fast, not built-in list_files".into(),
             why: "xray_fast uses a pre-built index (~35ms). Built-in list_files does a live filesystem walk (~3s). 90x+ faster.".into(),
@@ -187,8 +300,13 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         },
         Tip {
             rule: "Read method source: use includeBody=true instead of reading files".into(),
-            why: "xray_definitions with includeBody=true returns method body inline, eliminating read_file round-trips. BEFORE reading any indexed source file, try xray_definitions with includeBody=true first. Use maxBodyLines/maxTotalBodyLines for budget. Only read files directly for non-indexed content (markdown, JSON, XML, config) or when you need exact line numbers for editing.".into(),
+            why: "xray_definitions with includeBody=true returns method body inline, eliminating read_file round-trips. BEFORE reading any indexed source file, try xray_definitions with includeBody=true first. Use maxBodyLines/maxTotalBodyLines for budget. Only read files directly for content that xray cannot parse/search, or when you need exact line numbers for editing.".into(),
             example: "MCP: xray_definitions parent=[\"UserService\"], includeBody=true, maxBodyLines=20. Also: xray_definitions name=[\"Program\",\"Startup\",\"OrderService\"] includeBody=true -> reads multiple classes at once, faster than multiple read_file calls".into(),
+        },
+        Tip {
+            rule: "Known-symbol shortcut: read the body with xray_definitions".into(),
+            why: "Once the class/method/procedure/function name is known, use xray_definitions includeBody=true instead of a raw file read. Add parent=[\"Y\"] or file=[\"path\"] for common names, overloads, traits/impls, and constructors.".into(),
+            example: "MCP: xray_definitions name=[\"ProcessOrder\"] parent=[\"OrderService\"] includeBody=true maxBodyLines=0. Or: file=[\"src/order.rs\"] name=[\"parse\"] includeBody=true maxBodyLines=0".into(),
         },
         Tip {
             rule: "Body budgets: manage with maxBodyLines and maxTotalBodyLines".into(),
@@ -269,7 +387,22 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
             why: "The most common policy violation is on tasks that FEEL trivial (quick validation, simple fact-check, one-line read). LLM skips MANDATORY PRE-FLIGHT CHECK because 'it's just a quick search'. But quick searches are EXACTLY where xray_grep shines (countOnly=true, <1ms). Habit-driven tool selection based on tool name matching intent keyword is the #1 policy break.".into(),
             example: "User asks 'validate that code has no X'. Reaching for search_files because intent contains 'search' -- VIOLATION. Correct: xray_grep terms=[\"X\"] countOnly=true.".into(),
         },
-    ]
+    ];
+
+    if has_sql {
+        all.push(Tip {
+            rule: "SQL signature is a summary, not the source of truth".into(),
+            why: "For stored procedures, the structured signature field is a convenience summary. Exact parameter types, defaults, OUTPUT markers, and formatting must be verified from the procedure body header.".into(),
+            example: "MCP: xray_definitions kind=[\"storedProcedure\"] name=[\"usp_Foo\"] includeBody=true bodyLineStart=<line_start> bodyLineEnd=<line_start+40>".into(),
+        });
+        all.push(Tip {
+            rule: "Stale def-index after parser fixes: reindex definitions".into(),
+            why: "Definition metadata is cached. After shipping or testing a parser/signature fix, old structured metadata remains until the definition index is rebuilt.".into(),
+            example: "MCP: xray_reindex_definitions ext=[\"sql\"] before validating stored procedure signatures again.".into(),
+        });
+    }
+
+    all
 }
 
 pub fn strategies() -> Vec<Strategy> {
@@ -303,6 +436,48 @@ pub fn strategies() -> Vec<Strategy> {
                 "Don't omit the class parameter -- without it, results mix callers from ALL classes with the same method name",
                 "Don't use xray_grep to manually find callers -- xray_callers does it in sub-millisecond with DI/interface resolution",
                 "Don't call xray_callers then xray_definitions separately to get source -- use includeBody=true in xray_callers to get both in ONE call",
+            ],
+        },
+        Strategy {
+            name: "Code Flow Investigation (end-to-end)",
+            when: "User asks 'explain this flow', 'trace X end-to-end', or 'investigate how X works'",
+            steps: &[
+                "Step 1 - Locate candidates: xray_fast pattern=[\"<name>\"] and xray_grep terms=[\"<term>\"] -> candidate files / call sites",
+                "Step 2 - List structure before bodies: xray_definitions file=[\"<dir-or-file>\"] -> classes/methods/functions/procedures in scope",
+                "Step 3 - Read the known target body: xray_definitions name=[\"<symbol>\"] parent=[\"<owner>\"] includeBody=true maxBodyLines=0, or file=[\"<known-path>\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0",
+                "Step 4 - Trace edges: xray_callers method=[\"<X>\"] class='<Y>' direction='up'|'down' includeBody=true",
+                "Step 5 - Wider file context only when needed: imports/usings, fields, neighbouring methods, generated regions, partial-class layout, non-indexed files, or exact edit line ranges",
+            ],
+            anti_patterns: &[
+                "Don't use read_file at step 3 -- the symbol name is known, so xray_definitions includeBody=true is the body read",
+                "Don't skip step 2 and jump straight to a common name like new/parse/Execute/Handle -- you risk reading the wrong overload or impl",
+            ],
+        },
+        Strategy {
+            name: "SQL Stored Procedure Investigation",
+            when: "User asks what a stored procedure does, how EXEC chains flow, or whether parameters/types are correct",
+            steps: &[
+                "Step 1 - Find the procedure file: xray_fast pattern=[\"usp_Foo\"] ext=[\"sql\"]",
+                "Step 2 - Read the procedure body: xray_definitions kind=[\"storedProcedure\"] name=[\"usp_Foo\"] includeBody=true maxBodyLines=0",
+                "Step 3 - Trace SP-to-SP calls: xray_callers method=[\"usp_Foo\"] class='dbo' direction='down' includeBody=true",
+                "Step 4 - If signature disagrees with the body header, run xray_reindex_definitions ext=[\"sql\"] and repeat the validation",
+            ],
+            anti_patterns: &[
+                "Don't trust the structured signature field for exact SQL parameter types/defaults -- verify the body header",
+                "Don't omit class for SQL call chains -- class is the schema name, for example 'dbo'",
+            ],
+        },
+        Strategy {
+            name: "Rust Code Flow Investigation",
+            when: "User asks to trace Rust methods/functions, impl flows, or test coverage",
+            steps: &[
+                "Step 1 - Read the exact body: xray_definitions name=[\"foo\"] parent=[\"TypeName\"] includeBody=true maxBodyLines=0; for free functions omit parent or add file=[\"path.rs\"]",
+                "Step 2 - Trace callers/callees: xray_callers method=[\"foo\"] class='TypeName' direction='up'|'down' includeBody=true",
+                "Step 3 - Find covering tests: xray_callers method=[\"foo\"] class='TypeName' direction='up' impactAnalysis=true depth=5",
+            ],
+            anti_patterns: &[
+                "Don't read common Rust method names without parent or file -- new/from/fmt/default/parse/handle are usually ambiguous",
+                "Don't use grep as the first caller-chain tool -- xray_callers has the Rust call graph and can include bodies",
             ],
         },
         Strategy {
@@ -395,6 +570,24 @@ pub fn strategies() -> Vec<Strategy> {
             ],
         },
     ]
+}
+
+pub fn strategies_for_extensions(def_extensions: &[String]) -> Vec<Strategy> {
+    let has_sql = def_extensions.iter().any(|ext| ext == "sql");
+    let has_rust = def_extensions.iter().any(|ext| ext == "rs");
+    let has_typescript = def_extensions
+        .iter()
+        .any(|ext| ext == "ts" || ext == "tsx");
+
+    strategies()
+        .into_iter()
+        .filter(|strategy| match strategy.name {
+            "SQL Stored Procedure Investigation" => has_sql,
+            "Rust Code Flow Investigation" => has_rust,
+            "Angular Component Hierarchy (TypeScript only)" => has_typescript,
+            _ => true,
+        })
+        .collect()
 }
 
 pub fn performance_tiers() -> Vec<PerfTier> {
@@ -579,7 +772,7 @@ pub fn render_cli(def_extensions: &[String]) -> String {
 
     out.push_str("STRATEGY RECIPES\n");
     out.push_str("----------------\n");
-    for strat in strategies() {
+    for strat in strategies_for_extensions(def_extensions) {
         out.push_str(&format!("  [{}]\n", strat.name));
         out.push_str(&format!("  When: {}\n", strat.when));
         for step in strat.steps {
@@ -667,6 +860,20 @@ pub fn tool_help(tool_name: &str, def_extensions: &[String]) -> Result<Value, St
             "modeA_lineRange": CANONICAL_MODE_A_EXAMPLE,
             "modeB_textMatch": CANONICAL_MODE_B_EXAMPLE,
         });
+        payload["decisionCard"] = json!({
+            "title": "When to use xray_edit vs built-in edit tools",
+            "ruleOfThumb": "Existing text file -> xray_edit. New large file or full rewrite >200 lines -> built-in whole-file write is acceptable.",
+            "useXrayEditFor": [
+                "Editing any existing text file, regardless of extension or index coverage",
+                "Small or surgical line-range/text-match changes",
+                "Multi-file edits, dryRun previews, post-write verification, and sync reindex"
+            ],
+            "builtInOkFor": [
+                "Creating a brand-new large file (xray_edit Mode A also works for small new files)",
+                "Full-file rewrites over about 200 lines",
+                "Binary files or byte-exact preservation cases"
+            ]
+        });
     }
 
     Ok(payload)
@@ -682,7 +889,7 @@ pub fn render_json(def_extensions: &[String]) -> Value {
         })
     }).collect();
 
-    let strategy_recipes: Vec<Value> = strategies().iter().map(|s| {
+    let strategy_recipes: Vec<Value> = strategies_for_extensions(def_extensions).iter().map(|s| {
         json!({
             "name": s.name,
             "when": s.when,
@@ -710,6 +917,87 @@ pub fn render_json(def_extensions: &[String]) -> Value {
     })
 }
 
+fn render_language_instruction_blocks(out: &mut String, profile: &LanguageProfile) {
+    if profile.has_sql_defs {
+        out.push_str("SQL INVESTIGATION (SQL parser is active):\n");
+        out.push_str("  - Read a stored procedure body: xray_definitions kind=[\"storedProcedure\"] name=[\"usp_Foo\"] includeBody=true maxBodyLines=0\n");
+        out.push_str("  - Read JUST the parameter header: first get line_start, then xray_definitions name=[\"usp_Foo\"] includeBody=true bodyLineStart=<line_start> bodyLineEnd=<line_start+40>. bodyLineStart/bodyLineEnd are absolute file lines.\n");
+        out.push_str("  - SP-to-SP EXEC chains: xray_callers method=[\"usp_Foo\"] class='dbo' direction='down'\n");
+        out.push_str("  - The structured signature field is a summary; verify exact parameter types/defaults against the body header.\n");
+        out.push_str("  - After a SQL parser/signature fix, run xray_reindex_definitions ext=[\"sql\"] before validating cached metadata.\n");
+        out.push_str("  - Tables/views/columns/indexes are searchable via kind, but call graph targets only callable code.\n\n");
+    }
+
+    if profile.has_typescript_defs {
+        out.push_str("TYPESCRIPT / ANGULAR INVESTIGATION (TS parser is active):\n");
+        out.push_str("  - Find parents of a component: xray_callers method=[\"app-foo\"] direction='up' depth=3 (selector string, not class name).\n");
+        out.push_str("  - Find children of a component: xray_callers method=[\"FooComponent\"] direction='down' depth=2 (templateChildren from templateUrl files).\n");
+        if profile.has_html_content {
+            out.push_str("  - Search HTML templates directly: xray_grep terms=[\"<app-foo\"] phrase=true ext=[\"html\"].\n");
+            out.push_str("  - Search Angular bindings directly: xray_grep terms=[\"[(ngModel)]\"] phrase=true ext=[\"html\"].\n");
+        } else {
+            out.push_str("  - HTML is not content-indexed; add html (and optionally scss/css) to --ext for xray_grep template searches. Selector call graph can still work from templateUrl enrichment.\n");
+        }
+        if profile.has_scss_content {
+            out.push_str("  - Styles are content-indexed; use xray_grep ext=[\"scss\"] or ext=[\"css\"] for style references.\n");
+        }
+        out.push_str("  - TS class fields are kind=[\"field\"]; interface signatures are kind=[\"property\"]. If property returns 0 in a class, retry field.\n\n");
+    }
+
+    if profile.has_csharp_defs {
+        out.push_str("C# INVESTIGATION (C# parser is active):\n");
+        out.push_str("  - DI-aware callers: xray_callers class='UserService' also matches callers using IUserService. If 0 callers, retry class='IUserService'.\n");
+        out.push_str("  - using static methods are defined on the helper class: xray_definitions name=[\"Bar\"] without parent, or parent=[\"FooHelper\"].\n");
+        out.push_str("  - Attribute string literals can surface as valueSourceHint on properties/fields; grep that string in appsettings/manifest/env/secrets.\n\n");
+    }
+
+    if profile.has_xml_on_demand {
+        out.push_str("XML / CSPROJ ON-DEMAND PARSING (XML on-demand is active):\n");
+        out.push_str("  - Find which element contains a line: xray_definitions file=[\"app.csproj\"] containsLine=42\n");
+        out.push_str("  - Search by element name or leaf text: xray_definitions file=[\"service.config\"] name=[\"PremiumStorage\"] (auto-promotes leaf matches to parent block).\n");
+        if profile.has_xml_content {
+            out.push_str("  - Raw XML phrase search: xray_grep terms=[\"<MaxRetries>3</MaxRetries>\"] phrase=true ext=[\"config\",\"xml\"]\n");
+        }
+        out.push('\n');
+    }
+
+    if profile.has_rust_defs {
+        out.push_str("RUST INVESTIGATION (Rust parser is active):\n");
+        out.push_str("  - Read a known function or impl method body: xray_definitions name=[\"foo\"] parent=[\"TypeName\"] includeBody=true maxBodyLines=0. For free functions, omit parent or add file=[\"path.rs\"].\n");
+        out.push_str("  - For common names (new/from/fmt/default/parse/handle), always add parent or file.\n");
+        out.push_str("  - Trace callers/callees: xray_callers method=[\"foo\"] class='TypeName' direction='up'|'down' includeBody=true.\n");
+        out.push_str("  - Find tests covering a method: xray_callers method=[\"foo\"] class='TypeName' direction='up' impactAnalysis=true depth=5.\n\n");
+    }
+}
+
+fn render_read_examples(profile: &LanguageProfile) -> String {
+    let mut examples = Vec::new();
+    if profile.has_csharp_defs {
+        examples.push("  - C#: xray_definitions file=[\"UserService.cs\"] includeBody=true maxBodyLines=0".to_string());
+    }
+    if profile.has_typescript_defs {
+        examples.push("  - TS: xray_definitions file=[\"user.service.ts\"] includeBody=true maxBodyLines=0".to_string());
+    }
+    if profile.has_sql_defs {
+        examples.push("  - SQL: xray_definitions file=[\"usp_GetUser.sql\"] kind=[\"storedProcedure\"] includeBody=true maxBodyLines=0".to_string());
+    }
+    if profile.has_rust_defs {
+        examples.push("  - Rust: xray_definitions file=[\"src/lib.rs\"] name=[\"parse\"] includeBody=true maxBodyLines=0".to_string());
+    }
+
+    for ext in &profile.definition_extensions {
+        let already_covered = matches!(ext.as_str(), "cs" | "ts" | "tsx" | "sql" | "rs");
+        if !already_covered {
+            examples.push(format!(
+                "  - .{}: xray_definitions file=[\"handler.{}\"] includeBody=true maxBodyLines=0",
+                ext, ext
+            ));
+        }
+    }
+
+    examples.join("\n")
+}
+
 /// Render tips as compact text for MCP initialize instructions field.
 ///
 /// Design principles:
@@ -722,7 +1010,14 @@ pub fn render_json(def_extensions: &[String]) -> Value {
 /// `def_extensions` — the file extensions that have definition parser support
 /// (intersection of server --ext and definition_extensions()). Used to dynamically
 /// filter task routing entries and generate the "NEVER READ" instruction.
+#[cfg(test)]
 pub fn render_instructions(def_extensions: &[&str]) -> String {
+    let profile = LanguageProfile::new(def_extensions, def_extensions);
+    render_instructions_for_profile(&profile)
+}
+
+pub fn render_instructions_for_profile(profile: &LanguageProfile) -> String {
+    let def_extensions = profile.definition_extension_refs();
     let mut out = String::new();
 
     out.push_str("=== XRAY_POLICY ===\n");
@@ -755,7 +1050,11 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     out.push_str("INTENT -> TOOL MAPPING (consult BEFORE choosing any tool):\n");
     if !def_extensions.is_empty() {
         out.push_str("  \"read the source code of a method/class\"         -> xray_definitions name=[\"X\"] includeBody=true maxBodyLines=0\n");
+        out.push_str("  \"I already know the class/method/procedure/function name and want its body\" -> xray_definitions name=[\"X\"] parent=[\"Y\"] includeBody=true maxBodyLines=0 OR file=[\"known/path.ext\"] name=[\"X\"] includeBody=true maxBodyLines=0\n");
+        out.push_str("  \"I just got the file path from xray_grep / xray_fast and want to list its symbols\" -> xray_definitions file=[\"<path>\"] (no includeBody first)\n");
+        out.push_str("  \"I just got the file path and truly need every body in it\" -> xray_definitions file=[\"<path>\"] includeBody=true maxBodyLines=0 maxTotalBodyLines=0 (use sparingly)\n");
         out.push_str("  \"find which method is at file:line N\"            -> xray_definitions file=[\"X\"] containsLine=N includeBody=true\n");
+        out.push_str("  \"I just got file:line from a stack trace\"       -> xray_definitions file=[\"<path>\"] containsLine=N includeBody=true\n");
         out.push_str("  \"find who calls/implements method X\"             -> xray_callers method=[\"X\"] class='Y' direction='up'\n");
         out.push_str("  \"verify upstream reachability of helper X\"       -> xray_callers method=[\"X\"] direction='up' (add class='Y' for methods; do NOT grep+read_file)\n");
     }
@@ -779,6 +1078,20 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
     //  All entries from TASK ROUTING are now implicit in the INTENT mapping.
     //  Fallback guidance kept inline:)
     out.push_str("If uncertain about file type/lines/encoding, call xray_info first (file=[\"X\"] -> lineCount/byteSize/lineEnding; not Get-Content/wc -l). Do not default to raw file reading.\n\n");
+
+    if !def_extensions.is_empty() {
+        out.push_str("INVESTIGATION DECISION TREE (apply when user asks explain/trace/investigate a code flow):\n");
+        out.push_str("  1. LOCATE - xray_fast (file names) + xray_grep (content). Output: candidate files / call sites.\n");
+        out.push_str("  2. STRUCTURE - xray_definitions file=[\"<dir-or-file>\"] (no includeBody). Output: classes/methods/SPs/tables in scope.\n");
+        out.push_str("  3. READ BODY - xray_definitions name=[\"<symbol>\"] parent=[\"<owner>\"] includeBody=true maxBodyLines=0 OR file=[\"<known-path>\"] name=[\"<symbol>\"] includeBody=true maxBodyLines=0. Once a symbol is known, this replaces read_file.\n");
+        out.push_str("  4. TRACE - xray_callers method=[\"<X>\"] class='<Y>' direction='up'|'down' includeBody=true.\n");
+        out.push_str("  5. WIDER FILE CONTEXT - read_file ONLY for imports/usings, fields, neighbouring methods, generated regions, partial-class layout, non-indexed files, or exact edit line ranges.\n");
+        out.push_str("  ANTI-PATTERN: doing step 3 with read_file when xray_definitions is available.\n\n");
+    }
+
+    if !def_extensions.is_empty() || profile.has_xml_on_demand {
+        render_language_instruction_blocks(&mut out, profile);
+    }
     // --- MANDATORY PRE-FLIGHT CHECK (procedural friction before built-in) ---
     // Rationale: even with INTENT mapping, habits can bypass the map. A 3-question
     // pre-flight in <thinking> forces a conscious justification before a built-in call.
@@ -814,7 +1127,11 @@ pub fn render_instructions(def_extensions: &[&str]) -> String {
         out.push_str(&format!("   DECISION TRIGGER: before reading ANY file — for ANY reason (exploration, validation, fact-checking, reviewing, debugging) — check extension. If {} -> xray_definitions includeBody=true.\n", ext_list));
         out.push_str(&format!("   If the file extension is NOT in {} -> reading directly is OK.\n", ext_list));
         out.push_str(&format!("   ONLY exception for {}: editing (need exact line numbers for xray_edit).\n", ext_list));
-        out.push_str(&format!("   EXAMPLE: instead of reading handler.{} directly, use: xray_definitions file=[\"handler.{}\"] includeBody=true maxBodyLines=0 (0=unlimited, returns full file)\n\n", def_extensions[0], def_extensions[0]));
+        out.push_str("   EXAMPLES:\n");
+        out.push_str(&render_read_examples(profile));
+        out.push_str("\n\n");
+    } else if profile.has_xml_on_demand {
+        out.push_str("NOTE: no ordinary source-code definition parser extensions are active, but XML on-demand parsing is available through xray_definitions for XML/config/csproj-style files. Use xray_grep for content search.\n\n");
     } else {
         out.push_str("NOTE: xray_definitions is not available for the configured file extensions. Use xray_grep for content search.\n\n");
     }
