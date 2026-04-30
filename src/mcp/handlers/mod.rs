@@ -187,11 +187,11 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
         },
         ToolDefinition {
             name: "xray_reindex".to_string(),
-            description: "Force rebuild the content index and reload it into the server's in-memory cache. Also rebinds workspace when dir parameter switches to a different directory (updates workspace binding, loads cached index first for speed, falls back to full rebuild). Response includes workspaceChanged, previousServerDir, indexAction fields. When workspace is UNRESOLVED (wrong CWD), call this with dir=<project_path> to fix it.".to_string(),
+            description: "Force rebuild the content index and reload it into the server's in-memory cache. Also rebinds workspace when dir parameter switches to a different directory, unless the server was started with a pinned --dir. If the server is pinned and you want to rebuild that same workspace, omit dir; pass dir only when intentionally rebinding an unpinned/unresolved workspace. Response includes workspaceChanged, previousServerDir, indexAction fields. When workspace is UNRESOLVED (wrong CWD), call this with dir=<project_path> to fix it.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "dir": { "type": "string", "description": "Directory to reindex" },
+                    "dir": { "type": "string", "description": "Directory to reindex. Omit this when rebuilding the current pinned --dir workspace." },
                     "ext": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -208,8 +208,10 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
             } else {
                 format!(
                     "Force rebuild the definition index and reload it into the server's in-memory cache. \
-                     Supports {}. Returns build metrics: files parsed, definitions extracted, call sites, \
-                     codeStatsEntries (methods with complexity metrics), parse errors, build time, and index size. \
+                     Supports {}. For servers started with a pinned --dir, omit dir when rebuilding the current workspace; \
+                     pass dir only when intentionally rebinding an unpinned/unresolved workspace. \
+                     Returns build metrics: files parsed, definitions extracted, call sites, codeStatsEntries \
+                     (methods with complexity metrics), parse errors, build time, and index size. \
                      After rebuild, code stats are available for includeCodeStats/sortBy/min* queries. \
                      Requires server started with --definitions flag.",
                     lang_list
@@ -218,7 +220,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "dir": { "type": "string", "description": "Directory to reindex (default: server's --dir)" },
+                    "dir": { "type": "string", "description": "Directory to reindex. Omit this when rebuilding the current pinned --dir workspace." },
                     "ext": {
                         "type": "array",
                         "items": { "type": "string" },
@@ -2097,8 +2099,9 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
         if ws.mode == WorkspaceBindingMode::PinnedCli {
             return ToolCallResult::error(format!(
-                "Server started with --dir {} (pinned). Cannot switch workspace. \
-                 Start another server instance or use CLI.",
+                "Server is pinned to --dir {} and cannot switch workspaces. \
+                 To rebuild this pinned workspace, omit the `dir` argument; \
+                 to index a different workspace, start another server instance or use CLI.",
                 previous_dir
             ));
         }
@@ -2268,8 +2271,9 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
         if ws.mode == WorkspaceBindingMode::PinnedCli {
             return ToolCallResult::error(format!(
-                "Server started with --dir {} (pinned). Cannot switch workspace. \
-                 Start another server instance or use CLI.",
+                "Server is pinned to --dir {} and cannot switch workspaces. \
+                 To rebuild this pinned workspace, omit the `dir` argument; \
+                 to index a different workspace, start another server instance or use CLI.",
                 previous_dir
             ));
         }
