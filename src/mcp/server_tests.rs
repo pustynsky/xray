@@ -23,7 +23,7 @@ fn test_handle_tools_list() {
     assert_eq!(result["jsonrpc"], "2.0");
     assert_eq!(result["id"], 2);
     let tools = result["result"]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 15);
+    assert_eq!(tools.len(), handlers::TOOL_DEFINITION_COUNT);
     let names: Vec<&str> = tools.iter().map(|t| t["name"].as_str().unwrap()).collect();
     assert!(names.contains(&"xray_grep"));
     assert!(names.contains(&"xray_fast"));
@@ -74,6 +74,86 @@ fn test_handle_tools_call_missing_params() {
     let result = handle_request(&ctx, "tools/call", &None, json!(5));
     assert_eq!(result["result"]["isError"], true);
     assert!(result["result"]["content"][0]["text"].as_str().unwrap().contains("Missing params"));
+}
+
+#[test]
+fn test_protocol_trace_extracts_initialize_capabilities() {
+    let params = Some(json!({
+        "capabilities": {
+            "roots": { "listChanged": true }
+        }
+    }));
+
+    assert_eq!(initialize_capabilities(&params), (true, true));
+    assert_eq!(initialize_capabilities(&None), (false, false));
+}
+
+#[test]
+fn test_protocol_trace_extracts_tool_name_before_dispatch() {
+    let params = Some(json!({
+        "name": "xray_grep",
+        "arguments": { "terms": ["needle"] }
+    }));
+
+    assert_eq!(tool_name_for_protocol(&params), "xray_grep");
+    assert_eq!(tool_name_for_protocol(&None), "<missing>");
+}
+
+fn protocol_field<'a>(fields: &'a [(&'static str, String)], name: &str) -> &'a str {
+    fields
+        .iter()
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| value.as_str())
+        .unwrap_or_else(|| panic!("missing protocol field {name}: {fields:?}"))
+}
+
+#[test]
+fn test_protocol_trace_uses_raw_tools_call_before_validation() {
+    let raw = json!({
+        "jsonrpc": "1.0",
+        "id": 7,
+        "method": "tools/call",
+        "params": { "name": "xray_grep", "arguments": {} }
+    });
+    let method = method_for_protocol(&raw);
+    let params = params_for_protocol(&raw);
+    let id = id_for_protocol(&raw);
+
+    let (event, fields) = protocol_request_event(&method, &params, id);
+
+    assert_eq!(event, "tools/call");
+    assert_eq!(protocol_field(&fields, "id"), "7");
+    assert_eq!(protocol_field(&fields, "name"), "xray_grep");
+}
+
+#[test]
+fn test_run_server_with_io_stdout_is_json_rpc_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ctx = make_ctx();
+    ctx.index_base = tmp.path().to_path_buf();
+
+    let input = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{"roots":{"listChanged":true}}}}"#,
+        r#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+        r#"{"jsonrpc":"1.0","id":7,"method":"tools/call","params":{"name":"xray_grep","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"xray_grep","arguments":{}}}"#,
+        r#"{"jsonrpc":"2.0","id":4,"method":"ping"}"#,
+    ].join("\n") + "\n";
+    let mut reader = std::io::Cursor::new(input.into_bytes());
+    let mut output = Vec::new();
+
+    run_server_with_io(ctx, &mut reader, &mut output, false);
+
+    let stdout = String::from_utf8(output).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 5, "stdout should contain responses only: {stdout}");
+    for line in lines {
+        assert!(!line.contains("PROTO"), "protocol trace leaked to stdout: {line}");
+        assert!(!line.contains("REQ  |"), "debug request log leaked to stdout: {line}");
+        let parsed: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(parsed["jsonrpc"], "2.0", "invalid JSON-RPC response: {line}");
+    }
 }
 
 #[test]

@@ -119,7 +119,7 @@ pub fn format_utc_timestamp() -> String {
         y, m, d, s / 3600, (s % 3600) / 60, s % 60)
 }
 
-/// Append a line to the debug log file. Shared by log_memory, log_request, log_response.
+/// Append a line to the debug log file. Shared by log_memory, protocol trace, and tool REQ/RESP logs.
 fn append_to_debug_log(line: &str) {
     if let Some(path) = DEBUG_LOG_PATH.get()
         && let Ok(mut f) = fs::OpenOptions::new().append(true).open(path) {
@@ -177,6 +177,27 @@ pub fn log_phase(label: &str, fields: &[(&str, String)]) {
     } else {
         format!("{:8.2} | PHASE | {} | {}", debug_elapsed_secs(), label, details)
     };
+    eprintln!("[debug-log] {}", line);
+    append_to_debug_log(&line);
+}
+
+fn format_protocol_event_line(event: &str, fields: &[(&str, String)]) -> String {
+    let details = format_phase_fields(fields);
+    if details.is_empty() {
+        format!("{} | PROTO | {}", format_utc_timestamp(), event)
+    } else {
+        format!("{} | PROTO | {} | {}", format_utc_timestamp(), event, details)
+    }
+}
+
+/// Log an MCP protocol lifecycle event to the debug log file.
+/// No-op when `--debug-log` is not passed.
+pub fn log_protocol_event(event: &str, fields: &[(&str, String)]) {
+    if !DEBUG_LOG_ENABLED.load(Ordering::Acquire) {
+        return;
+    }
+
+    let line = format_protocol_event_line(event, fields);
     eprintln!("[debug-log] {}", line);
     append_to_debug_log(&line);
 }

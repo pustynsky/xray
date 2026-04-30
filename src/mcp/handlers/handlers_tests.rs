@@ -13,7 +13,7 @@ use std::sync::{Arc, RwLock};
 #[test]
 fn test_tool_definitions_count() {
     let tools = tool_definitions(&["cs".to_string()]);
-    assert_eq!(tools.len(), 15);
+    assert_eq!(tools.len(), TOOL_DEFINITION_COUNT);
 }
 
 #[test]
