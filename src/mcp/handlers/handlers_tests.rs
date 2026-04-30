@@ -276,6 +276,29 @@ fn test_reindex_definitions_has_schema() {
     assert!(props.contains_key("ext"), "Should have ext parameter");
 }
 
+#[test]
+fn test_reindex_tools_tell_pinned_callers_to_omit_dir() {
+    let tools = tool_definitions(&["cs".to_string()]);
+    for name in ["xray_reindex", "xray_reindex_definitions"] {
+        let tool = tools.iter().find(|t| t.name == name).unwrap();
+        assert!(
+            tool.description.contains("omit dir"),
+            "{} description must tell callers to omit dir for current pinned workspace; got: {}",
+            name,
+            tool.description
+        );
+        let dir_description = tool.input_schema["properties"]["dir"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(
+            dir_description.contains("Omit this when rebuilding the current pinned --dir workspace."),
+            "{} dir schema must include pinned-workspace omit-dir guidance; got: {}",
+            name,
+            dir_description
+        );
+    }
+}
+
 // --- containsLine error test (general) ---
 
 #[test]

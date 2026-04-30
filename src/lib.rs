@@ -85,7 +85,7 @@ pub fn clean_path(p: &str) -> String {
 #[inline]
 pub fn path_eq(a: &str, b: &str) -> bool {
     if cfg!(windows) {
-        a.eq_ignore_ascii_case(b)
+        clean_path(a).eq_ignore_ascii_case(&clean_path(b))
     } else {
         a == b
     }

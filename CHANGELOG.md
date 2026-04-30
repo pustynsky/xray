@@ -1,5 +1,10 @@
 # Changelog
 
+## Pinned reindex workspace handling
+
+- **Treat Windows path spellings as the same pinned workspace.** Pinned `xray_reindex` and `xray_reindex_definitions` requests no longer report a workspace switch when the same Windows path is passed with different separators or an extended-path prefix.
+- **Guide pinned reindex callers to omit `dir`.** Reindex tool descriptions, schemas, and pinned-workspace errors now tell MCP callers to omit `dir` when rebuilding the current pinned `--dir` workspace and to use another server or CLI for a different workspace.
+
 ## Sync reindex watch-mode preservation
 
 - **Keep sync mutations live on plain content indexes.** Sync reindex/edit paths can now initialize a path lookup for targeted file updates without turning the index into watch reverse-map mode.

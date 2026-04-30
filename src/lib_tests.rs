@@ -87,6 +87,13 @@ fn test_path_eq_case_insensitive_on_windows() {
     assert!(path_eq("C:/Repos/Xray/Sub", "C:/REPOS/XRAY/SUB"));
 }
 
+#[cfg(windows)]
+#[test]
+fn test_path_eq_normalizes_windows_separators() {
+    assert!(path_eq(r"C:\Repos\Shared", "C:/Repos/Shared"));
+    assert!(path_eq(r"\\?\C:\Repos\Shared", "C:/Repos/Shared"));
+}
+
 #[cfg(not(windows))]
 #[test]
 fn test_path_eq_case_sensitive_on_unix() {

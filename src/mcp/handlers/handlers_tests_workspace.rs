@@ -10,8 +10,10 @@
 use super::{
     HandlerContext, WorkspaceBindingMode, WorkspaceStatus,
     cross_load_content_index, cross_load_definition_index,
-    handle_xray_reindex_inner, rollback_workspace_state,
+    handle_xray_reindex_definitions_inner, handle_xray_reindex_inner,
+    rollback_workspace_state,
 };
+use super::handlers_test_utils::make_ctx_with_defs;
 use serde_json::json;
 
 /// D1 — `rollback_workspace_state` must restore ALL four mutable fields of
@@ -190,12 +192,14 @@ fn test_handle_xray_reindex_inner_rejects_switch_in_pinned_cli_mode() {
     let ctx = HandlerContext::default();
     // HandlerContext::default() pins ws to ".", PinnedCli mode, generation=1.
     let pinned_dir_before = ctx.server_dir();
+    let canonical_dir_before;
     let mode_before;
     let generation_before;
     {
         let ws = ctx.workspace.read().unwrap();
         assert_eq!(ws.mode, WorkspaceBindingMode::PinnedCli,
             "Precondition: default ctx must be in PinnedCli mode");
+        canonical_dir_before = ws.canonical_dir.clone();
         mode_before = ws.mode;
         generation_before = ws.generation;
     }
@@ -220,13 +224,112 @@ fn test_handle_xray_reindex_inner_rejects_switch_in_pinned_cli_mode() {
     let msg_lower = msg.to_lowercase();
     assert!(msg_lower.contains("pinned") || msg_lower.contains("--dir"),
         "Error message must explain the pinning constraint; got: {}", msg);
+    assert!(msg.contains("omit the `dir` argument"),
+        "Error message must tell callers how to rebuild the pinned workspace; got: {}", msg);
 
     // Critical: workspace state must be UNCHANGED (no partial mutation).
     let ws = ctx.workspace.read().unwrap();
     assert_eq!(ws.dir, pinned_dir_before,
         "Rejected switch must NOT mutate workspace.dir");
+    assert_eq!(ws.canonical_dir, canonical_dir_before,
+        "Rejected switch must NOT mutate workspace.canonical_dir");
     assert_eq!(ws.mode, mode_before,
         "Rejected switch must NOT mutate workspace.mode");
     assert_eq!(ws.generation, generation_before,
         "Rejected switch must NOT bump workspace.generation");
+}
+
+#[cfg(windows)]
+#[test]
+fn test_handle_xray_reindex_definitions_allows_same_pinned_dir_with_separator_variation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("sample.rs"),
+        "fn separator_regression_sample() {}\n",
+    ).unwrap();
+
+    let canonical = std::fs::canonicalize(&workspace).unwrap();
+    let forward_dir = code_xray::clean_path(&canonical.to_string_lossy());
+    let backslash_dir = forward_dir.replace('/', "\\");
+
+    let mut ctx = make_ctx_with_defs();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = tmp.path().join("indexes");
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(backslash_dir.clone());
+        ws.mode = WorkspaceBindingMode::PinnedCli;
+    }
+    let (canonical_dir_before, generation_before) = {
+        let ws = ctx.workspace.read().unwrap();
+        (ws.canonical_dir.clone(), ws.generation)
+    };
+
+    let result = handle_xray_reindex_definitions_inner(
+        &ctx,
+        &json!({ "dir": forward_dir, "ext": ["rs"] }),
+    );
+
+    assert!(
+        !result.is_error,
+        "same pinned workspace with separator variation should reindex; got: {}",
+        result.content[0].text
+    );
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["status"], "ok");
+    assert!(
+        output.get("workspaceChanged").is_none(),
+        "same workspace must not be reported as a switch: {}",
+        output
+    );
+
+    let ws = ctx.workspace.read().unwrap();
+    assert_eq!(ws.dir, backslash_dir);
+    assert_eq!(ws.canonical_dir, canonical_dir_before);
+    assert_eq!(ws.mode, WorkspaceBindingMode::PinnedCli);
+    assert_eq!(ws.generation, generation_before);
+}
+
+#[test]
+fn test_reindex_pinned_switch_errors_tell_callers_to_omit_dir() {
+    let switch_target = if cfg!(windows) {
+        "Z:\\nonexistent_xray_test_target_guidance"
+    } else {
+        "/nonexistent_xray_test_target_guidance"
+    };
+    let args = json!({"dir": switch_target});
+
+    let content_ctx = HandlerContext::default();
+    let definitions_ctx = make_ctx_with_defs();
+    for ctx in [&content_ctx, &definitions_ctx] {
+        ctx.workspace.write().unwrap().mode = WorkspaceBindingMode::PinnedCli;
+    }
+    let cases = [
+        ("xray_reindex", handle_xray_reindex_inner(&content_ctx, &args)),
+        (
+            "xray_reindex_definitions",
+            handle_xray_reindex_definitions_inner(&definitions_ctx, &args),
+        ),
+    ];
+
+    for (tool_name, result) in cases {
+        assert!(result.is_error, "{} must reject pinned workspace switches", tool_name);
+        let msg = result.content.iter()
+            .map(|c| c.text.as_str())
+            .collect::<Vec<_>>().join(" ");
+        assert!(
+            msg.contains("omit the `dir` argument"),
+            "{} pinned switch error must tell callers to omit dir; got: {}",
+            tool_name,
+            msg
+        );
+        assert!(
+            msg.contains("start another server instance or use CLI"),
+            "{} pinned switch error must explain how to index a different workspace; got: {}",
+            tool_name,
+            msg
+        );
+    }
 }
