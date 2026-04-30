@@ -74,6 +74,178 @@ pub(crate) fn inject_index_degraded(summary: &mut Value, ctx: &HandlerContext) {
     }
 }
 
+pub(crate) fn build_result_status(
+    status: &str,
+    complete: bool,
+    safe_for_exhaustive_claims: bool,
+    safe_for_exact_semantics: bool,
+    evidence_level: &str,
+    reasons: Vec<String>,
+) -> Value {
+    json!({
+        "status": status,
+        "complete": complete,
+        "safeForExhaustiveClaims": safe_for_exhaustive_claims,
+        "safeForExactSemantics": safe_for_exact_semantics,
+        "evidenceLevel": evidence_level,
+        "reasons": reasons,
+    })
+}
+
+pub(crate) fn attach_result_status(output: Value, result_status: Value) -> Value {
+    let Value::Object(map) = output else {
+        return output;
+    };
+
+    let mut ordered = serde_json::Map::new();
+    ordered.insert("resultStatus".to_string(), result_status);
+    for (key, value) in map {
+        if key != "resultStatus" {
+            ordered.insert(key, value);
+        }
+    }
+    Value::Object(ordered)
+}
+
+pub(crate) fn set_result_status(output: &mut Value, result_status: Value) {
+    let current = std::mem::take(output);
+    *output = attach_result_status(current, result_status);
+}
+
+pub(crate) fn count_tree_nodes(nodes: &[Value]) -> usize {
+    fn count_nested(node: &Value) -> usize {
+        let mut total = 1usize;
+        for child_key in ["callers", "callees", "children", "parents"] {
+            if let Some(children) = node.get(child_key).and_then(|value| value.as_array()) {
+                total += children.iter().map(count_nested).sum::<usize>();
+            }
+        }
+        total
+    }
+
+    nodes.iter().map(count_nested).sum()
+}
+
+pub(crate) fn add_collection_accounting(result_status: &mut Value, shown: Value, total: Value) {
+    let omitted = match (&shown, &total) {
+        (Value::Object(shown_obj), Value::Object(total_obj)) => {
+            let mut omitted_obj = serde_json::Map::new();
+            for (key, total_value) in total_obj {
+                if let (Some(total_u64), Some(shown_u64)) = (
+                    total_value.as_u64(),
+                    shown_obj.get(key).and_then(Value::as_u64),
+                ) {
+                    omitted_obj.insert(key.clone(), json!(total_u64.saturating_sub(shown_u64)));
+                }
+            }
+            Value::Object(omitted_obj)
+        }
+        _ => Value::Null,
+    };
+    result_status["shown"] = shown;
+    result_status["total"] = total;
+    if !omitted.is_null() {
+        result_status["omitted"] = omitted;
+    }
+    result_status["totalKnown"] = json!(true);
+}
+
+fn add_generic_accounting_from_output(result_status: &mut Value, output: &Value) {
+    let Some(summary) = output.get("summary") else {
+        result_status["totalKnown"] = json!(false);
+        result_status["omittedReason"] = json!("response_size_cap");
+        return;
+    };
+
+    if let Some(files) = output.get("files").and_then(Value::as_array) {
+        let shown_occurrences = files
+            .iter()
+            .filter_map(|file| file.get("occurrences").and_then(Value::as_u64))
+            .sum::<u64>();
+        let total_files = summary.get("totalFiles").and_then(Value::as_u64);
+        let total_occurrences = summary.get("totalOccurrences").and_then(Value::as_u64);
+        if let (Some(total_files), Some(total_occurrences)) = (total_files, total_occurrences) {
+            add_collection_accounting(
+                result_status,
+                json!({ "files": files.len(), "occurrences": shown_occurrences }),
+                json!({ "files": total_files, "occurrences": total_occurrences }),
+            );
+            return;
+        }
+    }
+
+    if let Some(definitions) = output.get("definitions").and_then(Value::as_array) {
+        if let Some(total_results) = summary.get("totalResults").and_then(Value::as_u64) {
+            add_collection_accounting(
+                result_status,
+                json!({ "definitions": definitions.len() }),
+                json!({ "definitions": total_results }),
+            );
+            return;
+        }
+    }
+
+    if let Some(call_tree) = output.get("callTree").and_then(Value::as_array) {
+        if let Some(total_nodes) = summary.get("totalNodes").and_then(Value::as_u64) {
+            add_collection_accounting(
+                result_status,
+                json!({ "nodes": count_tree_nodes(call_tree) }),
+                json!({ "nodes": total_nodes }),
+            );
+            return;
+        }
+    }
+
+    result_status["totalKnown"] = json!(false);
+    result_status["omittedReason"] = json!("response_size_cap");
+}
+
+pub(crate) fn mark_result_status_response_truncated(output: &mut Value, reasons: &[String]) {
+    let evidence_level = output
+        .get("resultStatus")
+        .and_then(|status| status.get("evidenceLevel"))
+        .and_then(Value::as_str)
+        .unwrap_or("snippet")
+        .to_string();
+
+    let mut status = output
+        .get("resultStatus")
+        .cloned()
+        .filter(|value| value.is_object())
+        .unwrap_or_else(|| {
+            build_result_status("partial", false, false, false, &evidence_level, Vec::new())
+        });
+
+    status["status"] = json!("partial");
+    status["complete"] = json!(false);
+    status["safeForExhaustiveClaims"] = json!(false);
+    status["safeForExactSemantics"] = json!(false);
+    status["evidenceLevel"] = json!(evidence_level);
+
+    let mut status_reasons = status
+        .get("reasons")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if !status_reasons.iter().any(|reason| reason == "response_truncated") {
+        status_reasons.push("response_truncated".to_string());
+    }
+    status["reasons"] = json!(status_reasons);
+
+    if !reasons.is_empty() {
+        status["truncationDetails"] = json!(reasons);
+    }
+    add_generic_accounting_from_output(&mut status, output);
+    set_result_status(output, status);
+}
+
+
 // ─── Dir validation ─────────────────────────────────────────────────
 
 /// Normalize path separators to forward slashes for cross-platform comparison.
@@ -1380,6 +1552,7 @@ fn inject_truncation_metadata(output: &mut Value, reasons: &[String], original_b
         summary["originalResponseBytes"] = json!(original_bytes);
         summary["hint"] = json!(hint);
     }
+    mark_result_status_response_truncated(output, reasons);
 }
 
 /// Apply response size truncation to a ToolCallResult (no metrics injection).

@@ -1,5 +1,11 @@
 # Changelog
 
+## MCP result completeness contract
+
+- **Expose machine-readable result status.** `xray_grep`, `xray_definitions`, and `xray_callers` now return top-level `resultStatus` metadata describing completeness, exactness safety, evidence level, reasons, and collection accounting.
+- **Report execution and scope decisions.** `xray_grep` includes top-level execution metadata, `xray_definitions` supports explicit exact-name and auto-correction controls, and `xray_callers` can mark production-only scope with node kinds.
+- **Preserve result metadata during truncation.** Oversized responses now keep handler-specific `resultStatus` details such as definition requests, auto-correction data, and caller scope while marking the response as partial.
+
 ## MCP startup protocol observability
 
 - **Trace MCP startup and tool discovery.** When `--debug-log` is enabled, the MCP stdio loop now records `PROTO` lifecycle events for `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, and `ping` before handler dispatch, including roots capabilities and requested tool names.

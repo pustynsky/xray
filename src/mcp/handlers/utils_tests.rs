@@ -884,6 +884,147 @@ fn test_truncate_definitions_array() {
 }
 
 #[test]
+fn test_truncate_preserves_result_status_request() {
+    let definitions = (0..1000)
+        .map(|i| json!({
+            "name": format!("ProcessOrder{}", i),
+            "kind": "method",
+            "file": format!("src/services/order_{}.rs", i),
+            "lines": "10-20",
+        }))
+        .collect::<Vec<_>>();
+    let output = json!({
+        "resultStatus": {
+            "status": "complete",
+            "complete": true,
+            "safeForExhaustiveClaims": true,
+            "safeForExactSemantics": true,
+            "evidenceLevel": "full",
+            "reasons": [],
+            "request": {
+                "name": ["ProcessOrder"],
+                "exactNameOnly": true,
+                "autoCorrect": false
+            }
+        },
+        "definitions": definitions,
+        "summary": {"totalResults": 1000, "returned": 1000}
+    });
+
+    let result = truncate_large_response(output, 1024);
+    let status = &result["resultStatus"];
+
+    assert_eq!(result["summary"]["responseTruncated"], true);
+    assert_eq!(status["status"], "partial");
+    assert_eq!(status["complete"], false);
+    assert_eq!(status["safeForExhaustiveClaims"], false);
+    assert_eq!(status["safeForExactSemantics"], false);
+    assert_eq!(status["request"]["name"], json!(["ProcessOrder"]));
+    assert_eq!(status["request"]["exactNameOnly"], true);
+    assert_eq!(status["request"]["autoCorrect"], false);
+    assert!(status["reasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|reason| reason.as_str() == Some("response_truncated")));
+}
+
+#[test]
+fn test_truncate_preserves_result_status_correction() {
+    let definitions = (0..1000)
+        .map(|i| json!({
+            "name": format!("ProcessOrder{}", i),
+            "kind": "method",
+            "file": format!("src/services/order_{}.rs", i),
+            "lines": "10-20",
+        }))
+        .collect::<Vec<_>>();
+    let output = json!({
+        "resultStatus": {
+            "status": "corrected",
+            "complete": true,
+            "safeForExhaustiveClaims": true,
+            "safeForExactSemantics": true,
+            "evidenceLevel": "full",
+            "reasons": ["auto_corrected"],
+            "correction": {
+                "applied": true,
+                "originalName": "ProcesOrder",
+                "correctedName": "ProcessOrder"
+            }
+        },
+        "definitions": definitions,
+        "summary": {"totalResults": 1000, "returned": 1000}
+    });
+
+    let result = truncate_large_response(output, 1024);
+    let status = &result["resultStatus"];
+    let reasons = status["reasons"].as_array().unwrap();
+
+    assert_eq!(result["summary"]["responseTruncated"], true);
+    assert_eq!(status["status"], "partial");
+    assert_eq!(status["correction"]["applied"], true);
+    assert_eq!(status["correction"]["originalName"], "ProcesOrder");
+    assert_eq!(status["correction"]["correctedName"], "ProcessOrder");
+    assert!(reasons
+        .iter()
+        .any(|reason| reason.as_str() == Some("auto_corrected")));
+    assert!(reasons
+        .iter()
+        .any(|reason| reason.as_str() == Some("response_truncated")));
+}
+
+#[test]
+fn test_truncate_preserves_result_status_scope() {
+    let call_tree = (0..1000)
+        .map(|i| json!({
+            "method": format!("Caller{}", i),
+            "class": "OrderController",
+            "file": format!("src/controllers/order_{}.rs", i),
+            "line": i + 1,
+            "nodeKind": "caller",
+            "callers": []
+        }))
+        .collect::<Vec<_>>();
+    let output = json!({
+        "resultStatus": {
+            "status": "complete",
+            "complete": true,
+            "safeForExhaustiveClaims": true,
+            "safeForExactSemantics": false,
+            "evidenceLevel": "call_graph",
+            "reasons": ["production_only_scope"],
+            "scope": {
+                "productionOnly": true,
+                "includesTests": false,
+                "builtInExcludes": ["test files", "test methods"]
+            }
+        },
+        "callTree": call_tree,
+        "summary": {"totalNodes": 1000}
+    });
+
+    let result = truncate_large_response(output, 1024);
+    let status = &result["resultStatus"];
+    let reasons = status["reasons"].as_array().unwrap();
+
+    assert_eq!(result["summary"]["responseTruncated"], true);
+    assert_eq!(status["status"], "partial");
+    assert_eq!(status["scope"]["productionOnly"], true);
+    assert_eq!(status["scope"]["includesTests"], false);
+    assert_eq!(
+        status["scope"]["builtInExcludes"],
+        json!(["test files", "test methods"])
+    );
+    assert!(reasons
+        .iter()
+        .any(|reason| reason.as_str() == Some("production_only_scope")));
+    assert!(reasons
+        .iter()
+        .any(|reason| reason.as_str() == Some("response_truncated")));
+}
+
+#[test]
 fn test_truncate_grep_hint_unchanged() {
     // Verify grep-style responses still get the grep-specific hint
     let mut files = Vec::new();

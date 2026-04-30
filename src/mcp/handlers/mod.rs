@@ -310,6 +310,14 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                         "type": "boolean",
                         "description": "Treat name as regex pattern (default: false)."
                     },
+                    "exactNameOnly": {
+                        "type": "boolean",
+                        "description": "When true with name, match definition names exactly instead of substring matching. Also disables name auto-correction for this request. (default: false)"
+                    },
+                    "autoCorrect": {
+                        "type": "boolean",
+                        "description": "Allow best-effort kind/name correction when the initial search returns no definitions. Set false to keep not_found exact. Ignored when exactNameOnly=true. (default: true)"
+                    },
                     "maxResults": {
                         "type": "integer",
                         "description": "Max results (default: 100, 0=unlimited)"
@@ -493,6 +501,10 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "impactAnalysis": {
                         "type": "boolean",
                         "description": "When true with direction='up', identifies test methods in the caller chain. Test methods (detected via [Test]/[Fact]/[Theory]/[TestMethod]/#[test] attributes or *.spec.ts/*.test.ts file patterns) are marked with isTest=true and collected in a 'testsCovering' array with full file path, depth (distance from target), and callChain (array of method names from target to test). Recursion stops at test methods. (default: false)"
+                    },
+                    "productionOnly": {
+                        "type": "boolean",
+                        "description": "When true, excludes test files and test methods from caller/callee trees and marks resultStatus.scope.productionOnly=true. (default: false)"
                     },
                     "includeGrepReferences": {
                         "type": "boolean",

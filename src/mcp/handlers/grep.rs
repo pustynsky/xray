@@ -83,6 +83,8 @@ pub(crate) struct GrepSearchParams<'a> {
     /// Trigram-backed prefilters must be disabled to avoid false negatives
     /// from stale trigram data.
     pub trigram_stale: bool,
+    /// User-visible mode requested before any internal auto-switch.
+    pub requested_mode: &'a str,
 }
 
 pub(crate) struct FileScoreEntry {
@@ -328,6 +330,183 @@ fn build_grep_base_summary(
     }
     summary
 }
+
+fn grep_requested_mode(parsed: &ParsedGrepArgs) -> &'static str {
+    if parsed.use_line_regex {
+        "lineRegex"
+    } else if parsed.use_phrase {
+        "phrase"
+    } else if parsed.use_regex {
+        "regex"
+    } else if parsed.use_substring {
+        "substring"
+    } else {
+        "token"
+    }
+}
+
+fn effective_mode_family(effective_mode: &str) -> &str {
+    if effective_mode.starts_with("substring") {
+        "substring"
+    } else if effective_mode.starts_with("phrase") {
+        "phrase"
+    } else if effective_mode.starts_with("lineRegex") {
+        "lineRegex"
+    } else if matches!(effective_mode, "or" | "and") {
+        "token"
+    } else {
+        effective_mode
+    }
+}
+
+fn grep_cost_class(effective_mode: &str, mode_changed: bool) -> &'static str {
+    if mode_changed || matches!(effective_mode_family(effective_mode), "phrase" | "lineRegex") {
+        "expensive"
+    } else {
+        "normal"
+    }
+}
+
+fn build_grep_execution(
+    params: &GrepSearchParams,
+    effective_mode: &str,
+    reason: Option<&str>,
+    prefilter_used: bool,
+    candidate_files: Option<usize>,
+    files_scanned: Option<usize>,
+) -> Value {
+    let effective_family = effective_mode_family(effective_mode);
+    let mode_changed = params.requested_mode != effective_family;
+    let effective_reason = reason.or_else(|| {
+        if params.requested_mode == "substring" && effective_family == "phrase" {
+            Some("term contains punctuation or whitespace that tokenizer strips")
+        } else if params.requested_mode == "lineRegex" && !prefilter_used {
+            Some("lineRegex ran without a literal prefilter")
+        } else {
+            None
+        }
+    });
+    let mut execution = json!({
+        "requestedMode": params.requested_mode,
+        "effectiveMode": effective_family,
+        "modeChanged": mode_changed,
+        "costClass": grep_cost_class(effective_mode, mode_changed),
+        "prefilterUsed": prefilter_used,
+    });
+    if let Some(reason) = effective_reason {
+        execution["reason"] = json!(reason);
+    }
+    if let Some(candidate_files) = candidate_files {
+        execution["candidateFiles"] = json!(candidate_files);
+    }
+    if let Some(files_scanned) = files_scanned {
+        execution["filesScanned"] = json!(files_scanned);
+    }
+    execution
+}
+
+fn build_grep_result_status(
+    returned_files: usize,
+    returned_occurrences: usize,
+    total_files: usize,
+    total_occurrences: usize,
+    count_only: bool,
+) -> Value {
+    if count_only {
+        let mut status = super::utils::build_result_status(
+            "counts_only",
+            true,
+            true,
+            false,
+            "counts_only",
+            Vec::new(),
+        );
+        status["total"] = json!({ "files": total_files, "occurrences": total_occurrences });
+        status["totalKnown"] = json!(true);
+        return status;
+    }
+
+    let not_found = total_files == 0 && total_occurrences == 0;
+    let partial = returned_files < total_files;
+    let mut status = super::utils::build_result_status(
+        if not_found { "not_found" } else if partial { "partial" } else { "complete" },
+        !partial,
+        !partial,
+        false,
+        "snippet",
+        if not_found {
+            vec!["no_matches".to_string()]
+        } else if partial {
+            vec!["max_results".to_string()]
+        } else {
+            Vec::new()
+        },
+    );
+    super::utils::add_collection_accounting(
+        &mut status,
+        json!({ "files": returned_files, "occurrences": returned_occurrences }),
+        json!({ "files": total_files, "occurrences": total_occurrences }),
+    );
+    status
+}
+
+fn add_grep_next_queries(output: &mut Value, terms: &Value, params: &GrepSearchParams) {
+    let is_partial = output
+        .get("resultStatus")
+        .and_then(|status| status.get("status"))
+        .and_then(Value::as_str)
+        == Some("partial");
+    let is_expensive = output
+        .get("execution")
+        .and_then(|execution| execution.get("costClass"))
+        .and_then(Value::as_str)
+        == Some("expensive");
+    if !is_partial && !is_expensive {
+        return;
+    }
+
+    let mut suggestions = Vec::new();
+    if is_partial {
+        suggestions.push(json!({
+            "tool": "xray_grep",
+            "args": { "terms": terms, "countOnly": true },
+            "reason": "get exhaustive counts before claiming completeness",
+        }));
+    }
+    if is_expensive && params.requested_mode == "substring" {
+        suggestions.push(json!({
+            "tool": "xray_grep",
+            "args": { "terms": terms, "lineRegex": true },
+            "reason": "make raw-line matching explicit when punctuation or anchors matter",
+        }));
+    }
+    if !suggestions.is_empty() {
+        output["recommendedNextQueries"] = json!(suggestions);
+    }
+}
+
+fn finalize_grep_output(
+    mut output: Value,
+    result_status: Value,
+    execution: Value,
+    terms: &Value,
+    params: &GrepSearchParams,
+) -> Value {
+    let mut ordered = serde_json::Map::new();
+    ordered.insert("execution".to_string(), execution);
+    if let Value::Object(map) = output {
+        for (key, value) in map {
+            if key != "execution" && key != "resultStatus" {
+                ordered.insert(key, value);
+            }
+        }
+    }
+    output = Value::Object(ordered);
+    output = super::utils::attach_result_status(output, result_status);
+    add_grep_next_queries(&mut output, terms, params);
+    output
+}
+
 
 /// Threshold (milliseconds) above which a `lineRegex` scan is considered slow
 /// enough to warrant a performance hint in the response. Patterns that reduce
@@ -1817,12 +1996,21 @@ fn build_grep_response(
     let search_elapsed = params.search_start.elapsed();
 
     if params.count_only {
+        let terms_value = json!(terms);
         let mut summary = build_grep_base_summary(
-            total_files, total_occurrences, &json!(terms), search_mode,
+            total_files, total_occurrences, &terms_value, search_mode,
             index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
-        let output = json!({ "summary": summary });
+        let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
+        let output = finalize_grep_output(
+            json!({ "summary": summary }),
+            result_status,
+            execution,
+            &terms_value,
+            params,
+        );
         return ToolCallResult::success(json_to_string(&output));
     }
 
@@ -1843,8 +2031,9 @@ fn build_grep_response(
         file_obj
     }).collect();
 
+    let terms_value = json!(terms);
     let mut summary = build_grep_base_summary(
-        total_files, total_occurrences, &json!(terms), search_mode,
+        total_files, total_occurrences, &terms_value, search_mode,
         index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
@@ -1866,10 +2055,25 @@ fn build_grep_response(
         }
     }
 
-    let output = json!({
-        "files": files_json,
-        "summary": summary
-    });
+    let returned_occurrences = results.iter().map(|result| result.occurrences).sum();
+    let result_status = build_grep_result_status(
+        results.len(),
+        returned_occurrences,
+        total_files,
+        total_occurrences,
+        false,
+    );
+    let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
+    let output = finalize_grep_output(
+        json!({
+            "files": files_json,
+            "summary": summary
+        }),
+        result_status,
+        execution,
+        &terms_value,
+        params,
+    );
 
     ToolCallResult::success(json_to_string(&output))
 }
@@ -1997,6 +2201,8 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let exclude_lower: Vec<String> = parsed.exclude.iter()
         .map(|s| s.to_lowercase())
         .collect();
+    let requested_mode = grep_requested_mode(&parsed);
+
     let grep_params = GrepSearchParams {
         ext_filter: &parsed.ext_filter,
         show_lines: parsed.show_lines,
@@ -2016,7 +2222,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         max_occurrences_per_term: parsed.max_occurrences_per_term,
         lock_wait_ms,
         trigram_stale,
+        requested_mode,
     };
+
 
     // --- Substring search mode
     if parsed.use_substring {
@@ -2334,11 +2542,13 @@ fn build_substring_response(
     auto_balance_info: Option<&AutoBalanceInfo>,
 ) -> ToolCallResult {
     let search_start = params.search_start;
+    let search_mode_label = format!("substring-{}", search_mode);
+    let terms_value = json!(raw_terms);
 
     if params.count_only {
         let mut summary = build_grep_base_summary(
-            total_files, total_occurrences, &json!(raw_terms),
-            &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false, params.lock_wait_ms,
+            total_files, total_occurrences, &terms_value,
+            &search_mode_label, index, search_start.elapsed(), ctx, false, params.lock_wait_ms,
         );
         // Don't include matchedTokens in countOnly mode — the caller only needs
         // totalFiles/totalOccurrences. Including tokens wastes bytes and can trigger
@@ -2350,9 +2560,17 @@ fn build_substring_response(
             inject_auto_balance(&mut summary, ab);
         }
         apply_dir_auto_converted_note(&mut summary, params);
-        let output = json!({ "summary": summary });
+        let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        let execution = build_grep_execution(params, &search_mode_label, None, false, Some(total_files), None);
+        let output = finalize_grep_output(
+            json!({ "summary": summary }),
+            result_status,
+            execution,
+            &terms_value,
+            params,
+        );
         debug!("[substring-trace] Total: {:.3}ms (count_only)", search_start.elapsed().as_secs_f64() * 1000.0);
-        return ToolCallResult::success(output.to_string());
+        return ToolCallResult::success(json_to_string(&output));
     }
 
     let json_start = Instant::now();
@@ -2373,8 +2591,8 @@ fn build_substring_response(
     }).collect();
 
     let mut summary = build_grep_base_summary(
-        total_files, total_occurrences, &json!(raw_terms),
-        &format!("substring-{}", search_mode), index, search_start.elapsed(), ctx, false, params.lock_wait_ms,
+        total_files, total_occurrences, &terms_value,
+        &search_mode_label, index, search_start.elapsed(), ctx, false, params.lock_wait_ms,
     );
     summary["matchedTokens"] = json!(all_matched_tokens);
     if !warnings.is_empty() {
@@ -2384,15 +2602,30 @@ fn build_substring_response(
         inject_auto_balance(&mut summary, ab);
     }
     apply_dir_auto_converted_note(&mut summary, params);
-    let output = json!({
-        "files": files_json,
-        "summary": summary
-    });
+    let returned_occurrences = results.iter().map(|result| result.occurrences).sum();
+    let result_status = build_grep_result_status(
+        results.len(),
+        returned_occurrences,
+        total_files,
+        total_occurrences,
+        false,
+    );
+    let execution = build_grep_execution(params, &search_mode_label, None, false, Some(total_files), None);
+    let output = finalize_grep_output(
+        json!({
+            "files": files_json,
+            "summary": summary
+        }),
+        result_status,
+        execution,
+        &terms_value,
+        params,
+    );
     debug!("[substring-trace] Response JSON: {:.3}ms", json_start.elapsed().as_secs_f64() * 1000.0);
     debug!("[substring-trace] Total: {:.3}ms ({} files, {} tokens matched)",
         search_start.elapsed().as_secs_f64() * 1000.0, total_files, all_matched_tokens.len());
 
-    ToolCallResult::success(output.to_string())
+    ToolCallResult::success(json_to_string(&output))
 }
 
 /// Substring search using the trigram index.
@@ -2542,15 +2775,25 @@ fn handle_phrase_search(
     }
 
     let search_elapsed = search_start.elapsed();
+    let search_mode = "phrase";
+    let terms_value = json!([phrase]);
 
     if count_only {
         let mut summary = build_grep_base_summary(
-            total_files, total_occurrences, &json!([phrase]), "phrase",
+            total_files, total_occurrences, &terms_value, search_mode,
             index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
         summary["phraseDetail"] = diag.to_json();
-        let output = json!({ "summary": summary });
+        let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
+        let output = finalize_grep_output(
+            json!({ "summary": summary }),
+            result_status,
+            execution,
+            &terms_value,
+            params,
+        );
         return ToolCallResult::success(json_to_string(&output));
     }
 
@@ -2572,15 +2815,30 @@ fn handle_phrase_search(
     }).collect();
 
     let mut summary = build_grep_base_summary(
-        total_files, total_occurrences, &json!([phrase]), "phrase",
+        total_files, total_occurrences, &terms_value, search_mode,
         index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
     summary["phraseDetail"] = diag.to_json();
-    let output = json!({
-        "files": files_json,
-        "summary": summary
-    });
+    let returned_occurrences = results.iter().map(|result| result.lines.len()).sum();
+    let result_status = build_grep_result_status(
+        results.len(),
+        returned_occurrences,
+        total_files,
+        total_occurrences,
+        false,
+    );
+    let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
+    let output = finalize_grep_output(
+        json!({
+            "files": files_json,
+            "summary": summary
+        }),
+        result_status,
+        execution,
+        &terms_value,
+        params,
+    );
 
     ToolCallResult::success(json_to_string(&output))
 }
@@ -2936,15 +3194,24 @@ fn handle_multi_phrase_search(
 
     let search_elapsed = search_start.elapsed();
     let search_mode = if mode_and { "phrase-and" } else { "phrase-or" };
+    let terms_value = json!(searched_terms);
 
     if count_only {
         let mut summary = build_grep_base_summary(
-            total_files, total_occurrences, &json!(searched_terms), search_mode,
+            total_files, total_occurrences, &terms_value, search_mode,
             index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
         summary["phraseDetail"] = last_diag.to_json();
-        let output = json!({ "summary": summary });
+        let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
+        let output = finalize_grep_output(
+            json!({ "summary": summary }),
+            result_status,
+            execution,
+            &terms_value,
+            params,
+        );
         return ToolCallResult::success(json_to_string(&output));
     }
 
@@ -2962,15 +3229,30 @@ fn handle_multi_phrase_search(
     }).collect();
 
     let mut summary = build_grep_base_summary(
-        total_files, total_occurrences, &json!(searched_terms), search_mode,
+        total_files, total_occurrences, &terms_value, search_mode,
         index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
     summary["phraseDetail"] = last_diag.to_json();
-    let output = json!({
-        "files": files_json,
-        "summary": summary
-    });
+    let returned_occurrences = results.iter().map(|result| result.lines.len()).sum();
+    let result_status = build_grep_result_status(
+        results.len(),
+        returned_occurrences,
+        total_files,
+        total_occurrences,
+        false,
+    );
+    let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
+    let output = finalize_grep_output(
+        json!({
+            "files": files_json,
+            "summary": summary
+        }),
+        result_status,
+        execution,
+        &terms_value,
+        params,
+    );
 
     ToolCallResult::success(json_to_string(&output))
 }
@@ -3414,10 +3696,12 @@ fn handle_line_regex_search_inner(
     let search_elapsed = params.search_start.elapsed();
     let search_mode = if params.mode_and { "lineRegex-and" } else { "lineRegex" };
 
+    let terms_value = json!(patterns);
+
     if params.count_only {
         let response_build_start = Instant::now();
         let mut summary = build_grep_base_summary(
-            total_files, total_occurrences, &json!(patterns), search_mode,
+            total_files, total_occurrences, &terms_value, search_mode,
             index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
@@ -3431,10 +3715,29 @@ fn handle_line_regex_search_inner(
             total_elapsed_ms,
             search_mode,
         );
-        let response = format!(r#"{{"summary":{}}}"#, summary_json);
+        let summary_value = serde_json::from_str::<Value>(&summary_json).unwrap_or(summary);
+        let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        let candidate_files = prefilter_info
+            .candidate_files_after_scope
+            .or(if prefilter_info.used { Some(prefilter_info.candidate_files) } else { prefilter_info.total_files_after_scope });
+        let execution = build_grep_execution(
+            params,
+            search_mode,
+            prefilter_info.reason.as_deref(),
+            prefilter_info.used,
+            candidate_files,
+            Some(scan_telemetry.files_visited),
+        );
+        let output = finalize_grep_output(
+            json!({ "summary": summary_value }),
+            result_status,
+            execution,
+            &terms_value,
+            params,
+        );
         scan_telemetry.response_finalize_duration = response_finalize_start.elapsed();
         let response = replace_response_finalize_placeholder(
-            response,
+            json_to_string(&output),
             scan_telemetry.response_finalize_ms(),
         );
         let total_elapsed_ms = params.search_start.elapsed().as_millis() as u64;
@@ -3470,7 +3773,7 @@ fn handle_line_regex_search_inner(
     }).collect();
 
     let mut summary = build_grep_base_summary(
-        total_files, total_occurrences, &json!(patterns), search_mode,
+        total_files, total_occurrences, &terms_value, search_mode,
         index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
@@ -3492,8 +3795,7 @@ fn handle_line_regex_search_inner(
             );
         }
     }
-    let files_json = Value::Array(files_json);
-    let files_json_string = json_to_string(&files_json);
+    let returned_occurrences = results.iter().map(|result| result.lines.len()).sum();
     scan_telemetry.response_build_duration = response_build_start.elapsed();
     let response_finalize_start = Instant::now();
     let total_elapsed_ms = params.search_start.elapsed().as_millis() as u64;
@@ -3504,13 +3806,38 @@ fn handle_line_regex_search_inner(
         total_elapsed_ms,
         search_mode,
     );
-    let response = format!(
-        r#"{{"files":{},"summary":{}}}"#,
-        files_json_string, summary_json
+    let summary_value = serde_json::from_str::<Value>(&summary_json).unwrap_or(summary);
+    let result_status = build_grep_result_status(
+        results.len(),
+        returned_occurrences,
+        total_files,
+        total_occurrences,
+        false,
+    );
+    let candidate_files = prefilter_info
+        .candidate_files_after_scope
+        .or(if prefilter_info.used { Some(prefilter_info.candidate_files) } else { prefilter_info.total_files_after_scope });
+    let execution = build_grep_execution(
+        params,
+        search_mode,
+        prefilter_info.reason.as_deref(),
+        prefilter_info.used,
+        candidate_files,
+        Some(scan_telemetry.files_visited),
+    );
+    let output = finalize_grep_output(
+        json!({
+            "files": files_json,
+            "summary": summary_value,
+        }),
+        result_status,
+        execution,
+        &terms_value,
+        params,
     );
     scan_telemetry.response_finalize_duration = response_finalize_start.elapsed();
     let response = replace_response_finalize_placeholder(
-        response,
+        json_to_string(&output),
         scan_telemetry.response_finalize_ms(),
     );
     let total_elapsed_ms = params.search_start.elapsed().as_millis() as u64;
