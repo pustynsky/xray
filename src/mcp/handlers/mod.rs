@@ -35,6 +35,9 @@ pub(crate) use self::callers::find_containing_method;
 #[cfg(test)]
 pub(crate) use self::callers::resolve_call_site;
 
+#[cfg(test)]
+pub(crate) static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Return all tool definitions for tools/list.
 /// `def_extensions` — file extensions with definition parser support (e.g., ["cs", "rs"]).
 /// Used to dynamically generate language lists in xray_definitions and xray_callers descriptions.
@@ -1100,7 +1103,7 @@ fn dispatch_inner(
     (result, unknown_args_report)
 }
 
-/// Response pipeline: guidance → unknown-args warning → metrics/truncation.
+/// Response pipeline: guidance → unknown-args warning → metrics/truncation → optional guidance prefix.
 /// Runs on **every** response (success, handler error, AND gate error).
 fn finalize_response(
     result: ToolCallResult,
@@ -1164,7 +1167,7 @@ fn finalize_response(
         ctx.max_response_bytes
     };
 
-    if ctx.metrics {
+    let result = if ctx.metrics {
         if tool_name == "xray_help" {
             utils::truncate_response_if_needed(result, effective_max)
         } else {
@@ -1172,7 +1175,9 @@ fn finalize_response(
         }
     } else {
         utils::truncate_response_if_needed(result, effective_max)
-    }
+    };
+
+    utils::render_guidance_prefix_if_enabled(result, tool_name)
 }
 
 // ─── Small inline handlers ──────────────────────────────────────────

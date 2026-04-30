@@ -1,4 +1,6 @@
 use super::*;
+use super::super::arg_validation::STRICT_ARGS_ENV_LOCK;
+
 
 #[test]
 fn test_json_to_string_happy_path() {
@@ -522,6 +524,170 @@ fn test_build_policy_reminder_is_imperative() {
     assert!(!reminder.contains("with explicit justification"),
         "policyReminder must not revert to the rationalization-friendly 'with explicit justification' clause");
 }
+
+struct GuidancePrefixOverrideGuard {
+    previous: Option<bool>,
+}
+
+impl GuidancePrefixOverrideGuard {
+    fn set(value: Option<bool>) -> Self {
+        Self {
+            previous: set_guidance_prefix_override_for_test(value),
+        }
+    }
+}
+
+impl Drop for GuidancePrefixOverrideGuard {
+    fn drop(&mut self) {
+        set_guidance_prefix_override_for_test(self.previous);
+    }
+}
+
+fn split_guidance_prefixed_text(text: &str) -> (&str, Value) {
+    let (prefix, suffix) = text
+        .split_once("\n\n")
+        .expect("guidance prefix should be separated from JSON suffix by one blank line");
+    let json_suffix: Value = serde_json::from_str(suffix).expect("JSON suffix should parse");
+    (prefix, json_suffix)
+}
+
+#[test]
+fn test_guidance_prefix_enabled_env_parsing() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+
+    for truthy in ["1", "true", "yes", "on", "TRUE", " On "] {
+        assert!(
+            guidance_prefix_env_value_enabled(Some(truthy)),
+            "value `{truthy}` should be truthy"
+        );
+    }
+
+    for falsy in ["0", "false", "no", "off", "", "maybe"] {
+        assert!(
+            !guidance_prefix_env_value_enabled(Some(falsy)),
+            "value `{falsy}` should be falsy"
+        );
+    }
+
+    assert!(
+        !guidance_prefix_env_value_enabled(None),
+        "unset should be falsy"
+    );
+}
+
+#[test]
+fn test_guidance_prefix_disabled_keeps_json_guidance_fields() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(false));
+
+    let result = ToolCallResult::success(json!({
+        "items": [],
+        "summary": {
+            "nextStepHint": "Next step",
+            "policyReminder": "Full policy",
+            "serverDir": "C:/repo"
+        }
+    }).to_string());
+
+    let rendered = render_guidance_prefix_if_enabled(result, "xray_grep");
+    let output: Value = serde_json::from_str(&rendered.content[0].text).unwrap();
+    assert_eq!(output["summary"]["nextStepHint"], "Next step");
+    assert_eq!(output["summary"]["policyReminder"], "Full policy");
+    assert!(!rendered.content[0].text.starts_with(GUIDANCE_PREFIX_HEADER));
+}
+
+#[test]
+fn test_guidance_prefix_moves_fields_and_recomputes_metrics() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+
+    let result = ToolCallResult::success(json!({
+        "files": [],
+        "summary": {
+            "nextStepHint": "Specific next step",
+            "policyReminder": "Full policy reminder text",
+            "serverDir": "C:/repo",
+            "unknownArgsWarning": "warning text",
+            "toolSpecific": 42,
+            "responseBytes": 1,
+            "estimatedTokens": 0
+        }
+    }).to_string());
+
+    let rendered = render_guidance_prefix_if_enabled(result, "xray_grep");
+    let text = &rendered.content[0].text;
+    let (prefix, output) = split_guidance_prefixed_text(text);
+    assert!(prefix.starts_with(GUIDANCE_PREFIX_HEADER));
+    assert!(prefix.contains("→ Specific next step"));
+    assert!(prefix.contains(COMPACT_POLICY_GUIDANCE));
+    assert!(prefix.ends_with(GUIDANCE_PREFIX_FOOTER));
+
+    let summary = output["summary"].as_object().unwrap();
+    assert!(!summary.contains_key("nextStepHint"));
+    assert!(!summary.contains_key("policyReminder"));
+    assert_eq!(summary["serverDir"], "C:/repo");
+    assert_eq!(summary["unknownArgsWarning"], "warning text");
+    assert_eq!(summary["toolSpecific"], 42);
+    assert_eq!(summary["responseBytes"].as_u64().unwrap(), text.len() as u64);
+    assert_eq!(summary["estimatedTokens"].as_u64().unwrap(), text.len() as u64 / 4);
+}
+
+#[test]
+fn test_guidance_prefix_uses_handler_specific_hint_after_guidance_injection() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+
+    let ctx = HandlerContext { server_ext: "rs".to_string(), ..Default::default() };
+    let result = ToolCallResult::success(json!({
+        "definitions": [],
+        "summary": { "nextStepHint": "Handler-specific hint" }
+    }).to_string());
+
+    let result = inject_response_guidance(result, "xray_grep", &ctx.server_ext, &ctx);
+    let rendered = render_guidance_prefix_if_enabled(result, "xray_grep");
+    let text = &rendered.content[0].text;
+    let (prefix, output) = split_guidance_prefixed_text(text);
+    assert!(prefix.contains("→ Handler-specific hint"));
+    assert!(!prefix.contains("Next: use xray_definitions for AST structure"));
+    assert!(output["summary"].get("serverDir").is_some());
+}
+
+#[test]
+fn test_guidance_prefix_excluded_tools_stay_json_only() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+
+    let result = ToolCallResult::success(json!({
+        "summary": {
+            "nextStepHint": "Next step",
+            "policyReminder": "Full policy"
+        }
+    }).to_string());
+
+    let rendered = render_guidance_prefix_if_enabled(result, "xray_info");
+    let output: Value = serde_json::from_str(&rendered.content[0].text).unwrap();
+    assert_eq!(output["summary"]["nextStepHint"], "Next step");
+    assert_eq!(output["summary"]["policyReminder"], "Full policy");
+}
+
+#[test]
+fn test_guidance_prefix_preserves_is_error() {
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+
+    let result = ToolCallResult::error(json!({
+        "error": "boom",
+        "summary": { "policyReminder": "Full policy" }
+    }).to_string());
+
+    let rendered = render_guidance_prefix_if_enabled(result, "xray_grep");
+    assert!(rendered.is_error);
+    let (prefix, output) = split_guidance_prefixed_text(&rendered.content[0].text);
+    assert!(prefix.contains(COMPACT_POLICY_GUIDANCE));
+    assert_eq!(output["error"], "boom");
+    assert!(output["summary"].get("policyReminder").is_none());
+}
+
 
 
 #[test]

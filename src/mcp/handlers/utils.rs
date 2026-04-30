@@ -695,6 +695,173 @@ pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, 
 }
 
 
+const GUIDANCE_PREFIX_HEADER: &str = "=== XRAY AGENT GUIDANCE ===";
+const GUIDANCE_PREFIX_FOOTER: &str = "===============================";
+const COMPACT_POLICY_GUIDANCE: &str = concat!(
+    "Use xray_* MCP tools for indexed files; ",
+    "built-in read/search/edit equivalents are policy violations."
+);
+
+fn guidance_prefix_env_value_enabled(value: Option<&str>) -> bool {
+    value
+        .map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+thread_local! {
+    static GUIDANCE_PREFIX_TEST_OVERRIDE: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
+}
+
+#[cfg(test)]
+pub(crate) fn set_guidance_prefix_override_for_test(value: Option<bool>) -> Option<bool> {
+    GUIDANCE_PREFIX_TEST_OVERRIDE.with(|override_value| {
+        let previous = override_value.get();
+        override_value.set(value);
+        previous
+    })
+}
+
+pub(crate) fn guidance_prefix_enabled() -> bool {
+    #[cfg(test)]
+    {
+        return GUIDANCE_PREFIX_TEST_OVERRIDE
+            .with(|override_value| override_value.get().unwrap_or(false));
+    }
+
+    #[cfg(not(test))]
+    {
+        guidance_prefix_env_value_enabled(
+            std::env::var("XRAY_GUIDANCE_PREFIX").ok().as_deref(),
+        )
+    }
+}
+
+fn guidance_prefix_excluded_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "xray_info" | "xray_help" | "xray_reindex" | "xray_reindex_definitions"
+    )
+}
+
+pub(crate) fn render_guidance_prefix_if_enabled(
+    result: ToolCallResult,
+    tool_name: &str,
+) -> ToolCallResult {
+    if !guidance_prefix_enabled() || guidance_prefix_excluded_tool(tool_name) {
+        return result;
+    }
+
+    let was_error = result.is_error;
+    let text = match result.content.first() {
+        Some(c) => c.text.clone(),
+        None => return result,
+    };
+
+    let mut output = match serde_json::from_str::<Value>(&text) {
+        Ok(v) => v,
+        Err(_) => return result,
+    };
+
+    let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) else {
+        return result;
+    };
+
+    let next_step_hint = summary
+        .get("nextStepHint")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|hint| !hint.is_empty())
+        .map(str::to_string);
+    let has_policy_reminder = summary
+        .get("policyReminder")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .is_some_and(|reminder| !reminder.is_empty());
+
+    if next_step_hint.is_none() && !has_policy_reminder {
+        return result;
+    }
+
+    let has_response_bytes = summary.contains_key("responseBytes");
+    let has_estimated_tokens = summary.contains_key("estimatedTokens");
+    summary.remove("nextStepHint");
+    summary.remove("policyReminder");
+
+    let mut guidance_lines = Vec::new();
+    if let Some(hint) = next_step_hint {
+        guidance_lines.push(format!("→ {}", hint));
+    }
+    if has_policy_reminder {
+        guidance_lines.push(COMPACT_POLICY_GUIDANCE.to_string());
+    }
+
+    let guidance_prefix = format!(
+        "{}\n{}\n{}",
+        GUIDANCE_PREFIX_HEADER,
+        guidance_lines.join("\n"),
+        GUIDANCE_PREFIX_FOOTER
+    );
+    let text = serialize_guidance_prefixed_response(
+        output,
+        &guidance_prefix,
+        has_response_bytes,
+        has_estimated_tokens,
+    );
+    let rendered = ToolCallResult::success(text);
+    if was_error {
+        ToolCallResult {
+            is_error: true,
+            ..rendered
+        }
+    } else {
+        rendered
+    }
+}
+
+fn serialize_guidance_prefixed_response(
+    mut output: Value,
+    guidance_prefix: &str,
+    has_response_bytes: bool,
+    has_estimated_tokens: bool,
+) -> String {
+    for _ in 0..8 {
+        let json_suffix = json_to_string(&output);
+        let final_text = format!("{}\n\n{}", guidance_prefix, json_suffix);
+        let final_bytes = final_text.len() as u64;
+        let estimated_tokens = final_bytes / 4;
+
+        let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) else {
+            return final_text;
+        };
+
+        let mut changed = false;
+        if has_response_bytes
+            && summary.get("responseBytes").and_then(Value::as_u64) != Some(final_bytes)
+        {
+            summary.insert("responseBytes".to_string(), json!(final_bytes));
+            changed = true;
+        }
+        if has_estimated_tokens
+            && summary.get("estimatedTokens").and_then(Value::as_u64) != Some(estimated_tokens)
+        {
+            summary.insert("estimatedTokens".to_string(), json!(estimated_tokens));
+            changed = true;
+        }
+
+        if !changed {
+            return final_text;
+        }
+    }
+
+    format!("{}\n\n{}", guidance_prefix, json_to_string(&output))
+}
+
 /// Measure the JSON-serialized size of a Value in bytes.
 fn measure_json_size(output: &Value) -> usize {
     serde_json::to_string(output).map(|s| s.len()).unwrap_or(0)

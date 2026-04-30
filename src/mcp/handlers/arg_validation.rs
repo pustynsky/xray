@@ -299,10 +299,9 @@ pub(crate) fn inject_warning(result: ToolCallResult, report: &UnknownArgsReport)
 }
 
 
-/// Serializes tests that mutate `XRAY_STRICT_ARGS` (process-wide env var).
-/// Shared with `handlers_tests.rs` so both modules grab the same lock.
+/// Serializes tests that mutate process-wide env vars.
 #[cfg(test)]
-pub(crate) static STRICT_ARGS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub(crate) use super::PROCESS_ENV_LOCK as STRICT_ARGS_ENV_LOCK;
 
 #[cfg(test)]
 mod tests {
