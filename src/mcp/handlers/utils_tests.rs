@@ -653,21 +653,30 @@ fn test_guidance_prefix_uses_handler_specific_hint_after_guidance_injection() {
 }
 
 #[test]
-fn test_guidance_prefix_excluded_tools_stay_json_only() {
+fn test_guidance_prefix_applies_to_all_tools() {
+    // 2026-04-30: previously xray_info/xray_help/xray_reindex/xray_reindex_definitions
+    // were excluded from prefix rendering, leaking the full policyReminder into
+    // the JSON suffix when XRAY_GUIDANCE_PREFIX=1. Contract is now uniform: every
+    // JSON-producing tool with guidance fields gets the prefix treatment.
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
     let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
 
-    let result = ToolCallResult::success(json!({
-        "summary": {
-            "nextStepHint": "Next step",
-            "policyReminder": "Full policy"
-        }
-    }).to_string());
+    for tool_name in ["xray_info", "xray_help", "xray_reindex", "xray_reindex_definitions"] {
+        let result = ToolCallResult::success(json!({
+            "summary": {
+                "policyReminder": "Full policy"
+            }
+        }).to_string());
 
-    let rendered = render_guidance_prefix_if_enabled(result, "xray_info");
-    let output: Value = serde_json::from_str(&rendered.content[0].text).unwrap();
-    assert_eq!(output["summary"]["nextStepHint"], "Next step");
-    assert_eq!(output["summary"]["policyReminder"], "Full policy");
+        let rendered = render_guidance_prefix_if_enabled(result, tool_name);
+        let text = &rendered.content[0].text;
+        let (prefix, output) = split_guidance_prefixed_text(text);
+        assert!(prefix.starts_with(GUIDANCE_PREFIX_HEADER), "{tool_name} must get guidance prefix");
+        assert!(prefix.contains(COMPACT_POLICY_GUIDANCE), "{tool_name} prefix must carry compact policy");
+        let summary = output["summary"].as_object().unwrap();
+        assert!(!summary.contains_key("policyReminder"), "{tool_name} JSON suffix must drop policyReminder");
+        assert!(!summary.contains_key("nextStepHint"), "{tool_name} JSON suffix must drop nextStepHint");
+    }
 }
 
 #[test]

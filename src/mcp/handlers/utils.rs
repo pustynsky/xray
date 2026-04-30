@@ -742,18 +742,19 @@ pub(crate) fn guidance_prefix_enabled() -> bool {
     }
 }
 
-fn guidance_prefix_excluded_tool(tool_name: &str) -> bool {
-    matches!(
-        tool_name,
-        "xray_info" | "xray_help" | "xray_reindex" | "xray_reindex_definitions"
-    )
-}
-
 pub(crate) fn render_guidance_prefix_if_enabled(
     result: ToolCallResult,
-    tool_name: &str,
+    _tool_name: &str,
 ) -> ToolCallResult {
-    if !guidance_prefix_enabled() || guidance_prefix_excluded_tool(tool_name) {
+    // 2026-04-30: removed per-tool exclusion list. XRAY_GUIDANCE_PREFIX is a
+    // presentation-mode switch, not a per-tool allowlist — every JSON-producing
+    // tool with summary.policyReminder / summary.nextStepHint must move those
+    // fields into the raw prefix so the JSON suffix stays compact and stable.
+    // Previously xray_info / xray_help / xray_reindex / xray_reindex_definitions
+    // were excluded, which leaked the full policy text inside JSON when the
+    // env var was on (see user-story
+    // user-story_xray-guidance-prefix-json-policy-reminder-leak_2026-04-30.md).
+    if !guidance_prefix_enabled() {
         return result;
     }
 
