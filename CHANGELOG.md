@@ -1,5 +1,12 @@
 # Changelog
 
+## Sync reindex watch-mode preservation
+
+- **Keep sync mutations live on plain content indexes.** Sync reindex/edit paths can now initialize a path lookup for targeted file updates without turning the index into watch reverse-map mode.
+- **Preserve watch reverse maps across handler reindex paths.** `xray_reindex` and content-index cache cross-load now preserve watcher-authoritative indexes when replacing the in-memory content index.
+- **Avoid accidental watch-mode memory growth.** A runtime-only `file_tokens_authoritative` flag distinguishes real watcher indexes from plain indexes that only need `path_to_id` for sync mutation.
+- **Keep MCP serve logs readable in VS Code.** Stderr tracing disables ANSI escape sequences so Output panel logs remain plain text.
+
 ## MCP result completeness contract
 
 - **Expose machine-readable result status.** `xray_grep`, `xray_definitions`, and `xray_callers` now return top-level `resultStatus` metadata describing completeness, exactness safety, evidence level, reasons, and collection accounting.

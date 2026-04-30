@@ -695,8 +695,9 @@ fn update_content_index(
     // of dirty paths requested.
     let applied_dirty_count = tokenized.len();
 
-    // ── Phase 2: Determine purge IDs (READ LOCK — instant) ──
-    let purge_ids: HashSet<u32> = match index.read() {
+    // ── Phase 2: Determine purge IDs (READ LOCK — instant when path lookup exists) ──
+    let mut path_lookup_missing = false;
+    let mut purge_ids: HashSet<u32> = match index.read() {
         Ok(idx) => {
             let mut ids = HashSet::new();
             if let Some(ref p2id) = idx.path_to_id {
@@ -713,6 +714,8 @@ fn update_content_index(
                         ids.insert(fid);
                     }
                 }
+            } else {
+                path_lookup_missing = true;
             }
             ids
         }
@@ -730,7 +733,25 @@ fn update_content_index(
             let lock_wait_ms = write_wait_start.elapsed().as_secs_f64() * 1000.0;
             let update_start = std::time::Instant::now();
             let idx = &mut *idx;
-            if idx.path_to_id.is_some() && idx.file_tokens.is_empty() {
+            if path_lookup_missing {
+                ensure_path_to_id(idx);
+                if let Some(ref p2id) = idx.path_to_id {
+                    for path in removed_clean {
+                        if let Some(&fid) = p2id.get(path) {
+                            purge_ids.insert(fid);
+                        }
+                    }
+                    for path in &tokenized_paths {
+                        if let Some(&fid) = p2id.get(path) {
+                            purge_ids.insert(fid);
+                        }
+                    }
+                }
+            }
+            if !idx.file_tokens_authoritative {
+                idx.file_tokens.clear();
+            }
+            if idx.file_tokens_authoritative && idx.file_tokens.is_empty() {
                 // Disk-loaded indexes do not persist `file_tokens`. Rebuild at
                 // the first mutable watch update instead of on every read-only
                 // CLI load, so `xray grep` never pays reverse-map memory/cpu.
@@ -792,8 +813,9 @@ fn update_content_index(
             // file_id; existing dirty files reuse the same file_id whose old
             // postings were removed above.
             let insert_start = std::time::Instant::now();
+            let maintain_file_tokens = idx.file_tokens_authoritative;
             for result in tokenized {
-                touched_tokens.extend(apply_tokenized_file(idx, result));
+                touched_tokens.extend(apply_tokenized_file(idx, result, maintain_file_tokens));
             }
             let insert_ms = insert_start.elapsed().as_secs_f64() * 1000.0;
 
@@ -961,10 +983,14 @@ fn tokenize_file_standalone(path: &Path) -> Option<TokenizedFileResult> {
 ///
 /// For existing files (already in path_to_id), assumes old postings have been
 /// purged via `batch_purge_files`. For new files, assigns a new file_id.
-fn apply_tokenized_file(index: &mut ContentIndex, result: TokenizedFileResult) -> Vec<String> {
-    // Watch mode is the only caller that can mutate a ContentIndex in place, and
-    // watch mode always has path_to_id. If this helper is accidentally called on
-    // a read-only index, do nothing rather than inventing unstable file_ids.
+fn apply_tokenized_file(
+    index: &mut ContentIndex,
+    result: TokenizedFileResult,
+    maintain_file_tokens: bool,
+) -> Vec<String> {
+    // In-place mutation requires a stable path lookup. If this helper is
+    // accidentally called on a read-only index, do nothing rather than inventing
+    // unstable file_ids.
     let file_id = if let Some(ref mut p2id) = index.path_to_id {
         if let Some(&fid) = p2id.get(&result.path) {
             fid  // existing file (already purged via batch_purge)
@@ -993,13 +1019,15 @@ fn apply_tokenized_file(index: &mut ContentIndex, result: TokenizedFileResult) -
     }
     token_names.sort_unstable();
 
-    let file_slot = file_id as usize;
-    // New files append dense file_ids; resizing keeps file_tokens indexed by the
-    // same file_id namespace as files[] and file_token_counts[].
-    if index.file_tokens.len() <= file_slot {
-        index.file_tokens.resize_with(file_slot + 1, Vec::new);
+    if maintain_file_tokens {
+        let file_slot = file_id as usize;
+        // New files append dense file_ids; resizing keeps file_tokens indexed by the
+        // same file_id namespace as files[] and file_token_counts[].
+        if index.file_tokens.len() <= file_slot {
+            index.file_tokens.resize_with(file_slot + 1, Vec::new);
+        }
+        index.file_tokens[file_slot] = token_names.clone();
     }
-    index.file_tokens[file_slot] = token_names.clone();
 
     // Update file token count
     if (file_id as usize) < index.file_token_counts.len() {
@@ -1209,25 +1237,26 @@ pub(crate) fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
         .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
-/// Build a ContentIndex with path_to_id populated (for watch mode).
-///
-/// Previously also built a forward index (file_id → Vec<token>) which consumed
-/// ~1.5 GB of RAM due to cloning every token string for every file it appears in.
-/// Now we only build path_to_id; on file change we scan the inverted index directly
-/// to remove stale postings (~50-100ms per file, acceptable for watcher debounce).
-pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
-    let mut path_to_id: std::collections::HashMap<PathBuf, u32> = std::collections::HashMap::new();
-
-    // Skip empty (tombstoned) slots — they correspond to files that were
-    // removed in a previous session. Without this filter a legacy on-disk
-    // index containing tombstones would resurrect them via path_to_id and
-    // the next watcher reconcile would re-tombstone them anyway.
-    for (i, path) in index.files.iter().enumerate() {
-        if path.is_empty() { continue; }
-        path_to_id.insert(PathBuf::from(path), i as u32);
+fn ensure_path_to_id(index: &mut ContentIndex) {
+    if index.path_to_id.is_some() {
+        return;
     }
 
+    let mut path_to_id = HashMap::with_capacity(index.files.len());
+    // Skip empty tombstone slots from files removed in previous sessions.
+    for (file_id, path) in index.files.iter().enumerate() {
+        if path.is_empty() {
+            continue;
+        }
+        path_to_id.insert(PathBuf::from(path), file_id as u32);
+    }
     index.path_to_id = Some(path_to_id);
+}
+
+/// Build a ContentIndex with mutation lookups populated (for watch mode).
+pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
+    ensure_path_to_id(&mut index);
+    index.file_tokens_authoritative = true;
     index.rebuild_file_tokens();
     index
 }
@@ -1977,7 +2006,10 @@ fn reconcile_content_index(
     match index.write() {
         Ok(mut idx) => {
             let idx = &mut *idx;
-            if idx.path_to_id.is_some() && idx.file_tokens.is_empty() {
+            if !idx.file_tokens_authoritative {
+                idx.file_tokens.clear();
+            }
+            if idx.file_tokens_authoritative && idx.file_tokens.is_empty() {
                 // Reconciliation can run immediately after startup on an index
                 // loaded from disk. Build the derived reverse map at this mutable
                 // gateway instead of in generic read-only load paths.
@@ -2040,8 +2072,9 @@ fn reconcile_content_index(
 
             // Apply pre-tokenized results after purge. New files append file_ids;
             // modified files reuse the file_id whose stale postings were purged.
+            let maintain_file_tokens = idx.file_tokens_authoritative;
             for result in tokenized {
-                touched_tokens.extend(apply_tokenized_file(idx, result));
+                touched_tokens.extend(apply_tokenized_file(idx, result, maintain_file_tokens));
             }
 
             shrink_if_oversized_targeted(idx, &touched_tokens);

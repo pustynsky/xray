@@ -1895,7 +1895,7 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
 
     if let Some(idx) = content_loaded {
         let had_watch = ctx.index.read()
-            .map(|i| i.path_to_id.is_some())
+            .map(|i| i.file_tokens_authoritative)
             .unwrap_or(false);
         let idx = if had_watch {
             crate::mcp::watcher::build_watch_index_from(idx)
@@ -2139,10 +2139,10 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
     let file_count = new_index.files.len();
     let token_count = new_index.index.len();
 
-    // Rebuild path_to_id if watcher is active (old index had path_to_id).
+    // Rebuild mutation lookups if watcher is active.
     // Without this, watcher becomes no-op after reindex (path_to_id = None).
     let had_watch = ctx.index.read()
-        .map(|idx| idx.path_to_id.is_some())
+        .map(|idx| idx.file_tokens_authoritative)
         .unwrap_or(false);
     let new_index = if had_watch {
         crate::mcp::watcher::build_watch_index_from(new_index)

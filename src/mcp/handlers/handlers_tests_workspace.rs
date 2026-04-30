@@ -9,7 +9,8 @@
 
 use super::{
     HandlerContext, WorkspaceBindingMode, WorkspaceStatus,
-    rollback_workspace_state, cross_load_definition_index, handle_xray_reindex_inner,
+    cross_load_content_index, cross_load_definition_index,
+    handle_xray_reindex_inner, rollback_workspace_state,
 };
 use serde_json::json;
 
@@ -75,6 +76,106 @@ fn test_cross_load_definition_index_returns_none_when_def_index_disabled() {
         "cross_load_definition_index must return None when def_index is disabled \
          (regression: would otherwise spawn background thread that panics or no-ops)");
 }
+
+/// Regression guard: content-index cache cross-load must preserve watch mutation mode.
+/// The cached read-only index has no reverse maps; handler code must rebuild them when
+/// the existing runtime index is watcher-authoritative.
+#[test]
+fn test_cross_load_content_index_preserves_watch_reverse_map_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("watched.rs"),
+        "fn cross_load_watch_mode_token() {}\n",
+    ).unwrap();
+
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+    let index_base = tmp.path().join("indexes");
+    let content_index = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: workspace_str.clone(),
+        ext: "rs".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    assert!(!content_index.file_tokens_authoritative,
+        "Precondition: cached build output should be read-only/plain");
+    crate::index::save_content_index(&content_index, &index_base).unwrap();
+
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = index_base;
+    {
+        let mut current = ctx.index.write().unwrap();
+        *current = crate::mcp::watcher::build_watch_index_from(crate::ContentIndex {
+            root: workspace_str.clone(),
+            extensions: vec!["rs".to_string()],
+            ..Default::default()
+        });
+        assert!(current.file_tokens_authoritative,
+            "Precondition: existing runtime index must represent watcher mode");
+    }
+
+    let action = cross_load_content_index(&ctx, &workspace_str);
+
+    assert_eq!(action, Some("loaded_cache"));
+    let idx = ctx.index.read().unwrap();
+    assert!(idx.file_tokens_authoritative,
+        "cross-load must preserve watcher-authoritative reverse-map mode");
+    assert!(idx.path_to_id.as_ref().map(|lookup| !lookup.is_empty()).unwrap_or(false),
+        "watch-mode cross-load must rebuild path lookup for cached content index");
+    assert!(idx.file_tokens.iter().any(|tokens| !tokens.is_empty()),
+        "watch-mode cross-load must rebuild per-file token reverse map");
+}
+
+/// Regression guard: explicit xray_reindex must also preserve watch mutation mode.
+/// This protects the handler-level sentinel from regressing back to path_to_id presence.
+#[test]
+fn test_handle_xray_reindex_inner_preserves_watch_reverse_map_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("watched.rs"),
+        "fn handler_reindex_watch_mode_token() {}\n",
+    ).unwrap();
+
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = tmp.path().join("indexes");
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(workspace_str.clone());
+    }
+    {
+        let mut current = ctx.index.write().unwrap();
+        *current = crate::mcp::watcher::build_watch_index_from(crate::ContentIndex {
+            root: workspace_str.clone(),
+            extensions: vec!["rs".to_string()],
+            ..Default::default()
+        });
+        assert!(current.file_tokens_authoritative,
+            "Precondition: existing runtime index must represent watcher mode");
+    }
+
+    let result = handle_xray_reindex_inner(&ctx, &json!({}));
+
+    assert!(!result.is_error,
+        "same-workspace xray_reindex should succeed in PinnedCli mode");
+    let idx = ctx.index.read().unwrap();
+    assert!(idx.file_tokens_authoritative,
+        "xray_reindex must preserve watcher-authoritative reverse-map mode");
+    assert!(idx.path_to_id.as_ref().map(|lookup| !lookup.is_empty()).unwrap_or(false),
+        "watch-mode xray_reindex must rebuild path lookup for the rebuilt index");
+    assert!(idx.file_tokens.iter().any(|tokens| !tokens.is_empty()),
+        "watch-mode xray_reindex must rebuild per-file token reverse map");
+}
+
 
 /// D3 — `handle_xray_reindex_inner` must reject a workspace switch when the
 /// server is in `PinnedCli` mode (started with `--dir <path>`). The request

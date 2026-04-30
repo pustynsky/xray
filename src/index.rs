@@ -1716,6 +1716,7 @@ pub fn build_content_index(args: &ContentIndexArgs) -> Result<ContentIndex, Sear
         files,
         index,
         file_tokens: Vec::new(),
+        file_tokens_authoritative: false,
         total_tokens,
         extensions: extensions.to_vec(),
         file_token_counts,
