@@ -114,41 +114,157 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
     debug!(id = ?id, "Received response to unknown server request");
 }
 
-pub fn run_server(ctx: HandlerContext) {
+fn json_rpc_id_for_log(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        _ => id.to_string(),
+    }
+}
 
+fn initialize_capabilities(params: &Option<Value>) -> (bool, bool) {
+    let has_roots = params
+        .as_ref()
+        .and_then(|p| p.pointer("/capabilities/roots"))
+        .is_some();
+    let has_list_changed = params
+        .as_ref()
+        .and_then(|p| p.pointer("/capabilities/roots/listChanged"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    (has_roots, has_list_changed)
+}
+
+fn xml_on_demand_available(ctx: &HandlerContext) -> bool {
+    cfg!(feature = "lang-xml") && ctx.def_index.is_some()
+}
+
+fn advertised_tool_count() -> usize {
+    handlers::TOOL_DEFINITION_COUNT
+}
+
+fn tool_name_for_protocol(params: &Option<Value>) -> String {
+    params
+        .as_ref()
+        .and_then(|p| p.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("<missing>")
+        .to_string()
+}
+
+fn protocol_request_event(method: &str, params: &Option<Value>, id: String) -> (&'static str, Vec<(&'static str, String)>) {
+    match method {
+        "initialize" => {
+            let (roots, list_changed) = initialize_capabilities(params);
+            ("initialize", vec![
+                ("id", id),
+                ("roots", roots.to_string()),
+                ("listChanged", list_changed.to_string()),
+            ])
+        }
+        "tools/list" => {
+            ("tools/list", vec![("id", id)])
+        }
+        "tools/call" => {
+            ("tools/call", vec![
+                ("id", id),
+                ("name", tool_name_for_protocol(params)),
+            ])
+        }
+        "ping" => {
+            ("ping", vec![("id", id)])
+        }
+        "notifications/initialized" => {
+            ("notifications/initialized", Vec::new())
+        }
+        "notifications/roots/list_changed" => {
+            ("notifications/roots/list_changed", Vec::new())
+        }
+        _ => {
+            ("request", vec![
+                ("id", id),
+                ("method", method.to_string()),
+            ])
+        }
+    }
+}
+
+fn log_protocol_request(method: &str, params: &Option<Value>, id: String) {
+    let (event, fields) = protocol_request_event(method, params, id);
+    crate::index::log_protocol_event(event, &fields);
+}
+
+fn method_for_protocol(raw: &Value) -> String {
+    raw.get("method")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| raw.get("method").map(Value::to_string).unwrap_or_else(|| "<missing>".to_string()))
+}
+
+fn params_for_protocol(raw: &Value) -> Option<Value> {
+    raw.get("params").cloned()
+}
+
+fn id_for_protocol(raw: &Value) -> String {
+    raw.get("id")
+        .map(json_rpc_id_for_log)
+        .unwrap_or_else(|| "null".to_string())
+}
+
+fn log_protocol_request_from_raw(raw: &Value) {
+    let method = method_for_protocol(raw);
+    let params = params_for_protocol(raw);
+    let id = id_for_protocol(raw);
+    log_protocol_request(&method, &params, id);
+}
+
+pub fn run_server(ctx: HandlerContext) {
     let stdin = io::stdin();
     let mut reader = stdin.lock();
     let stdout = io::stdout();
     let mut writer = stdout.lock();
 
+    run_server_with_io(ctx, &mut reader, &mut writer, true);
+}
+
+fn run_server_with_io<R: BufRead, W: Write>(
+    ctx: HandlerContext,
+    reader: &mut R,
+    mut writer: &mut W,
+    install_signal_handler: bool,
+) {
     let mut state = ServerState::new();
 
     const MAX_REQUEST_SIZE: usize = 10 * 1024 * 1024; // 10 MB
 
     // Set up Ctrl+C / SIGINT / SIGTERM handler for graceful shutdown
     let shutdown_flag = Arc::new(AtomicBool::new(false));
-    let shutdown_clone = shutdown_flag.clone();
-    if let Err(e) = ctrlc::set_handler(move || {
-        shutdown_clone.store(true, Ordering::SeqCst);
-        eprintln!("\nReceived shutdown signal, saving indexes...");
-    }) {
-        warn!("Failed to set Ctrl+C handler: {}", e);
+    if install_signal_handler {
+        let shutdown_clone = shutdown_flag.clone();
+        if let Err(e) = ctrlc::set_handler(move || {
+            shutdown_clone.store(true, Ordering::SeqCst);
+            eprintln!("\nReceived shutdown signal, saving indexes...");
+        }) {
+            warn!("Failed to set Ctrl+C handler: {}", e);
+        }
     }
 
     info!("MCP server ready, waiting for JSON-RPC requests on stdin");
 
     let mut line = String::new();
-    loop {
+    let shutdown_reason = loop {
         line.clear();
         // Use .take() to cap reading at MAX_REQUEST_SIZE + 1 bytes, preventing OOM
         // from a malicious/buggy client sending gigabytes without a newline.
         match reader.by_ref().take(MAX_REQUEST_SIZE as u64 + 1).read_line(&mut line) {
-            Ok(0) => break, // EOF
+            Ok(0) => {
+                crate::index::log_protocol_event("eof", &[("reason", "stdin closed".to_string())]);
+                break "stdin";
+            }
             Ok(_) => {
                 // Check if shutdown was signaled (belt-and-suspenders for signal between reads)
                 if shutdown_flag.load(Ordering::SeqCst) {
                     info!("Shutdown flag set, exiting event loop");
-                    break;
+                    break "signal";
                 }
                 if line.len() > MAX_REQUEST_SIZE {
                     error!(size = line.len(), "Request too large (exceeded {} bytes), skipping", MAX_REQUEST_SIZE);
@@ -183,7 +299,7 @@ pub fn run_server(ctx: HandlerContext) {
                             cap = DRAIN_BYTE_CAP,
                             "Oversized-request drain exceeded cap; terminating event loop to avoid unbounded read"
                         );
-                        break;
+                        break "error";
                     }
                     continue;
                 }
@@ -199,6 +315,9 @@ pub fn run_server(ctx: HandlerContext) {
                     Ok(v) => v,
                     Err(e) => {
                         warn!(error = %e, "Failed to parse JSON-RPC message");
+                        crate::index::log_protocol_event("parse/error", &[
+                            ("reason", "invalid_json".to_string()),
+                        ]);
                         let err = JsonRpcErrorResponse::new(
                             Value::Null, -32700, format!("Parse error: {}", e),
                         );
@@ -212,11 +331,17 @@ pub fn run_server(ctx: HandlerContext) {
 
                 // Route: if has "method" → request or notification; else → response
                 if raw.get("method").is_some() {
+                    log_protocol_request_from_raw(&raw);
                     // Request or notification
                     let request: JsonRpcRequest = match serde_json::from_value(raw.clone()) {
                         Ok(r) => r,
                         Err(e) => {
                             warn!(error = %e, "Failed to parse JSON-RPC request structure");
+                            crate::index::log_protocol_event("request/invalid", &[
+                                ("id", id_for_protocol(&raw)),
+                                ("method", method_for_protocol(&raw)),
+                                ("reason", "invalid_request".to_string()),
+                            ]);
                             continue;
                         }
                     };
@@ -233,6 +358,12 @@ pub fn run_server(ctx: HandlerContext) {
                             "Rejecting request with unsupported JSON-RPC version"
                         );
                         let reply_id = request.id.clone().unwrap_or(Value::Null);
+                        crate::index::log_protocol_event("request/invalid", &[
+                            ("id", json_rpc_id_for_log(&reply_id)),
+                            ("method", request.method.clone()),
+                            ("reason", "invalid_jsonrpc".to_string()),
+                            ("jsonrpc", request.jsonrpc.clone()),
+                        ]);
                         let err = JsonRpcErrorResponse::new(
                             reply_id,
                             -32600,
@@ -297,14 +428,8 @@ pub fn run_server(ctx: HandlerContext) {
 
                     // Special handling for initialize — parse client capabilities
                     if request.method == "initialize"
-                        && let Some(ref params) = request.params {
-                            let has_roots = params
-                                .pointer("/capabilities/roots")
-                                .is_some();
-                            let has_list_changed = params
-                                .pointer("/capabilities/roots/listChanged")
-                                .and_then(|v| v.as_bool())
-                                .unwrap_or(false);
+                        && request.params.is_some() {
+                            let (has_roots, has_list_changed) = initialize_capabilities(&request.params);
                             state.client_supports_roots = has_roots;
                             state.client_supports_roots_list_changed = has_list_changed;
                             info!(roots = has_roots, list_changed = has_list_changed,
@@ -338,26 +463,30 @@ pub fn run_server(ctx: HandlerContext) {
                     debug!(response = %resp_str, "Outgoing JSON-RPC");
                     if let Err(e) = writeln!(writer, "{}", resp_str) {
                         error!(error = %e, "Failed to write response to stdout, shutting down");
-                        break;
+                        break "error";
                     }
                     if let Err(e) = writer.flush() {
                         error!(error = %e, "Failed to flush stdout, shutting down");
-                        break;
+                        break "error";
                     }
                 } else if raw.get("result").is_some() || raw.get("error").is_some() {
                     // Response to a server-initiated request
                     handle_pending_response(&raw, &mut state, &ctx);
                 } else {
                     warn!("Received message with no 'method', 'result', or 'error' field");
+                    crate::index::log_protocol_event("message/invalid", &[
+                        ("reason", "missing_method_result_error".to_string()),
+                    ]);
                 }
             }
             Err(e) => {
                 error!(error = %e, "Error reading stdin");
-                break;
+                break "error";
             }
         }
-    }
+    };
 
+    crate::index::log_protocol_event("shutdown", &[("reason", shutdown_reason.to_string())]);
     info!("stdin closed, saving indexes before shutdown...");
     crate::index::log_memory("shutdown: saving indexes");
     save_indexes_on_shutdown(&ctx);
@@ -450,6 +579,7 @@ fn handle_request(
             // Use ctx.def_extensions (computed once in serve.rs) to ensure
             // initialize instructions are consistent with tools/list descriptions.
             // Both must use the same def_extensions source.
+            let id_for_log = json_rpc_id_for_log(&id);
             let content_ext_refs: Vec<&str> = ctx
                 .server_ext
                 .split(',')
@@ -457,21 +587,31 @@ fn handle_request(
                 .filter(|ext| !ext.is_empty())
                 .collect();
             let def_ext_refs: Vec<&str> = ctx.def_extensions.iter().map(|s| s.as_str()).collect();
-            let xml_on_demand_available = cfg!(feature = "lang-xml") && ctx.def_index.is_some();
             let result = InitializeResult::new_with_extensions_and_xml_on_demand(
                 &content_ext_refs,
                 &def_ext_refs,
-                xml_on_demand_available,
+                xml_on_demand_available(ctx),
             );
             let result_val = safe_to_value(result, &id);
-            safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)
+            let response = safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null);
+            crate::index::log_protocol_event("initialize/response", &[
+                ("id", id_for_log),
+                ("toolsAdvertised", advertised_tool_count().to_string()),
+            ]);
+            response
         }
         "tools/list" => {
-            let xml_on_demand_available = cfg!(feature = "lang-xml") && ctx.def_index.is_some();
-            let tools = handlers::tool_definitions_with_runtime(&ctx.def_extensions, xml_on_demand_available);
+            let id_for_log = json_rpc_id_for_log(&id);
+            let tools = handlers::tool_definitions_with_runtime(&ctx.def_extensions, xml_on_demand_available(ctx));
+            let tool_count = tools.len();
             let result = ToolsListResult { tools };
             let result_val = safe_to_value(result, &id);
-            safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null)
+            let response = safe_to_value(JsonRpcResponse::new(id, result_val), &Value::Null);
+            crate::index::log_protocol_event("tools/list/response", &[
+                ("id", id_for_log),
+                ("tools", tool_count.to_string()),
+            ]);
+            response
         }
         "tools/call" => {
             let params = match params {

@@ -1,5 +1,11 @@
 # Changelog
 
+## MCP startup protocol observability
+
+- **Trace MCP startup and tool discovery.** When `--debug-log` is enabled, the MCP stdio loop now records `PROTO` lifecycle events for `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, and `ping` before handler dispatch, including roots capabilities and requested tool names.
+- **Capture invalid protocol paths.** Malformed JSON, invalid request shapes, unsupported JSON-RPC versions, unknown message shapes, EOF, and shutdown reasons now appear in the protocol trace to distinguish host-side startup races from requests that reached xray.
+- **Preserve stdout purity.** Protocol diagnostics are emitted only to stderr/debug logs, keeping stdout reserved for JSON-RPC responses.
+
 ## Language-aware xray guidance
 
 - **Render guidance from active language capabilities.** MCP initialize instructions now distinguish content-indexed extensions from definition-parser extensions, so SQL, TypeScript/Angular, C#, Rust, and XML-on-demand guidance only appears when the corresponding runtime capability is available.

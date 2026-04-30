@@ -268,6 +268,20 @@ fn test_log_request_format() {
 }
 
 #[test]
+fn test_protocol_event_format_sanitizes_fields() {
+    let line = super::format_protocol_event_line("tools/call", &[
+        ("id", "42".to_string()),
+        ("name", "xray_grep".to_string()),
+        ("note", "one\ntwo".to_string()),
+    ]);
+
+    assert!(line.contains(" | PROTO | tools/call | "), "{line}");
+    assert!(line.contains("id=42"), "{line}");
+    assert!(line.contains("name=xray_grep"), "{line}");
+    assert!(line.contains("note=one\\ntwo"), "{line}");
+}
+
+#[test]
 fn test_log_response_format() {
     // Verify format_utc_timestamp produces valid ISO 8601
     let ts = crate::index::format_utc_timestamp();

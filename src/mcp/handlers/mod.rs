@@ -38,6 +38,11 @@ pub(crate) use self::callers::resolve_call_site;
 #[cfg(test)]
 pub(crate) static PROCESS_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+/// Number of tools advertised by `tools/list`.
+/// Keep this in sync with `tool_definitions_with_runtime`; server protocol trace
+/// uses it to avoid rebuilding full tool descriptions during initialize logging.
+pub const TOOL_DEFINITION_COUNT: usize = 15;
+
 /// Return all tool definitions for tools/list.
 /// `def_extensions` — file extensions with definition parser support (e.g., ["cs", "rs"]).
 /// Used to dynamically generate language lists in xray_definitions and xray_callers descriptions.
