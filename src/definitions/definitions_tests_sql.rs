@@ -696,6 +696,289 @@ END
 }
 
 #[test]
+fn test_sql_procedure_signature_uses_header_params_only() {
+    let source = r#"
+CREATE PROCEDURE [Modifiers].[usp_Example]
+     @CallingWorkspaceId AS BIGINT
+    ,@TenantId AS BIGINT
+    ,@AccessRequestApprovalContext AS [Modifiers].[udtt_AccessRequestApprovalContext] READONLY
+AS
+BEGIN
+    SELECT @ContentProviderDisplayText = cp.DisplayText,
+           @ContentProviderFolderId = cp.FolderId,
+           @ContentProviderKey = cp.ProviderKey
+    FROM [dbo].[ContentProviders_V0] AS cp
+
+    EXEC Modifiers.nsp_EnsureContentProviderAccess_V40
+        @CallingWorkspaceId = -1,
+        @CallingTenantId = @TenantId
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let proc = defs.iter().find(|d| d.kind == DefinitionKind::StoredProcedure).unwrap();
+    let sig = proc.signature.as_ref().unwrap();
+
+    assert!(
+        sig.contains("(@CallingWorkspaceId, @TenantId, @AccessRequestApprovalContext)"),
+        "Signature should include only header params, got: {}",
+        sig
+    );
+    assert!(!sig.contains("@ContentProviderFolderId"), "Signature should not include body local values, got: {}", sig);
+    assert!(!sig.contains("@ContentProviderKey"), "Signature should not include body local values, got: {}", sig);
+    assert!(!sig.contains("@CallingTenantId"), "Signature should not include EXEC call args, got: {}", sig);
+}
+
+#[test]
+fn test_sql_function_signature_params_stop_before_returns() {
+    let source = r#"
+CREATE FUNCTION [dbo].[udf_Example]
+(
+    @InputId INT
+    ,@TenantId BIGINT
+)
+RETURNS INT
+AS
+BEGIN
+    RETURN @TenantId
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let func = defs.iter().find(|d| d.kind == DefinitionKind::SqlFunction).unwrap();
+    let sig = func.signature.as_ref().unwrap();
+
+    assert!(
+        sig.contains("(@InputId, @TenantId)"),
+        "Signature should include function header params, got: {}",
+        sig
+    );
+}
+
+#[test]
+fn test_sql_inline_procedure_signature_params_stop_before_body() {
+    let source = r#"
+CREATE PROCEDURE [dbo].[usp_Inline] @TenantId BIGINT, @ReportId BIGINT AS SELECT @BodyLocal = @TenantId
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let proc = defs.iter().find(|d| d.kind == DefinitionKind::StoredProcedure).unwrap();
+    let sig = proc.signature.as_ref().unwrap();
+
+    assert_eq!(
+        sig,
+        "CREATE PROCEDURE [dbo].[usp_Inline] @TenantId BIGINT, @ReportId BIGINT"
+    );
+    assert!(!sig.contains("@BodyLocal"), "Signature should not include inline body values, got: {}", sig);
+}
+
+#[test]
+fn test_sql_inline_function_signature_params_stop_before_returns() {
+    let source = r#"
+CREATE FUNCTION [dbo].[udf_Inline](@InputId INT, @TenantId BIGINT) RETURNS INT AS BEGIN RETURN @TenantId END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let func = defs.iter().find(|d| d.kind == DefinitionKind::SqlFunction).unwrap();
+    let sig = func.signature.as_ref().unwrap();
+
+    assert_eq!(
+        sig,
+        "CREATE FUNCTION [dbo].[udf_Inline](@InputId INT, @TenantId BIGINT)"
+    );
+}
+
+
+#[test]
+fn test_sql_inline_procedure_signature_preserves_comment_markers_in_defaults() {
+    let source = r#"
+CREATE PROCEDURE [dbo].[usp_DefaultMarkers] @Dash VARCHAR(8) = '--', @Slash VARCHAR(8) = '/*', @TenantId INT AS SELECT @TenantId
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let proc = defs.iter().find(|d| d.kind == DefinitionKind::StoredProcedure).unwrap();
+    let sig = proc.signature.as_ref().unwrap();
+
+    assert_eq!(
+        sig,
+        "CREATE PROCEDURE [dbo].[usp_DefaultMarkers] @Dash VARCHAR(8) = '--', @Slash VARCHAR(8) = '/*', @TenantId INT"
+    );
+}
+
+#[test]
+fn test_sql_multiline_function_signature_appends_params_after_open_paren() {
+    let source = r#"
+CREATE FUNCTION [dbo].[udf_MultilineOpen](
+    @InputId INT
+    ,@TenantId BIGINT
+)
+RETURNS INT
+AS
+BEGIN
+    RETURN @TenantId
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let func = defs.iter().find(|d| d.kind == DefinitionKind::SqlFunction).unwrap();
+    let sig = func.signature.as_ref().unwrap();
+
+    assert_eq!(
+        sig,
+        "CREATE FUNCTION [dbo].[udf_MultilineOpen](@InputId, @TenantId)"
+    );
+}
+
+
+#[test]
+fn test_sql_multiline_procedure_signature_rebuilds_partial_first_line_params() {
+    let source = r#"
+CREATE PROCEDURE [dbo].[usp_Partial] @FirstParam INT,
+    @SecondParam BIGINT
+AS
+BEGIN
+    SELECT 1
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let proc = defs.iter().find(|d| d.kind == DefinitionKind::StoredProcedure).unwrap();
+    let sig = proc.signature.as_ref().unwrap();
+
+    assert_eq!(
+        sig,
+        "CREATE PROCEDURE [dbo].[usp_Partial] (@FirstParam, @SecondParam)"
+    );
+}
+
+#[test]
+fn test_sql_multiline_function_signature_rebuilds_partial_first_line_params() {
+    let source = r#"
+CREATE FUNCTION [dbo].[udf_Partial](@InputId INT,
+    @TenantId BIGINT
+)
+RETURNS INT
+AS
+BEGIN
+    RETURN @TenantId
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let func = defs.iter().find(|d| d.kind == DefinitionKind::SqlFunction).unwrap();
+    let sig = func.signature.as_ref().unwrap();
+
+    assert_eq!(
+        sig,
+        "CREATE FUNCTION [dbo].[udf_Partial](@InputId, @TenantId)"
+    );
+}
+
+#[test]
+fn test_sql_signature_starts_at_real_create_not_commented_out_procedure() {
+    let source = r#"
+-- CREATE PROCEDURE [dbo].[usp_Fake]
+--     @FakeParam INT
+-- AS SELECT @FakeParam
+CREATE PROCEDURE [dbo].[usp_CommentSafe]
+    @RealParam INT
+AS
+BEGIN
+    SELECT 1
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let proc = defs.iter().find(|d| d.kind == DefinitionKind::StoredProcedure).unwrap();
+    let sig = proc.signature.as_ref().unwrap();
+
+    assert_eq!(proc.name, "usp_CommentSafe");
+    assert!(sig.starts_with("CREATE PROCEDURE"), "Signature should start at real CREATE, got: {}", sig);
+    assert!(sig.contains("@RealParam"), "Signature should include real header param, got: {}", sig);
+    assert!(!sig.contains("@FakeParam"), "Signature should not include comment text, got: {}", sig);
+}
+
+#[test]
+fn test_sql_signature_starts_at_real_create_not_commented_out_function() {
+    let source = r#"
+-- CREATE FUNCTION [dbo].[udf_Fake](@FakeParam INT) RETURNS INT AS BEGIN RETURN @FakeParam END
+CREATE FUNCTION [dbo].[udf_CommentSafe](@RealParam INT) RETURNS INT AS BEGIN RETURN @RealParam END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let func = defs.iter().find(|d| d.kind == DefinitionKind::SqlFunction).unwrap();
+    let sig = func.signature.as_ref().unwrap();
+
+    assert_eq!(func.name, "udf_CommentSafe");
+    assert!(sig.starts_with("CREATE FUNCTION"), "Signature should start at real CREATE, got: {}", sig);
+    assert!(sig.contains("@RealParam"), "Signature should include real header param, got: {}", sig);
+    assert!(!sig.contains("@FakeParam"), "Signature should not include comment text, got: {}", sig);
+}
+
+
+#[test]
+fn test_sql_dispatch_ignores_block_commented_create() {
+    let source = r#"
+/*
+CREATE TABLE [dbo].[FakeTable]
+(
+    Id INT
+)
+*/
+CREATE PROCEDURE [dbo].[usp_BlockCommentDispatch]
+    @RealParam INT
+AS
+BEGIN
+    SELECT 1
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let proc = defs.iter().find(|d| d.kind == DefinitionKind::StoredProcedure).unwrap();
+    let sig = proc.signature.as_ref().unwrap();
+
+    assert_eq!(proc.name, "usp_BlockCommentDispatch");
+    assert!(sig.contains("(@RealParam)"), "Signature should include real header param, got: {}", sig);
+    assert!(defs.iter().all(|d| d.name != "FakeTable"), "Commented-out CREATE TABLE should not be parsed");
+}
+
+#[test]
+fn test_sql_signature_params_ignore_header_comments() {
+    let source = r#"
+CREATE PROCEDURE [dbo].[usp_HeaderComments]
+    -- AS SELECT @LegacyParam
+    /* @BlockParam BIGINT */
+    @RealParam INT
+AS
+BEGIN
+    SELECT @BodyLocal = 1
+END
+"#;
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let proc = defs.iter().find(|d| d.kind == DefinitionKind::StoredProcedure).unwrap();
+    let sig = proc.signature.as_ref().unwrap();
+
+    assert!(sig.contains("(@RealParam)"), "Signature should include real header param, got: {}", sig);
+    assert!(!sig.contains("@LegacyParam"), "Signature should ignore line-comment params, got: {}", sig);
+    assert!(!sig.contains("@BlockParam"), "Signature should ignore block-comment params, got: {}", sig);
+    assert!(!sig.contains("@BodyLocal"), "Signature should not include body values, got: {}", sig);
+}
+
+
+#[test]
+fn test_sql_signature_params_preserve_crlf_boundaries() {
+    let source = "CREATE PROCEDURE [dbo].[usp_Crlf]\r\n    @FirstParam INT\r\n    ,@SecondParam BIGINT\r\nAS\r\nBEGIN\r\n    SELECT @BodyLocal = 1\r\nEND\r\n";
+    let (defs, _, _) = parse_sql_definitions(source, 0);
+
+    let proc = defs.iter().find(|d| d.kind == DefinitionKind::StoredProcedure).unwrap();
+    let sig = proc.signature.as_ref().unwrap();
+
+    assert!(sig.contains("(@FirstParam, @SecondParam)"), "Signature should include CRLF header params, got: {}", sig);
+    assert!(!sig.contains("@BodyLocal"), "Signature should not include CRLF body values, got: {}", sig);
+}
+
+#[test]
 fn test_sql_whitespace_only_file() {
     let source = "   \n\n   \n  \t  \n";
     let (defs, _, _) = parse_sql_definitions(source, 0);
