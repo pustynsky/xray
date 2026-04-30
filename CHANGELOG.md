@@ -1,5 +1,11 @@
 # Changelog
 
+## Angular context hints
+
+- **Surface Angular navigation guidance in existing `summary.nextStepHint`.** `xray_definitions` now suggests selector-based parent lookups and class-based child lookups when component selector/template metadata is present, while `xray_callers` template-navigation responses clarify that nodes are component parents/children rather than method callers.
+- **Preserve handler-specific MCP guidance.** Shared response guidance now keeps a handler-provided `nextStepHint` instead of replacing it with generic tool text.
+- **Harden template-navigation follow-ups.** `xray_callers direction="up"` accepts known Angular selectors even when they do not contain `-`, and source hints resolve to repo-relative paths to avoid ambiguous basename-only `file=[...]` suggestions.
+
 ## Serve background build failure handling
 
 - **Unblock startup waiters after detached index build failure or panic.**

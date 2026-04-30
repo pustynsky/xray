@@ -678,7 +678,9 @@ pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, 
     if let Some(summary) = obj.get_mut("summary").and_then(|v| v.as_object_mut()) {
         summary.insert("policyReminder".to_string(), json!(build_policy_reminder(indexed_ext)));
         if let Some(hint) = next_step_hint(tool_name) {
-            summary.insert("nextStepHint".to_string(), json!(hint));
+            // Tool handlers may set a more specific nextStepHint; use the generic
+            // guidance only when the response did not already provide one.
+            summary.entry("nextStepHint".to_string()).or_insert(json!(hint));
         }
         // Inject workspace metadata into every response
         if let Ok(ws) = ctx.workspace.read() {

@@ -174,6 +174,120 @@ const BUILTIN_RECEIVER_TYPES: &[&str] = &[
     "Tuple", "ValueTuple", "Span", "Memory",
 ];
 
+/// Build a contextual hint for Angular template-navigation results.
+///
+/// These nodes are component parent/child relationships, not method call graph
+/// nodes. The node's `file` field is intentionally basename-shaped for the
+/// existing call-tree payload, so resolve it back to a repo-relative path before
+/// suggesting an `xray_definitions file=[...]` follow-up.
+fn template_navigation_next_step_hint(
+    template_results: &[Value],
+    def_idx: &DefinitionIndex,
+    method_name: &str,
+    direction: &str,
+) -> Option<String> {
+    let Some(first_node) = template_results.first() else {
+        let relation = if direction == "down" { "child components" } else { "parent templates" };
+        return Some(format!(
+            "Template-navigation result: no Angular {} found for '{}'. Check the selector/class with xray_definitions.",
+            relation,
+            method_name,
+        ));
+    };
+    match template_navigation_source_file(first_node, def_idx) {
+        Some(file) => Some(format!(
+            "Template-navigation result: nodes are Angular component parents/children, not method callers. Read source: xray_definitions includeBody=true file=[\"{}\"].",
+            file,
+        )),
+        None => Some(
+            "Template-navigation result: nodes are Angular component parents/children, not method callers. Use xray_definitions to inspect the returned component class."
+                .to_string(),
+        ),
+    }
+}
+
+fn template_navigation_hint_path(file_path: &str, def_idx: &DefinitionIndex) -> String {
+    let normalized_file = file_path.replace('\\', "/");
+    let normalized_root = def_idx.root.replace('\\', "/");
+    let root = normalized_root.trim_end_matches('/');
+    if root.is_empty() || root == "." || normalized_file.len() <= root.len() {
+        return normalized_file;
+    }
+
+    let Some(file_prefix) = normalized_file.get(..root.len()) else {
+        return normalized_file;
+    };
+    let root_matches = file_prefix == root
+        || (root.as_bytes().get(1) == Some(&b':') && file_prefix.eq_ignore_ascii_case(root));
+    if root_matches && normalized_file.as_bytes().get(root.len()) == Some(&b'/') {
+        normalized_file[root.len() + 1..].to_string()
+    } else {
+        normalized_file
+    }
+}
+
+fn is_known_angular_selector(selector: &str, def_idx: &DefinitionIndex) -> bool {
+    !selector.is_empty()
+        && def_idx
+            .selector_index
+            .keys()
+            .any(|known_selector| known_selector.eq_ignore_ascii_case(selector))
+}
+
+fn is_known_angular_component(class_name: &str, def_idx: &DefinitionIndex) -> bool {
+    let Some(def_indices) = def_idx.name_index.get(&class_name.to_lowercase()) else {
+        return false;
+    };
+
+    def_indices.iter().any(|&def_index| {
+        def_idx
+            .definitions
+            .get(def_index as usize)
+            .is_some_and(|def| {
+                def.kind == DefinitionKind::Class
+                    && def.attributes.iter().any(|attr| attr.starts_with("Component("))
+            })
+    })
+}
+
+fn template_navigation_source_file(node: &Value, def_idx: &DefinitionIndex) -> Option<String> {
+    let class_name = node
+        .get("class")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())?;
+    let expected_file_name = node
+        .get("file")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty());
+    let def_indices = def_idx.name_index.get(&class_name.to_lowercase())?;
+
+    for &def_index in def_indices {
+        let Some(def) = def_idx.definitions.get(def_index as usize) else {
+            continue;
+        };
+        let Some(file_path) = def_idx.files.get(def.file_id as usize) else {
+            continue;
+        };
+
+        if let Some(expected) = expected_file_name {
+            let Some(actual) = Path::new(file_path.as_str())
+                .file_name()
+                .and_then(|f| f.to_str())
+            else {
+                continue;
+            };
+            if !actual.eq_ignore_ascii_case(expected) {
+                continue;
+            }
+        }
+
+        return Some(template_navigation_hint_path(file_path, def_idx));
+    }
+
+    None
+}
+
+
 pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let def_index = match &ctx.def_index {
         Some(idx) => idx,
@@ -295,26 +409,35 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
 
     // ─── Angular template tree (check before standard call tree) ─────
     let is_down = direction == "down";
-    let template_results = if is_down {
-        let mut visited = HashSet::new();
-        build_template_callee_tree(&method_name, max_depth, 0, &def_idx, &mut visited)
+    let template_navigation_requested = if is_down {
+        is_known_angular_component(&method_name, &def_idx)
     } else {
-        // For up direction, if method contains '-' it might be a selector
-        if method_name.contains('-') {
-            let mut visited = HashSet::new();
-            find_template_parents(&method_name, max_depth, 0, &def_idx, &mut visited)
+        // Upward Angular template navigation is selector-based. The old hyphen
+        // heuristic keeps legacy behavior, while selector_index covers valid
+        // selectors that do not contain '-'.
+        method_name.contains('-') || is_known_angular_selector(&method_name, &def_idx)
+    };
+    let template_results = if template_navigation_requested {
+        let mut visited = HashSet::new();
+        if is_down {
+            build_template_callee_tree(&method_name, max_depth, 0, &def_idx, &mut visited)
         } else {
-            Vec::new()
+            find_template_parents(&method_name, max_depth, 0, &def_idx, &mut visited)
         }
+    } else {
+        Vec::new()
     };
 
-    if !template_results.is_empty() {
+    if template_navigation_requested {
         let search_elapsed = search_start.elapsed();
         let mut summary = json!({
             "totalNodes": template_results.len(),
             "templateNavigation": true,
             "searchTimeMs": search_elapsed.as_secs_f64() * 1000.0,
         });
+        if let Some(hint) = template_navigation_next_step_hint(&template_results, &def_idx, &method_name, direction) {
+            summary["nextStepHint"] = json!(hint);
+        }
         inject_branch_warning(&mut summary, ctx);
         inject_index_degraded(&mut summary, ctx);
         let mut output = json!({
