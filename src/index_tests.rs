@@ -1,6 +1,5 @@
 #![allow(clippy::field_reassign_with_default)] // tests prefer mutate-after-default for readability
 use std::collections::HashMap;
-use std::io::Write;
 use code_xray::Posting;
 use crate::index::build_trigram_index;
 
@@ -195,23 +194,32 @@ fn test_log_memory_is_noop_when_disabled() {
 }
 
 #[test]
-fn test_enable_debug_log_creates_file() {
+fn test_create_debug_log_file_creates_file_with_header() {
     let tmp = tempfile::tempdir().unwrap();
-    // Note: we can't call enable_debug_log in tests because it uses
-    // global OnceLock (can only set once per process). Instead, test the
-    // file creation logic directly.
-    let log_path = tmp.path().join("debug.log");
-    {
-        let mut f = std::fs::File::create(&log_path).unwrap();
-        writeln!(f, "{:>8} | {:>8} | {:>8} | {:>8} | label",
-            "elapsed", "WS_MB", "Peak_MB", "Commit_MB").unwrap();
-        writeln!(f, "{}", "-".repeat(70)).unwrap();
-    }
+    let root = crate::canonicalize_test_root(tmp.path());
+    let server_dir = root.to_string_lossy().to_string();
+
+    let log_path = crate::index::create_debug_log_file(&root, &server_dir).unwrap();
+
     assert!(log_path.exists());
     let content = std::fs::read_to_string(&log_path).unwrap();
     assert!(content.contains("elapsed"));
     assert!(content.contains("WS_MB"));
     assert!(content.contains("label"));
+}
+
+#[test]
+fn test_create_debug_log_file_returns_error_when_index_base_is_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let index_base = root.join("not-a-directory");
+    std::fs::write(&index_base, "not a directory").unwrap();
+    let server_dir = root.to_string_lossy().to_string();
+
+    let err = crate::index::create_debug_log_file(&index_base, &server_dir).unwrap_err();
+
+    assert!(err.path().starts_with(&index_base));
+    assert!(!err.path().exists());
 }
 
 #[test]

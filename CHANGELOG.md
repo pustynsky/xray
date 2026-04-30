@@ -8,6 +8,11 @@
 - **Expose per-file readability metadata in `xray_info`.** File metadata now reports `definitionParserActive`, `xmlOnDemandActive`, and `symbolReadableViaDefinitions`, with hints for parser-backed source files and XML-on-demand files.
 - **Clarify `xray_edit` tool choice.** `xray_help tool="xray_edit"` now includes a decision card for when to use `xray_edit` versus built-in whole-file writes.
 
+## Debug-log startup diagnostics
+
+- **Report debug-log initialization failures explicitly.** `xray serve --debug-log` now creates the `.debug.log` file before index build/load, reports filesystem failures to stderr with the target path and source error, and leaves debug logging disabled instead of claiming success when the file was not created.
+- **Keep MCP startup best-effort for debug logging.** If the debug-log file cannot be created, the server continues normal MCP startup without polluting JSON-RPC stdout.
+
 ## SQL procedure/function signature parameters
 
 - **Scope SQL signature params to declarations.** `xray_definitions` now builds stored procedure and function signatures from declaration headers only, preserving comma-leading and multiline params while excluding body locals and `EXEC` arguments.

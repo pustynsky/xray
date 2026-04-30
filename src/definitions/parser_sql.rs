@@ -456,10 +456,10 @@ fn find_signature_body_boundary(line: &str, kind: DefinitionKind) -> Option<usiz
     let leading_whitespace = line.len() - line.trim_start().len();
     let trimmed = &line[leading_whitespace..];
 
-    if kind == DefinitionKind::SqlFunction {
-        if let Some(returns_idx) = find_sql_keyword(trimmed, "RETURNS") {
-            return Some(leading_whitespace + returns_idx);
-        }
+    if kind == DefinitionKind::SqlFunction
+        && let Some(returns_idx) = find_sql_keyword(trimmed, "RETURNS")
+    {
+        return Some(leading_whitespace + returns_idx);
     }
 
     if let Some(as_idx) = find_proc_body_as(trimmed) {

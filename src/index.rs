@@ -68,28 +68,83 @@ pub fn debug_log_path_for(index_base: &std::path::Path, server_dir: &str) -> Pat
     index_base.join(format!("{}_{:08x}.debug.log", prefix, hash as u32))
 }
 
-/// Enable debug logging: creates/truncates a per-server `.debug.log` in `index_base`,
-/// writes a header line, and sets the global enable flag.
+/// Error returned when the debug-log file cannot be initialized.
+/// Carries the final target path so startup diagnostics can name the exact file.
+#[derive(Debug)]
+pub struct DebugLogInitError {
+    path: PathBuf,
+    source: std::io::Error,
+}
+
+impl DebugLogInitError {
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub fn source(&self) -> &std::io::Error {
+        &self.source
+    }
+}
+
+/// Create/truncate a per-server `.debug.log` and write its header.
+/// This is the testable filesystem boundary and does not touch global debug state.
+pub fn create_debug_log_file(index_base: &std::path::Path, server_dir: &str) -> Result<PathBuf, DebugLogInitError> {
+    let log_path = debug_log_path_for(index_base, server_dir);
+    fs::create_dir_all(index_base).map_err(|source| DebugLogInitError {
+        path: log_path.clone(),
+        source,
+    })?;
+
+    let mut f = fs::File::create(&log_path).map_err(|source| DebugLogInitError {
+        path: log_path.clone(),
+        source,
+    })?;
+    writeln!(f,
+        "{:>8} | {:>8} | {:>8} | {:>8} | label",
+        "elapsed", "WS_MB", "Peak_MB", "Commit_MB"
+    ).map_err(|source| DebugLogInitError {
+        path: log_path.clone(),
+        source,
+    })?;
+    writeln!(f, "{}", "-".repeat(70)).map_err(|source| DebugLogInitError {
+        path: log_path.clone(),
+        source,
+    })?;
+
+    Ok(log_path)
+}
+
+/// Enable debug logging: creates/truncates the log file and sets the global enable flag.
 ///
 /// The log filename uses the same semantic prefix as index files (e.g.,
 /// `repos_<repo>_<hash>.debug.log`) so multiple servers don't overwrite
 /// each other's logs.
 ///
+/// Debug logging is best-effort for MCP startup: if the file cannot be created,
+/// the server keeps running, emits a stderr diagnostic, and leaves logging disabled.
+/// Repeated calls keep the first initialized log file because the global state is single-use.
 /// Must be called once at startup before any `log_memory()` / `log_request()` / `log_response()` calls.
 pub fn enable_debug_log(index_base: &std::path::Path, server_dir: &str) {
-    let _ = fs::create_dir_all(index_base);
-    let log_path = debug_log_path_for(index_base, server_dir);
-
-    // Truncate and write header
-    if let Ok(mut f) = fs::File::create(&log_path) {
-        let _ = writeln!(f,
-            "{:>8} | {:>8} | {:>8} | {:>8} | label",
-            "elapsed", "WS_MB", "Peak_MB", "Commit_MB"
-        );
-        let _ = writeln!(f, "{}", "-".repeat(70));
+    if let Some(path) = DEBUG_LOG_PATH.get() {
+        eprintln!("[debug-log] Already enabled, writing to {}", path.display());
+        return;
     }
 
-    let _ = DEBUG_LOG_PATH.set(log_path.clone());
+    let log_path = match create_debug_log_file(index_base, server_dir) {
+        Ok(path) => path,
+        Err(err) => {
+            // Debug logging is optional; never fail MCP startup because diagnostics cannot be written.
+            eprintln!("[debug-log] Disabled; failed to create {}: {}", err.path().display(), err.source());
+            return;
+        }
+    };
+
+    if DEBUG_LOG_PATH.set(log_path.clone()).is_err() {
+        if let Some(path) = DEBUG_LOG_PATH.get() {
+            eprintln!("[debug-log] Already enabled, writing to {}", path.display());
+        }
+        return;
+    }
     let _ = DEBUG_LOG_START.set(Instant::now());
     DEBUG_LOG_ENABLED.store(true, Ordering::Release);
 
