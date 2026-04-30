@@ -2,8 +2,8 @@
 
 ## Guidance prefix for MCP responses
 
-- **Add opt-in agent guidance prefix.** When `XRAY_GUIDANCE_PREFIX` is truthy, eligible MCP tool responses move `summary.nextStepHint` and `summary.policyReminder` into a compact text prefix before the JSON payload, while default output remains JSON-only.
-- **Keep operational tools JSON-only.** `xray_info`, `xray_help`, `xray_reindex`, and `xray_reindex_definitions` are excluded from prefix rendering so automation can continue parsing them directly.
+- **Add opt-in agent guidance prefix.** When `XRAY_GUIDANCE_PREFIX` is truthy, MCP tool responses move `summary.nextStepHint` and `summary.policyReminder` into a compact text prefix before the JSON payload, while default output remains JSON-only.
+- **Apply prefix uniformly across all JSON-producing tools.** Prefix rendering covers every tool that injects guidance fields, including `xray_info`, `xray_help`, `xray_reindex`, and `xray_reindex_definitions`. Automation that consumes responses with `XRAY_GUIDANCE_PREFIX=1` must split the prefix from the JSON suffix before parsing.
 - **Preserve response post-processing contracts.** Prefix rendering runs after guidance injection, unknown-argument warnings, metrics, and truncation, and recomputes final `responseBytes` and `estimatedTokens` for the actual response text.
 
 ## Angular context hints
