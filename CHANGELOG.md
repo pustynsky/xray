@@ -6,6 +6,12 @@
 - **Report execution and scope decisions.** `xray_grep` includes top-level execution metadata, `xray_definitions` supports explicit exact-name and auto-correction controls, and `xray_callers` can mark production-only scope with node kinds.
 - **Preserve result metadata during truncation.** Oversized responses now keep handler-specific `resultStatus` details such as definition requests, auto-correction data, and caller scope while marking the response as partial.
 
+## Grep phrase missing-token diagnostics
+
+- **Explain phrase short-circuits on missing index tokens.** `xray_grep phrase=true` now records missing phrase tokens in `summary.phraseDetail.missingTokens`, keeps a `perToken` entry with zero postings, and adds a `searchModeNote` that suggests `substring=true` or `lineRegex=true` instead of returning an ambiguous zero-result response.
+- **Preserve multi-phrase missing-token context.** Multi-phrase searches now keep compact `summary.phraseWarnings` for phrases that stopped before file reads, so diagnostics from an earlier phrase are not hidden by the last phrase's `phraseDetail`.
+- **Bound diagnostic payload growth.** Multi-phrase warnings are capped and report `summary.phraseWarningsOmitted` when more warnings were suppressed, preserving the fast token-index short-circuit path without adding fallback scans or unbounded summary JSON.
+
 ## MCP startup protocol observability
 
 - **Trace MCP startup and tool discovery.** When `--debug-log` is enabled, the MCP stdio loop now records `PROTO` lifecycle events for `initialize`, `notifications/initialized`, `tools/list`, `tools/call`, and `ping` before handler dispatch, including roots capabilities and requested tool names.
