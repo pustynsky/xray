@@ -2635,6 +2635,100 @@ fn test_phrase_pure_punctuation_hints_line_regex() {
     cleanup_tmp(&tmp);
 }
 
+#[test]
+fn test_phrase_missing_underscore_token_hints_alternatives() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["Definitely_NotHere"],
+        "phrase": true
+    }));
+    assert!(!result.is_error, "Missing-token phrase should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+    assert_eq!(summary["totalFiles"], 0);
+
+    let detail = &summary["phraseDetail"];
+    assert_eq!(detail["tokenCount"], 1);
+    let per_token = detail["perToken"].as_array().expect("perToken should be present");
+    assert_eq!(per_token.len(), 1);
+    assert_eq!(per_token[0]["token"].as_str().unwrap(), "definitely_nothere");
+    assert_eq!(per_token[0]["postings"], 0);
+    assert_eq!(per_token[0]["passed"], 0);
+
+    let missing = detail["missingTokens"].as_array().expect("missingTokens should be present");
+    assert_eq!(missing.len(), 1);
+    assert_eq!(missing[0].as_str().unwrap(), "definitely_nothere");
+
+    let note = summary["searchModeNote"].as_str()
+        .expect("searchModeNote should explain the missing index token");
+    assert!(note.contains("no postings"),
+        "note should explain that the token had no postings. Got: {}", note);
+    assert!(note.contains("substring=true"),
+        "note should suggest substring=true. Got: {}", note);
+    assert!(note.contains("lineRegex=true"),
+        "note should suggest lineRegex=true. Got: {}", note);
+
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_multi_phrase_missing_token_keeps_phrase_warning() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["Definitely_NotHere", "public class"],
+        "phrase": true
+    }));
+    assert!(!result.is_error, "Multi-phrase search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+    let total = summary["totalFiles"].as_u64().unwrap();
+    assert!(total >= 1, "second phrase should still find files, got {}", total);
+
+    let warnings = summary["phraseWarnings"].as_array()
+        .expect("missing first phrase should be retained in phraseWarnings");
+    assert_eq!(warnings.len(), 1);
+    assert_eq!(warnings[0]["phrase"].as_str().unwrap(), "Definitely_NotHere");
+    let missing = warnings[0]["missingTokens"].as_array()
+        .expect("warning should include missingTokens");
+    assert_eq!(missing[0].as_str().unwrap(), "definitely_nothere");
+    assert_eq!(warnings[0]["missingTokenCount"], 1);
+    assert!(warnings[0].get("perToken").is_none(),
+        "phraseWarnings should stay compact and avoid full phraseDetail payload");
+
+    let note = summary["searchModeNote"].as_str()
+        .expect("searchModeNote should point at phraseWarnings");
+    assert!(note.contains("summary.phraseWarnings"),
+        "note should point at phraseWarnings. Got: {}", note);
+
+    cleanup_tmp(&tmp);
+}
+
+#[test]
+fn test_multi_phrase_missing_token_warnings_are_capped() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let terms = (0..25)
+        .map(|i| format!("Definitely_NotHere_{}", i))
+        .collect::<Vec<_>>();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": terms,
+        "phrase": true
+    }));
+    assert!(!result.is_error,
+        "Capped phrase warnings search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let summary = &output["summary"];
+
+    let warnings = summary["phraseWarnings"].as_array()
+        .expect("phraseWarnings should include capped missing-token warnings");
+    assert_eq!(warnings.len(), 20);
+    assert_eq!(summary["phraseWarningsOmitted"], 5);
+    assert!(warnings.iter().all(|warning| warning.get("perToken").is_none()),
+        "phraseWarnings should stay compact even when capped");
+    assert!(warnings.iter().all(|warning| warning["missingTokenCount"] == 1));
+
+    cleanup_tmp(&tmp);
+}
+
 
 /// Block B: dynamic searchModeNote — hint must list the actual offending
 /// characters from raw_terms, not the old hardcoded SqlClient/Blobs example.

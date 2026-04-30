@@ -2194,7 +2194,7 @@ fn auto_switch_to_phrase_if_needed(
                      (substring mode operates on individual tokens which only contain \
                      alphanumeric characters and underscores)", reason)
                 };
-                summary["searchModeNote"] = serde_json::Value::String(note);
+                append_search_mode_note(summary, note);
             }
             *text = json_to_string(&output);
         }
@@ -2550,6 +2550,7 @@ fn handle_phrase_search(
         );
         apply_dir_auto_converted_note(&mut summary, params);
         summary["phraseDetail"] = diag.to_json();
+        inject_phrase_diagnostic_note(&mut summary, &diag);
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -2577,6 +2578,7 @@ fn handle_phrase_search(
     );
     apply_dir_auto_converted_note(&mut summary, params);
     summary["phraseDetail"] = diag.to_json();
+    inject_phrase_diagnostic_note(&mut summary, &diag);
     let output = json!({
         "files": files_json,
         "summary": summary
@@ -2586,10 +2588,14 @@ fn handle_phrase_search(
 }
 
 /// Diagnostic counters for phrase search sub-timings.
+const PHRASE_WARNINGS_MAX: usize = 20;
+const PHRASE_WARNING_MISSING_TOKENS_MAX: usize = 3;
+
 #[derive(Debug, Default, Clone)]
 pub(crate) struct PhraseSearchDiag {
     pub token_count: usize,
     pub per_token: Vec<(String, usize, usize, f64)>,
+    pub missing_tokens: Vec<String>,
     pub posting_scan_ms: f64,
     pub intersection_ms: f64,
     pub candidates_after_intersection: usize,
@@ -2600,7 +2606,7 @@ pub(crate) struct PhraseSearchDiag {
 
 impl PhraseSearchDiag {
     fn to_json(&self) -> Value {
-        json!({
+        let mut value = json!({
             "tokenCount": self.token_count,
             "postingScanMs": format!("{:.1}", self.posting_scan_ms),
             "intersectionMs": format!("{:.1}", self.intersection_ms),
@@ -2610,8 +2616,86 @@ impl PhraseSearchDiag {
             "perToken": self.per_token.iter().map(|(t, postings, passed, ms)| json!({
                 "token": t, "postings": postings, "passed": passed, "ms": format!("{:.1}", ms)
             })).collect::<Vec<_>>(),
-        })
+        });
+        if !self.missing_tokens.is_empty() {
+            value["missingTokens"] = json!(self.missing_tokens);
+        }
+        value
     }
+
+    fn has_missing_tokens(&self) -> bool {
+        !self.missing_tokens.is_empty()
+    }
+
+    fn missing_tokens_note(&self) -> Option<String> {
+        if self.missing_tokens.is_empty() {
+            return None;
+        }
+        let mut preview = self.missing_tokens.iter()
+            .take(PHRASE_WARNING_MISSING_TOKENS_MAX)
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(", ");
+        if self.missing_tokens.len() > PHRASE_WARNING_MISSING_TOKENS_MAX {
+            preview.push_str(&format!(
+                " ... (+{} more)",
+                self.missing_tokens.len() - PHRASE_WARNING_MISSING_TOKENS_MAX,
+            ));
+        }
+        Some(format!(
+            "Phrase search stopped before reading files because {} token(s) had no postings in the index: {}. Try substring=true for token-substring search, or lineRegex=true for raw literal matching.",
+            self.missing_tokens.len(), preview
+        ))
+    }
+}
+
+fn append_search_mode_note(summary: &mut Value, note: String) {
+    let next = match summary.get("searchModeNote").and_then(Value::as_str) {
+        Some(existing) if existing == note => return,
+        Some(existing) if !existing.is_empty() => format!("{} {}", existing, note),
+        _ => note,
+    };
+    summary["searchModeNote"] = Value::String(next);
+}
+
+fn inject_phrase_diagnostic_note(summary: &mut Value, diag: &PhraseSearchDiag) {
+    if let Some(note) = diag.missing_tokens_note() {
+        append_search_mode_note(summary, note);
+    }
+}
+
+fn phrase_warning_json(phrase: &str, diag: &PhraseSearchDiag) -> Value {
+    let missing_tokens = diag.missing_tokens
+        .iter()
+        .take(PHRASE_WARNING_MISSING_TOKENS_MAX)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut warning = json!({
+        "phrase": phrase,
+        "tokenCount": diag.token_count,
+        "missingTokenCount": diag.missing_tokens.len(),
+        "missingTokens": missing_tokens,
+    });
+    if diag.missing_tokens.len() > PHRASE_WARNING_MISSING_TOKENS_MAX {
+        warning["missingTokensOmitted"] = json!(diag.missing_tokens.len() - PHRASE_WARNING_MISSING_TOKENS_MAX);
+    }
+    warning
+}
+
+fn inject_multi_phrase_warnings(summary: &mut Value, phrase_warnings: &[Value], omitted: usize) {
+    if phrase_warnings.is_empty() && omitted == 0 {
+        return;
+    }
+    if !phrase_warnings.is_empty() {
+        summary["phraseWarnings"] = json!(phrase_warnings);
+    }
+    if omitted > 0 {
+        summary["phraseWarningsOmitted"] = json!(omitted);
+    }
+    append_search_mode_note(
+        summary,
+        "One or more phrase terms stopped before reading files because an index token had no postings; see summary.phraseWarnings. Try substring=true for token-substring search, or lineRegex=true for raw literal matching.".to_string(),
+    );
 }
 
 /// Core phrase-matching logic: finds files containing the given phrase.
@@ -2672,7 +2756,17 @@ fn collect_phrase_matches(
         let token_start = Instant::now();
         let postings = match index.index.get(token.as_str()) {
             Some(p) => p,
-            None => return Ok((Vec::new(), diag)),
+            None => {
+                diag.missing_tokens.push(token.clone());
+                diag.per_token.push((
+                    token.clone(),
+                    0,
+                    0,
+                    token_start.elapsed().as_secs_f64() * 1000.0,
+                ));
+                diag.posting_scan_ms = posting_scan_start.elapsed().as_secs_f64() * 1000.0;
+                return Ok((Vec::new(), diag));
+            }
         };
         let posting_count = postings.len();
         let mut pass_count = 0usize;
@@ -2693,11 +2787,12 @@ fn collect_phrase_matches(
             map.insert(p.file_id, lines);
             pass_count += 1;
         }
-        if map.is_empty() {
-            return Ok((Vec::new(), diag));
-        }
         diag.per_token.push((token.clone(), posting_count, pass_count,
             token_start.elapsed().as_secs_f64() * 1000.0));
+        if map.is_empty() {
+            diag.posting_scan_ms = posting_scan_start.elapsed().as_secs_f64() * 1000.0;
+            return Ok((Vec::new(), diag));
+        }
         per_token_file_lines.push(map);
     }
     diag.posting_scan_ms = posting_scan_start.elapsed().as_secs_f64() * 1000.0;
@@ -2899,10 +2994,19 @@ fn handle_multi_phrase_search(
     let mut per_phrase_results: Vec<Vec<PhraseFileMatch>> = Vec::new();
     let mut searched_terms: Vec<&str> = Vec::new();
     let mut last_diag = PhraseSearchDiag::default();
+    let mut phrase_warnings: Vec<Value> = Vec::new();
+    let mut phrase_warnings_omitted = 0usize;
 
     for phrase in phrases {
         match collect_phrase_matches(index, phrase, params) {
             Ok((matches, diag)) => {
+                if diag.has_missing_tokens() {
+                    if phrase_warnings.len() < PHRASE_WARNINGS_MAX {
+                        phrase_warnings.push(phrase_warning_json(phrase, &diag));
+                    } else {
+                        phrase_warnings_omitted += 1;
+                    }
+                }
                 last_diag = diag;
                 per_phrase_results.push(matches);
                 searched_terms.push(phrase);
@@ -2944,6 +3048,7 @@ fn handle_multi_phrase_search(
         );
         apply_dir_auto_converted_note(&mut summary, params);
         summary["phraseDetail"] = last_diag.to_json();
+        inject_multi_phrase_warnings(&mut summary, &phrase_warnings, phrase_warnings_omitted);
         let output = json!({ "summary": summary });
         return ToolCallResult::success(json_to_string(&output));
     }
@@ -2967,6 +3072,7 @@ fn handle_multi_phrase_search(
     );
     apply_dir_auto_converted_note(&mut summary, params);
     summary["phraseDetail"] = last_diag.to_json();
+    inject_multi_phrase_warnings(&mut summary, &phrase_warnings, phrase_warnings_omitted);
     let output = json!({
         "files": files_json,
         "summary": summary
