@@ -1,5 +1,11 @@
 # Changelog
 
+## SQL procedure/function signature parameters
+
+- **Scope SQL signature params to declarations.** `xray_definitions` now builds stored procedure and function signatures from declaration headers only, preserving comma-leading and multiline params while excluding body locals and `EXEC` arguments.
+- **Ignore comments and string defaults while detecting SQL headers.** Commented-out DDL no longer wins `CREATE` dispatch or signature starts, header comments do not add fake params, and defaults containing `--` or `/*` remain intact.
+- **Harden inline and multiline signature formatting.** Inline typed params, CRLF headers, open-paren multiline functions, and partial first-line params no longer emit duplicate or malformed parameter lists.
+
 ## Guidance prefix for MCP responses
 
 - **Add opt-in agent guidance prefix.** When `XRAY_GUIDANCE_PREFIX` is truthy, eligible MCP tool responses move `summary.nextStepHint` and `summary.policyReminder` into a compact text prefix before the JSON payload, while default output remains JSON-only.
