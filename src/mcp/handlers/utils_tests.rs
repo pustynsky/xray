@@ -394,6 +394,18 @@ fn test_inject_response_guidance_creates_summary() {
 }
 
 #[test]
+fn test_inject_response_guidance_preserves_existing_next_step_hint() {
+    let result = ToolCallResult::success(r#"{"files":[],"summary":{"nextStepHint":"custom"}}"#.to_string());
+    let ctx = HandlerContext::default();
+    let result = inject_response_guidance(result, "xray_grep", "rs, md", &ctx);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(output["summary"]["nextStepHint"].as_str(), Some("custom"));
+    assert!(output["summary"]["policyReminder"].as_str().is_some());
+}
+
+
+#[test]
 fn test_inject_response_guidance_skips_non_json_success() {
     let result = ToolCallResult::success("plain text".to_string());
     let ctx = HandlerContext::default();

@@ -1151,6 +1151,149 @@ fn make_test_def_index() -> DefinitionIndex {
     }
 }
 
+/// Test fixture tuple: (component class name, selector, selectors used in its template).
+fn make_angular_definitions_ctx(entries: Vec<(&str, &str, Vec<&str>)>) -> HandlerContext {
+    let definitions: Vec<DefinitionEntry> = entries
+        .iter()
+        .enumerate()
+        .map(|(idx, (name, _, _))| DefinitionEntry {
+            name: (*name).to_string(),
+            kind: DefinitionKind::Class,
+            file_id: idx as u32,
+            line_start: 1,
+            line_end: 50,
+            signature: None,
+            parent: None,
+            modifiers: vec![],
+            attributes: vec!["Component".to_string()],
+            base_types: vec![],
+        })
+        .collect();
+
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut selector_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut template_children: HashMap<u32, Vec<String>> = HashMap::new();
+
+    for (idx, (name, selector, children)) in entries.iter().enumerate() {
+        let def_idx = idx as u32;
+        name_index.entry(name.to_lowercase()).or_default().push(def_idx);
+        kind_index.entry(DefinitionKind::Class).or_default().push(def_idx);
+        file_index.entry(def_idx).or_default().push(def_idx);
+        selector_index.entry((*selector).to_string()).or_default().push(def_idx);
+        if !children.is_empty() {
+            template_children.insert(def_idx, children.iter().map(|child| (*child).to_string()).collect());
+        }
+    }
+
+    let files = entries
+        .iter()
+        .map(|(name, _, _)| format!("src/{}.ts", name))
+        .collect();
+
+    let def_index = DefinitionIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        extensions: vec!["ts".to_string()],
+        files,
+        definitions,
+        name_index,
+        kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index,
+        path_to_id: HashMap::new(),
+        method_calls: HashMap::new(),
+        selector_index,
+        template_children,
+        ..Default::default()
+    };
+
+    HandlerContext {
+        index: Arc::new(RwLock::new(crate::ContentIndex {
+            root: ".".to_string(),
+            extensions: vec!["ts".to_string()],
+            ..Default::default()
+        })),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        ..Default::default()
+    }
+}
+
+
+#[test]
+fn test_definitions_next_step_hint_mentions_selector_parent_call() {
+    let ctx = make_angular_definitions_ctx(vec![("RequestAccessComponent", "request-access-ui", vec![])]);
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
+        "name": ["RequestAccessComponent"]
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["nextStepHint"].as_str().unwrap();
+
+    assert!(hint.contains("request-access-ui"), "hint should include selector: {}", hint);
+    assert!(
+        hint.contains("xray_callers method=[\"request-access-ui\"] direction='up'"),
+        "hint should include selector-based parent lookup: {}",
+        hint
+    );
+    assert!(!hint.contains("direction='down'"), "child lookup should be absent without children: {}", hint);
+}
+
+#[test]
+fn test_definitions_next_step_hint_uses_class_name_for_child_call() {
+    let ctx = make_angular_definitions_ctx(vec![
+        ("RequestAccessComponent", "request-access-ui", vec!["app-header"]),
+    ]);
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
+        "name": ["RequestAccessComponent"]
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["nextStepHint"].as_str().unwrap();
+
+    assert!(
+        hint.contains("xray_callers method=[\"RequestAccessComponent\"] direction='down'"),
+        "child lookup should use component class name: {}",
+        hint
+    );
+    assert!(
+        !hint.contains("xray_callers method=[\"request-access-ui\"] direction='down'"),
+        "child lookup must not use selector: {}",
+        hint
+    );
+}
+
+#[test]
+fn test_definitions_next_step_hint_limits_selectors_to_three_distinct_values() {
+    let defs_json = vec![
+        serde_json::json!({"name": "OneComponent", "selector": "one-comp"}),
+        serde_json::json!({"name": "TwoComponent", "selector": "two-comp"}),
+        serde_json::json!({"name": "DuplicateTwoComponent", "selector": "two-comp"}),
+        serde_json::json!({"name": "ThreeComponent", "selector": "three-comp"}),
+        serde_json::json!({"name": "FourComponent", "selector": "four-comp"}),
+    ];
+    let hint = angular_component_next_step_hint(&defs_json).unwrap();
+
+    assert!(hint.contains("selectors: 'one-comp', 'two-comp', 'three-comp'"), "hint should preserve returned order: {}", hint);
+    assert!(!hint.contains("four-comp"), "hint should cap selectors at three: {}", hint);
+}
+
+#[test]
+fn test_definitions_next_step_hint_generic_fallback_without_selector() {
+    let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+    let result = super::super::dispatch_tool(&ctx, "xray_definitions", &serde_json::json!({
+        "name": ["QueryService"]
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["nextStepHint"].as_str().unwrap();
+
+    assert_eq!(hint, "Next: use xray_callers for call chains or xray_grep for text patterns");
+}
+
+
 #[test]
 fn test_collect_candidates_no_filters_returns_all() {
     let index = make_test_def_index();

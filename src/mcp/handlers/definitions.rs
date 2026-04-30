@@ -1161,6 +1161,61 @@ fn format_definition_entry(
     obj
 }
 
+/// Build a contextual nextStepHint for Angular component definitions.
+///
+/// Parent navigation is selector-based because templates reference selectors, while
+/// child navigation is class-based because `direction='down'` starts from the
+/// component definition and follows its indexed `templateChildren`.
+fn angular_component_next_step_hint(defs_json: &[Value]) -> Option<String> {
+    let mut selectors: Vec<String> = Vec::new();
+    let mut child_component: Option<String> = None;
+
+    for def in defs_json {
+        if let Some(selector) = def.get("selector").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+            if selectors.len() < 3 && !selectors.iter().any(|existing| existing == selector) {
+                selectors.push(selector.to_string());
+            }
+
+            if child_component.is_none() {
+                let has_template_children = def
+                    .get("templateChildren")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|children| !children.is_empty());
+                if has_template_children
+                    && let Some(name) = def.get("name").and_then(|v| v.as_str()).filter(|s| !s.is_empty())
+                {
+                    child_component = Some(name.to_string());
+                }
+            }
+        }
+    }
+
+    if selectors.is_empty() {
+        return None;
+    }
+
+    let selector_list = selectors
+        .iter()
+        .map(|selector| format!("'{}'", selector))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut hint = format!(
+        "Angular components detected (selectors: {}). Find parent templates: xray_callers method=[\"{}\"] direction='up'.",
+        selector_list,
+        selectors[0],
+    );
+
+    if let Some(name) = child_component {
+        hint.push_str(&format!(
+            " Find child components: xray_callers method=[\"{}\"] direction='down'.",
+            name,
+        ));
+    }
+
+    Some(hint)
+}
+
+
 /// Build the summary JSON object for the search response.
 #[allow(clippy::too_many_arguments)]
 fn build_search_summary(
@@ -1274,6 +1329,9 @@ fn build_search_summary(
     }
     if let Some(missing) = compute_missing_terms(index, defs_json, args) {
         summary["missingTerms"] = missing;
+    }
+    if let Some(hint) = angular_component_next_step_hint(defs_json) {
+        summary["nextStepHint"] = json!(hint);
     }
     inject_branch_warning(&mut summary, ctx);
     inject_index_degraded(&mut summary, ctx);

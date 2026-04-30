@@ -52,6 +52,12 @@ fn class_def(file_id: u32, name: &str, base_types: Vec<&str>) -> DefinitionEntry
     }
 }
 
+fn angular_class_def(file_id: u32, name: &str, selector: &str) -> DefinitionEntry {
+    let mut def = class_def(file_id, name, vec![]);
+    def.attributes = vec![format!("Component({{selector: '{}', template: '<div></div>'}})", selector)];
+    def
+}
+
 /// Helper: create a DefinitionEntry for a method inside a class.
 fn method_def(file_id: u32, name: &str, parent: &str, line_start: u32, line_end: u32) -> DefinitionEntry {
     DefinitionEntry {
@@ -1199,6 +1205,147 @@ fn test_find_template_parents_found() {
     assert_eq!(result.len(), 1, "Should find 1 parent");
     assert_eq!(result[0]["class"].as_str().unwrap(), "ParentComp");
 }
+
+#[test]
+fn test_callers_template_navigation_next_step_hint_points_to_result_file() {
+    let definitions = vec![
+        class_def(0, "ParentComp", vec![]),
+        class_def(1, "ChildComp", vec![]),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.template_children.insert(0, vec!["child-comp".to_string()]);
+    def_idx.selector_index.insert("parent-comp".to_string(), vec![0]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["child-comp"],
+        "direction": "up",
+        "depth": 3
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["nextStepHint"].as_str().unwrap();
+
+    assert_eq!(v["summary"]["templateNavigation"].as_bool(), Some(true));
+    assert!(hint.contains("Template-navigation result"), "hint should identify template-navigation: {}", hint);
+    assert!(
+        hint.contains("xray_definitions includeBody=true file=[\"src/OrderController.ts\"]"),
+        "hint should point at first template result file: {}",
+        hint
+    );
+}
+
+#[test]
+fn test_callers_next_step_hint_template_navigation_accepts_known_non_hyphen_selector() {
+    let definitions = vec![
+        class_def(0, "ParentComp", vec![]),
+        angular_class_def(1, "MenuComp", "menu"),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.template_children.insert(0, vec!["menu".to_string()]);
+    def_idx.selector_index.insert("menu".to_string(), vec![1]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["menu"],
+        "direction": "up",
+        "depth": 3
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(v["summary"]["templateNavigation"].as_bool(), Some(true));
+    assert_eq!(v["callTree"][0]["class"].as_str(), Some("ParentComp"));
+}
+
+#[test]
+fn test_callers_template_navigation_known_selector_with_no_parents_does_not_fall_back_to_callers() {
+    let definitions = vec![angular_class_def(0, "MenuComp", "menu")];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.selector_index.insert("menu".to_string(), vec![0]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["menu"],
+        "direction": "up",
+        "depth": 3
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["nextStepHint"].as_str().unwrap();
+
+    assert_eq!(v["summary"]["templateNavigation"].as_bool(), Some(true));
+    assert_eq!(v["summary"]["totalNodes"].as_u64(), Some(0));
+    assert_eq!(v["callTree"].as_array().unwrap().len(), 0);
+    assert!(
+        hint.contains("no Angular parent templates found for 'menu'"),
+        "known selector should stay in template-navigation mode: {}",
+        hint
+    );
+}
+
+
+#[test]
+fn test_callers_template_navigation_next_step_hint_uses_repo_relative_path_with_duplicate_basename() {
+    let definitions = vec![
+        class_def(0, "ParentComp", vec![]),
+        class_def(1, "ChildComp", vec![]),
+    ];
+    let mut def_idx = make_def_index(definitions, HashMap::new());
+    def_idx.root = "C:/Repos/AngularApp".to_string();
+    def_idx.files = vec![
+        "C:/Repos/AngularApp/src/features/OrderController.ts".to_string(),
+        "C:/Repos/AngularApp/src/legacy/OrderController.ts".to_string(),
+    ];
+    def_idx.template_children.insert(0, vec!["child-comp".to_string()]);
+    def_idx.selector_index.insert("parent-comp".to_string(), vec![0]);
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["child-comp"],
+        "direction": "up",
+        "depth": 3
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["nextStepHint"].as_str().unwrap();
+
+    assert!(
+        hint.contains("xray_definitions includeBody=true file=[\"src/features/OrderController.ts\"]"),
+        "hint should use the parent component's repo-relative path: {}",
+        hint
+    );
+    assert!(
+        !hint.contains("file=[\"OrderController.ts\"]"),
+        "basename-only hint would be ambiguous: {}",
+        hint
+    );
+
+    assert!(
+        !hint.contains("C:/Repos/AngularApp"),
+        "absolute hint should be stripped to a repo-relative path: {}",
+        hint
+    );
+}
+
+#[test]
+fn test_callers_next_step_hint_generic_fallback_for_normal_call_tree() {
+    let definitions = vec![class_def(0, "OrderService", vec![])];
+    let def_idx = make_def_index(definitions, HashMap::new());
+    let ctx = make_ctx_with_idx(def_idx);
+
+    let result = super::super::dispatch_tool(&ctx, "xray_callers", &serde_json::json!({
+        "method": ["process"],
+        "depth": 1
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = v["summary"]["nextStepHint"].as_str().unwrap();
+
+    assert!(v["summary"].get("templateNavigation").is_none());
+    assert_eq!(hint, "Next: use xray_definitions includeBody=true for source or xray_grep for text refs");
+}
+
 
 #[test]
 fn test_find_template_parents_multiple() {
