@@ -736,6 +736,11 @@ fn make_batch_test_setup()
 
     let mut index = ContentIndex {
         root: dir.to_string_lossy().to_string(),
+        // The sharded persistence path enforces format-version match on load
+        // (`load_content_index_at_path` rejects `version=0`). Test fixtures
+        // that round-trip through save/load MUST stamp the live constant the
+        // same way production builders do.
+        format_version: code_xray::CONTENT_INDEX_VERSION,
         files: vec![clean_a.clone(), clean_b.clone()],
         index: inverted,
         total_tokens: 20,
@@ -3417,7 +3422,7 @@ fn test_post_reconcile_checkpoint_writes_postings_after_modify_only() {
     let content_path = crate::index::content_index_path_for(
         &dir.to_string_lossy(), "cs", &index_base,
     );
-    let reloaded: ContentIndex = crate::index::load_compressed(&content_path, "content")
+    let reloaded: ContentIndex = crate::index::load_content_index_at_path(&content_path)
         .expect("reload on-disk index");
     assert!(reloaded.index.contains_key("gamma"),
         "post-reconcile checkpoint must persist new 'gamma' token to disk \

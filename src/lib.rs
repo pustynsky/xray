@@ -691,7 +691,7 @@ pub fn generate_trigrams(token: &str) -> Vec<String> {
 /// to the files and line numbers where it appears.
 /// Format version for ContentIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const CONTENT_INDEX_VERSION: u32 = 3;
+pub const CONTENT_INDEX_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ContentIndex {
@@ -790,6 +790,113 @@ impl Clone for ContentIndex {
         }
     }
 }
+
+
+/// On-disk projection of `ContentIndex` with the heavy `index` HashMap
+/// excluded. The `index` map is persisted as N independent LZ4 frames
+/// (see `crate::index::save_sharded` / `load_sharded`) so it can be decoded
+/// in parallel during hot-start.
+///
+/// **Field order MUST exactly mirror the persisted-field order of
+/// `ContentIndex`** (i.e. every non-`#[serde(skip)]` field of `ContentIndex`
+/// EXCEPT `index`, in source order). The first two fields MUST stay
+/// `root: String` then `format_version: u32` so the lightweight header
+/// readers (`read_root_from_index_file`,
+/// `read_format_version_from_index_file`) can extract those two fields
+/// from the plain-bincode head without decoding anything else.
+///
+/// `total_tokens` lives in the head because it is a single `u64` (no point
+/// sharding) and is consulted by callers immediately after load.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ContentIndexHead {
+    pub root: String,
+    #[serde(default)]
+    pub format_version: u32,
+    pub created_at: u64,
+    pub max_age_secs: u64,
+    pub files: Vec<String>,
+    pub total_tokens: u64,
+    pub extensions: Vec<String>,
+    pub file_token_counts: Vec<u32>,
+    #[serde(default)]
+    pub trigram: TrigramIndex,
+    #[serde(default)]
+    pub trigram_dirty: bool,
+    #[serde(default)]
+    pub path_to_id: Option<HashMap<PathBuf, u32>>,
+    #[serde(default)]
+    pub read_errors: usize,
+    #[serde(default)]
+    pub lossy_file_count: usize,
+    #[serde(default)]
+    pub worker_panics: usize,
+    #[serde(default)]
+    pub respect_git_exclude: bool,
+}
+
+impl ContentIndex {
+    /// Build a `ContentIndexHead` snapshot from this index. The head clones
+    /// the small/medium metadata fields (root, files, trigram, etc.) but does
+    /// NOT touch the heavy `index: HashMap<String, Vec<Posting>>` — callers
+    /// pass that map separately to `crate::index::save_sharded` as a
+    /// `Vec<(&String, &Vec<Posting>)>` of borrowed entries to keep the save
+    /// path's transient memory peak proportional to metadata size, not
+    /// total-index size.
+    pub fn build_head(&self) -> ContentIndexHead {
+        ContentIndexHead {
+            root: self.root.clone(),
+            format_version: self.format_version,
+            created_at: self.created_at,
+            max_age_secs: self.max_age_secs,
+            files: self.files.clone(),
+            total_tokens: self.total_tokens,
+            extensions: self.extensions.clone(),
+            file_token_counts: self.file_token_counts.clone(),
+            trigram: self.trigram.clone(),
+            trigram_dirty: self.trigram_dirty,
+            path_to_id: self.path_to_id.clone(),
+            read_errors: self.read_errors,
+            lossy_file_count: self.lossy_file_count,
+            worker_panics: self.worker_panics,
+            respect_git_exclude: self.respect_git_exclude,
+        }
+    }
+
+    /// Reconstruct a `ContentIndex` from a sharded head + decoded entries.
+    /// Used by the production load path (`load_content_index`).
+    /// `file_tokens` and `file_tokens_authoritative` are reset to empty/false
+    /// because they are derived watch-mode state and never persisted.
+    pub fn from_head_and_entries(
+        head: ContentIndexHead,
+        entries: Vec<(String, Vec<Posting>)>,
+    ) -> Self {
+        let mut index = HashMap::with_capacity(entries.len());
+        for (k, v) in entries {
+            index.insert(k, v);
+        }
+        Self {
+            root: head.root,
+            format_version: head.format_version,
+            created_at: head.created_at,
+            max_age_secs: head.max_age_secs,
+            files: head.files,
+            index,
+            file_tokens: Vec::new(),
+            file_tokens_authoritative: false,
+            total_tokens: head.total_tokens,
+            extensions: head.extensions,
+            file_token_counts: head.file_token_counts,
+            trigram: head.trigram,
+            trigram_dirty: head.trigram_dirty,
+            path_to_id: head.path_to_id,
+            read_errors: head.read_errors,
+            lossy_file_count: head.lossy_file_count,
+            worker_panics: head.worker_panics,
+            respect_git_exclude: head.respect_git_exclude,
+        }
+    }
+}
+
 
 impl ContentIndex {
     pub fn rebuild_file_tokens(&mut self) {

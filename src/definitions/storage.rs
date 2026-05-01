@@ -23,17 +23,32 @@ pub fn save_definition_index(index: &DefinitionIndex, index_base: &std::path::Pa
     std::fs::create_dir_all(index_base)?;
     let exts_str = index.extensions.join(",");
     let path = definition_index_path_for(&index.root, &exts_str, index_base);
-    crate::index::save_compressed(&path, index, "definition-index")?;
+    let head = index.build_head();
+    // Borrowed entries — cheap O(n) pointer collect, no per-entry clone.
+    let definitions: Vec<&super::types::DefinitionEntry> = index.definitions.iter().collect();
+    crate::index::save_sharded(&path, &head, definitions, "definition-index")?;
     crate::index::save_index_meta(&path, &crate::index::definition_index_meta(index));
     Ok(())
 }
 
 pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
     let path = definition_index_path_for(dir, exts, index_base);
+    load_definition_index_at_path(&path)
+}
+
+/// Load a definition index from an explicit path. Performs the same fast
+/// version-check the directory-keyed `load_definition_index` does, then
+/// dispatches by file magic: `SHARD_MAGIC` -> sharded parallel decode,
+/// `LZ4_MAGIC` -> legacy single-frame load. Legacy fallback exists only
+/// for tests that still write via raw `save_compressed`; production saves
+/// always use the sharded path.
+pub fn load_definition_index_at_path(path: &std::path::Path) -> Result<DefinitionIndex, crate::SearchError> {
+    use std::io::Read;
 
     // Fast version check BEFORE full deserialization — reads ~100 bytes via LZ4
-    // streaming decompression. Prevents OOM/abort from old indexes with shifted layout.
-    match crate::index::read_format_version_from_index_file(&path) {
+    // streaming decompression (legacy) or 12 bytes of plain header (sharded).
+    // Prevents OOM/abort from old indexes with shifted layout.
+    match crate::index::read_format_version_from_index_file(path) {
         Some(v) if v != super::types::DEFINITION_INDEX_VERSION => {
             eprintln!(
                 "[definition-index] Format version mismatch (found {}, expected {}), index outdated",
@@ -54,7 +69,31 @@ pub fn load_definition_index(dir: &str, exts: &str, index_base: &std::path::Path
         Some(_) => {} // version matches, proceed to full load
     }
 
-    crate::index::load_compressed(&path, "definition-index")
+    // Dispatch by magic so test harnesses that still use raw `save_compressed`
+    // (LZ4_MAGIC, single frame) keep loading. Production save path emits
+    // SHARD_MAGIC.
+    let mut magic = [0u8; 4];
+    {
+        let mut f = std::fs::File::open(path).map_err(|e| crate::SearchError::IndexLoad {
+            path: path.display().to_string(),
+            message: format!("cannot open file: {}", e),
+        })?;
+        f.read_exact(&mut magic).map_err(|e| crate::SearchError::IndexLoad {
+            path: path.display().to_string(),
+            message: format!("read error (magic): {}", e),
+        })?;
+    }
+
+    if &magic == crate::index::SHARD_MAGIC {
+        let (head, definitions) = crate::index::load_sharded::<
+            super::types::DefinitionIndexHead,
+            super::types::DefinitionEntry,
+        >(path, "definition-index")?;
+        Ok(DefinitionIndex::from_head_and_entries(head, definitions))
+    } else {
+        // Legacy LZ4_MAGIC or pre-LZ4 plain bincode — keep working for tests.
+        crate::index::load_compressed(path, "definition-index")
+    }
 }
 
 /// Try to find any definition index for a directory.
@@ -113,7 +152,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
                 }
                 Some(_) => {}
             }
-            match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
+            match load_definition_index_at_path(&path) {
                 Ok(index) => return Some(index),
                 Err(e) => {
                     warn!(target: "xray::definitions", path = %path.display(), error = %e, "find_definition_index: metadata matched but load failed");
@@ -144,7 +183,7 @@ pub fn find_definition_index_for_dir(dir: &str, index_base: &std::path::Path, ex
             Some(_) => {}
         }
         // Root + version OK — load full index
-        match crate::index::load_compressed::<DefinitionIndex>(&path, "definition-index") {
+        match load_definition_index_at_path(&path) {
             Ok(index) => {
                 let idx_root = std::fs::canonicalize(&index.root)
                     .map(|p| clean_path(&p.to_string_lossy()))

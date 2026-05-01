@@ -1665,3 +1665,199 @@ fn duration_ms_format_uses_one_decimal_place() {
     assert_eq!(rendered, "1.2");
 }
 
+// ─── Sharded LZ4 layout tests ──────────────────────────────────────────
+
+#[test]
+fn test_sharded_save_load_roundtrip_basic() {
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Head { root: String, format_version: u32, n: u64 }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("sharded.bin");
+    let head = Head { root: "/some/root".to_string(), format_version: 4, n: 7 };
+    let entries: Vec<(String, u32)> = (0..100).map(|i| (format!("k{i}"), i as u32)).collect();
+
+    crate::index::save_sharded(&path, &head, entries.clone(), "test").unwrap();
+    let (loaded_head, loaded_entries): (Head, Vec<(String, u32)>) =
+        crate::index::load_sharded(&path, "test").unwrap();
+    assert_eq!(loaded_head, head);
+    assert_eq!(loaded_entries, entries);
+}
+
+#[test]
+fn test_sharded_preserves_entry_order() {
+    // The DefinitionIndex contract relies on `definitions` ordering being
+    // preserved across save→load (def_idx values in secondary maps point
+    // at positions in this Vec). Verify the merged Vec is exactly the
+    // sequential concatenation of per-shard chunks.
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Head { root: String, format_version: u32 }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("ordered.bin");
+    let head = Head { root: String::new(), format_version: 4 };
+    let entries: Vec<u32> = (0..1234).collect();
+
+    crate::index::save_sharded(&path, &head, entries.clone(), "test").unwrap();
+    let (_loaded_head, loaded): (Head, Vec<u32>) =
+        crate::index::load_sharded(&path, "test").unwrap();
+    assert_eq!(loaded, entries, "order must be preserved across shards");
+}
+
+#[test]
+fn test_sharded_handles_empty_entries() {
+    // Edge: zero entries (e.g. brand-new index). Save still emits SHARD_COUNT
+    // (possibly empty) shards so the header layout is stable; load merges to
+    // an empty Vec.
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Head { root: String, format_version: u32 }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("empty.bin");
+    let head = Head { root: String::new(), format_version: 4 };
+    let entries: Vec<u32> = Vec::new();
+
+    crate::index::save_sharded(&path, &head, entries, "test").unwrap();
+    let (_loaded_head, loaded): (Head, Vec<u32>) =
+        crate::index::load_sharded(&path, "test").unwrap();
+    assert!(loaded.is_empty());
+}
+
+#[test]
+fn test_sharded_handles_fewer_entries_than_shards() {
+    // Edge: SHARD_COUNT shards but only 1–2 entries. Excess shards must be
+    // empty, and load must not panic on the (legitimately empty) decoded vecs.
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Head { root: String, format_version: u32 }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("tiny.bin");
+    let head = Head { root: String::new(), format_version: 4 };
+    let entries: Vec<String> = vec!["only-one".to_string()];
+
+    crate::index::save_sharded(&path, &head, entries.clone(), "test").unwrap();
+    let (_loaded_head, loaded): (Head, Vec<String>) =
+        crate::index::load_sharded(&path, "test").unwrap();
+    assert_eq!(loaded, entries);
+}
+
+#[test]
+fn test_sharded_rejects_legacy_lz4_magic() {
+    // load_sharded must NOT silently accept a single-frame LZ4 file written
+    // by save_compressed — callers dispatch by magic upstream and a wrong
+    // magic here would corrupt subsequent reads.
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("legacy.bin");
+    let payload: Vec<u32> = vec![1, 2, 3];
+    crate::index::save_compressed(&path, &payload, "legacy-test").unwrap();
+
+    let result: Result<((), Vec<u32>), _> = crate::index::load_sharded(&path, "legacy-test");
+    assert!(result.is_err(), "load_sharded must reject LZ4_MAGIC");
+    let err = format!("{}", result.unwrap_err());
+    assert!(err.contains("magic"), "error must mention magic, got: {}", err);
+}
+
+#[test]
+fn test_sharded_header_readers_extract_root_and_version() {
+    // Lightweight header readers (`read_root_from_index_file_pub`,
+    // `read_format_version_from_index_file`) must work on the sharded layout
+    // without touching shard payloads. Critical for find_*_for_dir scans.
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Head { root: String, format_version: u32, ignored: u64 }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("header.bin");
+    let head = Head {
+        root: "C:/some/long/path/to/repo".to_string(),
+        format_version: 4,
+        ignored: 0xDEAD_BEEF,
+    };
+    let entries: Vec<(String, u32)> = (0..32).map(|i| (format!("k{i}"), i)).collect();
+    crate::index::save_sharded(&path, &head, entries, "test").unwrap();
+
+    let root = crate::index::read_root_from_index_file_pub(&path);
+    assert_eq!(root.as_deref(), Some("C:/some/long/path/to/repo"));
+    let version = crate::index::read_format_version_from_index_file(&path);
+    assert_eq!(version, Some(4));
+}
+
+#[test]
+fn test_sharded_round_trip_property_random_sizes() {
+    // Property-style: a range of sizes (1, 2, SHARD_COUNT, SHARD_COUNT*10,
+    // SHARD_COUNT*1000+small-tail) all round-trip identically.
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Head { root: String, format_version: u32 }
+
+    for &n in &[1usize, 2, 3, 4, 5, 7, 16, 17, 4001] {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join(format!("prop_{n}.bin"));
+        let head = Head { root: format!("/n={n}"), format_version: 4 };
+        let entries: Vec<(u32, String)> =
+            (0..n as u32).map(|i| (i, format!("value-{i}"))).collect();
+        crate::index::save_sharded(&path, &head, entries.clone(), "prop-test").unwrap();
+        let (loaded_head, loaded): (Head, Vec<(u32, String)>) =
+            crate::index::load_sharded(&path, "prop-test").unwrap();
+        assert_eq!(loaded_head, head, "head mismatch at n={n}");
+        assert_eq!(loaded, entries, "entries mismatch at n={n}");
+    }
+}
+
+#[test]
+fn test_content_index_save_load_roundtrip_via_sharded_path() {
+    // End-to-end: production save_content_index -> load_content_index_at_path
+    // produces the sharded magic on disk and reconstructs an equivalent
+    // ContentIndex (same `index` map, same `files`, same metadata).
+    use std::collections::HashMap;
+    use code_xray::Posting;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mut idx = code_xray::ContentIndex::default();
+    idx.root = "C:/repo/sample".to_string();
+    idx.format_version = code_xray::CONTENT_INDEX_VERSION;
+    idx.files = vec!["a.rs".to_string(), "b.rs".to_string()];
+    idx.extensions = vec!["rs".to_string()];
+    idx.file_token_counts = vec![3, 2];
+    let mut inverted: HashMap<String, Vec<Posting>> = HashMap::new();
+    for i in 0..50u32 {
+        inverted.insert(format!("tok{i}"), vec![Posting { file_id: i % 2, lines: vec![1, 2] }]);
+    }
+    idx.index = inverted.clone();
+    idx.total_tokens = 50;
+
+    crate::save_content_index(&idx, tmp.path()).unwrap();
+
+    let path = crate::index::content_index_path_for("C:/repo/sample", "rs", tmp.path());
+    // Magic check: production save must emit the sharded magic.
+    let mut buf = [0u8; 4];
+    use std::io::Read;
+    std::fs::File::open(&path).unwrap().read_exact(&mut buf).unwrap();
+    assert_eq!(&buf, crate::index::SHARD_MAGIC, "production save must emit SHARD_MAGIC");
+
+    let loaded = crate::index::load_content_index_at_path(&path).unwrap();
+    assert_eq!(loaded.root, idx.root);
+    assert_eq!(loaded.format_version, idx.format_version);
+    assert_eq!(loaded.files, idx.files);
+    assert_eq!(loaded.extensions, idx.extensions);
+    assert_eq!(loaded.total_tokens, idx.total_tokens);
+    // `Posting` does not implement PartialEq, so compare the keyset and each
+    // posting list field-by-field. Still proves the sharded round-trip
+    // re-assembled every (token → postings) entry without loss or duplication.
+    assert_eq!(loaded.index.len(), inverted.len(), "token count must match");
+    for (token, expected_postings) in &inverted {
+        let got = loaded.index.get(token)
+            .unwrap_or_else(|| panic!("token {token} missing after round-trip"));
+        assert_eq!(got.len(), expected_postings.len(), "posting count for {token}");
+        for (g, e) in got.iter().zip(expected_postings.iter()) {
+            assert_eq!(g.file_id, e.file_id, "file_id for {token}");
+            assert_eq!(g.lines, e.lines, "lines for {token}");
+        }
+    }
+}
+
+

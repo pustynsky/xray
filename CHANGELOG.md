@@ -1,5 +1,31 @@
 # Changelog
 
+## Hot-start parallel index decode
+
+- **Decode large content/definition indexes in parallel.** Hot-start now
+  loads the heavy entries payload of `ContentIndex` and `DefinitionIndex`
+  as N independent LZ4 frames decoded on per-shard OS threads, with shard
+  byte offsets recorded up front so each thread can `seek` directly to
+  its slice. Measured on the Shared workspace: content `indexDecodeMs`
+  4468 ms → 504 ms (4 shards), definitions `indexDecodeMs` 1366 ms → 178
+  ms, `primaryTerminalAtMs` 4510 ms → 1830 ms.
+- **Bump `CONTENT_INDEX_VERSION 3 → 4` and `DEFINITION_INDEX_VERSION 3
+  → 4`.** First launch after upgrade rebuilds caches once because the
+  on-disk magic and field layout changed; subsequent hot-starts use the
+  new sharded format.
+- **Add per-shard telemetry.** New debug-log fields on `indexLoad`:
+  `indexShardCount`, `indexShardDecodeMaxMs`, `indexMergeMs`,
+  `indexHeaderMs`, `indexHeadReadMs`, `indexHeadDecodeMs`,
+  `indexHeadBytes`, `indexEntries`. Lets the next perf iteration
+  attribute remaining wall time between shard decode and header decode
+  (the latter still single-threaded because it carries the
+  `TrigramIndex`).
+- **Preserve definition order across shards.** `DefinitionIndex.definitions`
+  is split into sequential chunks and merged in shard order so `def_idx`
+  values stored in the secondary `*_index` HashMaps still point at the
+  right entries after a save→load round-trip.
+
+
 ## Hot-start index load performance
 
 - **Defer watch reverse-token map rebuild during warm serve startup.** Watch-enabled content indexes now keep the path lookup ready but rebuild the expensive token-to-file reverse map lazily on the first mutable content update, removing the large `contentWatchIndexMs` startup tax while preserving incremental update behavior.
