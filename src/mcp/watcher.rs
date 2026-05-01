@@ -129,7 +129,8 @@ pub fn start_watcher(
     index: Arc<RwLock<ContentIndex>>,
     def_index: Option<Arc<RwLock<DefinitionIndex>>>,
     dir: PathBuf,
-    extensions: Vec<String>,
+    content_extensions: Vec<String>,
+    definition_extensions: Vec<String>,
     debounce_ms: u64,
     index_base: PathBuf,
     content_ready: Arc<AtomicBool>,
@@ -243,13 +244,13 @@ pub fn start_watcher(
         // thread on the next event, and `periodic_autosave` itself also
         // no-ops on read failure).
         let (content_added, content_modified, content_removed) =
-            reconcile_content_index(&index, &dir_str, &extensions, respect_git_exclude);
+            reconcile_content_index(&index, &dir_str, &content_extensions, respect_git_exclude);
 
         let def_changed = if let Some(ref def_idx) = def_index {
             // Non-blocking reconciliation: parse files OUTSIDE the lock, apply INSIDE.
             // def_ready stays true — MCP requests work on old data during parsing.
             let (added, modified, removed) = definitions::reconcile_definition_index_nonblocking(
-                def_idx, &dir_str, &extensions, respect_git_exclude
+                def_idx, &dir_str, &definition_extensions, respect_git_exclude
             );
             added + modified + removed > 0
         } else {
@@ -330,7 +331,7 @@ pub fn start_watcher(
                         if should_invalidate_file_index(&event.kind) {
                             file_index_dirty.store(true, Ordering::Relaxed);
                         }
-                        if !matches_extensions(path, &extensions) {
+                        if !matches_extensions(path, &content_extensions) {
                             continue;
                         }
                         match event.kind {
@@ -1519,7 +1520,12 @@ pub(crate) fn scan_dir_state(dir: &str, extensions: &[String], respect_git_exclu
     let dir_path = canonicalize_or_warn(dir);
 
     let mut walker = WalkBuilder::new(&dir_path);
-    walker.follow_links(true).hidden(false).git_ignore(true).git_exclude(respect_git_exclude);
+    walker
+        .follow_links(true)
+        .hidden(true)
+        .git_ignore(true)
+        .git_global(true)
+        .git_exclude(respect_git_exclude);
 
     let mut all_files: HashMap<PathBuf, SystemTime> = HashMap::new();
     let mut ext_matched: HashMap<PathBuf, SystemTime> = HashMap::new();
@@ -1726,7 +1732,8 @@ pub(crate) fn periodic_rescan_once(
     file_index: &Arc<RwLock<Option<FileIndex>>>,
     file_index_dirty: &Arc<AtomicBool>,
     dir: &str,
-    extensions: &[String],
+    content_extensions: &[String],
+    definition_extensions: &[String],
     stats: &Arc<WatcherStats>,
     respect_git_exclude: bool,
     autosave_dirty: &Arc<AtomicBool>,
@@ -1734,7 +1741,7 @@ pub(crate) fn periodic_rescan_once(
     let start = Instant::now();
     stats.periodic_rescan_total.fetch_add(1, Ordering::Relaxed);
 
-    let state = scan_dir_state(dir, extensions, respect_git_exclude);
+    let state = scan_dir_state(dir, content_extensions, respect_git_exclude);
     let (content_added, content_removed, content_modified) =
         compute_content_drift(index, &state.ext_matched);
     let (file_index_added, file_index_removed) =
@@ -1759,11 +1766,11 @@ pub(crate) fn periodic_rescan_once(
         // collapsing to a single walk is a follow-up). Bailing out
         // when nothing changed is their internal fast path.
         let (applied_added, applied_modified, applied_removed) =
-            reconcile_content_index(index, dir, extensions, respect_git_exclude);
+            reconcile_content_index(index, dir, content_extensions, respect_git_exclude);
         let mut definition_changed = false;
         if let Some(di) = def_index {
             let (def_added, def_modified, def_removed) =
-                definitions::reconcile_definition_index_nonblocking(di, dir, extensions, respect_git_exclude);
+                definitions::reconcile_definition_index_nonblocking(di, dir, definition_extensions, respect_git_exclude);
             definition_changed = def_added + def_modified + def_removed > 0;
         }
         // Schedule autosave from applied content changes, not merely detected
@@ -1839,7 +1846,8 @@ pub fn start_periodic_rescan(
     file_index: Arc<RwLock<Option<FileIndex>>>,
     file_index_dirty: Arc<AtomicBool>,
     dir: PathBuf,
-    extensions: Vec<String>,
+    content_extensions: Vec<String>,
+    definition_extensions: Vec<String>,
     interval_sec: u64,
     watcher_generation: Arc<AtomicU64>,
     my_generation: u64,
@@ -1887,7 +1895,8 @@ pub fn start_periodic_rescan(
                 &file_index,
                 &file_index_dirty,
                 &dir_str,
-                &extensions,
+                &content_extensions,
+                &definition_extensions,
                 &stats,
                 respect_git_exclude,
                 &autosave_dirty,

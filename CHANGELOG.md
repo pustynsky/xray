@@ -1,5 +1,11 @@
 # Changelog
 
+## Fix watcher reconcile extension filters
+
+- **Separate content and definition extension sets during watcher reconciliation.** The startup reconcile, periodic rescan, and workspace restart paths now carry two distinct extension vectors — one for content indexing (the full `--ext` list) and one for definition indexing (the intersection of `--ext` with supported parsers). Previously, definition reconcile received the full content extension list and incorrectly added content-only files (`.json`, `.md`, `.xml`, etc.) into the definition index; on a large repo this produced thousands of false additions on every cold start.
+- **Align `scan_dir_state` with content-build discovery semantics.** The watcher's directory scanner now skips hidden files and respects global gitignore, matching the behavior of the content-build walker and eliminating a secondary class of false-positive reconcile events.
+
+
 ## Pinned reindex workspace handling
 
 - **Treat Windows path spellings as the same pinned workspace.** Pinned `xray_reindex` and `xray_reindex_definitions` requests no longer report a workspace switch when the same Windows path is passed with different separators or an extended-path prefix.
