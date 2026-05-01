@@ -151,6 +151,28 @@ pub fn cmd_serve(args: ServeArgs) {
         compute_thread_budget(true, args.definitions)
     };
 
+    let definition_load = if args.definitions {
+        let def_dir_str = dir_str.clone();
+        let def_extensions = extensions.clone();
+        let def_idx_base = idx_base.clone();
+        let def_exts_for_load = exts_for_load.clone();
+        let def_ready_for_load = Arc::clone(&def_ready);
+        let def_build_terminal_for_load = Arc::clone(&def_build_terminal);
+        let def_building_for_load = Arc::clone(&def_building);
+        let def_respect_git_exclude = args.respect_git_exclude;
+        Some(std::thread::spawn(move || {
+            load_or_build_definition_index(
+                &def_dir_str, &def_extensions, &def_idx_base, &def_exts_for_load,
+                is_unresolved, true,
+                &def_ready_for_load, &def_build_terminal_for_load, &def_building_for_load,
+                def_respect_git_exclude,
+                def_thread_budget,
+            )
+        }))
+    } else {
+        None
+    };
+
     // ─── Content index: load from disk or build in background ───
     // Returns the effective `respect_git_exclude` resolved against any persisted
     // value on disk — see `resolve_respect_git_exclude` in `super`. This must be
@@ -165,13 +187,20 @@ pub fn cmd_serve(args: ServeArgs) {
     );
 
     // ─── Definition index: same async pattern ───
-    let (def_index, def_extensions_vec, definition_reconcile_extensions, effective_respect_def) = load_or_build_definition_index(
-        &dir_str, &extensions, &idx_base, &exts_for_load,
-        is_unresolved, args.definitions,
-        &def_ready, &def_build_terminal, &def_building,
-        args.respect_git_exclude,
-        def_thread_budget,
-    );
+    let (def_index, def_extensions_vec, definition_reconcile_extensions, effective_respect_def) = if let Some(definition_load) = definition_load {
+        match definition_load.join() {
+            Ok(result) => result,
+            Err(payload) => std::panic::resume_unwind(payload),
+        }
+    } else {
+        load_or_build_definition_index(
+            &dir_str, &extensions, &idx_base, &exts_for_load,
+            is_unresolved, false,
+            &def_ready, &def_build_terminal, &def_building,
+            args.respect_git_exclude,
+            def_thread_budget,
+        )
+    };
 
     let cache_hit_content = content_ready.load(Ordering::Acquire);
     let cache_hit_definitions = args.definitions && def_ready.load(Ordering::Acquire);
@@ -913,16 +942,28 @@ fn load_or_build_content_index(
             load_method, idx.live_file_count(), idx.index.len(),
             idx.trigram.trigram_map.len(), cache_age
         ));
-        let mut idx = if watch {
-            mcp::watcher::build_watch_index_from(idx)
+        let post_load_start = Instant::now();
+        let (mut idx, watch_index_elapsed) = if watch {
+            let watch_index_start = Instant::now();
+            let idx = mcp::watcher::build_watch_index_from(idx);
+            (idx, watch_index_start.elapsed())
         } else {
-            idx
+            (idx, Duration::ZERO)
         };
+        let shrink_start = Instant::now();
         idx.shrink_maps();
+        let shrink_elapsed = shrink_start.elapsed();
+        let publish_start = Instant::now();
         *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
+        let publish_elapsed = publish_start.elapsed();
+        let post_load_elapsed = post_load_start.elapsed();
         crate::index::log_phase("contentReady", &[
             ("cacheHitContent", "true".to_string()),
             ("contentLoadMs", crate::index::format_duration_ms(load_elapsed)),
+            ("contentPostLoadMs", crate::index::format_duration_ms(post_load_elapsed)),
+            ("contentWatchIndexMs", crate::index::format_duration_ms(watch_index_elapsed)),
+            ("contentShrinkMapsMs", crate::index::format_duration_ms(shrink_elapsed)),
+            ("contentPublishMs", crate::index::format_duration_ms(publish_elapsed)),
             ("contentReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
             ("contentFilesRead", loaded_file_count.to_string()),
             ("contentTokenCount", loaded_token_count.to_string()),
@@ -937,13 +978,16 @@ fn load_or_build_content_index(
         // Pre-warm trigram index in background to eliminate cold-start penalty
         let warmup_index = Arc::clone(&index);
         std::thread::spawn(move || {
-            eprintln!("[warmup] Starting trigram pre-warm...");
+            crate::index::log_phase("trigramWarmupStarted", &[]);
             let start = Instant::now();
             let (trigrams, tokens) = warmup_index.read()
                 .unwrap_or_else(|e| e.into_inner())
                 .warm_up();
-            eprintln!("[warmup] Trigram pre-warm completed in {:.1}ms ({} trigrams, {} tokens)",
-                start.elapsed().as_secs_f64() * 1000.0, trigrams, tokens);
+            crate::index::log_phase("trigramWarmupReady", &[
+                ("trigramWarmupMs", crate::index::format_duration_ms(start.elapsed())),
+                ("trigrams", trigrams.to_string()),
+                ("tokens", tokens.to_string()),
+            ]);
             crate::index::log_memory("serve: trigram warm-up done");
         });
     } else if !is_unresolved {
@@ -1058,13 +1102,16 @@ fn load_or_build_content_index(
             crate::index::log_memory("serve: content ready");
 
             // Pre-warm trigram index after background build
-            eprintln!("[warmup] Starting trigram pre-warm...");
+            crate::index::log_phase("trigramWarmupStarted", &[]);
             let warmup_start = Instant::now();
             let (trigrams, tokens) = bg_index.read()
                 .unwrap_or_else(|e| e.into_inner())
                 .warm_up();
-            eprintln!("[warmup] Trigram pre-warm completed in {:.1}ms ({} trigrams, {} tokens)",
-                warmup_start.elapsed().as_secs_f64() * 1000.0, trigrams, tokens);
+            crate::index::log_phase("trigramWarmupReady", &[
+                ("trigramWarmupMs", crate::index::format_duration_ms(warmup_start.elapsed())),
+                ("trigrams", trigrams.to_string()),
+                ("tokens", tokens.to_string()),
+            ]);
         });
     } else {
         content_build_terminal.store(true, Ordering::Release);
@@ -1233,12 +1280,21 @@ fn load_or_build_definition_index(
                 def_load_method, def_file_count, def_count,
                 def_call_count, cache_age
             ));
+            let post_load_start = Instant::now();
             let mut idx = idx;
+            let shrink_start = Instant::now();
             idx.shrink_maps();
+            let shrink_elapsed = shrink_start.elapsed();
+            let publish_start = Instant::now();
             *def_arc.write().unwrap_or_else(|e| e.into_inner()) = idx;
+            let publish_elapsed = publish_start.elapsed();
+            let post_load_elapsed = post_load_start.elapsed();
             crate::index::log_phase("definitionsReady", &[
                 ("cacheHitDefinitions", "true".to_string()),
                 ("definitionsLoadMs", crate::index::format_duration_ms(def_elapsed)),
+                ("definitionsPostLoadMs", crate::index::format_duration_ms(post_load_elapsed)),
+                ("definitionsShrinkMapsMs", crate::index::format_duration_ms(shrink_elapsed)),
+                ("definitionsPublishMs", crate::index::format_duration_ms(publish_elapsed)),
                 ("definitionsReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
                 ("definitionsFilesParsed", def_file_count.to_string()),
                 ("definitionsExtracted", def_count.to_string()),
@@ -1375,13 +1431,10 @@ fn build_git_cache_background(
             crate::index::log_phase("gitCacheStarted", &[
                 ("gitCacheStartedAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
             ]);
-            eprintln!("[git-cache] Initializing for {}...", bg_dir);
-
             // Determine repo path — check if it's a git repository
             let repo_path = PathBuf::from(&bg_dir);
             let git_dir = repo_path.join(".git");
             if !git_dir.exists() {
-                eprintln!("[git-cache] No .git directory found, skipping");
                 bg_git_ready.store(true, Ordering::Release);
                 crate::index::log_phase("gitCacheReady", &[
                     ("cacheHitGit", "false".to_string()),
@@ -1395,10 +1448,7 @@ fn build_git_cache_background(
 
             // Detect default branch
             let branch = match GitHistoryCache::detect_default_branch(&repo_path) {
-                Ok(b) => {
-                    eprintln!("[git-cache] Detected branch: {}", b);
-                    b
-                }
+                Ok(b) => b,
                 Err(e) => {
                     warn!(error = %e, "Failed to detect default branch, skipping git cache");
                     bg_git_ready.store(true, Ordering::Release);
@@ -1491,7 +1541,9 @@ fn build_git_cache_background(
                         &readiness.def_ready,
                         readiness.wait_for_def_terminal,
                     );
-                    eprintln!("[git-cache] Building cache for branch '{}' (this may take a few minutes for large repos)...", branch);
+                    crate::index::log_phase("gitCacheColdBuildStarted", &[
+                        ("branch", branch.clone()),
+                    ]);
                     let git_build_start = Instant::now();
                     match GitHistoryCache::build(&repo_path, &branch) {
                         Ok(new_cache) => {
@@ -1541,10 +1593,6 @@ fn build_git_cache_background(
                 ("files", file_count.to_string()),
             ]);
             crate::index::log_memory("git-cache: ready");
-            eprintln!(
-                "[git-cache] Ready: {} commits, {} files in {:.1}s",
-                commit_count, file_count, elapsed.as_secs_f64()
-            );
         });
     }
 

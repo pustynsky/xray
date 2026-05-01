@@ -1886,7 +1886,8 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
 /// Cross-load content index on workspace switch from `handle_xray_reindex_definitions_inner`.
 /// Mirrors `cross_load_definition_index` for symmetry.
 /// Tries cache first, then schedules a background build if no cache exists.
-/// Returns `Some("loaded_cache")` or `Some("background_build")` describing the action taken.
+/// Returns `Some("loaded_cache")`, `Some("background_build")`, or
+/// `Some("build_in_progress")` describing the action taken.
 fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static str> {
     let content_ext = ctx.server_ext.clone();
     let content_loaded = load_content_index(dir, &content_ext, &ctx.index_base).ok()
@@ -1922,18 +1923,28 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
 
     // No cache — start background build
     ctx.content_ready.store(false, Ordering::Release);
+    let had_watch = ctx.index.read()
+        .map(|i| i.file_tokens_authoritative)
+        .unwrap_or(false);
+    let (build_generation, build_workspace_dir) = {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        (ws.generation, ws.dir.clone())
+    };
     let bg_index = Arc::clone(&ctx.index);
     let bg_dir = dir.to_string();
     let bg_ext = content_ext;
     let bg_idx_base = ctx.index_base.clone();
     let bg_ready = Arc::clone(&ctx.content_ready);
     let bg_building = Arc::clone(&ctx.content_building);
+    let bg_workspace = Arc::clone(&ctx.workspace);
     let bg_file_dirty = Arc::clone(&ctx.file_index_dirty);
     let bg_respect_git_exclude = ctx.respect_git_exclude;
+    if ctx.content_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
+        info!(dir = %dir, "Content index background build already running (workspace switch)");
+        return Some("build_in_progress");
+    }
     std::thread::spawn(move || {
-        if bg_building.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire).is_err() {
-            return;
-        }
+        let mut build_succeeded = false;
         info!(dir = %bg_dir, "Building content index in background (workspace switch)");
         match build_content_index(&ContentIndexArgs {
             dir: bg_dir.clone(), ext: bg_ext.clone(),
@@ -1941,19 +1952,41 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
             threads: 0, min_token_len: DEFAULT_MIN_TOKEN_LEN,
         }) {
             Ok(idx) => {
-                if let Err(e) = save_content_index(&idx, &bg_idx_base) {
-                    warn!(error = %e, "Failed to save content index");
+                let workspace_still_current = {
+                    let ws = bg_workspace.read().unwrap_or_else(|e| e.into_inner());
+                    ws.generation == build_generation
+                        && code_xray::path_eq(&ws.dir, &build_workspace_dir)
+                        && code_xray::path_eq(&ws.dir, &bg_dir)
+                };
+                if !workspace_still_current {
+                    warn!(
+                        dir = %bg_dir,
+                        generation = build_generation,
+                        "Discarding stale content index background build after workspace switch"
+                    );
+                } else {
+                    if let Err(e) = save_content_index(&idx, &bg_idx_base) {
+                        warn!(error = %e, "Failed to save content index");
+                    }
+                    let idx = if had_watch {
+                        crate::mcp::watcher::build_watch_index_from(idx)
+                    } else {
+                        idx
+                    };
+                    *bg_index.write().unwrap_or_else(|e| e.into_inner()) = idx;
+                    bg_file_dirty.store(true, Ordering::Relaxed);
+                    build_succeeded = true;
                 }
-                *bg_index.write().unwrap_or_else(|e| e.into_inner()) = idx;
-                bg_file_dirty.store(true, Ordering::Relaxed);
             }
             Err(e) => {
                 warn!(error = %e, "Failed to build content index");
             }
         }
         bg_building.store(false, Ordering::Release);
-        bg_ready.store(true, Ordering::Release);
-        crate::index::log_memory("reindex_def: content cross-build complete");
+        if build_succeeded {
+            bg_ready.store(true, Ordering::Release);
+            crate::index::log_memory("reindex_def: content cross-build complete");
+        }
     });
     info!(dir = %dir, "Content index background build started (no cache)");
     Some("background_build")
