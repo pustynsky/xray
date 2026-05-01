@@ -85,20 +85,81 @@ FNV-1a provides 64-bit hashes, truncated to 32 bits for the filename. Hash colli
 
 ## Serialization Format
 
-All indexes use [bincode](https://docs.rs/bincode/1/bincode/) v1 for serialization, wrapped in [LZ4 frame compression](https://crates.io/crates/lz4_flex) for reduced disk usage and faster I/O:
+All indexes use [bincode](https://docs.rs/bincode/1/bincode/) v1 for serialization, wrapped in [LZ4 frame compression](https://crates.io/crates/lz4_flex) for reduced disk usage and faster I/O.
+
+### Two on-disk layouts
+
+`xray` writes one of two LZ4-based layouts depending on the index type:
+
+| Layout | Magic | Used by | Reason |
+| --- | --- | --- | --- |
+| Single LZ4 frame | `LZ4S` | `FileIndex` (`.file-list`), `GitHistoryCache` (`.git-history`) | Small payloads (a few MB). Single-thread decode is already fast. |
+| Sharded LZ4 (N independent frames) | `XRYS` | `ContentIndex` (`.word-search`), `DefinitionIndex` (`.code-structure`) | Hundreds of MB on large repos. Decoded in parallel during hot-start. |
+
+Header readers (`read_root_from_index_file`, `read_format_version_from_index_file`)
+dispatch by magic so both layouts coexist on disk and the lightweight metadata
+lookups (`xray info`, find-by-root scans) stay zero-copy regardless of layout.
+
+### Single LZ4 frame layout (legacy / small indexes)
 
 ```rust
-// Write (LZ4-compressed)
 let file = File::create(path)?;
 let mut writer = BufWriter::new(file);
-writer.write_all(b"LZ4S")?;  // magic bytes
+writer.write_all(b"LZ4S")?;                       // magic
 let mut encoder = lz4_flex::frame::FrameEncoder::new(writer);
-bincode::serialize_into(&mut encoder, &index)?;
+bincode::serialize_into(&mut encoder, &index)?;   // whole struct in one stream
 encoder.finish()?.flush()?;
-
-// Read (auto-detects compressed vs legacy uncompressed)
-let result = load_compressed::<ContentIndex>(&path, "content-index");
 ```
+
+Load goes through `load_compressed::<T>(&path, label)` which streams
+`FrameDecoder` -> `bincode::deserialize_from`.
+
+### Sharded LZ4 layout (`SHARD_MAGIC = b"XRYS"`)
+
+Large indexes carry a heavy entries payload (the `index: HashMap` of
+`ContentIndex`, the `definitions: Vec` of `DefinitionIndex`) that dominates
+bincode decode wall time. The sharded layout splits that payload into N
+independent LZ4 frames whose byte offsets are recorded up front, so
+`load_sharded` can `seek` directly to each shard and decode it on its own
+OS thread.
+
+Byte layout written by `save_sharded`:
+
+```text
+[4 bytes]                magic = SHARD_MAGIC ("XRYS")
+[8 bytes le u64]         head_size — length of the head bincode payload
+[head_size bytes]        bincode of `head` (PLAIN, NOT LZ4-compressed).
+                         Field order MUST start with `root: String` then
+                         `format_version: u32` so the lightweight header
+                         readers can extract those two fields without
+                         touching shard payloads.
+[4 bytes le u32]         shard_count
+[8 * shard_count bytes]  le u64[] shard_compressed_sizes
+[shard 0 bytes]          one independent LZ4 frame containing bincode `Vec<T>`
+[shard 1 bytes]          ...
+[shard N-1 bytes]
+```
+
+- `SHARD_COUNT = 4` today (`src/index.rs`).
+- The head carries every persisted field EXCEPT the heavy entries payload
+  (`ContentIndexHead` / `DefinitionIndexHead` in `src/lib.rs` and
+  `src/definitions/types.rs`).
+- `definitions` is split into sequential chunks and merged in shard order
+  on load, so `def_idx` values stored in the secondary `*_index` HashMaps
+  remain valid across save→load.
+
+Load path:
+
+1. `load_content_index_at_path` / `load_definition_index_at_path` peek the
+   first 4 bytes.
+2. `LZ4_MAGIC` -> `load_compressed` (legacy / test fixtures still allowed).
+3. `SHARD_MAGIC` -> `load_sharded::<H, T>` -> `(head, Vec<T>)` ->
+   `ContentIndex::from_head_and_entries` /
+   `DefinitionIndex::from_head_and_entries`.
+
+Per-shard decode is timed and reported in the debug log via
+`indexShardCount`, `indexShardDecodeMaxMs`, `indexMergeMs`, `indexHeaderMs`,
+`indexHeadReadMs`, `indexHeadDecodeMs`, `indexHeadBytes`, `indexEntries`.
 
 ### Bincode Properties
 
@@ -106,9 +167,9 @@ let result = load_compressed::<ContentIndex>(&path, "content-index");
 | ----------- | --------------------------------------------------------------------------------------- |
 | Format      | Little-endian, variable-length integers                                                 |
 | Schema      | Implicit — derived from Rust struct layout                                              |
-| Versioning  | None — format changes require reindex                                                   |
-| Compression | LZ4 frame compression (`lz4_flex`); magic bytes `LZ4S` prefix; backward-compatible with legacy uncompressed files |
-| Atomicity   | Whole-file write (`fs::write`) — atomic on most FSes if < 4KB, otherwise not guaranteed |
+| Versioning  | `format_version: u32` field on every index struct; bump on layout change triggers rebuild |
+| Compression | LZ4 frame compression (`lz4_flex`); single-frame magic `LZ4S` or sharded magic `XRYS`   |
+| Atomicity   | Whole-file write to a unique temp sibling (`.<file>.xray_tmp.<pid>.<nanos>.<counter>`) then `rename` over the target |
 
 ### Sizes on Disk
 
@@ -233,10 +294,9 @@ When loading a content index, the system tries two strategies:
 Hash the directory + extensions to get the exact filename:
 
 ```rust
-fn load_content_index(dir: &str, exts: &str) -> Option<ContentIndex> {
+fn load_content_index(dir: &str, exts: &str) -> Result<ContentIndex, SearchError> {
     let path = content_index_path_for(dir, exts);  // Deterministic hash
-    let data = fs::read(&path).ok()?;
-    bincode::deserialize(&data).ok()
+    load_content_index_at_path(&path)              // Dispatch by magic
 }
 ```
 
@@ -248,7 +308,8 @@ If exact match fails (e.g., user indexed with `cs` but queries without specifyin
 fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
     for entry in fs::read_dir(index_dir()) {
         if path.extension() == "word-search" {
-            let index: ContentIndex = load_compressed(&path)?;
+            // Magic-dispatch: SHARD_MAGIC -> load_sharded, LZ4_MAGIC -> load_compressed.
+            let index = load_content_index_at_path(&path).ok()?;
             if index.root == canonical_dir {
                 return Some(index);
             }

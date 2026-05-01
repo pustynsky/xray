@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use crate::{current_unix_secs, index_dir, index::load_compressed, ContentIndex, FileIndex};
+use crate::{current_unix_secs, index_dir, index::load_compressed, index::load_content_index_at_path, definitions::load_definition_index_at_path, FileIndex};
 #[allow(unused_imports)] // Used in tests (info_tests.rs) and in cmd_info_json
 use crate::index::{load_index_meta, save_index_meta, IndexDetails, IndexMeta};
 
@@ -124,7 +124,7 @@ pub fn cmd_info() {
                     size as f64 / 1_048_576.0, age_hours(meta.created_at), stale_str, filename
                 );
             } else {
-                match load_compressed::<ContentIndex>(&path, "content-index") {
+                match load_content_index_at_path(&path) {
                     Ok(index) => {
                         found = true;
                         let stale = if index.is_stale() { " [STALE]" } else { "" };
@@ -156,7 +156,7 @@ pub fn cmd_info() {
                     size as f64 / 1_048_576.0, age_hours(meta.created_at), filename
                 );
             } else {
-                match load_compressed::<crate::definitions::DefinitionIndex>(&path, "definition-index") {
+                match load_definition_index_at_path(&path) {
                     Ok(index) => {
                         found = true;
                         let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
@@ -341,7 +341,7 @@ pub(crate) fn cmd_info_json_for_dir(dir: &std::path::Path) -> serde_json::Value 
             } else if ext == Some("word-search") {
                 if let Some(meta) = load_index_meta(&path) {
                     indexes.push(meta_to_json(&meta, size, &filename));
-                } else if let Ok(index) = load_compressed::<ContentIndex>(&path, "content-index") {
+                } else if let Ok(index) = load_content_index_at_path(&path) {
                     let age_secs = age_secs_since(index.created_at);
                     indexes.push(serde_json::json!({
                         "type": "content",
@@ -359,7 +359,7 @@ pub(crate) fn cmd_info_json_for_dir(dir: &std::path::Path) -> serde_json::Value 
             } else if ext == Some("code-structure") {
                 if let Some(meta) = load_index_meta(&path) {
                     indexes.push(meta_to_json(&meta, size, &filename));
-                } else if let Ok(index) = load_compressed::<crate::definitions::DefinitionIndex>(&path, "definition-index") {
+                } else if let Ok(index) = load_definition_index_at_path(&path) {
                     let age_secs = age_secs_since(index.created_at);
                     let call_sites: usize = index.method_calls.values().map(|v| v.len()).sum();
                     let active_defs: usize = index.file_index.values().map(|v| v.len()).sum();

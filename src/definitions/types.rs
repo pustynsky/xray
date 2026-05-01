@@ -220,7 +220,7 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 3;
+pub const DEFINITION_INDEX_VERSION: u32 = 4;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(Default)]
@@ -300,6 +300,127 @@ pub struct DefinitionIndex {
     /// `docs/bug-reports/2026-04-23_417f315_cli-auto-rebuild-loses-flag.md`.
     #[serde(default)]
     pub respect_git_exclude: bool,
+}
+
+
+/// On-disk projection of `DefinitionIndex` with the heavy `definitions: Vec<DefinitionEntry>`
+/// excluded. Used by the sharded layout (see `crate::index::save_sharded` /
+/// `load_sharded`) so the per-entry payload can be decoded in parallel.
+///
+/// **Field order MUST exactly mirror the persisted-field order of
+/// `DefinitionIndex`** (every non-`#[serde(skip)]` field EXCEPT `definitions`,
+/// in source order). The first two fields MUST stay `root: String` then
+/// `format_version: u32` so the lightweight header readers in `crate::index`
+/// can extract them from the plain-bincode head.
+///
+/// Sharding `definitions` (and not the secondary `*_index` HashMaps) keeps
+/// def_idx values consistent across save->load round-trips: the merged
+/// `Vec<DefinitionEntry>` is a sequential concatenation of the original
+/// chunks, so positions are preserved.
+#[derive(Serialize, Deserialize, Debug)]
+pub struct DefinitionIndexHead {
+    pub root: String,
+    #[serde(default)]
+    pub format_version: u32,
+    pub created_at: u64,
+    pub extensions: Vec<String>,
+    pub files: Vec<String>,
+    pub name_index: HashMap<String, Vec<u32>>,
+    pub kind_index: HashMap<DefinitionKind, Vec<u32>>,
+    pub attribute_index: HashMap<String, Vec<u32>>,
+    pub base_type_index: HashMap<String, Vec<u32>>,
+    pub file_index: HashMap<u32, Vec<u32>>,
+    #[serde(default)]
+    pub selector_index: HashMap<String, Vec<u32>>,
+    #[serde(default)]
+    pub method_calls: HashMap<u32, Vec<CallSite>>,
+    #[serde(default)]
+    pub code_stats: HashMap<u32, CodeStats>,
+    #[serde(default)]
+    pub template_children: HashMap<u32, Vec<String>>,
+    pub path_to_id: HashMap<PathBuf, u32>,
+    #[serde(default)]
+    pub parse_errors: usize,
+    #[serde(default)]
+    pub lossy_file_count: usize,
+    #[serde(default)]
+    pub empty_file_ids: Vec<(u32, u64)>,
+    #[serde(default)]
+    pub extension_methods: HashMap<String, Vec<String>>,
+    #[serde(default)]
+    pub worker_panics: usize,
+    #[serde(default)]
+    pub respect_git_exclude: bool,
+}
+
+impl DefinitionIndex {
+    /// Build a `DefinitionIndexHead` snapshot from this index. Clones every
+    /// metadata field (small/medium maps) but does NOT touch the heavy
+    /// `definitions: Vec<DefinitionEntry>` — callers pass that vec separately
+    /// to `crate::index::save_sharded` as `Vec<&DefinitionEntry>` of borrowed
+    /// entries to keep the save path's transient memory peak proportional to
+    /// metadata size, not total-index size.
+    pub fn build_head(&self) -> DefinitionIndexHead {
+        DefinitionIndexHead {
+            root: self.root.clone(),
+            format_version: self.format_version,
+            created_at: self.created_at,
+            extensions: self.extensions.clone(),
+            files: self.files.clone(),
+            name_index: self.name_index.clone(),
+            kind_index: self.kind_index.clone(),
+            attribute_index: self.attribute_index.clone(),
+            base_type_index: self.base_type_index.clone(),
+            file_index: self.file_index.clone(),
+            selector_index: self.selector_index.clone(),
+            method_calls: self.method_calls.clone(),
+            code_stats: self.code_stats.clone(),
+            template_children: self.template_children.clone(),
+            path_to_id: self.path_to_id.clone(),
+            parse_errors: self.parse_errors,
+            lossy_file_count: self.lossy_file_count,
+            empty_file_ids: self.empty_file_ids.clone(),
+            extension_methods: self.extension_methods.clone(),
+            worker_panics: self.worker_panics,
+            respect_git_exclude: self.respect_git_exclude,
+        }
+    }
+
+    /// Reconstruct a `DefinitionIndex` from a sharded head + decoded
+    /// definitions vec. `definitions` order MUST be the sequential
+    /// concatenation of the per-shard chunks emitted by `save_sharded`
+    /// (preserved by `load_sharded`'s in-order merge), otherwise the
+    /// def_idx values stored in the secondary `*_index` HashMaps no
+    /// longer point at the right entries.
+    pub fn from_head_and_entries(
+        head: DefinitionIndexHead,
+        definitions: Vec<DefinitionEntry>,
+    ) -> Self {
+        Self {
+            root: head.root,
+            format_version: head.format_version,
+            created_at: head.created_at,
+            extensions: head.extensions,
+            files: head.files,
+            definitions,
+            name_index: head.name_index,
+            kind_index: head.kind_index,
+            attribute_index: head.attribute_index,
+            base_type_index: head.base_type_index,
+            file_index: head.file_index,
+            selector_index: head.selector_index,
+            method_calls: head.method_calls,
+            code_stats: head.code_stats,
+            template_children: head.template_children,
+            path_to_id: head.path_to_id,
+            parse_errors: head.parse_errors,
+            lossy_file_count: head.lossy_file_count,
+            empty_file_ids: head.empty_file_ids,
+            extension_methods: head.extension_methods,
+            worker_panics: head.worker_panics,
+            respect_git_exclude: head.respect_git_exclude,
+        }
+    }
 }
 
 impl DefinitionIndex {
