@@ -1,5 +1,11 @@
 # Changelog
 
+## Hot-start index load performance
+
+- **Defer watch reverse-token map rebuild during warm serve startup.** Watch-enabled content indexes now keep the path lookup ready but rebuild the expensive token-to-file reverse map lazily on the first mutable content update, removing the large `contentWatchIndexMs` startup tax while preserving incremental update behavior.
+- **Overlap content and definition cache hot-load.** `xray serve --definitions` now starts definition index loading in parallel with content index loading and reports debug-log startup timing for post-load, shrink, publish, and readiness phases.
+- **Guard background content cross-loads by workspace identity.** Workspace-switch content builds now verify generation and path identity before publishing, so stale in-flight builds cannot mark a newer workspace ready or install the wrong index.
+
 ## Fix watcher reconcile extension filters
 
 - **Separate content and definition extension sets during watcher reconciliation.** The startup reconcile, periodic rescan, and workspace restart paths now carry two distinct extension vectors — one for content indexing (the full `--ext` list) and one for definition indexing (the intersection of `--ext` with supported parsers). Previously, definition reconcile received the full content extension list and incorrectly added content-only files (`.json`, `.md`, `.xml`, etc.) into the definition index; on a large repo this produced thousands of false additions on every cold start.

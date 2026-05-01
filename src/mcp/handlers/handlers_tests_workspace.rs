@@ -16,6 +16,18 @@ use super::{
 use super::handlers_test_utils::make_ctx_with_defs;
 use serde_json::json;
 
+
+fn wait_until(predicate: impl Fn() -> bool) -> bool {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while std::time::Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    predicate()
+}
+
 /// D1 — `rollback_workspace_state` must restore ALL four mutable fields of
 /// `WorkspaceBinding` (dir, canonical_dir-via-set_dir, mode, generation) AND
 /// force `status = Resolved`. Regression of any one of these would leave the
@@ -80,10 +92,10 @@ fn test_cross_load_definition_index_returns_none_when_def_index_disabled() {
 }
 
 /// Regression guard: content-index cache cross-load must preserve watch mutation mode.
-/// The cached read-only index has no reverse maps; handler code must rebuild them when
-/// the existing runtime index is watcher-authoritative.
+/// The cached read-only index has no watch lookups; handler code must re-enable them
+/// without eagerly rebuilding the per-file reverse-token map.
 #[test]
-fn test_cross_load_content_index_preserves_watch_reverse_map_mode() {
+fn test_cross_load_content_index_preserves_watch_lazy_reverse_map_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -128,14 +140,179 @@ fn test_cross_load_content_index_preserves_watch_reverse_map_mode() {
         "cross-load must preserve watcher-authoritative reverse-map mode");
     assert!(idx.path_to_id.as_ref().map(|lookup| !lookup.is_empty()).unwrap_or(false),
         "watch-mode cross-load must rebuild path lookup for cached content index");
-    assert!(idx.file_tokens.iter().any(|tokens| !tokens.is_empty()),
-        "watch-mode cross-load must rebuild per-file token reverse map");
+    assert!(idx.file_tokens.is_empty(),
+        "watch-mode cross-load must leave per-file token reverse map lazy on cache load");
 }
+
+
+#[test]
+fn test_cross_load_content_index_background_build_preserves_watch_lazy_reverse_map_mode() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace_bg");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("watched.rs"),
+        "fn background_cross_load_watch_mode_token() {}\n",
+    ).unwrap();
+
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = tmp.path().join("indexes_bg");
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(workspace_str.clone());
+    }
+    {
+        let mut current = ctx.index.write().unwrap();
+        *current = crate::mcp::watcher::build_watch_index_from(crate::ContentIndex {
+            root: "old-workspace".to_string(),
+            extensions: vec!["rs".to_string()],
+            ..Default::default()
+        });
+        assert!(current.file_tokens_authoritative,
+            "Precondition: existing runtime index must represent watcher mode");
+    }
+
+    let action = cross_load_content_index(&ctx, &workspace_str);
+
+    assert_eq!(action, Some("background_build"));
+    assert!(wait_until(|| ctx.content_ready.load(std::sync::atomic::Ordering::Acquire)),
+        "background content build should publish readiness after installing the new index");
+    let idx = ctx.index.read().unwrap();
+    assert_eq!(idx.root, workspace_str);
+    assert!(idx.file_tokens_authoritative,
+        "background cross-load must preserve watcher-authoritative mode");
+    assert!(idx.path_to_id.as_ref().map(|lookup| !lookup.is_empty()).unwrap_or(false),
+        "background cross-load must build path lookup for watcher mutation mode");
+    assert!(idx.file_tokens.is_empty(),
+        "background cross-load must leave per-file token reverse map lazy");
+}
+
+#[test]
+fn test_cross_load_content_index_background_build_failure_does_not_mark_ready() {
+    let tmp = tempfile::tempdir().unwrap();
+    let missing_workspace = tmp.path().join("missing_workspace");
+    let missing_workspace_str = crate::clean_path(&missing_workspace.to_string_lossy());
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = tmp.path().join("indexes_fail");
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(missing_workspace_str.clone());
+    }
+    ctx.content_ready.store(true, std::sync::atomic::Ordering::Release);
+    {
+        let mut current = ctx.index.write().unwrap();
+        *current = crate::ContentIndex {
+            root: "old-workspace".to_string(),
+            extensions: vec!["rs".to_string()],
+            ..Default::default()
+        };
+    }
+
+    let action = cross_load_content_index(&ctx, &missing_workspace_str);
+
+    assert_eq!(action, Some("background_build"));
+    assert!(wait_until(|| !ctx.content_building.load(std::sync::atomic::Ordering::Acquire)),
+        "background content build should exit after build failure");
+    assert!(!ctx.content_ready.load(std::sync::atomic::Ordering::Acquire),
+        "failed background cross-load must not advertise content readiness");
+    let idx = ctx.index.read().unwrap();
+    assert_eq!(idx.root, "old-workspace",
+        "failed background cross-load must not replace the previous index");
+}
+
+
+#[test]
+fn test_cross_load_content_index_existing_background_build_does_not_mark_ready() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace_waiting");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = tmp.path().join("indexes_waiting");
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(workspace_str.clone());
+    }
+    ctx.content_ready.store(true, std::sync::atomic::Ordering::Release);
+    ctx.content_building.store(true, std::sync::atomic::Ordering::Release);
+    {
+        let mut current = ctx.index.write().unwrap();
+        *current = crate::ContentIndex {
+            root: "old-workspace".to_string(),
+            extensions: vec!["rs".to_string()],
+            ..Default::default()
+        };
+    }
+
+    let action = cross_load_content_index(&ctx, &workspace_str);
+
+    assert_eq!(action, Some("build_in_progress"));
+    assert!(!ctx.content_ready.load(std::sync::atomic::Ordering::Acquire),
+        "new workspace must stay not-ready while another content build is in flight");
+    let idx = ctx.index.read().unwrap();
+    assert_eq!(idx.root, "old-workspace",
+        "pre-existing build gate must not replace the index for this workspace");
+}
+
+#[test]
+fn test_cross_load_content_index_stale_background_build_does_not_publish() {
+    let tmp = tempfile::tempdir().unwrap();
+    let stale_workspace = tmp.path().join("stale_workspace");
+    let current_workspace = tmp.path().join("current_workspace");
+    std::fs::create_dir_all(&stale_workspace).unwrap();
+    std::fs::create_dir_all(&current_workspace).unwrap();
+    std::fs::write(
+        stale_workspace.join("stale.rs"),
+        "fn stale_background_build_token() {}\n",
+    ).unwrap();
+    let stale_workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&stale_workspace).unwrap().to_string_lossy(),
+    );
+    let current_workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&current_workspace).unwrap().to_string_lossy(),
+    );
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = tmp.path().join("indexes_stale");
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(current_workspace_str);
+        ws.generation += 1;
+    }
+    {
+        let mut current = ctx.index.write().unwrap();
+        *current = crate::ContentIndex {
+            root: "old-workspace".to_string(),
+            extensions: vec!["rs".to_string()],
+            ..Default::default()
+        };
+    }
+
+    let action = cross_load_content_index(&ctx, &stale_workspace_str);
+
+    assert_eq!(action, Some("background_build"));
+    assert!(wait_until(|| !ctx.content_building.load(std::sync::atomic::Ordering::Acquire)),
+        "stale background content build should exit");
+    assert!(!ctx.content_ready.load(std::sync::atomic::Ordering::Acquire),
+        "stale background build must not mark the current workspace ready");
+    let idx = ctx.index.read().unwrap();
+    assert_eq!(idx.root, "old-workspace",
+        "stale background build must not publish an index for another workspace");
+}
+
 
 /// Regression guard: explicit xray_reindex must also preserve watch mutation mode.
 /// This protects the handler-level sentinel from regressing back to path_to_id presence.
 #[test]
-fn test_handle_xray_reindex_inner_preserves_watch_reverse_map_mode() {
+fn test_handle_xray_reindex_inner_preserves_watch_lazy_reverse_map_mode() {
     let tmp = tempfile::tempdir().unwrap();
     let workspace = tmp.path().join("workspace");
     std::fs::create_dir_all(&workspace).unwrap();
@@ -174,8 +351,8 @@ fn test_handle_xray_reindex_inner_preserves_watch_reverse_map_mode() {
         "xray_reindex must preserve watcher-authoritative reverse-map mode");
     assert!(idx.path_to_id.as_ref().map(|lookup| !lookup.is_empty()).unwrap_or(false),
         "watch-mode xray_reindex must rebuild path lookup for the rebuilt index");
-    assert!(idx.file_tokens.iter().any(|tokens| !tokens.is_empty()),
-        "watch-mode xray_reindex must rebuild per-file token reverse map");
+    assert!(idx.file_tokens.is_empty(),
+        "watch-mode xray_reindex must leave per-file token reverse map lazy after rebuild");
 }
 
 

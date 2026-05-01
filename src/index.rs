@@ -762,6 +762,43 @@ pub(crate) fn recover_mutex<T>(mutex: std::sync::Mutex<T>, label: &str) -> T {
 /// Magic bytes identifying LZ4-compressed index files.
 pub const LZ4_MAGIC: &[u8; 4] = b"LZ4S";
 
+struct TimedReader<R> {
+    inner: R,
+    read_elapsed: Duration,
+    bytes_read: u64,
+}
+
+impl<R> TimedReader<R> {
+    fn new(inner: R) -> Self {
+        Self {
+            inner,
+            read_elapsed: Duration::ZERO,
+            bytes_read: 0,
+        }
+    }
+
+    fn read_elapsed(&self) -> Duration {
+        self.read_elapsed
+    }
+
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read
+    }
+}
+
+impl<R: Read> Read for TimedReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let start = Instant::now();
+        let result = self.inner.read(buf);
+        self.read_elapsed += start.elapsed();
+        if let Ok(bytes_read) = result {
+            self.bytes_read += bytes_read as u64;
+        }
+        result
+    }
+}
+
+
 /// Save a serializable value to a file with LZ4 frame compression.
 ///
 /// **Atomic, collision-resistant write:** writes to a per-call unique temp
@@ -840,28 +877,35 @@ pub fn save_compressed<T: serde::Serialize>(path: &std::path::Path, data: &T, la
 pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, label: &str) -> Result<T, SearchError> {
     let path_str = path.display().to_string();
     let start = Instant::now();
+
+    let metadata_start = Instant::now();
     let compressed_size = std::fs::metadata(path)
         .map_err(|e| SearchError::IndexLoad {
             path: path_str.clone(),
             message: format!("file not found or inaccessible: {}", e),
         })?
         .len();
+    let metadata_elapsed = metadata_start.elapsed();
 
+    let open_start = Instant::now();
     let file = std::fs::File::open(path).map_err(|e| SearchError::IndexLoad {
         path: path_str.clone(),
         message: format!("cannot open file: {}", e),
     })?;
     let mut reader = BufReader::new(file);
+    let open_elapsed = open_start.elapsed();
 
+    let magic_start = Instant::now();
     let mut magic = [0u8; 4];
     reader.read_exact(&mut magic).map_err(|e| SearchError::IndexLoad {
         path: path_str.clone(),
         message: format!("read error (magic bytes): {}", e),
     })?;
+    let magic_elapsed = magic_start.elapsed();
 
     // Cap deserialization at 2 GB to prevent OOM/abort from corrupted indexes.
     // When format_version changes shift the binary layout, garbled length fields
-    // can cause bincode to attempt multi-TB allocations → process abort.
+    // can cause bincode to attempt multi-TB allocations -> process abort.
     // Using fixint_encoding() + allow_trailing_bytes() matches the legacy
     // bincode::serialize()/deserialize() wire format.
     use bincode::Options;
@@ -870,19 +914,23 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
         .allow_trailing_bytes()
         .with_limit(2_000_000_000); // 2 GB
 
-    let result = if &magic == LZ4_MAGIC {
+    let decode_start = Instant::now();
+    let (result, storage_format, read_elapsed, bytes_read) = if &magic == LZ4_MAGIC {
         // Compressed format
-        let decoder = lz4_flex::frame::FrameDecoder::new(reader);
-        bincode_opts.deserialize_from(decoder).map_err(|e| SearchError::IndexLoad {
+        let mut timed_reader = TimedReader::new(reader);
+        let decoder = lz4_flex::frame::FrameDecoder::new(&mut timed_reader);
+        let result = bincode_opts.deserialize_from(decoder).map_err(|e| SearchError::IndexLoad {
             path: path_str.clone(),
             message: format!("LZ4 deserialization failed: {}", e),
-        })?
+        })?;
+        (result, "lz4", timed_reader.read_elapsed(), timed_reader.bytes_read())
     } else {
         // Legacy uncompressed format
         reader.seek(SeekFrom::Start(0)).map_err(|e| SearchError::IndexLoad {
             path: path_str.clone(),
             message: format!("seek error: {}", e),
         })?;
+        let read_start = Instant::now();
         let data = {
             let mut buf = Vec::new();
             reader.read_to_end(&mut buf).map_err(|e| SearchError::IndexLoad {
@@ -891,24 +939,30 @@ pub fn load_compressed<T: serde::de::DeserializeOwned>(path: &std::path::Path, l
             })?;
             buf
         };
-        bincode_opts.deserialize(&data).map_err(|e| SearchError::IndexLoad {
+        let read_elapsed = read_start.elapsed();
+        let bytes_read = data.len() as u64;
+        let result = bincode_opts.deserialize(&data).map_err(|e| SearchError::IndexLoad {
             path: path_str.clone(),
             message: format!("deserialization failed: {}", e),
-        })?
+        })?;
+        (result, "legacy", read_elapsed, bytes_read)
     };
+    let decode_elapsed = decode_start.elapsed();
 
     let elapsed = start.elapsed();
     log_phase("indexLoad", &[
         ("indexLabel", label.to_string()),
         ("indexLoadMs", format_duration_ms(elapsed)),
+        ("indexStorage", storage_format.to_string()),
+        ("indexMetadataMs", format_duration_ms(metadata_elapsed)),
+        ("indexOpenMs", format_duration_ms(open_elapsed)),
+        ("indexMagicMs", format_duration_ms(magic_elapsed)),
+        ("indexReadMs", format_duration_ms(read_elapsed)),
+        ("indexDecodeMs", format_duration_ms(decode_elapsed)),
+        ("indexBytesRead", bytes_read.to_string()),
         ("compressedBytes", compressed_size.to_string()),
         ("path", format_debug_path(path)),
     ]);
-    eprintln!("[{}] Loaded {:.1} MB in {:.3}s",
-        label,
-        compressed_size as f64 / 1_048_576.0,
-        elapsed.as_secs_f64());
-
     Ok(result)
 }
 

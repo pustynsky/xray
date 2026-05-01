@@ -1254,11 +1254,12 @@ fn ensure_path_to_id(index: &mut ContentIndex) {
     index.path_to_id = Some(path_to_id);
 }
 
-/// Build a ContentIndex with mutation lookups populated (for watch mode).
+/// Build a ContentIndex with mutation lookups enabled (for watch mode).
+/// The per-file reverse-token map stays lazy until the first mutable update.
 pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
     ensure_path_to_id(&mut index);
+    index.file_tokens.clear();
     index.file_tokens_authoritative = true;
-    index.rebuild_file_tokens();
     index
 }
 

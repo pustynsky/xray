@@ -36,6 +36,7 @@ fn test_build_watch_index_has_path_to_id() {
 
     assert!(watch_index.path_to_id.is_some());
     assert!(watch_index.file_tokens_authoritative);
+    assert!(watch_index.file_tokens.is_empty());
 }
 
 #[test]
@@ -526,6 +527,32 @@ fn test_file_tokens_maintained_after_insert() {
     assert_eq!(touched_tokens, vec!["alpha".to_string(), "beta".to_string()]);
     assert_eq!(index.file_tokens[0], touched_tokens);
 }
+
+#[test]
+fn test_watch_update_lazily_rebuilds_file_tokens() {
+    let (_tmp, dir, index) = make_batch_test_setup();
+    {
+        let mut idx = index.write().unwrap();
+        idx.file_tokens_authoritative = true;
+        idx.file_tokens.clear();
+    }
+
+    let file_a = dir.join("a.cs");
+    std::fs::write(&file_a, "class Delta { string changed; }\n").unwrap();
+
+    let result = update_content_index(&index, &[], std::slice::from_ref(&file_a));
+
+    assert!(result.ok);
+    let idx = index.read().unwrap();
+    let file_id = idx.path_to_id.as_ref().unwrap().get(&file_a).copied().unwrap();
+    assert!(idx.file_tokens_authoritative);
+    assert!(!idx.file_tokens.is_empty());
+    assert!(idx.file_tokens[file_id as usize].contains(&"delta".to_string()));
+    assert!(idx.index.get("alpha")
+        .map(|postings| postings.iter().all(|posting| posting.file_id != file_id))
+        .unwrap_or(true));
+}
+
 
 #[test]
 fn test_content_index_clone_skips_file_tokens() {
