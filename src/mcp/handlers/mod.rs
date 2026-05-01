@@ -1969,11 +1969,15 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
     let watch_dir = std::fs::canonicalize(dir)
         .unwrap_or_else(|_| std::path::PathBuf::from(dir));
     let ext_vec: Vec<String> = ctx.server_ext.split(',').map(|s| s.trim().to_string()).collect();
+    let def_ext_vec = ctx.def_index.as_ref()
+        .and_then(|idx| idx.read().ok().map(|idx| idx.extensions.clone()))
+        .unwrap_or_else(|| ctx.def_extensions.clone());
     if let Err(e) = crate::mcp::watcher::start_watcher(
         Arc::clone(&ctx.index),
         ctx.def_index.as_ref().map(Arc::clone),
         watch_dir,
         ext_vec,
+        def_ext_vec.clone(),
         ctx.watch_debounce_ms,
         ctx.index_base.clone(),
         Arc::clone(&ctx.content_ready),
@@ -2005,6 +2009,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
             Arc::clone(&ctx.file_index_dirty),
             watch_dir_rescan,
             ext_vec_rescan,
+            def_ext_vec,
             ctx.rescan_interval_sec,
             Arc::clone(&ctx.watcher_generation),
             new_gen,

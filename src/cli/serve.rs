@@ -165,7 +165,7 @@ pub fn cmd_serve(args: ServeArgs) {
     );
 
     // ─── Definition index: same async pattern ───
-    let (def_index, def_extensions_vec, effective_respect_def) = load_or_build_definition_index(
+    let (def_index, def_extensions_vec, definition_reconcile_extensions, effective_respect_def) = load_or_build_definition_index(
         &dir_str, &extensions, &idx_base, &exts_for_load,
         is_unresolved, args.definitions,
         &def_ready, &def_build_terminal, &def_building,
@@ -232,6 +232,7 @@ pub fn cmd_serve(args: ServeArgs) {
             def_index.as_ref().map(Arc::clone),
             watch_dir.clone(),
             extensions.clone(),
+            definition_reconcile_extensions.clone(),
             args.debounce_ms,
             idx_base.clone(),
             Arc::clone(&content_ready),
@@ -258,6 +259,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 Arc::clone(&file_index_dirty),
                 watch_dir,
                 extensions,
+                definition_reconcile_extensions,
                 args.rescan_interval_sec,
                 Arc::clone(&watcher_generation),
                 0,
@@ -1084,7 +1086,7 @@ fn load_or_build_definition_index(
     def_building: &Arc<AtomicBool>,
     respect_git_exclude: bool,
     build_threads: usize,
-) -> (Option<Arc<RwLock<definitions::DefinitionIndex>>>, Vec<String>, bool) {
+) -> (Option<Arc<RwLock<definitions::DefinitionIndex>>>, Vec<String>, Vec<String>, bool) {
     // Use compile-time definition extensions based on enabled Cargo features
     let supported_def_langs = definitions::definition_extensions();
     let def_exts = supported_def_langs.iter()
@@ -1118,6 +1120,16 @@ fn load_or_build_definition_index(
     } else {
         def_exts
     };
+
+    let definition_reconcile_extensions: Vec<String> = if definitions_enabled {
+        def_exts.split(',')
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect()
+    } else {
+        Vec::new()
+    };
+
 
     // Compute def_extensions for dynamic tool descriptions.
     // IMPORTANT: use the RAW intersection of --ext and definition_extensions(),
@@ -1172,7 +1184,7 @@ fn load_or_build_definition_index(
 
         // Try fast load from disk
         let def_start = Instant::now();
-        let def_ext_vec: Vec<String> = def_exts.split(',').map(|s| s.to_string()).collect();
+        let def_ext_vec = definition_reconcile_extensions.clone();
         let def_direct = if is_unresolved { None } else {
             match definitions::load_definition_index(dir_str, &def_exts, idx_base) {
                 Ok(idx) => Some(idx),
@@ -1331,7 +1343,7 @@ fn load_or_build_definition_index(
         None
     };
 
-    (def_index, def_extensions_vec, effective_respect_git_exclude)
+    (def_index, def_extensions_vec, definition_reconcile_extensions, effective_respect_git_exclude)
 }
 
 struct GitCacheReadiness {
@@ -2142,7 +2154,7 @@ mod serve_respect_git_exclude_tests {
         let def_build_terminal = Arc::new(AtomicBool::new(false));
         let def_building = Arc::new(AtomicBool::new(false));
 
-        let (_def_index, _def_extensions, effective) = load_or_build_definition_index(
+        let (_def_index, _def_extensions, _definition_reconcile_extensions, effective) = load_or_build_definition_index(
             &dir.to_string_lossy(),
             &extensions,
             &idx_base,

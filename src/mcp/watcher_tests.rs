@@ -2101,6 +2101,38 @@ fn scan_dir_state_classifies_ext_matched_subset_of_all_files() {
 }
 
 #[test]
+fn scan_dir_state_excludes_hidden_paths_like_content_build() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join(".hidden_dir")).unwrap();
+    std::fs::write(dir.join("visible.cs"), "class Visible {}").unwrap();
+    std::fs::write(dir.join(".hidden.cs"), "class Hidden {}").unwrap();
+    std::fs::write(dir.join(".hidden_dir").join("nested.cs"), "class Nested {}").unwrap();
+
+    let state = super::scan_dir_state(
+        &dir.to_string_lossy(),
+        &["cs".to_string()],
+        false,
+    );
+
+    assert_eq!(
+        state.ext_matched.len(),
+        1,
+        "scan_dir_state must match content build hidden-file policy (got {:?})",
+        state.ext_matched.keys().collect::<Vec<_>>()
+    );
+    assert!(state
+        .ext_matched
+        .keys()
+        .all(|p| p.to_string_lossy().ends_with("visible.cs")));
+    assert!(
+        state.all_files.keys().all(|p| !p.to_string_lossy().contains(".hidden")),
+        "hidden files must not appear in all_files either"
+    );
+}
+
+
+#[test]
 fn scan_dir_state_extension_match_is_case_insensitive() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
@@ -2233,6 +2265,7 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
         &["cs".to_string()],
+        &["cs".to_string()],
         &stats,
         false,
         &autosave_dirty,
@@ -2265,6 +2298,7 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
         &["cs".to_string()],
+        &["cs".to_string()],
         &stats,
         false,
         &autosave_dirty,
@@ -2286,6 +2320,61 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
         "reconcile_content_index must have indexed the new file"
     );
 }
+
+#[test]
+fn periodic_rescan_uses_definition_extensions_subset() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    std::fs::write(root.join("data.json"), "{\"name\":\"gamma\"}").unwrap();
+
+    let mut def_index = crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 0,
+        respect_git_exclude: false,
+    });
+    let future_created_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    def_index.created_at = future_created_at;
+    let def_index = Arc::new(RwLock::new(def_index));
+
+    let stats = Arc::new(super::WatcherStats::new());
+    let file_index_dirty = Arc::new(AtomicBool::new(false));
+    let file_index = Arc::new(RwLock::new(None));
+    let autosave_dirty = Arc::new(AtomicBool::new(false));
+
+    let outcome = super::periodic_rescan_once(
+        &index,
+        &Some(Arc::clone(&def_index)),
+        &file_index,
+        &file_index_dirty,
+        &root.to_string_lossy(),
+        &["cs".to_string(), "json".to_string()],
+        &["cs".to_string()],
+        &stats,
+        false,
+        &autosave_dirty,
+    );
+
+    assert_eq!(outcome.content_added, 1, "content reconcile should see data.json");
+    let def_guard = def_index.read().unwrap_or_else(|e| e.into_inner());
+    assert_eq!(
+        def_guard.created_at,
+        future_created_at,
+        "definition reconcile must not treat content-only extensions as definition changes"
+    );
+    assert!(
+        def_guard
+            .path_to_id
+            .keys()
+            .all(|p| p.extension().and_then(|e| e.to_str()) == Some("cs")),
+        "definition index must only track .cs files, got {:?}",
+        def_guard.path_to_id.keys().collect::<Vec<_>>()
+    );
+}
+
 
 #[test]
 fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty() {
@@ -2331,6 +2420,7 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
+        &["cs".to_string()],
         &["cs".to_string()],
         &stats,
         false,
@@ -2428,6 +2518,7 @@ fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
         &index, &Some(Arc::clone(&def_index)), &file_index, &file_index_dirty,
         &root.to_string_lossy(),
         &["cs".to_string()],
+        &["cs".to_string()],
         &stats,
         false,
         &autosave_dirty,
@@ -2470,6 +2561,7 @@ fn periodic_rescan_detects_removed_file_and_reconciles_content() {
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
+        &["cs".to_string()],
         &["cs".to_string()],
         &stats,
         false,
@@ -2520,6 +2612,7 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
         &["cs".to_string()], // .json is OUTSIDE --ext on purpose
+        &["cs".to_string()],
         &stats,
         false,
         &autosave_dirty,
@@ -2561,6 +2654,7 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
         Arc::clone(&file_index),
         Arc::clone(&file_index_dirty),
         tmp.path().to_path_buf(),
+        vec!["cs".to_string()],
         vec!["cs".to_string()],
         super::MIN_RESCAN_INTERVAL_SEC,
         Arc::clone(&generation),
@@ -2637,6 +2731,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
         Arc::clone(&file_index),
         Arc::clone(&file_index_dirty),
         root.clone(),
+        vec!["cs".to_string()],
         vec!["cs".to_string()],
         super::MIN_RESCAN_INTERVAL_SEC,
         Arc::clone(&generation),
