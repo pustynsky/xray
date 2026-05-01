@@ -1,5 +1,49 @@
 # Changelog
 
+## v0.2.2 (2026-05-02)
+
+Performance and correctness improvements for hot-start and cold-start of the
+MCP server. Highlights since v0.2.1:
+
+- **Sharded LZ4 layout for content / definition indexes (PR #255).** The heavy
+  `ContentIndex.index` HashMap and `DefinitionIndex.definitions` Vec are now
+  persisted as N independent LZ4 frames decoded in parallel during hot-start.
+  Measured on a 76K-file workspace: content `indexDecodeMs` 4468 ms → 504 ms,
+  definitions `indexDecodeMs` 1366 ms → 178 ms, `primaryTerminalAtMs` 4510 ms
+  → 1830 ms (−60% hot-start). New telemetry fields on `indexLoad`:
+  `indexShardCount`, `indexShardDecodeMaxMs`, `indexMergeMs`, `indexHeaderMs`,
+  `indexHeadReadMs`, `indexHeadDecodeMs`, `indexHeadBytes`, `indexEntries`.
+- **Cold-start double-build fix.** A too-tight `head_size` sanity check (100
+  MB) in `load_sharded` was rejecting valid sharded indexes with large heads,
+  causing the server to fall back to a full second build. Bound raised to 2 GB
+  (matches the bincode `with_limit`); cold `primaryTerminalAtMs` 246 s → 99 s
+  in the same 76K-file workspace.
+- **Format version bumps:** `CONTENT_INDEX_VERSION 3 → 4`,
+  `DEFINITION_INDEX_VERSION 3 → 4`. First launch after upgrade rebuilds caches
+  once because the on-disk magic and field layout changed; subsequent
+  hot-starts use the new sharded format.
+- **Hot-start load parallelization (PR #254).** Watcher reverse-token map
+  rebuild deferred to first mutation; content and definition cache hot-loads
+  now run in parallel; background cross-loads guarded by workspace identity.
+- **Watcher reconcile extension filter fix.** Definition reconcile no longer
+  receives content-only extensions (`json`, `md`, `xml`, ...) on cold start.
+- **Pinned reindex workspace handling.** Windows path spelling differences no
+  longer trigger a spurious workspace switch in `xray_reindex` /
+  `xray_reindex_definitions`.
+- **Sync reindex watch-mode preservation.** Sync reindex paths can mutate a
+  plain content index without flipping it into watch reverse-map mode.
+- **MCP result completeness contract.** `xray_grep`, `xray_definitions`, and
+  `xray_callers` now return top-level `resultStatus` metadata describing
+  completeness, exactness safety, evidence level, and reasons; `xray_grep`
+  also exposes execution metadata.
+- **Grep phrase missing-token diagnostics.** `xray_grep phrase=true`
+  short-circuits with a `phraseDetail.missingTokens` entry and a
+  `searchModeNote` instead of an ambiguous zero-result response.
+
+See the unreleased section history below for the full per-change record.
+
+
+
 ## Hot-start parallel index decode
 
 - **Decode large content/definition indexes in parallel.** Hot-start now
