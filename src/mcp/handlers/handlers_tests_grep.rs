@@ -520,6 +520,131 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     cleanup_tmp(&tmp_dir);
 }
 
+/// Regression: server startup must clear `trigram_dirty` BEFORE the first
+/// wide `xray_grep`, so the first user query does not pay the rebuild +
+/// transient peak-RSS spike (~+800 MB on Shared, 2026-05-02 cold-start log).
+/// Mirrors the watcher-driven dirty-rebuild path but exercises the
+/// `warm_trigram_index` entry point that `cmd_serve` calls on cache load.
+#[test] fn warm_trigram_index_clears_dirty_on_startup() {
+    use std::io::Write;
+    let (ctx, tmp_dir) = make_e2e_substring_ctx();
+    {
+        let mut idx = ctx.index.write().unwrap();
+        let new_file_id = idx.files.len() as u32;
+        let new_path = tmp_dir.join("WarmupRegression.cs");
+        {
+            let mut f = std::fs::File::create(&new_path).unwrap();
+            writeln!(f, "public class WarmupRegressionMarkerToken {{}}").unwrap();
+        }
+        idx.files.push(clean_path(&new_path.to_string_lossy()));
+        idx.file_token_counts.push(1);
+        idx.index
+            .entry("warmupregressionmarkertoken".to_string())
+            .or_default()
+            .push(Posting { file_id: new_file_id, lines: vec![1] });
+        idx.total_tokens += 1;
+        idx.trigram_dirty = true;
+    }
+
+    let (trigrams, tokens) =
+        crate::mcp::handlers::warm_trigram_index(&ctx.index, &ctx.trigram_build_gate);
+
+    let idx = ctx.index.read().unwrap();
+    assert!(!idx.trigram_dirty, "warm_trigram_index must clear trigram_dirty when set on entry");
+    assert!(
+        idx.trigram.tokens.iter().any(|t| t == "warmupregressionmarkertoken"),
+        "warm_trigram_index must rebuild the trigram with the new token",
+    );
+    assert!(trigrams > 0, "warm_trigram_index must report touched trigram count");
+    assert!(tokens > 0, "warm_trigram_index must report touched token count");
+    cleanup_tmp(&tmp_dir);
+}
+
+/// `warm_trigram_index` MUST be a no-op when the trigram is already clean
+/// — the cheap page-in path must remain cheap. We don't have a direct
+/// counter for "rebuild ran", so we observe through stable trigram state:
+/// a rebuild would replace `trigram` with a fresh structure, so the token
+/// list and trigram-map length must match the snapshot taken before warm-up.
+#[test] fn warm_trigram_index_skips_rebuild_when_clean() {
+    let (ctx, tmp_dir) = make_e2e_substring_ctx();
+    let (tokens_before, trigrams_before) = {
+        let idx = ctx.index.read().unwrap();
+        assert!(!idx.trigram_dirty, "precondition: fresh test ctx is trigram-clean");
+        (idx.trigram.tokens.clone(), idx.trigram.trigram_map.len())
+    };
+
+    let _ = crate::mcp::handlers::warm_trigram_index(&ctx.index, &ctx.trigram_build_gate);
+
+    let idx = ctx.index.read().unwrap();
+    assert!(!idx.trigram_dirty, "clean trigram must stay clean");
+    assert_eq!(idx.trigram.tokens, tokens_before, "clean-path warm-up must not mutate trigram tokens");
+    assert_eq!(idx.trigram.trigram_map.len(), trigrams_before, "clean-path warm-up must not mutate trigram map length");
+    cleanup_tmp(&tmp_dir);
+}
+
+/// Regression: `start_warm_trigram_index` (the split-phase wrapper used by
+/// `cmd_serve` cache-load) must do phase-1 (snapshot + clear dirty)
+/// synchronously on the caller thread AND release the single-flight gate
+/// after the bg thread completes — not leave it latched. We assert (a)
+/// dirty bit is cleared synchronously before return, and (b) within a
+/// short bound the gate becomes releasable again, proving the bg thread
+/// reached its `TrigramBuildGuard` drop.
+#[test] fn start_warm_trigram_index_clears_dirty_sync_and_releases_gate() {
+    use std::io::Write;
+    use std::time::{Duration, Instant};
+    let (ctx, tmp_dir) = make_e2e_substring_ctx();
+    {
+        let mut idx = ctx.index.write().unwrap();
+        let new_file_id = idx.files.len() as u32;
+        let new_path = tmp_dir.join("StartWarmupRegression.cs");
+        {
+            let mut f = std::fs::File::create(&new_path).unwrap();
+            writeln!(f, "public class StartWarmupRegressionMarkerToken {{}}").unwrap();
+        }
+        idx.files.push(clean_path(&new_path.to_string_lossy()));
+        idx.file_token_counts.push(1);
+        idx.index
+            .entry("startwarmupregressionmarkertoken".to_string())
+            .or_default()
+            .push(Posting { file_id: new_file_id, lines: vec![1] });
+        idx.total_tokens += 1;
+        idx.trigram_dirty = true;
+    }
+
+    crate::mcp::handlers::start_warm_trigram_index(&ctx.index, &ctx.trigram_build_gate);
+
+    // Phase-1 sync invariant: dirty bit MUST be cleared on this thread
+    // before the call returns. If this assertion races, the split-phase
+    // sync contract is broken.
+    assert!(
+        !ctx.index.read().unwrap().trigram_dirty,
+        "start_warm_trigram_index must clear trigram_dirty synchronously on caller thread",
+    );
+
+    // Bg thread must release the gate within a short bound.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let busy = *ctx.trigram_build_gate.building.lock().unwrap();
+        if !busy {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "start_warm_trigram_index bg thread did not release the gate within 5s — gate is latched",
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // After bg completes, the trigram must contain the new token (proves
+    // the rebuild actually ran, not just dirty-cleared).
+    let idx = ctx.index.read().unwrap();
+    assert!(
+        idx.trigram.tokens.iter().any(|t| t == "startwarmupregressionmarkertoken"),
+        "start_warm_trigram_index bg thread must rebuild the trigram with the new token",
+    );
+    cleanup_tmp(&tmp_dir);
+}
+
 #[test] fn e2e_index_serialization_roundtrip_with_trigram() {
     let (ctx, tmp_dir) = make_e2e_substring_ctx();
     let original = ctx.index.read().unwrap();

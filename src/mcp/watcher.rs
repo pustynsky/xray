@@ -1145,70 +1145,59 @@ fn periodic_autosave(
     let mut saved = Vec::new();
     let mut all_ok = true;
 
-    // ── Content index: snapshot under brief read lock, serialize without lock ──
+    // ── Content index: serialize directly under read lock ──
     // Gate: `idx.files.is_empty()` — allocator-capacity check, NOT live count.
     // Rationale: if all files were removed during this session, `live_file_count() == 0`
     // but the index is still dirty (the on-disk copy holds stale entries). We MUST
     // checkpoint that "now empty" state so a forced kill doesn't resurrect them.
     // We only skip when the index has never held any file (allocator never grew).
-    let content_snapshot = match index.read() {
+    //
+    // We hold the read lock for the full serialize (~4 s on Shared) instead of
+    // cloning the index first. Cloning a ~1.7 GB content index doubled peak RSS
+    // by ~2 GB on Shared and risked OOM on 16 GB dev machines
+    // (see user-stories/user-story_xray-autosave-clone-peak_2026-05-02.md).
+    // RwLock is std::sync::RwLock — concurrent readers (`xray_grep`,
+    // `xray_definitions`) keep working; only WRITERS (watcher incremental
+    // mutations) wait. Mutations are already debounced and tolerate the pause.
+    match index.read() {
         Ok(idx) => {
-            if idx.files.is_empty() { None }
-            else {
-                let clone_start = std::time::Instant::now();
-                let snapshot = idx.clone();
-                let clone_ms = clone_start.elapsed().as_secs_f64() * 1000.0;
-                Some((snapshot, clone_ms))
+            if !idx.files.is_empty() {
+                let serialize_start = std::time::Instant::now();
+                if let Err(e) = crate::save_content_index(&idx, index_base) {
+                    warn!(error = %e, "Periodic autosave: failed to save content index");
+                    all_ok = false;
+                } else {
+                    let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
+                    saved.push(format!("content({} files, serializeMs={:.0})",
+                        idx.live_file_count(), serialize_ms));
+                }
             }
         }
         Err(e) => {
             warn!(error = %e, "Periodic autosave: failed to read content index");
             all_ok = false;
-            None
-        }
-    };
-    // READ lock released — clone took ~1-2s for large indexes, not ~79s serialization.
-
-    if let Some((snapshot, clone_ms)) = content_snapshot {
-        let serialize_start = std::time::Instant::now();
-        if let Err(e) = crate::save_content_index(&snapshot, index_base) {
-            warn!(error = %e, "Periodic autosave: failed to save content index");
-            all_ok = false;
-        } else {
-            let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
-            saved.push(format!("content({} files, cloneMs={:.0}, serializeMs={:.0})",
-                snapshot.live_file_count(), clone_ms, serialize_ms));
         }
     }
 
-    // ── Definition index: same snapshot-then-serialize pattern ──
+    // ── Definition index: same hold-read-lock pattern ──
     if let Some(def_idx) = def_index {
-        let def_snapshot = match def_idx.read() {
+        match def_idx.read() {
             Ok(idx) => {
-                if idx.files.is_empty() { None }
-                else {
-                    let clone_start = std::time::Instant::now();
-                    let snapshot = idx.clone();
-                    let clone_ms = clone_start.elapsed().as_secs_f64() * 1000.0;
-                    Some((snapshot, clone_ms))
+                if !idx.files.is_empty() {
+                    let serialize_start = std::time::Instant::now();
+                    if let Err(e) = crate::definitions::save_definition_index(&idx, index_base) {
+                        warn!(error = %e, "Periodic autosave: failed to save definition index");
+                        all_ok = false;
+                    } else {
+                        let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
+                        saved.push(format!("def({} defs, serializeMs={:.0})",
+                            idx.definitions.len(), serialize_ms));
+                    }
                 }
             }
             Err(e) => {
                 warn!(error = %e, "Periodic autosave: failed to read definition index");
                 all_ok = false;
-                None
-            }
-        };
-
-        if let Some((snapshot, clone_ms)) = def_snapshot {
-            let serialize_start = std::time::Instant::now();
-            if let Err(e) = crate::definitions::save_definition_index(&snapshot, index_base) {
-                warn!(error = %e, "Periodic autosave: failed to save definition index");
-                all_ok = false;
-            } else {
-                let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
-                saved.push(format!("def({} defs, cloneMs={:.0}, serializeMs={:.0})",
-                    snapshot.definitions.len(), clone_ms, serialize_ms));
             }
         }
     }
@@ -1261,6 +1250,65 @@ pub fn build_watch_index_from(mut index: ContentIndex) -> ContentIndex {
     index.file_tokens.clear();
     index.file_tokens_authoritative = true;
     index
+}
+
+
+/// Schedule a background rebuild of the per-file reverse-token map
+/// (`ContentIndex.file_tokens`) for an index that just entered watch mode.
+///
+/// Background: `rebuild_file_tokens()` is O(total_postings) — ~14M iterations
+/// on a 76k-file workspace, ~2.6 s of `String::clone`. The lazy guard inside
+/// [`update_content_index`] runs it under the exclusive write lock on the
+/// first user edit, blocking every concurrent reader for that whole duration.
+///
+/// This helper moves the work to a dedicated thread, executed during the
+/// idle window between content-ready announcement and the first user edit.
+/// The lazy guard remains as the source of truth (and as a safety net if
+/// the background thread loses the race or fails to spawn).
+///
+/// Idempotent and race-safe: the worker re-checks `file_tokens_authoritative`
+/// and `file_tokens.is_empty()` under the write lock before doing work, so
+/// repeated or concurrent calls do at most one rebuild.
+pub fn schedule_rebuild_file_tokens(index: Arc<RwLock<ContentIndex>>) {
+    let _ = std::thread::Builder::new()
+        .name("xray-rebuild-file-tokens".into())
+        .spawn(move || {
+            // Cheap pre-check under the read lock: avoid contending for the
+            // write lock when there is provably nothing to do.
+            match index.read() {
+                Ok(idx) => {
+                    if !idx.file_tokens_authoritative || !idx.file_tokens.is_empty() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Background file_tokens rebuild aborted (poisoned read lock)");
+                    return;
+                }
+            }
+            // Acquire the write lock and re-validate — the state may have
+            // changed between the read drop and the write acquire.
+            match index.write() {
+                Ok(mut idx) => {
+                    if !idx.file_tokens_authoritative || !idx.file_tokens.is_empty() {
+                        return;
+                    }
+                    let start = Instant::now();
+                    idx.rebuild_file_tokens();
+                    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
+                    info!(
+                        elapsed_ms = format_args!("{:.0}", elapsed_ms),
+                        "Background file_tokens rebuild complete"
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "Background file_tokens rebuild aborted (poisoned write lock)");
+                }
+            }
+        });
+    // Best-effort: a thread-spawn failure (resource exhaustion) leaves the
+    // existing lazy guard in [`update_content_index`] to do the rebuild on
+    // first user edit — same behavior as before this helper existed.
 }
 
 /// Update a single file in the index (incremental).

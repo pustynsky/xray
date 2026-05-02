@@ -93,7 +93,9 @@ fn test_cross_load_definition_index_returns_none_when_def_index_disabled() {
 
 /// Regression guard: content-index cache cross-load must preserve watch mutation mode.
 /// The cached read-only index has no watch lookups; handler code must re-enable them
-/// without eagerly rebuilding the per-file reverse-token map.
+/// (set `file_tokens_authoritative=true`, populate `path_to_id`) and schedule a
+/// background `rebuild_file_tokens` so the first user edit doesn't pay the rebuild
+/// cost under the exclusive watcher write lock (C2-A, 2026-05-02).
 #[test]
 fn test_cross_load_content_index_preserves_watch_lazy_reverse_map_mode() {
     let tmp = tempfile::tempdir().unwrap();
@@ -140,11 +142,15 @@ fn test_cross_load_content_index_preserves_watch_lazy_reverse_map_mode() {
         "cross-load must preserve watcher-authoritative reverse-map mode");
     assert!(idx.path_to_id.as_ref().map(|lookup| !lookup.is_empty()).unwrap_or(false),
         "watch-mode cross-load must rebuild path lookup for cached content index");
-    assert!(idx.file_tokens.is_empty(),
-        "watch-mode cross-load must leave per-file token reverse map lazy on cache load");
+    drop(idx);
+    // C2-A: cache-load schedules a background `rebuild_file_tokens` so the
+    // first user edit doesn't pay the rebuild cost under the watcher write
+    // lock. Wait until that background warmer populates the reverse map.
+    assert!(
+        wait_until(|| ctx.index.read().map(|i| !i.file_tokens.is_empty()).unwrap_or(false)),
+        "watch-mode cross-load must warm per-file token reverse map in background"
+    );
 }
-
-
 #[test]
 fn test_cross_load_content_index_background_build_preserves_watch_lazy_reverse_map_mode() {
     let tmp = tempfile::tempdir().unwrap();
@@ -187,8 +193,13 @@ fn test_cross_load_content_index_background_build_preserves_watch_lazy_reverse_m
         "background cross-load must preserve watcher-authoritative mode");
     assert!(idx.path_to_id.as_ref().map(|lookup| !lookup.is_empty()).unwrap_or(false),
         "background cross-load must build path lookup for watcher mutation mode");
-    assert!(idx.file_tokens.is_empty(),
-        "background cross-load must leave per-file token reverse map lazy");
+    drop(idx);
+    // C2-A: see sibling test above. Background build path also schedules a
+    // background `rebuild_file_tokens` post-install.
+    assert!(
+        wait_until(|| ctx.index.read().map(|i| !i.file_tokens.is_empty()).unwrap_or(false)),
+        "background cross-load must warm per-file token reverse map in background"
+    );
 }
 
 #[test]
@@ -351,8 +362,12 @@ fn test_handle_xray_reindex_inner_preserves_watch_lazy_reverse_map_mode() {
         "xray_reindex must preserve watcher-authoritative reverse-map mode");
     assert!(idx.path_to_id.as_ref().map(|lookup| !lookup.is_empty()).unwrap_or(false),
         "watch-mode xray_reindex must rebuild path lookup for the rebuilt index");
-    assert!(idx.file_tokens.is_empty(),
-        "watch-mode xray_reindex must leave per-file token reverse map lazy after rebuild");
+    drop(idx);
+    // C2-A: xray_reindex install path also schedules a background warmer.
+    assert!(
+        wait_until(|| ctx.index.read().map(|i| !i.file_tokens.is_empty()).unwrap_or(false)),
+        "watch-mode xray_reindex must warm per-file token reverse map in background"
+    );
 }
 
 

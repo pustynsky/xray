@@ -1440,6 +1440,182 @@ pub(crate) fn schedule_trigram_rebuild_after_edit(ctx: &HandlerContext) {
     }
 }
 
+/// Startup trigram warm-up that also clears `trigram_dirty` if needed.
+///
+/// Plain `ContentIndex::warm_up()` only faults pages in via `black_box`; if
+/// the persisted index was saved with `trigram_dirty=true` (a previous
+/// session ended with pending edits before a wide grep ran), warm-up leaves
+/// the dirty flag set, and the first wide `xray_grep` after startup ends up
+/// paying the full ~3 s rebuild + transient peak RSS spike (~+800 MB on
+/// Shared). This helper does the rebuild ahead of time, gated by the same
+/// single-flight `TrigramRebuildGate` that the edit/grep handlers share, so
+/// a watcher edit landing during warm-up cannot race the rebuild.
+///
+/// Returns `(trigram_count, token_count)` — the same shape as `warm_up`
+/// so the caller can preserve the `trigramWarmupReady` log fields.
+pub(crate) fn warm_trigram_index(
+    index: &Arc<RwLock<ContentIndex>>,
+    gate: &Arc<utils::TrigramRebuildGate>,
+) -> (usize, usize) {
+    // Cheap read-locked dirty check. We don't hold the lock across the
+    // rebuild — `rebuild_trigram_index_singleflight` re-checks under the
+    // write lock for race correctness.
+    let needs_rebuild = match index.read() {
+        Ok(idx) => idx.trigram_dirty,
+        Err(poisoned) => poisoned.into_inner().trigram_dirty,
+    };
+    if needs_rebuild {
+        rebuild_trigram_index_singleflight(index, gate, false);
+    }
+    // Always page-in: after a fresh rebuild the new trigram pages are hot,
+    // but the surrounding inverted-index keys / postings still benefit from
+    // the explicit fault-in pass that `warm_up()` performs.
+    let idx = index.read().unwrap_or_else(|e| e.into_inner());
+    idx.warm_up()
+}
+
+/// Eager-startup variant of [`warm_trigram_index`] that performs phase-1
+/// (snapshot tokens + clear dirty) **synchronously on the caller thread**,
+/// then spawns a background thread for the offline build + swap + page-in.
+///
+/// Why split: on a cache-load startup, `cmd_serve` spawns this warm-up
+/// alongside `schedule_rebuild_file_tokens`. The latter holds the
+/// `ContentIndex` write lock for ~3 s on a 76K-file workspace. If the
+/// warm-up's first `index.write()` lands AFTER the file_tokens write lock
+/// has latched, the warm-up serializes behind it (~+3 s on
+/// `trigramWarmupReady`). Performing phase-1 synchronously on the caller
+/// thread before the file_tokens spawn guarantees the trigram snapshot
+/// wins the race for the write lock; the long offline build then runs in
+/// parallel with the file_tokens rebuild.
+///
+/// The single-flight gate is held across the whole operation via a
+/// `TrigramBuildGuard` carried into the background thread, so concurrent
+/// `xray_edit`-driven rebuilds wait via the existing condvar path.
+pub(crate) fn start_warm_trigram_index(
+    index: &Arc<RwLock<ContentIndex>>,
+    gate: &Arc<utils::TrigramRebuildGate>,
+) {
+    let warmup_start = Instant::now();
+
+    // Try to acquire the single-flight gate. If a rebuild is already in
+    // flight (e.g. an `xray_edit` fired between content-publish and here),
+    // fall back to page-in only — that other rebuild will populate the
+    // trigram for us.
+    {
+        let mut building = gate.building.lock().unwrap_or_else(|e| e.into_inner());
+        if *building {
+            drop(building);
+            spawn_warmup_page_in_only(Arc::clone(index), warmup_start);
+            return;
+        }
+        *building = true;
+    }
+
+    // Phase 1 (sync, on caller thread): under write lock, check the dirty
+    // bit and snapshot tokens. Brief — a `Vec::clone` over HashMap keys
+    // (~3.8 M entries on Shared, ~50 ms) versus the multi-second
+    // file_tokens hold we are racing.
+    let initial_snapshot: Option<Vec<String>> = {
+        let mut idx = index.write().unwrap_or_else(|e| e.into_inner());
+        if idx.trigram_dirty {
+            let tokens: Vec<String> = idx.index.keys().cloned().collect();
+            idx.trigram_dirty = false;
+            Some(tokens)
+        } else {
+            None
+        }
+    };
+
+    let Some(initial_tokens) = initial_snapshot else {
+        // Trigram already clean — release gate and run page-in only.
+        {
+            let mut building = gate.building.lock().unwrap_or_else(|e| e.into_inner());
+            *building = false;
+            gate.done.notify_all();
+        }
+        spawn_warmup_page_in_only(Arc::clone(index), warmup_start);
+        return;
+    };
+
+    // Phase 2/3 (background): offline build + swap + re-loop on race + page-in.
+    let bg_index = Arc::clone(index);
+    let bg_gate = Arc::clone(gate);
+    let spawn_result = std::thread::Builder::new()
+        .name("xray-trigram-warmup".to_string())
+        .spawn(move || {
+            crate::index::log_phase("trigramWarmupStarted", &[]);
+            let _guard = TrigramBuildGuard { gate: bg_gate };
+
+            let mut tokens = initial_tokens;
+            loop {
+                let trigram = build_trigram_index_from_tokens(tokens, 0);
+
+                let mut idx = bg_index.write().unwrap_or_else(|e| e.into_inner());
+                idx.trigram = trigram;
+                let dirty_after_swap = idx.trigram_dirty;
+                if dirty_after_swap {
+                    tokens = idx.index.keys().cloned().collect();
+                    idx.trigram_dirty = false;
+                } else {
+                    tokens = Vec::new();
+                }
+                drop(idx);
+
+                if !dirty_after_swap {
+                    break;
+                }
+                info!("[grep-trace] trigram dirtied during warm-up rebuild; rebuilding again");
+            }
+
+            // Page-in pass.
+            let idx = bg_index.read().unwrap_or_else(|e| e.into_inner());
+            let (trigrams, tkns) = idx.warm_up();
+            crate::index::log_phase("trigramWarmupReady", &[
+                ("trigramWarmupMs", crate::index::format_duration_ms(warmup_start.elapsed())),
+                ("trigrams", trigrams.to_string()),
+                ("tokens", tkns.to_string()),
+            ]);
+            crate::index::log_memory("serve: trigram warm-up done");
+        });
+
+    // If the bg thread failed to spawn, the closure was dropped: the
+    // `TrigramBuildGuard` was never constructed, so the gate would stay
+    // latched forever, AND we already cleared `trigram_dirty` above. A
+    // later wide grep would then either skip the rebuild (dirty=false →
+    // stale trigram) or wait forever on the stuck gate. Restore both
+    // pieces of state so the next grep can re-trigger a rebuild via
+    // `rebuild_trigram_index_singleflight`.
+    if let Err(err) = spawn_result {
+        warn!(
+            "[grep-trace] failed to spawn trigram warm-up thread; restoring trigram_dirty and releasing gate: {}",
+            err
+        );
+        {
+            let mut idx = index.write().unwrap_or_else(|e| e.into_inner());
+            idx.trigram_dirty = true;
+        }
+        let mut building = gate.building.lock().unwrap_or_else(|e| e.into_inner());
+        *building = false;
+        gate.done.notify_all();
+    }
+}
+
+fn spawn_warmup_page_in_only(index: Arc<RwLock<ContentIndex>>, warmup_start: Instant) {
+    let _ = std::thread::Builder::new()
+        .name("xray-trigram-warmup".to_string())
+        .spawn(move || {
+            crate::index::log_phase("trigramWarmupStarted", &[]);
+            let idx = index.read().unwrap_or_else(|e| e.into_inner());
+            let (trigrams, tokens) = idx.warm_up();
+            crate::index::log_phase("trigramWarmupReady", &[
+                ("trigramWarmupMs", crate::index::format_duration_ms(warmup_start.elapsed())),
+                ("trigrams", trigrams.to_string()),
+                ("tokens", tokens.to_string()),
+            ]);
+            crate::index::log_memory("serve: trigram warm-up done");
+        });
+}
+
 fn rebuild_trigram_index_singleflight(
     index: &Arc<RwLock<ContentIndex>>,
     gate: &Arc<utils::TrigramRebuildGate>,
