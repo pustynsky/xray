@@ -173,6 +173,15 @@ pub fn cmd_serve(args: ServeArgs) {
         None
     };
 
+    // ─── Trigram rebuild gate: shared between startup warm-up, watcher edits,
+    // and the grep handler's single-flight rebuild path. Constructed BEFORE
+    // `load_or_build_content_index` so the warm-up thread it spawns can
+    // serialise against any incoming `xray_edit` rebuilds via the same gate,
+    // and reused unchanged when the `HandlerContext` is built below — the
+    // identity of the `Arc<TrigramRebuildGate>` matters for single-flight
+    // semantics, so the context must NOT construct a fresh one.
+    let trigram_build_gate = Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new());
+
     // ─── Content index: load from disk or build in background ───
     // Returns the effective `respect_git_exclude` resolved against any persisted
     // value on disk — see `resolve_respect_git_exclude` in `super`. This must be
@@ -184,6 +193,7 @@ pub fn cmd_serve(args: ServeArgs) {
         is_unresolved, args.watch, args.respect_git_exclude,
         &content_ready, &content_build_terminal, &content_building,
         content_thread_budget,
+        &trigram_build_gate,
     );
 
     // ─── Definition index: same async pattern ───
@@ -356,7 +366,7 @@ pub fn cmd_serve(args: ServeArgs) {
         rescan_interval_sec: args.rescan_interval_sec,
         branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
         file_index_build_gate: Arc::new(crate::mcp::handlers::utils::FileIndexBuildGate::new()),
-        trigram_build_gate: Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new()),
+        trigram_build_gate: Arc::clone(&trigram_build_gate),
         autosave_dirty: Arc::clone(&autosave_dirty),
     };
     mcp::server::run_server(ctx);
@@ -858,6 +868,7 @@ fn load_or_build_content_index(
     content_build_terminal: &Arc<AtomicBool>,
     content_building: &Arc<AtomicBool>,
     build_threads: usize,
+    trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
 ) -> (Arc<RwLock<ContentIndex>>, bool) {
     // ─── Async startup: create empty indexes, start event loop immediately ───
     let empty_index = ContentIndex {
@@ -956,6 +967,24 @@ fn load_or_build_content_index(
         let publish_start = Instant::now();
         *index.write().unwrap_or_else(|e| e.into_inner()) = idx;
         let publish_elapsed = publish_start.elapsed();
+        // ── Trigram warm-up: phase-1 SYNCHRONOUS on this thread. ──
+        // `start_warm_trigram_index` snapshots tokens + clears `trigram_dirty`
+        // under a brief write-lock grab BEFORE returning, then spawns the
+        // long offline build in the background. This must happen before
+        // `schedule_rebuild_file_tokens` below, because file_tokens rebuild
+        // holds the `ContentIndex` write lock for ~3 s on a 76K-file
+        // workspace; serializing the trigram phase-1 grab behind it added
+        // ~3 s to `trigramWarmupReady` (measured 2026-05-02 on Shared).
+        // After phase-1, the offline trigram build runs in parallel with
+        // the file_tokens rebuild and the swap waits at most one write-lock
+        // queue position behind file_tokens.
+        crate::mcp::handlers::start_warm_trigram_index(&index, trigram_build_gate);
+        // Warm `file_tokens` in background so the first user edit doesn't pay
+        // the ~2.6 s rebuild cost under the watcher's exclusive write lock.
+        // No-op when not in watch mode (`file_tokens_authoritative=false`).
+        if watch {
+            mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&index));
+        }
         let post_load_elapsed = post_load_start.elapsed();
         crate::index::log_phase("contentReady", &[
             ("cacheHitContent", "true".to_string()),
@@ -975,21 +1004,6 @@ fn load_or_build_content_index(
         content_build_terminal.store(true, Ordering::Release);
         crate::index::log_memory("serve: content ready");
 
-        // Pre-warm trigram index in background to eliminate cold-start penalty
-        let warmup_index = Arc::clone(&index);
-        std::thread::spawn(move || {
-            crate::index::log_phase("trigramWarmupStarted", &[]);
-            let start = Instant::now();
-            let (trigrams, tokens) = warmup_index.read()
-                .unwrap_or_else(|e| e.into_inner())
-                .warm_up();
-            crate::index::log_phase("trigramWarmupReady", &[
-                ("trigramWarmupMs", crate::index::format_duration_ms(start.elapsed())),
-                ("trigrams", trigrams.to_string()),
-                ("tokens", tokens.to_string()),
-            ]);
-            crate::index::log_memory("serve: trigram warm-up done");
-        });
     } else if !is_unresolved {
         crate::index::log_phase("contentBuildQueued", &[
             ("cacheHitContent", "false".to_string()),
@@ -1002,6 +1016,7 @@ fn load_or_build_content_index(
         let bg_dir = dir_str.to_string();
         let bg_ext = exts_for_load.to_string();
         let bg_idx_base = idx_base.to_path_buf();
+        let bg_gate = Arc::clone(trigram_build_gate);
 
         spawn_background_build("contentBuildPanicked", bg_building, bg_ready, bg_terminal, move |build_state| {
             info!("Building content index in background...");
@@ -1087,6 +1102,10 @@ fn load_or_build_content_index(
                 "Content index ready (background build complete)"
             );
             *bg_index.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
+            // See cache-load path above for rationale.
+            if watch {
+                mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&bg_index));
+            }
             build_state.mark_not_building();
             crate::index::log_phase("contentReady", &[
                 ("cacheHitContent", "false".to_string()),
@@ -1101,12 +1120,16 @@ fn load_or_build_content_index(
             build_state.complete_ready();
             crate::index::log_memory("serve: content ready");
 
-            // Pre-warm trigram index after background build
+            // Pre-warm trigram index after background build. Fresh builds set
+            // `trigram_dirty=false`, so this normally degenerates to the
+            // cheap page-in pass; the gate is threaded through anyway to keep
+            // the warm-up safe against an `xray_edit` racing the build's
+            // tail (the dirty flag could flip back true between build and
+            // warm-up entry).
             crate::index::log_phase("trigramWarmupStarted", &[]);
             let warmup_start = Instant::now();
-            let (trigrams, tokens) = bg_index.read()
-                .unwrap_or_else(|e| e.into_inner())
-                .warm_up();
+            let (trigrams, tokens) =
+                crate::mcp::handlers::warm_trigram_index(&bg_index, &bg_gate);
             crate::index::log_phase("trigramWarmupReady", &[
                 ("trigramWarmupMs", crate::index::format_duration_ms(warmup_start.elapsed())),
                 ("trigrams", trigrams.to_string()),
@@ -2145,6 +2168,7 @@ mod serve_respect_git_exclude_tests {
         let content_build_terminal = Arc::new(AtomicBool::new(false));
         let content_building = Arc::new(AtomicBool::new(false));
 
+        let trigram_build_gate = Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new());
         let (_index, effective) = load_or_build_content_index(
             &dir.to_string_lossy(),
             "cs",
@@ -2157,6 +2181,7 @@ mod serve_respect_git_exclude_tests {
             &content_build_terminal,
             &content_building,
             1,     // build_threads (unused — cache hit path)
+            &trigram_build_gate,
         );
 
         assert!(
@@ -2249,6 +2274,7 @@ mod serve_respect_git_exclude_tests {
         let content_build_terminal = Arc::new(AtomicBool::new(false));
         let content_building = Arc::new(AtomicBool::new(false));
 
+        let trigram_build_gate = Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new());
         let (_index, effective) = load_or_build_content_index(
             &dir.to_string_lossy(),
             "cs",
@@ -2261,6 +2287,7 @@ mod serve_respect_git_exclude_tests {
             &content_build_terminal,
             &content_building,
             1,     // build_threads
+            &trigram_build_gate,
         );
 
         assert!(effective, "cold start: CLI flag passes through unchanged");

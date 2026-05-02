@@ -49,6 +49,66 @@ fn test_build_watch_index_populates_path_to_id() {
     assert_eq!(path_to_id.get(&PathBuf::from("file1.cs")), Some(&1));
 }
 
+
+#[test]
+fn test_schedule_rebuild_file_tokens_warms_reverse_map() {
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
+
+    // Watch-mode index with empty `file_tokens` — same shape produced by
+    // `build_watch_index_from` after a disk load.
+    let watch_index = build_watch_index_from(make_test_index());
+    assert!(watch_index.file_tokens_authoritative);
+    assert!(watch_index.file_tokens.is_empty(), "precondition: reverse map starts empty");
+
+    let arc = Arc::new(RwLock::new(watch_index));
+    schedule_rebuild_file_tokens(Arc::clone(&arc));
+
+    // Poll up to 2s for the background worker to populate `file_tokens`.
+    // 2s is generous — a 2-file/2-token rebuild completes in microseconds;
+    // CI machines under load may still need a small slack.
+    let deadline = Instant::now() + Duration::from_secs(2);
+    loop {
+        {
+            let idx = arc.read().unwrap();
+            if !idx.file_tokens.is_empty() {
+                // Verify the reverse map matches the forward index:
+                // file 0 has both tokens, file 1 has only `ilogger`.
+                assert_eq!(idx.file_tokens.len(), 2);
+                assert_eq!(idx.file_tokens[0], vec!["httpclient".to_string(), "ilogger".to_string()]);
+                assert_eq!(idx.file_tokens[1], vec!["ilogger".to_string()]);
+                return;
+            }
+        }
+        if Instant::now() >= deadline {
+            panic!("background rebuild did not populate file_tokens within 2s");
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn test_schedule_rebuild_file_tokens_skips_when_not_authoritative() {
+    use std::sync::{Arc, RwLock};
+    use std::time::{Duration, Instant};
+
+    // Plain (non-watch) index: file_tokens stays empty by contract.
+    let mut index = make_test_index();
+    index.file_tokens_authoritative = false;
+    index.file_tokens.clear();
+
+    let arc = Arc::new(RwLock::new(index));
+    schedule_rebuild_file_tokens(Arc::clone(&arc));
+
+    // Wait long enough that an active worker would have completed the
+    // 2-token rebuild many times over, then assert no work was done.
+    std::thread::sleep(Duration::from_millis(100));
+    let _wait_until = Instant::now();
+    let idx = arc.read().unwrap();
+    assert!(idx.file_tokens.is_empty(),
+        "non-authoritative index must not be touched by background warmer");
+}
+
 #[test]
 fn test_incremental_update_new_file() {
     let tmp = tempfile::tempdir().unwrap();
@@ -3207,10 +3267,13 @@ fn test_periodic_autosave_returns_false_on_poisoned_lock() {
 
 #[test]
 fn test_periodic_autosave_clone_snapshot_is_independent() {
-    // Verify that clone-then-serialize produces a snapshot independent
-    // of the original: mutations to the live index after clone must NOT
-    // appear in the saved file. This guards the correctness of the
-    // lock-free serialization path.
+    // Verify that ContentIndex::clone() produces an independent snapshot:
+    // mutations to the live index after clone must NOT appear in the saved
+    // file. The production autosave path no longer clones (it serializes
+    // under read lock per user-stories/user-story_xray-autosave-clone-peak_2026-05-02.md),
+    // but the Clone impl is still used by tests, manual snapshot APIs,
+    // and is a load-bearing invariant if the clone-then-serialize pattern
+    // is ever reintroduced. Test name kept for stability.
     let tmp = tempfile::tempdir().unwrap();
     let index_base = tmp.path();
 

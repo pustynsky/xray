@@ -426,8 +426,28 @@ pub fn estimate_content_index_memory(idx: &ContentIndex) -> serde_json::Value {
         1.0
     };
 
-    // If we only sampled, extrapolate total postings
-    let full_total_postings: usize = idx.index.values().map(|v| v.len()).sum();
+    // Single full pass: count total postings AND build a posting-length
+    // histogram for SmallVec<[u32; N]> inline-capacity sizing (T3 of
+    // user-stories/user-story_xray-content-index-ram-investigation_2026-05-02.md).
+    // Buckets: 1, 2, 3..=4, 5..=8, 9.. — chosen to drive C1 inline capacity.
+    let mut full_total_postings: usize = 0;
+    let mut hist_1: u64 = 0;
+    let mut hist_2: u64 = 0;
+    let mut hist_3_4: u64 = 0;
+    let mut hist_5_8: u64 = 0;
+    let mut hist_9_plus: u64 = 0;
+    for postings in idx.index.values() {
+        full_total_postings += postings.len();
+        for p in postings {
+            match p.lines.len() {
+                0 | 1 => hist_1 += 1,
+                2 => hist_2 += 1,
+                3..=4 => hist_3_4 += 1,
+                5..=8 => hist_5_8 += 1,
+                _ => hist_9_plus += 1,
+            }
+        }
+    }
 
     // Inverted index estimate (realistic coefficients):
     // Each HashMap entry: ~120 bytes overhead (bucket + hash + metadata + alignment padding)
@@ -489,6 +509,16 @@ pub fn estimate_content_index_memory(idx: &ContentIndex) -> serde_json::Value {
         "totalPostings": full_total_postings,
         "trigramCount": idx.trigram.trigram_map.len(),
         "fileCount": live_files,
+        // Posting-length distribution. Used to size SmallVec inline capacity
+        // for the C1 candidate in the RAM investigation story. Sum equals
+        // totalPostings; percentages are caller's job (keeps schema stable).
+        "postingLengthHistogram": {
+            "len1": hist_1,
+            "len2": hist_2,
+            "len3to4": hist_3_4,
+            "len5to8": hist_5_8,
+            "len9plus": hist_9_plus,
+        },
     })
 }
 

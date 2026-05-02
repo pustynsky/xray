@@ -8,6 +8,7 @@ mod edit;
 mod fast;
 mod git;
 mod grep;
+pub(crate) use grep::{start_warm_trigram_index, warm_trigram_index};
 pub(crate) mod utils;
 #[cfg(feature = "lang-xml")]
 mod xml_on_demand;
@@ -1915,6 +1916,12 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
                 warn!(error = %e, "Failed to update content index on workspace switch");
             }
         }
+        // Warm `file_tokens` in background so the first user edit avoids the
+        // ~2.6 s rebuild under the watcher write lock. Lazy guard remains as
+        // safety net. No-op when watch mode was not active.
+        if had_watch {
+            crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&ctx.index));
+        }
         // Invalidate file-list index
         if let Ok(mut fi) = ctx.file_index.write() { *fi = None; }
         ctx.file_index_dirty.store(true, Ordering::Relaxed);
@@ -1974,6 +1981,9 @@ fn cross_load_content_index(ctx: &HandlerContext, dir: &str) -> Option<&'static 
                         idx
                     };
                     *bg_index.write().unwrap_or_else(|e| e.into_inner()) = idx;
+                    if had_watch {
+                        crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&bg_index));
+                    }
                     bg_file_dirty.store(true, Ordering::Relaxed);
                     build_succeeded = true;
                 }
@@ -2206,6 +2216,13 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
             }
             return ToolCallResult::error(format!("Failed to update in-memory index: {}", e));
         }
+    }
+
+    // Warm `file_tokens` in background so the first user edit avoids the
+    // ~2.6 s rebuild under the watcher write lock. Lazy guard remains as
+    // safety net. No-op when watch mode was not active.
+    if had_watch {
+        crate::mcp::watcher::schedule_rebuild_file_tokens(Arc::clone(&ctx.index));
     }
 
     // Mark workspace as resolved and content index as ready.

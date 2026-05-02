@@ -2,6 +2,75 @@
 
 ## v0.2.2 (2026-05-02)
 
+- **Periodic-autosave RAM peak fix.** `periodic_autosave` no longer
+  `idx.clone()`s the content/definition indexes before serialization.
+  Serialization now runs under the existing read lock (concurrent
+  readers unaffected; watcher writers wait ~4 s every 5 min instead).
+  Measured on a 76K-file workspace: peak `workingSet` during autosave
+  ~6164 MB → ~2520 MB (−2 GB peak, eliminates OOM risk on 16 GB dev
+  machines). Telemetry: `cloneMs=` field removed from
+  `Periodic autosave complete` log line; `serializeMs=` retained.
+  See `user-stories/user-story_xray-autosave-clone-peak_2026-05-02.md`.
+- **`xray_info` posting-length histogram.** `memoryEstimate.contentIndex`
+  now includes `postingLengthHistogram = {len1, len2, len3to4, len5to8,
+  len9plus}` to drive future `SmallVec` inline-capacity sizing for
+  `Posting.lines`. Single full pass replaces the previous separate
+  posting-count loop — no extra cost. See
+  `user-stories/user-story_xray-content-index-ram-investigation_2026-05-02.md`.
+
+- **First-edit pause fix for watch mode.** MCP `serve --watch` now schedules
+  `ContentIndex.file_tokens` reverse-map rebuild in a background thread as
+  soon as a content index enters watch mode. This moves the unavoidable
+  one-time O(total_postings) rebuild out of the first user edit's exclusive
+  watcher write-lock window. On the 76K-file Shared workspace, the observed
+  first-edit `update_content_index` pause was ~2656 ms; expected post-fix
+  first-edit `update_ms` is ≤200 ms when the background warmer finishes first.
+  The existing lazy guard remains as a safety net. See
+  `user-stories/user-story_xray-first-edit-pause_2026-05-02.md`.
+
+- **First-grep pause fix on cold start (dirty-aware trigram warm-up).** The
+  background trigram warm-up scheduled by `cmd_serve` after a cache load now
+  rebuilds the trigram structure when the persisted `trigram_dirty` flag is
+  set, instead of only paging cold pages in. Previously the cached `dirty=true`
+  bit was carried into the running server unchanged, so the first wide
+  `xray_grep` paid the full O(token_count) rebuild plus a transient peak-RSS
+  spike. Observed on the 76K-file Shared workspace cold-start log
+  (2026-05-02): first wide grep latency ~3.3 s, working-set peaked at
+  3987 MB vs ~3194 MB pre-grep (≈+800 MB transient). With the fix the
+  rebuild runs during warm-up under single-flight semantics shared with the
+  `xray_edit` path, so the first user grep is cheap and the peak-RSS spike
+  no longer crosses the warm-up baseline. The cache-miss / background-build
+  warm-up path was also moved to the same helper to keep ordering safe
+  against an `xray_edit` racing the build's tail.
+
+- **Trigram warm-up / file_tokens spawn order swapped.** On the cache-load
+  path of `cmd_serve`, the trigram warm-up thread is now spawned **before**
+  `schedule_rebuild_file_tokens`. Both run in parallel, but `file_tokens`
+  rebuild holds the `ContentIndex` write lock for ~2.7 s on a 76K-file
+  workspace, while trigram warm-up only needs two brief write-lock grabs
+  (read tokens → build offline → swap). With the previous order, the brief
+  trigram grabs queued behind the long file_tokens hold, serializing what
+  should have been parallel work. Measured 2026-05-02 (Shared, 76K files,
+  cache-load): `trigramWarmupReady` at startup+8.8 s pre-swap; expected
+  post-swap drop is ~2.7 s, which in turn unblocks the first wide
+  `xray_grep` (was blocking on `waiting for in-flight trigram rebuild`).
+
+- **Trigram warm-up phase-1 made synchronous on caller thread.** Even after
+  swapping spawn order, `trigramWarmupReady` stayed at startup+7.0 s on
+  the 76K-file Shared workspace, because the warm-up bg thread had to do
+  a `log_phase` write-to-disk before its first `index.write()`, leaving a
+  ~5–10 ms window for `schedule_rebuild_file_tokens` to latch the long
+  write hold first; warm-up then serialized behind it as before.
+  `cmd_serve` cache-load path now calls a new `start_warm_trigram_index`
+  helper that performs phase-1 (snapshot tokens + clear `trigram_dirty`)
+  under a brief write-lock grab **on the caller thread, before spawning
+  the bg thread**. This guarantees trigram phase-1 wins the race; the
+  offline trigram build then runs in parallel with the file_tokens
+  rebuild, and the swap waits at most one write-lock queue position
+  behind it. Measured 2026-05-03 (Shared, cache-load): `trigramWarmupMs`
+  7053 → 3663 (−48%); first directory-scoped `xray_grep` after
+  `trigramWarmupReady` 1812 ms → 44 ms (−98%).
+
 Performance and correctness improvements for hot-start and cold-start of the
 MCP server. Highlights since v0.2.1:
 
