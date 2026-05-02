@@ -35,6 +35,67 @@ const NEAREST_MATCH_MIN_SIMILARITY: f64 = 0.4;
 /// Maximum length of search/match text shown in hint messages.
 const NEAREST_MATCH_MAX_DISPLAY_LEN: usize = 150;
 
+/// Maximum number of lines (max of original/modified) at which the unified
+/// diff is fully rendered. Beyond this, the diff body is replaced with a
+/// short marker; line counts (`lines_added`, `lines_removed`, `new_line_count`)
+/// in the response remain authoritative. Bounds the line-Myers DP that runs
+/// on every successful edit. See bug #3 in
+/// docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md.
+const UNIFIED_DIFF_MAX_LINES: usize = 2_000;
+
+/// Hard byte cap on the rendered unified diff string. Caps both response
+/// payload size and the time spent serializing the diff into JSON. Triggers
+/// AFTER `UNIFIED_DIFF_MAX_LINES` is checked, so files within the line cap
+/// but with extremely wide lines (one-line minified bundles, etc.) still get
+/// a bounded response.
+const UNIFIED_DIFF_MAX_BYTES: usize = 256 * 1024; // 256 KB
+
+
+/// Cheap byte-bag prefilter ratio for `find_nearest_match`, expressed in
+/// percent and tied to `NEAREST_MATCH_MIN_SIMILARITY` (40 %).
+///
+/// A window is dropped without running the expensive Myers diff when its
+/// byte-bag intersection with `search_text` is strictly below
+///
+/// ```text
+/// (RATIO * (search_text.chars().count() + window.chars().count())) / 200
+/// ```
+///
+/// This is a provable upper bound on `similar::TextDiff::from_chars(...).ratio()`,
+/// which is `2 * char_matches / (search.chars().count() + window.chars().count())`.
+/// Soundness:
+///
+/// 1. `from_chars` measures char-level LCS, not byte-level.
+/// 2. Each char in the LCS is encoded by its UTF-8 bytes in BOTH strings
+///    (1 to 4 bytes per char), so `byte_intersection >= byte_LCS >= char_LCS`.
+/// 3. Therefore dropping when `byte_intersection < (RATIO * (a_chars + b_chars)) / 200`
+///    implies `char_LCS / ((a_chars + b_chars) / 2) < RATIO/100`, i.e. ratio
+///    < `NEAREST_MATCH_MIN_SIMILARITY`.
+///
+/// History: an earlier draft used `search_text.len() * RATIO / 100`, which
+/// was unsafe for short windows fully contained in a long search (caught in
+/// review finding #2). The interim per-pair fix used **byte** lengths, which
+/// was still unsafe whenever search or window contained non-ASCII chars
+/// because byte length over-counts vs. char count (caught in re-review,
+/// same bug report). The current formula uses char counts everywhere and
+/// has a regression test for both classes of mistake.
+const NEAREST_MATCH_PREFILTER_RATIO: usize = 40;
+
+/// Hard budget on cumulative Myers DP cells across one `find_nearest_match`
+/// scan. Sized so even a pathological input (multi-thousand-line file plus
+/// a multi-KB stale `search`) cannot stall the single-threaded MCP stdio
+/// loop for more than a fraction of a second on the slowest measured
+/// profile (Windows debug-allocator at ~25M cells/s).
+///
+/// The cap is on COMPUTED CELLS, not wall-clock — keeps tests deterministic.
+/// When exhausted, the scan breaks early and returns whatever `best` was
+/// already found (or `None` if nothing crossed the similarity floor).
+///
+/// History: 2026-05-02 the unbounded scan stalled the server for ~5 minutes
+/// on a 137 KB CHANGELOG.md edit with a 14-line stale `search` block; see
+/// docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md.
+const NEAREST_MATCH_WORK_BUDGET: usize = 10_000_000;
+
 /// Minimum similarity ratio for emitting a byte-level diff hint alongside the
 /// `Nearest match` line. Was 0.99, but multi-line whitespace / blank-line drift
 /// drops similarity to ~0.85–0.95 — right when the byte hint is most needed
@@ -2459,6 +2520,31 @@ fn truncate_for_display(s: &str) -> String {
     }
 }
 
+/// 256-bin byte histogram of `s`. Used by [`histogram_intersection`] for the
+/// cheap O(N) prefilter that gates the expensive Myers diff in
+/// [`find_nearest_match`].
+fn byte_histogram(s: &str) -> [u32; 256] {
+    let mut h = [0u32; 256];
+    for &b in s.as_bytes() {
+        h[b as usize] = h[b as usize].saturating_add(1);
+    }
+    h
+}
+
+/// Multiset intersection size of `profile` and the byte-bag of `window`.
+/// This is a mathematical upper bound on the LCS length used by Myers char
+/// similarity when window and search are of comparable size — see
+/// `NEAREST_MATCH_PREFILTER_RATIO`.
+fn histogram_intersection(profile: &[u32; 256], window: &str) -> u32 {
+    let mut win = [0u32; 256];
+    for &b in window.as_bytes() {
+        win[b as usize] = win[b as usize].saturating_add(1);
+    }
+    (0..256)
+        .map(|i| profile[i].min(win[i]))
+        .sum()
+}
+
 /// A single nearest-match candidate located inside a file. Carried
 /// out of `find_nearest_match` so multiple downstream hint builders
 /// (`nearest_match_hint`, swap-detection) can re-use one similarity scan.
@@ -2478,7 +2564,16 @@ struct NearestMatch {
 /// Algorithm:
 /// - Single-line search: compare against each line with char-level similarity.
 /// - Multi-line search: sliding window of N lines, joined and compared.
-/// - Skips files > 500KB for performance.
+/// - Skips files > `NEAREST_MATCH_MAX_FILE_SIZE` (500 KB) for performance.
+///
+/// Per-window guards (added 2026-05-03 after the 5-min CHANGELOG.md hang;
+/// see docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md):
+/// 1. Cheap O(window) byte-bag prefilter — drops windows that cannot reach the
+///    minimum similarity floor before the expensive Myers diff runs.
+/// 2. Hard work-cell budget (`NEAREST_MATCH_WORK_BUDGET`) on cumulative Myers
+///    DP cells — bounds wall-clock independent of input shape. When the
+///    budget is exhausted the scan breaks early; whatever `best` was already
+///    found is still returned (subject to the existing similarity floor).
 fn find_nearest_match(content: &str, search_text: &str) -> Option<NearestMatch> {
     if content.len() > NEAREST_MATCH_MAX_FILE_SIZE {
         return None;
@@ -2492,21 +2587,73 @@ fn find_nearest_match(content: &str, search_text: &str) -> Option<NearestMatch> 
         return None;
     }
 
+    // Pre-compute the byte-bag profile and the search-side char count
+    // (constants for this call). The per-window threshold depends on window
+    // CHAR length and is computed inside the loop — see
+    // `NEAREST_MATCH_PREFILTER_RATIO` doc comment for the formula and review
+    // finding #2 (and its re-review) for why byte length is unsafe with
+    // non-ASCII input.
+    let search_profile = byte_histogram(search_text);
+    let search_chars_count = search_text.chars().count();
+
     let mut best = NearestMatch { line: 0, similarity: 0.0, text: String::new() };
+    let mut work_used: usize = 0;
 
     if search_line_count <= 1 {
         for (i, line) in content_lines.iter().enumerate() {
+            // (1) Cheap prefilter: byte-bag intersection upper-bounds char-LCS,
+            //     which upper-bounds ratio. Threshold uses CHAR counts — see
+            //     NEAREST_MATCH_PREFILTER_RATIO docs for the soundness proof.
+            let line_chars = line.chars().count();
+            let prefilter_min = ((search_chars_count + line_chars)
+                .saturating_mul(NEAREST_MATCH_PREFILTER_RATIO)
+                / 200) as u32;
+            if histogram_intersection(&search_profile, line) < prefilter_min {
+                continue;
+            }
+            // (2) Hard work-cell budget across the whole scan.
+            let cells = search_text.len().saturating_mul(line.len());
+            if work_used.saturating_add(cells) > NEAREST_MATCH_WORK_BUDGET {
+                break;
+            }
+            work_used = work_used.saturating_add(cells);
             let ratio = similar::TextDiff::from_chars(search_text, line).ratio();
             if ratio > best.similarity {
                 best = NearestMatch { line: i + 1, similarity: ratio, text: (*line).to_string() };
             }
         }
     } else if content_lines.len() >= search_line_count {
+        // Reuse a single window buffer across iterations to avoid ~N⋅L bytes
+        // of allocator churn (which is the dominant cost on Windows debug
+        // builds under parallel test load — ~5× slowdown observed).
+        let mut window = String::with_capacity(search_text.len() + search_line_count);
         for i in 0..=(content_lines.len() - search_line_count) {
-            let window = content_lines[i..i + search_line_count].join("\n");
-            let ratio = similar::TextDiff::from_chars(search_text, &window).ratio();
+            window.clear();
+            for (offset, line) in content_lines[i..i + search_line_count].iter().enumerate() {
+                if offset > 0 {
+                    window.push('\n');
+                }
+                window.push_str(line);
+            }
+            // (1) Cheap prefilter (char-length aware — see
+            //     NEAREST_MATCH_PREFILTER_RATIO docs for soundness on
+            //     non-ASCII input, regression caught in re-review).
+            let window_chars = window.chars().count();
+            let prefilter_min = ((search_chars_count + window_chars)
+                .saturating_mul(NEAREST_MATCH_PREFILTER_RATIO)
+                / 200) as u32;
+            if histogram_intersection(&search_profile, &window) < prefilter_min {
+                continue;
+            }
+            // (2) Hard work-cell budget.
+            let cells = search_text.len().saturating_mul(window.len());
+            if work_used.saturating_add(cells) > NEAREST_MATCH_WORK_BUDGET {
+                break;
+            }
+            work_used = work_used.saturating_add(cells);
+            let ratio = similar::TextDiff::from_chars(search_text, window.as_str()).ratio();
             if ratio > best.similarity {
-                best = NearestMatch { line: i + 1, similarity: ratio, text: window };
+                best = NearestMatch { line: i + 1, similarity: ratio, text: window.clone() };
             }
         }
     }
@@ -2869,15 +3016,55 @@ fn is_prose_extension(path_str: &str) -> bool {
 }
 
 /// Generate a unified diff between original and modified content.
+///
+/// Bounded for both wall-clock and response size:
+/// - Files where `max(orig_lines, modified_lines) > UNIFIED_DIFF_MAX_LINES`
+///   skip the line-Myers DP entirely and return a short marker. Authoritative
+///   counts (`lines_added`, `lines_removed`, `new_line_count`) live on the
+///   response object — the inline diff is a convenience, not a contract.
+/// - Files within the line cap but whose rendered diff exceeds
+///   `UNIFIED_DIFF_MAX_BYTES` are truncated at the cap with a footer marker.
 fn generate_unified_diff(path: &str, original: &str, modified: &str) -> String {
     if original == modified {
         return String::new();
     }
 
-    similar::TextDiff::from_lines(original, modified)
+    let orig_lines = original.lines().count();
+    let modified_lines = modified.lines().count();
+    let max_lines = orig_lines.max(modified_lines);
+    if max_lines > UNIFIED_DIFF_MAX_LINES {
+        return format!(
+            "--- a/{path}\n+++ b/{path}\n# diff omitted: file has {max_lines} lines, exceeds UNIFIED_DIFF_MAX_LINES ({cap}). \
+             This is a FILE-SIZE cap, not an edit-size cap — the edit is valid (and was applied unless `dryRun: true`). \
+             Authoritative change counts: see linesAdded / linesRemoved / newLineCount on the response. \
+             To inspect the actual change: re-run with `dryRun: true` AND a narrower `startLine`/`endLine` \
+             range, or read the post-edit region with `xray_definitions file=[...] containsLine=N includeBody=true`. \
+             Do NOT retry the same edit hoping the diff appears.\n",
+            path = path,
+            max_lines = max_lines,
+            cap = UNIFIED_DIFF_MAX_LINES,
+        );
+    }
+
+    let diff = similar::TextDiff::from_lines(original, modified)
         .unified_diff()
         .header(&format!("a/{}", path), &format!("b/{}", path))
-        .to_string()
+        .to_string();
+    if diff.len() > UNIFIED_DIFF_MAX_BYTES {
+        let cut = diff.floor_char_boundary(UNIFIED_DIFF_MAX_BYTES);
+        return format!(
+            "{}\n# diff truncated: rendered diff is {} bytes, exceeds UNIFIED_DIFF_MAX_BYTES ({}). \
+             This is a payload cap, not an edit-size cap — the edit is valid (and was applied unless `dryRun: true`). \
+             Authoritative counts: linesAdded / linesRemoved / newLineCount. The portion of the \
+             diff above is the leading {} bytes; the remainder was discarded. To inspect the \
+             tail, re-run `dryRun: true` on a narrower line range.",
+            &diff[..cut],
+            diff.len(),
+            UNIFIED_DIFF_MAX_BYTES,
+            cut,
+        );
+    }
+    diff
 }
 
 #[cfg(test)]
