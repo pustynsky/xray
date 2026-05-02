@@ -1950,16 +1950,27 @@ fn try_name_correction(
     let mut best_score: f64 = 0.0;
 
     for index_name in index.name_index.keys() {
+        // Length-ratio prefilter for `try_name_correction` (bug #5 in
+        // docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md).
+        //
+        // The same `length_ratio < AUTO_CORRECT_MIN_LENGTH_RATIO` guard
+        // already existed BELOW the score check before this commit; moving
+        // it BEFORE the per-name `name_similarity()` call is purely a perf
+        // refactor and does not change which corrections fire. The trade-off
+        // (Jaro-Winkler can score `cheeseburger` vs `cheese` at ~0.90 even
+        // with length_ratio 0.5 — see review finding #1) was accepted by the
+        // pre-fix code and is preserved as-is here. A safer Jaro-aware
+        // prefilter is tracked as deferred work in the bug report.
+        let len_ratio = search_lower.len().min(index_name.len()) as f64
+            / search_lower.len().max(index_name.len()) as f64;
+        if len_ratio < AUTO_CORRECT_MIN_LENGTH_RATIO {
+            continue;
+        }
         let score = name_similarity(&search_lower, index_name);
         if score >= AUTO_CORRECT_NAME_THRESHOLD && score > best_score {
-            // Guard: reject corrections where query and match differ too much in length.
-            // Jaro-Winkler inflates similarity for shared prefixes (e.g., "xray_definitions" vs "search" = 87%)
-            // but 6/18 = 33% length ratio reveals it's a partial match, not a typo.
-            let length_ratio = search_lower.len().min(index_name.len()) as f64
-                / search_lower.len().max(index_name.len()) as f64;
-            if length_ratio < AUTO_CORRECT_MIN_LENGTH_RATIO {
-                continue;
-            }
+            // Length-ratio guard already applied above; keep the versioned-name
+            // exclusion here because it depends on the actual string content,
+            // not just lengths.
             if is_versioned_name_mismatch(&search_lower, index_name) {
                 continue;
             }
@@ -2267,19 +2278,17 @@ fn hint_file_fuzzy_match(
             let path_normalized = normalize(&path_lower);
             if path_normalized.contains(&ff_normalized)
                 && seen_paths.insert(path_lower.clone()) {
-                    let segments: Vec<&str> = path_lower.split('/').collect();
-                    for window_size in 1..=segments.len() {
-                        for start in 0..=(segments.len() - window_size) {
-                            let segment = segments[start..start + window_size].join("/");
-                            let seg_normalized = normalize(&segment);
-                            if seg_normalized.contains(&ff_normalized) || ff_normalized.contains(&seg_normalized) {
-                                let count = def_indices.len();
-                                match &best_match {
-                                    None => { best_match = Some((segment, count)); }
-                                    Some((_, prev_count)) => {
-                                        if count > *prev_count {
-                                            best_match = Some((segment, count));
-                                        }
+                    for segment in path_lower.split('/') {
+                        let seg_normalized = normalize(segment);
+                        if seg_normalized.contains(&ff_normalized) || ff_normalized.contains(&seg_normalized) {
+                            let count = def_indices.len();
+                            match &best_match {
+                                None => {
+                                    best_match = Some((segment.to_string(), count));
+                                }
+                                Some((_, prev_count)) => {
+                                    if count > *prev_count {
+                                        best_match = Some((segment.to_string(), count));
                                     }
                                 }
                             }
@@ -2309,6 +2318,15 @@ fn hint_nearest_name(
     let mut best_score: f64 = 0.0;
 
     for (name, indices) in &index.name_index {
+        // NOTE: bug #5 explored adding a length-ratio prefilter here for the
+        // same reason as `try_name_correction`. Reverted: this site is the
+        // observability-only `hint_nearest_name` path. A length-ratio gate
+        // would silently suppress valid Jaro-Winkler matches — e.g.
+        // `cheeseburger` vs `cheese` has length_ratio 0.5 but Jaro-Winkler
+        // ~0.90 (above the 0.80 threshold). For the auto-correction path
+        // the same gate is acceptable because the existing pre-fix code
+        // already had it; here it would be a fresh behavior change. The
+        // perf hole is documented in the bug report's "deferred" section.
         let score = name_similarity(&search_name, name);
         if score > best_score && score > 0.8 {
             best_score = score;

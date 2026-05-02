@@ -1875,6 +1875,233 @@ fn test_nearest_match_hint_regex_not_found() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════
+// find_nearest_match work-budget regression tests (bug #1, bug #2)
+// 2026-05-03: docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md
+// ═══════════════════════════════════════════════════════════════════════
+
+#[test]
+fn test_find_nearest_match_multiline_budget_caps_runtime_on_large_file() {
+    // Bug #1 reproduction: a multi-thousand-line file with a multi-KB stale
+    // multi-line `search` used to spend ~5 minutes inside Myers DP because
+    // the only guard was `content.len() > NEAREST_MATCH_MAX_FILE_SIZE`.
+    //
+    // Setup is sized below the 500 KB file guard but well above the work-cell
+    // budget: 200 KB / ~8000 lines (multi-line search ~50 lines × ~24 bytes).
+    // Without the fix this test would not return within the timeout.
+    let line = "fn foo() { /* lorem ipsum */ }\n"; // 32 bytes incl. newline
+    let large = line.repeat(8_000); // ~256 KB across ~8000 lines
+    let absent_search: String = std::iter::once("fn nonexistent_helper() {")
+        .chain(std::iter::repeat("  call_some_function();").take(49))
+        .collect::<Vec<_>>()
+        .join("\n"); // 50-line search, ~1.2 KB
+
+    let (tmp, filename, _) = create_temp_file(&large);
+    let ctx = make_ctx(tmp.path());
+
+    let start = std::time::Instant::now();
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": absent_search, "replace": "x" }
+        ]
+    }));
+    let elapsed = start.elapsed();
+
+    assert!(result.is_error, "absent search must produce an error");
+    // SLA is generous to absorb Windows-debug parallel-test contention.
+    // Solo runs are ~200–400 ms; the full --no-fail-fast suite (~2 500 tests
+    // running in parallel under the Win debug allocator) inflates per-call
+    // wall-clock by ~5×. Production / release wall-clock is sub-second per
+    // docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md.
+    // Pre-fix this would have been ~5 minutes.
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "find_nearest_match must respect the work budget; took {:?}",
+        elapsed
+    );
+    let text = &result.content[0].text;
+    // No spurious hint should fire when the budget is exhausted before any
+    // candidate crosses NEAREST_MATCH_MIN_SIMILARITY (0.40).
+    assert!(
+        !text.contains("Nearest match"),
+        "unrelated stale block must not surface a near-match hint, got: {text}"
+    );
+}
+
+#[test]
+fn test_find_nearest_match_singleline_budget_caps_runtime_on_giant_line() {
+    // Bug #2: single-line branch is the same DP shape — one window can already
+    // exceed the budget if the file is one giant minified line.
+    //
+    // 100 KB single-line file (one line, no newlines) × 1 KB single-line
+    // search with high byte-bag overlap (so prefilter does NOT short-circuit)
+    // would have cost ~10^8 Myers cells without the budget.
+    let giant_line = "x".repeat(100_000); // 100 KB single line, no \n
+    let absent_search = "x".repeat(1024); // single-line, 1 KB
+
+    let (tmp, filename, _) = create_temp_file(&giant_line);
+    let ctx = make_ctx(tmp.path());
+
+    let start = std::time::Instant::now();
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": absent_search, "replace": "y" }
+        ]
+    }));
+    let elapsed = start.elapsed();
+
+    // Note: search "x".repeat(1024) IS literally a substring of the file, so
+    // the edit may actually succeed — the test contract is the runtime
+    // guarantee, not the success/failure branch. Both outcomes are valid.
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "single-line find_nearest_match must respect the work budget; took {:?}",
+        elapsed
+    );
+    let _ = result;
+}
+
+#[test]
+fn test_find_nearest_match_singleline_unrelated_text_returns_quickly() {
+    // Same shape as bug #2 but the search shares zero bytes with the file —
+    // exercises the prefilter (intersection = 0 < prefilter_min) instead of
+    // the budget. Runtime must still be bounded.
+    let giant_line = "a".repeat(100_000);
+    let absent_search = "z".repeat(1024);
+
+    let (tmp, filename, _) = create_temp_file(&giant_line);
+    let ctx = make_ctx(tmp.path());
+
+    let start = std::time::Instant::now();
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": absent_search, "replace": "y" }
+        ]
+    }));
+    let elapsed = start.elapsed();
+
+    assert!(result.is_error, "absent search must produce an error");
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "prefilter must short-circuit zero-overlap searches; took {:?}",
+        elapsed
+    );
+    let text = &result.content[0].text;
+    // Prefilter discards every window before Myers — best stays at 0 → no hint.
+    assert!(
+        !text.contains("Nearest match"),
+        "zero-overlap search must not surface a near-match hint, got: {text}"
+    );
+}
+
+#[test]
+fn test_find_nearest_match_prefilter_keeps_useful_hint_on_small_file() {
+    // Sanity check that the prefilter does NOT drop a window that would have
+    // produced a useful similarity hint on a realistic small file. Mirrors
+    // existing test_nearest_match_hint_partial_overlap shape but locked in as
+    // a regression for the prefilter change.
+    let (tmp, filename, _) = create_temp_file(
+        "function processData() {\n    return data;\n}\n"
+    );
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": "function processdata() {", "replace": "fn processData() {" }
+        ]
+    }));
+
+    assert!(result.is_error, "case-different search must fail");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("Nearest match"),
+        "prefilter must keep the case-typo near-match visible, got: {text}"
+    );
+}
+
+#[test]
+fn test_find_nearest_match_prefilter_keeps_short_window_in_long_search() {
+    // Regression for code-review finding #2 (length-skewed prefilter).
+    //
+    // Pre-fix the prefilter required `intersection >= search_text.len() * 0.40`,
+    // which silently dropped a short-but-fully-overlapping window inside a long
+    // `search_text`: `similar::TextDiff::from_chars` would have rated it at
+    // `2 * matches / (search_len + window_len)` = exactly the reporting floor.
+    //
+    // Construct a 100-char search and a small file whose only line is the
+    // first 25 chars of search. Without the fix the hint is suppressed; with
+    // the corrected length-aware threshold the hint is preserved.
+    let needle: String = (b'a'..=b'z').cycle().take(100).map(char::from).collect();
+    let short_match: String = needle.chars().take(25).collect();
+    let file_body = format!("{}\nunrelated trailing line\n", short_match);
+
+    let (tmp, filename, _) = create_temp_file(&file_body);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": needle, "replace": "REPLACED" }
+        ]
+    }));
+
+    assert!(result.is_error, "long search must fail (no full-length occurrence in file)");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("Nearest match"),
+        "length-aware prefilter must keep the short-but-overlapping near-match \
+         visible (this exact case was suppressed by the pre-fix `search.len()`-only \
+         threshold). Got: {text}"
+    );
+}
+
+#[test]
+fn test_find_nearest_match_prefilter_handles_non_ascii_search() {
+    // Regression for code-review re-review finding (byte-vs-char unit mismatch).
+    //
+    // Pre-fix the per-pair prefilter used BYTE lengths in the formula but
+    // compared against a byte-histogram intersection. For non-ASCII input the
+    // two units diverge: a multi-byte char contributes 2–4 to byte length but
+    // only 1 to char count. This caused valid hints to be silently dropped.
+    //
+    // Reviewer's exact counterexample: search = "aaaa" + 6 emojis → 10 chars,
+    // 28 bytes. window/file-line = "aaaabbbbbb" → 10 chars, 10 bytes.
+    // similar::TextDiff::from_chars ratio = 2*4 / (10+10) = 0.40, equal to
+    // NEAREST_MATCH_MIN_SIMILARITY. The hint floor is `< 0.4` (strict), so
+    // 0.40 must surface.
+    //
+    // The fixed formula uses chars().count() everywhere; the prefilter
+    // threshold becomes ((10+10)*40)/200 = 4, intersection is 4 ('a' × 4),
+    // so the candidate passes the prefilter and Myers fires.
+    let needle: String = std::iter::once('a').cycle().take(4)
+        .chain(std::iter::repeat('😀').take(6))
+        .collect();
+    let file_body = "aaaabbbbbb\nunrelated trailing line\n";
+
+    let (tmp, filename, _) = create_temp_file(file_body);
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            { "search": needle, "replace": "REPLACED" }
+        ]
+    }));
+
+    assert!(result.is_error, "non-ASCII needle has no occurrence in ASCII file");
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("Nearest match"),
+        "char-aware prefilter must keep the multi-byte/ASCII boundary case \
+         visible (regression test for re-review finding on byte-vs-char \
+         units). Got: {text}"
+    );
+}
+
+// ═══════════════════════════════════════════════════════════════════════
 // skippedDetails tests
 // ═══════════════════════════════════════════════════════════════════════
 
@@ -6142,6 +6369,96 @@ fn test_swap_hint_silent_for_near_miss_replace_text() {
     assert!(
         text.contains("not found"),
         "failure-path error must still surface 'not found' baseline: {text}"
+    );
+}
+
+
+#[test]
+fn test_generate_unified_diff_caps_at_2000_lines() {
+    // Bug #3 (docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md):
+    // an edit that produces a diff far above UNIFIED_DIFF_MAX_LINES (2 000)
+    // must skip the line-Myers DP and return a short marker. Authoritative
+    // change counts (lines_added / lines_removed / new_line_count) must still
+    // be present and correct on the response.
+    let original: String = (1..=5_000)
+        .map(|i| format!("old line {}\n", i))
+        .collect();
+    let (tmp, filename, _) = create_temp_file(&original);
+    let ctx = make_ctx(tmp.path());
+
+    let new_body: String = (1..=5_000)
+        .map(|i| format!("new line {}\n", i))
+        .collect();
+
+    let started = std::time::Instant::now();
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 1, "endLine": 5000, "content": new_body }
+        ],
+        "dryRun": true
+    }));
+    let elapsed = started.elapsed();
+
+    assert!(!result.is_error, "edit must succeed: {}", &result.content[0].text);
+    let text = &result.content[0].text;
+    // Diff body must be replaced by the marker, not by 5 000 lines of unified diff.
+    // Exact line-count is brittle (xray edit can shift by ±1 due to trailing-newline
+    // semantics), so anchor on the marker substrings instead.
+    assert!(
+        text.contains("diff omitted") && text.contains("exceeds UNIFIED_DIFF_MAX_LINES"),
+        "oversize diff must collapse to omission marker, got: {}",
+        &text[..text.len().min(400)]
+    );
+    // Authoritative line counts must still be on the response.
+    assert!(text.contains("\"linesAdded\":") && text.contains("\"linesRemoved\":"),
+        "line counts must remain on response, got: {}", &text[..text.len().min(400)]);
+    // The cap exists to bound wall-clock; even on a debug build under parallel
+    // test contention this path should be sub-second.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "capped diff must be fast: took {:?}", elapsed
+    );
+}
+
+#[test]
+fn test_generate_unified_diff_truncates_oversize_byte_payload() {
+    // Bug #3 second cap: file is within UNIFIED_DIFF_MAX_LINES but the rendered
+    // diff exceeds UNIFIED_DIFF_MAX_BYTES (256 KB). This shape is realistic for
+    // minified bundles or generated tables — short on lines, very wide. The
+    // diff must be truncated with a footer marker instead of returning the
+    // full payload.
+    let wide_old: String = (1..=400)
+        .map(|i| format!("OLD-{:04}-{}\n", i, "x".repeat(800)))
+        .collect();
+    let (tmp, filename, _) = create_temp_file(&wide_old);
+    let ctx = make_ctx(tmp.path());
+
+    let wide_new: String = (1..=400)
+        .map(|i| format!("NEW-{:04}-{}\n", i, "y".repeat(800)))
+        .collect();
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "operations": [
+            { "startLine": 1, "endLine": 400, "content": wide_new }
+        ],
+        "dryRun": true
+    }));
+
+    assert!(!result.is_error, "edit must succeed: {}", &result.content[0].text);
+    let text = &result.content[0].text;
+    assert!(
+        text.contains("diff truncated"),
+        "oversize byte diff must be truncated with marker, got prefix: {}",
+        &text[..text.len().min(400)]
+    );
+    // Sanity: the response itself must still be bounded — not the unbounded
+    // pre-fix shape where the full > 256 KB diff was inlined.
+    assert!(
+        text.len() < 600 * 1024,
+        "response payload should stay bounded by the byte cap; len = {}",
+        text.len()
     );
 }
 

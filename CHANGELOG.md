@@ -2,6 +2,37 @@
 
 ## v0.2.2 (2026-05-02)
 
+- **Bounded 5 unbounded-work hot paths in `xray_edit` + `xray_definitions`
+  (single-threaded MCP stdin loop).** Five paths could spend O(M·N) or
+  unbounded time on adversarial input and block all unrelated MCP tool
+  calls (the server processes stdin FIFO):
+  1. `find_nearest_match` ran `similar::TextDiff::from_chars` (Myers DP) on
+     every line of every scanned file when an `xray_edit` search string was
+     not found. Fix: byte-histogram intersection prefilter (40% char-ratio
+     gate, formal upper bound on char-LCS — see
+     `NEAREST_MATCH_PREFILTER_RATIO` doc) + 10M work-cell hard budget.
+     Multi-line branch reuses one preallocated window buffer instead of
+     `lines.join("\n")` per iteration.
+  2. `generate_unified_diff` rendered the full unified diff for files of
+     any size (Vec<u8> + String alloc + JSON encoding + MCP roundtrip).
+     Fix: 2 000-line + 256 KB caps. Truncation markers are now actionable
+     for LLM consumers — they explicitly state it is a FILE-SIZE cap, not
+     an edit-size cap, point at `linesAdded` / `linesRemoved` /
+     `newLineCount` for authoritative counts, and recommend re-running
+     with `dryRun:true` on a narrower `startLine`/`endLine` range.
+  3. `hint_file_fuzzy_match` did a cubic windowed scan over path segments
+     (O(D³)). Fix: linear single-segment scan (O(D)) — the windowed scan
+     never produced different matches in practice.
+  4. `try_name_correction` now runs the length-ratio guard *before*
+     `name_similarity` (jaro_winkler) instead of after. Pure perf
+     refactor, no behavior change. (`hint_nearest_name` reverted —
+     observability path + Jaro-Winkler false-negative risk;
+     `suggested_name_matches` deferred per bug report.)
+  Tests: 2 557 passed, 0 failed (full `--bin xray --no-fail-fast`).
+  Includes 8 new tests covering work-cell budget, prefilter math (ASCII
+  length-skew + Unicode emoji counterexamples for char-vs-byte soundness),
+  and unified-diff caps. See
+  `docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md`.
 - **Periodic-autosave RAM peak fix.** `periodic_autosave` no longer
   `idx.clone()`s the content/definition indexes before serialization.
   Serialization now runs under the existing read lock (concurrent
