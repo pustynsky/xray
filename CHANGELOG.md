@@ -1,5 +1,18 @@
 # Changelog
 
+## Unreleased
+
+- **Perf-regression test guards for the unbounded-work helpers fixed in
+  v0.2.2.** Two new tests in `src/mcp/handlers/definitions_tests.rs` lock
+  in wall-clock SLAs for `hint_file_fuzzy_match` (bug #4) and
+  `hint_nearest_name` (bug #5 worst case) on synthetic large indexes
+  (10 000 deeply-nested paths and 50 000 unique definition names
+  respectively). Bugs #1–#3 were already covered by perf tests in
+  `edit_tests.rs` from PR #257. Test-only change — no behavior change.
+  Catches future regressions that re-introduce O(D³) windowed scans or
+  per-name allocations inside the inner loops.
+
+
 ## v0.2.2 (2026-05-02)
 
 - **Bounded 5 unbounded-work hot paths in `xray_edit` + `xray_definitions`
