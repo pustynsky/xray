@@ -259,6 +259,69 @@ fn test_file_filter_comma_separated_no_match_returns_empty() {
     assert_eq!(defs.len(), 0, "no files match, should return 0 results");
 }
 
+// ─── File-only fast path tests ───────────────────────────────────
+//
+// These tests exercise the prefilter branch in `collect_candidates` that
+// fires when `file=` is the ONLY index-side filter (no kind/name/attribute/
+// baseType). Without the prefilter, the handler walks every active definition
+// in the index (~1M on the Shared workspace) just to keep ~30. See
+// 2026-05-03 fix in `collect_candidates`.
+
+#[test]
+fn test_file_only_filter_returns_all_defs_in_single_file() {
+    let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
+        "file": ["QueryService.cs"]
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    // Fixture has 1 class + 3 methods in QueryService.cs (file_id 2).
+    assert_eq!(defs.len(), 4,
+        "expected 4 defs (class + 3 methods) in QueryService, got {}", defs.len());
+    for d in defs {
+        assert!(d["file"].as_str().unwrap().contains("QueryService"),
+            "all results must be from QueryService, got {}", d["file"]);
+    }
+}
+
+#[test]
+fn test_file_only_filter_multi_file_returns_union() {
+    let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
+        "file": ["ResilientClient.cs", "ProxyClient.cs"]
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    // ResilientClient.cs: 1 class + 1 method. ProxyClient.cs: 1 class + 1 method.
+    assert_eq!(defs.len(), 4, "expected 4 defs across both files, got {}", defs.len());
+    let files: std::collections::HashSet<&str> = defs.iter()
+        .map(|d| d["file"].as_str().unwrap())
+        .collect();
+    assert!(files.iter().any(|f| f.contains("ResilientClient")),
+        "must include ResilientClient");
+    assert!(files.iter().any(|f| f.contains("ProxyClient")),
+        "must include ProxyClient");
+    for d in defs {
+        let f = d["file"].as_str().unwrap();
+        assert!(!f.contains("QueryService"),
+            "QueryService.cs must be excluded by the prefilter, got {}", f);
+    }
+}
+
+#[test]
+fn test_file_only_filter_no_match_returns_empty() {
+    let ctx = super::super::handlers_test_utils::make_ctx_with_defs();
+    let result = handle_xray_definitions(&ctx, &serde_json::json!({
+        "file": ["NoSuchFileExists.cs"]
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let defs = v["definitions"].as_array().unwrap();
+    assert_eq!(defs.len(), 0, "no files match, should return 0 results");
+}
+
 // ─── Comma-separated parent filter tests ─────────────────────────
 
 #[test]

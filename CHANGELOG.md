@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- **Fix MCP dispatcher 5-minute stall on `xray_definitions` (lock re-entry).**
+  `inject_index_degraded` in `src/mcp/handlers/utils.rs` previously took the
+  `HandlerContext` and re-acquired `ctx.def_index.read()` to fetch
+  `worker_panics`, while every caller already held an outer
+  `def_arc.read()` guard. On Windows, `std::sync::RwLock` wraps SRWLOCK,
+  where recursive read acquisition is undefined — when the file watcher
+  acquired the writer between the two read attempts, the second `read()`
+  blocked for multiple minutes (observed `searchTimeMs: 68 ms` but
+  `totalTimeMs: 321 650 ms` on a Shared workspace dispatch). Helper
+  signature changed to `(summary, worker_panics: usize)`; the seven
+  call sites in `definitions.rs` and `callers.rs` now pass the value
+  read from the guard they already hold. Doc comment cites the
+  2026-05-03 incident as a guardrail for future refactors.
+
+- **Perf: `xray_definitions file=[…]` 1.5–2.3 s → ~70–130 ms on large
+  workspaces (file-only fast path).** When `file=` was the sole filter
+  (no `kind`/`name`/`parent`/`attribute`/`baseType`), `collect_candidates`
+  in `src/mcp/handlers/definitions.rs` fell through to the "no filter"
+  branch and collected all active definitions (~846 k on the Shared
+  workspace) before `apply_entry_filters` linearly scanned them with
+  per-iteration path normalization. Added a prefilter that walks
+  `index.files.iter().enumerate()`, normalizes each path once
+  (`replace('\\', "/").to_lowercase()`, matching `apply_entry_filters`
+  exactly), and gathers matching files' definitions via
+  `index.file_index.get(file_id)`. Three new tests in
+  `definitions_tests.rs` (`test_file_only_filter_*`) lock in single-file,
+  multi-file union, and no-match semantics for the new branch.
+  Measured on Shared (4 file probes): IB2BStoredProcedures.cs 1913 → 130 ms
+  (~15×), B2BConfiguration.cs 1491 → 71 ms (~21×), IB2BWorkflowsManager.cs
+  2103 → 74 ms (~28×), B2BUtils.cs 2290 → 74 ms (~31×).
+
 - **Bug-report 2026-04-28: stale `xray_reindex` cache + stale `branchWarning`
   (`docs/bug-reports/bug-report_xray-index-freshness-reindex-cache-and-stale-branch-warning_2026-04-28.md`).**
   Two correctness fixes plus one collateral safety improvement, all behind

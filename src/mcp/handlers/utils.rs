@@ -148,14 +148,21 @@ pub(crate) fn inject_branch_warning(summary: &mut Value, ctx: &HandlerContext) {
 /// suspiciously empty results from `xray_definitions` / `xray_callers` and have
 /// no way to distinguish "no matches" from "index is incomplete". The flag
 /// hints the user to rerun `xray_reindex_definitions`.
-pub(crate) fn inject_index_degraded(summary: &mut Value, ctx: &HandlerContext) {
-    let Some(ref def_arc) = ctx.def_index else { return };
-    let Ok(idx) = def_arc.read() else { return };
-    if idx.worker_panics > 0 {
+///
+/// `worker_panics` MUST be read from a `DefinitionIndex` guard already held by
+/// the caller. Re-acquiring `ctx.def_index.read()` here would re-enter the
+/// same `RwLock` on the same thread, which is undefined for `std::sync::RwLock`
+/// and on Windows can stall for minutes if a writer (watcher / reindex) is
+/// waiting between the outer and inner read. See
+/// [docs/concurrency.md](docs/concurrency.md) §"Lock Ordering Contract" and
+/// the 2026-05-03 incident on a large workspace (321 s stall on a single
+/// `xray_definitions` request) recorded in the local debug log.
+pub(crate) fn inject_index_degraded(summary: &mut Value, worker_panics: usize) {
+    if worker_panics > 0 {
         summary["indexDegraded"] = json!(true);
         summary["indexDegradedHint"] = json!(format!(
             "{} parser worker(s) panicked during index build — run xray_reindex_definitions to recover",
-            idx.worker_panics
+            worker_panics
         ));
     }
 }

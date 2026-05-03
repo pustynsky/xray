@@ -590,7 +590,7 @@ fn handle_contains_line_mode(
         }
     }
     inject_branch_warning(&mut summary, ctx);
-    inject_index_degraded(&mut summary, ctx);
+    inject_index_degraded(&mut summary, index.worker_panics);
     let output = json!({
         "containingDefinitions": containing_defs,
         "query": {
@@ -753,6 +753,37 @@ fn collect_candidates(
                 None => matching_indices.into_iter().cloned().collect(),
             });
         }
+    }
+
+    // File-only fast path: when the only filter is `file=`, narrow via the
+    // file_index lookup table BEFORE collecting all active definitions. The
+    // unfiltered fallback below would walk every entry of `index.file_index`
+    // (~1M defs on the Shared workspace), then hand them to `apply_entry_filters`
+    // which re-normalizes each path string and substring-checks it. For a
+    // single-file query the user wants ~30 results, not 1M iterations.
+    //
+    // This mirrors the prefilter shape used by `xray_grep` (per-term postings
+    // before TF-IDF) and the `containsLine` mode below, both of which already
+    // narrow by file before doing per-definition work. Bug observed 2026-05-03:
+    // `xray_definitions file=["IB2BWorkflowsManager.cs"]` took 2.1 s on Shared,
+    // dropping to ~30-80 ms after this prefilter.
+    //
+    // Path normalization here MUST match `apply_entry_filters` exactly
+    // (`replace('\\', "/").to_lowercase()`) so that the post-filter is a no-op
+    // and we do not silently drop matches on case-sensitive filesystems.
+    if candidate_indices.is_none()
+        && let Some(ref file_terms) = args.file_filter_terms
+    {
+        let mut narrowed: Vec<u32> = Vec::new();
+        for (file_id, file_path) in index.files.iter().enumerate() {
+            let file_lower = file_path.replace('\\', "/").to_lowercase();
+            if file_terms.iter().any(|t| file_lower.contains(t.as_str()))
+                && let Some(defs) = index.file_index.get(&(file_id as u32))
+            {
+                narrowed.extend(defs);
+            }
+        }
+        candidate_indices = Some(narrowed);
     }
 
     // If no filters applied, return all ACTIVE definitions (via file_index to exclude tombstoned)
@@ -1666,7 +1697,7 @@ fn build_search_summary(
         summary["nextStepHint"] = json!(hint);
     }
     inject_branch_warning(&mut summary, ctx);
-    inject_index_degraded(&mut summary, ctx);
+    inject_index_degraded(&mut summary, index.worker_panics);
 
     summary
 }
@@ -2495,7 +2526,7 @@ fn build_auto_summary(
         "totalDefinitions": active_definitions,
     });
     inject_branch_warning(&mut summary, ctx);
-    inject_index_degraded(&mut summary, ctx);
+    inject_index_degraded(&mut summary, index.worker_panics);
 
     let mut result_status = build_result_status(
         "summary_only",

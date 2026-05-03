@@ -518,7 +518,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             summary["nextStepHint"] = json!(hint);
         }
         inject_branch_warning(&mut summary, ctx);
-        inject_index_degraded(&mut summary, ctx);
+        inject_index_degraded(&mut summary, def_idx.worker_panics);
         let template_node_count = count_tree_nodes(&template_results);
         let mut output = json!({
             "callTree": template_results,
@@ -648,7 +648,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             }
         }
         inject_branch_warning(&mut summary, ctx);
-        inject_index_degraded(&mut summary, ctx);
+        inject_index_degraded(&mut summary, def_idx.worker_panics);
         let mut output = json!({
             "callTree": tree,
             "query": {
@@ -790,7 +790,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             }
         }
         inject_branch_warning(&mut summary, ctx);
-        inject_index_degraded(&mut summary, ctx);
+        inject_index_degraded(&mut summary, def_idx.worker_panics);
         let mut output = json!({
             "callTree": tree,
             "query": {
@@ -1154,7 +1154,7 @@ fn handle_multi_method_callers(
         }
     }
     inject_branch_warning(&mut summary, ctx);
-    inject_index_degraded(&mut summary, ctx);
+    inject_index_degraded(&mut summary, def_idx.worker_panics);
     let shown_nodes: usize = results
         .iter()
         .map(|result| {
