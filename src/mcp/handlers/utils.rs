@@ -1,7 +1,8 @@
 //! Shared utility functions for MCP tool handlers.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::time::Instant;
+use std::process::Command;
+use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
@@ -9,6 +10,12 @@ use crate::mcp::protocol::ToolCallResult;
 use crate::clean_path;
 
 use super::HandlerContext;
+
+/// TTL for the live current-branch probe used by [`branch_warning`].
+/// Short enough that `git checkout main` is reflected within a few seconds;
+/// long enough that repeated tool calls don't fork a `git` subprocess each
+/// time. See `bug-report_xray-index-freshness-reindex-cache-and-stale-branch-warning_2026-04-28.md`.
+const BRANCH_PROBE_TTL: Duration = Duration::from_secs(5);
 
 /// Serialize a JSON Value to a string, returning a fallback error JSON
 /// if serialization fails (e.g., due to NaN/Infinity float values).
@@ -31,12 +38,91 @@ pub(crate) fn json_to_string(v: &serde_json::Value) -> String {
 
 // ─── Branch warning ─────────────────────────────────────────────────
 
+/// Provenance of the value returned by [`current_branch_resolved`].
+pub(crate) enum BranchSource {
+    /// Value came from a successful live `git rev-parse` probe (or its TTL
+    /// cache) within the current workspace.
+    Live,
+    /// Value came from `HandlerContext::current_branch` (the snapshot taken
+    /// at server startup) because the live probe failed or is disabled.
+    Startup,
+    /// No branch could be determined (no startup value and probe failed).
+    Unknown,
+}
+
+/// Resolve the current branch for `branch_warning`.
+///
+/// When `ctx.live_branch_probe_enabled` is false (tests, CLI subcommands),
+/// returns the static value captured at server startup. When true (long-running
+/// MCP server), performs a `git rev-parse --abbrev-ref HEAD` probe in the
+/// current workspace directory and caches the result for [`BRANCH_PROBE_TTL`].
+///
+/// Probe failure (no `git`, not a repo, detached HEAD with empty output) falls
+/// back to `ctx.current_branch` so behaviour is never worse than the legacy
+/// startup-only path.
+///
+/// Returns the branch source alongside the value so callers can surface
+/// `branchSource` for diagnostics if they want to.
+pub(crate) fn current_branch_resolved(ctx: &HandlerContext) -> (Option<String>, BranchSource) {
+    if !ctx.live_branch_probe_enabled {
+        return (
+            ctx.current_branch.clone(),
+            if ctx.current_branch.is_some() { BranchSource::Startup } else { BranchSource::Unknown },
+        );
+    }
+
+    let dir = ctx.server_dir();
+
+    // Read-lock fast path: serve cached value if still fresh.
+    if let Ok(cache) = ctx.current_branch_cache.read()
+        && let Some((ts, val)) = cache.get(&dir)
+        && ts.elapsed() < BRANCH_PROBE_TTL
+    {
+        return match val {
+            Some(_) => (val.clone(), BranchSource::Live),
+            None => (ctx.current_branch.clone(), BranchSource::Startup),
+        };
+    }
+
+
+    // Cold or expired entry — probe live. Note: a brief race where N concurrent
+    // requests all probe at once is possible (the read-lock check above is not
+    // atomic with the write below). N is bounded by handler concurrency and the
+    // probe is cheap (~5–20 ms on Windows), so we accept it instead of adding a
+    // single-flight gate.
+    let probed = Command::new("git")
+        .args(["rev-parse", "--abbrev-ref", "HEAD"])
+        .current_dir(&dir)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    if let Ok(mut cache) = ctx.current_branch_cache.write() {
+        cache.insert(dir, (Instant::now(), probed.clone()));
+    }
+
+    match probed {
+        Some(b) => (Some(b), BranchSource::Live),
+        None => (
+            ctx.current_branch.clone(),
+            if ctx.current_branch.is_some() { BranchSource::Startup } else { BranchSource::Unknown },
+        ),
+    }
+}
+
 /// Returns a warning message if the current branch is not `main` or `master`.
 /// Used by index-based tools (xray_grep, xray_definitions, xray_callers,
 /// xray_fast) to alert the user that results may differ from production.
+///
+/// Resolves the branch via [`current_branch_resolved`] so a long-running MCP
+/// server reflects `git checkout` within seconds (bug-report 2026-04-28).
 pub(crate) fn branch_warning(ctx: &HandlerContext) -> Option<String> {
-    ctx.current_branch.as_ref().and_then(|b| {
-        if b == "main" || b == "master" {
+    let (branch, _src) = current_branch_resolved(ctx);
+    branch.and_then(|b| {
+        if b == "main" || b == "master" || b == "HEAD" {
             None
         } else {
             Some(format!(

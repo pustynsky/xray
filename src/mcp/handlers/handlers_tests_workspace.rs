@@ -525,3 +525,473 @@ fn test_reindex_pinned_switch_errors_tell_callers_to_omit_dir() {
         );
     }
 }
+
+// ─── Bug-report 2026-04-28: force-rebuild + live branch warning ─────────
+//
+// Validates that `xray_reindex` against the *current* workspace forces a
+// fresh rebuild instead of silently returning the on-disk cache, and that
+// the optional `useCache: true` opt-out preserves the legacy fast path for
+// callers who prefer cold-rebuild latency over freshness. Also covers the
+// branch_warning live-probe TTL cache and its workspace-switch invalidation.
+
+/// Helper: build a content-index cache on disk for `workspace_str`, then
+/// register `ctx` against it without loading anything into memory yet — so
+/// each test starts from a known "cache-on-disk, empty-in-memory" state.
+fn seed_disk_cache(
+    ctx: &mut HandlerContext,
+    tmp: &tempfile::TempDir,
+    workspace_str: &str,
+) {
+    let index_base = tmp.path().join("indexes");
+    let cache = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: workspace_str.to_string(),
+        ext: "rs".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    crate::index::save_content_index(&cache, &index_base).unwrap();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = index_base;
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(workspace_str.to_string());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+}
+
+/// Bug-report 2026-04-28, Acceptance #3: `xray_reindex` against the current
+/// workspace must rebuild from the live filesystem (`indexAction="rebuilt"`,
+/// `rebuiltFromDisk=true`, `forceRebuild=true`) rather than silently reusing
+/// the existing on-disk cache.
+#[test]
+fn test_handle_xray_reindex_inner_forces_rebuild_for_current_workspace() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("seed.rs"), "fn force_rebuild_seed() {}\n").unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+
+    let mut ctx = HandlerContext::default();
+    seed_disk_cache(&mut ctx, &tmp, &workspace_str);
+
+    let result = handle_xray_reindex_inner(&ctx, &json!({}));
+    assert!(!result.is_error, "current-workspace reindex must succeed");
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["indexAction"], "rebuilt",
+        "current-workspace reindex must rebuild from disk, got: {}", output);
+    assert_eq!(output["rebuiltFromDisk"], true,
+        "rebuiltFromDisk must mirror indexAction=='rebuilt'");
+    assert_eq!(output["forceRebuild"], true,
+        "forceRebuild must be true for current-workspace reindex without useCache");
+}
+
+/// Bug-report 2026-04-28, Acceptance #3 (opt-out): explicit `useCache: true`
+/// preserves the legacy cache-load fast path for callers who prefer
+/// cold-rebuild latency over freshness.
+#[test]
+fn test_handle_xray_reindex_inner_use_cache_opt_in_keeps_loaded_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace_use_cache");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("seed.rs"), "fn use_cache_seed() {}\n").unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+
+    let mut ctx = HandlerContext::default();
+    seed_disk_cache(&mut ctx, &tmp, &workspace_str);
+
+    let result = handle_xray_reindex_inner(&ctx, &json!({"useCache": true}));
+    assert!(!result.is_error);
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["indexAction"], "loaded_cache",
+        "useCache=true must keep the legacy fast path");
+    assert_eq!(output["rebuiltFromDisk"], false);
+    assert_eq!(output["forceRebuild"], false);
+}
+
+/// Bug-report 2026-04-28, Acceptance #4: a token added to disk after the
+/// cache was built becomes searchable in the in-memory index immediately
+/// after `xray_reindex` (because force-rebuild walks the live filesystem).
+#[test]
+fn test_handle_xray_reindex_inner_picks_up_new_tokens_from_disk() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace_new_token");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("seed.rs"), "fn before_reindex_token() {}\n").unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+
+    let mut ctx = HandlerContext::default();
+    seed_disk_cache(&mut ctx, &tmp, &workspace_str);
+
+    // Mutate the workspace AFTER the cache was built. Use a uniquely-shaped
+    // identifier so substring-search is unambiguous.
+    std::fs::write(
+        workspace.join("seed.rs"),
+        "fn after_reindex_uniq_zzqq_token() {}\n",
+    ).unwrap();
+
+    let result = handle_xray_reindex_inner(&ctx, &json!({}));
+    assert!(!result.is_error);
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["indexAction"], "rebuilt");
+
+    let idx = ctx.index.read().unwrap();
+    let tokens: Vec<&String> = idx.index.keys().collect();
+    assert!(
+        tokens.iter().any(|t| t.contains("after_reindex_uniq_zzqq_token")),
+        "force-rebuild must surface tokens added after the cache was built; tokens={:?}",
+        tokens.iter().filter(|t| t.contains("reindex")).collect::<Vec<_>>()
+    );
+}
+
+/// `build_or_load_content_index(force_rebuild=false)` must still serve the
+/// existing on-disk cache. Pins the workspace-switch fast path semantics so a
+/// future refactor can't accidentally make every cross-load do a full rebuild.
+#[test]
+fn test_build_or_load_content_index_force_false_uses_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace_keep_cache");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("seed.rs"), "fn keep_cache_seed() {}\n").unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+    let index_base = tmp.path().join("indexes");
+    let cache = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: workspace_str.clone(),
+        ext: "rs".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    crate::index::save_content_index(&cache, &index_base).unwrap();
+
+    let (_idx, action) = super::build_or_load_content_index(
+        &workspace_str, "rs", &index_base, false, /* force_rebuild = */ false,
+    ).expect("cached index should load");
+    assert_eq!(action, "loaded_cache",
+        "force_rebuild=false must keep the cache fast path");
+}
+
+/// `build_or_load_content_index(force_rebuild=true)` must rebuild even when a
+/// matching on-disk cache exists.
+#[test]
+fn test_build_or_load_content_index_force_true_ignores_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace_force_true");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("seed.rs"), "fn force_true_seed() {}\n").unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+    let index_base = tmp.path().join("indexes");
+    let cache = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: workspace_str.clone(),
+        ext: "rs".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    crate::index::save_content_index(&cache, &index_base).unwrap();
+
+    let (_idx, action) = super::build_or_load_content_index(
+        &workspace_str, "rs", &index_base, false, /* force_rebuild = */ true,
+    ).expect("force-rebuild should still produce an index");
+    assert_eq!(action, "rebuilt",
+        "force_rebuild=true must bypass the cache fast path");
+}
+
+/// Bug-report 2026-04-28: `branch_warning` with `live_branch_probe_enabled=false`
+/// (test default) keeps reading the static `current_branch` snapshot — this
+/// guarantees that turning the long-running probe off via the flag keeps the
+/// pre-fix behaviour for tests and CLI subcommands.
+#[test]
+fn test_branch_warning_live_probe_disabled_uses_startup_value() {
+    let ctx = HandlerContext {
+        current_branch: Some("feature/legacy".to_string()),
+        ..HandlerContext::default()
+    };
+    assert!(!ctx.live_branch_probe_enabled,
+        "Default ctx must keep the live probe disabled");
+    let warning = super::utils::branch_warning(&ctx);
+    assert!(warning.is_some(),
+        "feature-branch startup value must still surface a warning");
+    assert!(warning.unwrap().contains("feature/legacy"));
+}
+
+/// Bug-report 2026-04-28: a workspace switch via `handle_xray_reindex_inner`
+/// must drop the cached live-branch probe entry for the outgoing workspace,
+/// so a subsequent call probing the same dir cannot serve a pre-switch value.
+#[test]
+fn test_workspace_switch_invalidates_current_branch_cache() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace_a = tmp.path().join("ws_a");
+    let workspace_b = tmp.path().join("ws_b");
+    for w in [&workspace_a, &workspace_b] {
+        std::fs::create_dir_all(w).unwrap();
+        std::fs::write(w.join("seed.rs"), "fn ws_switch_seed() {}\n").unwrap();
+    }
+    let dir_a = crate::clean_path(
+        &std::fs::canonicalize(&workspace_a).unwrap().to_string_lossy(),
+    );
+    let dir_b = crate::clean_path(
+        &std::fs::canonicalize(&workspace_b).unwrap().to_string_lossy(),
+    );
+
+    let mut ctx = HandlerContext::default();
+    seed_disk_cache(&mut ctx, &tmp, &dir_a);
+    // Workspace must be switchable for this test (default is PinnedCli).
+    ctx.workspace.write().unwrap().mode = WorkspaceBindingMode::ManualOverride;
+
+    // Pre-populate cache for the outgoing workspace so we can observe the
+    // explicit removal that `handle_xray_reindex_inner` performs on switch.
+    {
+        let mut cache = ctx.current_branch_cache.write().unwrap();
+        cache.insert(
+            dir_a.clone(),
+            (std::time::Instant::now(), Some("feature/should_be_evicted".to_string())),
+        );
+    }
+    assert!(
+        ctx.current_branch_cache.read().unwrap().contains_key(&dir_a),
+        "Precondition: cache must contain the outgoing-workspace entry"
+    );
+
+    // Build a cache on disk for ws_b too so the switch's cross-load succeeds.
+    let cache_b = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: dir_b.clone(),
+        ext: "rs".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    crate::index::save_content_index(&cache_b, &ctx.index_base).unwrap();
+
+    let result = handle_xray_reindex_inner(&ctx, &json!({"dir": dir_b}));
+    assert!(!result.is_error, "workspace switch must succeed: {}", result.content[0].text);
+
+    let cache = ctx.current_branch_cache.read().unwrap();
+    assert!(
+        !cache.contains_key(&dir_a),
+        "Workspace switch must drop the outgoing-workspace branch cache entry"
+    );
+}
+
+/// Bug-report 2026-04-28 (reviewer follow-up): when `save_content_index` fails
+/// for a force-rebuilt index, the function MUST return the freshly-built
+/// in-memory index instead of re-loading the surviving (stale) on-disk cache.
+/// We force the failure by pointing `index_base` at a regular file — the
+/// `create_dir_all(index_base)` at the top of `save_content_index` then errors
+/// because the path component already exists as a non-directory.
+#[test]
+fn test_build_or_load_content_index_save_failure_keeps_fresh_in_memory_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("workspace_save_fail");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("seed.rs"),
+        "fn save_fail_uniq_zzqq_token() {}\n",
+    ).unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+
+    // Point index_base at a regular FILE — save_content_index's create_dir_all
+    // will fail with ErrorKind::NotADirectory (Linux) / similar on Windows.
+    let index_base_file = tmp.path().join("not_a_dir.dat");
+    std::fs::write(&index_base_file, b"placeholder").unwrap();
+
+    let (idx, action) = super::build_or_load_content_index(
+        &workspace_str,
+        "rs",
+        &index_base_file,
+        false,
+        /* force_rebuild = */ true,
+    ).expect("force-rebuild must yield an in-memory index even when save fails");
+
+    assert_eq!(
+        action, "rebuilt",
+        "save failure must NOT downgrade indexAction to loaded_cache"
+    );
+    let tokens: Vec<&String> = idx.index.keys().collect();
+    assert!(
+        tokens.iter().any(|t| t.contains("save_fail_uniq_zzqq_token")),
+        "in-memory idx must contain freshly-built tokens despite save failure; matching={:?}",
+        tokens.iter().filter(|t| t.contains("save_fail")).collect::<Vec<_>>()
+    );
+}
+
+/// Bug-report 2026-04-28 (reviewer Round-2 finding): the same save-failure
+/// stale-cache bug existed in `handle_xray_reindex_definitions_inner` (the
+/// `xray_reindex_definitions` handler). Mirror the content-side fix: when
+/// `save_definition_index` fails, keep the freshly-built `new_index` in
+/// memory and skip the drop+reload — otherwise the handler would silently
+/// re-publish stale definitions while reporting fresh counts to the caller.
+#[test]
+fn test_handle_xray_reindex_definitions_inner_save_failure_keeps_fresh_in_memory_index() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws_def_save_fail");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("seed.rs"),
+        "fn def_save_fail_uniq_zzqq_marker() {}\n",
+    ).unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+
+    let mut ctx = make_ctx_with_defs();
+    ctx.server_ext = "rs".to_string();
+    // Force save_definition_index to fail by pointing index_base at a regular
+    // file: the `create_dir_all(index_base)` inside the save layer will error
+    // because the path component already exists as a non-directory.
+    let index_base_file = tmp.path().join("not_a_dir.dat");
+    std::fs::write(&index_base_file, b"placeholder").unwrap();
+    ctx.index_base = index_base_file;
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(workspace_str.clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+
+    let result = handle_xray_reindex_definitions_inner(&ctx, &json!({}));
+    assert!(
+        !result.is_error,
+        "definition reindex must succeed even when save fails: {}",
+        result.content[0].text
+    );
+
+    // Verify the in-memory definition index has the fresh symbol — not the
+    // stale entries baked into make_ctx_with_defs() (ResilientClient etc.).
+    let def_arc = ctx.def_index.as_ref().expect("ctx must have def_index_arc").clone();
+    let def_idx = def_arc.read().unwrap();
+    assert!(
+        def_idx.definitions.iter().any(|d| d.name.contains("def_save_fail_uniq_zzqq_marker")),
+        "in-memory def index must contain freshly-built symbol despite save failure; got {} definitions",
+        def_idx.definitions.len()
+    );
+}
+
+/// Bug-report 2026-04-28 (reviewer Round-3 stricter coverage): the
+/// previous save-failure tests only prove fresh data ends up in memory —
+/// they do not distinguish the BUGGY drop+reload+rebuild fallback path
+/// (which would also publish fresh data when load also fails) from the
+/// FIXED path that returns the in-memory new_index directly. This test
+/// explicitly distinguishes them by:
+///   1. seeding a readable stale on-disk shard with a unique stale-only marker
+///   2. mutating the workspace so the stale marker no longer exists
+///   3. making every shard file read-only so save_sharded's
+///      rename(temp, target) fails with ACCESS_DENIED while load_definition_index
+///      can still open the (read-only but readable) stale shard
+///   4. asserting the published index contains the FRESH marker AND does NOT
+///      contain the stale-only marker.
+///
+/// Pre-fix code would publish the stale-only marker via the load fallback;
+/// post-fix code keeps the in-memory fresh new_index.
+///
+/// Windows-only: POSIX rename over a read-only target succeeds when the
+/// parent directory is writable, so this trick does not apply on Linux/macOS.
+#[cfg(windows)]
+#[test]
+fn test_handle_xray_reindex_definitions_inner_save_failure_does_not_publish_stale_shard() {
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws_def_stale_pin");
+    std::fs::create_dir_all(&workspace).unwrap();
+    let seed_path = workspace.join("seed.rs");
+    std::fs::write(&seed_path, "fn stale_only_zzqq_marker() {}\n").unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+    let index_base = tmp.path().join("indexes_stale_pin");
+
+    // 1. Build & save STALE def index containing the unique stale-only marker.
+    let stale_idx = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: workspace_str.clone(),
+            ext: "rs".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    crate::definitions::save_definition_index(&stale_idx, &index_base)
+        .expect("seeding stale shard must succeed");
+    drop(stale_idx);
+
+    // 2. Rewrite the workspace so the stale marker is GONE and the fresh marker
+    //    is the only symbol. A correct rebuild MUST surface fresh_zzqq_marker
+    //    and MUST NOT surface stale_only_zzqq_marker.
+    std::fs::write(&seed_path, "fn fresh_zzqq_marker() {}\n").unwrap();
+
+    // 3. Make every shard file read-only so save_sharded's atomic-rename fails
+    //    on Windows. Load can still read the (read-only) stale shard.
+    fn set_readonly_recursive(path: &std::path::Path) {
+        if path.is_file() {
+            let mut perm = std::fs::metadata(path).unwrap().permissions();
+            perm.set_readonly(true);
+            std::fs::set_permissions(path, perm).unwrap();
+        } else if path.is_dir() {
+            for entry in std::fs::read_dir(path).unwrap() {
+                set_readonly_recursive(&entry.unwrap().path());
+            }
+        }
+    }
+    set_readonly_recursive(&index_base);
+
+    // 4. Reindex via the handler.
+    let mut ctx = make_ctx_with_defs();
+    ctx.server_ext = "rs".to_string();
+    ctx.index_base = index_base.clone();
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(workspace_str.clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+    }
+
+    let result = handle_xray_reindex_definitions_inner(&ctx, &json!({}));
+
+    // Restore writable so tempdir cleanup succeeds regardless of test outcome.
+    // The `permissions_set_readonly_false` lint warns that `set_readonly(false)`
+    // doesn't fully restore Unix permissions; here we only need write-back
+    // for tempdir teardown on Windows, so the lint is intentional.
+    #[allow(clippy::permissions_set_readonly_false)]
+    fn unset_readonly_recursive(path: &std::path::Path) {
+        if path.is_file() {
+            if let Ok(meta) = std::fs::metadata(path) {
+                let mut perm = meta.permissions();
+                perm.set_readonly(false);
+                let _ = std::fs::set_permissions(path, perm);
+            }
+        } else if let Ok(entries) = std::fs::read_dir(path) {
+            for entry in entries.flatten() {
+                unset_readonly_recursive(&entry.path());
+            }
+        }
+    }
+    unset_readonly_recursive(&index_base);
+
+    assert!(
+        !result.is_error,
+        "definition reindex must succeed even when save fails: {}",
+        result.content[0].text
+    );
+
+    // 5. Assert fresh marker present AND stale-only marker absent.
+    let def_arc = ctx.def_index.as_ref().expect("ctx must have def_index_arc").clone();
+    let def_idx = def_arc.read().unwrap();
+    let names: Vec<&str> = def_idx.definitions.iter().map(|d| d.name.as_str()).collect();
+    assert!(
+        names.iter().any(|n| n.contains("fresh_zzqq_marker")),
+        "in-memory def index must contain freshly-built symbol; got {:?}",
+        names
+    );
+    assert!(
+        !names.iter().any(|n| n.contains("stale_only_zzqq_marker")),
+        "in-memory def index must NOT contain the stale-only symbol that exists only on the read-only shard; got {:?}",
+        names
+    );
+}
+
+
+
