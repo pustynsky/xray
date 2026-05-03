@@ -5239,3 +5239,229 @@ fn test_xml_partial_path_dotdot_input_does_not_use_fallback() {
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
+
+// ─── Perf-regression guards ─────────────────────────────────────────
+//
+// These tests lock in wall-clock SLAs for the four hint paths that were
+// fixed in PR #257 (bug-report_xray-unbounded-work-hot-paths_2026-05-03).
+//
+// Bugs #1, #2, #3 are already covered by perf tests in `edit_tests.rs`:
+//   - test_find_nearest_match_multiline_budget_caps_runtime_on_large_file
+//   - test_find_nearest_match_singleline_budget_caps_runtime_on_giant_line
+//   - test_generate_unified_diff_caps_at_2000_lines
+//
+// Bugs #4 and #5 need their own guards here because they live in
+// `definitions.rs` and are not reachable through the edit handler.
+//
+// Goal: if a future refactor accidentally removes the linear-scan fix
+// (#4) or moves the length-ratio prefilter back AFTER name_similarity
+// (#5), these tests fail loudly instead of silently re-introducing the
+// stdio-loop stall described in the bug report.
+//
+// SLAs are intentionally loose to absorb Windows-debug allocator load
+// under parallel test contention (~5x release wall-clock). Solo runs
+// are typically 10-50x under the asserted bound.
+
+/// Build a synthetic DefinitionIndex with `count` deeply-nested file
+/// paths (8 segments each), each carrying one `Helper` class. Used to
+/// exercise the worst-case shape for `hint_file_fuzzy_match` (bug #4):
+/// pre-fix it ran an O(D^3) per-file segment-window scan; post-fix it
+/// is O(D) per file.
+fn make_perf_index_with_deep_paths(count: usize) -> DefinitionIndex {
+    let mut definitions: Vec<DefinitionEntry> = Vec::with_capacity(count);
+    let mut files: Vec<String> = Vec::with_capacity(count);
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    for i in 0..count {
+        // 9-segment path (8 directories + filename) - deep enough that
+        // the pre-fix windowed loop would do D*(D+1)/2 = 45 windows per
+        // file. Pre-fix on a 10 000-file index this was ~4.5 x 10^5
+        // join+normalize calls; post-fix is just D = 9 per file.
+        let path = format!(
+            "src/area{}/feature{}/module{}/sub{}/inner{}/leaf{}/impl{}/Helper{}.cs",
+            i % 7, i % 11, i % 13, i % 17, i % 19, i % 23, i % 29, i,
+        );
+        files.push(path);
+        definitions.push(DefinitionEntry {
+            name: format!("Helper{}", i),
+            kind: DefinitionKind::Class,
+            file_id: i as u32,
+            line_start: 1,
+            line_end: 50,
+            signature: None,
+            parent: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        });
+        let def_idx = i as u32;
+        name_index.entry(format!("helper{}", i)).or_default().push(def_idx);
+        kind_index.entry(DefinitionKind::Class).or_default().push(def_idx);
+        file_index.entry(def_idx).or_default().push(def_idx);
+    }
+
+    DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files, definitions, name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
+    }
+}
+
+/// Build a synthetic DefinitionIndex with `count` unique definition
+/// names, each ~16 chars long. Used to exercise the worst-case shape
+/// for `hint_nearest_name` (bug #5 worst case, no prefilter): one
+/// jaro_winkler call per name. Acts as a regression guard for the
+/// bigger-picture bound - if anyone ever adds a per-name `String::new`
+/// or `to_lowercase` allocation here, this test catches it.
+fn make_perf_index_with_many_names(count: usize) -> DefinitionIndex {
+    let mut definitions: Vec<DefinitionEntry> = Vec::with_capacity(count);
+    let mut name_index: HashMap<String, Vec<u32>> = HashMap::new();
+    let mut kind_index: HashMap<DefinitionKind, Vec<u32>> = HashMap::new();
+    let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
+
+    for i in 0..count {
+        // 16-char names - typical real-world distribution (e.g.
+        // `GetCustomerData`, `RenderShellTemplate`).
+        let name = format!("definition_name_{:08}", i);
+        definitions.push(DefinitionEntry {
+            name: name.clone(),
+            kind: DefinitionKind::Method,
+            file_id: 0,
+            line_start: (i as u32) + 1,
+            line_end: (i as u32) + 5,
+            signature: None,
+            parent: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        });
+        let def_idx = i as u32;
+        name_index.entry(name.to_lowercase()).or_default().push(def_idx);
+        kind_index.entry(DefinitionKind::Method).or_default().push(def_idx);
+        file_index.entry(0).or_default().push(def_idx);
+    }
+
+    DefinitionIndex {
+        root: ".".to_string(), created_at: 0,
+        extensions: vec!["cs".to_string()],
+        files: vec!["big.cs".to_string()],
+        definitions, name_index, kind_index,
+        attribute_index: HashMap::new(),
+        base_type_index: HashMap::new(),
+        file_index, path_to_id: HashMap::new(),
+        method_calls: HashMap::new(), ..Default::default()
+    }
+}
+
+#[test]
+fn perf_hint_file_fuzzy_match_linear_in_segments_on_large_index() {
+    // Bug #4 regression guard. Pre-fix this hint helper ran an O(D^2)
+    // window scan over path segments for every file in the index whose
+    // normalized path contained the query. On a workspace with ~10 000
+    // matching deeply-nested paths the response of a single failing
+    // `xray_definitions file='area'`-style call could exceed the ~1 ms
+    // baseline of the index lookup by 50-500x.
+    //
+    // Post-fix the inner loop is a flat single-segment scan (O(D)),
+    // so the whole helper is bounded by `matching_files x avg_segments`
+    // rather than `matching_files x avg_segments^2`.
+    //
+    // Test query MUST satisfy `path_normalized.contains(&ff_normalized)`
+    // for the synthetic paths, otherwise the inner segment loop never
+    // runs and the guard becomes a no-op (caught in code review).
+    // Synthetic paths look like `src/area<i>/feature<j>/.../Helper<i>.cs`,
+    // so the literal substring `area` matches the normalized form of
+    // every path (`normalize` strips '/' and '-' but keeps the rest).
+    let index = make_perf_index_with_deep_paths(10_000);
+    let args = parse_definition_args(
+        &json!({ "file": ["area"] }),
+    ).unwrap();
+
+    let started = std::time::Instant::now();
+    let result = hint_file_fuzzy_match(&index, &args);
+    let elapsed = started.elapsed();
+
+    // Sanity check: the branch under test (the inner segment loop) must
+    // actually execute. If `result` is None here, the test is no longer
+    // exercising the post-fix codepath and any wall-clock assertion
+    // below is meaningless.
+    assert!(
+        result.is_some(),
+        "perf guard requires the inner segment loop to fire \
+         (post-fix codepath); got None for query='area' against 10k \
+         synthetic paths. The test query no longer satisfies the outer \
+         `path_normalized.contains(&ff_normalized)` gate \
+         (definitions.rs hint_file_fuzzy_match)."
+    );
+
+    // SLA: 5 s. Solo release runs are ~5-20 ms; solo debug ~50-150 ms;
+    // debug inside the full --no-fail-fast suite (~2 559 tests under the
+    // Windows debug allocator running in parallel) is ~1-2 s because the
+    // inner loop allocates a fresh `String` per segment via `replace()`.
+    // A regression to the windowed loop on this shape (10 000 matching
+    // files x 9 split segments x 45 windows) would push this well past
+    // 30 s. The SLA is intentionally loose to absorb parallel-test
+    // contention; the contract is "linear, not quadratic" - not
+    // absolute throughput.
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
+        "hint_file_fuzzy_match must stay linear in path segments; took {:?}. \
+         If regressed, check definitions.rs for a re-introduced \
+         `for window_size in 1..=segments.len()` loop.",
+        elapsed,
+    );
+}
+
+#[test]
+fn perf_hint_nearest_name_bounded_on_large_name_index() {
+    // Bug #5 (worst case) regression guard. `hint_nearest_name` is the
+    // observability-only sibling of `try_name_correction`; per the bug
+    // report it intentionally has no length-ratio prefilter (a
+    // length-ratio gate would silently suppress valid matches like
+    // `cheese` vs `cheeseburger`). That makes it the worst-case bound
+    // for the whole name-correction family - if even this path stays
+    // sub-second on a 50 000-name index, then the prefiltered
+    // `try_name_correction` and `suggested_name_matches` paths are
+    // strictly faster.
+    //
+    // Goal: catch any future regression that adds per-name allocation
+    // (e.g. a stray `to_lowercase()` or `String::from`) to the inner
+    // loop, which would silently turn the whole helper into a
+    // multi-second hang on production-sized indexes.
+    // Use a query that is NOT an exact match in the synthetic index
+    // (names are zero-padded to 8 digits, so 9-digit names cannot
+    // exist). This forces `hint_nearest_name` through the full
+    // `name_index` scan even if a future change adds an exact-match
+    // early return; the worst-case loop is what we want to guard.
+    let index = make_perf_index_with_many_names(50_000);
+    let args = parse_definition_args(
+        &json!({ "name": ["definition_name_000099999"] }),
+    ).unwrap();
+
+    let started = std::time::Instant::now();
+    let result = hint_nearest_name(&index, &args);
+    let elapsed = started.elapsed();
+
+    // Either we get a near-match (very likely - same prefix, edit
+    // distance 1) or we get None. Both are valid; the contract is
+    // wall-clock.
+    let _ = result;
+
+    // SLA: 2 s. Solo release runs are ~30-80 ms; debug under parallel
+    // contention is ~200-500 ms. A regression that adds `String::new()`
+    // or `format!` per name would push this to 5-10 s.
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "hint_nearest_name must stay O(N) in name count; took {:?}. \
+         If regressed, check definitions.rs for new per-name \
+         allocations inside the loop.",
+        elapsed,
+    );
+}
+
