@@ -43,6 +43,7 @@ test-out.log
 
 # Project-specific content (may contain internal names/links)
 user-stories/
+/demo/
 
 # Temp artifacts
 docs/pr-description.md
