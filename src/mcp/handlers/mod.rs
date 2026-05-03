@@ -188,7 +188,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
         },
         ToolDefinition {
             name: "xray_reindex".to_string(),
-            description: "Force rebuild the content index and reload it into the server's in-memory cache. Also rebinds workspace when dir parameter switches to a different directory, unless the server was started with a pinned --dir. If the server is pinned and you want to rebuild that same workspace, omit dir; pass dir only when intentionally rebinding an unpinned/unresolved workspace. Response includes workspaceChanged, previousServerDir, indexAction fields. When workspace is UNRESOLVED (wrong CWD), call this with dir=<project_path> to fix it.".to_string(),
+            description: "Force rebuild the content index and reload it into the server's in-memory cache. By default, reindexing the *current* workspace re-walks the live filesystem (indexAction=\"rebuilt\", rebuiltFromDisk=true) so freshness is guaranteed; pass useCache=true to opt into the legacy cache-load fast path (indexAction=\"loaded_cache\", rebuiltFromDisk=false) when cold-rebuild latency matters more than freshness. Workspace switches (dir argument pointing to a different directory) keep the cache fast path because they are a binding action. Also rebinds workspace when dir parameter switches to a different directory, unless the server was started with a pinned --dir. If the server is pinned and you want to rebuild that same workspace, omit dir; pass dir only when intentionally rebinding an unpinned/unresolved workspace. Response includes workspaceChanged, previousServerDir, indexAction, rebuiltFromDisk, forceRebuild fields. When workspace is UNRESOLVED (wrong CWD), call this with dir=<project_path> to fix it.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -197,6 +197,10 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                         "type": "array",
                         "items": { "type": "string" },
                         "description": "File extensions, e.g., [\"rs\",\"toml\"]"
+                    },
+                    "useCache": {
+                        "type": "boolean",
+                        "description": "Opt in to the cache-load fast path for the *current* workspace (default: false = force rebuild from live filesystem). Ignored when dir points to a different workspace, where the cache fast path is always tried first."
                     }
                 },
                 "required": []
@@ -893,6 +897,34 @@ pub struct HandlerContext {
     /// rename is a manual one-shot action; the previous behaviour spawned
     /// up to 4 sequential `git rev-parse` per request indefinitely.
     pub branch_name_cache: Arc<RwLock<std::collections::HashMap<String, Option<String>>>>,
+    /// Per-workspace TTL cache for the live current-branch probe used by
+    /// `branch_warning` (bug-report 2026-04-28). Without this, every
+    /// `xray_grep`/`xray_definitions`/`xray_callers`/`xray_fast` call would
+    /// spawn a fresh `git rev-parse --abbrev-ref HEAD` (5–20 ms on Windows).
+    ///
+    /// Key: workspace directory string (matches `server_dir()`); value:
+    /// `(probed_at, branch_name_or_none)`. TTL is enforced inside
+    /// [`utils::current_branch_cached`] (default 5 s) — short enough that
+    /// `git checkout main` is reflected within seconds, long enough that
+    /// repeated tool calls don't fork a subprocess each time.
+    ///
+    /// **Invalidation:** keyed by workspace directory, so a workspace switch
+    /// (`xray_reindex` with a new `dir`) naturally misses-then-repopulates.
+    /// `handle_xray_reindex_inner` also explicitly clears the entry for the
+    /// outgoing workspace so a stale probe cannot leak across switches.
+    ///
+    /// **Probe failure** (`git` missing, not a repo, detached HEAD): falls
+    /// back to [`HandlerContext::current_branch`] (the value captured at
+    /// server startup) so behaviour is never worse than before this cache
+    /// existed.
+    pub current_branch_cache:
+        Arc<RwLock<std::collections::HashMap<String, (Instant, Option<String>)>>>,
+    /// Whether `branch_warning` should perform the live `git rev-parse` probe
+    /// described above. Set to `true` by [`crate::cli::serve::cmd_serve`] for
+    /// long-running MCP servers; left `false` for tests and CLI subcommands
+    /// so they keep using the static `current_branch` field without spawning
+    /// `git` on every call.
+    pub live_branch_probe_enabled: bool,
     /// PERF-08: single-flight gate for `xray_fast`'s lazy file-index rebuild.
     ///
     /// **Problem fixed:** the previous code did
@@ -980,6 +1012,8 @@ impl Default for HandlerContext {
             periodic_rescan_enabled: false,
             rescan_interval_sec: 300,
             branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            current_branch_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+            live_branch_probe_enabled: false,
             file_index_build_gate: Arc::new(utils::FileIndexBuildGate::new()),
             trigram_build_gate: Arc::new(utils::TrigramRebuildGate::new()),
             autosave_dirty: Arc::new(AtomicBool::new(false)),
@@ -1773,20 +1807,35 @@ fn rollback_workspace_state(
 }
 
 /// Build or load a content index for the given directory.
-/// Returns (index, action_str) on success, or error message on failure.
+///
+/// Returns `(index, action_str)` on success. `action_str` is `"loaded_cache"`
+/// when an existing on-disk index was reused (only possible when
+/// `force_rebuild == false`), or `"rebuilt"` when a fresh index was built
+/// from the live filesystem.
+///
+/// `force_rebuild` is the bug-report 2026-04-28 fix: `xray_reindex` against
+/// the current workspace passes `true` so the user-visible “refresh” action
+/// actually re-walks the filesystem instead of silently re-loading the same
+/// on-disk cache that was already in memory. Workspace-switch cross-loads
+/// keep `false` because their cache fast path is a documented binding
+/// optimisation, not a freshness guarantee.
 fn build_or_load_content_index(
     dir: &str,
     ext: &str,
     index_base: &std::path::Path,
     respect_git_exclude: bool,
+    force_rebuild: bool,
 ) -> Result<(ContentIndex, &'static str), String> {
     let extensions: Vec<String> = ext.split(',').map(|s| s.trim().to_string()).collect();
-    let loaded = load_content_index(dir, ext, index_base)
-        .ok()
-        .or_else(|| find_content_index_for_dir(dir, index_base, &extensions));
 
-    if let Some(idx) = loaded {
-        return Ok((idx, "loaded_cache"));
+    if !force_rebuild {
+        let loaded = load_content_index(dir, ext, index_base)
+            .ok()
+            .or_else(|| find_content_index_for_dir(dir, index_base, &extensions));
+
+        if let Some(idx) = loaded {
+            return Ok((idx, "loaded_cache"));
+        }
     }
 
     // Build from scratch
@@ -1800,9 +1849,16 @@ fn build_or_load_content_index(
         min_token_len: DEFAULT_MIN_TOKEN_LEN,
     }).map_err(|e| format!("Failed to build content index: {}", e))?;
 
-    // Save to disk
+    // Save to disk. If save fails AND we're force-rebuilding, we MUST keep the
+    // freshly-built `idx` in memory: the drop+reload path below would otherwise
+    // re-load whatever stale shard survived the failed save (rename is
+    // not-atomic against a pre-existing target on some filesystems), silently
+    // re-publishing the stale cache while reporting `indexAction="rebuilt"`.
+    // Skipping the compact-memory drop is the safe trade-off: callers explicitly
+    // asked for fresh data via `force_rebuild` and freshness wins over layout.
     if let Err(e) = save_content_index(&idx, index_base) {
-        warn!(error = %e, "Failed to save reindexed content to disk");
+        warn!(error = %e, "Failed to save reindexed content to disk; keeping in-memory index");
+        return Ok((idx, "rebuilt"));
     }
 
     // Drop build result and reload from disk for compact memory layout
@@ -2169,14 +2225,31 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         ws.generation += 1;
         ws.status = WorkspaceStatus::Reindexing;
         info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex");
+
+        // Drop the cached live-branch probe for the outgoing workspace so a
+        // stale value cannot survive a workspace switch (bug-report 2026-04-28).
+        // Per-workspace TTL (5s) would also catch it, but explicit removal is
+        // cheap and removes the window entirely.
+        if let Ok(mut cache) = ctx.current_branch_cache.write() {
+            cache.remove(&previous_dir);
+        }
     }
 
     info!(dir = %dir, ext = %ext, "Rebuilding content index");
     let start = Instant::now();
 
-    // Phase 1: Build or load content index
+    // Phase 1: Build or load content index.
+    //
+    // Force rebuild when the user reindexed the *current* workspace - that is
+    // the operator's escape hatch for stale freshness signals. Workspace
+    // switches keep the cache fast path because they are a binding action,
+    // not a freshness action; an explicit `useCache: true` argument lets a
+    // caller opt back into the cache for the current workspace if they care
+    // about cold-rebuild latency more than freshness.
+    let user_wants_cache = args.get("useCache").and_then(|v| v.as_bool()).unwrap_or(false);
+    let force_rebuild = !workspace_changed && !user_wants_cache;
     let (new_index, index_action) = match build_or_load_content_index(
-        &dir, &ext, &ctx.index_base, ctx.respect_git_exclude,
+        &dir, &ext, &ctx.index_base, ctx.respect_git_exclude, force_rebuild,
     ) {
         Ok(result) => result,
         Err(e) => {
@@ -2263,6 +2336,8 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         "uniqueTokens": token_count,
         "rebuildTimeMs": elapsed.as_secs_f64() * 1000.0,
         "indexAction": index_action,
+        "rebuiltFromDisk": index_action == "rebuilt",
+        "forceRebuild": force_rebuild,
     });
     if workspace_changed {
         output["workspaceChanged"] = json!(true);
@@ -2360,10 +2435,18 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         respect_git_exclude: ctx.respect_git_exclude,
     });
 
-    // Save to disk
-    if let Err(e) = crate::definitions::save_definition_index(&new_index, &ctx.index_base) {
-        warn!(error = %e, "Failed to save definition index to disk");
-    }
+    // Save to disk. Same correctness rationale as `build_or_load_content_index`:
+    // if save fails the surviving on-disk shard may be stale (rename is
+    // not-atomic against a pre-existing target on some filesystems). On failure
+    // we MUST keep the freshly-built `new_index` in memory and skip the
+    // drop+reload step — otherwise the handler would silently re-publish stale
+    // definitions while reporting fresh counts to the caller.
+    let save_failed = if let Err(e) = crate::definitions::save_definition_index(&new_index, &ctx.index_base) {
+        warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
+        true
+    } else {
+        false
+    };
 
     let file_count = new_index.files.len();
     let def_count = new_index.definitions.len();
@@ -2376,22 +2459,25 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         .unwrap_or(0.0);
 
     // Drop build result and reload from disk for compact memory layout
-    // (same pattern as serve.rs startup — eliminates allocator fragmentation)
-    drop(new_index);
-    crate::index::force_mimalloc_collect();
-    crate::index::log_memory("reindex: after drop+mi_collect (def)");
-
-    let new_index = match crate::definitions::load_definition_index(&dir, &ext, &ctx.index_base) {
-        Ok(idx) => idx,
-        Err(e) => {
-            warn!(error = %e, "Failed to reload def index from disk after reindex, rebuilding");
-            crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
-                dir: dir.to_string(), ext: ext.clone(), threads: 0,
-                respect_git_exclude: ctx.respect_git_exclude,
-            })
+    // (same pattern as serve.rs startup — eliminates allocator fragmentation).
+    // SKIPPED on save failure: see save-failure rationale above.
+    let new_index = if save_failed {
+        new_index
+    } else {
+        drop(new_index);
+        crate::index::force_mimalloc_collect();
+        crate::index::log_memory("reindex: after drop+mi_collect (def)");
+        match crate::definitions::load_definition_index(&dir, &ext, &ctx.index_base) {
+            Ok(idx) => idx,
+            Err(e) => {
+                warn!(error = %e, "Failed to reload def index from disk after reindex, rebuilding");
+                crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+                    dir: dir.to_string(), ext: ext.clone(), threads: 0,
+                    respect_git_exclude: ctx.respect_git_exclude,
+                })
+            }
         }
     };
-
     // Update in-memory cache
     match def_index_arc.write() {
         Ok(mut idx) => {

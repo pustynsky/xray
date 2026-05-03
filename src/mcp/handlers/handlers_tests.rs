@@ -102,6 +102,8 @@ fn test_handler_context_field_count_guard() {
         periodic_rescan_enabled: false,
         rescan_interval_sec: 300,
         branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        current_branch_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        live_branch_probe_enabled: false,
         file_index_build_gate: Arc::new(crate::mcp::handlers::utils::FileIndexBuildGate::new()),
         trigram_build_gate: Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new()),
         autosave_dirty: Arc::new(AtomicBool::new(false)),

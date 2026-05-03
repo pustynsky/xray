@@ -2,6 +2,49 @@
 
 ## Unreleased
 
+- **Bug-report 2026-04-28: stale `xray_reindex` cache + stale `branchWarning`
+  (`docs/bug-reports/bug-report_xray-index-freshness-reindex-cache-and-stale-branch-warning_2026-04-28.md`).**
+  Two correctness fixes plus one collateral safety improvement, all behind
+  feature flag `live_branch_probe_enabled` so tests stay deterministic.
+  - **`branch_warning` now reflects the live branch.** A new
+    `current_branch_resolved` helper in `src/mcp/handlers/utils.rs` runs
+    `git rev-parse --abbrev-ref HEAD` against the current workspace dir,
+    cached per-dir for 5 s in `HandlerContext.current_branch_cache`. Falls
+    back to `ctx.current_branch` (startup snapshot) on probe failure.
+    Detached `HEAD` no longer triggers a warning. Production `cmd_serve`
+    sets `live_branch_probe_enabled = true`; `HandlerContext::default()`
+    keeps it `false` so unit tests are not coupled to the host repo's git
+    state.
+  - **`xray_reindex` for the current workspace force-rebuilds from disk
+    by default.** `build_or_load_content_index` gained a `force_rebuild:
+    bool` parameter; `handle_xray_reindex_inner` derives it as
+    `!workspace_changed && !user_wants_cache`, where `useCache: bool`
+    (new optional MCP arg, default `false`) is the legacy opt-in that
+    preserves the cache fast-path for callers who prefer cold-rebuild
+    latency over freshness. Workspace switches keep the cache fast-path
+    unchanged. Response gains diagnostic fields `rebuiltFromDisk` and
+    `forceRebuild`. The `xray_reindex` tool description and schema
+    document the new behaviour.
+  - **Workspace-switch invalidates the live-branch cache entry** for the
+    outgoing workspace inside `handle_xray_reindex_inner`, so a switch +
+    switch-back inside the 5 s TTL cannot serve a pre-switch value.
+  - **Save-failure no longer publishes stale data.** `build_or_load_content_index`
+    and `handle_xray_reindex_definitions_inner` previously dropped the
+    freshly-built in-memory index after a failed `save_*_index`, then
+    reloaded from disk — silently re-publishing whatever stale shard
+    survived the failed atomic-rename. Both paths now keep the in-memory
+    index when save fails, skipping the compact-memory drop+reload. New
+    regression tests cover both content and definition handlers,
+    including a Windows-only stale-shard test that proves the published
+    index contains fresh symbols and not the stale-only marker on the
+    read-only on-disk shard.
+  - Follow-up flagged for a separate PR: the same drop+reload
+    save-failure pattern still exists in `cross_load_definition_index`
+    (workspace-switch path) and the startup `load_or_build_definition_index`
+    in `src/cli/serve.rs`. Both have narrower exposure than the explicit
+    user-triggered handlers fixed here.
+
+
 - **Perf-regression test guards for the unbounded-work helpers fixed in
   v0.2.2.** Two new tests in `src/mcp/handlers/definitions_tests.rs` lock
   in wall-clock SLAs for `hint_file_fuzzy_match` (bug #4) and

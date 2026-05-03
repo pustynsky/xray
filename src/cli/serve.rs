@@ -365,6 +365,8 @@ pub fn cmd_serve(args: ServeArgs) {
         periodic_rescan_enabled: !args.no_periodic_rescan,
         rescan_interval_sec: args.rescan_interval_sec,
         branch_name_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        current_branch_cache: Arc::new(RwLock::new(std::collections::HashMap::new())),
+        live_branch_probe_enabled: true,
         file_index_build_gate: Arc::new(crate::mcp::handlers::utils::FileIndexBuildGate::new()),
         trigram_build_gate: Arc::clone(&trigram_build_gate),
         autosave_dirty: Arc::clone(&autosave_dirty),
