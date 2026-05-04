@@ -2,6 +2,17 @@
 
 ## Unreleased
 
+## v0.2.4 (2026-05-04)
+
+- **Default `XRAY_GUIDANCE_PREFIX` to ON.** The text-prefix presentation
+  mode for `policyReminder` / `nextStepHint` (raw text before the JSON
+  suffix) is now the default for all users — previously you had to set
+  `XRAY_GUIDANCE_PREFIX=1` explicitly. Set
+  `XRAY_GUIDANCE_PREFIX=0|false|no|off` to opt back into the legacy
+  behaviour where guidance fields stay inside `summary` of the JSON
+  body. Implemented in `guidance_prefix_enabled()`
+  (`src/mcp/handlers/utils.rs`); env-parser semantics unchanged.
+
 ## v0.2.3 (2026-05-04)
 
 - **Feat: `xray_git_history` gains `firstCommit: true` for "who created this

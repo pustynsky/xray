@@ -1150,9 +1150,14 @@ pub(crate) fn guidance_prefix_enabled() -> bool {
 
     #[cfg(not(test))]
     {
-        guidance_prefix_env_value_enabled(
-            std::env::var("XRAY_GUIDANCE_PREFIX").ok().as_deref(),
-        )
+        // 2026-05-04: prefix mode (policyReminder/nextStepHint as raw text
+        // before the JSON suffix) is now the default. Set
+        // XRAY_GUIDANCE_PREFIX=0|false|no|off to opt back into the legacy
+        // mode where guidance fields stay inside `summary` of the JSON body.
+        match std::env::var("XRAY_GUIDANCE_PREFIX").ok() {
+            None => true,
+            Some(v) => guidance_prefix_env_value_enabled(Some(&v)),
+        }
     }
 }
 
