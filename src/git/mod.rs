@@ -188,12 +188,24 @@ fn parse_commit_record(record: &str) -> Option<CommitInfo> {
         return None;
     }
 
+    // The format string ends with `%s{FIELD_SEP}` so the last split chunk is
+    // always an empty (or whitespace-only) trailing fragment. Strip it before
+    // joining so messages don't carry a trailing `␞` artifact. Without this
+    // step, a single-commit message like "create a.txt" parses as
+    // "create a.txt␞" because `String::trim()` doesn't treat `␞` as
+    // whitespace.
+    let message_end = if fields.last().map(|s| s.trim().is_empty()).unwrap_or(false) {
+        fields.len() - 1
+    } else {
+        fields.len()
+    };
+
     Some(CommitInfo {
         hash: fields[0].trim().to_string(),
         date: fields[1].trim().to_string(),
         author_name: fields[2].trim().to_string(),
         author_email: fields[3].trim().to_string(),
-        message: fields[4..].join(FIELD_SEP).trim().to_string(),
+        message: fields[4..message_end].join(FIELD_SEP).trim().to_string(),
         patch: None,
     })
 }
@@ -369,6 +381,82 @@ fn get_commit_diff(repo_path: &str, hash: &str, file: &str) -> Result<String, St
         Ok(output)
     }
 }
+
+/// Get the commit that introduced a file (the "creation" commit).
+///
+/// Uses `git log --follow --diff-filter=A --max-count=1` so the result is
+/// correct across renames (--follow walks back through rename detection) and
+/// `--diff-filter=A` ensures we pick the commit that classifies as Added for
+/// this path, not just the oldest reachable modification. For files deleted
+/// from current HEAD, `--follow` may still find the original add via tree
+/// traversal in many cases; when it returns nothing, we retry without
+/// `--follow` (which can succeed on truly deleted-without-rename files where
+/// `--follow` bails). Default git rename detection (`diff.renames=true`)
+/// also helps the no-follow path classify a rename commit's Add side.
+///
+/// Returns `Ok(None)` when both queries produced no commit at all (the path
+/// never existed in this repository).
+///
+/// # Why dedicated rather than "oldest entry of file_history"
+///
+///   * `--diff-filter=A` is the only flag that classifies a commit as the
+///     creation event for this path. Hand-rolling "oldest of full history"
+///     requires materialising every commit touching the file just to take
+///     the last one.
+///   * Bypasses the in-memory git cache: cache stores commits in branch-tip
+///     order without rename graph reconstruction or per-commit add/modify
+///     classification, so cache-derived "oldest" would be wrong on renamed
+///     files and indistinguishable from a modify on first-time-seen paths.
+///
+/// # Why no `--reverse`
+///
+/// Combining `--reverse` with `--follow` empirically drops the creation
+/// commit during git's history simplification (verified on git 2.40+).
+/// Without `--reverse`, `--max-count=1` plus `--diff-filter=A` returns the
+/// single Add event directly.
+pub fn file_first_commit(repo_path: &str, file: &str) -> Result<Option<CommitInfo>, String> {
+    if let Some(c) = run_first_commit_query(repo_path, file, true)? {
+        return Ok(Some(c));
+    }
+    // Fallback: if the --follow query returns no Add event (rare; e.g. some
+    // deleted-without-rename histories where --follow's tree traversal yields
+    // nothing), retry without --follow. Plain --diff-filter=A still finds the
+    // original add for paths that were never renamed.
+    run_first_commit_query(repo_path, file, false)
+}
+
+fn run_first_commit_query(
+    repo_path: &str,
+    file: &str,
+    follow: bool,
+) -> Result<Option<CommitInfo>, String> {
+    let format = format!(
+        "{}%H{}%ai{}%an{}%ae{}%s{}",
+        RECORD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP, FIELD_SEP
+    );
+
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo_path)
+        .arg("log")
+        .arg(format!("--format={}", format))
+        .arg("--diff-filter=A")
+        .arg("--max-count=1");
+
+    if follow {
+        cmd.arg("--follow");
+    }
+
+    cmd.arg("--").arg(file);
+
+    let output = run_git(&mut cmd)?;
+
+    Ok(output
+        .split(RECORD_SEP)
+        .filter(|s| !s.trim().is_empty())
+        .filter_map(parse_commit_record)
+        .next())
+}
+
 
 /// Get top authors for a file or directory, ranked by commit count.
 ///

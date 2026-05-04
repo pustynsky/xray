@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **Feat: `xray_git_history` gains `firstCommit: true` for "who created this
+  file?".** Previously the only way to find a file's creation commit was
+  `xray_git_history maxResults: 0` (pull entire history) and grab the last
+  entry — wasteful on long-lived files, and incorrect for renamed files
+  because cache-derived ordering doesn't reconstruct the rename graph.
+  The new flag short-circuits to
+  `git log --follow --diff-filter=A --max-count=1 -- <file>` (with a
+  no-follow fallback for files deleted from HEAD), returning a single
+  envelope `{firstCommit: {hash,date,author,email,message} | null,
+  summary: {...}}`. Correct across renames, works on deleted files,
+  bypasses cache and other filters (date/author/message/maxResults are
+  ignored in firstCommit mode). `xray_git_diff` rejects the flag (no
+  patch is returned). Side fix: `parse_commit_record` no longer leaks
+  the trailing `␞` FIELD_SEP into commit messages — pre-existing
+  artifact exposed by exact-match assertions in the new tests. Five
+  unit tests in `git_tests.rs` (creation / rename traversal /
+  deleted-file fallback / nonexistent-file None / renamed-then-deleted
+  composes correctly) plus three handler tests in
+  `handlers_tests_git.rs` (envelope shape / cache bypass /
+  `xray_git_diff` rejection).
+
 - **Fix MCP dispatcher 5-minute stall on `xray_definitions` (lock re-entry).**
   `inject_index_degraded` in `src/mcp/handlers/utils.rs` previously took the
   `HandlerContext` and re-acquired `ctx.def_index.read()` to fetch

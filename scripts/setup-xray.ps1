@@ -33,11 +33,26 @@
     Run non-interactively where possible: overwrite existing xray entry, overwrite
     existing xray.exe, accept suggested extensions, and skip Roo setup unless -EnableRoo is passed.
 
+.PARAMETER Restore
+    Restore .vscode/mcp.json (and .roo/mcp.json if present) from the .bak files
+    created on the previous setup run, then exit. Skips download and extension
+    detection. Use this to undo a setup-xray run.
+
+    Backup behavior: every regular setup run (without -Restore) copies the
+    existing .vscode/mcp.json to .vscode/mcp.json.bak (and the same for
+    .roo/mcp.json) before overwriting. The .bak file is replaced on each run,
+    so it always reflects the file state immediately before the most recent
+    setup. If no .bak exists when -Restore is invoked, the script exits with
+    an error.
+
 .EXAMPLE
     .\setup-xray.ps1 -RepoPath C:\Repos\MyProject
 
 .EXAMPLE
     .\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Extensions cs,sql,md -Force
+
+.EXAMPLE
+    .\setup-xray.ps1 -RepoPath C:\Repos\MyProject -Restore
 #>
 param(
     [string]$RepoPath,
@@ -46,7 +61,8 @@ param(
     [string]$Extensions,
     [switch]$SkipDownload,
     [switch]$EnableRoo,
-    [switch]$Force
+    [switch]$Force,
+    [switch]$Restore
 )
 
 $ErrorActionPreference = 'Stop'
@@ -138,6 +154,36 @@ function Read-YesNo {
     return $answer.Trim().ToLowerInvariant() -eq 'y'
 }
 
+function Backup-McpJson {
+    param(
+        [string]$Path
+    )
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    $bakPath = "$Path.bak"
+    Copy-Item -Path $Path -Destination $bakPath -Force
+    Write-Host "Backed up existing config to $bakPath" -ForegroundColor DarkGray
+}
+
+function Restore-McpJson {
+    param(
+        [string]$Path
+    )
+
+    $bakPath = "$Path.bak"
+    if (-not (Test-Path $bakPath)) {
+        return $false
+    }
+
+    Copy-Item -Path $bakPath -Destination $Path -Force
+    Remove-Item -Path $bakPath -Force
+    Write-Host "Restored $Path from backup" -ForegroundColor Green
+    return $true
+}
+
 function Get-DetectedExtensions {
     param(
         [string]$RootPath,
@@ -182,6 +228,25 @@ try {
 catch {
     Write-Error "Repository path not found: $RepoPath"
     exit 1
+}
+
+if ($Restore) {
+    Write-Host "`n=== Restoring MCP configs in: $RepoPath ===" -ForegroundColor Cyan
+
+    $vscodeMcpPath = Join-Path $RepoPath '.vscode\mcp.json'
+    $rooMcpPath = Join-Path $RepoPath '.roo\mcp.json'
+
+    $restoredAny = $false
+    if (Restore-McpJson -Path $vscodeMcpPath) { $restoredAny = $true }
+    if (Restore-McpJson -Path $rooMcpPath) { $restoredAny = $true }
+
+    if (-not $restoredAny) {
+        Write-Error 'No .bak files found. Nothing to restore.'
+        exit 1
+    }
+
+    Write-Host "`n=== Restore complete ===" -ForegroundColor Cyan
+    exit 0
 }
 
 $isGitRepo = Test-Path (Join-Path $RepoPath '.git')
@@ -366,6 +431,8 @@ if ($writeVscode) {
         New-Item -ItemType Directory -Path $vscodeMcpDir -Force | Out-Null
     }
 
+    Backup-McpJson -Path $vscodeMcpPath
+
     $xrayEntry = [ordered]@{
         type    = 'stdio'
         command = $xrayPath
@@ -430,6 +497,8 @@ if ($writeRoo) {
     if (-not (Test-Path $rooMcpDir)) {
         New-Item -ItemType Directory -Path $rooMcpDir -Force | Out-Null
     }
+
+    Backup-McpJson -Path $rooMcpPath
 
     $rooXrayEntry = [ordered]@{
         command     = $xrayPath
