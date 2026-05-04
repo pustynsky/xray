@@ -951,3 +951,166 @@ fn test_get_commit_diff_merge_commit_uses_first_parent() {
     );
 }
 
+
+// ── file_first_commit (firstCommit mode) ─────────────────────────────
+
+/// Basic creation commit lookup: 3 commits (create, modify, modify); first_commit
+/// returns the original create commit (oldest), not HEAD.
+#[test]
+fn test_file_first_commit_returns_creation() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "first@example.com"]);
+    run_git(repo, &["config", "user.name", "First Author"]);
+
+    std::fs::write(repo.join("a.txt"), "v1\n").expect("write v1");
+    run_git(repo, &["add", "a.txt"]);
+    run_git(repo, &["commit", "-m", "create a.txt", "--quiet"]);
+
+    std::fs::write(repo.join("a.txt"), "v2\n").expect("write v2");
+    run_git(repo, &["commit", "-am", "modify a.txt v2", "--quiet"]);
+
+    std::fs::write(repo.join("a.txt"), "v3\n").expect("write v3");
+    run_git(repo, &["commit", "-am", "modify a.txt v3", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let creation = file_first_commit(repo_str, "a.txt")
+        .expect("file_first_commit must succeed")
+        .expect("creation commit must be Some for an existing tracked file");
+    assert_eq!(
+        creation.message, "create a.txt",
+        "firstCommit must return the CREATE commit, not the latest modification. Got: {:?}",
+        creation
+    );
+    assert!(!creation.hash.is_empty(), "hash must be populated");
+    assert!(!creation.author_email.is_empty(), "author email must be populated");
+}
+
+/// Rename robustness: file created as `old.txt`, later renamed to `new.txt`.
+/// Querying first_commit on the CURRENT name must follow the rename and
+/// return the original create commit — not the rename commit.
+#[test]
+fn test_file_first_commit_follows_renames() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "rename@example.com"]);
+    run_git(repo, &["config", "user.name", "Rename Author"]);
+
+    std::fs::write(repo.join("old.txt"), "original content\n").expect("write old");
+    run_git(repo, &["add", "old.txt"]);
+    run_git(repo, &["commit", "-m", "create old.txt (creation)", "--quiet"]);
+
+    // Padding modification so rename is not the first commit reachable from new.txt.
+    std::fs::write(repo.join("old.txt"), "original content v2\n").expect("modify old");
+    run_git(repo, &["commit", "-am", "modify old.txt", "--quiet"]);
+
+    run_git(repo, &["mv", "old.txt", "new.txt"]);
+    run_git(repo, &["commit", "-m", "rename old.txt -> new.txt", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let creation = file_first_commit(repo_str, "new.txt")
+        .expect("file_first_commit must succeed")
+        .expect("creation must be Some — --follow should trace back through the rename");
+    assert_eq!(
+        creation.message, "create old.txt (creation)",
+        "firstCommit on new.txt must return the original old.txt creation commit \
+         (git log --follow --diff-filter=A --max-count=1 traces back through the rename to the \
+         original add). Returning the rename commit means --follow is missing or git classified \
+         the rename as Add. Got: {:?}",
+        creation
+    );
+}
+
+/// Deleted-file robustness: file existed for two commits, then was deleted.
+/// first_commit must still return the original creation commit even though
+/// the file is no longer in HEAD.
+#[test]
+fn test_file_first_commit_works_for_deleted_files() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "deleted@example.com"]);
+    run_git(repo, &["config", "user.name", "Deleted Author"]);
+
+    std::fs::write(repo.join("gone.txt"), "hello\n").expect("write gone");
+    run_git(repo, &["add", "gone.txt"]);
+    run_git(repo, &["commit", "-m", "create gone.txt", "--quiet"]);
+
+    std::fs::write(repo.join("gone.txt"), "hello v2\n").expect("modify gone");
+    run_git(repo, &["commit", "-am", "modify gone.txt", "--quiet"]);
+
+    run_git(repo, &["rm", "gone.txt"]);
+    run_git(repo, &["commit", "-m", "delete gone.txt", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let creation = file_first_commit(repo_str, "gone.txt")
+        .expect("file_first_commit must succeed for deleted files")
+        .expect("creation must be Some — deleted files still have a creation commit");
+    assert_eq!(
+        creation.message, "create gone.txt",
+        "firstCommit on a deleted file must return the original creation commit. Got: {:?}",
+        creation
+    );
+}
+
+/// Nonexistent file: first_commit returns Ok(None), not an error.
+#[test]
+fn test_file_first_commit_returns_none_for_nonexistent_file() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "none@example.com"]);
+    run_git(repo, &["config", "user.name", "None Author"]);
+    std::fs::write(repo.join("only.txt"), "x\n").expect("write only");
+    run_git(repo, &["add", "only.txt"]);
+    run_git(repo, &["commit", "-m", "only commit", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let result = file_first_commit(repo_str, "never-existed.txt")
+        .expect("git log on a nonexistent path is not an error — just empty output");
+    assert!(result.is_none(), "nonexistent file must yield None, got: {:?}", result);
+}
+
+/// Renamed THEN deleted: `old.txt` -> `new.txt` -> `git rm new.txt`.
+/// Querying by the post-rename name (`new.txt`) must STILL return the original
+/// `old.txt` creation commit. `--follow` traces back through both the delete
+/// and the rename via tree traversal even though `new.txt` is no longer in
+/// HEAD. This pins the contract advertised by the tool description: "correct
+/// across renames; works for deleted files" — the two compose.
+#[test]
+fn test_file_first_commit_renamed_then_deleted_traces_to_original_create() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let repo = dir.path();
+    run_git(repo, &["init", "--quiet", "-b", "main"]);
+    run_git(repo, &["config", "user.email", "rename-del@example.com"]);
+    run_git(repo, &["config", "user.name", "RenameDel Author"]);
+
+    std::fs::write(repo.join("old.txt"), "original\n").expect("write old");
+    run_git(repo, &["add", "old.txt"]);
+    run_git(repo, &["commit", "-m", "create old.txt", "--quiet"]);
+
+    run_git(repo, &["mv", "old.txt", "new.txt"]);
+    run_git(repo, &["commit", "-m", "rename old.txt -> new.txt", "--quiet"]);
+
+    run_git(repo, &["rm", "new.txt"]);
+    run_git(repo, &["commit", "-m", "delete new.txt", "--quiet"]);
+
+    let repo_str = repo.to_str().expect("repo utf-8");
+    let creation = file_first_commit(repo_str, "new.txt")
+        .expect("file_first_commit on renamed-and-deleted file must succeed")
+        .expect(
+            "creation must be Some — --follow on the post-rename name must trace back \
+             through delete + rename to the original add",
+        );
+    assert_eq!(
+        creation.message, "create old.txt",
+        "renamed-and-deleted file queried by the post-rename name must return the \
+         original creation commit (compose: --follow + --diff-filter=A across rename + \
+         delete). If the result is the rename commit, --follow regressed for deleted paths. \
+         Got: {:?}",
+        creation
+    );
+}
+

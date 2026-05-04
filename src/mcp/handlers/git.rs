@@ -63,7 +63,7 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
     vec![
         crate::mcp::protocol::ToolDefinition {
             name: "xray_git_history".to_string(),
-            description: "Get commit history for a specific file in a git repository. Works for BOTH existing AND deleted files (cache covers full branch history; CLI fallback auto-retries without --follow for deleted files). Returns a list of commits that modified the file, with hash, date, author, and message. Use date filters to narrow results. Uses in-memory cache for sub-millisecond responses when available, falls back to git CLI. If the file was deleted from current HEAD, the response includes an 'info' field — this is NOT an error. NEVER fall back to raw `git log --all --diff-filter=D` — this tool covers deleted files directly.".to_string(),
+            description: "Get commit history for a specific file in a git repository. Works for BOTH existing AND deleted files (cache covers full branch history; CLI fallback auto-retries without --follow for deleted files). Returns a list of commits that modified the file, with hash, date, author, and message. Use date filters to narrow results. Uses in-memory cache for sub-millisecond responses when available, falls back to git CLI. If the file was deleted from current HEAD, the response includes an 'info' field — this is NOT an error. NEVER fall back to raw `git log --all --diff-filter=D` — this tool covers deleted files directly. Set firstCommit=true to return only the commit that introduced the file (uses --follow --diff-filter=A --max-count=1, with no-follow fallback; correct across renames; works for deleted files; bypasses cache and other filters).".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -75,7 +75,8 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
                     "maxResults": { "type": "integer", "description": "Max commits (default: 50, 0=unlimited)" },
                     "author": { "type": "string", "description": "Filter by author name/email (substring, case-insensitive)" },
                     "message": { "type": "string", "description": "Filter by commit message (substring, case-insensitive)" },
-                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" }
+                    "noCache": { "type": "boolean", "description": "Bypass cache, query git CLI directly (default: false)" },
+                    "firstCommit": { "type": "boolean", "description": "If true, return only the commit that CREATED this file (git log --follow --diff-filter=A --max-count=1, with no-follow fallback for deleted files). Correct across renames; works for deleted files. Ignores cache and date/author/message/maxResults filters. Response shape: {firstCommit: {hash,date,author,email,message} | null, summary: {...}}. Default: false." }
                 },
                 "required": ["repo", "file"]
             }),
@@ -337,6 +338,61 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
             "xray_git_history requires a specific file path, not '.'. \
              Use xray_git_activity for repo-wide commit history across all files.".to_string()
         );
+    }
+
+    // ── firstCommit short-circuit ─────────────────────────────────────────
+    // Returns the single commit that introduced the file. Bypasses cache and
+    // ALL other filters (date/author/message/maxResults) — semantics is
+    // "creation commit, definitionally unique". See git::file_first_commit
+    // for the rationale (--diff-filter=A required to disambiguate from
+    // "oldest reachable modification").
+    let first_commit = args.get("firstCommit").and_then(|v| v.as_bool()).unwrap_or(false);
+    if first_commit {
+        if include_diff {
+            return ToolCallResult::error(
+                "firstCommit is not supported by xray_git_diff (no patch is returned). \
+                 Use xray_git_history with firstCommit=true.".to_string()
+            );
+        }
+        let start = Instant::now();
+        return match git::file_first_commit(repo, file) {
+            Ok(Some(c)) => {
+                let elapsed = start.elapsed();
+                let output = json!({
+                    "firstCommit": {
+                        "hash": c.hash,
+                        "date": c.date,
+                        "author": c.author_name,
+                        "email": c.author_email,
+                        "message": c.message,
+                    },
+                    "summary": {
+                        "tool": "xray_git_history",
+                        "mode": "firstCommit",
+                        "file": file,
+                        "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
+                        "hint": "Creation commit (git log --follow --diff-filter=A --max-count=1, with no-follow fallback for deleted files). Other filters (from/to/date/author/message/maxResults/noCache) are ignored in firstCommit mode.",
+                    }
+                });
+                ToolCallResult::success(json_to_string(&output))
+            }
+            Ok(None) => {
+                let elapsed = start.elapsed();
+                let mut output = json!({
+                    "firstCommit": Value::Null,
+                    "summary": {
+                        "tool": "xray_git_history",
+                        "mode": "firstCommit",
+                        "file": file,
+                        "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
+                        "hint": "No creation commit found. The file may never have existed in git, or the path is filtered by .gitignore.",
+                    }
+                });
+                annotate_empty_git_result(&mut output, repo, file, 0);
+                ToolCallResult::success(json_to_string(&output))
+            }
+            Err(e) => ToolCallResult::error(e),
+        };
     }
 
     let from_owned = match read_string(args, "from") {

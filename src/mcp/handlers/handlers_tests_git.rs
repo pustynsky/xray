@@ -421,3 +421,79 @@ fn test_git_activity_include_deleted_filters_existing_files_in_real_repo() {
         "includeDeleted=true must filter out files that exist in current HEAD (baseline={}, filtered={})",
         baseline_count, filtered_count);
 }
+
+// ── firstCommit handler tests ─────────────────────────────────────────
+
+/// firstCommit=true on xray_git_history: response shape is {firstCommit: {...}, summary: {...}},
+/// NOT the usual {commits: [...], summary: {...}}. Hint mentions firstCommit mode.
+/// Bypasses the populated cache (no "(from cache)" hint).
+#[test]
+fn test_git_history_first_commit_returns_creation_envelope() {
+    let ctx = make_ctx_with_git_cache();
+    // Use Cargo.toml — exists in real workspace git repo where these tests run.
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
+        "repo": ".",
+        "file": "Cargo.toml",
+        "firstCommit": true
+    }));
+    if result.is_error {
+        // Workspace may be a non-git checkout in some CI configs; skip rather
+        // than fail — the unit-level coverage in git_tests.rs is authoritative.
+        return;
+    }
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Envelope: firstCommit field present (not commits array), no "from cache" hint.
+    assert!(output.get("firstCommit").is_some(),
+        "firstCommit mode must return a firstCommit field, got: {}", output);
+    assert!(output.get("commits").is_none(),
+        "firstCommit mode must NOT return the commits array (different envelope), got: {}", output);
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(!hint.contains("(from cache)"),
+        "firstCommit must bypass cache, hint says: {}", hint);
+    assert_eq!(output["summary"]["mode"].as_str(), Some("firstCommit"),
+        "summary.mode must be 'firstCommit', got: {}", output["summary"]);
+
+    let first = &output["firstCommit"];
+    assert!(first.is_object(),
+        "firstCommit must be a populated object for Cargo.toml (it has a creation commit), got: {}", first);
+    assert!(first["hash"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "hash must be populated, got: {}", first);
+    assert!(first["message"].as_str().map(|s| !s.is_empty()).unwrap_or(false),
+        "message must be populated, got: {}", first);
+}
+
+/// firstCommit on xray_git_diff is rejected (no patch is returned in firstCommit mode).
+#[test]
+fn test_git_diff_first_commit_rejected() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "xray_git_diff", &json!({
+        "repo": ".",
+        "file": "Cargo.toml",
+        "firstCommit": true
+    }));
+    assert!(result.is_error,
+        "firstCommit on xray_git_diff must return an error, got success: {}",
+        result.content[0].text);
+    let msg = &result.content[0].text;
+    assert!(msg.contains("firstCommit") && msg.contains("xray_git_diff"),
+        "error message must mention firstCommit and xray_git_diff, got: {}", msg);
+}
+
+/// firstCommit on a never-existed file: firstCommit=null and the empty-result
+/// annotation kicks in (warning/info distinguishing never-existed vs deleted).
+#[test]
+fn test_git_history_first_commit_nonexistent_returns_null() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
+        "repo": ".",
+        "file": "definitely/does/not/exist/anywhere.txt",
+        "firstCommit": true
+    }));
+    if result.is_error { return; } // see note in envelope test above
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["firstCommit"].is_null(),
+        "firstCommit on a nonexistent path must be null, got: {}", output["firstCommit"]);
+    assert_eq!(output["summary"]["mode"].as_str(), Some("firstCommit"));
+}
+
