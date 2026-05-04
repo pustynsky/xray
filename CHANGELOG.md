@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## v0.2.3 (2026-05-04)
+
 - **Feat: `xray_git_history` gains `firstCommit: true` for "who created this
   file?".** Previously the only way to find a file's creation commit was
   `xray_git_history maxResults: 0` (pull entire history) and grab the last

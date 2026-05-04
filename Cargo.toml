@@ -1,6 +1,6 @@
 [package]
 name = "code-xray"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2024"
 # MSRV: oldest stable Rust that compiles the crate. Raising is a breaking change
 # for downstream consumers; bump only in an intentional PR and document in
