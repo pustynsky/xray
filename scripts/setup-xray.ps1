@@ -32,6 +32,12 @@
 .PARAMETER Force
     Run non-interactively where possible: overwrite existing xray entry, overwrite
     existing xray.exe, accept suggested extensions, and skip Roo setup unless -EnableRoo is passed.
+    Implies -KillRunning when xray.exe is locked by a running process.
+
+.PARAMETER KillRunning
+    If xray.exe is in use (e.g. running as an MCP server in another VS Code instance),
+    terminate all running xray.exe processes without prompting before overwriting the
+    binary. Without this switch, the script asks for confirmation interactively.
 
 .PARAMETER Restore
     Restore .vscode/mcp.json (and .roo/mcp.json if present) from the .bak files
@@ -62,6 +68,7 @@ param(
     [switch]$SkipDownload,
     [switch]$EnableRoo,
     [switch]$Force,
+    [switch]$KillRunning,
     [switch]$Restore
 )
 
@@ -303,7 +310,48 @@ if (-not $SkipDownload) {
             exit 1
         }
 
-        Move-Item $downloaded $xrayPath -Force
+        # Windows refuses to overwrite a running .exe. If xray.exe is in use
+        # (typically an MCP server spawned by another VS Code / Roo instance),
+        # terminate the running processes first - either silently when the user
+        # opts in via -KillRunning / -Force, or after an interactive prompt.
+        try {
+            Move-Item $downloaded $xrayPath -Force -ErrorAction Stop
+        }
+        catch [System.IO.IOException] {
+            $running = @(Get-Process -Name 'xray' -ErrorAction SilentlyContinue)
+            if ($running.Count -eq 0) {
+                Remove-Item $tempDir -Recurse -Force
+                Write-Error "Cannot replace $xrayPath but no xray.exe process is running. Original error: $($_.Exception.Message)"
+                exit 1
+            }
+
+            Write-Host "$xrayPath is in use by $($running.Count) running xray.exe process(es):" -ForegroundColor Yellow
+            $running | ForEach-Object { Write-Host ("  PID $($_.Id)  $($_.Path)") -ForegroundColor Yellow }
+
+            $kill = $KillRunning -or (Read-YesNo -Prompt 'Kill these processes and continue?' -Default $false -ForceYes:$Force)
+            if (-not $kill) {
+                Remove-Item $tempDir -Recurse -Force
+                Write-Error "Aborted: xray.exe is in use. Re-run with -KillRunning to terminate it automatically, or close the MCP hosts manually."
+                exit 1
+            }
+
+            foreach ($proc in $running) {
+                try {
+                    Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+                    Write-Host "Stopped PID $($proc.Id)." -ForegroundColor DarkYellow
+                }
+                catch {
+                    Remove-Item $tempDir -Recurse -Force
+                    Write-Error "Failed to stop PID $($proc.Id): $($_.Exception.Message)"
+                    exit 1
+                }
+            }
+
+            # Give Windows a moment to release the file handle.
+            Start-Sleep -Milliseconds 500
+            Move-Item $downloaded $xrayPath -Force
+            Write-Host 'Note: MCP hosts that were using xray will need to restart it.' -ForegroundColor Yellow
+        }
         Remove-Item $tempDir -Recurse -Force
         Write-Host "Installed xray $tag to $xrayPath" -ForegroundColor Green
     }

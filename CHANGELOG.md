@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **`scripts/setup-xray.ps1`: handle locked `xray.exe` on overwrite.**
+  `Move-Item` previously failed with `Cannot create a file when that file
+  already exists` when the existing `xray.exe` was running as an MCP
+  server in another VS Code / Roo instance. The download flow now catches
+  the `IOException`, lists the offending PIDs (`Get-Process xray`), and
+  either prompts the user to terminate them or kills them silently when
+  the new `-KillRunning` switch (or `-Force`) is passed, then retries the
+  move. Aborts with an actionable hint if the user declines or no xray
+  process is actually running.
+
 ## v0.2.4 (2026-05-04)
 
 - **Default `XRAY_GUIDANCE_PREFIX` to ON.** The text-prefix presentation
