@@ -1776,8 +1776,12 @@ fn test_reindexing_gate_carries_pipeline_metadata() {
 
 #[test]
 fn test_index_building_gate_carries_pipeline_metadata() {
-    // Phase 2 contract: content-index-not-ready error (plain text) must be
-    // wrapped into JSON envelope and carry policyReminder + totalTimeMs.
+    // Phase 2 contract: content-index-not-ready error must be a JSON envelope
+    // and carry policyReminder + totalTimeMs from the response pipeline.
+    // Updated 2026-05-05: envelope tag is now `"error": "INDEX_BUILDING"`
+    // (structured) and the human-readable text moved to `"message"`. This is
+    // the regression target — older clients keyed on substring inside `error`
+    // would silently miss the new tag.
     let ctx = HandlerContext {
         metrics: true,
         content_ready: Arc::new(AtomicBool::new(false)),
@@ -1787,9 +1791,13 @@ fn test_index_building_gate_carries_pipeline_metadata() {
     let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["test"]}));
     assert!(result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text)
-        .expect("plain-text gate error must be wrapped into JSON envelope");
-    assert!(output["error"].as_str().unwrap().contains("being built"),
-        "error must mention index being built");
+        .expect("gate error must be a structured JSON envelope");
+    assert_eq!(output["error"], json!("INDEX_BUILDING"),
+        "error tag must be the stable structured value, got: {output}");
+    assert_eq!(output["phase"], json!("content"),
+        "content-index gate must report phase='content'");
+    assert!(output["message"].as_str().unwrap().contains("being built"),
+        "human-readable message must still mention index being built, got: {output}");
     let summary = &output["summary"];
     assert!(summary["policyReminder"].as_str().is_some(),
         "policyReminder must be injected on index-building gate error");

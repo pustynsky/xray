@@ -452,6 +452,135 @@ fn test_dispatch_callers_while_def_index_building() {
         "Expected 'being built' message, got: {}", result.content[0].text);
 }
 
+// ─── INDEX_BUILDING JSON envelope shape ─────────────────────────────
+//
+// Regression suite for 2026-05-05 fix: the gate previously emitted a plain-
+// text error (`"Content index is currently being built ..."`) which forced
+// LLM agents into blind-retry loops with arbitrary sleep durations. The
+// envelope is now structured so callers can read `phase` and poll
+// `xray_info` for the matching index entry. These tests lock the envelope
+// shape so future refactors don't regress to plain text.
+
+#[test]
+fn test_dispatch_grep_index_building_returns_structured_envelope() {
+    let ctx = HandlerContext {
+        content_ready: Arc::new(AtomicBool::new(false)),
+        ..make_empty_ctx()
+    };
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({"terms": ["foo"]}));
+    assert!(result.is_error, "gate must mark response as error");
+    let body: Value = serde_json::from_str(&result.content[0].text)
+        .expect("INDEX_BUILDING envelope must be valid JSON, got: ");
+    assert_eq!(body["error"], json!("INDEX_BUILDING"),
+        "error field must be the structured tag, got: {body}");
+    assert_eq!(body["phase"], json!("content"),
+        "phase must identify the readiness flag that triggered the gate");
+    assert!(body["filesIndexedSoFar"].is_u64(),
+        "filesIndexedSoFar must be a non-negative integer, got: {}", body["filesIndexedSoFar"]);
+    let hint = body["hint"].as_str().expect("hint must be a string");
+    assert!(hint.contains("xray_info"),
+        "hint must direct the agent to xray_info polling, got: {hint}");
+    let message = body["message"].as_str().expect("message must be a string");
+    assert!(message.contains("Content"),
+        "message must mention which index is building, got: {message}");
+}
+
+#[test]
+fn test_dispatch_definitions_index_building_returns_structured_envelope() {
+    let ctx = HandlerContext {
+        def_ready: Arc::new(AtomicBool::new(false)),
+        def_index: Some(Arc::new(RwLock::new(crate::definitions::DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: Vec::new(),
+            definitions: Vec::new(),
+            name_index: HashMap::new(),
+            kind_index: HashMap::new(),
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index: HashMap::new(),
+            path_to_id: HashMap::new(),
+            method_calls: HashMap::new(),
+            ..Default::default()
+        }))),
+        ..make_empty_ctx()
+    };
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({"name": "Foo"}));
+    assert!(result.is_error);
+    let body: Value = serde_json::from_str(&result.content[0].text)
+        .expect("INDEX_BUILDING envelope must be valid JSON");
+    assert_eq!(body["error"], json!("INDEX_BUILDING"));
+    assert_eq!(body["phase"], json!("definition"),
+        "definition-index gate must report phase='definition'");
+    assert!(body["filesIndexedSoFar"].is_u64());
+    let message = body["message"].as_str().unwrap();
+    assert!(message.contains("Definition"),
+        "message must mention which index is building, got: {message}");
+}
+
+#[test]
+fn test_dispatch_callers_index_building_returns_structured_envelope() {
+    let ctx = HandlerContext {
+        def_ready: Arc::new(AtomicBool::new(false)),
+        def_index: Some(Arc::new(RwLock::new(crate::definitions::DefinitionIndex {
+            root: ".".to_string(),
+            created_at: 0,
+            extensions: vec!["cs".to_string()],
+            files: Vec::new(),
+            definitions: Vec::new(),
+            name_index: HashMap::new(),
+            kind_index: HashMap::new(),
+            attribute_index: HashMap::new(),
+            base_type_index: HashMap::new(),
+            file_index: HashMap::new(),
+            path_to_id: HashMap::new(),
+            method_calls: HashMap::new(),
+            ..Default::default()
+        }))),
+        ..make_empty_ctx()
+    };
+    let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": ["Foo"]}));
+    assert!(result.is_error);
+    let body: Value = serde_json::from_str(&result.content[0].text)
+        .expect("INDEX_BUILDING envelope must be valid JSON");
+    assert_eq!(body["error"], json!("INDEX_BUILDING"));
+    assert_eq!(body["phase"], json!("definition"),
+        "xray_callers shares the definition-index gate, must report phase='definition'");
+}
+
+#[test]
+fn test_dispatch_surfaces_unknown_arg_warning_in_summary() {
+    // Regression for 2026-05-05: integration check that the dispatch
+    // pipeline (dispatch_tool → dispatch_inner → finalize_response →
+    // inject_warning) actually delivers `summary.unknownArgsWarning` for an
+    // unknown arg in default (non-strict) mode. The alias-resolution
+    // semantics for specific keys (e.g. `topN` → `top` for
+    // xray_git_authors) are unit-tested directly in
+    // `arg_validation.rs::tests`; this test only locks the pipeline-level
+    // contract that the warning IS surfaced via the summary path. We use
+    // `topN` against `xray_grep` (which has no `top` arg) so the alias
+    // schema-guard short-circuits to the generic Jaro-Winkler hint and we
+    // can assert without touching git infrastructure.
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    // SAFETY: serial single-threaded test; restored at end.
+    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(
+        &ctx,
+        "xray_grep",
+        &json!({"terms": ["x"], "topN": 15}),
+    );
+    assert!(!result.is_error,
+        "unknown arg should warn, not hard-fail in default mode");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let warning = output["summary"]["unknownArgsWarning"]
+        .as_str()
+        .expect("unknownArgsWarning must be present in summary");
+    assert!(warning.contains("'topN'"),
+        "warning must name the offending key, got: {warning}");
+}
+
 #[test]
 fn test_dispatch_reindex_not_blocked_when_content_not_ready() {
     // After the pre-fix (Stage 0), xray_reindex is NOT blocked by content_ready=false.

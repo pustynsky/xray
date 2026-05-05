@@ -123,6 +123,15 @@ fn alias_table() -> &'static HashMap<&'static str, Alias> {
         m.insert("repository", Alias { correct: "repo", note: None });
         m.insert("repo_path", Alias { correct: "repo", note: None });
         m.insert("repoPath", Alias { correct: "repo", note: None });
+        // xray_git_authors: agents commonly guess `topN` (statistical idiom),
+        // `topn` (lowercase), or `topCount` (verbose form). Real schema arg is
+        // `top`. Without these aliases the silent-ignore + Jaro-Winkler hint
+        // ("Did you mean 'top'?") still surfaced the right name, but the LLM
+        // often skipped the buried `summary.unknownArgsWarning` and reported
+        // "top 1 author" as if the request had honored the requested cap.
+        m.insert("topN", Alias { correct: "top", note: None });
+        m.insert("topn", Alias { correct: "top", note: None });
+        m.insert("topCount", Alias { correct: "top", note: None });
         m
     })
 }
@@ -416,6 +425,36 @@ mod tests {
         let report = check_unknown_args("xray_git_history", &args)
             .expect("`since` should be flagged for git tools");
         assert!(report.unknown[0].hint.contains("Use 'from' instead"));
+    }
+
+    #[test]
+    fn alias_hint_topn_to_top_for_git_authors() {
+        // Regression for 2026-05-05: agents passed `topN=15` and the previous
+        // alias table had no entry for it, so the hint fell back to the
+        // generic Jaro-Winkler line ("Did you mean 'top'? (similarity 94%)").
+        // The explicit alias is now registered so the hint is unambiguous.
+        let args = json!({"repo": ".", "topN": 15});
+        let report = check_unknown_args("xray_git_authors", &args)
+            .expect("`topN` should be flagged for xray_git_authors");
+        let hint = &report.unknown[0].hint;
+        assert!(hint.contains("Use 'top' instead"),
+            "hint must explicitly suggest 'top', not the generic Jaro-Winkler form, got: {hint}");
+    }
+
+    #[test]
+    fn alias_hint_topn_lowercase_to_top() {
+        let args = json!({"repo": ".", "topn": 15});
+        let report = check_unknown_args("xray_git_authors", &args)
+            .expect("`topn` should be flagged");
+        assert!(report.unknown[0].hint.contains("Use 'top' instead"));
+    }
+
+    #[test]
+    fn alias_hint_topcount_to_top() {
+        let args = json!({"repo": ".", "topCount": 15});
+        let report = check_unknown_args("xray_git_authors", &args)
+            .expect("`topCount` should be flagged");
+        assert!(report.unknown[0].hint.contains("Use 'top' instead"));
     }
 
     // ─── nearest-match (Jaro-Winkler) fallback ───────────────────────────
