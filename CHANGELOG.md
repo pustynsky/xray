@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+- **Periodic autosave is ~5× faster on large workspaces (W1+W2+W3).**
+  On the 78K-file Shared workspace (657 MB content index + 238 MB
+  definition index), `Periodic autosave complete` wall-clock dropped
+  from ~12.3 s to ~2.4 s. Three independent wins compound:
+  - **W1 — parallel content + definition save.** `periodic_autosave` in
+    `src/mcp/watcher.rs` now spawns content and definition serializes
+    concurrently under `std::thread::scope`. They take separate
+    `RwLock`s and write to separate files, so the smaller def-index
+    save (~0.7 s) overlaps entirely inside the content-index save
+    (~2.1 s). On Shared this collapsed 9.3 s + 2.4 s sequential into
+    ~max(2.1 s, 0.7 s) ≈ 2.1 s wall-clock for the save phase. The
+    historical hold-read-lock-during-serialize choice is preserved
+    per-thread (cloning the index would double peak RSS by ~2 GB and
+    risk OOM on 16 GB dev machines per
+    `user-stories/user-story_xray-autosave-clone-peak_2026-05-02.md`).
+  - **W2 — parallel per-shard serialize+compress.** `save_sharded` in
+    `src/index.rs` now runs the four `bincode + lz4_flex` shard encode
+    passes in parallel via `std::thread::scope`, mirroring the
+    pre-existing parallel-decode path. Shard outputs are reassembled
+    in stable `shard_idx` order before the file write. Content-index
+    serialize loop dropped from ~4.3 s to ~1.1 s (4 cores × ~150 MB/s).
+    The `T: serde::Serialize + Sync` bound is now required on
+    `save_sharded`'s entry type — `ContentEntry` and `DefinitionEntry`
+    already satisfy it.
+  - **W3 — 1 MB BufWriter for the index file write.** The default
+    `BufWriter::new` 8 KB buffer issued ~84K `WriteFile` syscalls per
+    657 MB index save, each round-tripping through Defender filter
+    drivers. `BufWriter::with_capacity(1 << 20, file)` cuts that to
+    ~660 syscalls and lets the kernel coalesce writes more
+    aggressively. Content-index `fileWrite` dropped from ~4.7 s to
+    ~0.75 s on Shared NVMe.
+  - **AUTOSAVE intervals reverted to 300 s quiet / 600 s max.** The
+    2026-05-05 bump to 900 s / 1800 s — added to keep a 65 s monolithic
+    autosave off the steady-state path — is no longer needed; at 2.4 s
+    wall-clock the cadence cost is back below 1 % of wall-clock, so
+    the original 5 min / 10 min force-kill recovery window is restored.
+  - **Per-shard timing instrumentation** stays in `save_sharded` for
+    future tuning: `serializeLoopMs` and `fileWriteMs` are added to
+    the `indexSave` `PHASE` log line; per-shard breakdown
+    (`shard_idx`, `entries`, `serialize_compress_ms`, `compressed_bytes`)
+    is emitted at `RUST_LOG=xray::index=debug`.
+  - **Periodic rescan also parallelized.** The earlier sequential
+    content + definition reconcile in `periodic_rescan_once` now also
+    runs both reconcilers concurrently under `std::thread::scope`, and
+    `reconcile_content_index_with_disk_files` was extracted so the
+    rescan path no longer double-walks the filesystem (one
+    `scan_dir_state` reused by both reconcilers).
+
 - **Index-not-ready gate now returns a structured JSON envelope.** When
   `xray_grep` / `xray_definitions` / `xray_callers` are called before the
   required index has finished building, the dispatch gate no longer

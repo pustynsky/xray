@@ -3119,12 +3119,13 @@ fn test_autosave_due_skipped_when_unsaved_but_below_quiet() {
 
 #[test]
 fn test_autosave_due_fires_on_quiet_interval_with_unsaved() {
-    // The bursty-edit-then-idle case (delete 50 files, idle for 5min,
-    // force-kill). Pre-PR-B the legacy 10-min gate would have lost all
-    // 50; with the quiet gate we save ~300s after the last batch.
+    // The bursty-edit-then-idle case (delete 50 files, idle for the
+    // quiet window, force-kill). Pre-PR-B the legacy max-interval gate
+    // would have lost all 50; with the quiet gate we save shortly
+    // after the last batch.
     assert!(autosave_due(true, AUTOSAVE_QUIET_INTERVAL));
     assert!(autosave_due(true, AUTOSAVE_QUIET_INTERVAL + Duration::from_secs(1)));
-    assert!(autosave_due(true, Duration::from_secs(400)));
+    assert!(autosave_due(true, AUTOSAVE_QUIET_INTERVAL + Duration::from_secs(100)));
 }
 
 #[test]
@@ -3143,11 +3144,19 @@ fn test_autosave_due_constants_have_expected_values() {
     // Pin the chosen budget so a future tweak lands intentionally
     // (and is reviewed against the durability/perf trade-off described
     // in `user-stories/meta-checkpoint-durability.md` Hole #2).
+    //
+    // 2026-05-05 history: briefly bumped to 900s/1800s to mitigate a
+    // ~12s monolithic autosave cost on 78K-file workspaces, then
+    // reverted back to 300s/600s after parallel content+def save,
+    // parallel per-shard serialize, and 1 MB BufWriter together
+    // collapsed Shared autosave to ~2.4s wall-clock (<1% of cadence).
     assert_eq!(AUTOSAVE_QUIET_INTERVAL, Duration::from_secs(300),
-        "300s bounds force-kill data loss to ~5min of unflushed activity; \
-         prevents continuous autosave on large repos where serialization exceeds 30s");
+        "5min quiet interval bounds force-kill data loss to ~5min of unflushed activity; \
+         autosave is ~2.4s on Shared post-parallelization (W1+W2+W3), so the cadence \
+         is back to <1% wall-clock cost");
     assert_eq!(AUTOSAVE_MAX_INTERVAL, Duration::from_secs(600),
-        "10min preserves legacy behavior for steady-state idle workspaces");
+        "10min hard ceiling; clean-index ticks short-circuit cheaply via \
+         `!idx.files.is_empty()` allocator-capacity gate");
     assert!(AUTOSAVE_QUIET_INTERVAL < AUTOSAVE_MAX_INTERVAL,
         "quiet interval must be tighter than max ceiling, otherwise have_unsaved gate is dead");
 }
