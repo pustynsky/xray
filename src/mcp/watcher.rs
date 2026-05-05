@@ -371,8 +371,9 @@ pub fn start_watcher(
                             // normally fires) may not run for many minutes,
                             // so we'd otherwise lose every incremental update
                             // on crash. With the quiet-interval gate the
-                            // first save now lands ~5min into a sustained
-                            // burst instead of after the legacy 10 min.
+                            // first save now lands ~AUTOSAVE_QUIET_INTERVAL
+                            // into a sustained burst instead of after the
+                            // hard-ceiling AUTOSAVE_MAX_INTERVAL.
                             if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
                                 // MCP-WCH-007: bump `last_autosave` even on
                                 // failure so a transient write error doesn't
@@ -434,7 +435,8 @@ pub fn start_watcher(
                     // MCP-WCH-004 + MCP-WCH-007: opportunistic autosave on
                     // every successful batch flush, not only when the
                     // pending sets are empty. Quiet-interval gate makes the
-                    // first save land ~5min after the burst started.
+                    // first save land ~AUTOSAVE_QUIET_INTERVAL after the
+                    // burst started.
                     if autosave_due(have_unsaved || autosave_dirty.load(std::sync::atomic::Ordering::Relaxed), last_autosave.elapsed()) {
                         let had_autosave_dirty = begin_autosave_attempt(&autosave_dirty);
                         let saved_ok = periodic_autosave(&index, &def_index, &index_base);
@@ -1070,11 +1072,17 @@ pub(crate) fn post_reconcile_checkpoint_needed(
 
 // MCP-WCH-007 (PR-B, Hole #2 from `user-stories/meta-checkpoint-durability.md`):
 // two-tier autosave timing in `start_watcher`'s event loop. The quiet
-// interval bounds data loss to ~5min in the bursty-edit-then-idle case
-// (delete 50 files → quiet for ~9 min → force-kill loses all 50 pre-PR-B;
-// post-PR-B at most ~5min of unflushed activity is lost). The max
-// interval preserves the legacy 10-minute upper bound so steady-state
-// idle workspaces still write at most once every 10 min.
+// interval bounds data loss in the bursty-edit-then-idle case (delete 50
+// files → quiet → force-kill loses all 50 pre-PR-B; post-PR-B at most
+// `AUTOSAVE_QUIET_INTERVAL` of unflushed activity is lost).
+//
+// **2026-05-05 cadence history:** these were briefly bumped to 900s/1800s
+// to mitigate ~12s autosave wall-clock on large workspaces, then reverted
+// once the parallel content+def save (`periodic_autosave`), parallel
+// per-shard serialize (`save_sharded`), and 1 MB BufWriter together
+// collapsed Shared autosave from ~12s to ~2.4s wall-clock. At 2.4s the
+// 5min cadence is back to <1% wall-clock cost, so the original recovery
+// window (force-kill loses ≤5min of unflushed activity) is preferred.
 pub(crate) const AUTOSAVE_QUIET_INTERVAL: Duration = Duration::from_secs(300);
 pub(crate) const AUTOSAVE_MAX_INTERVAL: Duration = Duration::from_secs(600);
 
@@ -1082,8 +1090,9 @@ pub(crate) const AUTOSAVE_MAX_INTERVAL: Duration = Duration::from_secs(600);
 /// `start_watcher` event loop should run `periodic_autosave`:
 ///
 /// - `have_unsaved && since_last_save >= AUTOSAVE_QUIET_INTERVAL`: bursty
-///   activity recently completed; flush within ~5min of the last batch
-///   so a force-kill loses at most ~5min of changes.
+///   activity recently completed; flush within ~AUTOSAVE_QUIET_INTERVAL
+///   of the last batch so a force-kill loses at most that much of
+///   unflushed mutations.
 /// - `since_last_save >= AUTOSAVE_MAX_INTERVAL`: hard ceiling, fires
 ///   even with `have_unsaved == false` (matches legacy behavior; on a
 ///   clean index the actual `periodic_autosave` call short-circuits via
@@ -1135,72 +1144,126 @@ pub(crate) fn autosave_due(have_unsaved: bool, since_last_save: Duration) -> boo
 /// or write error). Callers in `start_watcher` use the return value to
 /// decide whether the unsaved-changes flag may be cleared — on failure,
 /// the next quiet-interval tick will re-attempt the save while still
-/// throttling at ~5min instead of busy-retrying every debounce tick.
+/// throttling at AUTOSAVE_QUIET_INTERVAL instead of busy-retrying every
+/// debounce tick.
 fn periodic_autosave(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     index_base: &std::path::Path,
 ) -> bool {
     let start = std::time::Instant::now();
-    let mut saved = Vec::new();
-    let mut all_ok = true;
 
-    // ── Content index: serialize directly under read lock ──
-    // Gate: `idx.files.is_empty()` — allocator-capacity check, NOT live count.
-    // Rationale: if all files were removed during this session, `live_file_count() == 0`
-    // but the index is still dirty (the on-disk copy holds stale entries). We MUST
-    // checkpoint that "now empty" state so a forced kill doesn't resurrect them.
-    // We only skip when the index has never held any file (allocator never grew).
+    // Content + definition saves run concurrently under `std::thread::scope`.
+    // They take SEPARATE RwLocks (different indexes) and write to SEPARATE
+    // files — no contention. Combined with the parallel per-shard serialize
+    // in `save_sharded` and the 1 MB BufWriter in the same function, this
+    // brought Shared autosave from ~12.3s sequential to ~2.4s wall-clock
+    // (~5× faster). The smaller def-index save (~0.7s) overlaps entirely
+    // inside the content-index save (~2.1s), so wall-clock here is
+    // dominated by the content branch.
     //
-    // We hold the read lock for the full serialize (~4 s on Shared) instead of
-    // cloning the index first. Cloning a ~1.7 GB content index doubled peak RSS
-    // by ~2 GB on Shared and risked OOM on 16 GB dev machines
-    // (see user-stories/user-story_xray-autosave-clone-peak_2026-05-02.md).
+    // The historical hold-read-lock-during-serialize choice still applies
+    // per-thread: cloning a ~1.7 GB content index doubled peak RSS by ~2 GB
+    // on Shared and risked OOM on 16 GB dev machines (see
+    // user-stories/user-story_xray-autosave-clone-peak_2026-05-02.md).
     // RwLock is std::sync::RwLock — concurrent readers (`xray_grep`,
     // `xray_definitions`) keep working; only WRITERS (watcher incremental
     // mutations) wait. Mutations are already debounced and tolerate the pause.
-    match index.read() {
-        Ok(idx) => {
-            if !idx.files.is_empty() {
-                let serialize_start = std::time::Instant::now();
-                if let Err(e) = crate::save_content_index(&idx, index_base) {
-                    warn!(error = %e, "Periodic autosave: failed to save content index");
-                    all_ok = false;
-                } else {
-                    let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
-                    saved.push(format!("content({} files, serializeMs={:.0})",
-                        idx.live_file_count(), serialize_ms));
-                }
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "Periodic autosave: failed to read content index");
-            all_ok = false;
-        }
-    }
-
-    // ── Definition index: same hold-read-lock pattern ──
-    if let Some(def_idx) = def_index {
-        match def_idx.read() {
-            Ok(idx) => {
-                if !idx.files.is_empty() {
+    let (content_outcome, def_outcome): (
+        (Option<String>, bool),
+        (Option<String>, bool),
+    ) = std::thread::scope(|s| {
+        let content_handle = s.spawn(|| {
+            // Gate: `idx.files.is_empty()` — allocator-capacity check, NOT
+            // live count. If all files were removed during this session,
+            // `live_file_count() == 0` but the index is still dirty (the
+            // on-disk copy holds stale entries). We MUST checkpoint that
+            // "now empty" state so a forced kill doesn't resurrect them.
+            // We only skip when the index has never held any file.
+            match index.read() {
+                Ok(idx) => {
+                    if idx.files.is_empty() {
+                        return (None, true);
+                    }
                     let serialize_start = std::time::Instant::now();
-                    if let Err(e) = crate::definitions::save_definition_index(&idx, index_base) {
-                        warn!(error = %e, "Periodic autosave: failed to save definition index");
-                        all_ok = false;
-                    } else {
-                        let serialize_ms = serialize_start.elapsed().as_secs_f64() * 1000.0;
-                        saved.push(format!("def({} defs, serializeMs={:.0})",
-                            idx.definitions.len(), serialize_ms));
+                    match crate::save_content_index(&idx, index_base) {
+                        Ok(()) => {
+                            let serialize_ms =
+                                serialize_start.elapsed().as_secs_f64() * 1000.0;
+                            (
+                                Some(format!(
+                                    "content({} files, serializeMs={:.0})",
+                                    idx.live_file_count(),
+                                    serialize_ms
+                                )),
+                                true,
+                            )
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Periodic autosave: failed to save content index");
+                            (None, false)
+                        }
                     }
                 }
+                Err(e) => {
+                    warn!(error = %e, "Periodic autosave: failed to read content index");
+                    (None, false)
+                }
             }
-            Err(e) => {
-                warn!(error = %e, "Periodic autosave: failed to read definition index");
-                all_ok = false;
+        });
+
+        let def_handle = s.spawn(|| {
+            let Some(def_idx) = def_index.as_ref() else {
+                return (None, true);
+            };
+            match def_idx.read() {
+                Ok(idx) => {
+                    if idx.files.is_empty() {
+                        return (None, true);
+                    }
+                    let serialize_start = std::time::Instant::now();
+                    match crate::definitions::save_definition_index(&idx, index_base) {
+                        Ok(()) => {
+                            let serialize_ms =
+                                serialize_start.elapsed().as_secs_f64() * 1000.0;
+                            (
+                                Some(format!(
+                                    "def({} defs, serializeMs={:.0})",
+                                    idx.definitions.len(),
+                                    serialize_ms
+                                )),
+                                true,
+                            )
+                        }
+                        Err(e) => {
+                            warn!(error = %e, "Periodic autosave: failed to save definition index");
+                            (None, false)
+                        }
+                    }
+                }
+                Err(e) => {
+                    warn!(error = %e, "Periodic autosave: failed to read definition index");
+                    (None, false)
+                }
             }
-        }
-    }
+        });
+
+        (
+            content_handle.join().unwrap_or_else(|_| {
+                warn!("Periodic autosave: content save thread panicked");
+                (None, false)
+            }),
+            def_handle.join().unwrap_or_else(|_| {
+                warn!("Periodic autosave: definition save thread panicked");
+                (None, false)
+            }),
+        )
+    });
+
+    let mut saved = Vec::new();
+    if let Some(s) = content_outcome.0 { saved.push(s); }
+    if let Some(s) = def_outcome.0 { saved.push(s); }
+    let all_ok = content_outcome.1 && def_outcome.1;
 
     if !saved.is_empty() {
         let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -1790,7 +1853,21 @@ pub(crate) fn periodic_rescan_once(
     let start = Instant::now();
     stats.periodic_rescan_total.fetch_add(1, Ordering::Relaxed);
 
+    // Capture walk start time BEFORE scan_dir_state so files modified during
+    // the walk/reconcile remain eligible for the next rescan. Mirrors the
+    // contract reconcile_content_index normally enforces internally; we lift
+    // it out here because the same DirState is reused for the reconcile call
+    // below (avoiding a redundant whole-tree walk on a 78K-file workspace).
+    let walk_start_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or(std::time::Duration::ZERO)
+        .as_secs();
     let state = scan_dir_state(dir, content_extensions, respect_git_exclude);
+    // `state.ext_matched` is moved into reconcile_content_index_with_disk_files
+    // when content drift is detected; capture lengths up-front for the no-drift
+    // debug log that runs after the move would otherwise have happened.
+    let ext_files_len = state.ext_matched.len();
+    let all_files_len = state.all_files.len();
     let (content_added, content_removed, content_modified) =
         compute_content_drift(index, &state.ext_matched);
     let (file_index_added, file_index_removed) =
@@ -1810,18 +1887,47 @@ pub(crate) fn periodic_rescan_once(
         file_index_dirty.store(true, Ordering::Relaxed);
     }
     if content_drift {
-        // Delegate to the existing reconcilers. They each perform
-        // their own walk today (acceptable on a 5-min cadence;
-        // collapsing to a single walk is a follow-up). Bailing out
-        // when nothing changed is their internal fast path.
-        let (applied_added, applied_modified, applied_removed) =
-            reconcile_content_index(index, dir, content_extensions, respect_git_exclude);
-        let mut definition_changed = false;
-        if let Some(di) = def_index {
-            let (def_added, def_modified, def_removed) =
-                definitions::reconcile_definition_index_nonblocking(di, dir, definition_extensions, respect_git_exclude);
-            definition_changed = def_added + def_modified + def_removed > 0;
-        }
+        // Reuse the DirState snapshot from above for content reconcile —
+        // skips one whole-tree walk (~1.9 s on a 78K-file workspace).
+        // The definition reconcile keeps its own walk because its walker
+        // options differ (`hidden(false)` vs `scan_dir_state`'s `hidden(true)`,
+        // matching `build_definition_index`'s contract).
+        //
+        // Both reconcilers run concurrently in a `thread::scope`: content
+        // reconcile is mostly I/O (read/tokenize files), def reconcile is
+        // CPU-bound (tree-sitter parse). Wall time = max(content, def)
+        // instead of sum — saves ~2 s per drift-positive tick on a 78K-file
+        // workspace where def reconcile alone took 2.8 s with applied=0.
+        // Both functions take their own internal locks; the only shared state
+        // is the FS itself (read-only walks tolerate parallelism).
+        let ext_matched = state.ext_matched;
+        let dir_owned = dir.to_string();
+        let def_extensions_owned = definition_extensions.to_vec();
+        let (content_outcome, def_outcome) = std::thread::scope(|s| {
+            let content_handle = s.spawn(|| {
+                reconcile_content_index_with_disk_files(index, ext_matched, walk_start_secs)
+            });
+            let def_handle = s.spawn(|| {
+                def_index.as_ref().map(|di| {
+                    definitions::reconcile_definition_index_nonblocking(
+                        di,
+                        &dir_owned,
+                        &def_extensions_owned,
+                        respect_git_exclude,
+                    )
+                })
+            });
+            // unwrap_or — a panicked reconcile worker should not crash the
+            // rescan thread; treat it as a no-op so the next tick retries.
+            (
+                content_handle.join().unwrap_or((0, 0, 0)),
+                def_handle.join().unwrap_or(None),
+            )
+        });
+        let (applied_added, applied_modified, applied_removed) = content_outcome;
+        let definition_changed = def_outcome
+            .map(|(a, m, r)| a + m + r > 0)
+            .unwrap_or(false);
         // Schedule autosave from applied content changes, not merely detected
         // content drift. If content tokenization failed, the old content snapshot
         // is intentionally kept in memory and should not be checkpointed as the
@@ -1845,8 +1951,8 @@ pub(crate) fn periodic_rescan_once(
         );
     } else {
         debug!(
-            ext_files = state.ext_matched.len(),
-            all_files = state.all_files.len(),
+            ext_files = ext_files_len,
+            all_files = all_files_len,
             "periodic rescan: no drift"
         );
     }
@@ -1974,21 +2080,33 @@ fn reconcile_content_index(
     extensions: &[String],
     respect_git_exclude: bool,
 ) -> (usize, usize, usize) {
-    let start = std::time::Instant::now();
-    // Capture walk start time for created_at update (not now() at end — avoids race condition
-    // where files modified during tokenization phase would be missed by next reconciliation)
+    // Capture walk start time BEFORE the walk so files modified during the
+    // walk/tokenize phases remain eligible for the next reconciliation.
     let walk_start = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or(std::time::Duration::ZERO)
         .as_secs();
-
-    // ── Phase 1: Walk filesystem (NO LOCK) ──
-    // Single shared walk — `disk_files` here is the ext-matched view.
-    // The full `all_files` view is intentionally unused at this call site
-    // (FileIndex is reconciled elsewhere); Phase 2 (`periodic_rescan_once`)
-    // will consume both views from the same `DirState` snapshot.
     let dir_state = scan_dir_state(dir, extensions, respect_git_exclude);
-    let disk_files = &dir_state.ext_matched;
+    reconcile_content_index_with_disk_files(index, dir_state.ext_matched, walk_start)
+}
+
+/// Same as [`reconcile_content_index`] but consumes a pre-built `disk_files`
+/// snapshot instead of walking the filesystem itself.
+///
+/// Used by [`periodic_rescan_once`] to avoid a redundant walk: that path
+/// already produced a fresh `DirState` for drift detection. Caller MUST pass:
+/// - `disk_files` produced by [`scan_dir_state`] using the SAME extensions and
+///   `respect_git_exclude` flag the content index was built with (otherwise
+///   files visible to the build path will look "deleted" here);
+/// - `walk_start` captured BEFORE the walk producing `disk_files` (this value
+///   is stored in `idx.created_at` to bound the next rescan's mtime threshold).
+pub(crate) fn reconcile_content_index_with_disk_files(
+    index: &Arc<RwLock<ContentIndex>>,
+    disk_files: HashMap<PathBuf, SystemTime>,
+    walk_start: u64,
+) -> (usize, usize, usize) {
+    let start = std::time::Instant::now();
+    let disk_files = &disk_files;
 
     let scanned = disk_files.len();
 

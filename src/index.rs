@@ -1051,7 +1051,10 @@ pub fn save_sharded<H, T>(
 ) -> Result<(), SearchError>
 where
     H: serde::Serialize,
-    T: serde::Serialize,
+    // `Sync` so per-shard `&Vec<T>` can cross thread boundaries in the
+    // `std::thread::scope` parallel-serialize path. ContentEntry / DefinitionEntry
+    // are plain POD-ish structs (Strings, Vecs, primitives) — already Sync.
+    T: serde::Serialize + Sync,
 {
     use bincode::Options;
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1086,20 +1089,57 @@ where
     }
 
     // 2. Serialize+compress each shard into its own buffer.
-    let mut shard_buffers: Vec<Vec<u8>> = Vec::with_capacity(shard_count);
-    for shard in &shards {
-        let mut buf: Vec<u8> = Vec::new();
-        {
-            let mut encoder = lz4_flex::frame::FrameEncoder::new(&mut buf);
-            bincode_opts.serialize_into(&mut encoder, shard)
-                .map_err(|e| SearchError::IndexLoad {
-                    path: path.display().to_string(),
-                    message: format!("shard serialization failed: {}", e),
-                })?;
-            encoder.finish().map_err(std::io::Error::other)?;
-        }
-        shard_buffers.push(buf);
+    // Each shard runs on its own OS thread via `std::thread::scope` so the
+    // wall-clock is `max(per-shard ms)` instead of `sum`. On Shared this
+    // brings the content-index serialize loop from ~4.3 s single-threaded to
+    // ~1.1 s with 4 shards on a 24-core box. Mirrors the parallel decode
+    // path below — same `bincode_opts` Copy trick, same join-then-collect.
+    //
+    // Per-shard timings collected for the autosave-throughput probe described
+    // in `user-stories/user-story_xray-autosave-shard-repartition_2026-05-05.md`:
+    // need to know whether the wall-clock is bincode walks (CPU-bound, now
+    // parallelized) or lz4/disk (which we attack separately via larger
+    // BufWriter capacity below).
+    // Each tuple = (shard_idx, entry_count, serialize_compress_ms, compressed_bytes).
+    let opts = bincode_opts; // Copy — DefaultOptions wrappers are Copy.
+    let serialize_loop_start = Instant::now();
+    type ShardSerializeOk = (usize, usize, f64, Vec<u8>);
+    let shard_results: Vec<Result<ShardSerializeOk, String>> = std::thread::scope(|s| {
+        let handles: Vec<_> = shards.iter().enumerate().map(|(shard_idx, shard)| {
+            s.spawn(move || -> Result<ShardSerializeOk, String> {
+                let shard_start = Instant::now();
+                let mut buf: Vec<u8> = Vec::new();
+                {
+                    let mut encoder = lz4_flex::frame::FrameEncoder::new(&mut buf);
+                    opts.serialize_into(&mut encoder, shard)
+                        .map_err(|e| format!("shard {} serialization failed: {}", shard_idx, e))?;
+                    encoder.finish()
+                        .map_err(|e| format!("shard {} lz4 finish failed: {}", shard_idx, e))?;
+                }
+                let shard_ms = shard_start.elapsed().as_secs_f64() * 1000.0;
+                Ok((shard_idx, shard.len(), shard_ms, buf))
+            })
+        }).collect();
+        handles.into_iter().map(|h| match h.join() {
+            Ok(r) => r,
+            Err(_) => Err("shard serialize thread panicked".to_string()),
+        }).collect()
+    });
+    let serialize_loop_ms = serialize_loop_start.elapsed().as_secs_f64() * 1000.0;
+
+    // Sort by shard_idx so on-disk order matches input order; thread::scope
+    // does not guarantee join order matches spawn order.
+    let mut shard_buffers: Vec<Vec<u8>> = vec![Vec::new(); shard_count];
+    let mut shard_timings: Vec<(usize, usize, f64, usize)> = Vec::with_capacity(shard_count);
+    for r in shard_results {
+        let (shard_idx, entries_in_shard, shard_ms, buf) = r.map_err(|msg| SearchError::IndexLoad {
+            path: path.display().to_string(),
+            message: msg,
+        })?;
+        shard_timings.push((shard_idx, entries_in_shard, shard_ms, buf.len()));
+        shard_buffers[shard_idx] = buf;
     }
+    shard_timings.sort_by_key(|(idx, _, _, _)| *idx);
 
     // 3. Serialize head to a buffer (need exact size to write the prefix).
     let head_bytes: Vec<u8> = bincode_opts.serialize(head)
@@ -1123,8 +1163,15 @@ where
         parent.join(format!(".{file_name}.xray_tmp.{pid}.{nanos}.{counter}"))
     };
     {
+        let file_write_start = Instant::now();
         let file = std::fs::File::create(&tmp_path)?;
-        let mut writer = BufWriter::new(file);
+        // 1 MB BufWriter (vs default 8 KB): on Shared the content index is
+        // ~657 MB; the 8 KB default issued ~84K WriteFile syscalls per save,
+        // each round-tripping through Defender filter drivers. 1 MB chunks
+        // bring that down to ~660 syscalls and let the kernel coalesce
+        // writes into the disk cache more aggressively. Memory cost is
+        // bounded (1 MB per concurrent save) so this is safe everywhere.
+        let mut writer = BufWriter::with_capacity(1 << 20, file);
         writer.write_all(SHARD_MAGIC)?;
         writer.write_all(&(head_bytes.len() as u64).to_le_bytes())?;
         writer.write_all(&head_bytes)?;
@@ -1136,30 +1183,51 @@ where
             writer.write_all(shard_buf)?;
         }
         writer.flush()?;
+        let file_write_ms = file_write_start.elapsed().as_secs_f64() * 1000.0;
+
+        let compressed_size = std::fs::metadata(&tmp_path)?.len();
+
+        std::fs::rename(&tmp_path, path).inspect_err(|_e| {
+            let _ = std::fs::remove_file(&tmp_path);
+        })?;
+
+        let elapsed = start.elapsed();
+
+        // Per-shard breakdown — emitted at debug level so the noise stays
+        // out of normal info logs but a `RUST_LOG=xray::index=debug` run
+        // captures everything needed to answer "is bincode the bottleneck?".
+        for (shard_idx, entries_in_shard, shard_ms, compressed_bytes) in &shard_timings {
+            tracing::debug!(
+                target: "xray::index",
+                index_label = label,
+                shard_idx = *shard_idx,
+                entries = *entries_in_shard,
+                serialize_compress_ms = *shard_ms,
+                compressed_bytes = *compressed_bytes,
+                "indexSave shard breakdown"
+            );
+        }
+
+        log_phase("indexSave", &[
+            ("indexLabel", label.to_string()),
+            ("indexSaveMs", format_duration_ms(elapsed)),
+            ("serializeLoopMs", format!("{:.1}", serialize_loop_ms)),
+            ("fileWriteMs", format!("{:.1}", file_write_ms)),
+            ("compressedBytes", compressed_size.to_string()),
+            ("indexShardCount", shard_count.to_string()),
+            ("indexEntries", total.to_string()),
+            ("path", format_debug_path(path)),
+        ]);
+
+        eprintln!("[{}] Saved {:.1} MB (compressed, {} shards) in {:.2}s to {} (serializeLoop={:.2}s, fileWrite={:.2}s)",
+            label,
+            compressed_size as f64 / 1_048_576.0,
+            shard_count,
+            elapsed.as_secs_f64(),
+            path.display(),
+            serialize_loop_ms / 1000.0,
+            file_write_ms / 1000.0);
     }
-
-    let compressed_size = std::fs::metadata(&tmp_path)?.len();
-
-    std::fs::rename(&tmp_path, path).inspect_err(|_e| {
-        let _ = std::fs::remove_file(&tmp_path);
-    })?;
-
-    let elapsed = start.elapsed();
-    log_phase("indexSave", &[
-        ("indexLabel", label.to_string()),
-        ("indexSaveMs", format_duration_ms(elapsed)),
-        ("compressedBytes", compressed_size.to_string()),
-        ("indexShardCount", shard_count.to_string()),
-        ("indexEntries", total.to_string()),
-        ("path", format_debug_path(path)),
-    ]);
-
-    eprintln!("[{}] Saved {:.1} MB (compressed, {} shards) in {:.2}s to {}",
-        label,
-        compressed_size as f64 / 1_048_576.0,
-        shard_count,
-        elapsed.as_secs_f64(),
-        path.display());
 
     Ok(())
 }
