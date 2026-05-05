@@ -1959,20 +1959,35 @@ fn cross_load_definition_index(ctx: &HandlerContext, dir: &str) -> Option<&'stat
             dir: bg_dir.clone(), ext: bg_ext.clone(), threads: 0,
             respect_git_exclude: bg_respect,
         });
-        if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
-            warn!(error = %e, "Failed to save definition index to disk");
-        }
-        // Drop + reload pattern for compact memory
-        drop(new_idx);
-        crate::index::force_mimalloc_collect();
-        let new_idx = crate::definitions::load_definition_index(&bg_dir, &bg_ext, &bg_idx_base)
-            .unwrap_or_else(|e| {
-                warn!(error = %e, "Failed to reload def index, rebuilding");
-                crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
-                    dir: bg_dir, ext: bg_ext, threads: 0,
-                    respect_git_exclude: bg_respect,
+        // Save to disk. Same correctness rationale as `build_or_load_content_index`
+        // and `handle_xray_reindex_definitions_inner` (commit e64ed47): if save
+        // fails the surviving on-disk shard may be stale (rename is not-atomic
+        // against a pre-existing target on some filesystems). On failure we MUST
+        // keep the freshly-built `new_idx` in memory and skip the drop+reload
+        // step — otherwise the watcher would silently re-publish the stale
+        // on-disk shard while reporting fresh counts via def_ready.
+        let save_failed = if let Err(e) = crate::definitions::save_definition_index(&new_idx, &bg_idx_base) {
+            warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
+            true
+        } else {
+            false
+        };
+        // Drop + reload pattern for compact memory.
+        // SKIPPED on save failure: see save-failure rationale above.
+        let new_idx = if save_failed {
+            new_idx
+        } else {
+            drop(new_idx);
+            crate::index::force_mimalloc_collect();
+            crate::definitions::load_definition_index(&bg_dir, &bg_ext, &bg_idx_base)
+                .unwrap_or_else(|e| {
+                    warn!(error = %e, "Failed to reload def index, rebuilding");
+                    crate::definitions::build_definition_index(&crate::definitions::DefIndexArgs {
+                        dir: bg_dir, ext: bg_ext, threads: 0,
+                        respect_git_exclude: bg_respect,
+                    })
                 })
-            });
+        };
         *bg_def.write().unwrap_or_else(|e| e.into_inner()) = new_idx;
         bg_building.store(false, Ordering::Release);
         bg_ready.store(true, Ordering::Release);

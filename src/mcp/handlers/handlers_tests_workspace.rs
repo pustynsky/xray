@@ -874,6 +874,81 @@ fn test_handle_xray_reindex_definitions_inner_save_failure_keeps_fresh_in_memory
     );
 }
 
+
+/// Save-failure smoke test (2026-05-05) for `cross_load_definition_index`'s
+/// background-build path. Forces `save_definition_index` to fail by pointing
+/// `index_base` at a regular file (so `create_dir_all(index_base)` inside the
+/// save layer errors), then waits for the BG build to publish via `def_ready`
+/// and asserts the in-memory index has the freshly-built marker.
+///
+/// **Documentary, NOT mutation-killing.** This test cannot distinguish the
+/// FIXED path (`if save_failed { new_idx } else { drop+reload }`) from the
+/// inverted-conditional mutation: when `index_base` is a regular file the
+/// drop+reload's `load_definition_index` ALSO fails and the rebuild-fallback
+/// rescues correctness with fresh data either way. A stale-shard
+/// mutation-killer (pre-seed shard → read-only → force save fail → expect
+/// drop+reload to read stale) cannot work here either, because the cache
+/// check at the top of `cross_load_definition_index` and the drop+reload at
+/// the bottom both call `load_definition_index` — if a pre-seeded shard is
+/// readable the cache check short-circuits to `"loaded_cache"` before the
+/// BG build runs, so we never reach the save-failed branch under test. The
+/// mutation-killing variant lives in
+/// `test_handle_xray_reindex_definitions_inner_save_failure_does_not_publish_stale_shard`,
+/// which exercises a sibling path (`xray_reindex_definitions`) that always
+/// rebuilds and therefore can be tested with a stale-shard fixture. This
+/// test catches grosser regressions only: removed save call, missing
+/// fallback, or BG build never publishing on save failure.
+#[test]
+#[cfg(feature = "lang-rust")]
+fn test_cross_load_definition_index_save_failure_keeps_fresh_in_memory_index() {
+    use std::sync::atomic::Ordering;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let workspace = tmp.path().join("ws_cross_load_save_fail");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(
+        workspace.join("seed.rs"),
+        "fn cross_load_save_fail_uniq_zzqq_marker() {}\n",
+    ).unwrap();
+    let workspace_str = crate::clean_path(
+        &std::fs::canonicalize(&workspace).unwrap().to_string_lossy(),
+    );
+
+    let mut ctx = make_ctx_with_defs();
+    ctx.def_extensions = vec!["rs".to_string()];
+    // Force save_definition_index to fail by pointing index_base at a regular
+    // file: the `create_dir_all(index_base)` inside the save layer will error
+    // because the path component already exists as a non-directory.
+    let index_base_file = tmp.path().join("not_a_dir.dat");
+    std::fs::write(&index_base_file, b"placeholder").unwrap();
+    ctx.index_base = index_base_file;
+    // Reset def_ready so we can poll it for background completion below.
+    ctx.def_ready.store(false, Ordering::Release);
+
+    let action = cross_load_definition_index(&ctx, &workspace_str);
+    assert_eq!(
+        action,
+        Some("background_build"),
+        "no cache exists — must spawn background build, not load_cache"
+    );
+
+    // Wait for background build to publish to the def_index Arc.
+    assert!(
+        wait_until(|| ctx.def_ready.load(Ordering::Acquire)),
+        "background build did not signal def_ready within timeout"
+    );
+
+    // Verify the in-memory def index has the fresh symbol — not the stale
+    // entries baked into make_ctx_with_defs() (ResilientClient etc.).
+    let def_arc = ctx.def_index.as_ref().expect("ctx must have def_index_arc").clone();
+    let def_idx = def_arc.read().unwrap();
+    assert!(
+        def_idx.definitions.iter().any(|d| d.name.contains("cross_load_save_fail_uniq_zzqq_marker")),
+        "cross-loaded def index must contain freshly-built symbol despite save failure; got {} definitions",
+        def_idx.definitions.len()
+    );
+}
+
 /// Bug-report 2026-04-28 (reviewer Round-3 stricter coverage): the
 /// previous save-failure tests only prove fresh data ends up in memory —
 /// they do not distinguish the BUGGY drop+reload+rebuild fallback path

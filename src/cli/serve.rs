@@ -1050,46 +1050,61 @@ fn load_or_build_content_index(
             let save_start = Instant::now();
             let save_result = save_content_index(&new_idx, &bg_idx_base);
             let save_elapsed = save_start.elapsed();
-            if let Err(e) = save_result {
-                warn!(error = %e, "Failed to save content index to disk");
+            let save_failed = if let Err(e) = save_result {
+                warn!(error = %e, "Failed to save content index to disk; keeping in-memory index");
+                true
             } else {
                 // Clean up old content indexes for the same root with different extensions
                 let exts_str = new_idx.extensions.join(",");
                 let saved_path = crate::content_index_path_for(&new_idx.root, &exts_str, &bg_idx_base);
                 crate::index::cleanup_stale_same_root_indexes(&bg_idx_base, &saved_path, &new_idx.root, "word-search");
-            }
+                false
+            };
 
             // Drop build-time index and reload from disk to eliminate allocator
             // fragmentation (~1.5 GB savings). Build creates many temporary allocs
             // that fragment the heap; reloading gives compact contiguous memory.
+            //
+            // SKIPPED on save failure (commit e64ed47 follow-up): if save failed,
+            // the surviving on-disk shard may be stale (rename is not-atomic against
+            // a pre-existing target on some filesystems) — reloading would silently
+            // re-publish the stale cache while we report fresh build counts via
+            // contentReady. Keep the freshly-built `new_idx` in memory at the cost
+            // of allocator fragmentation; correctness wins over layout.
             let file_count = new_idx.files.len();
             let token_count = new_idx.index.len();
             let drop_reload_start = Instant::now();
-            drop(new_idx);
-            crate::index::log_memory("serve: after drop(content build)");
-            crate::index::force_mimalloc_collect();
-            crate::index::log_memory("serve: after mi_collect (content)");
-            let new_idx = match load_content_index(&bg_dir, &bg_ext, &bg_idx_base) {
-                Ok(idx) => idx,
-                Err(e) => {
-                    warn!(error = %e, "Failed to reload content index from disk, rebuilding");
-                    match build_content_index(&ContentIndexArgs {
-                        dir: bg_dir, ext: bg_ext,
-                        max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
-                        threads: build_threads, min_token_len: DEFAULT_MIN_TOKEN_LEN,
-                    }) {
-                        Ok(idx) => idx,
-                        Err(e2) => {
-                            warn!(error = %e2, "Failed to rebuild content index from scratch");
-                            build_state.complete_failed();
-                            return;
+            let new_idx = if save_failed {
+                new_idx
+            } else {
+                drop(new_idx);
+                crate::index::log_memory("serve: after drop(content build)");
+                crate::index::force_mimalloc_collect();
+                crate::index::log_memory("serve: after mi_collect (content)");
+                match load_content_index(&bg_dir, &bg_ext, &bg_idx_base) {
+                    Ok(idx) => idx,
+                    Err(e) => {
+                        warn!(error = %e, "Failed to reload content index from disk, rebuilding");
+                        match build_content_index(&ContentIndexArgs {
+                            dir: bg_dir, ext: bg_ext,
+                            max_age_hours: 24, hidden: false, no_ignore: false, respect_git_exclude,
+                            threads: build_threads, min_token_len: DEFAULT_MIN_TOKEN_LEN,
+                        }) {
+                            Ok(idx) => idx,
+                            Err(e2) => {
+                                warn!(error = %e2, "Failed to rebuild content index from scratch");
+                                build_state.complete_failed();
+                                return;
+                            }
                         }
                     }
                 }
             };
             let drop_reload_elapsed = drop_reload_start.elapsed();
+            if !save_failed {
+                crate::index::log_memory("serve: after reload content from disk");
+            }
 
-            crate::index::log_memory("serve: after reload content from disk");
             let mut new_idx = if watch {
                 mcp::watcher::build_watch_index_from(new_idx)
             } else {
@@ -1358,35 +1373,50 @@ fn load_or_build_definition_index(
                 let save_start = Instant::now();
                 let save_result = definitions::save_definition_index(&new_idx, &bg_idx_base);
                 let save_elapsed = save_start.elapsed();
-                if let Err(e) = save_result {
-                    warn!(error = %e, "Failed to save definition index to disk");
+                let save_failed = if let Err(e) = save_result {
+                    warn!(error = %e, "Failed to save definition index to disk; keeping in-memory index");
+                    true
                 } else {
                     // Clean up old definition indexes for the same root with different extensions
                     let exts_str = new_idx.extensions.join(",");
                     let saved_path = definitions::definition_index_path_for(&new_idx.root, &exts_str, &bg_idx_base);
                     crate::index::cleanup_stale_same_root_indexes(&bg_idx_base, &saved_path, &new_idx.root, "code-structure");
-                }
+                    false
+                };
 
-                // Drop + reload to eliminate allocator fragmentation (same pattern)
+                // Drop + reload to eliminate allocator fragmentation (same pattern).
+                //
+                // SKIPPED on save failure (commit e64ed47 follow-up): if save failed,
+                // the surviving on-disk shard may be stale (rename is not-atomic against
+                // a pre-existing target on some filesystems) — reloading would silently
+                // re-publish stale definitions while we report fresh build counts via
+                // definitionsReady. Keep the freshly-built `new_idx` in memory at the
+                // cost of allocator fragmentation; correctness wins over layout.
                 let def_count = new_idx.definitions.len();
                 let file_count = new_idx.files.len();
                 let call_count: usize = new_idx.method_calls.values().map(Vec::len).sum();
                 let drop_reload_start = Instant::now();
-                drop(new_idx);
-                crate::index::log_memory("serve: after drop(def build)");
-                crate::index::force_mimalloc_collect();
-                crate::index::log_memory("serve: after mi_collect (def)");
-                let new_idx = definitions::load_definition_index(&bg_dir, &bg_def_exts, &bg_idx_base)
-                    .unwrap_or_else(|e| {
-                        warn!(error = %e, "Failed to reload definition index from disk, rebuilding");
-                        definitions::build_definition_index(&definitions::DefIndexArgs {
-                            dir: bg_dir, ext: bg_def_exts, threads: build_threads,
-                            respect_git_exclude,
+                let new_idx = if save_failed {
+                    new_idx
+                } else {
+                    drop(new_idx);
+                    crate::index::log_memory("serve: after drop(def build)");
+                    crate::index::force_mimalloc_collect();
+                    crate::index::log_memory("serve: after mi_collect (def)");
+                    definitions::load_definition_index(&bg_dir, &bg_def_exts, &bg_idx_base)
+                        .unwrap_or_else(|e| {
+                            warn!(error = %e, "Failed to reload definition index from disk, rebuilding");
+                            definitions::build_definition_index(&definitions::DefIndexArgs {
+                                dir: bg_dir, ext: bg_def_exts, threads: build_threads,
+                                respect_git_exclude,
+                            })
                         })
-                    });
+                };
                 let drop_reload_elapsed = drop_reload_start.elapsed();
+                if !save_failed {
+                    crate::index::log_memory("serve: after reload def from disk");
+                }
 
-                crate::index::log_memory("serve: after reload def from disk");
                 let elapsed = build_start.elapsed();
                 info!(
                     elapsed_ms = format_args!("{:.1}", elapsed.as_secs_f64() * 1000.0),
@@ -2295,6 +2325,152 @@ mod serve_respect_git_exclude_tests {
         assert!(effective, "cold start: CLI flag passes through unchanged");
     }
 }
+
+
+    /// Save-failure smoke test (2026-05-05) for `load_or_build_content_index`'s
+    /// background-build path. Forces `save_content_index` to fail by pointing
+    /// `idx_base` at a regular file (so `create_dir_all(idx_base)` inside the
+    /// save layer errors), then waits for the BG build to publish and asserts
+    /// the in-memory index has the freshly-built marker.
+    ///
+    /// **Documentary, NOT mutation-killing.** This test cannot distinguish
+    /// the FIXED path (`if save_failed { new_idx } else { drop+reload }`)
+    /// from the inverted-conditional mutation: when `idx_base` is a regular
+    /// file the drop+reload's `load_content_index` ALSO fails and the
+    /// rebuild-fallback rescues correctness with fresh data either way. A
+    /// stale-shard mutation-killer (pre-seed shard → read-only → force save
+    /// fail → expect drop+reload to read stale) cannot work here either,
+    /// because the cache check and the drop+reload use the SAME
+    /// `load_content_index` — if a pre-seeded shard is readable the cache
+    /// check short-circuits before the BG build runs, so we never reach the
+    /// save-failed branch under test. The mutation-killing variant lives in
+    /// `test_handle_xray_reindex_definitions_inner_save_failure_does_not_publish_stale_shard`,
+    /// which exercises a sibling path (`xray_reindex_definitions`) that
+    /// always rebuilds and therefore can be tested with a stale-shard
+    /// fixture. This test catches grosser regressions only: removed save
+    /// call, missing fallback, or BG build never publishing on save failure.
+    #[test]
+    fn serve_load_or_build_content_index_save_failure_keeps_fresh_in_memory_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ws_content_save_fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed.cs"),
+            "public class ContentSaveFailUniqZzqqMarker {}",
+        ).unwrap();
+
+        // Force save_content_index to fail by pointing idx_base at a regular
+        // file: the `create_dir_all(idx_base)` inside the save layer will error
+        // because the path component already exists as a non-directory.
+        let idx_base = tmp.path().join("not_a_dir.dat");
+        std::fs::write(&idx_base, b"placeholder").unwrap();
+
+        let extensions = vec!["cs".to_string()];
+        let content_ready = Arc::new(AtomicBool::new(false));
+        let content_build_terminal = Arc::new(AtomicBool::new(false));
+        let content_building = Arc::new(AtomicBool::new(false));
+        let trigram_build_gate = Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new());
+
+        let (index, _effective) = load_or_build_content_index(
+            &dir.to_string_lossy(),
+            "cs",
+            &extensions,
+            &idx_base,
+            false, // is_unresolved
+            false, // watch
+            false, // CLI flag (irrelevant for save-failure semantics)
+            &content_ready,
+            &content_build_terminal,
+            &content_building,
+            1,     // build_threads
+            &trigram_build_gate,
+        );
+
+        // Wait for background build to publish to the index Arc.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline
+            && !content_build_terminal.load(Ordering::Acquire)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            content_build_terminal.load(Ordering::Acquire),
+            "background build did not signal content_build_terminal within timeout"
+        );
+
+        // Verify the in-memory content index has fresh tokens despite save failure.
+        let idx_guard = index.read().unwrap();
+        let tokens: Vec<&String> = idx_guard.index.keys().collect();
+        assert!(
+            tokens.iter().any(|t| t.contains("contentsavefailuniqzzqqmarker")),
+            "in-memory content index must contain freshly-built tokens despite save failure; matching={:?}; total tokens={}",
+            tokens.iter().filter(|t| t.contains("contentsavefail") || t.contains("ContentSaveFail")).collect::<Vec<_>>(),
+            tokens.len()
+        );
+    }
+
+    /// Save-failure smoke test (2026-05-05) for `load_or_build_definition_index`'s
+    /// background-build path. Same shape and same documentary-only caveat as
+    /// `serve_load_or_build_content_index_save_failure_keeps_fresh_in_memory_index`
+    /// (see that test's doc-comment for the mutation-killing-impossibility
+    /// analysis). Catches grosser regressions: removed save call, missing
+    /// fallback, or BG build never publishing on save failure.
+    #[test]
+    #[cfg(feature = "lang-csharp")]
+    fn serve_load_or_build_definition_index_save_failure_keeps_fresh_in_memory_index() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ws_def_save_fail");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("seed.cs"),
+            "public class DefSaveFailUniqZzqqMarker {}",
+        ).unwrap();
+
+        // Force save_definition_index to fail by pointing idx_base at a regular file.
+        let idx_base = tmp.path().join("not_a_dir.dat");
+        std::fs::write(&idx_base, b"placeholder").unwrap();
+
+        let extensions = vec!["cs".to_string()];
+        let def_ready = Arc::new(AtomicBool::new(false));
+        let def_build_terminal = Arc::new(AtomicBool::new(false));
+        let def_building = Arc::new(AtomicBool::new(false));
+
+        let (def_index_opt, _exts, _reconcile_exts, _effective) = load_or_build_definition_index(
+            &dir.to_string_lossy(),
+            &extensions,
+            &idx_base,
+            "cs",
+            false, // is_unresolved
+            true,  // definitions_enabled
+            &def_ready,
+            &def_build_terminal,
+            &def_building,
+            false, // CLI flag (irrelevant for save-failure semantics)
+            1,     // build_threads
+        );
+
+        let def_index = def_index_opt.expect("definitions_enabled=true must yield Some(arc)");
+
+        // Wait for background build to publish to the def_index Arc.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while std::time::Instant::now() < deadline
+            && !def_build_terminal.load(Ordering::Acquire)
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(
+            def_build_terminal.load(Ordering::Acquire),
+            "background build did not signal def_build_terminal within timeout"
+        );
+
+        // Verify the in-memory def index has the fresh symbol despite save failure.
+        let def_idx = def_index.read().unwrap();
+        assert!(
+            def_idx.definitions.iter().any(|d| d.name.contains("DefSaveFailUniqZzqqMarker")),
+            "in-memory def index must contain freshly-built symbol despite save failure; got {} definitions",
+            def_idx.definitions.len()
+        );
+    }
 
 #[cfg(test)]
 mod serve_thread_budget_tests {

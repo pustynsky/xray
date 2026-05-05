@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+- **Save-failure hardening: 3 remaining sites covered (commit `e64ed47` follow-up).** The `build → save → drop+reload` anti-pattern that was fixed in `build_or_load_content_index` and `handle_xray_reindex_definitions_inner` (commit `e64ed47`) also lived in three other index-publish call sites. All three now mirror the same fix: when the disk save fails, the freshly-built in-memory index is kept and the drop+reload step is skipped — otherwise the rename-not-atomic semantics on Windows could let a stale on-disk shard be re-read on top of the fresh build.
+  - `cross_load_definition_index` ([src/mcp/handlers/mod.rs](src/mcp/handlers/mod.rs)) — workspace-switch background build path. Save failure no longer drops the freshly-built `new_idx`.
+  - `load_or_build_content_index` ([src/cli/serve.rs](src/cli/serve.rs)) — cold-start content build path. Save failure no longer drops the freshly-built index; allocator-fragmentation drop+reload is preserved on the success path (~1.5 GB RSS savings retained).
+  - `load_or_build_definition_index` ([src/cli/serve.rs](src/cli/serve.rs)) — cold-start definition build path. Same shape: save-success keeps drop+reload for compact memory; save-failure keeps the fresh in-memory index.
+  - Three documentary regression tests added (one per site) pin the contract "save fails → fresh data in memory".
+  - Exposure pre-fix had two failure modes depending on whether a previous on-disk shard existed:
+    1. **No previous shard (clean cold start):** save fails → drop+reload's `load_*_index` fails → rebuild fallback rescues correctness at ~2× build cost, blocking `contentReady` / `definitionsReady`. Perf-only.
+    2. **Previous shard exists and is readable (re-cold-start, `cross_load` after switch back, etc.):** save fails (Defender lock, full disk, read-only target file) → drop+reload's `load_*_index` reads the surviving stale shard → stale data silently re-published while the handler reports fresh build counts via `contentReady` / `definitionsReady`. Correctness bug, same shape as the original e64ed47 hazard.
+  - The three new tests are documentary smoke tests only (cache short-circuit + rebuild fallback prevent a stale-shard mutation-killer fixture from working on these sites — see each test's doc-comment for the structural analysis). The mutation-killing variant for the same bug class already exists in `test_handle_xray_reindex_definitions_inner_save_failure_does_not_publish_stale_shard` for the sibling reindex path that always rebuilds. See `user-stories/IMPORTANT_user-story_xray-save-failure-drop-reload-pattern_2026-05-03.md` for the full backlog item this closes.
+
 - **Periodic autosave is ~5× faster on large workspaces (W1+W2+W3).**
   On the 78K-file Shared workspace (657 MB content index + 238 MB
   definition index), `Periodic autosave complete` wall-clock dropped
