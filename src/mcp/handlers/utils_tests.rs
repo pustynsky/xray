@@ -741,6 +741,12 @@ fn test_guidance_prefix_moves_fields_and_recomputes_metrics() {
     assert!(prefix.starts_with(GUIDANCE_PREFIX_HEADER));
     assert!(prefix.contains("→ Specific next step"));
     assert!(prefix.contains(COMPACT_POLICY_GUIDANCE));
+    // 2026-05-05: unknown-args warning must mirror into the prefix so the
+    // hint about a silently-ignored argument is visible BEFORE the JSON
+    // body. The summary copy is preserved (asserted below) for programmatic
+    // clients that already parse `summary.unknownArgsWarning`.
+    assert!(prefix.contains("⚠ warning text"),
+        "prefix must mirror unknownArgsWarning, got prefix: {prefix}");
     assert!(prefix.ends_with(GUIDANCE_PREFIX_FOOTER));
 
     let summary = output["summary"].as_object().unwrap();
@@ -751,6 +757,41 @@ fn test_guidance_prefix_moves_fields_and_recomputes_metrics() {
     assert_eq!(summary["toolSpecific"], 42);
     assert_eq!(summary["responseBytes"].as_u64().unwrap(), text.len() as u64);
     assert_eq!(summary["estimatedTokens"].as_u64().unwrap(), text.len() as u64 / 4);
+}
+
+#[test]
+fn test_guidance_prefix_emitted_for_unknown_args_warning_only() {
+    // Regression for 2026-05-05: even when no policyReminder / nextStepHint
+    // are present, a non-empty unknownArgsWarning is enough to emit the
+    // guidance prefix. Without this, the warning stays buried in summary
+    // and agents miss it (the original failure mode that motivated topN
+    // alias surfacing). The summary copy MUST be preserved untouched.
+    let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _prefix = GuidancePrefixOverrideGuard::set(Some(true));
+
+    let result = ToolCallResult::success(json!({
+        "items": [],
+        "summary": {
+            "serverDir": "C:/repo",
+            "unknownArgsWarning": "Unknown args silently ignored (1): 'topN': Use 'top' instead.",
+        }
+    }).to_string());
+
+    let rendered = render_guidance_prefix_if_enabled(result, "xray_git_authors");
+    let text = &rendered.content[0].text;
+    assert!(text.starts_with(GUIDANCE_PREFIX_HEADER),
+        "prefix must be emitted for unknown-args-only case, got: {text}");
+    let (prefix, output) = split_guidance_prefixed_text(text);
+    assert!(prefix.contains("⚠ Unknown args"),
+        "prefix must surface the warning, got prefix: {prefix}");
+    assert!(prefix.contains("'topN'"),
+        "prefix must name the offending key, got prefix: {prefix}");
+    let summary = output["summary"].as_object().unwrap();
+    assert_eq!(
+        summary["unknownArgsWarning"].as_str().unwrap(),
+        "Unknown args silently ignored (1): 'topN': Use 'top' instead.",
+        "summary copy must remain intact for programmatic clients"
+    );
 }
 
 #[test]

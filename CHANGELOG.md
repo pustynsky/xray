@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+- **Index-not-ready gate now returns a structured JSON envelope.** When
+  `xray_grep` / `xray_definitions` / `xray_callers` are called before the
+  required index has finished building, the dispatch gate no longer
+  returns a plain-text `"Content index is currently being built ...
+  Please retry in a few seconds."` string. The new envelope
+  ```json
+  {
+    "error": "INDEX_BUILDING",
+    "phase": "content" | "definition",
+    "message": "<phase> index is being built in the background.",
+    "filesIndexedSoFar": <usize>,
+    "hint": "Poll xray_info — wait until the matching indexes[] entry has no 'status' field..."
+  }
+  ```
+  lets agents distinguish content vs definition phase, see partial-build
+  progress (`filesIndexedSoFar`), and follow a deterministic
+  polling target (`xray_info.indexes[].status`). The pipeline metadata
+  (`policyReminder`, `totalTimeMs`) is still injected by `finalize_response`,
+  so the JSON body remains valid after the optional guidance prefix is
+  promoted to a leading text block.
+  Implemented in `build_index_not_ready_response` in
+  `src/mcp/handlers/mod.rs`; gate sites at the dispatch readiness check
+  switched from the old `INDEX_BUILDING_MSG` / `DEF_INDEX_BUILDING_MSG`
+  constants (now removed) to the builder. Three new regression tests in
+  `handlers_tests.rs` lock the envelope shape per phase, and
+  `handlers_tests_misc.rs::test_index_building_gate_carries_pipeline_metadata`
+  now asserts on the structured tag rather than the legacy substring.
+
+- **`unknownArgsWarning` is now mirrored into the guidance prefix.** Agents
+  that previously surfaced an unknown-argument hint only inside
+  `summary.unknownArgsWarning` (e.g. when `topN=15` was passed and
+  silently downgraded to `top=10`) routinely missed the warning when they
+  scanned only top-level fields, then reported wrong-scope answers as if
+  the original argument had been honored. `render_guidance_prefix_if_enabled`
+  in `src/mcp/handlers/utils.rs` now also promotes a non-empty
+  `summary.unknownArgsWarning` into the prefix as a `⚠ ...` line, so the
+  warning appears BEFORE the JSON body. The summary copy is preserved
+  unchanged for programmatic clients (and existing tests). The prefix is
+  emitted whenever ANY of `nextStepHint` / `policyReminder` /
+  `unknownArgsWarning` is present (previously only the first two
+  triggered the prefix). One new regression test in `utils_tests.rs`
+  covers the unknown-args-only case; the existing
+  `test_guidance_prefix_moves_fields_and_recomputes_metrics` was
+  extended to assert the new prefix line is emitted.
+
+- **`topN` / `topn` / `topCount` aliased to `top` for `xray_git_authors`.**
+  The alias table in `src/mcp/handlers/arg_validation.rs` previously had
+  no entry for these LLM-typical synonyms of the `top` argument, so the
+  hint fell back to the generic Jaro-Winkler line
+  ("Did you mean 'top'? (similarity 94%)"). Combined with the
+  warning-buried-in-summary problem above, this turned a routine typo
+  into a silently-wrong "top 1 author" report. The alias now emits the
+  explicit "Use 'top' instead." form, which the prefix promotion
+  surfaces directly to the agent. Three new regression tests in
+  `arg_validation.rs` lock the alias entries.
+
 - **`scripts/setup-xray.ps1`: handle locked `xray.exe` on overwrite.**
   `Move-Item` previously failed with `Cannot create a file when that file
   already exists` when the existing `xray.exe` was running as an MCP
@@ -507,7 +563,7 @@ Every **handler-level** error response from any xray MCP tool (`xray_grep`, `xra
   - After: `result.content[0].text == r#"{"error":"File 'X': Text not found: ...","summary":{"totalTimeMs":591.4,"policyReminder":"...","serverDir":"...",...}}"#` (JSON envelope).
   - `is_error: true` at the MCP `ToolCallResult` layer is **preserved** — standard MCP clients (Claude Desktop, Claude Code, anything that checks `isError` first) are unaffected.
   - **At-risk**: custom tooling that does `text.contains(...)` / regex on the raw error string. Those need to either (a) check `isError` first then JSON-parse `text` and read `.error`, or (b) keep `text.contains(...)` style — the original error string is preserved verbatim under `.error`, so `text.contains("Text not found")` still works.
-- **Out of scope** — 6 dispatch-level early returns (`Unknown tool: X`, `WORKSPACE_UNRESOLVED`, `WORKSPACE_REINDEXING`, `INDEX_BUILDING_MSG`, `DEF_INDEX_BUILDING_MSG`, `XRAY_STRICT_ARGS=1` violation) still bypass the pipeline (these are all sub-ms validation rejects where timing has no diagnostic value). Tracked separately in [`docs/user-stories/todo_2026-04-27_dispatch-error-pipeline-bypass.md`](docs/user-stories/todo_2026-04-27_dispatch-error-pipeline-bypass.md) (root cause analysis: `ToolCallResult::error` is a constructor not a pipeline stage; refactor proposals graded A/B/C).
+- **Out of scope** — none remaining for this PR. The original entry listed 6 dispatch-level early returns (`Unknown tool: X`, `WORKSPACE_UNRESOLVED`, `WORKSPACE_REINDEXING`, `INDEX_BUILDING_MSG`, `DEF_INDEX_BUILDING_MSG`, `XRAY_STRICT_ARGS=1` violation) as still bypassing the pipeline; that statement was already partially stale when written — per-handler error returns had been wrapped into a JSON envelope by `inject_response_guidance` in this same Phase 1 work — and is now fully stale: `dispatch_tool` always feeds every result returned by `dispatch_inner` through `finalize_response`, so each of those gates carries `policyReminder` + `totalTimeMs` in its summary (regression-tested in `handlers_tests_misc.rs`). The follow-up note in [`docs/user-stories/todo_2026-04-27_dispatch-error-pipeline-bypass.md`](docs/user-stories/todo_2026-04-27_dispatch-error-pipeline-bypass.md) is historical for this concrete bypass scope; any broader architectural cleanup (typed errors / preventing future direct-constructor misuse / JSON-RPC layer errors outside `dispatch_tool`) is tracked there independently.
 - **Tests**: `test_metrics_not_injected_on_error` → `test_metrics_injected_on_error` (inverted contract). New per-tool error-path coverage: `test_metrics_injected_on_xray_edit_error`, `test_metrics_injected_on_xray_definitions_error`. All three assert `is_error` preserved + envelope parses + carries `totalTimeMs` + `policyReminder` + `serverDir`.
 
 ### `xray_edit` Phase 1 — error-feedback ergonomics & alias normalization

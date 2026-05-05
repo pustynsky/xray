@@ -1203,8 +1203,22 @@ pub(crate) fn render_guidance_prefix_if_enabled(
         .and_then(Value::as_str)
         .map(str::trim)
         .is_some_and(|reminder| !reminder.is_empty());
+    // 2026-05-05: also promote `unknownArgsWarning` into the prefix so the
+    // hint about a silently-ignored argument is visible BEFORE the JSON body.
+    // The previous summary-only placement was easy to miss when the LLM
+    // skimmed top-level fields and reported wrong-scope results (e.g.
+    // `topN=15` ignored → "top 1 author" reported as if 15 was honored).
+    // The field is intentionally NOT removed from `summary` — programmatic
+    // clients (and existing tests) keep reading `summary.unknownArgsWarning`
+    // unchanged. The prefix carries a short, human-friendly mirror.
+    let unknown_args_warning = summary
+        .get("unknownArgsWarning")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|warning| !warning.is_empty())
+        .map(str::to_string);
 
-    if next_step_hint.is_none() && !has_policy_reminder {
+    if next_step_hint.is_none() && !has_policy_reminder && unknown_args_warning.is_none() {
         return result;
     }
 
@@ -1214,6 +1228,9 @@ pub(crate) fn render_guidance_prefix_if_enabled(
     summary.remove("policyReminder");
 
     let mut guidance_lines = Vec::new();
+    if let Some(warning) = unknown_args_warning {
+        guidance_lines.push(format!("⚠ {}", warning));
+    }
     if let Some(hint) = next_step_hint {
         guidance_lines.push(format!("→ {}", hint));
     }

@@ -1021,13 +1021,55 @@ impl Default for HandlerContext {
     }
 }
 
-/// Message returned when the content index is still building in background.
-const INDEX_BUILDING_MSG: &str =
-    "Content index is currently being built in the background. Please retry in a few seconds.";
-
-/// Message returned when the definition index is still building in background.
-const DEF_INDEX_BUILDING_MSG: &str =
-    "Definition index is currently being built in the background. Please retry in a few seconds.";
+/// Build a structured JSON error envelope when a tool's gate rejects the
+/// request because the required index is still building in the background.
+///
+/// `phase` must be `"content"` or `"definition"` — it identifies which
+/// readiness flag (`content_ready` / `def_ready`) triggered the gate so the
+/// agent can decide which `xray_info.indexes[]` entry to poll.
+///
+/// `filesIndexedSoFar` is the live file count of the in-memory index at the
+/// moment of the gate; it can legitimately be `0` when the build hasn't
+/// published any files yet (cold start, very early in the workspace switch).
+///
+/// Why structured (vs the previous plain-text `"... Please retry in a few
+/// seconds."` message): the old text forced agents into blind retry loops with
+/// arbitrary sleep durations — an agent could not tell `phase`, could not see
+/// build progress, and had no reliable polling target. With this envelope the
+/// agent knows to poll `xray_info` and check `indexes[].status != "building"`
+/// for the right phase, which is the **only** authoritative readiness signal
+/// the server publishes.
+fn build_index_not_ready_response(ctx: &HandlerContext, phase: &'static str) -> ToolCallResult {
+    let files_so_far: usize = match phase {
+        "content" => ctx
+            .index
+            .read()
+            .map(|i| i.live_file_count())
+            .unwrap_or(0),
+        "definition" => ctx
+            .def_index
+            .as_ref()
+            .and_then(|arc| arc.read().ok().map(|i| i.live_file_count()))
+            .unwrap_or(0),
+        _ => 0,
+    };
+    let phase_capitalized = if phase == "content" {
+        "Content"
+    } else {
+        "Definition"
+    };
+    let body = serde_json::json!({
+        "error": "INDEX_BUILDING",
+        "phase": phase,
+        "message": format!(
+            "{} index is being built in the background.",
+            phase_capitalized
+        ),
+        "filesIndexedSoFar": files_so_far,
+        "hint": "Poll xray_info — wait until the matching indexes[] entry has no 'status' field. An entry with 'status: \"building\"' means that index is not ready yet.",
+    });
+    ToolCallResult::error(utils::json_to_string(&body))
+}
 
 /// Message returned when xray_reindex is called while a background build is in progress.
 const ALREADY_BUILDING_MSG: &str =
@@ -1134,10 +1176,10 @@ fn dispatch_inner(
     // they need to run even when ready=false (e.g., after workspace switch).
     // Their concurrent build protection uses content_building/def_building flags.
     if requires_content_index(tool_name) && !ctx.content_ready.load(Ordering::Acquire) {
-        return (ToolCallResult::error(INDEX_BUILDING_MSG.to_string()), None);
+        return (build_index_not_ready_response(ctx, "content"), None);
     }
     if requires_def_index(tool_name) && !ctx.def_ready.load(Ordering::Acquire) {
-        return (ToolCallResult::error(DEF_INDEX_BUILDING_MSG.to_string()), None);
+        return (build_index_not_ready_response(ctx, "definition"), None);
     }
 
     // Strict args validation: detect unknown/aliased keys before dispatch.
