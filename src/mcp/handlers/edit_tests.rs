@@ -3937,6 +3937,142 @@ fn test_sync_reindex_outside_server_dir_is_skipped() {
     assert!(idx.index.is_empty(), "server index must remain empty for outside-server-dir edits");
 }
 
+// ─── writeStatus + reindexStatus disambiguation (2026-05-06) ─────────
+//
+// These tests pin the contract that the new top-level fields cannot be
+// confused for write-failure signals. They also lock in the backward-compat
+// requirement: every place where the legacy `skippedReason` was previously
+// emitted MUST still emit it (carrying the same value), so existing parsers
+// continue to work unchanged. New parsers should consume
+// `reindexStatus` + `reindexSkipReason` instead.
+
+#[test]
+fn test_write_status_committed_for_in_scope_edit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("in_scope.cs");
+    std::fs::write(&path, "class InScope {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "in_scope.cs",
+        "edits": [{"search": "InScope", "replace": "Renamed"}],
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(v["writeStatus"], json!("committed"),
+        "writeStatus must be 'committed' on a successful real write");
+    assert_eq!(v["reindexStatus"], json!("completed"),
+        "reindexStatus must be 'completed' when the file is in indexing scope");
+    assert!(v.get("reindexSkipReason").is_none(),
+        "reindexSkipReason must be ABSENT when reindexStatus='completed'");
+    assert!(v.get("skippedReason").is_none(),
+        "deprecated skippedReason must also be absent when reindex completed");
+}
+
+#[test]
+fn test_write_status_committed_with_skipped_reindex_outside_server_dir() {
+    let server_root = tempfile::tempdir().unwrap();
+    let outside_root = tempfile::tempdir().unwrap();
+    let outside_path = outside_root.path().join("alien.cs");
+    std::fs::write(&outside_path, "class AlienW {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(server_root.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": outside_path.to_string_lossy(),
+        "edits": [{"search": "AlienW", "replace": "NeighborW"}],
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Write succeeded — this is the whole point: out-of-scope ≠ failed write.
+    assert_eq!(v["writeStatus"], json!("committed"),
+        "writeStatus MUST be 'committed' even when the file lives outside server --dir; \
+         the bytes always landed on disk");
+    assert_eq!(v["reindexStatus"], json!("skipped"),
+        "reindexStatus must be 'skipped' for out-of-scope files");
+    assert_eq!(v["reindexSkipReason"], json!("outsideServerDir"),
+        "reindexSkipReason must mirror the classifier verdict");
+
+    // Backward-compat: legacy alias still present, same value.
+    assert_eq!(v["skippedReason"], json!("outsideServerDir"),
+        "deprecated skippedReason alias must continue to be emitted with the same value \
+         so existing consumers keep working");
+
+    // And the file MUST still be on disk with the new content.
+    let actual = std::fs::read_to_string(&outside_path).unwrap();
+    assert_eq!(actual, "class NeighborW {}\n");
+}
+
+#[test]
+fn test_write_status_omitted_on_dry_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("preview.cs");
+    std::fs::write(&path, "class PreviewMe {}\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "preview.cs",
+        "dryRun": true,
+        "edits": [{"search": "PreviewMe", "replace": "NoOp"}],
+    }));
+    assert!(!result.is_error);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // dryRun is a preview — there is no write to attest to.
+    assert!(v.get("writeStatus").is_none(),
+        "dryRun MUST NOT emit writeStatus (no write happened)");
+    assert!(v.get("reindexStatus").is_none(),
+        "dryRun MUST NOT emit reindexStatus (no reindex happened)");
+    assert!(v.get("reindexSkipReason").is_none(),
+        "dryRun MUST NOT emit reindexSkipReason");
+    // Pre-existing contract preserved.
+    assert!(v.get("skippedReason").is_none(),
+        "dryRun MUST NOT emit deprecated skippedReason either");
+}
+
+#[test]
+fn test_write_status_multi_file_mixed_per_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cs_file = tmp.path().join("good.cs");
+    let txt_file = tmp.path().join("bad.txt");
+    std::fs::write(&cs_file, "class MixA {}\n").unwrap();
+    std::fs::write(&txt_file, "plain mix\n").unwrap();
+
+    let ctx = make_ctx_with_ext(tmp.path(), "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["good.cs", "bad.txt"],
+        "edits": [
+            {"search": "MixA", "replace": "BetterA", "skipIfNotFound": true},
+            {"search": "plain mix", "replace": "fancy mix", "skipIfNotFound": true},
+        ],
+    }));
+    assert!(!result.is_error, "mixed multi-file edit must succeed: {}", result.content[0].text);
+    let v: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = v["results"].as_array().expect("results must be array");
+    assert_eq!(results.len(), 2);
+
+    let good = results.iter().find(|r| r["path"] == "good.cs").expect("good.cs in results");
+    let bad  = results.iter().find(|r| r["path"] == "bad.txt").expect("bad.txt in results");
+
+    // Both files were committed to disk.
+    assert_eq!(good["writeStatus"], json!("committed"));
+    assert_eq!(bad["writeStatus"], json!("committed"),
+        "out-of-scope file in a multi-file batch must still report writeStatus='committed'");
+
+    // But only the in-scope file got reindexed.
+    assert_eq!(good["reindexStatus"], json!("completed"));
+    assert!(good.get("reindexSkipReason").is_none(),
+        "in-scope file must NOT carry reindexSkipReason");
+
+    assert_eq!(bad["reindexStatus"], json!("skipped"));
+    assert_eq!(bad["reindexSkipReason"], json!("extensionNotIndexed"));
+    // Legacy alias preserved per-file, same value as the new field.
+    assert_eq!(bad["skippedReason"], json!("extensionNotIndexed"),
+        "deprecated skippedReason alias must still appear on the per-file entry");
+}
+
+
 #[test]
 fn test_sync_reindex_multi_file_summary_has_reindex_elapsed_ms() {
     let tmp = tempfile::tempdir().unwrap();
@@ -4090,6 +4226,31 @@ fn test_sync_reindex_multi_file_dry_run_omits_index_telemetry() {
         assert!(
             entry.get("defIndexUpdated").is_none(),
             "dry-run must NOT emit defIndexUpdated, got: {}",
+            entry
+        );
+        // 2026-05-06 mutation guard: the new write/reindex status fields are
+        // ALSO gated by `if !dry_run` in the multi-file path. If a future
+        // refactor moves any of these assignments outside that gate, dry-run
+        // would lie about a write that never happened. Pin the contract
+        // per-file so the regression cannot pass review.
+        assert!(
+            entry.get("writeStatus").is_none(),
+            "dry-run must NOT emit writeStatus per file, got: {}",
+            entry
+        );
+        assert!(
+            entry.get("reindexStatus").is_none(),
+            "dry-run must NOT emit reindexStatus per file, got: {}",
+            entry
+        );
+        assert!(
+            entry.get("reindexSkipReason").is_none(),
+            "dry-run must NOT emit reindexSkipReason per file, got: {}",
+            entry
+        );
+        assert!(
+            entry.get("skippedReason").is_none(),
+            "dry-run must NOT emit deprecated skippedReason per file, got: {}",
             entry
         );
     }
