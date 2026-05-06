@@ -2336,6 +2336,18 @@ fn build_grep_response(
 /// When grep returns 0 results and `ext` filter targets a non-indexed extension,
 /// inject a hint explaining why no results were found.
 /// Only fires when ext filter is explicitly set — avoids noise on generic searches.
+///
+/// Two independent hints can fire from this function (each into its own summary field):
+///   1. `summary.hint` — generic non-indexed-extension explanation, suggests `read_file`.
+///      Fires when ANY ext in the filter is not in `ctx.server_ext`.
+///   2. `summary.xmlOnDemandHint` (cfg `lang-xml`) — XML-on-demand redirect, suggests
+///      `xray_definitions file=[…] name=[…]`. Fires when ANY ext in the filter is in
+///      the XML on-demand whitelist (`is_xml_extension`), regardless of whether the
+///      extension is also content-indexed. Independent of hint #1: XML on-demand parses
+///      one file at runtime via tree-sitter and does NOT depend on `--ext` at all (see
+///      `parser_xml::is_xml_extension`). Without this hint, agents that hit `0 matches
+///      with ext=["xml"]` typically fall back to PowerShell `Get-ChildItem + [xml]`
+///      instead of `xray_definitions` on-demand.
 fn inject_grep_ext_hint(
     result: &mut ToolCallResult,
     ext_filter: &[String],
@@ -2373,20 +2385,57 @@ fn inject_grep_ext_hint(
         .filter(|e| !e.is_empty() && !server_exts.iter().any(|s| s.eq_ignore_ascii_case(e)))
         .collect();
 
-    if non_indexed.is_empty() { return; }
+    let mut summary_changed = false;
 
-    let hint = format!(
-        "Extension(s) '{}' not in content index (indexed: {}). \
-         Use read_file for these file types.",
-        non_indexed.join(", "),
-        ctx.server_ext,
-    );
-
-    if let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) {
-        summary.insert("hint".to_string(), json!(hint));
+    // Hint #1: generic non-indexed-extension explanation
+    if !non_indexed.is_empty() {
+        let hint = format!(
+            "Extension(s) '{}' not in content index (indexed: {}). \
+             Use read_file for these file types.",
+            non_indexed.join(", "),
+            ctx.server_ext,
+        );
+        if let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) {
+            summary.insert("hint".to_string(), json!(hint));
+            summary_changed = true;
+        }
     }
 
-    result.content[0].text = json_to_string(&output);
+    // Hint #2: XML on-demand redirect (independent of hint #1).
+    // Fires when any filter ext is XML-shaped — the on-demand path parses one file
+    // at runtime and does NOT depend on `--ext`, so the redirect is valid even when
+    // the extension is genuinely missing from the content index.
+    #[cfg(feature = "lang-xml")]
+    {
+        use crate::definitions::parser_xml::is_xml_extension;
+        let xml_shaped: Vec<&str> = ext_filter.iter()
+            .map(|s| s.as_str())
+            .filter(|e| !e.is_empty() && is_xml_extension(e))
+            .collect();
+        if !xml_shaped.is_empty()
+            && let Some(summary) = output.get_mut("summary").and_then(|v| v.as_object_mut()) {
+            let xml_hint = format!(
+                "0 matches with ext=[{}] in content index. XML on-demand parsing works for \
+                 .xml/.config/.csproj/.vbproj/.fsproj/.vcxproj/.props/.targets/.nuspec/\
+                 .vsixmanifest/.manifestxml/.appxmanifest/.resx regardless of --ext. \
+                 For XML element values, prefer xray_definitions file=[\"<path>\"] \
+                 name=[\"<element>\"] includeBody=true — discover paths via \
+                 xray_fast pattern=[\"*.<ext>\"]. Note: xray_grep ext=[\"xml\"] does NOT \
+                 match .manifestxml/.csproj/.props (different ext tokens) — list each \
+                 ext explicitly OR use xray_definitions on-demand.",
+                xml_shaped.iter()
+                    .map(|e| format!("\"{}\"", e))
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+            summary.insert("xmlOnDemandHint".to_string(), json!(xml_hint));
+            summary_changed = true;
+        }
+    }
+
+    if summary_changed {
+        result.content[0].text = json_to_string(&output);
+    }
 }
 
 

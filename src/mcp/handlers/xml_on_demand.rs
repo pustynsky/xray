@@ -117,6 +117,39 @@ pub(crate) fn try_intercept(
     // `xml_indices` was non-empty and len == 1 implies index 0 is XML.
     let _ext = extract_file_extension(file_filter)?;
 
+    // Glob detection — reject patterns BEFORE `resolve_xml_file_path`'s
+    // `canonicalize()` call, which on Windows surfaces `os error 123`
+    // (ERROR_INVALID_NAME) for paths containing `*`/`?`. The opaque
+    // OS error leaves the agent without a recovery path; this typed hint
+    // keeps the `xray_fast` recipe explicit (enumerate matching paths,
+    // then loop `xray_definitions` per file).
+    //
+    // Only `*` and `?` are checked because they are the universally-recognized
+    // glob metachars AND they are reserved/illegal characters in NTFS
+    // filenames on Windows (so a literal `q?.xml` cannot exist on disk on
+    // Windows). `[` is intentionally NOT rejected: it is a legal filename
+    // character on every supported platform (NTFS, ext4, APFS, HFS+), and
+    // a literal `[abc].xml` file should still flow through to
+    // `resolve_xml_file_path` and parse normally. The cost of this trade-off
+    // is that an agent passing `[abc].xml` as a glob pattern (rare; agents
+    // overwhelmingly type `*.xml` first) loses the typed hint — the request
+    // falls through to the normal not-found error path, which is acceptable.
+    //
+    // We do NOT expand globs inline in `file=[]`: each entry must be
+    // canonicalized + sandbox-checked individually (see MAJOR-1/MAJOR-2 in
+    // the 2026-04-17 review). An in-line walker would duplicate `xray_fast`
+    // for marginal UX gain; the explicit two-step (`xray_fast` → loop)
+    // keeps the security boundary intact.
+    if file_filter.contains('*') || file_filter.contains('?') {
+        return Some(ToolCallResult::error(format!(
+            "file=[\"{}\"] looks like a glob pattern, but `file=[]` requires concrete paths. \
+             Run xray_fast pattern=[\"{}\"] to enumerate matching files, then call \
+             xray_definitions per file (loop). Glob expansion in `file=[]` is intentionally \
+             not supported because each entry is canonicalized and sandbox-checked individually.",
+            file_filter, file_filter,
+        )));
+    }
+
     // Resolve file path (sandboxed to workspace, MAJOR-1/MAJOR-2 in review).
     //
     // If the verbatim input does not exist on disk, try a path-component-

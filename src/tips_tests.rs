@@ -762,6 +762,35 @@ fn test_instructions_xml_on_demand_only_omits_raw_grep() {
 }
 
 #[test]
+fn test_instructions_xml_block_lists_full_whitelist_and_warns_about_ext_mismatch() {
+    // User-story scenario: agent ran `xray_grep ext=["xml"]` over a workspace
+    // that uses `.manifestxml`, got 0 results, fell back to PowerShell `[xml]`.
+    // The system-prompt block must (a) list the full XML on-demand whitelist
+    // including manifestxml, (b) clarify the path works regardless of --ext,
+    // and (c) warn that `xray_grep ext=["xml"]` does NOT match other XML
+    // extensions (different ext tokens). Without these three facts present in
+    // the prompt block, agents cannot recover from the bypass scenario.
+    let profile = LanguageProfile::new(&["csproj", "config"], &[]);
+    let text = render_instructions_for_profile(&profile);
+    if cfg!(feature = "lang-xml") {
+        assert!(text.contains("manifestxml"),
+            "XML block must mention .manifestxml in the on-demand whitelist; got:\n{text}");
+        assert!(text.contains("does NOT match"),
+            "XML block must warn that xray_grep ext=[\"xml\"] does NOT match other XML extensions; got:\n{text}");
+        assert!(text.contains("regardless of --ext"),
+            "XML block must clarify on-demand parsing works regardless of --ext; got:\n{text}");
+        assert!(text.contains("xray_fast pattern="),
+            "XML block must include xray_fast pattern=[…] discovery recipe; got:\n{text}");
+    } else {
+        // Without lang-xml, the whole block is suppressed by other tests —
+        // here we only assert that no half-rendered fragment leaks through.
+        assert!(!text.contains("manifestxml"),
+            "manifestxml must not leak when lang-xml feature is disabled; got:\n{text}");
+    }
+}
+
+
+#[test]
 fn test_instructions_rust_block_present_when_rs_indexed() {
     let profile = LanguageProfile::new(&["rs"], &["rs"]);
     let text = render_instructions_for_profile(&profile);

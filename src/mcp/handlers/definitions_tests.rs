@@ -4802,6 +4802,62 @@ fn test_xml_on_demand_rejects_multi_file_array() {
 
 #[test]
 #[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_rejects_glob_pattern() {
+    // Glob detection: glob patterns in `file=[…]` must error with an actionable
+    // hint pointing at xray_fast BEFORE any filesystem call. Without this gate,
+    // Windows surfaces `os error 123` (ERROR_INVALID_NAME) from canonicalize()
+    // — opaque and non-recoverable for the agent (no `xray_fast` recipe in the
+    // OS error text). The user-story scenario is `xray_definitions file=[\"*.xml\"]
+    // name=[\"X\"]` after an agent guesses XML supports glob input.
+    //
+    // Two globs cover the two universally-recognized glob metachars (*, ?)
+    // so that dropping either `contains` check kills exactly one case
+    // (mutation test). `[abc].xml` is intentionally NOT in the iteration
+    // because `[` is a legal filename character and the production code
+    // deliberately does not reject it (see xml_on_demand.rs glob-detection
+    // comment for the trade-off rationale).
+    let tmp_dir = std::env::temp_dir()
+        .join(format!("xray_xml_glob_reject_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    // Intentionally no XML files on disk — glob detection must fire BEFORE
+    // any stat/canonicalize, so the test passes regardless of disk state.
+    let content_index = crate::ContentIndex {
+        root: tmp_dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+    for glob in ["*.xml", "q?.xml"] {
+        let result = handle_xray_definitions(&ctx, &json!({
+            "file": [glob],
+            "name": ["Service"],
+        }));
+        assert!(result.is_error,
+            "glob `{glob}` must error, got: {}", result.content[0].text);
+        let msg = &result.content[0].text;
+        assert!(msg.contains("xray_fast"),
+            "must point at xray_fast; glob=`{glob}`, got: {msg}");
+        assert!(msg.contains("pattern="),
+            "must include `pattern=` recipe; glob=`{glob}`, got: {msg}");
+        assert!(msg.contains(glob),
+            "must echo glob input; glob=`{glob}`, got: {msg}");
+        assert!(!msg.contains("os error"),
+            "must not leak Windows OS error text; glob=`{glob}`, got: {msg}");
+    }
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+}
+
+
+#[test]
+#[cfg(feature = "lang-xml")]
 fn test_xml_on_demand_single_file_array_still_works() {
     // Regression guard: `file=["only.xml"]` (1 element) must still hit XML
     // on-demand. Otherwise the multi-file reject would shadow the legitimate
@@ -5526,5 +5582,55 @@ fn perf_hint_nearest_name_bounded_on_large_name_index() {
          allocations inside the loop.",
         elapsed,
     );
+}
+
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_literal_brackets_in_filename_resolved() {
+    // Regression guard for the glob-detection trade-off (see
+    // xml_on_demand.rs glob-detection comment): `[` is a legal filename
+    // character on every supported platform, so a literal `[abc].xml` file
+    // must still flow through to the normal resolve path and parse OK.
+    // If a future edit re-adds `|| file_filter.contains('[')` to the glob
+    // guard, this test fails with `is_error=true` and a `glob pattern`
+    // error message instead of a successful XML definition list.
+    use std::io::Write;
+    let tmp_dir = std::env::temp_dir()
+        .join(format!("xray_xml_brackets_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let xml_body = r#"<Root><Service><Name>BracketSvc</Name></Service></Root>"#;
+    let bracket_path = tmp_dir.join("[abc].xml");
+    {
+        let mut f = std::fs::File::create(&bracket_path).unwrap();
+        f.write_all(xml_body.as_bytes()).unwrap();
+    }
+    let content_index = crate::ContentIndex {
+        root: tmp_dir.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(make_test_def_index()))),
+        server_ext: "xml".to_string(),
+        workspace: Arc::new(RwLock::new(
+            WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+    let result = handle_xray_definitions(&ctx, &json!({
+        "file": ["[abc].xml"],
+        "name": ["Service"],
+    }));
+    assert!(!result.is_error,
+        "literal `[abc].xml` filename must NOT be rejected as a glob; got: {}",
+        result.content[0].text);
+    let msg = &result.content[0].text;
+    assert!(!msg.contains("looks like a glob pattern"),
+        "literal `[abc].xml` must not trip glob detection; got: {msg}");
+    assert!(msg.contains("BracketSvc") || msg.contains("Service"),
+        "must successfully extract XML definitions; got: {msg}");
+    let _ = std::fs::remove_dir_all(&tmp_dir);
 }
 
