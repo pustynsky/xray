@@ -1144,6 +1144,16 @@ fn handle_single_file_edit(
     // Eliminates the 500ms FS-watcher debounce window so a follow-up xray_grep
     // or xray_definitions sees the new content immediately.
     if !dry_run {
+        // ── Disambiguate write vs reindex outcome (2026-05-06) ──
+        // Historical response had only `skippedReason` next to `applied`/`diff`,
+        // which read as "the EDIT was skipped" — the most common cognitive
+        // footgun reported by clients. The write itself always succeeded by
+        // the time we reach this branch (earlier code returns errors otherwise);
+        // `skippedReason` only ever described the index-update outcome. Two new
+        // top-level fields (`writeStatus`, `reindexStatus`) make the distinction
+        // explicit at a glance. `skippedReason` is kept as a deprecated alias
+        // for backward compat with existing consumers.
+        response["writeStatus"] = json!("committed");
         let server_extensions: Vec<String> = ctx.server_ext.split(',')
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
@@ -1153,9 +1163,12 @@ fn handle_single_file_edit(
                 response["contentIndexUpdated"] = json!(false);
                 response["defIndexUpdated"] = json!(false);
                 response["fileListInvalidated"] = json!(false);
-                response["skippedReason"] = json!(reason);
+                response["reindexStatus"] = json!("skipped");
+                response["reindexSkipReason"] = json!(reason);
+                response["skippedReason"] = json!(reason); // deprecated alias of reindexSkipReason
             }
             None => {
+                response["reindexStatus"] = json!("completed");
                 let stats = crate::mcp::watcher::reindex_paths_sync(
                     &ctx.index,
                     &ctx.def_index,
@@ -1440,14 +1453,25 @@ fn handle_multi_file_edit(
         }
         // Per-file sync-reindex outcome.
         if !dry_run {
+            // See single-file path: writeStatus + reindexStatus disambiguate the
+            // "edit committed" vs "index update skipped" outcomes that
+            // historically both threaded through `skippedReason`. By Phase 4
+            // every file in `edit_results` has already been renamed onto its
+            // target path (Phase 3b), so `writeStatus = "committed"` holds
+            // unconditionally here — mid-batch rename failures return earlier
+            // with an explicit error and never reach this builder.
+            file_result["writeStatus"] = json!("committed");
             match per_file_skip[i] {
                 Some(reason) => {
                     file_result["contentIndexUpdated"] = json!(false);
                     file_result["defIndexUpdated"] = json!(false);
                     file_result["fileListInvalidated"] = json!(false);
-                    file_result["skippedReason"] = json!(reason);
+                    file_result["reindexStatus"] = json!("skipped");
+                    file_result["reindexSkipReason"] = json!(reason);
+                    file_result["skippedReason"] = json!(reason); // deprecated alias
                 }
                 None => {
+                    file_result["reindexStatus"] = json!("completed");
                     // Mirror the single-file path: derive `contentIndexUpdated`
                     // from the actual batch outcome, NOT from "we tried". When
                     // the content-index lock was poisoned, `reindex_paths_sync`

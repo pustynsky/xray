@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **`xray_edit` response: explicit `writeStatus` + `reindexStatus` fields.** Disambiguates the most common cognitive footgun in the response shape: historically only `skippedReason` appeared next to `applied`/`diff`, which read as "the EDIT was skipped" — but the field has always described the *index-update* outcome, not the write. The write itself always succeeded by the time the field could appear. Real writes (not `dryRun`) now include two new top-level fields:
+  - `writeStatus`: always `"committed"` (the bytes are on disk — atomic temp+rename verified).
+  - `reindexStatus`: `"completed"` when the in-process index was refreshed, `"skipped"` when the file is out of indexing scope (`outsideServerDir` / `extensionNotIndexed` / `insideGitDir`).
+  - `reindexSkipReason`: only emitted when `reindexStatus="skipped"`, mirrors the value previously found in `skippedReason`.
+  - `skippedReason` is kept as a deprecated alias — it still carries the same value, so existing consumers continue to work unchanged. New consumers should read `reindexStatus` + `reindexSkipReason` instead. Multi-file responses apply the same shape per file in the `results[]` array.
+
 - **Save-failure hardening: 3 remaining sites covered (commit `e64ed47` follow-up).** The `build → save → drop+reload` anti-pattern that was fixed in `build_or_load_content_index` and `handle_xray_reindex_definitions_inner` (commit `e64ed47`) also lived in three other index-publish call sites. All three now mirror the same fix: when the disk save fails, the freshly-built in-memory index is kept and the drop+reload step is skipped — otherwise the rename-not-atomic semantics on Windows could let a stale on-disk shard be re-read on top of the fresh build.
   - `cross_load_definition_index` ([src/mcp/handlers/mod.rs](src/mcp/handlers/mod.rs)) — workspace-switch background build path. Save failure no longer drops the freshly-built `new_idx`.
   - `load_or_build_content_index` ([src/cli/serve.rs](src/cli/serve.rs)) — cold-start content build path. Save failure no longer drops the freshly-built index; allocator-fragmentation drop+reload is preserved on the success path (~1.5 GB RSS savings retained).
