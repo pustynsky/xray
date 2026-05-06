@@ -474,6 +474,57 @@ fn add_grep_next_queries(output: &mut Value, terms: &Value, params: &GrepSearchP
         }));
     }
     if is_expensive && params.requested_mode == "substring" {
+        // Two suggestions, in priority order — the user has been auto-switched
+        // from substring to phrase mode (~100x slower) because their terms
+        // carried tokenizer-stripping characters (spaces, punctuation,
+        // brackets, generics, namespace separators, ...).
+        //
+        // 1. Drop the punctuation, AND-intersect the surviving clean tokens.
+        //    This is the right answer for the OVERWHELMINGLY common case:
+        //    the user pasted a method/type signature like
+        //    `DeleteAsync(IEnumerable<CatalogIndexDocumentBase>` or
+        //    `commandType: CommandType.StoredProcedure` looking for callers /
+        //    references — they don't actually need the punctuation, they need
+        //    the IDENTIFIERS to co-occur on the same file. Substring + AND on
+        //    the cleaned tokens delivers that at substring-search cost
+        //    (typically <1ms) instead of phrase-search cost (~100ms+).
+        // 2. lineRegex=true — retained as a fallback for the case where the
+        //    punctuation IS the intent (regex anchors `^`/`$`, exact bracket
+        //    structure for templates, raw operator strings like `=>`, etc.).
+        //
+        // Tokens come from the SAME `crate::tokenize` algorithm the content
+        // index uses, with `min_len=2` so single-character noise (`i`, `a`,
+        // `T`) does not pollute the suggestion. Order is preserved (first
+        // occurrence wins) so the suggestion remains stable across runs and
+        // human-readable: agents that reproduce the suggestion verbatim get
+        // the same text every time.
+        let clean_tokens = extract_clean_tokens_from_terms(terms);
+        if !clean_tokens.is_empty() {
+            let mut args = serde_json::Map::new();
+            args.insert("terms".to_string(), json!(clean_tokens));
+            // mode="and" is meaningful only with 2+ tokens; for a single
+            // surviving token AND vs OR is identical, so omit the field to
+            // keep the suggestion minimal.
+            if clean_tokens.len() >= 2 {
+                args.insert("mode".to_string(), json!("and"));
+            }
+            // Propagate the active extension scope so the suggestion is a
+            // drop-in replacement for the user's original query (same files
+            // would be considered).
+            if !params.ext_filter.is_empty() {
+                args.insert("ext".to_string(), json!(params.ext_filter));
+            }
+            let reason = if clean_tokens.len() >= 2 {
+                "drop punctuation and intersect clean tokens — substring AND-search is ~100x faster than the auto-switched phrase mode"
+            } else {
+                "drop punctuation — substring search on the cleaned token is ~100x faster than the auto-switched phrase mode"
+            };
+            suggestions.push(json!({
+                "tool": "xray_grep",
+                "args": Value::Object(args),
+                "reason": reason,
+            }));
+        }
         suggestions.push(json!({
             "tool": "xray_grep",
             "args": { "terms": terms, "lineRegex": true },
@@ -483,6 +534,34 @@ fn add_grep_next_queries(output: &mut Value, terms: &Value, params: &GrepSearchP
     if !suggestions.is_empty() {
         output["recommendedNextQueries"] = json!(suggestions);
     }
+}
+
+/// Re-tokenize user-provided terms using the same algorithm the content index
+/// uses (`crate::tokenize` with `min_len=2`), and de-duplicate the result while
+/// preserving first-occurrence order. Powers the
+/// `recommendedNextQueries` rewrite suggestion that turns an auto-switched
+/// phrase-mode query (slow path) back into a substring AND-intersect query
+/// (fast path) when the user pasted a punctuated identifier expression like
+/// `Foo.Bar<T>(IEnumerable<X>)` or `commandType: CommandType.StoredProcedure`.
+///
+/// Tokens shorter than 2 characters are dropped: a 1-char token like `T` (the
+/// generic parameter) would force a near-full-corpus scan and starve the
+/// AND-intersection of any narrowing power.
+fn extract_clean_tokens_from_terms(terms: &Value) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let Some(arr) = terms.as_array() else {
+        return out;
+    };
+    for item in arr {
+        let Some(s) = item.as_str() else { continue };
+        for tok in tokenize(s, 2) {
+            if seen.insert(tok.clone()) {
+                out.push(tok);
+            }
+        }
+    }
+    out
 }
 
 fn finalize_grep_output(

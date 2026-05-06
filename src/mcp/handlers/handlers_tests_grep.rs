@@ -2760,6 +2760,292 @@ fn test_phrase_pure_punctuation_hints_line_regex() {
     cleanup_tmp(&tmp);
 }
 
+// ─── Block B': recommendedNextQueries rewrite suggestion (2026-05-06) ───
+//
+// When the user pastes a punctuated identifier expression, the grep handler
+// auto-switches them from substring (fast) to phrase (~100x slower). Since
+// 2026-05-06 the response carries an additional `recommendedNextQueries`
+// suggestion that re-tokenizes the input into clean identifiers and runs them
+// in substring AND mode — a drop-in faster replacement for the SAME intent.
+// These tests pin (a) the suggestion appears, (b) tokens are clean, (c)
+// `mode="and"` is added only with 2+ tokens, (d) the existing `lineRegex`
+// suggestion is preserved as a fallback after the new one, (e) `ext` is
+// propagated when the original query carried an extension scope.
+
+/// The full suggestion shape: clean tokens + AND mode + ext propagation +
+/// lineRegex fallback, in priority order. Mirrors the user-feedback example
+/// `DeleteAsync(IEnumerable<CatalogIndexDocumentBase>` from the May-2026
+/// session that drove this change.
+#[test]
+fn test_recommended_next_queries_emits_clean_tokens_and_mode_for_punctuated_phrase() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["DeleteAsync(IEnumerable<CatalogIndexDocumentBase>"]
+    }));
+    assert!(!result.is_error, "Punctuated grep must not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let suggestions = output["recommendedNextQueries"].as_array()
+        .expect("auto-switched substring queries must carry recommendedNextQueries");
+    assert!(suggestions.len() >= 2,
+        "expected (clean-tokens-AND, lineRegex) pair at minimum, got: {:?}", suggestions);
+
+    // Suggestion 1 (priority): clean tokens + AND mode.
+    let first = &suggestions[0];
+    assert_eq!(first["tool"], json!("xray_grep"));
+    let first_terms = first["args"]["terms"].as_array()
+        .expect("first suggestion must carry terms[]");
+    let first_terms: Vec<String> = first_terms.iter()
+        .map(|v| v.as_str().expect("each term must be string").to_string())
+        .collect();
+    assert_eq!(
+        first_terms,
+        vec!["deleteasync", "ienumerable", "catalogindexdocumentbase"],
+        "clean tokens must be lowercased, in source order, deduplicated"
+    );
+    assert_eq!(first["args"]["mode"], json!("and"),
+        "2+ tokens → mode=\"and\" so the agent intersects rather than unions");
+
+    // Suggestion 2 (fallback): lineRegex on the original term.
+    let second = &suggestions[1];
+    assert_eq!(second["args"]["lineRegex"], json!(true),
+        "lineRegex fallback must remain present after the clean-tokens suggestion, \
+         for cases where punctuation IS the search intent");
+
+    cleanup_tmp(&tmp);
+}
+
+/// When tokenization yields a single surviving identifier, `mode` is omitted
+/// (AND vs OR is identical for one term). Keeps the suggestion minimal and
+/// avoids surfacing irrelevant knobs that confuse downstream agents.
+#[test]
+fn test_recommended_next_queries_omits_mode_for_single_token() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // `@Attribute` tokenizes to a single token "attribute".
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["@Attribute"]
+    }));
+    assert!(!result.is_error, "single-identifier+punct grep must not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let suggestions = output["recommendedNextQueries"].as_array()
+        .expect("auto-switched query must carry recommendedNextQueries");
+    let first = &suggestions[0];
+    let first_terms: Vec<String> = first["args"]["terms"].as_array()
+        .expect("first suggestion must carry terms[]")
+        .iter()
+        .map(|v| v.as_str().expect("string").to_string())
+        .collect();
+    assert_eq!(first_terms, vec!["attribute"],
+        "single surviving token must be present");
+    assert!(first["args"].get("mode").is_none(),
+        "single-token suggestion must NOT carry `mode` — AND/OR are identical for 1 term and \
+         a stale `mode` would mislead future readers. Got: {}", first["args"]);
+
+    cleanup_tmp(&tmp);
+}
+
+/// When the original query carried an `ext` scope, the rewritten suggestion
+/// must carry the same scope — otherwise the agent who follows the suggestion
+/// gets back a wider result set and is forced to re-add the filter manually.
+///
+/// Bonus mutation guard: the input `commandType: CommandType.StoredProcedure`
+/// tokenizes to `commandtype, commandtype, storedprocedure` BEFORE dedupe.
+/// Asserting the exact terms list (with `commandtype` appearing exactly once)
+/// also kills the mutation "drop the `HashSet` dedupe in
+/// `extract_clean_tokens_from_terms`" — a regression that would otherwise
+/// pass through unnoticed because dedupe removes the duplicate silently.
+#[test]
+fn test_recommended_next_queries_propagates_ext_scope() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["commandType: CommandType.StoredProcedure"],
+        "ext": ["cs"],
+    }));
+    assert!(!result.is_error, "scoped punctuated grep must not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let suggestions = output["recommendedNextQueries"].as_array()
+        .expect("auto-switched query must carry recommendedNextQueries");
+    let first = &suggestions[0];
+    let ext = first["args"]["ext"].as_array()
+        .expect("ext scope must be propagated when present in the original query");
+    let ext: Vec<String> = ext.iter()
+        .map(|v| v.as_str().expect("ext entry must be string").to_string())
+        .collect();
+    assert_eq!(ext, vec!["cs"],
+        "ext filter must round-trip verbatim from the original query");
+
+    // Mutation guard for `extract_clean_tokens_from_terms` dedupe: input
+    // contains `commandType` and `CommandType` which both lowercase to
+    // `commandtype`. The HashSet dedupe must collapse them to ONE entry; if
+    // someone removes the dedupe, the assertion below fails.
+    let first_terms: Vec<String> = first["args"]["terms"].as_array()
+        .expect("first suggestion must carry terms[]")
+        .iter()
+        .map(|v| v.as_str().expect("each term must be string").to_string())
+        .collect();
+    assert_eq!(first_terms, vec!["commandtype", "storedprocedure"],
+        "dedupe MUST collapse the two `commandtype` casings to one entry, in source order. \
+         Got: {:?}", first_terms);
+
+    cleanup_tmp(&tmp);
+}
+
+/// Mutation guard for `tokenize(s, 2)`: if someone changes `min_len` from 2
+/// to 1, single-character generic-parameter tokens like `T` and `U` would
+/// leak into the suggestion. The asserted output below pins their absence.
+/// Input: `GetItem<T>(IEnumerable<U>)` tokenizes (with min_len=1) to
+/// `["getitem", "t", "ienumerable", "u"]`; with min_len=2 the single-char
+/// noise drops out and we get `["getitem", "ienumerable"]`.
+#[test]
+fn test_recommended_next_queries_drops_single_char_tokens() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["GetItem<T>(IEnumerable<U>)"]
+    }));
+    assert!(!result.is_error,
+        "generic-signature grep must not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let suggestions = output["recommendedNextQueries"].as_array()
+        .expect("auto-switched query must carry recommendedNextQueries");
+    let first_terms: Vec<String> = suggestions[0]["args"]["terms"].as_array()
+        .expect("first suggestion must carry terms[]")
+        .iter()
+        .map(|v| v.as_str().expect("each term must be string").to_string())
+        .collect();
+    assert_eq!(first_terms, vec!["getitem", "ienumerable"],
+        "single-character generic-parameter tokens (`T`, `U`) MUST be dropped \
+         by `tokenize(_, 2)`. Lowering `min_len` to 1 would inflate this list \
+         to `[\"getitem\", \"t\", \"ienumerable\", \"u\"]` and starve the \
+         AND-intersection of any narrowing power. Got: {:?}", first_terms);
+
+    cleanup_tmp(&tmp);
+}
+
+/// When BOTH the result is partial (capped by `maxResults`) AND the cost
+/// class is expensive (auto-switched substring → phrase), the suggestions
+/// must come back in this exact priority order:
+///
+///   1. countOnly  — "first, get exhaustive counts"
+///   2. clean tokens + AND  — "then, the fast rewrite"
+///   3. lineRegex  — "finally, the punctuation-preserving fallback"
+///
+/// Mutation guard: any reordering of the three `suggestions.push(...)` calls
+/// in `add_grep_next_queries` flips one of the assertions below.
+#[test]
+fn test_recommended_next_queries_orders_count_first_when_partial_and_expensive() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    // `using System;` carries tokenizer-stripping characters (space and
+    // semicolon) so the grep auto-switches substring → phrase (expensive).
+    // Both fixture files (Service.cs line 1, Controller.cs line 1) start with
+    // this exact phrase, so the result has 2 matching files and `maxResults:
+    // 1` forces the partial path. Two surviving clean tokens (`using`,
+    // `system`) means the rewrite suggestion gets `mode="and"`, which slot 1
+    // pins below.
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["using System;"],
+        "maxResults": 1,
+    }));
+    assert!(!result.is_error,
+        "partial+expensive grep must not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Pin the gating preconditions so a future drift in the cost-class /
+    // partial-detection logic loudly invalidates this whole test instead of
+    // silently passing for the wrong reason.
+    assert_eq!(output["resultStatus"]["status"], json!("partial"),
+        "precondition: maxResults=1 must produce a partial result so the \
+         countOnly suggestion path fires. Got: {}", output["resultStatus"]);
+    assert_eq!(output["execution"]["costClass"], json!("expensive"),
+        "precondition: punctuated terms must auto-switch to phrase mode and \
+         hit costClass=expensive so the clean-tokens path fires. Got: {}",
+        output["execution"]);
+
+    let suggestions = output["recommendedNextQueries"].as_array()
+        .expect("partial+expensive must carry recommendedNextQueries");
+    assert_eq!(suggestions.len(), 3,
+        "expected exactly [countOnly, clean-tokens-AND, lineRegex] — got: {:?}",
+        suggestions);
+    assert_eq!(suggestions[0]["args"]["countOnly"], json!(true),
+        "slot 0 MUST be the countOnly suggestion (exhaustive counts come first \
+         so the agent doesn't claim completeness on a truncated set). Got: {:?}",
+        suggestions[0]);
+    assert_eq!(suggestions[1]["args"]["mode"], json!("and"),
+        "slot 1 MUST be the clean-tokens AND suggestion (the fast rewrite that \
+         replaces the auto-switched phrase). Got: {:?}", suggestions[1]);
+    assert_eq!(suggestions[2]["args"]["lineRegex"], json!(true),
+        "slot 2 MUST be the lineRegex fallback (last priority — only when \
+         punctuation IS the search intent). Got: {:?}", suggestions[2]);
+
+    cleanup_tmp(&tmp);
+}
+
+/// When the user EXPLICITLY passes `phrase: true`, they have already declared
+/// that the punctuation IS the intent. The clean-tokens AND rewrite would be
+/// actively wrong for them — it would change the meaning of the query. The
+/// gate `requested_mode == "substring"` in `add_grep_next_queries` enforces
+/// this; the assertion below pins the absence so a future drift (e.g. the
+/// gate gets relaxed to also fire on explicit phrase) does not silently
+/// regress the contract.
+#[test]
+fn test_recommended_next_queries_absent_for_explicit_phrase_mode() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["HttpClientHandler _handler"],
+        "phrase": true,
+    }));
+    assert!(!result.is_error,
+        "explicit-phrase grep must not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // The clean-tokens suggestion is identified by `args.mode == "and"` (no
+    // other suggestion shape carries that field). If `recommendedNextQueries`
+    // is absent altogether (typical for non-partial / non-expensive paths),
+    // the assertion below trivially passes — which is the correct answer.
+    if let Some(suggestions) = output["recommendedNextQueries"].as_array() {
+        for (idx, suggestion) in suggestions.iter().enumerate() {
+            assert_ne!(suggestion["args"]["mode"], json!("and"),
+                "explicit `phrase: true` declares the punctuation IS the intent \
+                 — the clean-tokens AND rewrite would CHANGE the meaning of \
+                 the query and must NOT be suggested. Found at index {}: {:?}",
+                idx, suggestion);
+        }
+    }
+
+    cleanup_tmp(&tmp);
+}
+
+/// When the input is pure punctuation (no surviving tokens after tokenize),
+/// the rewrite suggestion is omitted gracefully and the existing lineRegex
+/// fallback remains — the only sensible answer for that case.
+///
+/// Note: pure-punctuation queries currently error out earlier (see
+/// `test_phrase_pure_punctuation_hints_line_regex`) so we cannot reach the
+/// recommendedNextQueries assembly path with a 0-token input via the public
+/// handler. This test instead exercises a query whose terms tokenize to >=1
+/// identifier (so we DO get suggestions) and checks the lineRegex fallback
+/// is the LAST entry, not eclipsed by the new suggestion.
+#[test]
+fn test_recommended_next_queries_keeps_line_regex_as_last_fallback() {
+    let (ctx, tmp) = make_e2e_substring_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["Foo.Bar"]
+    }));
+    assert!(!result.is_error, "dotted grep must not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    let suggestions = output["recommendedNextQueries"].as_array()
+        .expect("auto-switched query must carry recommendedNextQueries");
+    let last = suggestions.last().expect("non-empty suggestions");
+    assert_eq!(last["args"]["lineRegex"], json!(true),
+        "the lineRegex fallback must always be the LAST suggestion so the new \
+         clean-tokens suggestion claims priority. Got: {:?}", suggestions);
+
+    cleanup_tmp(&tmp);
+}
+
 #[test]
 fn test_phrase_missing_underscore_token_hints_alternatives() {
     let (ctx, tmp) = make_e2e_substring_ctx();
