@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **`xray_grep` response: actionable rewrite suggestion when auto-switched to phrase mode.** When a substring query is auto-switched to phrase mode because terms carry tokenizer-stripping characters (spaces, punctuation, brackets, generics, namespace separators), the response's `recommendedNextQueries` now leads with a concrete drop-in replacement: re-tokenize the input into clean identifiers and run them in substring `mode="and"`. This is the right answer for the overwhelmingly common case (a pasted method/type signature like `DeleteAsync(IEnumerable<CatalogIndexDocumentBase>` or `commandType: CommandType.StoredProcedure` looking for callers/references) and runs at substring-search cost (typically <1ms) instead of phrase-search cost (~100ms+). Concretely:
+  - Tokens come from the same `crate::tokenize` algorithm the content index uses, with `min_len=2` to drop single-character noise (`i`, `T`).
+  - Order is preserved (first occurrence wins) and duplicates are removed, so the suggestion is stable across runs and human-readable.
+  - `mode="and"` is added only when 2+ tokens survive (AND vs OR is identical for a single token, so the field is omitted to keep the suggestion minimal).
+  - The active `ext` scope is propagated verbatim, so the rewritten query targets the same files.
+  - The pre-existing `lineRegex=true` suggestion is preserved as a secondary fallback for the case where the punctuation IS the search intent (regex anchors, exact bracket structure, raw operator strings).
+
 - **`xray_edit` response: explicit `writeStatus` + `reindexStatus` fields.** Disambiguates the most common cognitive footgun in the response shape: historically only `skippedReason` appeared next to `applied`/`diff`, which read as "the EDIT was skipped" — but the field has always described the *index-update* outcome, not the write. The write itself always succeeded by the time the field could appear. Real writes (not `dryRun`) now include two new top-level fields:
   - `writeStatus`: always `"committed"` (the bytes are on disk — atomic temp+rename verified).
   - `reindexStatus`: `"completed"` when the in-process index was refreshed, `"skipped"` when the file is out of indexing scope (`outsideServerDir` / `extensionNotIndexed` / `insideGitDir`).
