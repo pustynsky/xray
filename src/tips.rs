@@ -952,9 +952,18 @@ fn render_language_instruction_blocks(out: &mut String, profile: &LanguageProfil
     }
 
     if profile.has_xml_on_demand {
-        out.push_str("XML / CSPROJ ON-DEMAND PARSING (XML on-demand is active):\n");
+        // XML on-demand is independent of the server's --ext flag. The whitelist
+        // (see parser_xml::is_xml_extension) is what determines which file
+        // extensions the on-demand path will parse — agents have historically
+        // confused "xray_grep ext=[\"xml\"] returned 0" with "xray cannot read
+        // this file at all", and fall back to PowerShell. Spell out the gap.
+        out.push_str("XML / CSPROJ ON-DEMAND PARSING (parses one file on demand; works regardless of --ext):\n");
+        out.push_str("  - Whitelist: .xml .config .csproj .vbproj .fsproj .vcxproj .props .targets .nuspec .vsixmanifest .manifestxml .appxmanifest .resx\n");
         out.push_str("  - Find which element contains a line: xray_definitions file=[\"app.csproj\"] containsLine=42\n");
         out.push_str("  - Search by element name or leaf text: xray_definitions file=[\"service.config\"] name=[\"PremiumStorage\"] (auto-promotes leaf matches to parent block).\n");
+        out.push_str("  - Deployment / manifest configs: xray_definitions file=[\"cluster.parameters.manifestxml\"] name=[\"PlatformSearchIndexConfiguration\"] includeBody=true\n");
+        out.push_str("  - Compare config across N files: xray_fast pattern=[\"*.search.xml\"] to enumerate, then loop xray_definitions per matched path. Do NOT fall back to PowerShell Get-ChildItem + [xml] / Select-String.\n");
+        out.push_str("  - xray_grep ext=[\"xml\"] does NOT match .manifestxml/.csproj/.props (different ext tokens). For grep coverage, list each ext explicitly OR use xray_definitions on-demand which does not depend on --ext at all.\n");
         if profile.has_xml_content {
             out.push_str("  - Raw XML phrase search: xray_grep terms=[\"<MaxRetries>3</MaxRetries>\"] phrase=true ext=[\"config\",\"xml\"]\n");
         }

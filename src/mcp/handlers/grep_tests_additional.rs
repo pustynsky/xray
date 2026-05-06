@@ -529,12 +529,19 @@ fn test_inject_grep_ext_hint_indexed_ext_no_hint() {
     let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
     let mut result = ToolCallResult::success(json_text.to_string());
     let ext_filter = vec!["rs".to_string()];
+    let original_text = result.content[0].text.clone();
 
     inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
 
     let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert!(output["summary"].get("hint").is_none(),
         "Should NOT add hint when ext IS indexed but just 0 results");
+    // Byte-for-byte preservation: zero-result indexed-ext is a no-touch path,
+    // `summary_changed` must stay false, no JSON re-serialization. Mutation
+    // guard for an unconditional `summary_changed = true` regression in the
+    // post-XML-branch tail.
+    assert_eq!(result.content[0].text, original_text,
+        "result.content text must be byte-for-byte preserved on indexed-ext no-touch path");
 }
 
 #[test]
@@ -585,6 +592,123 @@ fn test_inject_grep_ext_hint_mixed_ext_filter() {
     assert!(hint.contains("ps1"), "hint should mention non-indexed ps1");
     assert!(!hint.contains("'rs"), "hint should NOT mention indexed rs");
 }
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_inject_grep_ext_hint_xml_shaped_emits_xml_on_demand_hint() {
+    // User-story scenario: agent narrowed by ext=["xml"] (or any XML-shaped
+    // ext like "manifestxml"/"props"/"resx") and got 0 results from the
+    // content index. The XML on-demand parser path is independent of --ext
+    // and supports the full whitelist, so a redirect hint must fire.
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "cs".to_string(); // xml NOT in content index
+
+    let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let ext_filter = vec!["xml".to_string()];
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let xml_hint = output["summary"]["xmlOnDemandHint"].as_str()
+        .expect("xmlOnDemandHint must be present for XML-shaped ext with 0 results");
+    assert!(xml_hint.contains("xray_definitions"),
+        "xmlOnDemandHint must point at xray_definitions; got: {xml_hint}");
+    assert!(xml_hint.contains("xray_fast"),
+        "xmlOnDemandHint must mention the xray_fast discovery recipe; got: {xml_hint}");
+    assert!(xml_hint.contains("manifestxml"),
+        "xmlOnDemandHint must list manifestxml in the whitelist; got: {xml_hint}");
+    // The legacy generic hint must ALSO fire (xml is non-indexed in this
+    // ctx). The two hints are independent fields and must coexist.
+    assert!(output["summary"]["hint"].as_str().is_some(),
+        "generic non-indexed-ext hint must coexist with xmlOnDemandHint");
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_inject_grep_ext_hint_non_xml_ext_no_xml_hint() {
+    // Negative-case mutation guard: ps1 is NON-XML even though it's
+    // non-indexed; the new XML-on-demand hint must NOT fire — only the
+    // legacy generic hint. Catches accidental "any non-indexed ext gets
+    // xmlOnDemandHint" regression.
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "cs".to_string();
+
+    let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let ext_filter = vec!["ps1".to_string()];
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"]["hint"].as_str().is_some(),
+        "legacy hint must still fire for non-indexed non-XML ext");
+    assert!(output["summary"].get("xmlOnDemandHint").is_none(),
+        "xmlOnDemandHint must NOT fire for non-XML ext like ps1");
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_inject_grep_ext_hint_manifestxml_emits_xml_on_demand_hint() {
+    // The motivating bug from the user story: agent ran
+    // `xray_grep ext=["xml"]` over a workspace that uses `.manifestxml`,
+    // got 0 results, fell back to PowerShell. Symmetrically, a query with
+    // ext=["manifestxml"] when the server only indexes `xml` (or nothing)
+    // must redirect to xray_definitions on-demand — the on-demand path
+    // accepts manifestxml even when --ext does not.
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "xml".to_string(); // xml indexed, manifestxml NOT
+
+    let json_text = r#"{"files":[],"summary":{"totalFiles":0,"totalOccurrences":0}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let ext_filter = vec!["manifestxml".to_string()];
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let xml_hint = output["summary"]["xmlOnDemandHint"].as_str()
+        .expect("xmlOnDemandHint must be present for manifestxml ext");
+    assert!(xml_hint.contains("manifestxml"),
+        "xmlOnDemandHint must echo the manifestxml ext; got: {xml_hint}");
+    assert!(xml_hint.contains("does NOT"),
+        "xmlOnDemandHint must explain that ext=[\"xml\"] does NOT match .manifestxml; got: {xml_hint}");
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
+fn test_inject_grep_ext_hint_xml_positive_results_no_xml_hint() {
+    // Mutation guard for early-return ordering: if a future edit moves the
+    // `totalFiles > 0` early-return BELOW the XML branch, successful
+    // `xray_grep ext=["xml"]` responses would falsely emit
+    // `summary.xmlOnDemandHint` and divert agents away from the real results.
+    // This positive-results test pins the invariant that BOTH hint fields
+    // are absent when there are matches, regardless of XML-shaped ext.
+    //
+    // Also asserts byte-for-byte preservation of `result.content[0].text`:
+    // the new code path uses a `summary_changed` boolean to skip JSON
+    // re-serialization for no-touch cases. A regression that always re-serializes
+    // would break downstream consumers that hash the response.
+    let mut ctx = HandlerContext::default();
+    ctx.server_ext = "xml".to_string();
+
+    let json_text = r#"{"files":[{"path":"app.xml"}],"summary":{"totalFiles":1,"totalOccurrences":3}}"#;
+    let mut result = ToolCallResult::success(json_text.to_string());
+    let original_text = result.content[0].text.clone();
+    let ext_filter = vec!["xml".to_string()];
+
+    inject_grep_ext_hint(&mut result, &ext_filter, &ctx);
+
+    let output: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("hint").is_none(),
+        "legacy hint must NOT fire when totalFiles>0; got: {}", result.content[0].text);
+    assert!(output["summary"].get("xmlOnDemandHint").is_none(),
+        "xmlOnDemandHint must NOT fire when totalFiles>0 (would divert from real results); got: {}",
+        result.content[0].text);
+    assert_eq!(result.content[0].text, original_text,
+        "result.content text must be byte-for-byte preserved when no hint fires");
+}
+
+
 
 
 // ─── L25: excludeDir matches by directory segment, not full path substring ──
