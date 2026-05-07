@@ -1,0 +1,14 @@
+{
+  "$schema": "https://example.com/mcp.schema.json",
+  "version": 1,
+  "mcpServers": {
+    "first": {
+      "type": "stdio",
+      "command": "true",
+      "args": []
+    }
+  },
+  "extra": {
+    "comment": "trailing top-level keys must survive round-trip"
+  }
+}

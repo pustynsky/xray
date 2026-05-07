@@ -24,8 +24,10 @@ cd xray
 3. Creates MCP configuration:
    - `.vscode/mcp.json` — for **VS Code GitHub Copilot Chat** (agent mode)
    - `.roo/mcp.json` — for **Roo Code** (optional, prompted with default N)
+   - `.mcp.json` — for **GitHub Copilot CLI** (with `-EnableCopilotCli`)
 4. Protects configs from accidental git push:
-   - Tracked files → `git update-index --skip-worktree` (local edits invisible to git)
+   - Tracked `.mcp.json` (shared repo case) → per-clone **git smudge/clean filter** so `git status` stays clean and `git pull` succeeds silently when upstream changes the file. See [Shared repo with a tracked `.mcp.json`](#shared-repo-with-a-tracked-mcpjson-smudgeclean-filter) below.
+   - Tracked `.vscode/mcp.json` / `.roo/mcp.json` → `git update-index --skip-worktree` (local edits invisible to git; safe because these are typically untracked).
    - Untracked files → `.git/info/exclude` (local gitignore)
 
 All xray tools are enabled by default **except** `xray_edit` (opt-in for safety).
@@ -49,9 +51,77 @@ All xray tools are enabled by default **except** `xray_edit` (opt-in for safety)
 .\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject -InstallDir "$HOME\.cargo\bin" -SkipDownload
 ```
 
-After setup, **reopen the repo folder in VS Code / Roo** to activate the MCP server.
+After setup, **reopen the repo folder in VS Code** to activate the MCP server.
 
-> **Cline / Roo users:** the script creates a config for Copilot by default. Roo is prompted separately (or pass `-EnableRoo`). For Cline, see [Section 3c](#3c-cline-vs-code-extension--global-config-with-workspace-auto-detection) below for the global config format.
+> **Cline users:** the script creates a config for Copilot by default. For Cline, see [Section 3c](#3c-cline-vs-code-extension--global-config-with-workspace-auto-detection) below for the global config format.
+>
+> **Roo Code users:** the `.roo/mcp.json` install path is currently disabled in `setup-xray.ps1`. The `-EnableRoo` switch is accepted as a no-op for backward compatibility but does nothing. To use xray with Roo, copy the `xray` entry from the generated `.mcp.json` into `.roo/mcp.json` by hand.
+
+---
+
+## Shared repo with a tracked `.mcp.json` (smudge/clean filter)
+
+When the target repo already tracks `.mcp.json` upstream (the common case for shared engineering repos that publish team-wide MCP servers like a notes store, an issue-tracker bridge, Playwright, etc.), running the installer with `-EnableCopilotCli` wires a **per-clone git smudge/clean filter** instead of using `skip-worktree`.
+
+### Install
+
+```powershell
+pwsh -File C:\path\to\xray\scripts\setup-xray.ps1 `
+    -RepoPath C:\Repos\YourSharedRepo `
+    -EnableCopilotCli `
+    -Extensions cs,csproj,xml,manifestxml,json,md,ps1,sql,yaml,yml
+```
+
+### Behaviour after install
+
+| Operation | Result |
+| --------- | ------ |
+| `git status` | clean — your local `xray` entry is invisible to git |
+| `git pull` (upstream changed `.mcp.json`) | succeeds silently — no "would be overwritten" abort |
+| `git add` / `git commit` of `.mcp.json` | produces an upstream-clean blob; your `xray.exe` path can never leak upstream |
+| `git stash` / `git checkout` / `git reset --hard` / `git rebase` | preserves the entry in the working tree |
+
+The trade-off: the `xray` entry inside `.mcp.json` is rendered as a single physical line tagged with a `_xrayMcpMarker` field. Other servers in the file keep their original formatting verbatim.
+
+### Files written into the target repo
+
+| Path | Purpose |
+| ---- | ------- |
+| `.git/xray-mcp/clean.sh` | per-clone filter that strips the xray entry on `git add` |
+| `.git/xray-mcp/smudge.sh` | per-clone filter that re-injects it on checkout/pull |
+| `.git/xray-mcp/snapshot.txt` | the byte-exact xray entry to inject |
+| `.git/info/attributes` | `+ ".mcp.json filter=xray-mcp"` |
+| `.git/config` | `+ [filter "xray-mcp"]` section, `required = false` |
+| `.mcp.json` | one-line xray entry inserted as the first `mcpServers` member |
+
+Nothing is written outside `.git/` and the `.mcp.json` working-tree file. No commits, no history rewrites.
+
+### Uninstall — full rollback
+
+```powershell
+pwsh -File C:\path\to\xray\scripts\setup-xray.ps1 -RepoPath C:\Repos\YourSharedRepo -Uninstall
+```
+
+| Flag | Effect |
+| ---- | ------ |
+| `-DryRun` | preview the plan without making changes |
+| `-KeepBinary` | leave `xray.exe` in `%LOCALAPPDATA%\xray\` |
+| `-KeepBackups` | keep `.mcp.json.bak` files |
+
+Uninstall removes every artifact the installer added — the filter scripts, the `.git/config` section, the `.git/info/attributes` line, the xray snapshot inside `.mcp.json`, and (on legacy installs) any `skip-worktree` / `assume-unchanged` flag and `.git/info/exclude` entries. After it runs, `git ls-files -v .mcp.json` shows `H` (no flags) and `git diff HEAD -- .mcp.json` is empty — the file is byte-identical to the upstream blob. The same uninstall flow also tears down xray entries from `.vscode/mcp.json`, `.roo/mcp.json`, and any other MCP host configs the installer touched on prior runs.
+
+### Why a filter and not `skip-worktree`?
+
+Earlier versions of the installer used `git update-index --skip-worktree`. That hides the local change from `git status` but causes `git pull` to abort with `error: Your local changes to .mcp.json would be overwritten by merge` whenever upstream touches the file — and recovery requires non-obvious manual steps (lift skip-worktree, stash, pull, pop, re-apply). Full rationale and the alternatives considered: [docs/mcp-filter-design.md](mcp-filter-design.md).
+
+### Regression tests
+
+The filter behaviour is covered by two PowerShell test suites in [scripts/mcp-filter/](../scripts/mcp-filter):
+
+- `test-roundtrip.ps1` — byte-exact `clean → smudge → clean` round-trip across 5 JSON shapes plus a synthetic CRLF case
+- `test-e2e.ps1` — full lifecycle in a temp clone: install → upstream change → pull → stash/pop → reset --hard → branch switch → uninstall, asserting `git status` clean and xray persistence at each step
+
+Both run on Windows with Git for Windows (perl from `C:\Program Files\Git\usr\bin\` is the only external dependency).
 
 ---
 

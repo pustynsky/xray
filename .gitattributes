@@ -1,0 +1,6 @@
+# Shell scripts MUST have LF line endings on every clone, even on Windows.
+# clean.sh / smudge.sh are invoked by git itself as filter drivers (via
+# .git/xray-mcp/, copied from scripts/mcp-filter/ by setup-xray.ps1). On
+# Windows the bundled bash interpreter chokes on CRLF in the shebang
+# (`/usr/bin/env\r: No such file or directory`).
+*.sh text eol=lf

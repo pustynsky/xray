@@ -4,6 +4,11 @@
 !.github/hooks/block-rustfmt.ps1
 !e2e-test.ps1
 !scripts/setup-xray.ps1
+# MCP-filter regression suite that ships with setup-xray.ps1; tracked.
+!scripts/mcp-filter/test-roundtrip.ps1
+!scripts/mcp-filter/test-e2e.ps1
+!scripts/mcp-filter/test-plain-uninstall.ps1
+!scripts/mcp-filter/test-worktree.ps1
 todo*.md
 proptest-regressions/
 

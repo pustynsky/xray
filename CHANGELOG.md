@@ -2,6 +2,224 @@
 
 ## Unreleased
 
+- **`setup-xray.ps1` + `scripts/mcp-filter/` — strict-reviewer-driven
+  hardening of the smudge/clean filter migration.** Two reviewer rounds
+  on the filter-migration branch (`feat/mcp-filter-driver`) found a
+  total of 4 BLOCKERs and 3 MAJOR/NIT issues. All confirmed findings
+  are fixed:
+    - **BLOCKER 1 (round 1): filter command non-portable on macOS/Linux.**
+      `git config filter.xray-mcp.{smudge,clean}` were stored as bare
+      script paths. Git invokes filters via `sh -c <command>`, so the
+      bare path requires the executable bit on macOS/Linux. Windows
+      filesystems do not carry that bit, the script writes the files via
+      `[IO.File]::WriteAllText` (no chmod), and `git update-index
+      --chmod=+x` only works on tracked paths — these are in `.git/`.
+      Fixed in the round-2 form (see BLOCKER 4 below) by storing the
+      filter command with an explicit `bash` interpreter.
+    - **BLOCKER 4 (round 2): linked-worktree breakage.** Round 1's first
+      attempt at BLOCKER 1 stored `bash .git/xray-mcp/smudge.sh`. That
+      works for normal repos but silently fails in LINKED WORKTREES
+      (`git worktree add`), where the working-tree-rooted `.git` is a
+      *file* (containing `gitdir: /path/to/main/.git/worktrees/<name>`),
+      not a directory — `bash .git/xray-mcp/smudge.sh` resolves to a
+      non-existent path, the filter degrades to passthrough (because
+      `required=false`), and any tracked `.mcp.json` checked out in the
+      worktree gets the upstream-only form (no xray entry). The follow-up
+      attempt at `bash "$(git rev-parse --git-dir)/xray-mcp/smudge.sh"`
+      *also* fails for linked worktrees because `--git-dir` returns the
+      per-worktree dir at `.git/worktrees/<name>/`, where the scripts do
+      NOT live. Fixed by switching to `--git-common-dir`, which returns
+      the SHARED main gitdir for both primary and linked worktrees, so
+      the filter command resolves correctly in either case. The
+      `$(...)` is single-quoted into git config so PowerShell does not
+      expand it; git stores it verbatim, and `sh -c <command>` evaluates
+      the substitution at filter-invocation time. Verified by the new
+      `scripts/mcp-filter/test-worktree.ps1` (8/8 PASS, including a
+      mutation check that re-applies the broken `bash .git/...` form
+      and confirms it would NOT inject xray inside a linked worktree —
+      proving the test is not documentary).
+    - **BLOCKER 2 (round 1): `Set-McpFileWithSnapshot` corrupted
+      CRLF-tracked files.** The function unconditionally normalized the
+      input to LF (`-replace "\`r\`n", "\`n"`) before re-emitting, so a
+      tracked `.mcp.json` whose blob ended each line with CRLF would
+      always come back from the smudge filter with LF — the round-trip
+      property `clean(smudge(canonical)) == canonical` broke and `git
+      status` showed the file as dirty. Fixed by detecting the dominant
+      separator (CRLF if any CRLF is present, else LF) at the top of the
+      function and emitting via `($newLines -join $sep)`. New files
+      still default to LF. Matches the smudge filter's own
+      separator-detection.
+    - **BLOCKER 3 (round 1): silent fallback to `ConvertTo-Json` +
+      skip-worktree when filter install failed.** If `Install-McpFilter`
+      returned `$false` for a tracked `.mcp.json`, the script silently
+      fell back to the legacy `ConvertTo-Json` + `git update-index
+      --skip-worktree` path — re-introducing the exact pull-abort /
+      silent-rebase damage class that the filter migration was designed
+      to replace. Fixed by failing closed: when filter install fails AND
+      `.mcp.json` is tracked, the script rolls back any partial filter
+      artifacts (`Uninstall-McpFilter`), warns loudly with the reason
+      and remediation, and skips Copilot-CLI configuration for the run.
+      Other clients (`.vscode/mcp.json`) still configure normally.
+      Untracked plain-JSON installs are unaffected.
+    - **MAJOR 1 (round 2): `Uninstall-McpFilter` rollback did not check
+      `git config --remove-section` exit code.** A failed removal (e.g.,
+      locked `.git/config`, permission error) was silently swallowed:
+      the function returned `'removed'` while the filter section
+      persisted. Combined with the filter-script directory being deleted
+      a step later, every future git checkout would invoke a missing
+      command. Fixed by capturing `$LASTEXITCODE` after the
+      `--remove-section` call, warning with the exit code, and returning
+      `'error'`.
+    - **MAJOR 2 (round 1): `git config` writes inside `Install-McpFilter`
+      did not check `$LASTEXITCODE`.** A failed write to `.git/config`
+      (e.g., file locked, permissions) would be silently swallowed and
+      the install would report success. Each `git config` call now
+      inspects `$LASTEXITCODE`; on non-zero, the function warns with the
+      failing operation and exit code, and returns `$false` so the
+      caller can take the BLOCKER 3 fail-closed path.
+    - **MAJOR 1 (round 1): no regression test for plain-JSON uninstall.**
+      The existing `test-e2e.ps1` exercises only the filter path
+      (tracked `.mcp.json`, smudge/clean lifecycle). The legacy
+      `ConvertTo-Json` + `Remove-XrayServerEntry` path that fires for
+      untracked `.mcp.json` had no automated coverage, even though it
+      was where the empty-mcpServers regression (fixed earlier in this
+      Unreleased block) had hit. Added
+      `scripts/mcp-filter/test-plain-uninstall.ps1` with two scenarios:
+      (A) xray-only file → uninstall must not leave an empty
+      `mcpServers` shell behind; (B) xray + another server → uninstall
+      must remove only xray and preserve the other entry verbatim. Each
+      scenario is followed by an explicit mutation check that re-creates
+      the bug state and confirms the assertion would fire. 14/14 PASS.
+    - **NIT (round 1):** `Remove-GitProtection` matched lifted flags via
+      `^[a-z]`, which is technically correct because PowerShell's
+      `-match` is case-insensitive by default but reads as a maintenance
+      trap. Tightened to `^[Sh] ` (S = skip-worktree, h =
+      assume-unchanged) with a comment. Behavior identical.
+    - **NIT (round 2):** Stale design comments in
+      `docs/mcp-filter-design.md` and `Install-McpFilter`'s docstring
+      still mentioned `text eol=lf`, `sed`/`awk`, bare filter paths, and
+      executable bits. Updated to match the current perl-based,
+      bash-prefixed, `--git-common-dir`-anchored, fail-closed
+      implementation so future reviewers do not re-approve a reverted
+      threat model.
+
+  Validation (each command run in a terminal, not asserted from
+  diagnostics):
+    * PowerShell parser: `[Parser]::ParseFile setup-xray.ps1` — no errors.
+    * PSScriptAnalyzer: only pre-existing warnings (`Write-Host`,
+      unapproved verb names from older code, missing BOM). No new
+      warnings introduced by the reviewer-driven changes.
+    * `bash -n scripts/mcp-filter/clean.sh` and `… smudge.sh` — both OK.
+    * `perl -c` on the embedded perl one-liners extracted from clean.sh
+      and smudge.sh — both `syntax OK`.
+    * `scripts/mcp-filter/test-roundtrip.ps1` — 6/6 PASS (including
+      byte-exact CRLF round-trip).
+    * `scripts/mcp-filter/test-e2e.ps1` — 27/27 PASS (full lifecycle:
+      install, pull, stash, reset, branch switch, uninstall).
+    * `scripts/mcp-filter/test-plain-uninstall.ps1` — 14/14 PASS
+      (including 2 mutation checks).
+    * `scripts/mcp-filter/test-worktree.ps1` — 8/8 PASS (linked-worktree
+      smudge resolution + 1 mutation check that proves the
+      `--git-common-dir` fix actually matters).
+    * Live re-install on `C:\Repos\Shared` — `git config --local
+      filter.xray-mcp.smudge` returns
+      `bash "$(git rev-parse --git-common-dir)/xray-mcp/smudge.sh"`,
+      `git status` stays clean across `checkout`, `pull`, `stash`.
+    * Live install on an external untracked-`.mcp.json` enterprise app repo
+      — plain-JSON path still works, no regression.
+
+- **`setup-xray.ps1` — silence noisy `pathspec did not match` leak from
+  `Test-IsTrackedFile` on PowerShell 7.3+.** The previous fix in this
+  release (`$PSNativeCommandUseErrorActionPreference = $false`) prevented
+  the script from *terminating* on the expected non-zero exit of
+  `git ls-files --error-unmatch <untracked>`, but did NOT silence the
+  stderr write — PowerShell 7.3+ wraps native stderr in a
+  `NativeCommandError` `ErrorRecord` *before* the `2>$null` redirect can
+  swallow it, so the user saw a red `git.exe : error: pathspec ... did
+  not match` block on the console at install time even though the script
+  continued normally. Replaced `2>$null` with `2>&1` and discarded the
+  merged stream via `$null = …`. The merge happens before the wrapping,
+  so nothing reaches the error stream. Verified on PS 7.4 against
+  an external enterprise app repo (no `.mcp.json`, install run with `-EnableCopilotCli
+  -Force`) — install output is now clean. Other `2>$null` use sites in
+  the script are not `--error-unmatch`-style probes (mostly `git config`
+  / `git update-index` / `git rev-parse`) and do not write to stderr in
+  normal operation; they remain unchanged.
+
+- **`setup-xray.ps1` — Roo Code install path disabled.** The
+  `.roo/mcp.json` install/restore/uninstall code paths are commented out
+  in the script body (Roo install block wrapped in `<# ... #>`, Roo entry
+  removed from the uninstall configs array, `.roo/mcp.json` removed from
+  the uninstall git-protect loop, and the `Restore-McpJson` call for
+  `.roo/mcp.json` commented out in the `-Restore` block). The
+  `-EnableRoo` switch is preserved as a documented no-op for backward
+  compatibility with caller scripts; passing it does nothing and emits no
+  warning. Re-enable by uncommenting the Roo block in the install body
+  (search for `Roo support disabled`) and the matching entries in the
+  `-Restore` and `-Uninstall` blocks. Verified live on an external enterprise app repo
+  (`-EnableRoo -EnableCopilotCli -Force` → no `.roo/` directory created;
+  `-Uninstall` no longer mentions Roo at all) and via the filter E2E
+  suite (still PASS).
+
+- **`setup-xray.ps1` — uninstall now correctly auto-deletes empty mcp
+  config files.** `Remove-XrayServerEntry` had a `@()`-around-`$null`
+  pitfall: `PSObject.Properties.Name` returns `$null` (not an empty
+  array) when the property collection is empty, and `@($null).Count`
+  evaluates to `1`, so the empty-container detection branch never fired.
+  Net effect: after uninstall, files like `.mcp.json` that contained
+  only the xray entry would be left on disk as `{"mcpServers": {}}`
+  instead of being deleted. Fixed by filtering out `$null` before the
+  `.Count` check (`Where-Object { $null -ne $_ }`). Also fixed an
+  operator-precedence bug on the early-return guard
+  (`-not $container.PSObject.Properties.Name -contains 'xray'` was
+  parsed as `(-not Name) -contains 'xray'` and always returned `$false`)
+  by adding explicit parentheses. Verified live on
+  an external enterprise app repo (plain-JSON path) and via the existing
+  E2E suite (filter path) — both still 27/27 PASS.
+
+- **`setup-xray.ps1` — fix PowerShell 7.4+ native-error abort on missing
+  files.** PowerShell 7.4+ defaults `$PSNativeCommandUseErrorActionPreference`
+  to `$true`, which (combined with the script's `$ErrorActionPreference =
+  'Stop'`) turned any non-zero exit from a probe like `git ls-files
+  --error-unmatch <missing>` into a terminating error mid-install — even
+  though stderr was redirected with `2>$null`. This aborted fresh installs
+  on repos that did not yet have `.mcp.json` (the `Test-IsTrackedFile`
+  probe legitimately returns exit 1 for an absent path). Fixed by
+  explicitly setting `$PSNativeCommandUseErrorActionPreference = $false`
+  at the top of the script — the codepath already inspects
+  `$LASTEXITCODE` after every native invocation, so opting out of the
+  auto-throw is safe.
+
+- **`setup-xray.ps1` — git smudge/clean filter for shared `.mcp.json`.**
+  Replaces the legacy `skip-worktree` / `assume-unchanged` strategy when
+  the target repo tracks `.mcp.json` upstream. The installer drops
+  per-clone `clean.sh` / `smudge.sh` / `snapshot.txt` into
+  `.git/xray-mcp/`, registers a `[filter "xray-mcp"]` section in
+  `.git/config` (with `required = false` so any future filter failure
+  degrades to passthrough rather than aborting git), and appends
+  `.mcp.json filter=xray-mcp` to `.git/info/attributes`. The xray entry
+  is rendered as a single-line JSON object tagged with a
+  `_xrayMcpMarker` field — that single-line shape is the contract the
+  filter relies on to strip the entry losslessly with a one-line perl
+  regex (`print unless /_xrayMcpMarker/`). Net result: `git status`
+  stays clean, `git pull` succeeds silently when upstream touches
+  `.mcp.json`, `git add` / `git commit` of the file produces an
+  upstream-clean blob, and `git stash` / `git checkout` / `git rebase`
+  preserve the entry. `setup-xray.ps1 -Uninstall` tears the whole thing
+  down (`-DryRun` previews, `-KeepBinary` / `-KeepBackups` opt-outs).
+  Filter scripts use perl with `binmode :raw` for byte-exact CRLF
+  preservation on Windows; awk/sed were rejected because Git for Windows
+  POSIX utilities silently normalize line endings. Covered by
+  `scripts/mcp-filter/test-roundtrip.ps1` (byte-exact `clean → smudge →
+  clean` round-trip across 5 JSON shapes + synthetic CRLF) and
+  `scripts/mcp-filter/test-e2e.ps1` (full lifecycle in a temp clone:
+  install / upstream change / pull / stash-pop / reset --hard / branch
+  switch / uninstall — 27/27 PASS). User-facing setup and uninstall
+  documentation in [docs/installation.md](docs/installation.md#shared-repo-with-a-tracked-mcpjson-smudgeclean-filter);
+  full design rationale and rejected alternatives (skip-worktree,
+  assume-unchanged, JSONC comment markers, brace-counting parsers) in
+  [docs/mcp-filter-design.md](docs/mcp-filter-design.md).
+
 - **Doc fix-up: T-RECONCILE structural restore.** In
   `docs/e2e/infrastructure-tests.md`, the body of `T-RECONCILE: Watcher
   startup reconciliation — catches stale cache files` was wedged into
