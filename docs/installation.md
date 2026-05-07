@@ -137,10 +137,10 @@ All files are LZ4-compressed. Safe to delete the whole folder — indexes will r
 ### How long the first build takes
 
 | Project size | Cold first-build time (rough) |
-|---|---|
+| --- | --- |
 | Small (≤ a few thousand files) | a few seconds |
-| Medium (~10–20K files) | ~30 sec |
-| Large (~50K+ files) | **~1 min** for content + AST definitions combined |
+| Medium (~10–20K files) | ~10–20 sec |
+| Large (~50K+ files, e.g. ~48K C# files) | **~25–50 sec** combined (content + AST definitions), depending on CPU thread count (see [benchmarks.md](benchmarks.md#build-times-across-machines)) |
 
 Subsequent `serve` starts load the cached indexes from disk in **0.7–1.6 sec**. Incremental updates (with `--watch`) are **< 1 sec per changed file**.
 
@@ -149,9 +149,11 @@ Subsequent `serve` starts load the cached indexes from disk in **0.7–1.6 sec**
 If you really want the very first MCP query to hit a warm index (e.g. you're scripting CI / first-impression demo), you can build the indexes ahead of time with the CLI — they'll be loaded by `serve` instead of rebuilt:
 
 ```powershell
-xray content-index -d C:\Projects\MyApp -e cs,sql,csproj,xml
-xray def-index     -d C:\Projects\MyApp -e cs,sql
+xray content-index -d C:\Projects\MyApp -e cs,sql,csproj,xml --respect-git-exclude
+xray def-index     -d C:\Projects\MyApp -e cs,sql                --respect-git-exclude
 ```
+
+`--respect-git-exclude` honours `.gitignore` / `.git/info/exclude` so build artefacts (`bin/`, `obj/`, `node_modules/`, etc.) are skipped. Recommended for any git-tracked project. Add the same flag to your `xray serve` args (Section 3) for consistency.
 
 For normal interactive use this is unnecessary — just go to step 3 and let `serve` do it.
 
@@ -168,6 +170,7 @@ In all examples (workspace-scoped configs):
 - `--ext rs md ps1` (or `--ext rs,md,ps1`) — **file extensions to index**. List every extension you want searchable: source code (`cs`, `ts`, `rs`, `sql`, …) plus configuration / docs you want the agent to find (`csproj`, `xml`, `config`, `json`, `yml`, `md`, `txt`, `ps1`). Both space-separated and comma-separated forms work.
 - `--definitions` — **important.** Enables AST-based definition + caller indexes. Without this, `xray_definitions`, `xray_callers`, `xray_reindex_definitions` are unavailable.
 - `--watch` — **important.** Enables filesystem watcher for incremental updates. Without it, indexes go stale after every edit and you have to call `xray_reindex` manually.
+- `--respect-git-exclude` — **recommended for git-tracked projects.** Skips files ignored by `.gitignore` / `.git/info/exclude` (build artefacts, `node_modules/`, etc.) so they don't bloat the index or pollute search results.
 - (optional) `--metrics`, `--debug-log` — extra diagnostics; safe to leave off for normal use.
 
 ### 3a. VS Code — GitHub Copilot Chat (agent mode)
@@ -230,7 +233,6 @@ Create `.roo/mcp.json`:
         "xray_fast",
         "xray_definitions",
         "xray_callers",
-        "xray_edit",
         "xray_help",
         "xray_info",
         "xray_reindex",
@@ -249,6 +251,8 @@ Create `.roo/mcp.json`:
 ```
 
 Roo Code panel → **MCP Servers → Edit Project MCP** opens this file. After saving, restart the server from the same panel.
+
+> **Note on `xray_edit`:** the example above intentionally **omits** `xray_edit` from `alwaysAllow` so the agent has to ask before each file edit. This matches the safer default used by `setup-xray.ps1`. Add `"xray_edit"` to the list only if you want unattended edits.
 
 ### 3c. Cline (VS Code extension) — global config with workspace auto-detection
 
@@ -278,7 +282,6 @@ Open the file via Cline panel → **MCP Servers → Configure MCP Servers**, and
         "xray_fast",
         "xray_definitions",
         "xray_callers",
-        "xray_edit",
         "xray_help",
         "xray_info",
         "xray_reindex",
@@ -297,7 +300,7 @@ Open the file via Cline panel → **MCP Servers → Configure MCP Servers**, and
 }
 ```
 
-> Schema differences between Roo and Cline: Roo uses `alwaysAllow`, Cline uses `autoApprove`. Otherwise the server block is identical.
+> Schema differences between Roo and Cline: Roo uses `alwaysAllow`, Cline uses `autoApprove`. Otherwise the server block is identical. As with the Roo example, `xray_edit` is intentionally omitted — add it only if you want unattended edits.
 
 ---
 

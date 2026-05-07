@@ -150,7 +150,7 @@ std::thread::scope(|s| {
 
 - tree-sitter `Parser` is `!Send` (contains internal mutable state). Each thread creates its own parser instance. This is intentional — tree-sitter parsers reuse internal memory allocations across parse calls, making per-thread parsers more efficient than a shared pool.
 - **Lazy parser initialization:** TS/TSX/Rust parsers are created via `Option<Parser>` + `get_or_insert_with()` only when a thread encounters a file with that extension. For C#-only projects (the common case), TypeScript/Rust grammars are never loaded, saving ~2s per parser per thread. The `def_exts` parameter in `serve.rs` filters to the intersection of `--ext` and supported languages (`cs`, `ts`, `tsx`, `sql`, `rs`), so unnecessary grammars are never even considered. SQL files use a regex-based parser (no tree-sitter grammar needed).
-- **Feature-gated parsers:** Each language parser is behind a Cargo feature flag (`lang-csharp`, `lang-typescript`, `lang-sql`, `lang-rust`). The `definition_extensions()` function returns only the languages enabled at compile time. Missing parsers emit a warning at startup.
+- **Feature-gated parsers:** Each tree-sitter language parser is behind a Cargo feature flag (`lang-csharp`, `lang-typescript`, `lang-rust`, `lang-xml`). The SQL parser is regex-based and always compiled (no Cargo feature gate). XML is on-demand only — it is parsed per `xray_definitions` request rather than persisted into the definition index. The `definition_extensions()` function returns only the languages enabled at compile time. Missing parsers emit a warning at startup.
 
 ## Phase 2: MCP Server Event Loop
 
@@ -444,22 +444,37 @@ A fixed global order breaks cycle formation by construction.
 | Call path                                         | Order observed           | Status                    |
 | ------------------------------------------------- | ------------------------ | ------------------------- |
 | `handle_xray_callers` (callers.rs)                | content → def            | ✅ conforms               |
-| `handle_xray_definitions` + `containsLine` mode   | def → content (reversed) | ❌ MAJOR-9, fix planned    |
+| `handle_xray_definitions` + `containsLine` mode   | content → def            | ✅ conforms (MAJOR-9 fixed via `lock_order::content_read` → `lock_order::def_read`) |
 | `unbind_workspace` (handlers/mod.rs)              | content → file_index     | ✅ conforms               |
 | `xray_fast` handler                               | file_index only          | ✅ single-lock, unconstrained |
 | `edit.rs` sync-reindex                            | content → def (+ file_index invalidate) | ✅ conforms |
 | git handlers                                      | git_cache only           | ✅ single-lock, unconstrained |
 
-### Enforcement plan
+### Enforcement
 
-The contract is documented here first so reviewers have a single source
-of truth. Code-level enforcement lands in the companion PR for MAJOR-8
-/ MAJOR-9 and will add either:
+The contract is enforced in code by the dedicated `src/mcp/lock_order.rs`
+module (lands as the MAJOR-8/MAJOR-9 follow-up). It provides both
+guardrails the original plan called for:
 
-- a thin RAII guard that wraps the two most-contended locks and
-  debug-asserts the order at acquisition, or
-- a `// LOCK ORDER:` comment header at the top of each handler file
-  that participates, mirroring the numbered list above.
+- **Thin RAII guards** — `lock_order::content_read(&ctx.index)` and
+  `lock_order::def_read(&ctx.def_index)` return `ContentReadGuard` /
+  `DefReadGuard` types. The actual AB/BA check lives in
+  `assert_can_acquire_content()`: in debug builds it `debug_assert!`s
+  that the per-thread `DEF_READ_HELD` counter is zero (i.e. the caller
+  is NOT already holding the def lock when it tries to take the content
+  lock); in release builds it logs a `warn!` instead of panicking.
+  `assert_can_acquire_def()` is intentionally a no-op — acquiring def
+  AFTER content is the documented order, so it never needs to assert.
+  Release happens automatically on `Drop`, so the lock-order counter
+  cannot leak.
+- **`// LOCK ORDER:` comment headers** at every multi-lock acquisition
+  site (e.g. `handle_xray_definitions` in
+  `src/mcp/handlers/definitions.rs`) cite this section explicitly so
+  reviewers see the contract inline.
+
+New handlers that touch two or more of the four shared locks MUST go
+through the `lock_order::*` helpers; raw `RwLock::read()` / `write()`
+acquisitions are reserved for single-lock paths and tests.
 
 ## Thread Safety Guarantees
 

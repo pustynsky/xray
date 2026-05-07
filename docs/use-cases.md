@@ -1,26 +1,50 @@
-# Use Cases & Vision
+# Use Cases & LLM Workflows
 
-![Search Time](https://img.shields.io/badge/avg_search-1ms-brightgreen)
-![Files Indexed](https://img.shields.io/badge/files_indexed-65K+-blue)
-![Definitions](https://img.shields.io/badge/AST_definitions-847K-blue)
+![Search Time](https://img.shields.io/badge/avg_search-1--2ms-brightgreen)
+![Files Indexed](https://img.shields.io/badge/files_indexed-66K+-blue)
+![Definitions](https://img.shields.io/badge/AST_definitions-878K-blue)
 ![Call Sites](https://img.shields.io/badge/call_sites-2.4M-blue)
-![Languages](https://img.shields.io/badge/languages-C%23_%7C_TypeScript-orange)
+![Languages](https://img.shields.io/badge/languages-C%23_%7C_TS_%7C_Rust_%7C_SQL_%7C_XML-orange)
 
-Real-world use cases, future ideas, and a case study showing how xray helps GenAI work faster, deeper, and more accurately in large repositories through structural search, code history, call graphs, impact analysis, and safe edits.
+> Numbers measured on a real production codebase — see [benchmarks.md](benchmarks.md). XML is parsed on-demand (`.xml`, `.csproj`, `.props`, `.targets`, `.config`, `.resx`, `.nuspec`, `.appxmanifest`, …) — not bulk-indexed.
+
+Real-world use cases, ready-made LLM workflows, and a case study showing how xray helps GenAI work faster, deeper, and more accurately in large repositories through structural search, code history, call graphs, impact analysis, and safe edits.
 
 ---
 
 ## Quick Reference: Which Tool Do I Need?
 
 ```
-Need to find something?
-├── Know the FILE NAME?        → xray_fast       (~25ms)
-├── Know the CLASS or METHOD?  → xray_definitions (~1ms)
-├── Need a CALL CHAIN?         → xray_callers     (~3-11ms)
-├── Need TEXT CONTENT?         → xray_grep        (~1ms)
-├── Need FILE COUNT only?      → xray_grep countOnly=true
-└── Not sure?                  → xray_help
+DISCOVERY
+├── Know the FILE NAME?            → xray_fast              (~25–35ms)
+├── Know the CLASS or METHOD?      → xray_definitions       (~1ms)
+├── Need a CALL CHAIN?             → xray_callers           (~3–11ms up / 0.5ms down)
+├── Need TEXT CONTENT?             → xray_grep              (~1–2ms)
+└── Need FILE COUNT only?          → xray_grep countOnly=true (1ms, ~46 tokens)
+
+IMPACT & QUALITY
+├── Tests covering a method?       → xray_callers impactAnalysis=true
+├── Production callers only?       → xray_callers productionOnly=true
+├── Dead code (no callers)?        → xray_definitions includeUsageCount=true
+├── Complexity hotspots?           → xray_definitions sortBy=cyclomaticComplexity
+└── Implementations of interface?  → xray_definitions baseType=IFoo (+ baseTypeTransitive)
+
+GIT HISTORY
+├── Who wrote / when introduced?   → xray_git_blame / xray_git_history
+├── When was the file CREATED?     → xray_git_history firstCommit=true
+├── What changed this week?        → xray_git_activity from=YYYY-MM-DD
+├── What was DELETED from a dir?   → xray_git_activity includeDeleted=true
+├── Top contributors?              → xray_git_authors
+└── On the right branch?           → xray_branch_status
+
+WRITE & MAINTAIN
+├── Edit a file safely?            → xray_edit (atomic, dryRun, multi-file)
+├── File line count / size?        → xray_info
+├── Force rebuild index?           → xray_reindex / xray_reindex_definitions
+└── Not sure?                      → xray_help
 ```
+
+> Times are pure tool execution time (in-memory index lookup). Add ~1–2 sec of LLM/MCP round-trip latency for end-to-end.
 
 ---
 
@@ -50,27 +74,25 @@ Total: ~2 minutes + manual analysis
 </td><td>
 
 ```json
-// 1. Find method at line 145 (1ms)
-{"file": ["OrderManager.cs"], "containsLine": 145}
-→ ProcessOrderAsync (lines 120-160), class: OrderManager
+// 1. xray_definitions — find method at line 145 (1ms)
+{"file": ["OrderManager.cs"], "containsLine": 145, "includeBody": true}
+→ ProcessOrderAsync (lines 120-160), class: OrderManager + body inline
 
-// 2. Trace callers (~3-11ms)
-{"method": ["ProcessOrderAsync"], "class": "OrderManager", "depth": 3}
+// 2. xray_callers — trace callers AND read bodies in one call (~3-11ms)
+{"method": ["ProcessOrderAsync"], "class": "OrderManager",
+ "depth": 3, "direction": "up", "includeBody": true}
 → OrderController.CreateOrder (line 56)
     └── OrderManager.ProcessOrderAsync (line 145)
         └── PaymentService.ChargeAsync (line 89)
-
-// 3. Read source inline (1ms)
-{"name": ["ProcessOrderAsync"], "includeBody": true}
-→ full method source code returned
+  + every node carries its source body
 ───────────────────────────────────
-Total: 3 milliseconds
+Total: ~3–12 ms (pure tool time)
 ```
 
 </td></tr>
 </table>
 
-**Speedup: ~20,000×**
+**Pure tool speedup: ~10,000–40,000×.** End-to-end (with LLM thinking + MCP round-trip) typically ~10–30× — still the difference between "continue debugging" and "context-switch lost".
 
 ---
 
@@ -117,37 +139,41 @@ Total: 3 milliseconds
 
 ```
 "Who else calls this method?"
-search_files → 46s
-read_file    → 2s
-read_file    → 2s
-(repeat 3x)  → 3 min
+rg "UpdateOrder" -t cs    → 46s
+read_file                  → 2s
+(repeat 3x)                → 3 min
+
+"Which tests will break?"
+rg + manual chase          → 5 min
 
 "All implementations?"
-search_files → 46s
-read_file    → 2s
+rg "IOrderService" -t cs  → 46s
 
 "Feature flag used elsewhere?"
-search_files → 46s
+rg "EnableNewPricing"     → 46s
 ───────────────────
-Total: ~8 minutes
+Total: ~10 minutes
 ```
 
 </td><td>
 
 ```json
-// "Who else calls this?" (~3-11ms)
-{"method": ["UpdateOrder"], "class": "OrderService", "depth": 2}
-→ 3 callers found in call tree
+// xray_callers — production callers + tests covering it, in one call
+{"method": ["UpdateOrder"], "class": "OrderService",
+ "depth": 3, "impactAnalysis": true, "productionOnly": false}
+→ callTree: 3 production callers
+→ testsCovering: ["OrderServiceTests.UpdateOrder_HappyPath",
+                  "OrderControllerTests.PutOrder_Returns200"]
 
-// "All implementations?" (1ms)
-{"baseType": "IOrderService"}
-→ OrderService, OrderServiceV2, MockOrderService
+// xray_definitions — all implementations, transitively (1ms)
+{"baseType": "IOrderService", "baseTypeTransitive": true}
+→ OrderService, OrderServiceV2, CachingOrderService, MockOrderService
 
-// "Feature flag elsewhere?" (1ms)
+// xray_grep — feature flag everywhere (1ms)
 {"terms": ["EnableNewPricing"], "substring": true}
-→ 7 files, including config + code
+→ 7 files, including .config + code
 ───────────────────
-Total: <3 milliseconds
+Total: <15 milliseconds
 ```
 
 </td></tr>
@@ -175,6 +201,8 @@ Total: <3 milliseconds
 ```
 
 **Key advantage:** Substring search catches `DeleteOrderServiceCacheEntry` and `m_orderService` — names that exact-token search misses.
+
+> **Tip:** combine with `xray_callers includeGrepReferences=true` to also catch delegate / method-group / reflection usage that AST doesn't see.
 
 ---
 
@@ -218,6 +246,12 @@ Total: <3 milliseconds
 // Read test examples inline (1ms)
 {"file": ["OrderManagerTest.cs"], "kind": ["method"], "includeBody": true}
 → all test methods with source code
+
+// Reverse: which tests already cover this method? (~3-11ms)
+// xray_callers impactAnalysis=true walks up and marks test methods
+{"method": ["ProcessOrder"], "class": "OrderManager",
+ "direction": "up", "impactAnalysis": true, "depth": 5}
+→ testsCovering: [{file, depth, callChain}, ...]
 ```
 
 ---
@@ -266,6 +300,98 @@ Total: <3 milliseconds
 **Tools used:** `xray_branch_status` → `xray_grep` → `xray_git_blame` → `xray_git_authors` → `xray_git_diff`
 **Total time:** ~3 seconds. Without xray: ~10 minutes of `git log`, `git blame`, manual searching.
 
+> **Related:** `xray_git_history firstCommit=true` answers "when was this file CREATED?" in one call (works on deleted files via auto `--follow`). `xray_git_activity includeDeleted=true` lists files that disappeared from a directory in a date range.
+
+---
+
+### ✏️ 9. Safe Multi-File Edits
+
+**Situation:** Rename `LegacyName` → `NewName` across 12 files, with rollback safety and zero stale-index window.
+
+```json
+// Step 1: dry-run preview — see exact diff before any byte hits disk (1-2ms)
+// xray_edit Mode B, multi-file
+{
+  "paths": ["src/A.cs", "src/B.cs", "src/C.cs", "...12 files"],
+  "edits": [
+    {"search": "LegacyName", "replace": "NewName",
+     "expectedContext": "public class", "skipIfNotFound": true}
+  ],
+  "dryRun": true
+}
+→ unified diff per file, no writes
+
+// Step 2: commit (atomic per file: temp + fsync + rename)
+{ ...same payload..., "dryRun": false }
+→ writeStatus=committed, reindexStatus=completed,
+  reindexElapsedMs="0.42", editResults=[{idx:0, matchCount:34}]
+
+// Step 3: verify — index is ALREADY refreshed, no debounce wait
+{"terms": ["LegacyName"], "countOnly": true}
+→ 0 files, 0 occurrences ✓
+```
+
+**Why this is hard with built-in edit tools:**
+
+- `xray_edit` is **atomic per file** (temp + fsync + rename) → a crash mid-write never leaves a half-written file.
+- **Synchronous reindex**: `xray_grep` / `xray_definitions` / `xray_callers` see the new content immediately on the next call (no 500ms FS-watcher debounce).
+- **`expectedContext`** acts as a per-edit safety net — a stray match in a comment that lacks the `public class` anchor is left alone.
+- **Idempotent `insertAfter` / `insertBefore`**: re-running the same payload after a partial success is safe — already-applied edits are detected and skipped.
+- Works on **any text file** (not limited to indexed extensions) — `.cs`, `.rs`, `.sql`, `.csproj`, `.json`, `.yaml`, …
+
+---
+
+### 🧹 10. Tech-Debt Detection — Dead Code, God Classes, Hotspots
+
+**Situation:** PR review or quarterly cleanup — find code that quietly rotted.
+
+```json
+// Dead code: methods that appear nowhere else (1ms)
+// xray_definitions includeUsageCount counts content-index occurrences
+{"kind": ["method"], "parent": ["OrderModule"], "includeUsageCount": true}
+→ filter usageCount<=1 → 14 candidates for deletion
+
+// God classes: largest files by line count (1ms)
+{"kind": ["class"], "sortBy": "lines", "maxResults": 10}
+→ top 10 classes by SLOC, ready for split-up
+
+// Complexity hotspots: cyclomatic + cognitive (1ms)
+{"sortBy": "cyclomaticComplexity", "minComplexity": 15, "maxResults": 20}
+→ 20 methods worth refactoring first
+
+// Unused feature flags: present in config, not in code
+{"terms": ["EnableLegacyFlag"], "countOnly": true, "ext": ["cs"]}
+→ 0 files → flag is dead, safe to remove
+```
+
+**Available metrics (`includeCodeStats=true` or any `sortBy`/`min*`):** `cyclomaticComplexity`, `cognitiveComplexity`, `maxNestingDepth`, `paramCount`, `returnCount`, `callCount`, `lambdaCount`, `lines`.
+
+---
+
+### 📦 11. XML / `.csproj` On-Demand Parsing
+
+**Situation:** `.csproj`, `.config`, `.props`, `.targets`, `.resx`, `.nuspec` files aren't bulk-indexed — they're parsed on demand by `xray_definitions`.
+
+```json
+// "Which element contains line 42 of this csproj?" (1ms)
+{"file": ["App.csproj"], "containsLine": 42}
+→ <PackageReference Include="Newtonsoft.Json" Version="13.0.1"/> (parent ItemGroup)
+
+// Find a config block by leaf TEXT content, not just element name
+// Auto-promotes the leaf match to its parent block
+{"file": ["service.config"], "name": ["PremiumStorage"]}
+→ matched via <ServiceType>PremiumStorage</ServiceType>
+  matchedBy="textContent", matchedChild="ServiceType"
+  + the surrounding <Service>...</Service> block
+
+// Cross-file: which projects pin a specific package version?
+// xray_grep with phrase mode for exact XML attribute
+{"terms": ["Version=\"13.0.1\""], "phrase": true, "ext": ["csproj"]}
+→ list of csproj files + line numbers
+```
+
+Supported XML extensions: `.xml`, `.config`, `.csproj`, `.vbproj`, `.fsproj`, `.vcxproj`, `.nuspec`, `.vsixmanifest`, `.manifestxml`, `.appxmanifest`, `.props`, `.targets`, `.resx`.
+
 ---
 
 ### ⚡ Time Savings Summary
@@ -279,6 +405,8 @@ Total: <3 milliseconds
 | Task scope estimation | ~5 min | ~30 sec | **10×** |
 
 **In a typical workday:** 5–10 tasks × 15 min saved = **1–2.5 hours saved daily** per developer.
+
+> Speedup numbers are **pure tool execution time** (in-memory index lookup + JSON response). End-to-end times in real MCP sessions add ~1–2 sec of LLM thinking + MCP round-trip per call — so a 20-call task runs in ~30–60 sec wall time, not ~0.5 sec. The win is still order-of-magnitude, just calibrated against LLM latency rather than disk I/O.
 
 ---
 
@@ -298,7 +426,7 @@ flowchart TD
     BUS -->|Picks up job| WS[Worker Service]
     WS --> MGR2[Manager - Run Scan]
     MGR2 -->|Query data| DB
-    MGR2 -->|Get metadata| ENG[Database Engine - DMV queries]
+    MGR2 -->|Get metadata| ENG["Database Engine (DMV queries)"]
     MGR2 -->|Read cached schemas| BLOB[(Blob Storage)]
     MGR2 -->|Write results| BLOB
 
@@ -361,41 +489,46 @@ All of this was done **without reading any documentation** — purely by navigat
 
 ---
 
-## Vision: Future Ideas
+## Common LLM Workflows You Can Build Today
 
-### 🔧 Near-term
+These are workflows people often label "future ideas", but every one of them
+is doable **right now** by chaining the existing xray MCP tools from inside
+a normal LLM agent loop. No extra infrastructure required.
 
-**Automatic Developer Onboarding** — A bot that answers "I got a bug in CacheManager, where do I start?" by finding the class, its callers, its dependencies, and related tests in 30 seconds.
+| Workflow | Tool chain | What you get |
+|---|---|---|
+| **Automatic developer onboarding** | `xray_definitions name=CacheManager` → `xray_callers up depth=3` → `xray_grep terms=["CacheManager"] excludeDir=["test"]` → `xray_definitions parent=CacheManager` | "Where do I start with a CacheManager bug?" answered in ~30 s — class location, callers, key methods, related production code. |
+| **PR impact analysis** | `git diff --name-only` → for each changed symbol: `xray_callers method=X depth=5 impactAnalysis=true` | "This change reaches N callers, including these test methods that cover it" — generated as a PR comment. `impactAnalysis=true` is a real, supported flag (`src/mcp/handlers/callers.rs`). |
+| **Auto-generated architecture docs** | `xray_definitions file=["src/foo/"]` → `xray_callers direction=down depth=2` per public entry point → LLM emits Mermaid | Generates a class map + call-tree diagram for any subsystem from a single MCP roundtrip set. |
+| **Code archaeology** ("tell me the story of this feature") | `xray_definitions name=X` → `xray_git_blame file=… line=…` → `xray_git_history file=…` → `xray_git_diff commit=…` | Narrative of who introduced what and why, anchored to commits — without leaving the chat. |
+| **Smart code review** | `xray_grep terms=["BeginScope"] countOnly=true` (find the canonical pattern) → `xray_callers up` on the new method (does it sit under the same wrapper?) | "47 other call sites wrap this in a logging scope — this PR doesn't" detection. |
+| **AI migration planner** | `xray_definitions kind=["class"] baseType="IFooService"` → `xray_grep terms=["AddSingleton<IFooService"]` → `xray_callers up depth=3` per implementation | Inventory of all DI registrations + consumers + per-implementation effort estimate. |
+| **"Explain this outage"** | Stack trace line → `xray_definitions file=… containsLine=N includeBody=true` → `xray_callers up depth=4` → `xray_grep terms=["FeatureFlag", "Throttle"] excludeDir=["test"]` | Stack trace → method → callers → feature flags / throttling → root-cause summary, all from MCP. |
+| **"What if I delete method X" simulator** | `xray_callers method=X depth=N impactAnalysis=true excludeDir=["test"]` (production blast radius) + same call without `excludeDir` (test coverage) | Full blast radius + which tests would catch the regression — already a built-in xray capability via `impactAnalysis`. |
 
-**PR Impact Analysis** — On every PR, run `xray_callers` depth=5 on every changed method. Generate: "This change affects 3 API endpoints and 47 callers."
+**Why these are doable today, not "future":** every primitive in the chains
+above is a stable MCP tool with documented args (see
+[mcp-guide.md](mcp-guide.md)). The "novelty" is in the orchestration, which
+is exactly what an LLM agent already does for free.
 
-**Auto-Generated Architecture Docs** — Given a namespace, auto-map all classes, call trees, and generate Mermaid diagrams.
+## Future Infrastructure (genuinely not solvable by LLM-orchestration alone)
 
-### 🚀 Mid-term
+Things that still require something xray itself does not yet provide:
 
-**Live Architecture Map** — Interactive dependency visualization from the full AST index. Heatmap of co-change frequency (correlating with git history).
-
-**Code Archaeology** — "Tell me the story of this feature" by combining xray with git blame/log.
-
-**Smart Code Review** — Auto-detect pattern violations: "47 other places wrap this in a logging scope — this PR doesn't."
-
-**Tech Debt Tracker** — Find dead code (methods with zero callers), God classes >3000 lines, unused feature flags.
-
-### 🤯 Moonshots
-
-**AI Migration Planner** — Map all DI registrations and dependencies, generate a migration plan with effort estimates.
-
-**Cross-Repo Search** — One query across all repos: frontend → API → backend → database.
-
-**"Explain This Outage"** — Stack trace → method → callers → feature flags → throttling rules → root cause summary.
-
-**"What If" Simulator** — "What breaks if I delete method X?" → full blast radius with affected tests.
+- **Live architecture map** — interactive UI that streams the existing AST +
+  call-graph data into a navigable diagram with co-change heatmaps from git
+  history. The data is already in xray; what is missing is a viewer / web
+  layer.
+- **Cross-repo search** — one query that fans out across multiple
+  repositories (frontend → API → backend → DB) at MCP level. Today each
+  repo is its own xray workspace; a federated multi-root mode is not yet
+  implemented.
 
 ---
 
 ## Why xray Makes All of This Possible
 
-**AST index + call graph + inverted text index in one tool** at **sub-millisecond to low single-digit milliseconds per query** across **65K+ files**.
+**AST index + call graph + inverted text index + git history cache + atomic multi-file editor in one tool**, at **sub-millisecond to low single-digit milliseconds per query** across **66K+ files**.
 
 Without it, each scenario requires minutes of ripgrep per query, manual file navigation, or heavyweight tools like Roslyn/CodeQL with long cold starts.
 

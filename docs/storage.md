@@ -173,15 +173,15 @@ Per-shard decode is timed and reported in the debug log via
 
 ### Sizes on Disk
 
-Measured on a real codebase (from `xray info` and build logs):
+Measured on a real codebase (LZ4-compressed disk size; uncompressed in-memory is larger — see [benchmarks.md](benchmarks.md) for raw bincode sizes):
 
-| Index Type      | Files Indexed   | Content                 | Disk Size |
-| --------------- | --------------- | ----------------------- | --------- |
-| FileIndex       | 333,875 entries | Paths + metadata        | 47.8 MB   |
-| ContentIndex    | 48,599 files    | 33M tokens, 754K unique | 241.7 MB  |
-| DefinitionIndex | ~48,600 files   | ~846K definitions + ~2.4M call sites | ~324 MB   |
+| Index Type      | Files Indexed   | Content                              | On-Disk (LZ4)  | Uncompressed bincode |
+| --------------- | --------------- | ------------------------------------ | -------------- | -------------------- |
+| FileIndex       | 333,875 entries | Paths + metadata                     | 47.8 MB        | n/a (single frame)   |
+| ContentIndex    | 48,599 files    | 33M tokens, 754K unique              | ~223.7 MB      | ~350 MB              |
+| DefinitionIndex | ~48,600 files   | ~846K definitions + ~2.4M call sites | ~103.1 MB      | ~324–328 MB          |
 
-In-memory size is larger than on-disk due to HashMap overhead and struct alignment, but has not been separately measured.
+In-memory size is larger than the uncompressed bincode column due to HashMap overhead and struct alignment, but has not been separately measured.
 
 ## Data Structures on Disk
 
@@ -208,15 +208,21 @@ struct FileEntry {
 ```rust
 struct ContentIndex {
     root: String,
+    format_version: u32,                          // Bumped on layout change → triggers rebuild
     created_at: u64,
     max_age_secs: u64,
     files: Vec<String>,                          // file_id → path
-    index: HashMap<String, Vec<Posting>>,         // token → postings
+    index: HashMap<String, Vec<Posting>>,         // token → postings (sharded on disk)
     total_tokens: u64,                           // Total tokens indexed
     extensions: Vec<String>,                     // Extensions indexed
     file_token_counts: Vec<u32>,                 // file_id → token count (TF denom)
-    forward: Option<HashMap<u32, Vec<String>>>,  // file_id → tokens (watch mode)
+    trigram: TrigramIndex,                       // Substring search (rebuilt lazily)
+    trigram_dirty: bool,
+    file_tokens: Vec<Vec<String>>,               // file_id → tokens (watch mode; #[serde(skip)])
+    file_tokens_authoritative: bool,             // True only when file_tokens is maintained
     path_to_id: Option<HashMap<PathBuf, u32>>,   // path → file_id (watch mode)
+    respect_git_exclude: bool,                   // Persisted user choice for auto-rebuild
+    // ...plus diagnostic counters: read_errors, lossy_file_count, worker_panics
 }
 
 struct Posting {
@@ -225,24 +231,31 @@ struct Posting {
 }
 ```
 
-**Watch mode fields:** `forward` and `path_to_id` are only populated when the MCP server starts with `--watch`. They are serialized as `None` when saving to disk (not needed for persistent storage, rebuilt on load).
+**Watch mode fields:** `file_tokens` and `path_to_id` are only populated when the MCP server starts with `--watch`. Both are marked `#[serde(skip)]` so they are not written to disk — they are rebuilt on demand when watch mode enters. `file_tokens` (the reverse `file_id → token-names` map) is only authoritative when `file_tokens_authoritative=true`; sync-reindex paths skip building it to save memory.
 
 ### DefinitionIndex
 
 ```rust
 struct DefinitionIndex {
     root: String,
+    format_version: u32,                               // Bumped on layout change → triggers rebuild
     created_at: u64,
     extensions: Vec<String>,
-    files: Vec<String>,                               // file_id → path
-    definitions: Vec<DefinitionEntry>,                 // All definitions
-    name_index: HashMap<String, Vec<u32>>,             // name → def indices
-    kind_index: HashMap<DefinitionKind, Vec<u32>>,     // kind → def indices
-    attribute_index: HashMap<String, Vec<u32>>,        // attribute → def indices
-    base_type_index: HashMap<String, Vec<u32>>,        // base type → def indices
-    file_index: HashMap<u32, Vec<u32>>,                // file_id → def indices
-    path_to_id: HashMap<PathBuf, u32>,                 // path → file_id
-    method_calls: HashMap<u32, Vec<CallSite>>,         // def_idx → call sites (for xray_callers "down")
+    files: Vec<String>,                                // file_id → path
+    definitions: Vec<DefinitionEntry>,                  // All definitions (sharded on disk)
+    name_index: HashMap<String, Vec<u32>>,              // name → def indices
+    kind_index: HashMap<DefinitionKind, Vec<u32>>,      // kind → def indices
+    attribute_index: HashMap<String, Vec<u32>>,         // attribute → def indices
+    base_type_index: HashMap<String, Vec<u32>>,         // base type → def indices
+    file_index: HashMap<u32, Vec<u32>>,                 // file_id → def indices (source of truth)
+    selector_index: HashMap<String, Vec<u32>>,          // Angular @Component selector → def indices
+    path_to_id: HashMap<PathBuf, u32>,                  // path → file_id
+    method_calls: HashMap<u32, Vec<CallSite>>,          // def_idx → call sites (xray_callers "down")
+    code_stats: HashMap<u32, CodeStats>,                // def_idx → complexity metrics
+    template_children: HashMap<u32, Vec<String>>,       // Angular component def_idx → child selectors
+    extension_methods: HashMap<String, Vec<String>>,    // C# extension method → host static classes
+    respect_git_exclude: bool,
+    // ...plus diagnostic counters: parse_errors, lossy_file_count, empty_file_ids, worker_panics
 }
 
 struct DefinitionEntry {
@@ -259,9 +272,11 @@ struct DefinitionEntry {
 }
 
 struct CallSite {
-    method_name: String,          // Name of the called method
+    method_name: String,           // Name of the called method
     receiver_type: Option<String>, // Resolved type of receiver (e.g., "IUserService")
-    line: u32,                    // Line number of the call site
+    line: u32,                     // Line number of the call site
+    receiver_is_generic: bool,     // `new List<int>()` → true; used to filter
+                                   // generic-arity mismatches with non-generic name collisions
 }
 ```
 
@@ -405,8 +420,9 @@ struct AuthorEntry {
 
 | Operation          | I/O Pattern                                                       | Duration                |
 | ------------------ | ----------------------------------------------------------------- | ----------------------- |
-| Index build        | Sequential read of all matching files, one large sequential write | 7-16s (measured)        |
-| Index load         | One large sequential read + deserialize                           | 0.055-0.689s (measured) |
+| Index build (content) | Sequential read of all matching files, one large sequential write | ~7–16s (measured)    |
+| Index build (definitions) | Sequential read + tree-sitter parse, one large sequential write | ~16–32s (measured) |
+| Index load         | One large sequential read + decompress + deserialize              | 0.055–0.689s (measured) |
 | Search query       | Pure in-memory (no disk I/O)                                      | 0.5-44ms (measured)     |
 | Incremental update | One small random read (file content) + in-memory update           | ~5ms (from logs)        |
 | Index save         | One large sequential write (only on full reindex)                 | ~2s (estimated)         |

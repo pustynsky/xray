@@ -67,36 +67,54 @@ The automated E2E tests are in [`e2e-test.ps1`](../../e2e-test.ps1) at the works
 
 ## Test Parallelization
 
-The E2E test script uses **`Start-Job`** to run independent MCP tests in parallel, reducing total execution time by ~50%.
+The E2E test script uses **`Start-Job`** to run independent MCP tests in parallel, reducing total execution time substantially compared to a fully sequential run.
 
 ### Test Classification
 
-| Group | Tests | Parallelizable | Reason |
-|-------|-------|---------------|--------|
-| **Sequential CLI** | T01-T22, T24, T42/T42b, T49, T54, T61-T64, T65(fast), T76, T80, T82, T-RESPECT-GIT-EXCLUDE | ❌ No | Share index files in `%LOCALAPPDATA%/xray/` for current directory |
+The categories below describe which kinds of tests can run concurrently — the
+full, exhaustive list lives only in [`e2e-test.ps1`](../../e2e-test.ps1)
+(currently ~50 parallel `Start-Job` blocks). Use the IDs as examples, not as
+a complete inventory.
+
+| Group | Examples | Parallelizable | Reason |
+|-------|----------|---------------|--------|
+| **Sequential CLI** | T01-T24, T42/T42b, T49, T54, T61-T64, T65 (fast), T76, T80, T82, T-RESPECT-GIT-EXCLUDE | ❌ No | Share index files in `%LOCALAPPDATA%/xray/` for the current directory |
 | **Sequential state** | T-EXT-CHECK, T-DEF-AUDIT, T-SHUTDOWN | ❌ No | T-EXT-CHECK depends on T20; T-SHUTDOWN modifies global state |
-| **MCP callers** | T65-66, T67, T68, T69, T-FIX3-EXPR-BODY, T-FIX3-VERIFY, T-FIX3-LAMBDA, T-OVERLOAD-DEDUP-UP, T-SAME-NAME-IFACE, T-ANGULAR | ✅ Yes | Each creates isolated temp directory with own indexes |
-| **Git MCP** | T-BRANCH-STATUS, T-GIT-FILE-NOT-FOUND, T-GIT-NOCACHE, T-GIT-TOTALCOMMITS, T-GIT-CACHE | ✅ Yes | Read-only queries against current repo |
-| **Serve help** | T-SERVE-HELP-TOOLS | ✅ Yes | Read-only, no index state |
+| **MCP callers (parallel)** | T-FIX3-EXPR-BODY, T-FIX3-VERIFY, T-FIX3-LAMBDA, T-OVERLOAD-DEDUP-UP, T-SAME-NAME-IFACE, T-MULTI-METHOD, T-CALLERS-PER-LEVEL-TRUNC, T-CLASS-ARRAY-REJECT, T-ANGULAR | ✅ Yes | Each creates an isolated temp directory with its own indexes |
+| **MCP definitions / hints (parallel)** | T-SORTBY-NO-AUTOSUMMARY, T-HINT-F-FUZZY, T-SQL | ✅ Yes | Read-only queries against fixtures or temp directories |
+| **MCP edit (parallel)** | T-EDIT, T-EDIT-CREATE, T-EDIT-FLEX-GATE, T-EDIT-INSERT-APPEND-HINT, T-EDIT-LINE-ENDING, T-EDIT-MULTI, T-EDIT-NO-SILENT-TRAILING-WS | ✅ Yes | Each test edits inside its own temp scratch directory |
+| **Sync-reindex (parallel)** | T-SYNC-DEFS, T-SYNC-DRYRUN, T-SYNC-EXT-NOT-INDEXED, T-SYNC-FAST, T-SYNC-GREP, T-SYNC-MULTI, T-SYNC-NARROW-GREP, T-SYNC-OUTSIDE-DIR, T-SYNC-RECONCILE-PRESERVED | ✅ Yes | Each spins up its own server in a temp directory |
+| **Watcher (parallel)** | T-RECONCILE, T-CHECKPOINT-AFTER-RECONCILE, T-BATCH-WATCHER | ✅ Yes | Isolated temp directory per test |
+| **Grep / args (parallel)** | T-ARGS-ALIAS-WARN, T-ARGS-STRICT-ERROR, T-LINE-REGEX-MD | ✅ Yes | Read-only or temp-scoped |
+| **Info / serve-help (parallel)** | T-INFO-NO-DEGRADED, T-INFO-NO-STALE-FILES-AFTER-REMOVAL, T-SEARCH-INFO-MCP, T-SERVE-HELP-TOOLS, T-RESCAN-CLI-FLAGS, T-RESCAN-INFO-COUNTERS | ✅ Yes | Read-only, no shared state |
+| **Fast (parallel, scoped)** | T-FAST-OUTSIDE-DIR, T-FAST-SUBDIR | ✅ Yes | Each operates against an isolated temp directory |
+| **Git MCP (parallel)** | T-BRANCH-STATUS, T-GIT-FILE-NOT-FOUND, T-GIT-INCLUDE-DELETED, T-GIT-NOCACHE, T-GIT-TOTALCOMMITS, T-GIT-CACHE | ✅ Yes | Read-only queries against the current repo |
+| **MCP instructions / policy (parallel)** | T-INTENT-MAPPING, T-POLICY-REMINDER | ✅ Yes | Read-only assertions on response payload |
 
 ### Implementation
 
-- **16 parallel tests** launched via `Start-Job` (PowerShell 5.1+)
+- **~50 parallel test blocks** launched via `Start-Job` (PowerShell 5.1+); the
+  exact count grows with every new isolated scenario — see
+  `$testBlocks += { ... }` in [`e2e-test.ps1`](../../e2e-test.ps1).
 - Each job receives: absolute binary path, absolute project directory, file extension
 - Each job returns: `@{ Name; Passed; Output }` hashtable
-- **120-second timeout** per batch (individual tests typically complete in 3-5 seconds)
+- **120-second timeout** for the whole batch (individual tests typically complete in 3-5 seconds)
 - Binary path resolved to absolute before job launch (jobs run in different working directory)
 - Git tests use absolute repo path (not `"."`) to avoid working directory issues in jobs
 
 ### Estimated Speedup
 
-| Metric | Sequential | Parallel |
-|--------|-----------|----------|
-| MCP callers (9 tests × ~4s) | ~36s | ~5s |
-| Git MCP (5 tests × ~3s) | ~15s | ~4s |
-| Serve help (1 test) | ~1s | included |
-| **Parallel batch total** | **~52s** | **~6s** |
-| Total E2E (with sequential) | ~2 min | **~1 min** |
+Rough order-of-magnitude only — actual numbers vary with CPU thread count
+and which tests are part of the parallel batch in the current revision.
+With the parallel batch hovering around ~50 isolated MCP tests:
+
+| Metric | Sequential equivalent | Parallel batch |
+|--------|----------------------|----------------|
+| ~50 isolated MCP tests × ~3-5 s each | **~3 min** | **~30-60 s** |
+| Total E2E (sequential CLI + parallel batch) | **~5 min** | **~1.5-2 min** |
+
+If the batch starts taking noticeably longer than that, the 120-second
+batch timeout in `e2e-test.ps1` is the first thing to revisit.
 
 ## When to Run
 

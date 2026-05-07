@@ -2,6 +2,99 @@
 
 ## Unreleased
 
+- **Documentation audit (Group A — top-level docs).** Full pass over every
+  tracked top-level Markdown doc validated each factual claim against live
+  code (`xray_info`, `cargo metadata`, `Select-String` of source) and
+  brought the docs back in line with the current binary. Shape: present
+  findings table per file → user approval → batched edit. Highlights:
+  - **README.md** — Rust toolchain bumped 1.83 → 1.91+, removed references
+    to the non-existent `lang-sql` Cargo feature (SQL is regex-based and
+    always compiled), added `lang-xml` to the default feature list, test
+    count refreshed (1200+ → 2600+, verified via `cargo test --no-run
+    --list`), E2E count revised (60+ → ~50 parallel + sequential CLI),
+    `Use Cases & Vision` link relabelled to `Use Cases & LLM Workflows`.
+  - **docs/architecture.md** — added `XMLOnDemand` to the language pipeline
+    Mermaid diagram, removed broken `TODO-relevance-ranking.md` link,
+    expanded the `handlers/` listing (`edit.rs`, `xml_on_demand.rs`,
+    `arg_validation.rs`, `advisory_hints.rs`, `grep_literal_extract.rs`),
+    split the Language Support table into persisted-vs-on-demand rows,
+    added the XML row to the AST Parser Status table, dropped all
+    `lang-sql` references.
+  - **docs/cli-reference.md** — surfaced `--respect-git-exclude` in the
+    Index / ContentIndex / Serve flag tables, fixed broken
+    `architecture.md#supported-languages` anchor → `#language-support`,
+    split the index-size figure into in-memory (~324 MB) + on-disk
+    (~103 MB LZ4) numbers, clarified that XML parsing is on-demand-only
+    via MCP.
+  - **docs/mcp-guide.md** — fixed the broken
+    `#search-grep--search-inverted-content-index` anchor →
+    `#xray-grep--search-inverted-content-index`.
+  - **docs/storage.md** — corrected the `ContentIndex` struct snippet to
+    list `file_tokens` + `file_tokens_authoritative` (matches current
+    `src/lib.rs`), added an uncompressed-size column to the disk-size
+    table and refreshed numbers (ContentIndex 241.7 → 223.7 MB LZ4,
+    DefinitionIndex ~324 → ~103.1 MB LZ4), split the index-build
+    duration row into content (~7-16 s) / def (~16-32 s), expanded the
+    `DefinitionIndex` snippet with `selector_index`, `code_stats`,
+    `template_children`, `extension_methods`, added
+    `receiver_is_generic` to the `CallSite` snippet.
+  - **docs/concurrency.md** — flipped the conformance-table row for
+    `handle_xray_definitions + containsLine` from "❌ MAJOR-9, fix planned"
+    to "✅ conforms (uses `lock_order::content_read` →
+    `lock_order::def_read`)" and rewrote the "Enforcement plan" section
+    to describe the now-shipped `src/mcp/lock_order.rs` RAII guard module
+    + `// LOCK ORDER:` header convention rather than future work.
+  - **docs/tradeoffs.md** — added `XML` and `lang-xml` to the supported-
+    languages table (with persistence-mode column), removed the
+    fictional `lang-sql` row, refreshed the LZ4 ratio rationale to
+    cite the canonical 48,599-file / ~350 MB uncompressed / 223.7 MB
+    LZ4 benchmark corpus (matching `benchmarks.md`), aligned the
+    "Why we chose tree-sitter" rationale with the now-5-language
+    reality.
+  - **docs/installation.md** — fixed inconsistency where Roo / Cline
+    auto-approve examples included `xray_edit` (they now intentionally
+    omit it, matching `setup-xray.ps1`'s safer default, with an explicit
+    note explaining the choice); added `--respect-git-exclude` to the
+    documented `serve` / `content-index` / `def-index` examples and
+    flag list with rationale (skip `bin/`, `obj/`, `node_modules/`,
+    etc.); refreshed the cold-build time estimate with thread-count
+    sensitivity (~25-50 s combined for ~50K C# files, depending on
+    thread count, linking to `benchmarks.md`).
+  - **docs/benchmarks.md** — bumped Rust toolchain row 1.83 → 1.91+,
+    extended the "Last measured" disclaimer to cover May 2026 refactors
+    (lock-order RAII, on-demand XML, doc audit), revised the RAM
+    estimate from ~500 MB (not measured) to ~600-800 MB estimated with
+    a per-component breakdown.
+  - **docs/use-cases.md** — title relabelled `Use Cases & Vision` →
+    `Use Cases & LLM Workflows`. The previous "Vision: Future Ideas"
+    section (Near-term / Mid-term / Moonshots tiers) was reclassified:
+    eight items (developer onboarding, PR impact analysis, auto-arch
+    docs, code archaeology, smart code review, AI migration planner,
+    "explain this outage", "what if I delete X" simulator) are doable
+    *today* via LLM-orchestration of existing MCP tools and now appear
+    as "Common LLM Workflows You Can Build Today" with concrete
+    `tool1 → tool2 → tool3` chains and a callout that `impactAnalysis=
+    true` is a real, supported flag (`src/mcp/handlers/callers.rs`).
+    Only items that genuinely require new infrastructure beyond
+    LLM-orchestration (interactive Live Architecture Map UI; federated
+    Cross-Repo Search across multiple xray workspaces) remain in a
+    much smaller "Future Infrastructure" section.
+  - **docs/e2e/README.md** — refreshed Test Parallelization section: the
+    "16 parallel tests" claim (now ~50 isolated MCP scenarios per
+    `Start-Job` count in `e2e-test.ps1`), Test Classification table
+    expanded across the actual test categories (callers, definitions,
+    edit, sync-reindex, watcher, grep/args, info/serve-help, fast,
+    git, instructions/policy) with the original IDs as examples
+    pointing at `e2e-test.ps1` for the canonical list, Estimated
+    Speedup table reframed as order-of-magnitude rather than fixed
+    seconds.
+  - **docs/e2e-test-plan.md** — verified as a stub-redirect to
+    `docs/e2e/README.md`; all nine target files exist, no edits
+    required.
+  - No code changes in this audit pass. Validation chain for every
+    factual claim is preserved in the audit transcript so the reviewer
+    can re-run the same `xray_*` / `Select-String` / `cargo` commands.
+
 - **XML config discovery hints — close the `xray_grep ext=["xml"]` 0-results bypass.** Fixes the user-story scenario where an agent narrowed `xray_grep` by `ext=["xml"]`, got 0 matches because the workspace uses `.manifestxml`/`.config`/`.csproj`/etc., and fell back to PowerShell `[xml]` parsing instead of `xray_definitions` on-demand. Three independent surfaces patched, each with its own regression test:
   - **System-prompt block (`tips.rs::render_language_instruction_blocks`):** the XML on-demand section now lists the full extension whitelist (`.xml`/`.config`/`.csproj`/`.vbproj`/`.fsproj`/`.vcxproj`/`.props`/`.targets`/`.nuspec`/`.vsixmanifest`/`.manifestxml`/`.appxmanifest`/`.resx`), clarifies the path works **regardless of `--ext`**, includes a `xray_fast pattern=["*.<ext>"]` discovery recipe, and explicitly warns that `xray_grep ext=["xml"]` does NOT match `.manifestxml`/`.csproj`/`.props` (different ext tokens — list each ext explicitly OR use `xray_definitions` on-demand).
   - **`xray_grep` zero-result hint (`grep.rs::inject_grep_ext_hint`):** when the request narrows by an XML-shaped `ext=` filter (any extension in the on-demand whitelist) and totalFiles=0, the response now carries a new `summary.xmlOnDemandHint` that points at `xray_definitions file=["<path>"] name=["<element>"] includeBody=true` and the `xray_fast` discovery recipe. The hint is independent of the existing `summary.hint` for non-indexed extensions and coexists with it (existing `inject_grep_ext_hint` tests unchanged).
@@ -925,7 +1018,7 @@ Implements items 1, 2, 5 (partial) and 6 of [`docs/user-stories/todo_2026-04-26_
 
 ### Performance (PERF-AUDIT-2026-04-24 baseline harness)
 
-- **PERF-00 — extend benchmarks for the perf-audit story (no production code change).** Added four micro-bench groups in `benches/search_benchmarks.rs` covering the hot paths targeted by the [PERF-AUDIT-2026-04-24 story](docs/user-stories/todo_approved_2026-04-24_perf-audit-followups.md): `generate_trigrams` (PERF-05, ASCII fast-path candidate + Cyrillic/CJK regression guards + 18k-vocab build), `regex_compile` (PERF-01, per-request `Regex::new` cost across the TV/PH/LR sites vs cached match-only reference), `top_authors_aggregation` (PERF-04, `format!` per-commit key vs tuple key over 50k synthetic commits), and `callers_resolve_substring` (PERF-07, naïve per-node lookup + substring scan vs memoised resolution over 100 simulated tree nodes). Spawn-bound git paths (PERF-02 `detect_main_branch_name`, PERF-03 `get_commit_diff`, PERF-09 `parse_blame_porcelain`, PERF-04 raw `git log` cost) are deliberately measured outside criterion via the new `scripts/bench-git-perf.ps1` harness — criterion + `git` subprocess produces high-variance numbers and bakes in repo-state coupling we don't want in the harness. `docs/benchmarks.md` gains a "PERF-AUDIT-2026-04-24 baselines" section documenting how to capture and diff against the `pre-perf-audit` baseline plus a bench-to-task mapping. End-to-end MCP handler latency is intentionally out of scope (would require a `bench-internals` feature flag exposing `HandlerContext` — deferred to a follow-up so this PR stays additive and zero-API-surface).
+- **PERF-00 — extend benchmarks for the perf-audit story (no production code change).** Added four micro-bench groups in `benches/search_benchmarks.rs` covering the hot paths targeted by the PERF-AUDIT-2026-04-24 story: `generate_trigrams` (PERF-05, ASCII fast-path candidate + Cyrillic/CJK regression guards + 18k-vocab build), `regex_compile` (PERF-01, per-request `Regex::new` cost across the TV/PH/LR sites vs cached match-only reference), `top_authors_aggregation` (PERF-04, `format!` per-commit key vs tuple key over 50k synthetic commits), and `callers_resolve_substring` (PERF-07, naïve per-node lookup + substring scan vs memoised resolution over 100 simulated tree nodes). Spawn-bound git paths (PERF-02 `detect_main_branch_name`, PERF-03 `get_commit_diff`, PERF-09 `parse_blame_porcelain`, PERF-04 raw `git log` cost) are deliberately measured outside criterion via the new `scripts/bench-git-perf.ps1` harness — criterion + `git` subprocess produces high-variance numbers and bakes in repo-state coupling we don't want in the harness. `docs/benchmarks.md` gains a "PERF-AUDIT-2026-04-24 baselines" section documenting how to capture and diff against the `pre-perf-audit` baseline plus a bench-to-task mapping. End-to-end MCP handler latency is intentionally out of scope (would require a `bench-internals` feature flag exposing `HandlerContext` — deferred to a follow-up so this PR stays additive and zero-API-surface).
 
 
 ### Bug Fixes (advisory + edit correctness ripple-grep 2026-04-24)
