@@ -180,8 +180,6 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ---
 
----
-
 ## Auto-Switch to Phrase
 
 ### T-US16-SPACE: `serve` — xray_grep auto-switches to phrase for spaced terms
@@ -207,8 +205,13 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - `summary.searchModeNote` contains `"non-token characters"` and `"auto-switched"`
 - When triggered by punctuation (dots/brackets), `searchModeNote` contains `"Tip:"` and `"~100x slower"`
 - When triggered by spaces only, `searchModeNote` does NOT contain `"Tip:"` (phrase is correct for spaces)
+- Alphanumeric+underscore terms stay in substring mode
 
-**Unit tests:** `test_auto_switch_phrase_hint_is_actionable`
+**Unit tests:** `test_auto_switch_phrase_hint_is_actionable`, `test_auto_switch_with_punctuation_returns_some`, `test_has_non_token_chars_brackets`
+
+**Status:** ✅ Implemented
+
+---
 
 ### T-COUNTONLY-NO-TOKENS: `serve` — xray_grep countOnly=true does NOT include matchedTokens
 
@@ -222,9 +225,6 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 - No `responseTruncated` from matchedTokens capping
 
 **Unit tests:** `test_substring_count_only_no_matched_tokens`, `test_substring_non_count_only_still_has_matched_tokens`
-- Alphanumeric+underscore terms stay in substring mode
-
-**Unit tests:** `test_auto_switch_with_punctuation_returns_some`, `test_has_non_token_chars_brackets`
 
 **Status:** ✅ Implemented
 
@@ -234,19 +234,25 @@ echo $msgs | cargo run -- serve --dir $TEST_DIR --ext $TEST_EXT
 
 ### T42: `serve` — Response size truncation for broad queries
 
-Progressive truncation to stay within ~32KB:
+Progressive truncation to fit the per-call response budget (default
+`DEFAULT_MAX_RESPONSE_BYTES = 16_384` bytes; per-tool overrides apply for
+`xray_help`, multi-method `xray_callers`, and any call with `includeBody=true`):
 
-1. Cap `lines` arrays per file to 10 entries
-2. Remove `lineContent` blocks
-3. Cap `matchedTokens` to 20 entries
-4. Remove `lines` arrays entirely
-5. Reduce file count
+1. Cap per-file `lines` arrays and bounded `lineContent` previews
+2. Cap `matchedTokens` in summary (keep first N, add `matchedTokensOmitted`)
+3. Remove file entries from the tail until under budget
+4. Remove `lines` arrays entirely from file entries
+5. Strip large body fields while preserving signatures and metadata
+6. Remove `lineContent` previews only if capped previews still exceed budget
+7. **Generic fallback** — truncate any top-level array (e.g. `definitions`,
+   `containingDefinitions`, `callTree`) so non-grep response shapes are also
+   covered
 
 **Expected:**
 
 - `summary.responseTruncated` = `true`
 - `summary.truncationReason` contains truncation phases applied
-- `summary.originalResponseBytes` > 32768
+- `summary.originalResponseBytes` > effective budget
 - `summary.totalFiles` and `summary.totalOccurrences` reflect FULL result set
 - Small queries are NOT truncated
 

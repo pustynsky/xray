@@ -89,12 +89,12 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 
 ---
 
-### T-GIT-08: Git tools available without --definitions flag
+### T-GIT-08: Git tools always registered (no opt-in flag)
 
 **Expected:**
 
-- `tools/list` contains all 15 tools including 6 git tools
-- No `--git` flag needed
+- `tools/list` contains all 15 tools: 9 from `handlers::tool_definitions_with_runtime` (`xray_grep`, `xray_fast`, `xray_info`, `xray_reindex`, `xray_reindex_definitions`, `xray_definitions`, `xray_callers`, `xray_edit`, `xray_help`) plus 6 from `git::git_tool_definitions` (`xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_activity`, `xray_git_blame`, `xray_branch_status`).
+- The git set is registered unconditionally via `tools.extend(git::git_tool_definitions())` in `src/mcp/handlers/mod.rs` — neither a `--git` flag nor `--definitions` gates it.
 
 ---
 
@@ -219,6 +219,8 @@ Tests for `xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_act
 
 **Applies to:** `xray_git_history`, `xray_git_authors`, `xray_git_activity`
 
+**Note:** `xray_git_diff` deliberately bypasses the cache — patches are never cached (the cache stores `CommitMeta` only, no diff text). The `noCache` parameter is therefore not exposed on `xray_git_diff`; the handler always shells out to `git log -p`.
+
 **Unit tests:** `test_git_history_no_cache_bypasses_cache`, `test_git_history_default_uses_cache`
 
 ---
@@ -310,6 +312,8 @@ for large repos.
 
 ## Git History Cache — Unit Tests
 
+*Note: T-CACHE-08 and T-CACHE-16 were retired when the underlying behaviour was merged into adjacent tests. Numbers are preserved to keep stable cross-references.*
+
 ### T-CACHE-01: Parser — Multi-commit git log output
 
 **Unit tests:** `test_parser_multi_commit`, `test_parser_commit_fields`
@@ -354,7 +358,7 @@ for large repos.
 
 ### T-CACHE-09: CommitMeta struct size
 
-**Unit test:** `test_commit_meta_size` (≤ 48 bytes)
+**Unit test:** `test_commit_meta_size` (≤ 48 bytes; design target 38)
 
 ---
 
@@ -434,7 +438,9 @@ for large repos.
 
 ### T-CACHE-FALLBACK: Git handlers fall back to CLI when cache is None
 
-**Validates:** Cache-or-fallback routing with zero behavioral regression.
+**Validates:** Cache-or-fallback routing with zero behavioural regression — when `ctx.git_cache_ready` is `false`, the handlers shell out to `git` directly and the response hint omits `(from cache)`.
+
+**Unit tests:** `test_git_history_no_cache_bypasses_cache`, `test_git_authors_no_cache_bypasses_cache`, `test_git_activity_no_cache_bypasses_cache`
 
 ---
 
@@ -445,17 +451,19 @@ for large repos.
 - `xray_git_history`, `xray_git_authors`, `xray_git_activity`: `"(from cache)"` in hint
 - `xray_git_diff`: always CLI (no cache for patches)
 
+**Unit tests:** `test_git_history_cached_returns_commits`, `test_git_authors_cached_has_first_and_last_change`, `test_git_activity_cached_returns_files`, `test_git_diff_does_not_use_cache`, `test_git_history_default_uses_cache`, `test_git_history_no_cache_false_uses_cache`
+
 ---
 
 ### T-CACHE-BACKGROUND: Background build and disk persistence
 
 **Expected:**
 
-- First run: background build, save to `.git-history` file
-- Second run: load from disk (~100ms vs ~59s rebuild)
-- After git pull: HEAD validation triggers rebuild
+- First run: background build (`spawn_background_build` in `src/cli/serve.rs:474`) parses `git log` output, populates the in-memory cache, and persists it to a `.git-history` file on disk.
+- Second run: deserialises the on-disk cache and reuses it (no re-parse).
+- After `git pull` (or any HEAD change): `is_valid_for(head)` returns `false` and the cache is rebuilt from scratch.
 
-**Unit tests:** `test_save_load_disk_roundtrip`, `test_cache_path_for_deterministic`
+**Unit tests:** `test_save_load_disk_roundtrip`, `test_cache_path_for_deterministic`, `test_is_valid_for_matching_head`, `test_is_valid_for_non_matching_head`
 
 ---
 

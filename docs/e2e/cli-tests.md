@@ -442,7 +442,7 @@ cargo run -- def-index -d $TEST_DIR -e $TEST_EXT
 
 **Validates:** Tree-sitter parsing, definition extraction, persistence.
 
-**Note:** For `.rs` files, Rust parser is used. For C# or TypeScript projects, expect hundreds/thousands of definitions. For `.sql` files, definitions include stored procedures, tables, views, functions, types, and indexes (regex-based parser).
+**Note:** For `.rs` files, Rust parser is used. For C# or TypeScript projects, expect hundreds/thousands of definitions. For `.sql` files, definitions include stored procedures, tables, views, functions, types, and indexes (regex-based parser; no `lang-sql` Cargo feature — the SQL parser is always compiled, unlike `lang-csharp` / `lang-typescript` / `lang-rust` / `lang-xml`).
 
 ---
 
@@ -465,12 +465,12 @@ cargo run -- grep "[invalid" -d $TEST_DIR -e $TEST_EXT --regex
 
 ---
 
-### T22: `find` — Nonexistent directory
+### T22: `fast` — Nonexistent directory
 
 **Command:**
 
 ```powershell
-cargo run -- find "test" -d /nonexistent/path
+cargo run -- fast "test" -d /nonexistent/path
 ```
 
 **Expected:**
@@ -478,7 +478,7 @@ cargo run -- find "test" -d /nonexistent/path
 - Exit code: 1
 - stderr: `Directory does not exist: /nonexistent/path`
 
-**Validates:** Graceful error on missing directory.
+**Validates:** Graceful error on missing directory. (The previous `xray find` subcommand was removed in the 2026-03-14 audit batch; `fast` is now the file-name search subcommand.)
 
 ---
 
@@ -625,7 +625,7 @@ cargo run -- def-index -d $TEST_DIR -e cs
 
 ### T-RESPECT-GIT-EXCLUDE: `--respect-git-exclude` reaches every walker (Bug 4)
 
-**Source:** `docs/bug-reports/2026-04-23_consolidated-fix-plan.md` Bug 4 — PR #128 plumbed `--respect-git-exclude` only into top-level args; five walker construction sites in the watcher / incremental / definitions builders silently re-walked excluded files.
+**Source:** Bug 4 of the 2026-04-23 consolidated-fix audit (local working note, not in the repo) — PR #128 plumbed `--respect-git-exclude` only into top-level args; five walker construction sites in the watcher / incremental / definitions builders silently re-walked excluded files.
 
 **Setup (inside `e2e-test.ps1`, self-contained block):**
 

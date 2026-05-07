@@ -2,6 +2,88 @@
 
 ## Unreleased
 
+- **Documentation audit (Group B — `docs/e2e/*.md`).** Full pass over every
+  tracked end-to-end test plan in `docs/e2e/`. Same shape as Group A:
+  validate every cited unit-test name against `src/**/*.rs`, cross-check
+  every behavioural claim against live code, present findings, then apply
+  batched edits. Highlights:
+  - **cli-tests.md** — `xray find` subcommand reference replaced with
+    `xray fast` (the `find` alias was removed in the 2026-03-14 audit
+    batch); SQL note clarified ("no `lang-sql` Cargo feature; the SQL
+    parser is always compiled, unlike the gated `lang-csharp` /
+    `lang-typescript` / `lang-rust` / `lang-xml`"); broken
+    `2026-04-23_consolidated-fix-plan.md` link unlinkified (file was
+    never tracked).
+  - **mcp-grep-tests.md** — `T-COUNTONLY-NO-TOKENS` lifted out of
+    `T-US16-PUNCT` (structural corruption); T42 truncation rewritten
+    against the actual 7-phase cascade in `utils.rs:856-867` and pinned
+    to `DEFAULT_MAX_RESPONSE_BYTES = 16_384`; double `---` separator
+    collapsed.
+  - **mcp-definitions-tests.md** — duplicate `T28f` / `T28g` headings
+    disambiguated; `T-HINT-E` test name corrected to
+    `test_hint_e_xml_extension_suggests_on_demand` (xml suggests
+    on-demand definitions, not `xray_grep`); 4 XML sandbox-traversal
+    tests renamed to their actual functions
+    (`test_xml_resolve_rejects_dotdot_escape`,
+    `test_xml_resolve_rejects_absolute_outside_workspace`,
+    `test_xml_resolve_no_substring_collision`,
+    `test_xml_resolve_accepts_relative_inside_workspace`); T52 budget
+    wording pinned to live constants.
+  - **mcp-callers-tests.md** — `T-MULTI-METHOD` body restored
+    (`T-BATCH-PARITY` was structurally wedged inside it); T29 corrected
+    re Rust empty-callTree (`extract_rust_call_sites` exists at
+    `parser_rust.rs:622`); T29a/T29f budget wording expanded with the
+    four response-byte constants
+    (`DEFAULT_MAX_RESPONSE_BYTES`, `INCLUDE_BODY_MIN_RESPONSE_BYTES`,
+    `MULTI_METHOD_RESPONSE_BYTES_PER`, `MULTI_METHOD_RESPONSE_MAX`).
+  - **mcp-fast-edit-tests.md** — `T-FAST-SUBDIR` /
+    `T-FAST-DIRTY-FLAG` structural corruption fixed (the SUBDIR body
+    had been wedged into `T-GREP-RELDIR`); T-EDIT-17/18/19/21/22/23
+    rewritten to match the **2-stage** retry cascade after PR #1 (exact
+    + opt-in flex-space gated by `expectedContext`); the prior 4-stage
+    cascade documentation (strip-trailing-WS, trim-blank-lines) and the
+    `trim_blank_lines` helper reference were removed because both
+    silent-retry stages were deliberately removed in PR #1; new
+    diagnose-first behaviour ("`Text not found` with categorised
+    `Nearest match` hint") now cited with the actual surviving
+    `test_no_silent_match_*` and `retry_cascade_tests` test names.
+  - **git-tests.md** — `T-GIT-08` retitled and corrected to "Git tools
+    always registered (no opt-in flag)" with the explicit 9+6 split
+    (`handlers::tool_definitions_with_runtime` + `git::git_tool_definitions`);
+    `T-CACHE-FALLBACK` and `T-CACHE-ROUTING` got concrete
+    `handlers_tests_git.rs` test references (they were empty before);
+    `T-CACHE-BACKGROUND`'s unverifiable "~100ms vs ~59s rebuild"
+    timing softened to a behavioural claim plus four anchoring tests;
+    `T-NOCACHE` extended with the explicit note that `xray_git_diff`
+    deliberately bypasses the cache (patches are never cached);
+    `T-CACHE-09` "≤ 48 bytes" annotated with the design target of 38
+    bytes; T-CACHE-08 / T-CACHE-16 numbering gap explained.
+  - **language-tests.md** — `T-AUDIT` test count corrected (`audit_tests.rs`
+    holds **25** tests in 6 PARTs, not 22 in 6 categories); T55 gained a
+    concrete `test_mixed_cs_ts_callers_ext_filter` reference; T-LOSSY
+    relaxed to mention both stderr summary shapes (`{n} lossy-UTF8 files`
+    from the def-audit logger and `{n} lossy-utf8` from the content-index
+    logger).
+  - **infrastructure-tests.md** — fixed nine broken/wrong test citations:
+    `test_serialize_response/tool_result_error_returns_internal_error` →
+    `test_safe_to_value_returns_error_on_serialization_failure`;
+    `test_enable_debug_log_creates_file` →
+    `test_create_debug_log_file_creates_file_with_header`;
+    `test_routing_tool_names_exist_in_definitions` →
+    `test_routing_critical_tools_have_hints`;
+    `test_should_invalidate_file_index_data_change_does_not_invalidate`
+    → `..._data_change_invalidates` (semantics flipped per MCP-WCH-001);
+    `test_is_path_within_logical_match` /
+    `..._through_symlink` / `..._traversal_protection` /
+    `test_dir_is_outside_through_symlinked_subdir` → actual symlink test
+    set in `lib_tests.rs` and `mcp::handlers::tests_*`. T39d realigned to
+    the live `COST REALITY` wording (`3-24x cheaper`) and to the trimmed
+    `STRATEGY RECIPES` block (header-only reference, full 7-recipe
+    catalog now on-demand via `xray_help`). Stale count claims dropped:
+    `T-DYNAMIC-DESCS` "12 tests" → 16, `T-FORMAT-VERSION` "7 tests" →
+    list of representative tests across `index_tests.rs` /
+    `storage_tests.rs` / `cache_tests.rs`, `T-STALE-CACHE` "8 unit
+    tests" → 2.
 - **Bug-report hygiene.** Removed three `docs/bug-reports/` files whose
   fixes have already shipped on `main`, leaving `docs/bug-reports/`
   scoped to currently-open issues:
