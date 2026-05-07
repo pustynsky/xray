@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "kusto": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@some/kusto-mcp-server"]
+    },
+    "azure-devops": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@some/ado-mcp-server", "--config", "{\"x\":1,\"y\":{\"z\":2}}"]
+    },
+    "playwright": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["@playwright/mcp"]
+    }
+  }
+}

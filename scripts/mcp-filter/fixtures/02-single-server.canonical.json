@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "kusto": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@some/kusto-mcp-server"]
+    }
+  }
+}

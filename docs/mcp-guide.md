@@ -55,6 +55,8 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 
 5. **Verify** — ask the AI: _"Use xray_grep to find all files containing HttpClient"_
 
+> **Installing into a shared repo with a tracked `.mcp.json`?** See [Installation Guide → Shared repo with tracked `.mcp.json`](installation.md#shared-repo-with-a-tracked-mcpjson-smudgeclean-filter) for the smudge/clean filter mechanism that keeps `git status` clean and `git pull` silent. Full design rationale: [docs/mcp-filter-design.md](mcp-filter-design.md).
+
 ## Exposed Tools
 
 | Tool                         | Description                                                                                                                             |
