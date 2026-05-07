@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **`README.md` — Quick Start sync with the new MCP-filter installer.**
+  The Quick Start "Installation → Option A" block still described
+  pre-filter behavior: it claimed the script "creates the MCP config
+  for VS Code Copilot (Roo Code is optional, prompted separately)" and
+  protected configs only via "`--skip-worktree` / `.git/info/exclude`".
+  Both bullets are now stale — the Roo install path is disabled
+  (`-EnableRoo` is a documented no-op), the script now prompts for
+  Copilot Chat AND Copilot CLI as separate opt-ins, and tracked
+  `.mcp.json` is protected via the per-clone smudge/clean filter
+  introduced in `feat/mcp-filter-driver` (commit 736dab1). Step 3 now
+  names both supported clients and the corresponding
+  `-EnableVSCode` / `-EnableCopilotCli` switches; step 4 enumerates
+  the three protection paths explicitly (smudge/clean filter for
+  tracked `.mcp.json`, `--skip-worktree` for tracked
+  `.vscode/mcp.json`, `.git/info/exclude` for untracked); the
+  Installation Guide pointer also mentions the smudge/clean filter
+  design and the Roo no-op note. Docs-only; no code change.
+
 - **`setup-xray.ps1` + `scripts/mcp-filter/` — strict-reviewer-driven
   hardening of the smudge/clean filter migration.** Two reviewer rounds
   on the filter-migration branch (`feat/mcp-filter-driver`) found a
