@@ -342,7 +342,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | Parameter            | Description                                                                                                                                         |
 | -------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `method` (required)  | Method name to trace, as an array of strings. Multi-element array for multi-method batch (e.g., `["Foo", "Bar", "Baz"]`). Each method gets an independent call tree. Single-element array returns `{callTree}`, multi-element returns `{results: [{method, callTree, nodesInTree}, ...]}`. **BREAKING 2026-04-25:** array required — comma-separated string is hard-rejected |
-| `class`              | Scope to a specific class. DI-aware: `class: "UserService"` also finds callers using `IUserService`. Works for both `"up"` and `"down"` directions. |
+| `class`              | Scope to a specific class. DI-aware: `class: "UserService"` also finds callers using `IUserService`. Works for both `"up"` and `"down"` directions. See [DI Support](di-support.md) for the full list of resolved patterns and supported containers. |
 | `direction`          | `"up"` = find callers (default), `"down"` = find callees                                                                                            |
 | `depth`              | Max recursion depth (default: 3, max: 10)                                                                                                           |
 | `maxCallersPerLevel` | Max callers per node (default: 10). Prevents explosion.                                                                                             |
@@ -507,7 +507,7 @@ Query multiple methods in a single call to reduce MCP round trips. Each method g
 
 - **Interface vs concrete class name** — when searching for callers, always use the **interface name** (e.g., `class: "IUserService"`) rather than the concrete class name (e.g., `class: "UserService"`). Calls through DI use the interface type as the receiver. Searching with the concrete class returns 0 callers if all call sites use the interface. Alternatively, set `resolveInterfaces: true` to auto-resolve implementations.
 
-- **Local variable calls not tracked** — calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected because the tool uses AST parsing without type inference. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported.
+- **Local variable calls — partially tracked.** The C#/TS analysers do infer the type of a local for explicit annotations (`IFoo x = ...`), `new` expressions (`var x = new FooImpl()`), casts (`var x = (IFoo)expr`), `as` expressions (`var x = expr as IFoo`), same-class method return types (`var x = SameClassMethod()`), `await Task<T>` unwrap (`var x = await GetAsync()`), and pattern matching (`if (obj is FooImpl named)`). Cross-class method return types and service-locator chains (`sp.GetRequiredService<IFoo>().X()`, `scope.Resolve<IFoo>().X()`, `factory.Create().X()`) are **not** resolved. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported. See [DI Support](di-support.md) for the full matrix.
 
 ---
 

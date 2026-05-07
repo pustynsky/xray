@@ -580,6 +580,8 @@ The `xray_callers` tool builds call trees by tracing method invocations through 
 - **Type inference for local variables** — cast expressions (`(Type)expr`), `as` expressions (`expr as Type`), method return types (`var x = GetStream()`), `await`/`Task<T>` unwrap (`var x = await GetStreamAsync()`), pattern matching (`if (obj is Type name)`, `case Type name:`), and extension method detection. Cross-class method return types are NOT resolved (only same-class methods)
 - **Local variable limitation** — calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected when the return type cannot be inferred. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported
 
+For the full canonical matrix of which DI patterns and which .NET DI containers are resolved automatically (and which aren't), see [DI Support](di-support.md).
+
 #### Angular Template Metadata
 
 Angular `@Component` class definitions are automatically enriched with template metadata during definition indexing:
