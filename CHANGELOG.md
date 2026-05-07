@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+- **`docs/di-support.md` — canonical DI-resolution reference (new file)
+  + cross-links from README, architecture, and mcp-guide.** The
+  "DI-aware" claim was previously fragmented across five places
+  (`architecture.md`, `tradeoffs.md` §10, `mcp-guide.md` `class`
+  parameter + Limitations, `use-cases.md`, comparison table) and never
+  enumerated which DI containers / which call-site shapes actually
+  resolve. The new doc is the single source of truth: explains the four
+  resolution mechanisms (`base_types` direct match,
+  `expand_interface_callers` sibling expansion at depth 0, fuzzy DI
+  candidate-file widening, per-method local-variable type inference)
+  with file:line references into the live code, lists the exact
+  `extract_csharp_var_declaration_types` patterns that are recognised
+  (explicit, `new`, cast, `as`, same-class method return, `await
+  Task<T>`, pattern matching), enumerates supported .NET DI containers
+  (MEDI, Autofac, Lamar, SimpleInjector, DryIoc, Ninject, Castle
+  Windsor, Unity, MEF, StrongInject, Pure.DI, Jab, Scrutor) with a
+  works/doesn't-work matrix per pattern, and gives recipes for the
+  common DI-shaped queries (find callers of a service method,
+  enumerate every implementation, locate registrations via grep, work
+  around `GetRequiredService<T>()` chains). Cross-links added: README
+  Documentation table + new Features bullet, `architecture.md` after
+  the caller-tree-verification bullet list, `mcp-guide.md` `class`
+  parameter description + rewritten Limitations item ("not tracked" →
+  "partially tracked" with the explicit list of inferred patterns).
+  Docs-only; no code change.
+
 - **`README.md` — Quick Start sync with the new MCP-filter installer.**
   The Quick Start "Installation → Option A" block still described
   pre-filter behavior: it claimed the script "creates the MCP config
