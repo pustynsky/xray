@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+- **Doc fix-up: T-RECONCILE structural restore.** In
+  `docs/e2e/infrastructure-tests.md`, the body of `T-RECONCILE: Watcher
+  startup reconciliation — catches stale cache files` was wedged into
+  `T-WATCHER-DEBOUNCE` since `47f7f3e` (2026-03-16 audit). Body moved
+  back under its own heading; test list re-anchored to the live tests in
+  `src/definitions/definitions_tests.rs` (`test_reconcile_adds_new_file`,
+  `test_reconcile_removes_deleted_file`, `test_reconcile_detects_modified_file`,
+  `test_reconcile_skips_unchanged_files`). Surfaced by the post-Group-B
+  adversarial review of commit `1d5431c`.
 - **Documentation audit (Group B — `docs/e2e/*.md`).** Full pass over every
   tracked end-to-end test plan in `docs/e2e/`. Same shape as Group A:
   validate every cited unit-test name against `src/**/*.rs`, cross-check

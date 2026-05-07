@@ -436,6 +436,16 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 
 ### T-RECONCILE: Watcher startup reconciliation — catches stale cache files
 
+**Expected:**
+
+- Added/modified/deleted files while server was offline are detected and fixed
+- stderr: `Definition index reconciliation complete` with `added`, `modified`, `removed` counts
+- Lock-free parsing (Phase 3 without lock, Phase 4 write lock <500ms)
+
+**Unit tests:** `test_reconcile_adds_new_file`, `test_reconcile_removes_deleted_file`, `test_reconcile_detects_modified_file`, `test_reconcile_skips_unchanged_files` (in `src/definitions/definitions_tests.rs`)
+
+---
+
 ### T-WATCHER-DEBOUNCE: Watcher debounce starvation fix (2026-03-16)
 
 **Scenario:** Watcher flushes within 3s even under continuous file changes
@@ -446,15 +456,6 @@ protection uses a separate `content_building` flag with `compare_exchange`.
 
 **Expected:** `MAX_ACCUMULATE` (3s) forces batch processing even when events arrive continuously.
 **Regression:** Previously, continuous events prevented the debounce timeout from firing.
-
-
-**Expected:**
-
-- Added/modified/deleted files while server was offline are detected and fixed
-- stderr: `Definition index reconciliation complete` with `added`, `modified`, `removed` counts
-- Lock-free parsing (Phase 3 without lock, Phase 4 write lock <500ms)
-
-**Unit tests:** `test_reconcile_adds_new_file`, `test_reconcile_removes_deleted_file`, `test_reconcile_detects_modified_file`
 
 ---
 
