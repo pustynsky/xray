@@ -24,6 +24,7 @@ graph TB
         TOK[Tokenizer]
         TFIDF[TF-IDF Scorer]
         TSP[tree-sitter Parser]
+        XMLOD[XML On-Demand<br/>Parser]
         CSTATS[Code Stats<br/>Analyzer]
     end
 
@@ -50,6 +51,7 @@ graph TB
     CIDX --> WALK --> TOK --> CI --> TRI
     DIDX --> WALK --> TSP --> DI
     TSP --> CSTATS --> DI
+    HAND --> XMLOD
     FAST --> FI
     GREP --> CI --> TFIDF
     SERVE --> PROTO --> HAND
@@ -529,7 +531,7 @@ For comma-separated multi-term queries, the **best** (lowest) tier across all te
 - **Kind is a tiebreaker, not a primary key** — a method `GetUser` (exact, tier 0) always outranks a class `GetUserService` (prefix, tier 1). Kind only matters within the same tier.
 - **Case-insensitive comparison** — `best_match_tier()` lowercases both the name and terms internally, so ranking works correctly regardless of input casing.
 
-See [TODO-relevance-ranking.md](TODO-relevance-ranking.md) for the full design rationale and comparison of alternatives.
+Design rationale lives inline in `src/mcp/handlers/utils.rs::best_match_tier` doc-comments and the surrounding ranking helpers.
 
 ### Call Tree Pipeline (xray_callers)
 
@@ -711,6 +713,11 @@ src/
         ├── definitions.rs    # handle_xray_definitions + body/doccomment injection + audit
         ├── callers.rs        # handle_xray_callers + caller/callee tree builders + impactAnalysis
         ├── git.rs            # Git history MCP handlers (history/diff/authors/activity/blame/branch_status)
+        ├── edit.rs           # handle_xray_edit — atomic multi-file edits, dryRun preview, sync reindex
+        ├── xml_on_demand.rs  # XML/.csproj/.config on-demand parser (no persisted index)
+        ├── arg_validation.rs # Shared MCP-tool argument validation helpers
+        ├── advisory_hints.rs # Hint generation for empty/ambiguous tool responses
+        ├── grep_literal_extract.rs # Literal-fragment extraction from regex for prefilter
         ├── utils.rs          # validate_search_dir, sorted_intersect, metrics helpers,
         │                       response size truncation, body injection utilities
         ├── handlers_test_utils.rs    # Shared test infrastructure (mock contexts, helpers)
@@ -741,19 +748,21 @@ The engine has two layers with **different language coverage**:
 | Layer | Tools | Language Support | How it works |
 | ----- | ----- | ---------------- | ------------ |
 | **Content search** | `xray grep`, `content-index`, `xray_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
-| **AST / structural search** | `xray def-index`, `xray_definitions`, `xray_callers` (MCP) | **C#, TypeScript/TSX, and Rust** (tree-sitter), **SQL** (regex) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. SQL uses a regex-based parser. Each language parser is optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-sql`, `lang-rust`). |
+| **AST / structural search (persisted index)** | `xray def-index`, `xray_definitions`, `xray_callers` (MCP) | **C#, TypeScript/TSX, Rust** (tree-sitter, optional features), **SQL** (regex, always-on) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. Tree-sitter parsers are optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-rust`). The SQL parser is regex-based and always compiled in (no feature flag). |
+| **AST / structural search (on-demand, no persisted index)** | `xray_definitions` for `.xml` / `.csproj` / `.config` | **XML** (tree-sitter, optional `lang-xml` feature, on by default) | Parses XML on each request — no entries stored in the on-disk `.code-structure` index. Returns elements/attributes that match the requested name and supports `containsLine` to locate the element wrapping a given line. |
 
 ### AST Parser Status
 
 | Language          | Parser                       | Definition Types                                                                                           | Status |
 | ----------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------- | ------ |
-| C# (.cs)          | tree-sitter-c-sharp          | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active |
-| TypeScript (.ts)  | tree-sitter-typescript       | class, interface, enum, method, constructor, property, field, function, type alias, variable (exported), enum member | ✅ Active |
-| TSX (.tsx)         | tree-sitter-typescript (TSX) | *(same as TypeScript)*                                                                                     | ✅ Active |
-| SQL (.sql)        | regex-based (no tree-sitter) | stored procedure, table, view, function, user-defined type, column, index                                  | ✅ Active |
-| Rust (.rs)        | tree-sitter-rust             | struct, enum, trait (→Interface), method (impl block), constructor (new/default), function, field, enum variant, const/static (→Variable), type alias | ✅ Active (optional: `--features lang-rust`) |
+| C# (.cs)          | tree-sitter-c-sharp          | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active (default; optional: `--features lang-csharp`) |
+| TypeScript (.ts)  | tree-sitter-typescript       | class, interface, enum, method, constructor, property, field, function, type alias, variable (exported), enum member | ✅ Active (default; optional: `--features lang-typescript`) |
+| TSX (.tsx)         | tree-sitter-typescript (TSX) | *(same as TypeScript)*                                                                                     | ✅ Active (default; optional: `--features lang-typescript`) |
+| SQL (.sql)        | regex-based (no tree-sitter) | stored procedure, table, view, function, user-defined type, column, index                                  | ✅ Active (always compiled in — no Cargo feature) |
+| Rust (.rs)        | tree-sitter-rust             | struct, enum, trait (→Interface), method (impl block), constructor (new/default), function, field, enum variant, const/static (→Variable), type alias | ✅ Active (default; optional: `--features lang-rust`) |
+| XML (.xml, .csproj, .config) | tree-sitter-xml | element, attribute (on-demand parse — not stored in `.code-structure`)                          | ✅ Active (default; optional: `--features lang-xml`) |
 
-> **Key takeaway:** You can use `content-index` / `xray_grep` on **any** codebase regardless of language. Only `def-index` / `xray_definitions` / `xray_callers` require a supported parser (currently C#, TypeScript/TSX, Rust via tree-sitter; SQL via regex). Each parser is an optional Cargo feature — build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-rust` for Rust, etc.
+> **Key takeaway:** You can use `content-index` / `xray_grep` on **any** codebase regardless of language. Only `def-index` / `xray_definitions` / `xray_callers` require a supported parser (currently C#, TypeScript/TSX, Rust, XML via tree-sitter; SQL via regex). Tree-sitter parsers are optional Cargo features — build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-rust,lang-xml` for Rust + XML, etc. SQL is always available (no feature flag).
 
 
 ## Shutdown Semantics and Ctrl+C Handling

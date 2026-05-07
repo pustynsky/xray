@@ -59,6 +59,18 @@ Tests for file name search (`xray_fast`) and file editing (`xray_edit`) MCP tool
 
 ### T-FAST-SUBDIR: `xray_fast` — Subdirectory reuses parent index
 
+**Expected:**
+
+- No new `.file-list` index for subdirectory
+- Results scoped to requested subdirectory
+- `maxDepth` relative to subdirectory, not root
+
+**Unit tests:** `test_xray_fast_subdir_reuses_parent_index`, `test_xray_fast_subdir_max_depth_relative_to_dir`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T-FAST-DIRTY-FLAG: `xray_fast` — In-memory dirty-flag invalidation
 
 **Expected:**
@@ -75,7 +87,6 @@ Tests for file name search (`xray_fast`) and file editing (`xray_edit`) MCP tool
 **Live E2E verification:** Create files → search → delete → search (verified via MCP xray_fast calls)
 
 **Status:** ✅ Implemented
-
 
 ---
 
@@ -113,22 +124,14 @@ Tests for file name search (`xray_fast`) and file editing (`xray_edit`) MCP tool
 
 ### T-GREP-RELDIR: `xray_grep` — Relative dir parameter resolution
 
+(Cross-cut from `mcp-grep-tests.md` — kept here next to `T-FAST-RELDIR` because both exercise the same relative-dir resolution path.)
+
 **Expected:**
 
 - `dir: "subA"` (relative) → resolves against server_dir, scopes grep to subdirectory
 - Results contain only files from the specified subdirectory
 
 **Unit test:** `test_grep_with_relative_subdir_filter`
-
-**Status:** ✅ Implemented
-
-**Expected:**
-
-- No new `.file-list` index for subdirectory
-- Results scoped to requested subdirectory
-- `maxDepth` relative to subdirectory, not root
-
-**Unit tests:** `test_xray_fast_subdir_reuses_parent_index`, `test_xray_fast_subdir_max_depth_relative_to_dir`
 
 **Status:** ✅ Implemented
 
@@ -372,37 +375,41 @@ Tests for file name search (`xray_fast`) and file editing (`xray_edit`) MCP tool
 
 ---
 
-### T-EDIT-17: Whitespace normalization — CRLF and trailing whitespace auto-retry
+### T-EDIT-17: Whitespace normalization — CRLF normalized at parse time
 
 **Expected:**
 
-- CRLF in search text normalized at parse time
-- Trailing whitespace auto-retry with warning
-- All-whitespace search text fails gracefully
+- CRLF in search text normalized at parse time (preserved through write).
+- Trailing-whitespace drift in `search` or `anchor` is **NOT** auto-stripped — it surfaces as a `Text not found` error with a categorised `Nearest match` hint. Silent retry was removed in PR #1 (2026) because it could match a semantically different block.
+- All-whitespace search text fails gracefully.
 
-**Status:** ✅ Covered by 22 unit tests
+**Unit tests:** `test_crlf_preservation`, `test_no_silent_match_on_trailing_whitespace_drift`, `test_no_silent_match_trailing_whitespace_in_search`, `test_no_silent_match_trailing_whitespace_in_anchor`, `test_no_silent_match_trailing_ws_cascade`
+
+**Status:** ✅ Implemented (cascade simplified — see T-EDIT-23)
 
 
 ---
 
-### T-EDIT-18: Blank line trimming — leading/trailing blank lines in search text
+### T-EDIT-18: Blank-line drift surfaces as `Text not found` (auto-trim removed)
 
 **Expected:**
 
-- Search `"\n## Heading"` matches `"## Heading"` in file → edit applied with warning
-- Search `"text\n\n"` matches `"text"` in file → edit applied with warning
-- Anchor `"\nline one"` matches `"line one"` → insert applied with warning
-- No blank lines in search text → exact match, no warning
+- Search `"\n## Heading"` against file `"## Heading"` (search has leading blank line that the file does not) → `Text not found` error with `Nearest match` hint pointing at `"## Heading"`. Auto-trim was removed in PR #1.
+- Search `"text\n\n"` against `"text"` (search has trailing blank lines) → `Text not found` with `Nearest match` hint.
+- Anchor `"\nline one"` against `"line one"` → `Text not found` (insert is rejected with hint).
+- No blank lines in search text → exact match (no warning, no error).
 
-**Unit tests:** `test_blank_line_trim_search_leading_newline`, `test_blank_line_trim_search_trailing_newlines`, `test_blank_line_trim_anchor_leading_newline`, `test_blank_line_trim_no_change_needed`
+**Unit tests:** `test_no_silent_match_search_leading_newline`, `test_no_silent_match_search_trailing_newlines`, `test_no_silent_match_anchor_leading_newline`, `test_no_silent_match_blank_lines_cascade`, `test_no_silent_match_on_blank_lines_drift`, `test_blank_line_trim_no_change_needed`
 
-**Status:** ✅ Covered by 4 unit tests
+**Status:** ✅ Implemented (PR #1 — see T-EDIT-23)
 
 ---
 
-### T-EDIT-19: Flex-space matching — whitespace-collapsed search
+### T-EDIT-19: Flex-space matching — whitespace-collapsed search (opt-in)
 
-**Expected:**
+**Important:** Flex-space matching is **opt-in** — it runs only when an `expectedContext` is also supplied (the safety guard). Without `expectedContext`, whitespace drift surfaces as `Text not found` with a `Nearest match` hint (see T-EDIT-17 / T-EDIT-18). This avoids silent matches against similar-looking blocks elsewhere in the file.
+
+**Expected (when `expectedContext` is set):**
 
 - Search `"| A | B |"` matches file content `"| A       | B     |"` (padded table) → edit applied with warning mentioning "flexible whitespace"
 - Multi-line search with padding → matched correctly
@@ -432,19 +439,20 @@ Tests for file name search (`xray_fast`) and file editing (`xray_edit`) MCP tool
 
 ---
 
-### T-EDIT-21: Helper functions — trim_blank_lines, collapse_spaces, search_to_flex_pattern
+### T-EDIT-21: Helper functions — collapse_spaces, search_to_flex_pattern
 
 **Expected:**
 
-- `trim_blank_lines` strips leading/trailing `\n`, preserves interior
 - `collapse_spaces` collapses runs of spaces/tabs to single space per line
 - `search_to_flex_pattern` produces valid regex matching padded text, returns `None` for all-whitespace input
 
-**Unit tests:** `test_trim_blank_lines`, `test_collapse_spaces`, `test_search_to_flex_pattern`
+**Unit tests:** `test_collapse_spaces`, `test_search_to_flex_pattern`
 
-**Status:** ✅ Covered by 3 unit tests
+**Status:** ✅ Implemented (note: the previous `trim_blank_lines` helper was removed alongside the auto-trim cascade in PR #1 — see T-EDIT-18 / T-EDIT-23)
 
-### T-EDIT-22: Flex-space matching — markdown table separator dash count mismatch
+### T-EDIT-22: Flex-space matching — markdown table separator dash count mismatch (opt-in)
+
+**Note:** As with all flex-space matches (T-EDIT-19), this requires `expectedContext` to be set on the edit — the cascade is opt-in.
 
 **Expected:**
 
@@ -458,23 +466,28 @@ Tests for file name search (`xray_fast`) and file editing (`xray_edit`) MCP tool
 
 **Status:** ✅ Covered by 4 integration tests + unit test extensions
 
-### T-EDIT-23: Retry cascade refactoring — regression coverage
+### T-EDIT-23: Retry cascade — current 2-stage shape and regression coverage
 
-**Context:** `apply_text_edits` was refactored to reduce its cognitive complexity (247 → split into smaller helpers). The 4-stage retry cascade (exact → strip-trailing-WS → trim-blank-lines → flex-space) was extracted into `find_with_retry`. This test set guards against regressions during further refactoring.
+**Context:** The `apply_text_edits` retry-cascade was simplified in PR #1 (2026). The original 4-stage cascade (exact → strip-trailing-WS → trim-blank-lines → flex-space) was reduced to **2 stages**:
+
+  1. **Exact literal match.**
+  2. **Flex-space regex match (collapse whitespace) — OPT-IN via `expectedContext`.**
+
+Stages 2 (strip trailing WS) and 3 (trim blank lines) were **removed** because silent retries could match a semantically different block. Drift in either dimension now surfaces as a `Text not found` error with a categorised `Nearest match` hint (see T-EDIT-17 / T-EDIT-18).
 
 **Expected:**
 
-- **Stage 2 disabled** → search text with trailing whitespace fails to match without producing a "trailing-whitespace stripped" warning. With Stage 2 enabled, the same edit succeeds and emits the warning.
-- **Stage 3 disabled** → search text padded with leading/trailing blank lines returns "Text not found" error. With Stage 3 enabled, the blank lines are trimmed and the edit applies.
-- **Stage 4 disabled** → search text containing differently-spaced runs vs the file (e.g., padded markdown table) fails. With Stage 4 enabled, the flex-space regex matches.
-- **Overflow wording**: when occurrence=N is requested but only M<N occurrences exist, the error message must say `"Occurrence N requested but text X found only M time(s)"` — exact phrasing required so the LLM/UI can parse it.
-- **Warning emission**: every successful retry stage past Stage 1 must add a hint string in the response, never silently mutate.
+- Trailing-WS drift in search/anchor → `Text not found` (no silent fix-up).
+- Leading/trailing blank-line drift in search/anchor → `Text not found` (no silent fix-up).
+- Flex-space match runs only when `expectedContext` is set; emits a warning string `"matched with flexible whitespace (spaces collapsed) [fallbackApplied:flexWhitespace]"` when used.
+- `expectedContext` validation runs after the flex-space match is found.
+- Error message distinguishes literal vs flex search shape.
 
-**Unit tests:** `test_a1_stage2_strip_trailing_ws_emits_warning`, `test_a2_stage3_trim_blank_lines_required_for_match`, `test_a3_stage4_flex_regex_required_for_padded_table`, `test_a4_overflow_wording_exact_phrase`, `test_a5_flex_pattern_anchor_insertion` (in `src/mcp/handlers/edit_tests.rs::retry_cascade_tests`)
+**Unit tests (in `src/mcp/handlers/edit_tests.rs::retry_cascade_tests`):** `test_no_silent_match_trailing_ws_cascade`, `test_no_silent_match_blank_lines_cascade`, `test_retry_cascade_flex_regex`, `test_error_message_literal_vs_flex`, `test_expected_context_after_flex_match`
 
-**Verification protocol:** each of the 5 tests was verified to FAIL when the corresponding stage was disabled in `find_with_retry` (e.g., `if false && stripped != original { ... }`), and to PASS once the disable was reverted. This proves the tests cover real behavior, not just code shape.
+**Companion tests (other modules):** `test_no_silent_match_search_leading_newline`, `test_no_silent_match_search_trailing_newlines`, `test_no_silent_match_anchor_leading_newline`, `test_no_silent_match_on_trailing_whitespace_drift`, `test_no_silent_match_on_blank_lines_drift`, `test_no_silent_match_trailing_whitespace_in_search`, `test_no_silent_match_trailing_whitespace_in_anchor`, `test_no_silent_match_skip_if_not_found_does_not_resurrect_match`
 
-**Status:** ✅ Covered by 5 unit tests + 4 builder-state tests in `callers_tests_additional.rs::builder_state_tests` (P1 set, 9 tests total) + 7 P2 plumbing tests (fast/workspace/serve)
+**Status:** ✅ Implemented (current cascade shape; PR #1 simplification)
 
 ---
 

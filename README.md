@@ -32,14 +32,14 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | 🕵️ **Investigate file history** — who changed this file? What was modified last week? Show me the diff from a specific commit. | ~5 min of git log | **<1 second** |
 > \* Times in the "With xray" column are **pure tool execution time** (index lookup + response). In practice, add ~1–2 seconds of LLM latency (model thinking + MCP round-trip) which is outside the tool's control.
 
-> 📖 **More:** [Use Cases & Vision](docs/use-cases.md) — detailed scenarios including AI-powered architecture exploration, automated impact analysis, and a real-world case study where we reverse-engineered a 3,800-line system in 5 minutes.
+> 📖 **More:** [Use Cases & LLM Workflows](docs/use-cases.md) — detailed scenarios including AI-powered architecture exploration, automated impact analysis, and a real-world case study where we reverse-engineered a 3,800-line system in 5 minutes.
 
 ## Documentation
 
 | Document | Description |
 |---|---|
 | [Installation Guide](docs/installation.md) | Download the pre-built `xray.exe`, configure VS Code Copilot Chat / Roo Code / Cline as an MCP client (Windows) |
-| [Use Cases & Vision](docs/use-cases.md) | Real-world scenarios, future ideas, and case studies |
+| [Use Cases & LLM Workflows](docs/use-cases.md) | Real-world scenarios, ready-made LLM tool chains, and case studies |
 | [CLI Reference](docs/cli-reference.md) | All commands with examples and options |
 | [MCP Server Guide](docs/mcp-guide.md) | Setup, tools API, JSON-RPC examples |
 | [Architecture](docs/architecture.md) | System overview, component design, data flow diagrams |
@@ -47,7 +47,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 | [Concurrency](docs/concurrency.md) | Thread model, lock strategy, watcher design |
 | [Trade-offs](docs/tradeoffs.md) | Design decisions with alternatives considered |
 | [Benchmarks](docs/benchmarks.md) | Performance data, scaling estimates, industry comparison |
-| [E2E Test Plan](docs/e2e/README.md) | End-to-end test cases (CLI + MCP), modular by tool — 8 files |
+| [E2E Test Plan](docs/e2e/README.md) | End-to-end test cases (CLI + MCP), modular by tool — 8 spec files + README |
 | [Changelog](CHANGELOG.md) | All notable changes organized by category (features, fixes, performance) |
 
 ## Features
@@ -64,7 +64,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 - **GenAI grounding** — gives agents direct structural access to code, history, call trees, and safe edit workflows, enabling deeper and more accurate conclusions than generic tool-by-tool orchestration
 - **Synchronous reindex after `xray_edit`** — file-edit responses now refresh the in-memory inverted-content and definition indexes before returning, so a follow-up `xray_grep` / `xray_definitions` / `xray_callers` / `xray_fast` call sees the new content with zero latency (no 500ms FS-watcher debounce wait)
 - **`xray_edit` is workspace-scope-agnostic by design** — unlike read/index tools, `xray_edit` accepts both relative paths (resolved against `--dir`) and absolute paths anywhere on disk. This is intentional: it lets one server instance handle edits across multiple workspaces, scratch dirs, or tooling configs without re-launching. Read-only tools (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`) remain workspace-bound to keep the in-memory indexes scoped and avoid leaking workspace topology to disk.
-- **Code definition index** — tree-sitter AST parsing for structural code search *(C# and TypeScript/TSX)*, regex-based parsing for *SQL* (.sql files: stored procedures, tables, views, functions, types, indexes, columns, and call sites from SP bodies). Angular components enriched with template metadata (selector, child components from HTML templates)
+- **Code definition index** — tree-sitter AST parsing for structural code search *(C#, TypeScript/TSX, Rust)*, regex-based parsing for *SQL* (.sql files: stored procedures, tables, views, functions, types, indexes, columns, and call sites from SP bodies), and on-demand tree-sitter parsing for *XML / .csproj / .config / .props / .targets / .resx / .nuspec / .vsixmanifest / .appxmanifest / .manifestxml*. Angular components enriched with template metadata (selector, child components from HTML templates)
 - **Code complexity metrics** — 7 metrics computed during AST indexing: cyclomatic complexity, cognitive complexity (SonarSource), max nesting depth, parameter count, return/throw count, call count, lambda count. Query with `includeCodeStats`, sort by any metric, filter with `min*` thresholds
 - **Parallel tokenization** — content index tokenization parallelized across all CPU cores
 - **Parallel parsing** — multi-threaded tree-sitter parsing with lazy grammar loading
@@ -104,35 +104,33 @@ cd xray
 cargo build --release
 ```
 
-Requires [Rust](https://rustup.rs/) 1.85+. Binary: `target/release/xray.exe` (Windows) or `target/release/xray` (Linux/Mac).
+Requires [Rust](https://rustup.rs/) 1.91+ (MSRV; see `rust-version` in [Cargo.toml](Cargo.toml)). Binary: `target/release/xray.exe` (Windows) or `target/release/xray` (Linux/Mac).
 
 ### Build with Feature Flags
 
-Language parsers are configurable via Cargo features. By default, all parsers are included:
+Tree-sitter language parsers are configurable via Cargo features. The SQL parser is always built in (regex-based, no tree-sitter dependency) and is not feature-gated. Default features enable C#, TypeScript/TSX, Rust, and XML on-demand parsing:
 
 ```bash
-# Default: all parsers (C#, TypeScript/TSX, SQL)
+# Default: C#, TypeScript/TSX, Rust, XML on-demand (+ SQL always-on)
 cargo build --release
 
-# C# only (no TypeScript/SQL parsers, no tree-sitter-typescript dependency)
+# C# only (drops TypeScript/Rust/XML tree-sitter grammars; SQL still works)
 cargo build --release --no-default-features --features lang-csharp
 
-# SQL only (no tree-sitter dependency at all — smallest binary)
-cargo build --release --no-default-features --features lang-sql
+# C# + Rust, no TypeScript/XML
+cargo build --release --no-default-features --features lang-csharp,lang-rust
 
-# C# + SQL, no TypeScript
-cargo build --release --no-default-features --features lang-csharp,lang-sql
-
-# No parsers (grep/content index only)
+# Smallest binary: no tree-sitter at all (SQL regex parser + content/file indexes only)
 cargo build --release --no-default-features
 ```
 
 | Feature | Dependencies | Parser |
 |---|---|---|
-| `lang-csharp` | `tree-sitter`, `tree-sitter-c-sharp` | C# AST (tree-sitter) |
-| `lang-typescript` | `tree-sitter`, `tree-sitter-typescript` | TypeScript/TSX AST (tree-sitter) |
-| `lang-sql` | *(none)* | SQL DDL (regex-based) |
-| `lang-rust` | `tree-sitter`, `tree-sitter-rust` | Rust AST (tree-sitter) |
+| `lang-csharp` *(default)* | `tree-sitter`, `tree-sitter-c-sharp` | C# AST (tree-sitter) |
+| `lang-typescript` *(default)* | `tree-sitter`, `tree-sitter-typescript` | TypeScript/TSX AST (tree-sitter) |
+| `lang-rust` *(default)* | `tree-sitter`, `tree-sitter-rust` | Rust AST (tree-sitter) |
+| `lang-xml` *(default)* | `tree-sitter`, `tree-sitter-xml` | XML / `.csproj` / `.config` / `.props` / `.targets` / `.resx` / `.nuspec` / `.vsixmanifest` / `.appxmanifest` / `.manifestxml` (on-demand, tree-sitter) |
+| *(always built-in, no feature)* | *(none)* | SQL DDL (regex-based: stored procedures, tables, views, functions, types, indexes, columns, call sites) |
 
 ### CLI Usage
 
@@ -169,7 +167,7 @@ The engine uses three independent index types plus a git history cache:
 | Definitions | `.code-structure` | `xray def-index` | `xray_definitions` / `xray_callers` | AST-extracted classes, methods, call sites |
 | Git history | `.git-history` | Background (auto) | `xray_git_history` / `xray_git_diff` / `xray_git_authors` / `xray_git_activity` / `xray_git_blame` / `xray_branch_status` | Commit metadata, file-to-commit mapping, branch status |
 
-Indexes are stored in `%LOCALAPPDATA%\xray\` and are language-agnostic for content search, language-specific (C#, TypeScript/TSX via tree-sitter; SQL via regex parser) for definitions. The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
+Indexes are stored in `%LOCALAPPDATA%\xray\` and are language-agnostic for content search, language-specific for definitions: C#, TypeScript/TSX, and Rust via tree-sitter; SQL via a built-in regex parser; XML / `.csproj` / `.config` / `.props` / `.targets` / `.resx` / `.nuspec` / `.appxmanifest` / `.vsixmanifest` / `.manifestxml` parsed on-demand via tree-sitter (not bulk-indexed). The git history cache builds automatically in the background when a `.git` directory is present. See [Architecture](docs/architecture.md) for details.
 
 For caller tree verification details (DI resolution, type inference, false-positive filtering) and Angular template metadata, see [Architecture](docs/architecture.md).
 
@@ -197,13 +195,13 @@ For caller tree verification details (DI resolution, type inference, false-posit
 ## Testing
 
 ```bash
-# Run all unit tests (~1200+)
+# Run all unit tests (~2600+; cargo test --list reports 2,609 in xray bin + 107 in lib)
 cargo test
 
 # Run benchmarks
 cargo bench
 
-# Run E2E tests (~60+ CLI + MCP tests)
+# Run E2E tests (~35 CLI + MCP tests in e2e-test.ps1; full E2E spec catalog in docs/e2e/ is larger)
 pwsh -File e2e-test.ps1
 ```
 

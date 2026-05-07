@@ -196,6 +196,8 @@ Tests for SQL, TypeScript/TSX, Angular, and Rust parser-specific behavior.
 
 - `ext: "ts"` → only `.ts` files in results
 
+**Unit test:** `test_mixed_cs_ts_callers_ext_filter`
+
 ---
 
 ### T56: `xray_callers` finds callers in TypeScript arrow function class properties
@@ -329,7 +331,7 @@ Tests for SQL, TypeScript/TSX, Angular, and Rust parser-specific behavior.
 **Expected:**
 
 - Windows-1252 bytes converted with replacement characters
-- `1 lossy-utf8 files` in stderr
+- stderr summary mentions a `lossy-utf8` count (definition-audit logs use the form `"{n} lossy-UTF8 files"`; content-index summary lines use `"{n} lossy-utf8"`)
 - Definitions still extracted
 
 ---
@@ -347,11 +349,11 @@ Tests for SQL, TypeScript/TSX, Angular, and Rust parser-specific behavior.
 
 ### T-AUDIT: Independent audit tests for code stats and call chains
 
-**22 unit tests in `audit_tests.rs` covering:**
+**25 unit tests in `src/definitions/audit_tests.rs` organised into 6 parts:**
 
-1. **C# Code Stats (7 tests)** — comprehensive method, while/do/try-catch, switch, lambdas
-2. **TypeScript Code Stats (5 tests)** — arrow counting, else-if chain, switch/case
-3. **Call Site Accuracy (2 tests)** — all call patterns with correct receiver types
-4. **Call Graph Verification (2 tests)** — multi-class completeness
-5. **Edge Cases (4 tests)** — nested lambdas, constructor stats, non-method definitions
-6. **Statistical Consistency (3 tests)** — invariant checks, cross-language consistency
+1. **C# Code Stats** — method/while/do/try-catch/switch/lambda counting against golden fixtures
+2. **TypeScript Code Stats** — arrow counting, else-if chain, switch/case
+3. **Call Site Accuracy** — all C# and TS call patterns with correct receiver types
+4. **Multi-class Call Graphs** — cross-class completeness for both languages
+5. **Edge Cases** — nested lambdas, constructor stats, non-method definitions
+6. **Statistical Consistency** — invariant checks and cross-language consistency

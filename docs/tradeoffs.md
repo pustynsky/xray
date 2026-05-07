@@ -12,7 +12,7 @@ Every architectural decision has alternatives. This document captures what was c
 - Fast — near-zero overhead deserialization, close to raw memory layout
 - Single-file — each index is one `.file-list`/`.word-search`/`.code-structure`/`.git-history` file
 - No runtime dependencies — no database process, no WAL, no compaction
-- LZ4 compression reduces disk footprint by ~42% (566 MB → 327 MB) with negligible decompression overhead (~100ms)
+- LZ4 compression reduces disk footprint by **~35-45%** (corpus-dependent; e.g. the 48,599-file C# benchmark corpus: ~350 MB uncompressed → 223.7 MB LZ4 — see [benchmarks.md](benchmarks.md#index-build-times)) with negligible decompression overhead (~100ms)
 - Backward-compatible — auto-detects legacy uncompressed files on load
 
 **Rejected alternatives:**
@@ -25,7 +25,7 @@ Every architectural decision has alternatives. This document captures what was c
 | **JSON**                      | 5-10x larger on disk, 10-50x slower to parse for large indexes                                                                 |
 | **MessagePack**               | Similar to bincode but less Rust-native, no meaningful advantage                                                               |
 | **zstd compression**          | Higher compression ratio but slower decompression (~3x slower than LZ4). Not worth the trade-off for indexes that are loaded once at startup |
-| **No compression**            | 566 MB vs 327 MB on disk. LZ4 decompression is fast enough to be negligible                                                    |
+| **No compression**            | ~1.6× larger on disk (e.g. ~350 MB uncompressed vs 223.7 MB LZ4 on the 48,599-file C# benchmark corpus). LZ4 decompression is fast enough to be negligible           |
 
 **Known limitations:**
 
@@ -45,7 +45,7 @@ Every architectural decision has alternatives. This document captures what was c
 - Simple — no secondary data structures to build, maintain, or invalidate
 - Cache-friendly — sequential scan over a contiguous `Vec` has excellent CPU cache locality
 - Flexible matching — supports substring, regex, case-insensitive, comma-separated multi-term OR — all patterns that are hard to pre-index efficiently
-- Small index — `Vec<FileEntry>` is ~48MB for 334K entries, significantly less than a content inverted index (~242MB)
+- Small index — `Vec<FileEntry>` is **~2.6 MB on disk (LZ4) for ~99K entries** (e.g. a Shared C# repo) and tens of MB in-memory due to per-entry `String` allocations; still significantly less than a content inverted index (~224 MB LZ4 for the same repo)
 
 **Rejected alternatives:**
 
@@ -85,7 +85,7 @@ Every architectural decision has alternatives. This document captures what was c
 **Known limitations:**
 
 - No prefix/fuzzy search without scanning all keys (regex mode does this, measured 44ms for 754K tokens)
-- Memory usage is O(unique_tokens × avg_posting_size) — for 49K files this is 242MB on disk
+- Memory usage is O(unique_tokens × avg_posting_size) — for the 48,599-file C# benchmark corpus this is 223.7 MB LZ4 on disk (~350 MB uncompressed)
 - Hash collisions can degrade under adversarial inputs (not a concern for code search)
 
 **When to reconsider:** If we add fuzzy/typo-tolerant search, an FST or Levenshtein automaton would be much more efficient than regex scanning all keys.
@@ -149,7 +149,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 
 ## 6. Tree-sitter vs Regex for Code Parsing
 
-### Chosen: tree-sitter AST parsing (C#, TypeScript/TSX, Rust) + regex parsing (SQL)
+### Chosen: tree-sitter AST parsing (C#, TypeScript/TSX, Rust, XML) + regex parsing (SQL)
 
 **Why:**
 
@@ -163,12 +163,17 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 
 **Supported languages:**
 
-| Language | Parser | Feature Flag | Default Build |
-|---|---|---|---|
-| C# | tree-sitter | `lang-csharp` | ✅ |
-| TypeScript/TSX | tree-sitter | `lang-typescript` | ✅ |
-| SQL | regex | `lang-sql` | ✅ |
-| Rust | tree-sitter | `lang-rust` | ✅ |
+| Language        | Parser      | Feature Flag      | Default Build | Indexing mode             |
+| --------------- | ----------- | ----------------- | ------------- | ------------------------- |
+| C#              | tree-sitter | `lang-csharp`     | ✅            | persisted definition index |
+| TypeScript/TSX  | tree-sitter | `lang-typescript` | ✅            | persisted definition index |
+| Rust            | tree-sitter | `lang-rust`       | ✅            | persisted definition index |
+| XML             | tree-sitter | `lang-xml`        | ✅            | on-demand (per MCP query)   |
+| SQL             | regex       | _(always built)_  | ✅            | persisted definition index |
+
+XML parsing is on-demand only — no XML definitions are persisted to the
+code-structure index. The SQL parser is regex-based and always compiled
+(no Cargo feature gate).
 
 **Rejected alternatives:**
 
@@ -177,7 +182,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 | **Regex patterns**                 | Cannot handle nesting, multi-line constructs, or distinguish between definition and usage. Would miss partial classes, expression-bodied members, etc. Works well for SQL DDL where syntax is regular — hence the SQL parser uses regex. |
 | **LSP (Language Server Protocol)** | Requires running the actual language server (Roslyn for C#). 10-100x slower, requires .NET SDK installed, heavy process.                               |
 | **ctags/universal-ctags**          | External tool dependency. Less structured output. Cannot extract attributes, base types, or modifiers.                                                 |
-| **syn (Rust AST crate)**          | Only works for Rust. tree-sitter provides a unified API across all 4 languages with consistent definition/call-site extraction. Using `syn` for Rust alone would mean a different code path, different data structures, and different testing approach. |
+| **syn (Rust AST crate)**          | Only works for Rust. tree-sitter provides a unified API across all 5 supported languages with consistent definition/call-site extraction. Using `syn` for Rust alone would mean a different code path, different data structures, and different testing approach. |
 
 **Known limitations:**
 
@@ -271,7 +276,7 @@ The combination of these capabilities in a single tool is what makes it distinct
 |---|---|---|---|---|---|
 | Text search <1ms | ✅ | ✅ | ❌ | ❌ (32s) | ✅ |
 | Substring search | ✅ (trigram) | ✅ | ❌ | ✅ (regex) | ✅ (trigram) |
-| AST-aware definitions | ❌ | ✅ (SCIP) | ✅ | ❌ | ✅ (tree-sitter, 4 languages) |
+| AST-aware definitions | ❌ | ✅ (SCIP) | ✅ | ❌ | ✅ (tree-sitter, 4 languages + regex SQL) |
 | Call graph / callers | ❌ | ✅ (precise) | ✅ | ❌ | ✅ (AST-based) |
 | DI-aware interface resolution | ❌ | ❌ | ✅ | ❌ | ✅ |
 | `containsLine` (line → method) | ❌ | ❌ | ✅ | ❌ | ✅ |

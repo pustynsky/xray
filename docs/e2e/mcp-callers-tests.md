@@ -11,7 +11,7 @@ Tests for the `xray_callers` MCP tool: call trees (up/down), DI resolution, over
 **Expected:**
 
 - Result includes `callTree` array, `query` object, `summary` object
-- For Rust codebase: empty callTree (Rust parser for callers)
+- Rust call-graph extraction is supported (`extract_rust_call_sites` in `src/definitions/parser_rust.rs`); see [language-tests.md](language-tests.md) for the supported call-site shapes (method calls, static calls, free function calls).
 
 ---
 
@@ -32,7 +32,7 @@ Tests for the `xray_callers` MCP tool: call trees (up/down), DI resolution, over
 **Expected:**
 
 - Each node in `callTree` contains `body` and `bodyStartLine`
-- Response budget automatically increased to 64KB
+- Response budget automatically raised to at least `INCLUDE_BODY_MIN_RESPONSE_BYTES = 65_536` bytes (~64 KB)
 
 ---
 
@@ -78,8 +78,9 @@ Tests for the `xray_callers` MCP tool: call trees (up/down), DI resolution, over
 
 **Expected:**
 
-- `includeBody=true` → up to 64KB
-- `includeBody=false` → default 16KB
+- `includeBody=true` → at least 64 KB (`INCLUDE_BODY_MIN_RESPONSE_BYTES = 65_536`)
+- `includeBody=false` → default 16 KB (`DEFAULT_MAX_RESPONSE_BYTES = 16_384`)
+- Multi-method `xray_callers` adds a per-method scaler of `MULTI_METHOD_RESPONSE_BYTES_PER = 32_768`, capped at `MULTI_METHOD_RESPONSE_MAX = 131_072` (128 KB)
 
 **Status:** ✅ Implemented
 
@@ -353,6 +354,18 @@ Tests for the `xray_callers` MCP tool: call trees (up/down), DI resolution, over
 
 ### T-MULTI-METHOD: Multi-method batch returns results array
 
+**Expected:**
+
+- `method: "process,validate"` → `results` array with 2 entries
+- Each entry has `method` name and `callTree`
+- Single method (no comma) returns existing format with `callTree` at top level
+
+**Unit tests:** `test_multi_method_returns_results_array`, `test_single_method_no_comma_returns_calltree_directly`
+
+**Status:** ✅ Implemented
+
+---
+
 ### T-BATCH-PARITY: Batch callers warning/hint/truncated parity (2026-03-16)
 
 **Scenario:** Batch callers include per-method warning, hint, and truncated fields
@@ -366,15 +379,8 @@ Tests for the `xray_callers` MCP tool: call trees (up/down), DI resolution, over
 3. Call with `maxTotalNodes=1` → verify `summary.truncated = true`
 
 **Expected:** Batch callers return the same diagnostic fields as single-method callers.
+
 **Regression:** Previously, batch path had no warning/hint/truncated/nodesVisited.
-
-**Expected:**
-
-- `method: "process,validate"` → `results` array with 2 entries
-- Each entry has `method` name and `callTree`
-- Single method (no comma) returns existing format with `callTree` at top level
-
-**Unit tests:** `test_multi_method_returns_results_array`, `test_single_method_no_comma_returns_calltree_directly`
 
 **Status:** ✅ Implemented
 

@@ -25,6 +25,7 @@ xray index -d C:\Projects --hidden --no-ignore
 | `--max-age-hours <N>` | Hours before index is considered stale (default: 24) |
 | `--hidden`            | Include hidden files                                 |
 | `--no-ignore`         | Include `.gitignore`d files                          |
+| `--respect-git-exclude` | Respect `.git/info/exclude` (default: false; xray ignores it so locally-excluded files are still indexed) |
 | `-t, --threads <N>`   | Thread count (0 = auto)                              |
 
 ---
@@ -110,6 +111,7 @@ xray content-index -d C:\Projects -e cs --hidden --no-ignore
 | `--max-age-hours <N>` | Hours before stale (default: 24)                 |
 | `--hidden`            | Include hidden files                             |
 | `--no-ignore`         | Include `.gitignore`d files                      |
+| `--respect-git-exclude` | Respect `.git/info/exclude` (default: false; xray ignores it so locally-excluded files are still indexed) |
 | `-t, --threads <N>`   | Thread count (0 = auto)                          |
 | `--min-token-len <N>` | Minimum token length (default: 2)                |
 
@@ -269,7 +271,9 @@ Removed 3 index file(s) for '.'.
 
 ## `xray def-index` — Build Code Definition Index
 
-Parses source files using tree-sitter (C#, TypeScript/TSX, Rust) or regex (SQL) to extract structural code definitions (classes, methods, interfaces, enums, stored procedures, tables, views, etc.). **Unlike the content index, this is language-specific** — supports C#, TypeScript/TSX, Rust, and SQL. See [Supported Languages](architecture.md#supported-languages) for details.
+Parses source files using tree-sitter (C#, TypeScript/TSX, Rust) or regex (SQL) to extract structural code definitions (classes, methods, interfaces, enums, stored procedures, tables, views, etc.). **Unlike the content index, this is language-specific** — supports C#, TypeScript/TSX, Rust, and SQL. See [Language Support](architecture.md#language-support) for details.
+
+> **Note:** XML / `.csproj` / `.config` parsing is **MCP-server-only and on-demand** — it is **not** built into the persisted `.code-structure` index produced by `def-index`. Use `xray_definitions` over the MCP server to query XML files (see [MCP Server Guide](mcp-guide.md)).
 
 ```bash
 # Index C# files
@@ -318,7 +322,8 @@ Each definition includes: name, kind, file path, line range, full signature, mod
 | ~48,600 files         | ~16-32s (varies by CPU/threads) |
 | Definitions extracted | ~846,000                        |
 | Call sites extracted  | ~2.4M                           |
-| Index size            | ~324 MB                         |
+| In-memory size        | ~324 MB                         |
+| On-disk size          | ~103 MB (LZ4 frame, ~3.2× compression) |
 
 **Options:**
 
@@ -405,6 +410,7 @@ xray serve --dir C:\Projects --ext rs --watch --definitions
 | `--log-level <LEVEL>`  | Log level: error, warn, info, debug (default: info)                  |
 | `--max-response-kb <N>`| Max response size in KB before truncation, 0 = unlimited (default: 16)|
 | `--debug-log`          | Write MCP request/response traces and memory diagnostics to `.debug.log` in index dir|
+| `--respect-git-exclude` | Respect `.git/info/exclude` during auto-rebuild (default: false; xray ignores it so locally-excluded files are still indexed) |
 
 **Periodic rescan fail-safe** (`--no-periodic-rescan`, `--rescan-interval-sec`):
 

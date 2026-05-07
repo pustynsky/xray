@@ -100,7 +100,7 @@ Tests for the `xray_definitions` MCP tool: body extraction, containsLine, auto-s
 
 ## Attribute & Dedup
 
-### T28f: `serve` — xray_definitions by attribute returns no duplicates
+### T28f-attr-dedup: `serve` — xray_definitions by attribute returns no duplicates
 
 **Expected:**
 
@@ -109,7 +109,7 @@ Tests for the `xray_definitions` MCP tool: body extraction, containsLine, auto-s
 
 ---
 
-### T28g: `serve` — xray_definitions with `maxResults: 0` (unlimited)
+### T28g-max-results-unlimited: `serve` — xray_definitions with `maxResults: 0` (unlimited)
 
 **Expected:**
 
@@ -151,7 +151,7 @@ Tests for the `xray_definitions` MCP tool: body extraction, containsLine, auto-s
 
 ### T52: `serve` — Response truncation for `xray_definitions` broad queries
 
-**Expected (if > 16KB):**
+**Expected (if response exceeds the effective response budget — default `DEFAULT_MAX_RESPONSE_BYTES = 16_384` bytes; per-tool overrides apply for `xray_help`, multi-method `xray_callers`, and any call with `includeBody=true`):**
 
 - `summary.responseTruncated` = `true`
 - `summary.truncationReason` contains `"truncated 'definitions' array"`
@@ -217,9 +217,9 @@ Tests for the `xray_definitions` MCP tool: body extraction, containsLine, auto-s
 
 ### T-HINT-E: Unsupported file extension hint
 
-**Expected:** `.xml` suggests `xray_grep`; unknown ext suggests `read_file`
+**Expected:** `.xml` triggers an XML on-demand hint suggesting `containsLine` / `name` against `xray_definitions` itself (not `xray_grep`); unknown extensions (e.g. `.xyz`) suggest `read_file`.
 
-**Unit tests:** `test_hint_e_xml_extension_suggests_xray_grep`
+**Unit tests:** `test_hint_e_xml_extension_suggests_on_demand`, `test_hint_e_md_extension_not_in_content_index_suggests_read_file`, `test_hint_e_cs_extension_no_hint`, `test_hint_e_case_insensitive_extension`
 
 **Status:** ✅ Implemented
 
@@ -536,25 +536,25 @@ Name matches appear first in results, textContent-promoted results after.
 
 **Scenario**: `xray_definitions file='../../etc/passwd' name='Any'` (or Windows equivalent `file='..\..\Windows\System32\drivers\etc\hosts'`) where the resolved absolute path is outside `server_dir`.
 
-**Expected**: Error response containing `"XML file path is outside workspace"`. No XML parsing performed. `isError: true`.
+**Expected**: Error response containing `"XML file '<path>' is outside the workspace"`. No XML parsing performed. `isError: true`.
 
-**Unit tests:** `test_xml_on_demand_rejects_path_traversal`
+**Unit tests:** `test_xml_resolve_rejects_dotdot_escape`
 
 ### T-XML-SANDBOX-ABSOLUTE-OUTSIDE — absolute `file=` outside workspace rejected
 
 **Scenario**: `xray_definitions file='C:/Windows/System32/config.xml' containsLine=1` on a Windows machine where `server_dir=C:/Repos/MyApp`.
 
-**Expected**: Error response `"XML file path is outside workspace: ..."`. Absolute paths pointing INSIDE `server_dir` still work (see `T-XML-ABSOLUTE-PATH`).
+**Expected**: Error response `"XML file '<path>' is outside the workspace ('<server_dir>')"`. Absolute paths pointing INSIDE `server_dir` still work (see `T-XML-ABSOLUTE-PATH`).
 
-**Unit tests:** `test_xml_on_demand_rejects_absolute_outside_workspace`
+**Unit tests:** `test_xml_resolve_rejects_absolute_outside_workspace`, `test_xml_partial_path_absolute_outside_workspace_does_not_use_fallback`
 
 ### T-XML-NO-SUBSTRING-FALLBACK — `file=` collision with substring fallback removed
 
 **Scenario**: Workspace contains `web.config` and `webapp.config`. `xray_definitions file='web.config' name='Any'` when `web.config` does NOT exist but `webapp.config` does (edge case: only `webapp.config` present).
 
-**Expected**: Error `"XML file not found"`. MUST NOT silently resolve to `webapp.config`. Previously the substring fallback matched any indexed file whose path contained `web.config` as a substring, including `webapp.config` — this silent fallback is removed.
+**Expected**: Error `"Failed to resolve XML file 'web.config': ..."`. MUST NOT silently resolve to `webapp.config`. Previously the substring fallback matched any indexed file whose path contained `web.config` as a substring, including `webapp.config` — this silent fallback is removed.
 
-**Unit tests:** `test_xml_on_demand_no_substring_fallback_collision`, `test_xml_on_demand_returns_error_for_missing_file`
+**Unit tests:** `test_xml_resolve_no_substring_collision`
 
 ### T-XML-UTF8-TRUNCATION — UTF-8 safe text content truncation (no panic)
 
@@ -570,4 +570,4 @@ Name matches appear first in results, textContent-promoted results after.
 
 **Expected**: The `file` field in each returned XML definition is a clean path like `C:\Repos\MyApp\app.config` — MUST NOT start with `\\?\` (the Windows UNC prefix returned by `Path::canonicalize()`). Sandbox validation still uses the full canonical form internally.
 
-**Unit tests:** `test_xml_on_demand_resolves_relative_path` (assertion `!returned_path.starts_with("\\\\?\\")` on Windows)
+**Unit tests:** `test_xml_resolve_accepts_relative_inside_workspace` (UNC-prefix stripping verified inline by `resolve_xml_file_path` in `src/mcp/handlers/xml_on_demand.rs`; see the comment at the `// UX: strip Windows UNC prefix` line)

@@ -2,6 +2,202 @@
 
 ## Unreleased
 
+- **Doc fix-up: T-RECONCILE structural restore.** In
+  `docs/e2e/infrastructure-tests.md`, the body of `T-RECONCILE: Watcher
+  startup reconciliation — catches stale cache files` was wedged into
+  `T-WATCHER-DEBOUNCE` since `47f7f3e` (2026-03-16 audit). Body moved
+  back under its own heading; test list re-anchored to the live tests in
+  `src/definitions/definitions_tests.rs` (`test_reconcile_adds_new_file`,
+  `test_reconcile_removes_deleted_file`, `test_reconcile_detects_modified_file`,
+  `test_reconcile_skips_unchanged_files`). Surfaced by the post-Group-B
+  adversarial review of commit `1d5431c`.
+- **Documentation audit (Group B — `docs/e2e/*.md`).** Full pass over every
+  tracked end-to-end test plan in `docs/e2e/`. Same shape as Group A:
+  validate every cited unit-test name against `src/**/*.rs`, cross-check
+  every behavioural claim against live code, present findings, then apply
+  batched edits. Highlights:
+  - **cli-tests.md** — `xray find` subcommand reference replaced with
+    `xray fast` (the `find` alias was removed in the 2026-03-14 audit
+    batch); SQL note clarified ("no `lang-sql` Cargo feature; the SQL
+    parser is always compiled, unlike the gated `lang-csharp` /
+    `lang-typescript` / `lang-rust` / `lang-xml`"); broken
+    `2026-04-23_consolidated-fix-plan.md` link unlinkified (file was
+    never tracked).
+  - **mcp-grep-tests.md** — `T-COUNTONLY-NO-TOKENS` lifted out of
+    `T-US16-PUNCT` (structural corruption); T42 truncation rewritten
+    against the actual 7-phase cascade in `utils.rs:856-867` and pinned
+    to `DEFAULT_MAX_RESPONSE_BYTES = 16_384`; double `---` separator
+    collapsed.
+  - **mcp-definitions-tests.md** — duplicate `T28f` / `T28g` headings
+    disambiguated; `T-HINT-E` test name corrected to
+    `test_hint_e_xml_extension_suggests_on_demand` (xml suggests
+    on-demand definitions, not `xray_grep`); 4 XML sandbox-traversal
+    tests renamed to their actual functions
+    (`test_xml_resolve_rejects_dotdot_escape`,
+    `test_xml_resolve_rejects_absolute_outside_workspace`,
+    `test_xml_resolve_no_substring_collision`,
+    `test_xml_resolve_accepts_relative_inside_workspace`); T52 budget
+    wording pinned to live constants.
+  - **mcp-callers-tests.md** — `T-MULTI-METHOD` body restored
+    (`T-BATCH-PARITY` was structurally wedged inside it); T29 corrected
+    re Rust empty-callTree (`extract_rust_call_sites` exists at
+    `parser_rust.rs:622`); T29a/T29f budget wording expanded with the
+    four response-byte constants
+    (`DEFAULT_MAX_RESPONSE_BYTES`, `INCLUDE_BODY_MIN_RESPONSE_BYTES`,
+    `MULTI_METHOD_RESPONSE_BYTES_PER`, `MULTI_METHOD_RESPONSE_MAX`).
+  - **mcp-fast-edit-tests.md** — `T-FAST-SUBDIR` /
+    `T-FAST-DIRTY-FLAG` structural corruption fixed (the SUBDIR body
+    had been wedged into `T-GREP-RELDIR`); T-EDIT-17/18/19/21/22/23
+    rewritten to match the **2-stage** retry cascade after PR #1 (exact
+    + opt-in flex-space gated by `expectedContext`); the prior 4-stage
+    cascade documentation (strip-trailing-WS, trim-blank-lines) and the
+    `trim_blank_lines` helper reference were removed because both
+    silent-retry stages were deliberately removed in PR #1; new
+    diagnose-first behaviour ("`Text not found` with categorised
+    `Nearest match` hint") now cited with the actual surviving
+    `test_no_silent_match_*` and `retry_cascade_tests` test names.
+  - **git-tests.md** — `T-GIT-08` retitled and corrected to "Git tools
+    always registered (no opt-in flag)" with the explicit 9+6 split
+    (`handlers::tool_definitions_with_runtime` + `git::git_tool_definitions`);
+    `T-CACHE-FALLBACK` and `T-CACHE-ROUTING` got concrete
+    `handlers_tests_git.rs` test references (they were empty before);
+    `T-CACHE-BACKGROUND`'s unverifiable "~100ms vs ~59s rebuild"
+    timing softened to a behavioural claim plus four anchoring tests;
+    `T-NOCACHE` extended with the explicit note that `xray_git_diff`
+    deliberately bypasses the cache (patches are never cached);
+    `T-CACHE-09` "≤ 48 bytes" annotated with the design target of 38
+    bytes; T-CACHE-08 / T-CACHE-16 numbering gap explained.
+  - **language-tests.md** — `T-AUDIT` test count corrected (`audit_tests.rs`
+    holds **25** tests in 6 PARTs, not 22 in 6 categories); T55 gained a
+    concrete `test_mixed_cs_ts_callers_ext_filter` reference; T-LOSSY
+    relaxed to mention both stderr summary shapes (`{n} lossy-UTF8 files`
+    from the def-audit logger and `{n} lossy-utf8` from the content-index
+    logger).
+  - **infrastructure-tests.md** — fixed nine broken/wrong test citations:
+    `test_serialize_response/tool_result_error_returns_internal_error` →
+    `test_safe_to_value_returns_error_on_serialization_failure`;
+    `test_enable_debug_log_creates_file` →
+    `test_create_debug_log_file_creates_file_with_header`;
+    `test_routing_tool_names_exist_in_definitions` →
+    `test_routing_critical_tools_have_hints`;
+    `test_should_invalidate_file_index_data_change_does_not_invalidate`
+    → `..._data_change_invalidates` (semantics flipped per MCP-WCH-001);
+    `test_is_path_within_logical_match` /
+    `..._through_symlink` / `..._traversal_protection` /
+    `test_dir_is_outside_through_symlinked_subdir` → actual symlink test
+    set in `lib_tests.rs` and `mcp::handlers::tests_*`. T39d realigned to
+    the live `COST REALITY` wording (`3-24x cheaper`) and to the trimmed
+    `STRATEGY RECIPES` block (header-only reference, full 7-recipe
+    catalog now on-demand via `xray_help`). Stale count claims dropped:
+    `T-DYNAMIC-DESCS` "12 tests" → 16, `T-FORMAT-VERSION` "7 tests" →
+    list of representative tests across `index_tests.rs` /
+    `storage_tests.rs` / `cache_tests.rs`, `T-STALE-CACHE` "8 unit
+    tests" → 2.
+- **Bug-report hygiene.** Removed three `docs/bug-reports/` files whose
+  fixes have already shipped on `main`, leaving `docs/bug-reports/`
+  scoped to currently-open issues:
+  - `2026-04-26_xml-deeply-nested-tree-sitter-flake.md` — addressed by
+    the XML on-demand discovery / indexing work (PRs [#214](https://github.com/pustynsky/xray/pull/214),
+    [#266](https://github.com/pustynsky/xray/pull/266)).
+  - `bug-report_xray-index-freshness-reindex-cache-and-stale-branch-warning_2026-04-28.md`
+    — fixed in PR [#259](https://github.com/pustynsky/xray/pull/259)
+    (`fix(mcp): live branch warning + force-rebuild on xray_reindex`).
+  - `bug-report_xray-unbounded-work-hot-paths_2026-05-03.md` — fixed in
+    PR [#257](https://github.com/pustynsky/xray/pull/257)
+    (`fix: bound 5 unbounded-work hot paths in xray_edit + xray_definitions`).
+- **Documentation audit (Group A — top-level docs).** Full pass over every
+  tracked top-level Markdown doc validated each factual claim against live
+  code (`xray_info`, `cargo metadata`, `Select-String` of source) and
+  brought the docs back in line with the current binary. Shape: present
+  findings table per file → user approval → batched edit. Highlights:
+  - **README.md** — Rust toolchain bumped 1.83 → 1.91+, removed references
+    to the non-existent `lang-sql` Cargo feature (SQL is regex-based and
+    always compiled), added `lang-xml` to the default feature list, test
+    count refreshed (1200+ → 2600+, verified via `cargo test --no-run
+    --list`), E2E count revised (60+ → ~50 parallel + sequential CLI),
+    `Use Cases & Vision` link relabelled to `Use Cases & LLM Workflows`.
+  - **docs/architecture.md** — added `XMLOnDemand` to the language pipeline
+    Mermaid diagram, removed broken `TODO-relevance-ranking.md` link,
+    expanded the `handlers/` listing (`edit.rs`, `xml_on_demand.rs`,
+    `arg_validation.rs`, `advisory_hints.rs`, `grep_literal_extract.rs`),
+    split the Language Support table into persisted-vs-on-demand rows,
+    added the XML row to the AST Parser Status table, dropped all
+    `lang-sql` references.
+  - **docs/cli-reference.md** — surfaced `--respect-git-exclude` in the
+    Index / ContentIndex / Serve flag tables, fixed broken
+    `architecture.md#supported-languages` anchor → `#language-support`,
+    split the index-size figure into in-memory (~324 MB) + on-disk
+    (~103 MB LZ4) numbers, clarified that XML parsing is on-demand-only
+    via MCP.
+  - **docs/mcp-guide.md** — fixed the broken
+    `#search-grep--search-inverted-content-index` anchor →
+    `#xray-grep--search-inverted-content-index`.
+  - **docs/storage.md** — corrected the `ContentIndex` struct snippet to
+    list `file_tokens` + `file_tokens_authoritative` (matches current
+    `src/lib.rs`), added an uncompressed-size column to the disk-size
+    table and refreshed numbers (ContentIndex 241.7 → 223.7 MB LZ4,
+    DefinitionIndex ~324 → ~103.1 MB LZ4), split the index-build
+    duration row into content (~7-16 s) / def (~16-32 s), expanded the
+    `DefinitionIndex` snippet with `selector_index`, `code_stats`,
+    `template_children`, `extension_methods`, added
+    `receiver_is_generic` to the `CallSite` snippet.
+  - **docs/concurrency.md** — flipped the conformance-table row for
+    `handle_xray_definitions + containsLine` from "❌ MAJOR-9, fix planned"
+    to "✅ conforms (uses `lock_order::content_read` →
+    `lock_order::def_read`)" and rewrote the "Enforcement plan" section
+    to describe the now-shipped `src/mcp/lock_order.rs` RAII guard module
+    + `// LOCK ORDER:` header convention rather than future work.
+  - **docs/tradeoffs.md** — added `XML` and `lang-xml` to the supported-
+    languages table (with persistence-mode column), removed the
+    fictional `lang-sql` row, refreshed the LZ4 ratio rationale to
+    cite the canonical 48,599-file / ~350 MB uncompressed / 223.7 MB
+    LZ4 benchmark corpus (matching `benchmarks.md`), aligned the
+    "Why we chose tree-sitter" rationale with the now-5-language
+    reality.
+  - **docs/installation.md** — fixed inconsistency where Roo / Cline
+    auto-approve examples included `xray_edit` (they now intentionally
+    omit it, matching `setup-xray.ps1`'s safer default, with an explicit
+    note explaining the choice); added `--respect-git-exclude` to the
+    documented `serve` / `content-index` / `def-index` examples and
+    flag list with rationale (skip `bin/`, `obj/`, `node_modules/`,
+    etc.); refreshed the cold-build time estimate with thread-count
+    sensitivity (~25-50 s combined for ~50K C# files, depending on
+    thread count, linking to `benchmarks.md`).
+  - **docs/benchmarks.md** — bumped Rust toolchain row 1.83 → 1.91+,
+    extended the "Last measured" disclaimer to cover May 2026 refactors
+    (lock-order RAII, on-demand XML, doc audit), revised the RAM
+    estimate from ~500 MB (not measured) to ~600-800 MB estimated with
+    a per-component breakdown.
+  - **docs/use-cases.md** — title relabelled `Use Cases & Vision` →
+    `Use Cases & LLM Workflows`. The previous "Vision: Future Ideas"
+    section (Near-term / Mid-term / Moonshots tiers) was reclassified:
+    eight items (developer onboarding, PR impact analysis, auto-arch
+    docs, code archaeology, smart code review, AI migration planner,
+    "explain this outage", "what if I delete X" simulator) are doable
+    *today* via LLM-orchestration of existing MCP tools and now appear
+    as "Common LLM Workflows You Can Build Today" with concrete
+    `tool1 → tool2 → tool3` chains and a callout that `impactAnalysis=
+    true` is a real, supported flag (`src/mcp/handlers/callers.rs`).
+    Only items that genuinely require new infrastructure beyond
+    LLM-orchestration (interactive Live Architecture Map UI; federated
+    Cross-Repo Search across multiple xray workspaces) remain in a
+    much smaller "Future Infrastructure" section.
+  - **docs/e2e/README.md** — refreshed Test Parallelization section: the
+    "16 parallel tests" claim (now ~50 isolated MCP scenarios per
+    `Start-Job` count in `e2e-test.ps1`), Test Classification table
+    expanded across the actual test categories (callers, definitions,
+    edit, sync-reindex, watcher, grep/args, info/serve-help, fast,
+    git, instructions/policy) with the original IDs as examples
+    pointing at `e2e-test.ps1` for the canonical list, Estimated
+    Speedup table reframed as order-of-magnitude rather than fixed
+    seconds.
+  - **docs/e2e-test-plan.md** — verified as a stub-redirect to
+    `docs/e2e/README.md`; all nine target files exist, no edits
+    required.
+  - No code changes in this audit pass. Validation chain for every
+    factual claim is preserved in the audit transcript so the reviewer
+    can re-run the same `xray_*` / `Select-String` / `cargo` commands.
+
 - **XML config discovery hints — close the `xray_grep ext=["xml"]` 0-results bypass.** Fixes the user-story scenario where an agent narrowed `xray_grep` by `ext=["xml"]`, got 0 matches because the workspace uses `.manifestxml`/`.config`/`.csproj`/etc., and fell back to PowerShell `[xml]` parsing instead of `xray_definitions` on-demand. Three independent surfaces patched, each with its own regression test:
   - **System-prompt block (`tips.rs::render_language_instruction_blocks`):** the XML on-demand section now lists the full extension whitelist (`.xml`/`.config`/`.csproj`/`.vbproj`/`.fsproj`/`.vcxproj`/`.props`/`.targets`/`.nuspec`/`.vsixmanifest`/`.manifestxml`/`.appxmanifest`/`.resx`), clarifies the path works **regardless of `--ext`**, includes a `xray_fast pattern=["*.<ext>"]` discovery recipe, and explicitly warns that `xray_grep ext=["xml"]` does NOT match `.manifestxml`/`.csproj`/`.props` (different ext tokens — list each ext explicitly OR use `xray_definitions` on-demand).
   - **`xray_grep` zero-result hint (`grep.rs::inject_grep_ext_hint`):** when the request narrows by an XML-shaped `ext=` filter (any extension in the on-demand whitelist) and totalFiles=0, the response now carries a new `summary.xmlOnDemandHint` that points at `xray_definitions file=["<path>"] name=["<element>"] includeBody=true` and the `xray_fast` discovery recipe. The hint is independent of the existing `summary.hint` for non-indexed extensions and coexists with it (existing `inject_grep_ext_hint` tests unchanged).
@@ -925,7 +1121,7 @@ Implements items 1, 2, 5 (partial) and 6 of [`docs/user-stories/todo_2026-04-26_
 
 ### Performance (PERF-AUDIT-2026-04-24 baseline harness)
 
-- **PERF-00 — extend benchmarks for the perf-audit story (no production code change).** Added four micro-bench groups in `benches/search_benchmarks.rs` covering the hot paths targeted by the [PERF-AUDIT-2026-04-24 story](docs/user-stories/todo_approved_2026-04-24_perf-audit-followups.md): `generate_trigrams` (PERF-05, ASCII fast-path candidate + Cyrillic/CJK regression guards + 18k-vocab build), `regex_compile` (PERF-01, per-request `Regex::new` cost across the TV/PH/LR sites vs cached match-only reference), `top_authors_aggregation` (PERF-04, `format!` per-commit key vs tuple key over 50k synthetic commits), and `callers_resolve_substring` (PERF-07, naïve per-node lookup + substring scan vs memoised resolution over 100 simulated tree nodes). Spawn-bound git paths (PERF-02 `detect_main_branch_name`, PERF-03 `get_commit_diff`, PERF-09 `parse_blame_porcelain`, PERF-04 raw `git log` cost) are deliberately measured outside criterion via the new `scripts/bench-git-perf.ps1` harness — criterion + `git` subprocess produces high-variance numbers and bakes in repo-state coupling we don't want in the harness. `docs/benchmarks.md` gains a "PERF-AUDIT-2026-04-24 baselines" section documenting how to capture and diff against the `pre-perf-audit` baseline plus a bench-to-task mapping. End-to-end MCP handler latency is intentionally out of scope (would require a `bench-internals` feature flag exposing `HandlerContext` — deferred to a follow-up so this PR stays additive and zero-API-surface).
+- **PERF-00 — extend benchmarks for the perf-audit story (no production code change).** Added four micro-bench groups in `benches/search_benchmarks.rs` covering the hot paths targeted by the PERF-AUDIT-2026-04-24 story: `generate_trigrams` (PERF-05, ASCII fast-path candidate + Cyrillic/CJK regression guards + 18k-vocab build), `regex_compile` (PERF-01, per-request `Regex::new` cost across the TV/PH/LR sites vs cached match-only reference), `top_authors_aggregation` (PERF-04, `format!` per-commit key vs tuple key over 50k synthetic commits), and `callers_resolve_substring` (PERF-07, naïve per-node lookup + substring scan vs memoised resolution over 100 simulated tree nodes). Spawn-bound git paths (PERF-02 `detect_main_branch_name`, PERF-03 `get_commit_diff`, PERF-09 `parse_blame_porcelain`, PERF-04 raw `git log` cost) are deliberately measured outside criterion via the new `scripts/bench-git-perf.ps1` harness — criterion + `git` subprocess produces high-variance numbers and bakes in repo-state coupling we don't want in the harness. `docs/benchmarks.md` gains a "PERF-AUDIT-2026-04-24 baselines" section documenting how to capture and diff against the `pre-perf-audit` baseline plus a bench-to-task mapping. End-to-end MCP handler latency is intentionally out of scope (would require a `bench-internals` feature flag exposing `HandlerContext` — deferred to a follow-up so this PR stays additive and zero-API-surface).
 
 
 ### Bug Fixes (advisory + edit correctness ripple-grep 2026-04-24)

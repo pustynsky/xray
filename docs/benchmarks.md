@@ -2,7 +2,7 @@
 
 All numbers in this document are **measured**, not estimated. Criterion benchmarks use synthetic data for reproducibility; CLI and MCP benchmarks use a real production codebase.
 
-> **Last measured: 2026-03.** April 2026 refactors (complexity reduction in `apply_text_edits` / `handle_xray_fast` / `handle_xray_reindex_inner` / `cmd_serve`, periodic watcher rescan, Rust parser via `lang-rust`) have **not** been re-benchmarked against the production C# corpus. Treat the absolute numbers as a March baseline; relative comparisons (xray vs ripgrep, index vs live walk) remain representative.
+> **Last measured: 2026-03.** Refactors landed since then (April 2026: complexity reduction in `apply_text_edits` / `handle_xray_fast` / `handle_xray_reindex_inner` / `cmd_serve`, periodic watcher rescan, Rust parser via `lang-rust`; May 2026: lock-order RAII enforcement in `mcp::lock_order`, on-demand XML parser via `lang-xml`, doc-audit pass) have **not** been re-benchmarked against the production C# corpus. Treat the absolute numbers as a March baseline; relative comparisons (xray vs ripgrep, index vs live walk) remain representative.
 
 ## Test Environments
 
@@ -14,7 +14,7 @@ Benchmarks were measured on two machines to show hardware-dependent variability:
 | **RAM**     | 128 GB                                               | 64 GB                                                      |
 | **Storage** | NVMe SSD                                             | DevDrive (ReFS) on Azure VM NVMe-backed disk               |
 | **OS**      | Windows 11                                           | Windows 11 Enterprise                                      |
-| **Rust**    | 1.83+ (edition 2024)                                 | same                                                       |
+| **Rust**    | 1.91+ (edition 2024)                                 | same                                                       |
 | **Build**   | `--release` with LTO (`opt-level = 3`, `lto = true`) | same                                                       |
 
 Unless noted, numbers are from Machine 1. Cross-machine comparisons are shown where available.
@@ -350,9 +350,9 @@ Regex scan time depends on number of unique tokens (500 in synthetic index), not
 ## PERF-AUDIT-2026-04-24 baselines
 
 The micro-benches below were added in PR `perf/00-extend-benches` as the
-reference point for the [PERF-AUDIT-2026-04-24 story](user-stories/todo_approved_2026-04-24_perf-audit-followups.md).
-Each PERF-* PR records its `before` / `after` numbers against
-`pre-perf-audit` baseline saved here.
+reference point for the PERF-AUDIT-2026-04-24 story. Each PERF-* PR
+records its `before` / `after` numbers against the `pre-perf-audit`
+baseline saved here.
 
 ### Running
 
@@ -431,7 +431,7 @@ Measured on 48,779-file C# codebase (see `docs/run-benchmarks.ps1` for automated
 | Index build (content, one-time) | N/A     | 7–16s                                 | —                     |
 | Index build (defs, one-time)    | N/A     | 16–32s                                | —                     |
 | Disk overhead                   | None    | ~327 MB (LZ4 compressed content+defs) | —                     |
-| RAM (server mode, estimated)    | None    | ~500 MB (not measured)                | —                     |
+| RAM (server mode, estimated)    | None    | ~600–800 MB (estimated, varies by repo size; e.g. ContentIndex ~350 MB + DefinitionIndex ~324 MB uncompressed in-memory for the 48,599-file C# corpus — see [storage.md](storage.md#sizes-on-disk)) | —                     |
 
 ## Bottlenecks and Scaling Limits
 
