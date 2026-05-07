@@ -2,6 +2,18 @@
 
 ## Unreleased
 
+- **Bug-report hygiene.** Removed three `docs/bug-reports/` files whose
+  fixes have already shipped on `main`, leaving `docs/bug-reports/`
+  scoped to currently-open issues:
+  - `2026-04-26_xml-deeply-nested-tree-sitter-flake.md` — addressed by
+    the XML on-demand discovery / indexing work (PRs [#214](https://github.com/pustynsky/xray/pull/214),
+    [#266](https://github.com/pustynsky/xray/pull/266)).
+  - `bug-report_xray-index-freshness-reindex-cache-and-stale-branch-warning_2026-04-28.md`
+    — fixed in PR [#259](https://github.com/pustynsky/xray/pull/259)
+    (`fix(mcp): live branch warning + force-rebuild on xray_reindex`).
+  - `bug-report_xray-unbounded-work-hot-paths_2026-05-03.md` — fixed in
+    PR [#257](https://github.com/pustynsky/xray/pull/257)
+    (`fix: bound 5 unbounded-work hot paths in xray_edit + xray_definitions`).
 - **Documentation audit (Group A — top-level docs).** Full pass over every
   tracked top-level Markdown doc validated each factual claim against live
   code (`xray_info`, `cargo metadata`, `Select-String` of source) and
