@@ -79,7 +79,7 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 ### Installation
 
-**Option A — Automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1) — it downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for VS Code Copilot (Roo Code is optional, prompted separately):
+**Option A — Automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1) — it downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for the clients you opt into (VS Code Copilot Chat and/or GitHub Copilot CLI):
 
 ```powershell
 # From a clone of this repo, or download just the script:
@@ -89,10 +89,13 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 The script will:
 1. Download the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
 2. Scan the repo and suggest file extensions to index
-3. Create `.vscode/mcp.json` for Copilot (optionally `.roo/mcp.json` for Roo, prompted separately)
-4. Protect configs from accidental git push (`--skip-worktree` / `.git/info/exclude`)
+3. Create the MCP configs you opt into — `.vscode/mcp.json` for **VS Code Copilot Chat** and/or `.mcp.json` for **GitHub Copilot CLI** (each prompted separately, or via `-EnableVSCode` / `-EnableCopilotCli`)
+4. Protect configs from being clobbered by `git pull` and from leaking your local xray entry into commits:
+   - Tracked `.mcp.json` (shared-repo case) → per-clone **git smudge/clean filter** so `git status` stays clean and upstream changes apply silently
+   - Tracked `.vscode/mcp.json` → `git update-index --skip-worktree`
+   - Untracked files → `.git/info/exclude`
 
-See the [Installation Guide](docs/installation.md) for details, manual setup, and Cline configuration.
+See the [Installation Guide](docs/installation.md) for the smudge/clean filter design, manual setup, Cline configuration, and the Roo Code note (the `-EnableRoo` switch is currently a no-op).
 
 **Option B — Pre-built binary (manual).** Download `xray.exe` from the [GitHub releases page](https://github.com/pustynsky/xray/releases) ([direct link](https://github.com/pustynsky/xray/releases/latest)), drop it into a folder, and follow the [Installation Guide](docs/installation.md) for manual VS Code Copilot Chat / Roo Code / Cline setup.
 
