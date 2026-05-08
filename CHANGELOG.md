@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v0.2.5 (2026-05-08)
 
 - **`docs/di-support.md` — canonical DI-resolution reference (new file)
   + cross-links from README, architecture, and mcp-guide.** The
