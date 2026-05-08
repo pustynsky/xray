@@ -670,6 +670,22 @@ function New-XraySnapshotLine {
     return ('    "xray":{"command":' + $cmdJson + ',"args":[' + $argsJson + '],"env":{},"_xrayMcpMarker":' + $markerJson + '}')
 }
 
+function Get-GitWorkTreeRoot {
+    param([Parameter(Mandatory)] [string]$RepoRoot)
+
+    $ErrorActionPreference = 'Continue'
+
+    try {
+        $top = & git -C $RepoRoot rev-parse --show-toplevel 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $top) { return $null }
+        return (Resolve-Path ($top | Select-Object -First 1)).Path
+    }
+    catch {
+        return $null
+    }
+}
+
+
 function Get-ResolvedGitDir {
     param([Parameter(Mandatory)] [string]$RepoRoot)
 
@@ -780,6 +796,135 @@ function Test-IsTrackedFile {
     }
 }
 
+function Add-TextLineNoBom {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Line
+    )
+
+    $resolvedPath = if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path (Get-Location).Path $Path }
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+    $parent = Split-Path -Parent $resolvedPath
+    if ($parent -and -not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
+    if (-not (Test-Path $resolvedPath)) {
+        [IO.File]::WriteAllText($resolvedPath, ($Line + "`n"), $utf8NoBom)
+        return $true
+    }
+
+    $raw = [IO.File]::ReadAllText($resolvedPath)
+    $lines = @($raw -split "`r?`n") | Where-Object { $_ -ne '' }
+    if ($lines -contains $Line) {
+        return $false
+    }
+
+    $sep = if ($raw -match "`r`n") { "`r`n" } else { "`n" }
+    $prefix = if ($raw.Length -gt 0 -and -not $raw.EndsWith("`n")) { $sep } else { '' }
+    [IO.File]::AppendAllText($resolvedPath, ($prefix + $Line + $sep), $utf8NoBom)
+    return $true
+}
+
+function Remove-TextLineNoBom {
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$Line
+    )
+
+    $resolvedPath = if ([IO.Path]::IsPathRooted($Path)) { $Path } else { Join-Path (Get-Location).Path $Path }
+    if (-not (Test-Path $resolvedPath)) {
+        return $false
+    }
+
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+    $raw = [IO.File]::ReadAllText($resolvedPath)
+    $sep = if ($raw -match "`r`n") { "`r`n" } else { "`n" }
+    $parts = @($raw -split "`r?`n")
+    $kept = @($parts | Where-Object { $_ -ne $Line })
+    if ($kept.Count -eq $parts.Count) {
+        return $false
+    }
+
+    while ($kept.Count -gt 0 -and $kept[-1] -eq '') {
+        if ($kept.Count -eq 1) {
+            $kept = @()
+        }
+        else {
+            $kept = @($kept[0..($kept.Count - 2)])
+        }
+    }
+
+    $body = if ($kept.Count -gt 0) { ($kept -join $sep) + $sep } else { '' }
+    [IO.File]::WriteAllText($resolvedPath, $body, $utf8NoBom)
+    return $true
+}
+
+
+function Test-GitIgnoresPath {
+    param(
+        [Parameter(Mandatory)] [string]$RepoRoot,
+        [Parameter(Mandatory)] [string]$RelativePath
+    )
+
+    $ErrorActionPreference = 'Continue'
+
+    Push-Location $RepoRoot
+    try {
+        & git check-ignore -q -- $RelativePath 2>$null
+        return $LASTEXITCODE -eq 0
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Add-DirectoryGitignoreOverride {
+    param(
+        [Parameter(Mandatory)] [string]$RepoRoot,
+        [Parameter(Mandatory)] [string]$RelativePath,
+        [string]$ExcludePath
+    )
+
+    $dirRel = (Split-Path -Parent $RelativePath) -replace '\\', '/'
+    if ([string]::IsNullOrWhiteSpace($dirRel)) {
+        return $false
+    }
+
+    $leaf = Split-Path -Leaf $RelativePath
+    $localGitignoreRel = "$dirRel/.gitignore"
+    if (Test-IsTrackedFile -RepoRoot $RepoRoot -RelativePath $localGitignoreRel) {
+        Write-Warning "Cannot create local ignore override for $RelativePath because $localGitignoreRel is tracked. The repository .gitignore may keep this file visible."
+        return $false
+    }
+
+    $localGitignorePath = Join-Path $RepoRoot $localGitignoreRel
+    $helperExistedBefore = Test-Path $localGitignorePath
+    $addedHelperLine = Add-TextLineNoBom -Path $localGitignorePath -Line $leaf
+
+    $addedExcludeLine = $false
+    if ($ExcludePath) {
+        $addedExcludeLine = Add-TextLineNoBom -Path $ExcludePath -Line $localGitignoreRel
+    }
+
+    if (-not (Test-GitIgnoresPath -RepoRoot $RepoRoot -RelativePath $localGitignoreRel)) {
+        Write-Warning "Local ignore helper $localGitignoreRel may be visible in git status."
+        if (-not $helperExistedBefore) {
+            Remove-Item -Path $localGitignorePath -Force -ErrorAction SilentlyContinue
+        }
+        elseif ($addedHelperLine) {
+            [void](Remove-TextLineNoBom -Path $localGitignorePath -Line $leaf)
+        }
+        if ($ExcludePath -and $addedExcludeLine) {
+            [void](Remove-TextLineNoBom -Path $ExcludePath -Line $localGitignoreRel)
+        }
+        return $false
+    }
+
+    return (Test-GitIgnoresPath -RepoRoot $RepoRoot -RelativePath $RelativePath)
+}
+
+
 function Set-McpFileWithSnapshot {
     <#
         Writes an MCP config file so that it contains the snapshot line as
@@ -797,9 +942,8 @@ function Set-McpFileWithSnapshot {
           - Container present (multi-line, opens at end of line): inject
             snapshot line after the line that opens the object.
           - Container inline ({} on one line) or missing: warn and bail.
-            The smudge filter will passthrough; user's xray entry will not
-            be registered until they reformat the file or re-run with no
-            existing file.
+            The caller must fail closed for tracked filter installs; otherwise
+            setup would report success without registering xray.
 
         Output preserves the file's existing dominant line separator (CRLF
         if any CRLF is present in the input, otherwise LF). This matches
@@ -835,6 +979,7 @@ function Set-McpFileWithSnapshot {
         $kept = @(($normalized -split "`n") | Where-Object { $_ -notmatch '_xrayMcpMarker' })
         $normalized = ($kept -join "`n")
     }
+
 
     # Build the open-pattern. ContainerKey is constrained by ValidateSet to
     # 'mcpServers' or 'servers' (both safe regex literals); no escaping
@@ -1387,6 +1532,13 @@ catch {
     exit 1
 }
 
+$gitWorkTreeRoot = Get-GitWorkTreeRoot -RepoRoot $RepoPath
+$isGitRepo = $null -ne $gitWorkTreeRoot
+if ($isGitRepo -and $gitWorkTreeRoot -ne $RepoPath) {
+    Write-Host "Resolved git worktree root: $gitWorkTreeRoot" -ForegroundColor DarkGray
+    $RepoPath = $gitWorkTreeRoot
+}
+
 if ($Force -and -not ($EnableVSCode -or $EnableRoo -or $EnableCopilotCli) -and -not $Restore) {
     Write-Error '-Force requires at least one of -EnableVSCode, -EnableRoo, -EnableCopilotCli (no MCP client would be configured otherwise).'
     exit 1
@@ -1417,7 +1569,6 @@ if ($Uninstall) {
     $action = if ($DryRun) { 'Dry-run uninstall plan for' } else { 'Uninstalling xray from' }
     Write-Host "`n=== $action`: $RepoPath ===" -ForegroundColor Cyan
 
-    $isGitRepo = Test-Path (Join-Path $RepoPath '.git')
     $excludePath = $null
     if ($isGitRepo) {
         Push-Location $RepoPath
@@ -1567,9 +1718,8 @@ if ($Uninstall) {
     exit 0
 }
 
-$isGitRepo = Test-Path (Join-Path $RepoPath '.git')
 if (-not $isGitRepo) {
-    Write-Warning "$RepoPath does not appear to be a git repository (.git not found)"
+    Write-Warning "$RepoPath does not appear to be a git work tree (git rev-parse --show-toplevel failed)"
     $continue = Read-YesNo -Prompt 'Continue anyway?' -Default $false -ForceYes:$Force
     if (-not $continue) {
         exit 0
@@ -1756,7 +1906,9 @@ $xrayArgs = @(
 
 $vscodeMcpDir = Join-Path $RepoPath '.vscode'
 $vscodeMcpPath = Join-Path $vscodeMcpDir 'mcp.json'
+$vscodeMcpExistedBefore = Test-Path $vscodeMcpPath
 $writeVscode = $false
+$protectExistingUntrackedVscode = $false
 $vscodeAction = 'create'
 
 if ($EnableVSCode) {
@@ -1778,6 +1930,9 @@ if ($writeVscode -and (Test-Path $vscodeMcpPath)) {
         if (-not $Force) {
             Write-Warning "$vscodeMcpPath already has an 'xray' server entry"
             $writeVscode = Read-YesNo -Prompt 'Update it?' -Default $false
+            if (-not $writeVscode) {
+                $protectExistingUntrackedVscode = $true
+            }
         }
         $vscodeAction = 'merge'
     }
@@ -1849,6 +2004,13 @@ if ($writeVscode) {
                     Pop-Location
                 }
                 Write-Host "Configured xray in $vscodeMcpPath via smudge/clean filter (git status stays clean across upstream pulls)." -ForegroundColor Green
+            }
+            else {
+                Write-Warning 'Filter installation succeeded but the tracked .vscode/mcp.json could not be injected with the xray entry.'
+                Write-Warning 'Rolling back filter artifacts and aborting; otherwise setup would finish with no VS Code xray server registered.'
+                $rollbackResult = Uninstall-McpFilter -RepoRoot $RepoPath -FilterName 'xray-vscode-mcp' -AttributePath '.vscode/mcp.json' -McpRelPath '.vscode/mcp.json'
+                Write-Warning ("Rollback result: {0}. Reformat .vscode/mcp.json so the servers object is multiline or empty-inline, then re-run setup." -f $rollbackResult)
+                exit 1
             }
         }
         else {
@@ -1980,7 +2142,9 @@ if ($writeRoo) {
 # .github/copilot/mcp.json and .github/mcp.json are NOT read by Copilot CLI
 # as of this writing (verified empirically against the official CLI).
 $copilotCliMcpPath = Join-Path $RepoPath '.mcp.json'
+$copilotCliMcpExistedBefore = Test-Path $copilotCliMcpPath
 $writeCopilotCli = $false
+$protectExistingUntrackedCopilotCli = $false
 $copilotCliAction = 'create'
 
 if ($EnableCopilotCli) {
@@ -2002,6 +2166,9 @@ if ($writeCopilotCli -and (Test-Path $copilotCliMcpPath)) {
         if (-not $Force) {
             Write-Warning "$copilotCliMcpPath already has an 'xray' server entry"
             $writeCopilotCli = Read-YesNo -Prompt 'Update it?' -Default $false
+            if (-not $writeCopilotCli) {
+                $protectExistingUntrackedCopilotCli = $true
+            }
         }
         $copilotCliAction = 'merge'
     }
@@ -2074,6 +2241,13 @@ if ($writeCopilotCli) {
                 }
                 Write-Host "Configured xray in $copilotCliMcpPath via smudge/clean filter (git status stays clean across upstream pulls)." -ForegroundColor Green
             }
+            else {
+                Write-Warning 'Filter installation succeeded but the tracked .mcp.json could not be injected with the xray entry.'
+                Write-Warning 'Rolling back filter artifacts and aborting; otherwise setup would finish with no Copilot CLI xray server registered.'
+                $rollbackResult = Uninstall-McpFilter -RepoRoot $RepoPath -FilterName 'xray-mcp' -AttributePath '.mcp.json' -McpRelPath '.mcp.json'
+                Write-Warning ("Rollback result: {0}. Reformat .mcp.json so the mcpServers object is multiline or empty-inline, then re-run setup." -f $rollbackResult)
+                exit 1
+            }
         }
         else {
             # FAIL-CLOSED: the upstream-tracked .mcp.json must NOT be rewritten
@@ -2124,6 +2298,7 @@ if ($isGitRepo) {
     try {
         $skipWorktreeFiles = @()
         $excludedFiles = @()
+        $gitProtectionFailed = $false
 
         # `git rev-parse` exits non-zero when .git exists but is not a real
         # repo (e.g. submodule placeholder or partially initialized dir).
@@ -2151,9 +2326,9 @@ if ($isGitRepo) {
         }
 
         foreach ($mcpFile in @(
-                @{ Path = '.vscode/mcp.json'; Protect = ($writeVscode -and -not $vscodeFilterInstalled -and (Test-Path (Join-Path $RepoPath '.vscode/mcp.json'))) },
-                @{ Path = '.roo/mcp.json'; Protect = ($writeRoo -and (Test-Path (Join-Path $RepoPath '.roo/mcp.json'))) },
-                @{ Path = '.mcp.json'; Protect = ($writeCopilotCli -and -not $copilotCliFilterInstalled -and (Test-Path (Join-Path $RepoPath '.mcp.json'))) }
+                @{ Path = '.vscode/mcp.json'; Protect = ((($writeVscode -and -not $vscodeFilterInstalled) -or $protectExistingUntrackedVscode) -and (Test-Path (Join-Path $RepoPath '.vscode/mcp.json'))); UntrackedOnly = ($protectExistingUntrackedVscode -and -not ($writeVscode -and -not $vscodeFilterInstalled)); Generated = (-not $vscodeMcpExistedBefore) },
+                @{ Path = '.roo/mcp.json'; Protect = ($writeRoo -and (Test-Path (Join-Path $RepoPath '.roo/mcp.json'))); UntrackedOnly = $false; Generated = $false },
+                @{ Path = '.mcp.json'; Protect = ((($writeCopilotCli -and -not $copilotCliFilterInstalled) -or $protectExistingUntrackedCopilotCli) -and (Test-Path (Join-Path $RepoPath '.mcp.json'))); UntrackedOnly = ($protectExistingUntrackedCopilotCli -and -not ($writeCopilotCli -and -not $copilotCliFilterInstalled)); Generated = (-not $copilotCliMcpExistedBefore) }
             )) {
             if (-not $mcpFile.Protect) {
                 continue
@@ -2169,6 +2344,10 @@ if ($isGitRepo) {
             }
 
             if ($tracked) {
+                if ($mcpFile.UntrackedOnly) {
+                    continue
+                }
+
                 & git update-index --skip-worktree $rel 2>$null | Out-Null
                 if ($LASTEXITCODE -eq 0) {
                     $skipWorktreeFiles += $rel
@@ -2177,10 +2356,33 @@ if ($isGitRepo) {
                     Write-Warning ("git update-index --skip-worktree {0} failed (exit {1})" -f $rel, $LASTEXITCODE)
                 }
             }
-            elseif ($excludePath -and $existingExcludes -notcontains $rel) {
-                Add-Content -Path $excludePath -Value $rel -Encoding UTF8
-                $excludedFiles += $rel
+            elseif ($excludePath) {
+                $addedExcludeLine = Add-TextLineNoBom -Path $excludePath -Line $rel
+
+                if (-not (Test-GitIgnoresPath -RepoRoot $RepoPath -RelativePath $rel)) {
+                    [void](Add-DirectoryGitignoreOverride -RepoRoot $RepoPath -RelativePath $rel -ExcludePath $excludePath)
+                }
+
+                if (Test-GitIgnoresPath -RepoRoot $RepoPath -RelativePath $rel) {
+                    $excludedFiles += $rel
+                }
+                else {
+                    Write-Warning ("Git protection for {0} was ineffective. A higher-priority .gitignore rule may be re-including it." -f $rel)
+                    if ($addedExcludeLine) {
+                        [void](Remove-TextLineNoBom -Path $excludePath -Line $rel)
+                    }
+                    if ($mcpFile.Generated) {
+                        Remove-Item -Path (Join-Path $RepoPath $rel) -Force -ErrorAction SilentlyContinue
+                        Write-Warning ("Removed generated {0} because it could not be hidden from git status." -f $rel)
+                    }
+                    $gitProtectionFailed = $true
+                }
             }
+        }
+
+        if ($gitProtectionFailed) {
+            Write-Error 'Git protection failed for one or more generated MCP configs. Setup aborted so local-only MCP files are not accidentally committed.'
+            exit 1
         }
 
         if ($skipWorktreeFiles.Count -gt 0) {

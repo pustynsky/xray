@@ -95,6 +95,45 @@ try {
     Write-Host "Fake xray:  $fakeXray" -ForegroundColor Cyan
     Write-Host ''
 
+    # ---- Step 0: compact tracked VS Code config ----
+    # Regression guard: a tracked file shaped as {"servers":{}} used to
+    # install the filter and exit 0 without injecting xray, leaving VS Code
+    # with no server despite setup reporting success. This shape is not
+    # byte-exact safe for the line-based clean filter, so setup must fail
+    # closed instead of reporting success.
+    Write-Host '== Step 0: compact tracked .vscode/mcp.json ({"servers":{}}) fails closed ==' -ForegroundColor Cyan
+    $compactDir = Join-Path $workRoot 'compact'
+    git init -q -b main $compactDir
+    Push-Location $compactDir
+    try {
+        git config user.email 'compact@example.com'
+        git config user.name 'Compact'
+        New-Item -ItemType Directory -Path '.vscode' -Force | Out-Null
+        [IO.File]::WriteAllText((Join-Path $compactDir '.vscode/mcp.json'), '{"servers":{}}', [Text.UTF8Encoding]::new($false))
+        git add .vscode/mcp.json
+        git commit -q -m 'compact vscode mcp config'
+    }
+    finally {
+        Pop-Location
+    }
+
+    & pwsh -NoProfile -File $setupScript `
+        -RepoPath $compactDir `
+        -InstallDir $fakeInstallDir `
+        -SkipDownload `
+        -EnableVSCode `
+        -Force `
+        -Extensions 'cs,md' | Out-Host
+
+    Assert-True 'compact: setup exits non-zero' ($LASTEXITCODE -ne 0)
+    $compactMcp = Read-Mcp (Join-Path $compactDir '.vscode\mcp.json')
+    Assert-True 'compact: xray entry not injected after failure' (-not ($compactMcp -match '"xray"\s*:'))
+    Assert-True 'compact: marker not present after failure' (-not ($compactMcp -match '_xrayMcpMarker'))
+    $compactStatus = Run-Git $compactDir status --porcelain -- '.vscode/mcp.json'
+    Assert-True 'compact: tracked config remains clean after fail-closed rollback' ([string]::IsNullOrWhiteSpace($compactStatus.Output))
+    Write-Host ''
+
+
     # ---- Step 1: build upstream + clone ----
     Write-Host '== Step 1: prepare upstream and clone (.vscode/mcp.json tracked) ==' -ForegroundColor Cyan
 
