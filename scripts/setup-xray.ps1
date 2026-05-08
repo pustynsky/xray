@@ -435,6 +435,210 @@ function Remove-GitProtection {
 
 $Script:XrayMcpMarker = 'managed-by-setup-xray.ps1-do-not-edit'
 
+# -----------------------------------------------------------------------------
+# Embedded MCP filter scripts (smudge / clean).
+# -----------------------------------------------------------------------------
+#
+# These are byte-identical copies of scripts/mcp-filter/{smudge,clean}.sh
+# from the xray repo. They are embedded so this script is fully
+# self-contained: when invoked via the bootstrap one-liner
+# (`iex (irm .../setup-xray.ps1)`) or downloaded standalone (Option A2),
+# there is no `mcp-filter/` directory next to the script on disk, but
+# Install-McpFilter still needs the filter scripts to wire git
+# smudge/clean.
+#
+# Source-of-truth: scripts/mcp-filter/{smudge,clean}.sh in the repo.
+# These embedded copies are kept in sync by:
+#   * scripts/mcp-filter/test-embedded-sync.ps1 (CI-style byte-equality
+#     check; AST-extracts these constants and diff-vs-disk).
+#   * Install-McpFilter prefers the on-disk source when present, so
+#     local edits to scripts/mcp-filter/*.sh take effect immediately
+#     without re-embedding here. The embedded copy is a fallback only.
+#
+# DO NOT EDIT BY HAND. Run `scripts/mcp-filter/test-embedded-sync.ps1`
+# to verify in-sync; if it fails, copy the canonical .sh body into the
+# corresponding here-string below verbatim.
+#
+# Encoding: single-quoted here-strings (`@'...'@`) take content literally
+# (no $ interpolation, no backtick escapes, single-quote chars allowed).
+# Both files have been verified to contain neither CRLF nor the
+# terminator sequence `'@` at column 1.
+
+$Script:EmbeddedSmudgeSh = @'
+#!/usr/bin/env bash
+# smudge filter for xray-managed MCP config files (.mcp.json,
+# .vscode/mcp.json, ...). Reads the canonical (upstream-only) form from
+# stdin, writes the enriched form (with the local xray entry injected) to
+# stdout.
+#
+# CONTAINER KEY (first positional argument):
+#   The JSON object key whose opening brace marks the injection point.
+#   - .mcp.json (Copilot CLI):     "mcpServers"  (default)
+#   - .vscode/mcp.json (VS Code): "servers"
+#   Defaults to "mcpServers" when no argument is passed, preserving
+#   backward compatibility with installs from the previous version of
+#   setup-xray.ps1 that wired the filter as `bash <path>` with no args.
+#
+# Strategy: insert the snapshot line as the FIRST entry inside the
+# container object, immediately after its opening brace. This avoids
+# matching the closing brace, which would require brace-counting that is
+# not safe against `{` and `}` characters appearing inside JSON string
+# values (common in args).
+#
+# Behavior:
+#   * snapshot.txt missing             -> passthrough (filter no-op)
+#   * input already contains marker    -> passthrough (defensive)
+#   * mcpServers opens at end of line  -> inject after that line
+#       - empty mcpServers (next non-blank line is `}` or `},`) -> inject without trailing comma
+#       - non-empty mcpServers                                  -> inject with trailing comma
+#   * any other shape (inline `{}`, single-line full mcpServers, missing key) -> passthrough
+#
+# Round-trip property (verified by test-roundtrip.ps1):
+#   clean(smudge(canonical)) == canonical for every fixture in fixtures/.
+#
+# Implementation note: uses perl (bundled with Git for Windows) instead of
+# awk because awk on Git for Windows normalizes CRLF -> LF even with
+# BINMODE=3, breaking byte-exact round-trip on Windows clones with
+# CRLF-stored .mcp.json. perl with `:raw` binmode preserves bytes verbatim
+# on all platforms.
+#
+# `filter.required = false` is set so that any failure here (including
+# missing bash on PATH) degrades to passthrough rather than aborting git.
+#
+# Installed as: .git/xray-mcp/smudge.sh
+# Wired via:    [filter "xray-mcp"] smudge = .git/xray-mcp/smudge.sh
+#
+# DO NOT EDIT BY HAND. setup-xray.ps1 manages this file.
+
+set -eu
+
+# First positional argument: container key (defaults to "mcpServers" for
+# backward compat with pre-vscode-extension installs that wired the filter
+# command as `bash <path>` with no args). Validate it's a non-empty
+# alphanumeric token so the value can be safely interpolated into the perl
+# regex below without escaping.
+container_key="${1:-mcpServers}"
+if ! printf '%s' "$container_key" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+    # Invalid container key -> degrade to passthrough rather than risk a
+    # regex injection or a perl die that would block git checkout.
+    exec cat
+fi
+
+snapshot_path="$(dirname "$0")/snapshot.txt"
+
+# Snapshot missing -> passthrough.
+if [ ! -r "$snapshot_path" ]; then
+    exec cat
+fi
+
+exec perl -e '
+    use strict;
+    use warnings;
+    binmode STDIN,  ":raw";
+    binmode STDOUT, ":raw";
+
+    # Read snapshot (single line; strip any trailing CR/LF).
+    my $snapshot_path = $ARGV[0];
+    my $container_key = $ARGV[1];
+    open my $sf, "<:raw", $snapshot_path or do { print while <STDIN>; exit 0 };
+    my $snap = do { local $/; <$sf> };
+    close $sf;
+    $snap =~ s/[\r\n]+\z//;
+
+    # Slurp entire input.
+    my $all = do { local $/; <STDIN> };
+    $all = "" unless defined $all;
+
+    # Defensive: if the marker is already present, passthrough byte-exact.
+    if ($all =~ /_xrayMcpMarker/) {
+        print $all;
+        exit 0;
+    }
+
+    # Detect dominant line separator (\r\n vs \n).
+    # If we see at least one \r\n in the input, use it; else \n; else \n.
+    my $sep = ($all =~ /\r\n/) ? "\r\n" : "\n";
+
+    # Split into lines preserving separators. Use split with limit=-1 so
+    # trailing empty strings are kept; structure is text,sep,text,sep,...
+    my @parts = split /(\r?\n)/, $all, -1;
+
+    # Build the container-opening regex: "<key>"\s*:\s*\{\s*$
+    # The key is validated by the bash wrapper to be /^[A-Za-z_][A-Za-z0-9_]*$/
+    # so it is safe to splice into the regex without escaping.
+    my $open_re = qr/"\Q$container_key\E"\s*:\s*\{\s*$/;
+
+    my @out;
+    my $injected = 0;
+    my $i = 0;
+    my $n = scalar @parts;
+    while ($i < $n) {
+        my $text = $parts[$i];
+        my $line_sep = ($i + 1 < $n) ? $parts[$i + 1] : "";
+        push @out, $text;
+        push @out, $line_sep if $line_sep ne "";
+
+        if (!$injected && $text =~ $open_re) {
+            # Peek next text segment (skip blank lines).
+            my $j = $i + 2;  # next text index after sep
+            while ($j < $n && $parts[$j] =~ /^\s*$/ && (($j + 1 < $n) ? $parts[$j + 1] ne "" : 0)) {
+                # Push the blank line through.
+                push @out, $parts[$j];
+                push @out, $parts[$j + 1];
+                $j += 2;
+            }
+            my $next = ($j < $n) ? $parts[$j] : "";
+            my $trimmed = $next;
+            $trimmed =~ s/^\s+//;
+            $trimmed =~ s/\s+$//;
+            my $is_empty_servers = ($trimmed eq "}" || $trimmed eq "}," || $trimmed eq "} ,");
+
+            my $line_to_emit = $is_empty_servers ? $snap : $snap . ",";
+            push @out, $line_to_emit;
+            push @out, $line_sep;  # match same line separator as opening line
+            $injected = 1;
+
+            # Continue from $j (we already pushed blank lines).
+            $i = $j;
+            next;
+        }
+
+        $i += 2;  # advance past text + sep
+    }
+
+    print join("", @out);
+' "$snapshot_path" "$container_key"
+'@
+
+$Script:EmbeddedCleanSh = @'
+#!/usr/bin/env bash
+# clean filter for .mcp.json (xray MCP per-clone setup).
+# Reads enriched .mcp.json from stdin, writes canonical (upstream-only) form
+# to stdout by deleting any line carrying the _xrayMcpMarker sentinel.
+#
+# Idempotent: an input with no marker passes through byte-identical.
+# Designed to be the exact inverse of smudge.sh on smudge-produced content.
+#
+# Implementation note: uses perl (bundled with Git for Windows) instead of
+# sed because sed on Git for Windows normalizes CRLF -> LF, breaking
+# byte-exact round-trip on Windows clones with CRLF-stored .mcp.json.
+# perl with `:raw` binmode preserves bytes verbatim on all platforms.
+#
+# Installed as: .git/xray-mcp/clean.sh
+# Wired via:    [filter "xray-mcp"] clean = .git/xray-mcp/clean.sh
+#
+# DO NOT EDIT BY HAND. setup-xray.ps1 manages this file.
+
+set -eu
+exec perl -e '
+    binmode STDIN, ":raw";
+    binmode STDOUT, ":raw";
+    while (<STDIN>) {
+        print unless /_xrayMcpMarker/;
+    }
+'
+'@
+
 function New-XraySnapshotLine {
     <#
         Builds the single-line JSON entry that the smudge filter injects
@@ -468,6 +672,14 @@ function New-XraySnapshotLine {
 
 function Get-ResolvedGitDir {
     param([Parameter(Mandatory)] [string]$RepoRoot)
+
+    # Local EAP override: see Test-IsTrackedFile for the full rationale.
+    # `git rev-parse --git-dir` writes "fatal: not a git repository" to
+    # stderr when called outside a repo; on Windows PowerShell 5.1 with
+    # $ErrorActionPreference='Stop' inherited from script scope, that
+    # stderr line is converted to a terminating ErrorRecord and aborts the
+    # entire script. Function scope confines the override.
+    $ErrorActionPreference = 'Continue'
 
     Push-Location $RepoRoot
     try {
@@ -512,6 +724,9 @@ function Get-ResolvedGitCommonDir {
     #>
     param([Parameter(Mandatory)] [string]$RepoRoot)
 
+    # Local EAP override: see Test-IsTrackedFile for the full rationale.
+    $ErrorActionPreference = 'Continue'
+
     Push-Location $RepoRoot
     try {
         $gcd = & git rev-parse --git-common-dir 2>$null
@@ -530,25 +745,34 @@ function Test-IsTrackedFile {
         [Parameter(Mandatory)] [string]$RelativePath
     )
 
+    # `git ls-files --error-unmatch` is the standard probe for "is this path
+    # tracked?". It exits 0 for tracked, 1 (with stderr "error: pathspec ...
+    # did not match") for untracked. The stderr message is the *expected*
+    # answer, not a real error.
+    #
+    # On Windows PowerShell 5.1 — the runtime the bootstrap one-liner
+    # invokes by default — native-command stderr is converted to a
+    # NativeCommandError ErrorRecord. With $ErrorActionPreference='Stop'
+    # inherited from script scope (set near the top of this script for
+    # safety), that ErrorRecord becomes a TERMINATING error and aborts
+    # the entire setup script BEFORE the script can branch on $LASTEXITCODE.
+    # `2>$null`, `2>&1 | Out-Null`, and `$null = ... 2>&1` do NOT change
+    # this behavior; the abort happens before the redirect can swallow
+    # the stream. PowerShell 7's $PSNativeCommandUseErrorActionPreference
+    # toggle does not exist in 5.1, so the fix has to be local-scope EAP
+    # relaxation. Function scope confines the override; nothing else needs
+    # the relaxed setting.
+    #
+    # See target/tmp/leak-probe2.ps1 for the cross-runtime test that
+    # established this. (Bug surfaced in production: setup-xray.ps1 line 551
+    # leaked `git.exe : error: pathspec '.vscode/mcp.json' did not match...`
+    # to the user's console and aborted setup before the VS Code MCP file
+    # could be created.)
+    $ErrorActionPreference = 'Continue'
+
     Push-Location $RepoRoot
     try {
-        # `git ls-files --error-unmatch` is the standard probe for "is this
-        # path tracked?". It exits 0 for tracked, 1 (with stderr "error:
-        # pathspec ... did not match") for untracked. The stderr message is
-        # the *expected* answer, not a real error.
-        #
-        # On PowerShell 7.3+ a plain `2>$null` does NOT silence native-command
-        # stderr — PowerShell wraps it in a NativeCommandError ErrorRecord
-        # before the redirect can swallow it, and the user sees the leak on
-        # the console even though the script continues normally (the parent
-        # `$PSNativeCommandUseErrorActionPreference = $false` set near the
-        # top of this script suppresses the *terminating* abort, but not the
-        # write to the error stream).
-        #
-        # `2>&1` merges stderr into the success stream BEFORE the wrapping
-        # happens, and `$null = …` discards both streams. This works on
-        # PowerShell 5.1, 7.0, 7.3, 7.4+ identically.
-        $null = & git ls-files --error-unmatch -- $RelativePath 2>&1
+        $null = & git ls-files --error-unmatch -- $RelativePath 2>$null
         return $LASTEXITCODE -eq 0
     }
     finally {
@@ -715,11 +939,35 @@ function Install-McpFilter {
         return $false
     }
 
+    # Filter script sources: prefer on-disk (clone case — local edits to
+    # scripts/mcp-filter/*.sh take effect immediately), fall back to the
+    # embedded constants ($Script:EmbeddedSmudgeSh / $Script:EmbeddedCleanSh)
+    # when no `mcp-filter/` directory exists next to this script. The
+    # fallback path is hit by:
+    #   * the bootstrap one-liner (`iex (irm .../setup-xray.ps1)`) — the
+    #     script never lands on disk, so $ScriptDir is irrelevant.
+    #   * Option A2 (`iwr ... -OutFile $tmp; & $tmp`) — the script lands
+    #     in %TEMP% with no sibling directory.
+    # The on-disk-vs-embedded byte-equality is enforced by
+    # scripts/mcp-filter/test-embedded-sync.ps1.
     $srcFilterDir = Join-Path $ScriptDir 'mcp-filter'
+    $filterSources = @{}
     foreach ($name in @('smudge.sh', 'clean.sh')) {
-        if (-not (Test-Path (Join-Path $srcFilterDir $name))) {
-            Write-Warning ("Filter source missing: {0}" -f (Join-Path $srcFilterDir $name))
-            return $false
+        $diskPath = Join-Path $srcFilterDir $name
+        if (Test-Path $diskPath) {
+            $filterSources[$name] = @{ Source = 'disk'; DiskPath = $diskPath }
+        }
+        else {
+            $embedded = if ($name -eq 'smudge.sh') { $Script:EmbeddedSmudgeSh } else { $Script:EmbeddedCleanSh }
+            if (-not $embedded) {
+                # Defensive: if a future refactor accidentally drops the
+                # embedded constants AND the disk source is missing, we
+                # cannot proceed. The previous behavior was a hard failure
+                # here too.
+                Write-Warning ("Filter source missing: {0} (and no embedded fallback)" -f $diskPath)
+                return $false
+            }
+            $filterSources[$name] = @{ Source = 'embedded'; Body = $embedded }
         }
     }
 
@@ -732,11 +980,23 @@ function Install-McpFilter {
 
     # Copy filter scripts, normalizing to LF (bash on Windows tolerates CRLF
     # in scripts but it can break heredocs and trailing-newline-sensitive
-    # constructs).
+    # constructs). Also enforce a trailing LF so the embedded-fallback path
+    # produces a file byte-identical to the on-disk source path: PowerShell
+    # here-strings (`@'...'@`) do NOT include the bounding newline before
+    # `'@` in the value, so the embedded constants end without `\n`; on-disk
+    # source files conventionally do. Ensuring trailing-LF here makes both
+    # branches converge.
     foreach ($name in @('smudge.sh', 'clean.sh')) {
-        $src = Join-Path $srcFilterDir $name
+        $info = $filterSources[$name]
+        if ($info.Source -eq 'disk') {
+            $body = [IO.File]::ReadAllText($info.DiskPath, $utf8NoBom)
+        }
+        else {
+            $body = $info.Body
+        }
+        $body = $body -replace "`r`n", "`n"
+        if (-not $body.EndsWith("`n")) { $body += "`n" }
         $dst = Join-Path $filterDir $name
-        $body = ([IO.File]::ReadAllText($src, $utf8NoBom)) -replace "`r`n", "`n"
         [IO.File]::WriteAllText($dst, $body, $utf8NoBom)
     }
 
@@ -778,13 +1038,37 @@ function Install-McpFilter {
         $smudgeCmd = 'bash "$(git rev-parse --git-common-dir)/' + $FilterName + '/smudge.sh" ' + $ContainerKey
         $cleanCmd  = 'bash "$(git rev-parse --git-common-dir)/' + $FilterName + '/clean.sh"'
 
-        & git config --local ("filter.{0}.smudge" -f $FilterName) $smudgeCmd 2>&1 | Out-Null
+        # Windows PowerShell 5.1 native-command argument-passing bug:
+        # when an argument value contains literal `"` characters, 5.1's
+        # CommandLineToArgvW-style serialization STRIPS the embedded
+        # quotes, then git word-splits the result. e.g. on 5.1,
+        # `& git config --local key 'bash "$(...)/smudge.sh" arg'` is
+        # delivered to git.exe as multiple args (`bash`, `$(...)/smudge.sh`,
+        # `arg`) and stored as just `bash` — or, when the broken split
+        # produces flag-shaped tokens, git aborts with "error: no action
+        # specified". PS 7.4+ defaults `$PSNativeCommandArgumentPassing`
+        # to `Standard` which escapes the embedded quotes correctly, so
+        # this hazard is 5.1-specific. Workaround: pre-escape every `"`
+        # in the value to `\"` ONLY on 5.1; PS 7+ would double-escape if
+        # we did the same.
+        # Was caught by target/tmp/test-prod-embedded.ps1; the existing
+        # test-e2e.ps1 misses it because it always invokes setup-xray.ps1
+        # via `pwsh -File ...` (PS 7) regardless of the runtime running
+        # the test itself.
+        $smudgeArg = $smudgeCmd
+        $cleanArg  = $cleanCmd
+        if ($PSVersionTable.PSVersion.Major -lt 6) {
+            $smudgeArg = $smudgeCmd -replace '"', '\"'
+            $cleanArg  = $cleanCmd  -replace '"', '\"'
+        }
+
+        & git config --local ("filter.{0}.smudge" -f $FilterName) $smudgeArg 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Warning ("git config filter.{0}.smudge failed (exit {1})" -f $FilterName, $LASTEXITCODE)
             return $false
         }
 
-        & git config --local ("filter.{0}.clean" -f $FilterName) $cleanCmd 2>&1 | Out-Null
+        & git config --local ("filter.{0}.clean" -f $FilterName) $cleanArg 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
             Write-Warning ("git config filter.{0}.clean failed (exit {1})" -f $FilterName, $LASTEXITCODE)
             return $false
@@ -960,6 +1244,35 @@ function Uninstall-McpFilter {
 }
 
 function Get-DetectedExtensions {
+    <#
+        Walks the directory tree under $RootPath and tallies file
+        extensions whose key is present in $KnownExtensions, skipping any
+        directory whose immediate name is in $SkipDirectoryNames.
+
+        IMPORTANT: pruning is applied at the DIRECTORY BOUNDARY, BEFORE
+        descending. The previous implementation used
+            Get-ChildItem -Recurse -File | Where-Object { ... not in skip ... }
+        which still had to enumerate every file inside `node_modules`,
+        `target`, `bin`, `obj`, `dist`, etc. and only THEN dropped them
+        in PowerShell. On the xray repo itself (warm cache) that
+        recursive enumeration walks ~67k files to keep ~380 — a ~178x
+        over-walk that takes ~3.4s. On any larger repo with a populated
+        `node_modules` (frontend monorepos, Electron apps) the same
+        pattern blows up to tens of seconds.
+
+        The new implementation uses an explicit stack +
+        [IO.Directory]::EnumerateFiles / EnumerateDirectories so we never
+        look inside a skipped directory at all. Same behavior on
+        permission-denied / IO failure / long-path / security errors
+        (silent — matches the previous `-ErrorAction SilentlyContinue`
+        semantics, which swallowed everything); same case-insensitive
+        skip-set semantics; same `-Force` equivalent (hidden dirs are
+        visited unless explicitly listed in $SkipDirectoryNames, which
+        is where `.git` / `.vs` / `.idea` / `.vscode` / etc. live).
+
+        Returns a hashtable of extension -> count. Extensions are
+        normalized lowercase, leading dot stripped.
+    #>
     param(
         [string]$RootPath,
         [hashtable]$KnownExtensions,
@@ -970,25 +1283,85 @@ function Get-DetectedExtensions {
     $skipSet = [System.Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
     $SkipDirectoryNames | ForEach-Object { $null = $skipSet.Add($_) }
 
-    Get-ChildItem -Path $RootPath -Recurse -File -Force -ErrorAction SilentlyContinue |
-        Where-Object {
-            $relativePath = $_.FullName.Substring($RootPath.Length + 1)
-            foreach ($segment in $relativePath.Split([IO.Path]::DirectorySeparatorChar)) {
-                if ($skipSet.Contains($segment)) {
-                    return $false
+    # Stack-based DFS. Using a Stack[string] (not List or recursion):
+    # avoids PS function-call overhead per directory; bounds memory at
+    # max-depth-of-tree rather than total-dir-count.
+    $stack = [System.Collections.Generic.Stack[string]]::new()
+    $stack.Push($RootPath)
+
+    while ($stack.Count -gt 0) {
+        $dir = $stack.Pop()
+
+        # Files in this directory.
+        #
+        # Catch contract MUST match the previous Get-ChildItem -Recurse
+        # -File -Force -ErrorAction SilentlyContinue behavior, which
+        # swallowed EVERY error during enumeration (auth, IO, security,
+        # long-path, etc.) and continued the walk. Catching only specific
+        # exceptions here would narrow that contract and could abort
+        # setup partway through scan on edge cases like deep node_modules
+        # paths > MAX_PATH (PathTooLongException is an IOException) or
+        # antivirus-locked files (IOException). UnauthorizedAccessException,
+        # IOException, and SecurityException together cover the entire set
+        # of exceptions the .NET enumerate APIs document as throwing.
+        try {
+            foreach ($file in [IO.Directory]::EnumerateFiles($dir)) {
+                # Path.GetExtension returns ".cs" / "" — strip the dot
+                # and lowercase. ToLowerInvariant matches the previous
+                # behavior; OrdinalIgnoreCase on the hashtable key would
+                # be a separate change.
+                $ext = [IO.Path]::GetExtension($file)
+                if ($ext.Length -gt 1) {
+                    $ext = $ext.Substring(1).ToLowerInvariant()
+                    if ($KnownExtensions.ContainsKey($ext)) {
+                        if ($extCounts.ContainsKey($ext)) {
+                            $extCounts[$ext]++
+                        }
+                        else {
+                            $extCounts[$ext] = 1
+                        }
+                    }
                 }
-            }
-            return $true
-        } |
-        ForEach-Object {
-            $ext = $_.Extension.TrimStart('.').ToLowerInvariant()
-            if ($ext -and $KnownExtensions.ContainsKey($ext)) {
-                if (-not $extCounts.ContainsKey($ext)) {
-                    $extCounts[$ext] = 0
-                }
-                $extCounts[$ext]++
             }
         }
+        catch [UnauthorizedAccessException] { } # silent — matches previous -ErrorAction SilentlyContinue
+        catch [IO.IOException] { }              # incl. DirectoryNotFound, FileNotFound, PathTooLong
+        catch [Security.SecurityException] { }
+
+        # Subdirectories — prune by leaf name AND by reparse-point attr.
+        #
+        # Reparse points (symlinks / junctions / mount points) are NOT
+        # followed. The previous Get-ChildItem -Recurse implementation
+        # also did not follow them by default — that's the safe behavior
+        # to avoid infinite loops on circular junctions and to avoid
+        # accidentally descending into mapped network drives or backup
+        # mount points. Switching to [IO.Directory]::EnumerateDirectories
+        # changes that default (it DOES follow them), so we must opt out
+        # explicitly. This was caught by a benchmark-vs-old comparison
+        # on the xray repo itself, where `.github\skills\repo-kb\` is a
+        # junction and the new implementation initially walked into it.
+        #
+        # Catch contract: same as the file-enumerate block — preserve the
+        # silent-on-everything semantics of the previous Get-ChildItem
+        # -ErrorAction SilentlyContinue.
+        try {
+            foreach ($sub in [IO.Directory]::EnumerateDirectories($dir)) {
+                $leaf = [IO.Path]::GetFileName($sub)
+                if ($skipSet.Contains($leaf)) { continue }
+                try {
+                    $attrs = [IO.File]::GetAttributes($sub)
+                    if ($attrs -band [IO.FileAttributes]::ReparsePoint) { continue }
+                }
+                catch [UnauthorizedAccessException] { continue }
+                catch [IO.IOException] { continue }              # incl. FileNotFound on race-removed dir
+                catch [Security.SecurityException] { continue }
+                $stack.Push($sub)
+            }
+        }
+        catch [UnauthorizedAccessException] { }
+        catch [IO.IOException] { }              # incl. DirectoryNotFound
+        catch [Security.SecurityException] { }
+    }
 
     return $extCounts
 }

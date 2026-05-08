@@ -2,6 +2,74 @@
 
 ## Unreleased
 
+- **`scripts/setup-xray.ps1` — four production install-path fixes
+  (`perf/setup-xray-scan-prune`).**
+  1. **`Get-DetectedExtensions` rewrite** (140–284× speed-up on
+    representative repos): replaced the recursive
+    `Get-ChildItem -Recurse -Force -ErrorAction SilentlyContinue` walk
+    with an explicit stack-based DFS that prunes at directory
+    boundaries (skips `.git`, `node_modules`, `target`, etc. before
+    descending), skips reparse points via
+    `[IO.File]::GetAttributes -band [IO.FileAttributes]::ReparsePoint`
+    so junctions/symlinks can’t cause infinite loops, and widens the
+    `try/catch` blocks so a single unreadable directory or
+    permission-denied file no longer aborts detection. Tracked test
+    coverage: `scripts/test-detect-extensions.ps1` (7 cases including
+    pruned-dir, deep-extension, reparse-point, and
+    permission-denied; both PS 7 and PS 5.1).
+  2. **PS 5.1 stderr-leak fix in `Test-IsTrackedFile` /
+    `Get-ResolvedGitDir` / `Get-ResolvedGitCommonDir`.** Under PS 5.1,
+    native-command stderr (e.g. `git ls-files --error-unmatch` for an
+    unknown path) becomes a `NativeCommandError` ErrorRecord; with the
+    script-scope `$ErrorActionPreference = 'Stop'` it becomes
+    terminating BEFORE `2>&1` can capture it, aborting the install
+    with `git.exe : error: pathspec '…' did not match any file(s)`.
+    Fix: function-scope `$ErrorActionPreference = 'Continue'` in those
+    three helpers so explicit `$LASTEXITCODE` checks remain the source
+    of truth across both runtimes.
+  3. **Embedded MCP filter scripts as fallback for the bootstrap
+    one-liner / Option A2 install path.** `Install-McpFilter`
+    previously failed with `Filter source missing: <tmp>\\mcp-filter\\smudge.sh`
+    when `setup-xray.ps1` was executed in-memory by the documented
+    `iex (irm …/setup-xray.ps1)` one-liner or downloaded to `%TEMP%`
+    by Option A2 (no `mcp-filter/` sibling on disk). The script now
+    embeds `$Script:EmbeddedSmudgeSh` / `$Script:EmbeddedCleanSh`
+    (single-quoted here-strings, byte-equal to the canonical
+    `scripts/mcp-filter/{smudge,clean}.sh`) and `Install-McpFilter`
+    prefers on-disk source when present (clone case — local edits to
+    the canonical `.sh` files take effect immediately) and falls back
+    to the embedded constants otherwise. Trailing-LF normalization
+    enforces byte-equality on both branches. Canonical `.sh` files
+    are unchanged; embedded copies are a redistribution payload for
+    the standalone case. Drift between the two is caught by
+    `scripts/mcp-filter/test-embedded-sync.ps1`.
+  4. **PS 5.1 `git config` argument-quoting fix.** PS 5.1's native-
+    command argument passing strips embedded `"` from
+    `git config --local filter.<n>.smudge "bash \"$(…)/smudge.sh\" arg"`,
+    which then word-splits and aborts with `error: no action
+    specified`. PS 7+ uses `Standard` argument passing and escapes
+    correctly. Fix: pre-escape `"` → `\"` ONLY when
+    `$PSVersionTable.PSVersion.Major -lt 6`. Stored config value is
+    byte-identical across runtimes; smudge filter actually fires on
+    `git checkout` post-install.
+
+  Three new tracked PowerShell tests (whitelisted in `.gitignore`)
+  guard these fixes:
+    * `scripts/test-detect-extensions.ps1` (7 cases) — detection
+      correctness + perf-relevant pruning behavior.
+    * `scripts/mcp-filter/test-embedded-sync.ps1` (2 cases) —
+      AST-extracts the embedded `.sh` constants from `setup-xray.ps1`
+      and asserts byte-equality to the canonical disk source.
+    * `scripts/mcp-filter/test-standalone-install.ps1` (26 cases
+      across PS 7 + PS 5.1 rounds) — stages `setup-xray.ps1` to a
+      temp dir with NO `mcp-filter/` sibling, runs the production
+      install, asserts filter scripts written byte-equal via
+      `[IO.File]::ReadAllBytes`, snapshot.txt written, all three
+      filter config keys (`smudge`, `clean`, `required=false`)
+      wired, and — critical mutation guard for the PS 5.1 quoting
+      fix — forces `git checkout HEAD -- .mcp.json` and asserts
+      smudge actually fires (xray entry re-injected).
+
 - **`README.md` / `docs/installation.md` — fix the `setup-xray.ps1`
   bootstrap one-liner.** Two field-reported papercuts on Windows
   PowerShell 5.1 (the default `powershell.exe` on Windows): (1) the
