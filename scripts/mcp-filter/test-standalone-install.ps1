@@ -134,7 +134,7 @@ function Assert-GitProtectedMcpState {
         }
         Local-Assert "$RuntimeLabel : untracked VS Code mcp config hidden via .git/info/exclude" ($excludeLines -contains '.vscode/mcp.json')
 
-        $statusLines = @(& git status --short -- '.mcp.json' '.vscode/mcp.json' 2>&1)
+        $statusLines = @(& git status --short -- '.mcp.json' '.vscode/mcp.json' '.vscode/.gitignore' 2>&1)
         $statusText = ($statusLines -join "`n")
         Local-Assert "$RuntimeLabel : git status stays clean for generated MCP configs" ([string]::IsNullOrWhiteSpace($statusText))
         if (-not [string]::IsNullOrWhiteSpace($statusText)) {
@@ -470,12 +470,426 @@ exit `$LASTEXITCODE
     }
 }
 
+function Invoke-InMemoryExistingVscodeDeclineUpdate {
+    <#
+        Recovery regression for a partial failed install: the first run may
+        already have created an untracked .vscode/mcp.json with an xray entry
+        but crashed before adding it to .git/info/exclude. On rerun, pressing
+        Enter at "Update it?" declines rewriting the file; setup must still
+        restore git protection so git status stays clean.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$RuntimeLabel,
+        [Parameter(Mandatory)] [string]$RuntimeExe
+    )
+
+    Write-Host ("== {0}: in-memory partial-rerun recovery (existing VS Code xray, decline update) ==" -f $RuntimeLabel) -ForegroundColor Cyan
+
+    $repo = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-rerun-repo-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $fakeInstallDir = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-rerun-bin-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-rerun-log-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".txt")
+
+    function Local-Assert {
+        param([string]$Msg, [bool]$Cond)
+        if ($Cond) { Write-Host ("  PASS  " + $Msg) -ForegroundColor Green }
+        else { Write-Host ("  FAIL  " + $Msg) -ForegroundColor Red; $script:localFails++; $script:failCount++ }
+    }
+    $script:localFails = 0
+
+    try {
+        New-Item -ItemType Directory -Path $repo, (Join-Path $repo '.vscode') -Force | Out-Null
+        Push-Location $repo
+        try {
+            git init -q
+            git config user.email 'rerun@example.com'
+            git config user.name 'PartialRerun'
+            'baseline' | Set-Content README.md -Encoding UTF8
+            git add README.md
+            git commit -q -m 'baseline repo' | Out-Null
+
+            $existing = '{"servers":{"xray":{"type":"stdio","command":"old-xray","args":["serve"]}}}'
+            [IO.File]::WriteAllText((Join-Path $repo '.vscode/mcp.json'), $existing, [Text.UTF8Encoding]::new($false))
+        }
+        finally {
+            Pop-Location
+        }
+
+        New-Item -ItemType Directory -Path $fakeInstallDir -Force | Out-Null
+        $fakeXray = Join-Path $fakeInstallDir 'xray.exe'
+        'fake xray binary for partial-rerun test' | Out-File -FilePath $fakeXray -Encoding ASCII
+
+        $body = [IO.File]::ReadAllText($canonicalSetup)
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
+
+        $childScript = @"
+function Read-Host {
+    param([string]`$Prompt)
+    Write-Host "MOCK Read-Host: `$Prompt -> <enter>"
+    return ''
+}
+`$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))
+`$sb = [scriptblock]::Create(`$body)
+& `$sb -RepoPath '$repo' -InstallDir '$fakeInstallDir' -SkipDownload -EnableVSCode -Extensions cs,md
+exit `$LASTEXITCODE
+"@
+
+        $childPath = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-rerun-driver-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".ps1")
+        try {
+            [IO.File]::WriteAllText($childPath, $childScript, [Text.UTF8Encoding]::new($false))
+            & $RuntimeExe -NoProfile -File $childPath *> $log
+            $exit = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item -Path $childPath -Force -ErrorAction SilentlyContinue
+        }
+
+        Local-Assert "$RuntimeLabel : partial-rerun install exit code 0 (got $exit)" ($exit -eq 0)
+        if ($exit -ne 0 -and (Test-Path $log)) {
+            Write-Host "  --- partial-rerun install log tail ---" -ForegroundColor Yellow
+            Get-Content $log | Select-Object -Last 25 | ForEach-Object { Write-Host "  | $_" -ForegroundColor Yellow }
+        }
+
+        if ($exit -eq 0) {
+            Assert-GitProtectedMcpState -RuntimeLabel $RuntimeLabel -RepoPath $repo
+            $current = [IO.File]::ReadAllText((Join-Path $repo '.vscode/mcp.json'))
+            Local-Assert "$RuntimeLabel : existing VS Code xray entry was not rewritten after declining update" ($current -match 'old-xray')
+        }
+
+        return ($script:localFails -eq 0)
+    }
+    finally {
+        if (-not $KeepTempDir) {
+            Remove-Item -Path $repo -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $fakeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $log -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host "  Kept: $repo" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $fakeInstallDir" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $log" -ForegroundColor DarkYellow
+        }
+    }
+}
+
+
+function Invoke-InMemoryVscodeGitignoreNegation {
+    <#
+        Some repos intentionally ignore .vscode/* but re-include
+        .vscode/mcp.json via a tracked root .gitignore rule such as
+        !**/.vscode/mcp.json. That higher-priority rule overrides
+        .git/info/exclude, so setup must add a local .vscode/.gitignore
+        override and keep both generated files out of git status.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$RuntimeLabel,
+        [Parameter(Mandatory)] [string]$RuntimeExe
+    )
+
+    Write-Host ("== {0}: in-memory install with repo .gitignore re-including .vscode/mcp.json ==" -f $RuntimeLabel) -ForegroundColor Cyan
+
+    $repo = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-negation-repo-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $fakeInstallDir = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-negation-bin-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-negation-log-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".txt")
+
+    function Local-Assert {
+        param([string]$Msg, [bool]$Cond)
+        if ($Cond) { Write-Host ("  PASS  " + $Msg) -ForegroundColor Green }
+        else { Write-Host ("  FAIL  " + $Msg) -ForegroundColor Red; $script:localFails++; $script:failCount++ }
+    }
+    $script:localFails = 0
+
+    try {
+        New-Item -ItemType Directory -Path $repo -Force | Out-Null
+        Push-Location $repo
+        try {
+            git init -q
+            git config user.email 'negation@example.com'
+            git config user.name 'GitignoreNegation'
+            "**/.vscode/*`n!**/.vscode/mcp.json`n" | Set-Content .gitignore -Encoding UTF8
+            'baseline' | Set-Content README.md -Encoding UTF8
+            git add .gitignore README.md
+            git commit -q -m 'baseline repo gitignore' | Out-Null
+        }
+        finally {
+            Pop-Location
+        }
+
+        New-Item -ItemType Directory -Path $fakeInstallDir -Force | Out-Null
+        $fakeXray = Join-Path $fakeInstallDir 'xray.exe'
+        'fake xray binary for gitignore-negation test' | Out-File -FilePath $fakeXray -Encoding ASCII
+
+        $body = [IO.File]::ReadAllText($canonicalSetup)
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
+
+        $childScript = @"
+`$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))
+`$sb = [scriptblock]::Create(`$body)
+& `$sb -RepoPath '$repo' -InstallDir '$fakeInstallDir' -SkipDownload -EnableVSCode -Extensions cs,md -Force
+exit `$LASTEXITCODE
+"@
+
+        $childPath = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-negation-driver-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".ps1")
+        try {
+            [IO.File]::WriteAllText($childPath, $childScript, [Text.UTF8Encoding]::new($false))
+            & $RuntimeExe -NoProfile -File $childPath *> $log
+            $exit = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item -Path $childPath -Force -ErrorAction SilentlyContinue
+        }
+
+        Local-Assert "$RuntimeLabel : gitignore-negation install exit code 0 (got $exit)" ($exit -eq 0)
+        if ($exit -ne 0 -and (Test-Path $log)) {
+            Write-Host "  --- gitignore-negation install log tail ---" -ForegroundColor Yellow
+            Get-Content $log | Select-Object -Last 25 | ForEach-Object { Write-Host "  | $_" -ForegroundColor Yellow }
+        }
+
+        if ($exit -eq 0) {
+            Assert-GitProtectedMcpState -RuntimeLabel $RuntimeLabel -RepoPath $repo
+            Local-Assert "$RuntimeLabel : local .vscode/.gitignore override created" (Test-Path (Join-Path $repo '.vscode/.gitignore'))
+            $localIgnore = [IO.File]::ReadAllText((Join-Path $repo '.vscode/.gitignore'))
+            Local-Assert "$RuntimeLabel : local .vscode/.gitignore ignores mcp.json" ($localIgnore -match '(?m)^mcp\.json$')
+        }
+
+        return ($script:localFails -eq 0)
+    }
+    finally {
+        if (-not $KeepTempDir) {
+            Remove-Item -Path $repo -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $fakeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $log -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host "  Kept: $repo" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $fakeInstallDir" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $log" -ForegroundColor DarkYellow
+        }
+    }
+}
+
+
+function Invoke-InMemoryVscodeHelperGitignoreNegationFailsClosed {
+    <#
+        If the repo also re-includes .vscode/.gitignore, setup cannot hide
+        the local helper it would need for .vscode/mcp.json. It must remove
+        both generated files and fail closed.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$RuntimeLabel,
+        [Parameter(Mandatory)] [string]$RuntimeExe
+    )
+
+    Write-Host ("== {0}: in-memory VS Code install where helper .vscode/.gitignore is re-included fails closed ==" -f $RuntimeLabel) -ForegroundColor Cyan
+
+    $repo = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-helper-negation-repo-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $fakeInstallDir = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-helper-negation-bin-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-helper-negation-log-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".txt")
+
+    function Local-Assert {
+        param([string]$Msg, [bool]$Cond)
+        if ($Cond) { Write-Host ("  PASS  " + $Msg) -ForegroundColor Green }
+        else { Write-Host ("  FAIL  " + $Msg) -ForegroundColor Red; $script:localFails++; $script:failCount++ }
+    }
+    $script:localFails = 0
+
+    try {
+        New-Item -ItemType Directory -Path $repo -Force | Out-Null
+        Push-Location $repo
+        try {
+            git init -q
+            git config user.email 'helper-negation@example.com'
+            git config user.name 'HelperGitignoreNegation'
+            "**/.vscode/*`n!**/.vscode/mcp.json`n!**/.vscode/.gitignore`n" | Set-Content .gitignore -Encoding UTF8
+            'baseline' | Set-Content README.md -Encoding UTF8
+            git add .gitignore README.md
+            git commit -q -m 'baseline helper gitignore' | Out-Null
+        }
+        finally {
+            Pop-Location
+        }
+
+        New-Item -ItemType Directory -Path $fakeInstallDir -Force | Out-Null
+        $fakeXray = Join-Path $fakeInstallDir 'xray.exe'
+        'fake xray binary for helper-gitignore-negation test' | Out-File -FilePath $fakeXray -Encoding ASCII
+
+        $body = [IO.File]::ReadAllText($canonicalSetup)
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
+
+        $childScript = @"
+`$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))
+`$sb = [scriptblock]::Create(`$body)
+& `$sb -RepoPath '$repo' -InstallDir '$fakeInstallDir' -SkipDownload -EnableVSCode -Extensions cs,md -Force
+exit `$LASTEXITCODE
+"@
+
+        $childPath = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-helper-negation-driver-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".ps1")
+        try {
+            [IO.File]::WriteAllText($childPath, $childScript, [Text.UTF8Encoding]::new($false))
+            & $RuntimeExe -NoProfile -File $childPath *> $log
+            $exit = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item -Path $childPath -Force -ErrorAction SilentlyContinue
+        }
+
+        Local-Assert "$RuntimeLabel : helper gitignore-negation setup exits non-zero (got $exit)" ($exit -ne 0)
+
+        Push-Location $repo
+        try {
+            Local-Assert "$RuntimeLabel : generated .vscode/mcp.json removed after helper protection failure" (-not (Test-Path '.vscode/mcp.json'))
+            Local-Assert "$RuntimeLabel : generated .vscode/.gitignore removed after helper protection failure" (-not (Test-Path '.vscode/.gitignore'))
+            $statusLines = @(& git status --short -- '.vscode/mcp.json' '.vscode/.gitignore' 2>&1)
+            $statusText = ($statusLines -join "`n")
+            Local-Assert "$RuntimeLabel : VS Code helper failure leaves status clean" ([string]::IsNullOrWhiteSpace($statusText))
+            if (-not [string]::IsNullOrWhiteSpace($statusText)) {
+                $statusLines | ForEach-Object { Write-Host "  | git status: $_" -ForegroundColor Yellow }
+            }
+            $excludePath = & git rev-parse --git-path info/exclude 2>$null
+            $excludeLines = if ($excludePath -and (Test-Path $excludePath)) { @(Get-Content $excludePath) } else { @() }
+            Local-Assert "$RuntimeLabel : failed helper protection rolls back .vscode/mcp.json exclude line" (-not ($excludeLines -contains '.vscode/mcp.json'))
+            Local-Assert "$RuntimeLabel : failed helper protection rolls back .vscode/.gitignore exclude line" (-not ($excludeLines -contains '.vscode/.gitignore'))
+        }
+        finally {
+            Pop-Location
+        }
+
+        return ($script:localFails -eq 0)
+    }
+    finally {
+        if (-not $KeepTempDir) {
+            Remove-Item -Path $repo -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $fakeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $log -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host "  Kept: $repo" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $fakeInstallDir" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $log" -ForegroundColor DarkYellow
+        }
+    }
+}
+
+
+function Invoke-InMemoryRootMcpGitignoreNegationFailsClosed {
+    <#
+        Root .mcp.json has no parent directory where setup can install a
+        higher-priority local .gitignore override. If a tracked root
+        .gitignore re-includes .mcp.json, setup must fail closed and remove
+        a freshly generated .mcp.json rather than exit 0 with a visible file.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$RuntimeLabel,
+        [Parameter(Mandatory)] [string]$RuntimeExe
+    )
+
+    Write-Host ("== {0}: in-memory Copilot CLI install with repo .gitignore re-including root .mcp.json fails closed ==" -f $RuntimeLabel) -ForegroundColor Cyan
+
+    $repo = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-root-negation-repo-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $fakeInstallDir = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-root-negation-bin-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-root-negation-log-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".txt")
+
+    function Local-Assert {
+        param([string]$Msg, [bool]$Cond)
+        if ($Cond) { Write-Host ("  PASS  " + $Msg) -ForegroundColor Green }
+        else { Write-Host ("  FAIL  " + $Msg) -ForegroundColor Red; $script:localFails++; $script:failCount++ }
+    }
+    $script:localFails = 0
+
+    try {
+        New-Item -ItemType Directory -Path $repo -Force | Out-Null
+        Push-Location $repo
+        try {
+            git init -q
+            git config user.email 'root-negation@example.com'
+            git config user.name 'RootGitignoreNegation'
+            "*.json`n!.mcp.json`n" | Set-Content .gitignore -Encoding UTF8
+            'baseline' | Set-Content README.md -Encoding UTF8
+            git add .gitignore README.md
+            git commit -q -m 'baseline root gitignore' | Out-Null
+        }
+        finally {
+            Pop-Location
+        }
+
+        New-Item -ItemType Directory -Path $fakeInstallDir -Force | Out-Null
+        $fakeXray = Join-Path $fakeInstallDir 'xray.exe'
+        'fake xray binary for root-gitignore-negation test' | Out-File -FilePath $fakeXray -Encoding ASCII
+
+        $body = [IO.File]::ReadAllText($canonicalSetup)
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
+
+        $childScript = @"
+`$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))
+`$sb = [scriptblock]::Create(`$body)
+& `$sb -RepoPath '$repo' -InstallDir '$fakeInstallDir' -SkipDownload -EnableCopilotCli -Extensions cs,md -Force
+exit `$LASTEXITCODE
+"@
+
+        $childPath = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-root-negation-driver-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".ps1")
+        try {
+            [IO.File]::WriteAllText($childPath, $childScript, [Text.UTF8Encoding]::new($false))
+            & $RuntimeExe -NoProfile -File $childPath *> $log
+            $exit = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item -Path $childPath -Force -ErrorAction SilentlyContinue
+        }
+
+        Local-Assert "$RuntimeLabel : root gitignore-negation setup exits non-zero (got $exit)" ($exit -ne 0)
+        if ($exit -eq 0 -and (Test-Path $log)) {
+            Write-Host "  --- root gitignore-negation install log tail ---" -ForegroundColor Yellow
+            Get-Content $log | Select-Object -Last 25 | ForEach-Object { Write-Host "  | $_" -ForegroundColor Yellow }
+        }
+
+        Push-Location $repo
+        try {
+            Local-Assert "$RuntimeLabel : generated .mcp.json removed after failed protection" (-not (Test-Path '.mcp.json'))
+            $statusLines = @(& git status --short -- '.mcp.json' 2>&1)
+            $statusText = ($statusLines -join "`n")
+            Local-Assert "$RuntimeLabel : root .mcp.json status clean after fail-closed cleanup" ([string]::IsNullOrWhiteSpace($statusText))
+            if (-not [string]::IsNullOrWhiteSpace($statusText)) {
+                $statusLines | ForEach-Object { Write-Host "  | git status: $_" -ForegroundColor Yellow }
+            }
+
+            $excludePath = & git rev-parse --git-path info/exclude 2>$null
+            $excludeLines = if ($excludePath -and (Test-Path $excludePath)) { @(Get-Content $excludePath) } else { @() }
+            Local-Assert "$RuntimeLabel : root .mcp.json fail-closed rolls back exclude line" (-not ($excludeLines -contains '.mcp.json'))
+        }
+        finally {
+            Pop-Location
+        }
+
+        return ($script:localFails -eq 0)
+    }
+    finally {
+        if (-not $KeepTempDir) {
+            Remove-Item -Path $repo -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $fakeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $log -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host "  Kept: $repo" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $fakeInstallDir" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $log" -ForegroundColor DarkYellow
+        }
+    }
+}
+
+
 # Round 1: current host runtime.
 $currentLabel = "PS $($PSVersionTable.PSVersion)"
 $currentExe = if ($PSVersionTable.PSVersion.Major -ge 6) { 'pwsh' } else { 'powershell.exe' }
 [void](Invoke-StandaloneInstall -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
 Write-Host ''
 [void](Invoke-InMemoryInstall -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
+Write-Host ''
+[void](Invoke-InMemoryExistingVscodeDeclineUpdate -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
+Write-Host ''
+[void](Invoke-InMemoryVscodeGitignoreNegation -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
+Write-Host ''
+[void](Invoke-InMemoryVscodeHelperGitignoreNegationFailsClosed -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
+Write-Host ''
+[void](Invoke-InMemoryRootMcpGitignoreNegationFailsClosed -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
 
 # Round 2: cross-runtime. The PS 5.1 install path has its own quoting
 # hazard; if we are running under PS 7 AND powershell.exe (5.1) is on
@@ -487,6 +901,14 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
         [void](Invoke-StandaloneInstall -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
         Write-Host ''
         [void](Invoke-InMemoryInstall -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
+        Write-Host ''
+        [void](Invoke-InMemoryExistingVscodeDeclineUpdate -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
+        Write-Host ''
+        [void](Invoke-InMemoryVscodeGitignoreNegation -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
+        Write-Host ''
+        [void](Invoke-InMemoryVscodeHelperGitignoreNegationFailsClosed -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
+        Write-Host ''
+        [void](Invoke-InMemoryRootMcpGitignoreNegationFailsClosed -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
     }
     else {
         Write-Host ''
@@ -501,6 +923,14 @@ else {
         [void](Invoke-StandaloneInstall -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
         Write-Host ''
         [void](Invoke-InMemoryInstall -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
+        Write-Host ''
+        [void](Invoke-InMemoryExistingVscodeDeclineUpdate -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
+        Write-Host ''
+        [void](Invoke-InMemoryVscodeGitignoreNegation -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
+        Write-Host ''
+        [void](Invoke-InMemoryVscodeHelperGitignoreNegationFailsClosed -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
+        Write-Host ''
+        [void](Invoke-InMemoryRootMcpGitignoreNegationFailsClosed -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
     }
     else {
         Write-Host ''
