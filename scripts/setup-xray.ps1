@@ -904,7 +904,11 @@ function Install-McpFilter {
     #>
     param(
         [Parameter(Mandatory)] [string]$RepoRoot,
-        [Parameter(Mandatory)] [string]$ScriptDir,
+        # Allow empty/null because the in-memory invocation form
+        # (`& ([scriptblock]::Create((iwr ...).Content))`) leaves the
+        # caller without a script path on disk. Install-McpFilter detects
+        # this below and short-circuits to the embedded fallback.
+        [Parameter()] [AllowEmptyString()] [AllowNull()] [string]$ScriptDir,
         [Parameter(Mandatory)] [string]$SnapshotLine,
         [Parameter(Mandatory)]
         [ValidateSet('xray-mcp', 'xray-vscode-mcp')]
@@ -950,11 +954,15 @@ function Install-McpFilter {
     #     in %TEMP% with no sibling directory.
     # The on-disk-vs-embedded byte-equality is enforced by
     # scripts/mcp-filter/test-embedded-sync.ps1.
-    $srcFilterDir = Join-Path $ScriptDir 'mcp-filter'
+    # When invoked in-memory (One-liner B / `iex (irm ...)`) the caller
+    # passes $ScriptDir as $null because there is no file on disk;
+    # `Join-Path $null ...` would abort with a null-binding error, so
+    # short-circuit straight into the embedded branch in that case.
+    $srcFilterDir = if ([string]::IsNullOrEmpty($ScriptDir)) { $null } else { Join-Path $ScriptDir 'mcp-filter' }
     $filterSources = @{}
     foreach ($name in @('smudge.sh', 'clean.sh')) {
-        $diskPath = Join-Path $srcFilterDir $name
-        if (Test-Path $diskPath) {
+        $diskPath = if ($srcFilterDir) { Join-Path $srcFilterDir $name } else { $null }
+        if ($diskPath -and (Test-Path $diskPath)) {
             $filterSources[$name] = @{ Source = 'disk'; DiskPath = $diskPath }
         }
         else {
@@ -963,8 +971,9 @@ function Install-McpFilter {
                 # Defensive: if a future refactor accidentally drops the
                 # embedded constants AND the disk source is missing, we
                 # cannot proceed. The previous behavior was a hard failure
-                # here too.
-                Write-Warning ("Filter source missing: {0} (and no embedded fallback)" -f $diskPath)
+                # here too. Use a PS 5.1-compatible null check (no `??`).
+                $where = if ($diskPath) { $diskPath } else { '(in-memory invocation, no $ScriptDir)' }
+                Write-Warning ("Filter source missing: {0} (and no embedded fallback)" -f $where)
                 return $false
             }
             $filterSources[$name] = @{ Source = 'embedded'; Body = $embedded }
@@ -1805,7 +1814,13 @@ if ($writeVscode) {
     }
 
     if ($useVscodeFilterStrategy) {
-        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+        # In-memory invocation (e.g. `& ([scriptblock]::Create((iwr ...).Content))`
+        # or `iex (irm ...)`) leaves $MyInvocation.MyCommand.Path as $null,
+        # so a naive `Split-Path -Parent $null` aborts the entire install.
+        # Preserve $null here so Install-McpFilter takes the embedded
+        # fallback path unconditionally.
+        $scriptPath = $MyInvocation.MyCommand.Path
+        $scriptDir = if ($scriptPath) { Split-Path -Parent $scriptPath } else { $null }
         $vscodeSnapshotLine = New-XraySnapshotLine -XrayPath $xrayPath -XrayArgs $xrayArgs -Shape 'VsCode'
 
         # Lift any pre-existing skip-worktree from a legacy install BEFORE we
@@ -2021,7 +2036,13 @@ if ($writeCopilotCli) {
     }
 
     if ($useFilterStrategy) {
-        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+        # In-memory invocation (e.g. `& ([scriptblock]::Create((iwr ...).Content))`
+        # or `iex (irm ...)`) leaves $MyInvocation.MyCommand.Path as $null,
+        # so a naive `Split-Path -Parent $null` aborts the entire install.
+        # Preserve $null here so Install-McpFilter takes the embedded
+        # fallback path unconditionally.
+        $scriptPath = $MyInvocation.MyCommand.Path
+        $scriptDir = if ($scriptPath) { Split-Path -Parent $scriptPath } else { $null }
         $snapshotLine = New-XraySnapshotLine -XrayPath $xrayPath -XrayArgs $xrayArgs
 
         # Lift any pre-existing skip-worktree from a legacy install BEFORE we
