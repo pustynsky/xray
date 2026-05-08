@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **`README.md` / `docs/installation.md` — fix the `setup-xray.ps1`
+  bootstrap one-liner.** Two field-reported papercuts on Windows
+  PowerShell 5.1 (the default `powershell.exe` on Windows): (1) the
+  documented A1/A2 `Invoke-WebRequest` calls were missing
+  `-UseBasicParsing`, so on 5.1 they fell back to the IE rendering
+  engine — which (a) blocks with a "Security Warning: Script Execution
+  Risk" prompt and (b) parses the script's `.SYNOPSIS` /
+  `.DESCRIPTION` block as HTML and dumps it to the success stream;
+  (2) the example `-RepoPath C:\Repos\MyProject` looked like a
+  placeholder but was a literal path — users who copy-pasted hit
+  `Repository path not found: C:\Repos\MyProject` and an immediate
+  exit. Fix: add `-UseBasicParsing` to all four `Invoke-WebRequest`
+  call sites (no-op on PowerShell 7+) and drop the broken `-RepoPath`
+  example so the script's interactive prompt
+  (`Read-Host 'Enter the path to the target repository'`) takes over.
+  The trailing-tip block in both files documents `-RepoPath <path>`
+  as the way to skip the prompt for non-interactive use.
+
 - **`scripts/setup-xray.ps1` — extend smudge/clean filter to tracked
   `.vscode/mcp.json` (`xray-vscode-mcp`).** The original filter
   migration covered only `.mcp.json` (Copilot CLI). Field deployment

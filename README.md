@@ -85,27 +85,27 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 Three ways to launch it. Pick whichever fits — they all run the same script and accept the same parameters.
 
-**A1. One-liner (download + run inline).** Shortest. The script is fetched and executed in-memory; nothing is left on disk.
+**A1. One-liner (download + run inline).** Shortest. The script is fetched and executed in-memory; nothing is left on disk. The script will prompt for the target repository path; pass `-RepoPath <path>` to skip the prompt.
 
 ```powershell
-& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1').Content)) -RepoPath C:\Repos\MyProject
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content))
 ```
 
 **A2. Download-then-run (recommended if you want to read the script first).** Saves the script to `%TEMP%` so you can audit it before running.
 
 ```powershell
 $tmp = Join-Path $env:TEMP 'setup-xray.ps1'
-Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -OutFile $tmp
-& $tmp -RepoPath C:\Repos\MyProject
+Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing -OutFile $tmp
+& $tmp
 ```
 
 **A3. From a clone of this repo.** Use this if you want to pin a specific commit/tag, or if you're already iterating on the script locally.
 
 ```powershell
-.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject
+.\scripts\setup-xray.ps1
 ```
 
-> Pin to a release tag instead of `main` for reproducibility — replace `main` in the URL with e.g. `v0.5.0`. Add `-EnableCopilotCli` and/or `-EnableVSCode` to skip the interactive client prompts.
+> Pin to a release tag instead of `main` for reproducibility — replace `main` in the URL with e.g. `v0.5.0`. Pass `-RepoPath <path>` to target a specific repo non-interactively. Add `-EnableCopilotCli` and/or `-EnableVSCode` to skip the interactive client prompts. `-UseBasicParsing` is required on Windows PowerShell 5.1 (it's a no-op on PowerShell 7+) and avoids the IE-engine security prompt.
 
 The script will:
 1. Download the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
