@@ -138,6 +138,27 @@ This is the single most important invariant in the whole project. Violating it s
 - Git for Windows MSYS2 bash vs Linux/macOS bash: line-ending tools differ. Filter MUST use perl-with-binmode-raw exclusively.
 - `core.autocrlf` set to `true` (default on Git for Windows) vs `false`: `.gitattributes` must explicitly normalize for any file consumed by tools that fail on CRLF.
 
+### F. Scope Skepticism — challenge the requester's framing (MANDATORY)
+
+The requester writes the prompt and often writes the test. Both are bounded by the requester's mental model of what "the change" is. Your job is to challenge that boundary, not accept it. A clean review against an incomplete threat model can still ship a broken product.
+
+Before issuing any verdict on installer / CLI / public-API code, answer these questions in the verdict body. If you skip them, set `Confidence: LOW` and add a MAJOR finding for a scope-skepticism gap.
+
+1. **Public entry-point matrix.** Open the user-facing docs (README install section, install.md, CLI help, package manifests) and enumerate every documented invocation form. For `setup-xray.ps1`, verify at minimum:
+   - A1: in-memory `& ([scriptblock]::Create((iwr ...).Content))` (no file on disk; `$MyInvocation.MyCommand.Path` is `$null`).
+   - A2: `iwr -OutFile $tmp; & $tmp` (file in `%TEMP%`; no `mcp-filter/` sibling).
+   - A3: clone-mode `.\scripts\setup-xray.ps1` (file in repo; `mcp-filter/` sibling present).
+   - Any `iex (irm ...)`, `pwsh -Command`, or `powershell.exe -Command` form if it appears in public docs.
+   For each row, name the test or manual repro that exercises it. Any documented row with no coverage is MAJOR.
+2. **Runtime substrate matrix.** PS 5.1 and PS 7+ must both be exercised. `pwsh -File <path>` and `& ([scriptblock]::Create(...))` are different substrates; the former populates `$MyInvocation.MyCommand.Path`, the latter does not. A suite that only stages a file and runs `-File` does not cover in-memory invocation.
+3. **State / mode matrix.** Ask what happens in clean repo, prior install, legacy install, partial uninstall, tracked config, untracked config, linked worktree, and submodule scenarios. For each mode affected by the diff, name the test or state the missing evidence.
+4. **Wider-context call-site review.** For every helper, parameter, or PowerShell special variable touched by the diff (`$MyInvocation.MyCommand.Path`, `$PSScriptRoot`, `$PSCommandPath`, `$args`, `$ErrorActionPreference`, `$PSNativeCommandUseErrorActionPreference`), search all uses in the script and verify each remains safe in every documented entry point.
+5. **Post-condition review.** Do not stop at "install exits 0." For installer changes, check the user-visible end state: `git status --short` is clean when the script promises git protection; tracked files are protected by skip-worktree or filters; untracked generated files are in `.git/info/exclude`; uninstall/restore can undo the change.
+
+Anti-pattern to call out as MAJOR: a prompt that frames the change narrowly (for example, "verify embedded fallback when `mcp-filter` sibling is missing") plus tests that exercise only that framing plus mutation tests within that framing. The correct response is to refuse the narrow framing and substitute the public entry-point matrix from the docs.
+
+Required line in every installer / CLI verdict: `Public entry-point matrix from README/install.md: <rows>; coverage: <tests/repros>; gaps: <list>.`
+
 ## Severity Model
 
 | Level | Definition | Merge Impact |
@@ -214,6 +235,8 @@ Recommendation:     <what to change>
 - Mark assumptions explicitly: `Assumption: ...`
 - Search callers of every changed helper via `xray_grep` before claiming "safe to change"
 - Re-run the round-trip + e2e suites; record both numbers in the table
+- Challenge the requester's scope. Re-derive public entry points, runtime substrates, and user-visible post-conditions from docs and behavior, not from the prompt alone (see Threat Model F)
+- For installer / CLI changes, run at least one documented user-facing launch command against a throwaway repo as a final sanity check before SHIP
 
 ### DON'T
 - Invent findings to look thorough — "None" is valid and PREFERRED to noise
@@ -222,3 +245,5 @@ Recommendation:     <what to change>
 - Approve any silent mutation of a tracked upstream file via PowerShell `ConvertTo-Json`
 - Approve any new sed/awk substitution that replaces the perl-with-binmode-raw filter pattern
 - Skip linters because "the diff is small" — discipline is binary
+- Accept the requester's threat model at face value. If the prompt says "this fixes scenario X," also verify behavior in scenarios Y/Z/W from the public surface area
+- Approve a test that only checks exit code when the feature promises a git-visible post-condition such as a clean `git status`
