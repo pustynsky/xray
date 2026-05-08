@@ -6,16 +6,41 @@ End-to-end setup for using `xray` as an MCP server with your AI coding agent.
 
 ## Quick Setup (recommended)
 
-The [`setup-xray.ps1`](../scripts/setup-xray.ps1) script automates the entire installation — download, extension detection, MCP config creation, and git protection — in one command:
+The [`setup-xray.ps1`](../scripts/setup-xray.ps1) script automates the entire installation — download, extension detection, MCP config creation, and git protection — in one command.
+
+Three ways to launch it. Pick whichever fits — they all run the same script and accept the same parameters.
+
+### A1. One-liner (download + run inline)
+
+Shortest. The script is fetched and executed in-memory; nothing is left on disk.
 
 ```powershell
-# Clone the repo (or just download the script)
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1').Content)) -RepoPath C:\Repos\MyProject
+```
+
+### A2. Download-then-run
+
+Recommended if you want to read the script before executing it. Saves to `%TEMP%`, runs from there.
+
+```powershell
+$tmp = Join-Path $env:TEMP 'setup-xray.ps1'
+Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -OutFile $tmp
+& $tmp -RepoPath C:\Repos\MyProject
+```
+
+### A3. From a clone of this repo
+
+Use this if you want to pin a specific commit/tag, or if you're iterating on the script locally.
+
+```powershell
 git clone https://github.com/pustynsky/xray
 cd xray
-
-# Run setup for your target project
 .\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject
 ```
+
+> **Pin a release.** Replace `main` in the URLs above with a tag (e.g. `v0.5.0`) to lock the script to a specific release for reproducibility.
+>
+> **Skip the prompts.** Add `-EnableCopilotCli` and/or `-EnableVSCode` to opt clients in non-interactively.
 
 **What it does:**
 
@@ -26,8 +51,9 @@ cd xray
    - `.roo/mcp.json` — for **Roo Code** (optional, prompted with default N)
    - `.mcp.json` — for **GitHub Copilot CLI** (with `-EnableCopilotCli`)
 4. Protects configs from accidental git push:
-   - Tracked `.mcp.json` (shared repo case) → per-clone **git smudge/clean filter** so `git status` stays clean and `git pull` succeeds silently when upstream changes the file. See [Shared repo with a tracked `.mcp.json`](#shared-repo-with-a-tracked-mcpjson-smudgeclean-filter) below.
-   - Tracked `.vscode/mcp.json` / `.roo/mcp.json` → `git update-index --skip-worktree` (local edits invisible to git; safe because these are typically untracked).
+   - Tracked `.mcp.json` (shared repo case) → per-clone **git smudge/clean filter** (`xray-mcp`) so `git status` stays clean and `git pull` succeeds silently when upstream changes the file. See [Shared repo with a tracked `.mcp.json`](#shared-repo-with-a-tracked-mcpjson-smudgeclean-filter) below.
+   - Tracked `.vscode/mcp.json` (shared repo case) → identical per-clone smudge/clean filter (`xray-vscode-mcp`) — same hazard, same fix, just bound to the VS Code-shape `servers` container.
+   - Untracked `.vscode/mcp.json` / `.roo/mcp.json` → `git update-index --skip-worktree` (local edits invisible to git; safe because these are typically untracked).
    - Untracked files → `.git/info/exclude` (local gitignore)
 
 All xray tools are enabled by default **except** `xray_edit` (opt-in for safety).

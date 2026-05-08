@@ -437,18 +437,32 @@ $Script:XrayMcpMarker = 'managed-by-setup-xray.ps1-do-not-edit'
 
 function New-XraySnapshotLine {
     <#
-        Builds the single-line JSON entry that the smudge filter injects into
-        .mcp.json. Indented with 4 spaces to match common .mcp.json formatting
-        (mcpServers content nested two levels deep).
+        Builds the single-line JSON entry that the smudge filter injects
+        into a tracked MCP config file. Indented with 4 spaces to match
+        common formatting (server entries nested two levels deep inside
+        the container object).
+
+        SHAPE controls which schema the entry follows:
+          * 'CopilotCli' (default): {"command":...,"args":[...],"env":{},"_xrayMcpMarker":...}
+            -> matches the .mcp.json schema (mcpServers container, no
+               'type' key, env always present).
+          * 'VsCode':              {"type":"stdio","command":...,"args":[...],"_xrayMcpMarker":...}
+            -> matches the .vscode/mcp.json schema (servers container,
+               'type' required, no 'env' by convention).
     #>
     param(
         [Parameter(Mandatory)] [string]$XrayPath,
-        [Parameter(Mandatory)] [string[]]$XrayArgs
+        [Parameter(Mandatory)] [string[]]$XrayArgs,
+        [ValidateSet('CopilotCli', 'VsCode')]
+        [string]$Shape = 'CopilotCli'
     )
 
     $argsJson = (@($XrayArgs) | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress }) -join ','
     $cmdJson  = ConvertTo-Json -InputObject $XrayPath -Compress
     $markerJson = ConvertTo-Json -InputObject $Script:XrayMcpMarker -Compress
+    if ($Shape -eq 'VsCode') {
+        return ('    "xray":{"type":"stdio","command":' + $cmdJson + ',"args":[' + $argsJson + '],"_xrayMcpMarker":' + $markerJson + '}')
+    }
     return ('    "xray":{"command":' + $cmdJson + ',"args":[' + $argsJson + '],"env":{},"_xrayMcpMarker":' + $markerJson + '}')
 }
 
@@ -461,6 +475,49 @@ function Get-ResolvedGitDir {
         if ($LASTEXITCODE -ne 0 -or -not $gd) { return $null }
         if (-not [IO.Path]::IsPathRooted($gd)) { $gd = Join-Path $RepoRoot $gd }
         return (Resolve-Path $gd).Path
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+function Get-ResolvedGitCommonDir {
+    <#
+        Returns the absolute path to the SHARED git common dir for the repo
+        at $RepoRoot. In a primary clone this equals --git-dir; in a linked
+        worktree (created via `git worktree add`), --git-dir points at
+        `<main>/.git/worktrees/<name>/` while --git-common-dir points at
+        `<main>/.git/`.
+
+        Use this for any per-clone artifact that must be SHARED across all
+        worktrees:
+          - the smudge/clean filter scripts (the filter command is stored
+            as `bash "$(git rev-parse --git-common-dir)/<name>/smudge.sh" ...`
+            and git evaluates that substitution at filter-invocation time
+            using --git-common-dir, so the scripts MUST physically live
+            under the common dir).
+          - `info/attributes` (per gitrepository-layout(5), the `info/`
+            directory is shared across worktrees; git's own
+            `git rev-parse --git-path info/attributes` resolves to the
+            common dir, and our manual `Join-Path $resolvedGitCommonDir
+            'info\attributes'` matches that).
+
+        For path lookups under `.git/info/` from elsewhere in the script
+        (e.g., `Remove-GitProtection` for `info/exclude`), prefer
+        `git rev-parse --git-path info/<name>` and let git pick the
+        correct directory rather than hand-building a path here. That
+        delegation is why `Get-ResolvedGitDir` is still used for
+        per-worktree HEAD/index lookups (and why `info/exclude` cleanup
+        does NOT call this function — it goes through git rev-parse).
+    #>
+    param([Parameter(Mandatory)] [string]$RepoRoot)
+
+    Push-Location $RepoRoot
+    try {
+        $gcd = & git rev-parse --git-common-dir 2>$null
+        if ($LASTEXITCODE -ne 0 -or -not $gcd) { return $null }
+        if (-not [IO.Path]::IsPathRooted($gcd)) { $gcd = Join-Path $RepoRoot $gcd }
+        return (Resolve-Path $gcd).Path
     }
     finally {
         Pop-Location
@@ -501,36 +558,43 @@ function Test-IsTrackedFile {
 
 function Set-McpFileWithSnapshot {
     <#
-        Writes .mcp.json so that it contains the snapshot line as the FIRST
-        entry of mcpServers, preserving any existing servers and any other
-        top-level keys verbatim.
+        Writes an MCP config file so that it contains the snapshot line as
+        the FIRST entry of the container object, preserving any existing
+        entries and any other top-level keys verbatim.
+
+        ContainerKey selects the container object key:
+          * 'mcpServers' (default): .mcp.json schema (Copilot CLI).
+          * 'servers':              .vscode/mcp.json schema (VS Code).
 
         Behavior:
-          - File missing: create a fresh minimal .mcp.json containing only xray.
+          - File missing: create a fresh minimal file containing only the
+            xray entry, wrapped in the requested container key.
           - Marker already present: replace existing snapshot line in place.
-          - mcpServers present (multi-line): inject snapshot line after the
-            line that opens the object.
-          - mcpServers inline ({} on one line) or missing: warn and bail.
-            The filter will passthrough; user's xray entry will not be
-            registered until they reformat the file or re-run with no
+          - Container present (multi-line, opens at end of line): inject
+            snapshot line after the line that opens the object.
+          - Container inline ({} on one line) or missing: warn and bail.
+            The smudge filter will passthrough; user's xray entry will not
+            be registered until they reformat the file or re-run with no
             existing file.
 
         Output preserves the file's existing dominant line separator (CRLF
-        if any CRLF is present in the input, otherwise LF). This matches the
-        smudge filter's separator-detection behavior, so the round-trip
+        if any CRLF is present in the input, otherwise LF). This matches
+        the smudge filter's separator-detection behavior, so the round-trip
         property `clean(smudge(canonical)) == canonical` is preserved
-        byte-exact even on repos whose tracked .mcp.json uses CRLF.
+        byte-exact even on repos whose tracked file uses CRLF.
         New files (no existing input) default to LF.
     #>
     param(
         [Parameter(Mandatory)] [string]$Path,
-        [Parameter(Mandatory)] [string]$SnapshotLine
+        [Parameter(Mandatory)] [string]$SnapshotLine,
+        [ValidateSet('mcpServers', 'servers')]
+        [string]$ContainerKey = 'mcpServers'
     )
 
     $utf8NoBom = [Text.UTF8Encoding]::new($false)
 
     if (-not (Test-Path $Path)) {
-        $body = "{`n  ""mcpServers"": {`n$SnapshotLine`n  }`n}`n"
+        $body = "{`n  ""$ContainerKey"": {`n$SnapshotLine`n  }`n}`n"
         [IO.File]::WriteAllText($Path, $body, $utf8NoBom)
         return $true
     }
@@ -548,13 +612,18 @@ function Set-McpFileWithSnapshot {
         $normalized = ($kept -join "`n")
     }
 
+    # Build the open-pattern. ContainerKey is constrained by ValidateSet to
+    # 'mcpServers' or 'servers' (both safe regex literals); no escaping
+    # required.
+    $openPattern = '"' + $ContainerKey + '"\s*:\s*\{\s*$'
+
     $lines = $normalized -split "`n"
     $newLines = New-Object System.Collections.Generic.List[string]
     $injected = $false
     for ($i = 0; $i -lt $lines.Length; $i++) {
         $newLines.Add($lines[$i])
-        if (-not $injected -and $lines[$i] -match '"mcpServers"\s*:\s*\{\s*$') {
-            # Determine whether mcpServers is empty by peeking ahead.
+        if (-not $injected -and $lines[$i] -match $openPattern) {
+            # Determine whether the container is empty by peeking ahead.
             $j = $i + 1
             while ($j -lt $lines.Length -and $lines[$j] -match '^\s*$') { $j++ }
             $emptyServers = ($j -lt $lines.Length -and $lines[$j] -match '^\s*\}\s*,?\s*$')
@@ -569,7 +638,7 @@ function Set-McpFileWithSnapshot {
     }
 
     if (-not $injected) {
-        Write-Warning ("Could not find an injection point for xray in {0} (mcpServers may be inline `{{}}` or absent). Filter will passthrough; xray entry NOT registered." -f $Path)
+        Write-Warning ("Could not find an injection point for xray in {0} ({1} may be inline `{{}}` or absent). Filter will passthrough; xray entry NOT registered." -f $Path, $ContainerKey)
         return $false
     }
 
@@ -579,19 +648,25 @@ function Set-McpFileWithSnapshot {
 
 function Install-McpFilter {
     <#
-        Installs the smudge/clean filter for .mcp.json in the given repo:
-          - Creates <git-common-dir>/xray-mcp/ with smudge.sh, clean.sh,
+        Installs the smudge/clean filter for an MCP config file in the
+        given repo. Supports multiple parallel filter setups distinguished
+        by FilterName (e.g. one for .mcp.json, one for .vscode/mcp.json).
+        Effects:
+          - Creates <git-common-dir>/<FilterName>/ with smudge.sh, clean.sh,
             snapshot.txt (LF-normalized; bash heredocs / set -e are
             sensitive to CRLF in script bodies).
-          - Sets .git/config [filter "xray-mcp"] smudge/clean/required.
-            The smudge/clean commands are stored as
-            `bash "$(git rev-parse --git-common-dir)/xray-mcp/<name>.sh"`
+          - Sets .git/config [filter "<FilterName>"] smudge/clean/required.
+            The smudge command is stored as
+            `bash "$(git rev-parse --git-common-dir)/<FilterName>/smudge.sh" <ContainerKey>`
             (NOT bare paths and NOT --git-dir): explicit `bash` avoids the
-            need for the executable bit on macOS/Linux, and
-            --git-common-dir resolves correctly inside linked worktrees
-            where the per-worktree --git-dir does NOT contain the scripts.
-          - Adds '.mcp.json filter=xray-mcp' to <git-common-dir>/info/attributes
-            (idempotent; replaces any prior .mcp.json line). NO `text eol=lf`
+            need for the executable bit on macOS/Linux, --git-common-dir
+            resolves correctly inside linked worktrees where the
+            per-worktree --git-dir does NOT contain the scripts, and the
+            ContainerKey arg lets a single smudge.sh source serve both
+            the 'mcpServers' (Copilot CLI) and 'servers' (VS Code) shapes.
+          - Adds '<AttributePath> filter=<FilterName>' to
+            <git-common-dir>/info/attributes (idempotent; replaces any
+            prior line for that attribute path). NO `text eol=lf`
             attribute: the perl-based filter preserves CRLF byte-exact.
         Returns $true on success, $false on failure (with a warning). Each
         git config write checks $LASTEXITCODE; a failure short-circuits and
@@ -599,16 +674,44 @@ function Install-McpFilter {
 
         Source scripts are copied from $ScriptDir/mcp-filter/{smudge,clean}.sh
         so both production install and dev iteration use the same files.
+        BOTH filter setups (xray-mcp and xray-vscode-mcp) get their OWN copy
+        of the same source scripts; refreshing one filter does not affect
+        the other.
     #>
     param(
         [Parameter(Mandatory)] [string]$RepoRoot,
         [Parameter(Mandatory)] [string]$ScriptDir,
-        [Parameter(Mandatory)] [string]$SnapshotLine
+        [Parameter(Mandatory)] [string]$SnapshotLine,
+        [Parameter(Mandatory)]
+        [ValidateSet('xray-mcp', 'xray-vscode-mcp')]
+        [string]$FilterName,
+        [Parameter(Mandatory)]
+        [ValidateSet('mcpServers', 'servers')]
+        [string]$ContainerKey,
+        [Parameter(Mandatory)]
+        [string]$AttributePath
     )
 
     $resolvedGitDir = Get-ResolvedGitDir -RepoRoot $RepoRoot
     if (-not $resolvedGitDir) {
         Write-Warning 'git rev-parse --git-dir failed - cannot install filter.'
+        return $false
+    }
+
+    # Filter scripts and snapshot.txt are referenced at runtime by
+    # `bash "$(git rev-parse --git-common-dir)/<FilterName>/..."`, so they
+    # MUST live under the SHARED common dir, not the per-worktree --git-dir.
+    # Otherwise: setup-xray.ps1 invoked from inside a linked worktree would
+    # write the scripts to `<main>/.git/worktrees/<wt>/<FilterName>/`, but
+    # git would look for them under `<main>/.git/<FilterName>/` and fail
+    # open (with required=false the result is a silent passthrough that
+    # both drops the xray entry on checkout AND, on the next `git add
+    # --renormalize`, can stage the marker-bearing working-tree text).
+    # `info/attributes` is also a shared-across-worktrees file per
+    # gitrepository-layout(5), so it goes here too.
+    $resolvedGitCommonDir = Get-ResolvedGitCommonDir -RepoRoot $RepoRoot
+    if (-not $resolvedGitCommonDir) {
+        Write-Warning 'git rev-parse --git-common-dir failed - cannot install filter.'
         return $false
     }
 
@@ -620,7 +723,7 @@ function Install-McpFilter {
         }
     }
 
-    $filterDir = Join-Path $resolvedGitDir 'xray-mcp'
+    $filterDir = Join-Path $resolvedGitCommonDir $FilterName
     if (-not (Test-Path $filterDir)) {
         New-Item -ItemType Directory -Path $filterDir -Force | Out-Null
     }
@@ -666,24 +769,30 @@ function Install-McpFilter {
     # verbatim, and `sh -c <command>` expands it at filter time.
     Push-Location $RepoRoot
     try {
-        $smudgeCmd = 'bash "$(git rev-parse --git-common-dir)/xray-mcp/smudge.sh"'
-        $cleanCmd  = 'bash "$(git rev-parse --git-common-dir)/xray-mcp/clean.sh"'
+        # The container key is interpolated into the filter command verbatim
+        # (single-quoted string above prevents PowerShell expansion). The
+        # smudge.sh wrapper validates the key against
+        # /^[A-Za-z_][A-Za-z0-9_]*$/ before splicing it into the perl regex,
+        # but ValidateSet on the parameter already restricts the value to
+        # 'mcpServers' / 'servers', so this is defense-in-depth.
+        $smudgeCmd = 'bash "$(git rev-parse --git-common-dir)/' + $FilterName + '/smudge.sh" ' + $ContainerKey
+        $cleanCmd  = 'bash "$(git rev-parse --git-common-dir)/' + $FilterName + '/clean.sh"'
 
-        & git config --local 'filter.xray-mcp.smudge' $smudgeCmd 2>&1 | Out-Null
+        & git config --local ("filter.{0}.smudge" -f $FilterName) $smudgeCmd 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning ("git config filter.xray-mcp.smudge failed (exit {0})" -f $LASTEXITCODE)
+            Write-Warning ("git config filter.{0}.smudge failed (exit {1})" -f $FilterName, $LASTEXITCODE)
             return $false
         }
 
-        & git config --local 'filter.xray-mcp.clean' $cleanCmd 2>&1 | Out-Null
+        & git config --local ("filter.{0}.clean" -f $FilterName) $cleanCmd 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning ("git config filter.xray-mcp.clean failed (exit {0})" -f $LASTEXITCODE)
+            Write-Warning ("git config filter.{0}.clean failed (exit {1})" -f $FilterName, $LASTEXITCODE)
             return $false
         }
 
-        & git config --local --bool 'filter.xray-mcp.required' false 2>&1 | Out-Null
+        & git config --local --bool ("filter.{0}.required" -f $FilterName) false 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
-            Write-Warning ("git config filter.xray-mcp.required failed (exit {0})" -f $LASTEXITCODE)
+            Write-Warning ("git config filter.{0}.required failed (exit {1})" -f $FilterName, $LASTEXITCODE)
             return $false
         }
     }
@@ -691,18 +800,27 @@ function Install-McpFilter {
         Pop-Location
     }
 
-    # Add attributes line (idempotent).
-    $attrFile = Join-Path $resolvedGitDir 'info\attributes'
+    # Add attributes line (idempotent). Each FilterName has its own
+    # AttributePath; we strip any prior line matching that AttributePath
+    # (including legacy ones for the SAME path that pointed at a different
+    # filter, e.g. an old install of the same script that used a different
+    # filter name) before appending the canonical line. The match anchor
+    # is start-of-line + the literal attribute path + a separator (space
+    # or tab), so a line attaching attributes to a DIFFERENT path that
+    # happens to begin with this path's basename does NOT get stripped.
+    $attrFile = Join-Path $resolvedGitCommonDir 'info\attributes'
     $attrDir = Split-Path -Parent $attrFile
     if (-not (Test-Path $attrDir)) {
         New-Item -ItemType Directory -Path $attrDir -Force | Out-Null
     }
-    $attrLine = '.mcp.json filter=xray-mcp'
+    $attrLine = ("{0} filter={1}" -f $AttributePath, $FilterName)
     $existingAttrs = @()
     if (Test-Path $attrFile) {
         $existingAttrs = @(Get-Content $attrFile -ErrorAction SilentlyContinue)
     }
-    $existingAttrs = @($existingAttrs | Where-Object { $_ -notmatch '^\s*\.mcp\.json\s' })
+    $escapedPath = [Regex]::Escape($AttributePath)
+    $stripPattern = '^\s*' + $escapedPath + '[ \t]'
+    $existingAttrs = @($existingAttrs | Where-Object { $_ -notmatch $stripPattern })
     $existingAttrs += $attrLine
     Set-Content -Path $attrFile -Value $existingAttrs -Encoding UTF8
 
@@ -712,16 +830,23 @@ function Install-McpFilter {
 function Uninstall-McpFilter {
     <#
         Tears down the smudge/clean filter installed by Install-McpFilter:
-          - Strips snapshot line from .mcp.json (so the working tree matches
-            the canonical / upstream form).
-          - Removes [filter "xray-mcp"] section from .git/config.
-          - Removes the .mcp.json line from .git/info/attributes.
-          - Deletes .git/xray-mcp/ directory.
+          - Strips snapshot line from McpRelPath (so the working tree
+            matches the canonical / upstream form).
+          - Removes [filter "<FilterName>"] section from .git/config.
+          - Removes the AttributePath line from .git/info/attributes.
+          - Deletes <git-common-dir>/<FilterName>/ directory.
         Idempotent: calling on a clean state is a no-op.
         Returns one of: 'removed', 'not-installed', 'error'.
     #>
     param(
         [Parameter(Mandatory)] [string]$RepoRoot,
+        [Parameter(Mandatory)]
+        [ValidateSet('xray-mcp', 'xray-vscode-mcp')]
+        [string]$FilterName,
+        [Parameter(Mandatory)]
+        [string]$AttributePath,
+        [Parameter(Mandatory)]
+        [string]$McpRelPath,
         [switch]$DryRun
     )
 
@@ -730,13 +855,27 @@ function Uninstall-McpFilter {
         return 'not-installed'
     }
 
-    $filterDir = Join-Path $resolvedGitDir 'xray-mcp'
-    $attrFile = Join-Path $resolvedGitDir 'info\attributes'
-    $mcpFile = Join-Path $RepoRoot '.mcp.json'
+    # See Install-McpFilter for the rationale: filter scripts and the
+    # info/attributes file live under --git-common-dir (shared across
+    # worktrees), not --git-dir (per-worktree). Reading from --git-dir
+    # here would cause uninstall invoked from a linked worktree to remove
+    # only the per-worktree config section while leaving the actual
+    # filter scripts and attributes line intact under the common dir,
+    # producing a half-uninstalled state where checkouts in OTHER
+    # worktrees still see the filter and try to invoke now-orphaned
+    # config that no longer exists.
+    $resolvedGitCommonDir = Get-ResolvedGitCommonDir -RepoRoot $RepoRoot
+    if (-not $resolvedGitCommonDir) {
+        return 'not-installed'
+    }
+
+    $filterDir = Join-Path $resolvedGitCommonDir $FilterName
+    $attrFile = Join-Path $resolvedGitCommonDir 'info\attributes'
+    $mcpFile = Join-Path $RepoRoot $McpRelPath
 
     $hadAnything = $false
 
-    # 1. Strip snapshot from .mcp.json (pure text op; doesn't depend on git or bash).
+    # 1. Strip snapshot from McpRelPath (pure text op; doesn't depend on git or bash).
     if (Test-Path $mcpFile) {
         $utf8NoBom = [Text.UTF8Encoding]::new($false)
         $raw = [IO.File]::ReadAllText($mcpFile, $utf8NoBom)
@@ -757,24 +896,24 @@ function Uninstall-McpFilter {
     Push-Location $RepoRoot
     try {
         $hasSection = $false
-        & git config --local --get-regexp '^filter\.xray-mcp\.' 2>$null | Out-Null
+        & git config --local --get-regexp ('^filter\.' + [Regex]::Escape($FilterName) + '\.') 2>$null | Out-Null
         if ($LASTEXITCODE -eq 0) { $hasSection = $true }
 
         if ($hasSection) {
             $hadAnything = $true
             if ($DryRun) {
-                Write-Host '  [DryRun] Would remove [filter "xray-mcp"] from .git/config' -ForegroundColor DarkYellow
+                Write-Host ('  [DryRun] Would remove [filter "{0}"] from .git/config' -f $FilterName) -ForegroundColor DarkYellow
             }
             else {
                 # Capture exit code: a failed `--remove-section` (e.g.,
                 # locked .git/config, permission error) must NOT be silently
-                # swallowed — leaving the filter section in place after the
+                # swallowed -- leaving the filter section in place after the
                 # scripts are deleted would cause every future git checkout
                 # to invoke a missing command and either fail loudly or, with
                 # required=false, silently passthrough (bad either way).
-                & git config --local --remove-section 'filter.xray-mcp' 2>&1 | Out-Null
+                & git config --local --remove-section ("filter.{0}" -f $FilterName) 2>&1 | Out-Null
                 if ($LASTEXITCODE -ne 0) {
-                    Write-Warning ("git config --remove-section filter.xray-mcp failed (exit {0}); .git/config may still reference the filter" -f $LASTEXITCODE)
+                    Write-Warning ("git config --remove-section filter.{0} failed (exit {1}); .git/config may still reference the filter" -f $FilterName, $LASTEXITCODE)
                     $script:_McpFilterRollbackError = $true
                 }
             }
@@ -789,14 +928,15 @@ function Uninstall-McpFilter {
         return 'error'
     }
 
-    # 3. Remove the .mcp.json line from .git/info/attributes.
+    # 3. Remove the AttributePath line from .git/info/attributes.
     if (Test-Path $attrFile) {
         $existingAttrs = @(Get-Content $attrFile -ErrorAction SilentlyContinue)
-        $filteredAttrs = @($existingAttrs | Where-Object { $_ -notmatch '^\s*\.mcp\.json\s.*filter=xray-mcp' })
+        $stripPattern = '^\s*' + [Regex]::Escape($AttributePath) + '[ \t].*filter=' + [Regex]::Escape($FilterName)
+        $filteredAttrs = @($existingAttrs | Where-Object { $_ -notmatch $stripPattern })
         if ($existingAttrs.Count -ne $filteredAttrs.Count) {
             $hadAnything = $true
             if ($DryRun) {
-                Write-Host ("  [DryRun] Would remove .mcp.json line from {0}" -f $attrFile) -ForegroundColor DarkYellow
+                Write-Host ("  [DryRun] Would remove {0} line from {1}" -f $AttributePath, $attrFile) -ForegroundColor DarkYellow
             }
             else {
                 Set-Content -Path $attrFile -Value $filteredAttrs -Encoding UTF8
@@ -804,7 +944,7 @@ function Uninstall-McpFilter {
         }
     }
 
-    # 4. Delete .git/xray-mcp/.
+    # 4. Delete <git-common-dir>/<FilterName>/.
     if (Test-Path $filterDir) {
         $hadAnything = $true
         if ($DryRun) {
@@ -908,34 +1048,44 @@ if ($Uninstall) {
         }
     }
 
-    # 1. Tear down the smudge/clean filter for .mcp.json (if installed).
-    # When the filter is in use, the snapshot-line strip already removes our
-    # entry without disturbing upstream's formatting. We then skip the
-    # JSON-parse-and-rewrite step for .mcp.json (which would reformat
-    # args arrays) and only handle .vscode/mcp.json and .roo/mcp.json that way.
-    $filterHandled = $false
+    # 1. Tear down the smudge/clean filters for .mcp.json AND
+    # .vscode/mcp.json (each is independent — one or the other may be
+    # installed, both, or neither). When a filter is in use, the
+    # snapshot-line strip already removes our entry without disturbing
+    # upstream's formatting; we then skip the JSON-parse-and-rewrite step
+    # for that file (which would reformat args arrays). $filterHandled is
+    # tracked per relative path so the JSON-rewrite loop below can decide
+    # per-file.
+    $filterHandled = @{}
     if ($isGitRepo) {
-        $filterStatus = Uninstall-McpFilter -RepoRoot $RepoPath -DryRun:$DryRun
-        switch ($filterStatus) {
-            'removed'        { Write-Host '  Removed .mcp.json smudge/clean filter.' -ForegroundColor Green; $filterHandled = $true }
-            'not-installed'  { Write-Host '  No .mcp.json filter installed (skip).' -ForegroundColor DarkGray }
-            default          { Write-Warning "Filter teardown returned: $filterStatus" }
+        $filterTeardowns = @(
+            @{ FilterName = 'xray-mcp';        AttributePath = '.mcp.json';        McpRelPath = '.mcp.json';        Label = '.mcp.json'        },
+            @{ FilterName = 'xray-vscode-mcp'; AttributePath = '.vscode/mcp.json'; McpRelPath = '.vscode/mcp.json'; Label = '.vscode/mcp.json' }
+        )
+        foreach ($td in $filterTeardowns) {
+            $filterStatus = Uninstall-McpFilter -RepoRoot $RepoPath -FilterName $td.FilterName -AttributePath $td.AttributePath -McpRelPath $td.McpRelPath -DryRun:$DryRun
+            switch ($filterStatus) {
+                'removed'        { Write-Host ("  Removed {0} smudge/clean filter ({1})." -f $td.Label, $td.FilterName) -ForegroundColor Green; $filterHandled[$td.McpRelPath] = $true }
+                'not-installed'  { Write-Host ("  No {0} filter installed (skip)." -f $td.Label) -ForegroundColor DarkGray }
+                default          { Write-Warning ("Filter teardown for {0} returned: {1}" -f $td.Label, $filterStatus) }
+            }
         }
     }
 
     # 2. Strip 'xray' entries from each known mcp config (preserving other servers).
-    # Skip .mcp.json if the filter teardown already handled it (avoids
-    # ConvertTo-Json reformatting upstream's args arrays).
+    # Skip .mcp.json / .vscode/mcp.json if the filter teardown already
+    # handled them (avoids ConvertTo-Json reformatting upstream's args
+    # arrays).
     # Roo support disabled: .roo/mcp.json entry kept commented out so legacy installs
     # can still be cleaned up via -Restore (which uses .bak files), but the new
     # uninstall flow no longer touches Roo.
     $configs = @(
-        @{ Path = (Join-Path $RepoPath '.vscode\mcp.json'); Container = 'servers';    Label = 'VS Code (.vscode/mcp.json)'; SkipIfFilterHandled = $false },
-        # @{ Path = (Join-Path $RepoPath '.roo\mcp.json');    Container = 'mcpServers'; Label = 'Roo (.roo/mcp.json)';        SkipIfFilterHandled = $false },
-        @{ Path = (Join-Path $RepoPath '.mcp.json');        Container = 'mcpServers'; Label = 'Copilot CLI (.mcp.json)';    SkipIfFilterHandled = $true  }
+        @{ Path = (Join-Path $RepoPath '.vscode\mcp.json'); RelPath = '.vscode/mcp.json'; Container = 'servers';    Label = 'VS Code (.vscode/mcp.json)'; SkipIfFilterHandled = $true  },
+        # @{ Path = (Join-Path $RepoPath '.roo\mcp.json');    RelPath = '.roo/mcp.json';    Container = 'mcpServers'; Label = 'Roo (.roo/mcp.json)';        SkipIfFilterHandled = $false },
+        @{ Path = (Join-Path $RepoPath '.mcp.json');        RelPath = '.mcp.json';        Container = 'mcpServers'; Label = 'Copilot CLI (.mcp.json)';    SkipIfFilterHandled = $true  }
     )
     foreach ($cfg in $configs) {
-        if ($cfg.SkipIfFilterHandled -and $filterHandled) {
+        if ($cfg.SkipIfFilterHandled -and $filterHandled[$cfg.RelPath]) {
             Write-Host ("  Skipping JSON rewrite for {0} (filter teardown already removed xray)" -f $cfg.Label) -ForegroundColor DarkGray
             continue
         }
@@ -969,14 +1119,18 @@ if ($Uninstall) {
         }
     }
 
-    # 4. Refresh git's stat-cache so the file no longer appears modified.
-    # We just rewrote .mcp.json (stripping the snapshot line); without this
-    # refresh, git status would show 'M' until the next git operation that
-    # naturally updates stat info.
-    if ($isGitRepo -and -not $DryRun -and (Test-Path (Join-Path $RepoPath '.mcp.json'))) {
+    # 4. Refresh git's stat-cache so the files no longer appear modified.
+    # We just rewrote .mcp.json / .vscode/mcp.json (stripping the snapshot
+    # line); without this refresh, git status would show 'M' until the
+    # next git operation that naturally updates stat info.
+    if ($isGitRepo -and -not $DryRun) {
         Push-Location $RepoPath
         try {
-            & git update-index --refresh -- '.mcp.json' 2>$null | Out-Null
+            foreach ($rel in @('.mcp.json', '.vscode/mcp.json')) {
+                if (Test-Path (Join-Path $RepoPath $rel)) {
+                    & git update-index --refresh -- $rel 2>$null | Out-Null
+                }
+            }
         }
         finally {
             Pop-Location
@@ -1263,26 +1417,95 @@ if ($writeVscode) {
 
     Backup-McpJson -Path $vscodeMcpPath
 
-    $xrayEntry = [ordered]@{
-        type    = 'stdio'
-        command = $xrayPath
-        args    = $xrayArgs
+    # Decide between two strategies (mirrors the .mcp.json install logic):
+    #   - Filter strategy (.vscode/mcp.json is tracked in a git repo): install
+    #     smudge/clean filter so 'git pull' merges upstream changes silently
+    #     and 'git status' stays clean.
+    #   - Plain JSON strategy (no git repo, OR file is untracked): merge xray
+    #     entry via JSON parse+rewrite, fall back on .git/info/exclude or
+    #     skip-worktree (handled later in the git-protect block).
+    $useVscodeFilterStrategy = $false
+    $vscodeFilterInstalled = $false
+    if ($isGitRepo) {
+        $isVscodeTracked = Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath '.vscode/mcp.json'
+        $useVscodeFilterStrategy = [bool]$isVscodeTracked
     }
 
-    if ($vscodeAction -eq 'merge' -and $existingVscode) {
-        Warn-McpMergeLossyFields -Path $vscodeMcpPath -Client 'VS Code' -ExistingXrayEntry $existingVscode.servers.xray -ScriptManagedFields @('type','command','args')
-        $existingVscode.servers | Add-Member -NotePropertyName 'xray' -NotePropertyValue $xrayEntry -Force
-        $existingVscode | ConvertTo-Json -Depth 10 | Set-Content -Path $vscodeMcpPath -Encoding UTF8
-        Write-Host "Updated xray entry in $vscodeMcpPath (other servers preserved)" -ForegroundColor Green
-    }
-    else {
-        $vscodeConfig = [ordered]@{
-            servers = [ordered]@{
-                xray = $xrayEntry
+    if ($useVscodeFilterStrategy) {
+        $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+        $vscodeSnapshotLine = New-XraySnapshotLine -XrayPath $xrayPath -XrayArgs $xrayArgs -Shape 'VsCode'
+
+        # Lift any pre-existing skip-worktree from a legacy install BEFORE we
+        # touch the file - otherwise our write would silently no-op in the index.
+        Push-Location $RepoPath
+        try {
+            & git update-index --no-skip-worktree '.vscode/mcp.json' 2>$null | Out-Null
+        }
+        finally {
+            Pop-Location
+        }
+
+        if (Install-McpFilter -RepoRoot $RepoPath -ScriptDir $scriptDir -SnapshotLine $vscodeSnapshotLine -FilterName 'xray-vscode-mcp' -ContainerKey 'servers' -AttributePath '.vscode/mcp.json') {
+            $vscodeFilterInstalled = $true
+            $injected = Set-McpFileWithSnapshot -Path $vscodeMcpPath -SnapshotLine $vscodeSnapshotLine -ContainerKey 'servers'
+            if ($injected) {
+                # Renormalize so the index reflects the canonical (clean) form.
+                Push-Location $RepoPath
+                try {
+                    & git add --renormalize '.vscode/mcp.json' 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Warning ("git add --renormalize .vscode/mcp.json failed (exit {0}). The xray line may show as a diff until the next clean filter pass." -f $LASTEXITCODE)
+                    }
+                }
+                finally {
+                    Pop-Location
+                }
+                Write-Host "Configured xray in $vscodeMcpPath via smudge/clean filter (git status stays clean across upstream pulls)." -ForegroundColor Green
             }
         }
-        $vscodeConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $vscodeMcpPath -Encoding UTF8
-        Write-Host "Created $vscodeMcpPath" -ForegroundColor Green
+        else {
+            # FAIL-CLOSED: same rationale as the .mcp.json branch - a
+            # tracked upstream .vscode/mcp.json must NOT be rewritten via
+            # ConvertTo-Json (loses single-element-array structure, rewrites
+            # whitespace, reintroduces the pull-abort/diff damage class the
+            # filter migration replaced). The legacy skip-worktree fallback
+            # is also unsafe: any future `git stash`/`reset --hard`/`checkout`
+            # would silently lift the bit and expose the xray entry as a real
+            # diff against upstream.
+            #
+            # Roll back any partial filter artifacts and abort the VS Code
+            # install for this repo.
+            Write-Warning 'Filter installation failed for the tracked upstream .vscode/mcp.json.'
+            Write-Warning 'Refusing to fall back to JSON merge + skip-worktree (would corrupt upstream formatting and create silent diff hazards on future git operations).'
+            Write-Warning 'Rolling back any partial filter artifacts and aborting the VS Code install for this repo.'
+            $rollbackResult = Uninstall-McpFilter -RepoRoot $RepoPath -FilterName 'xray-vscode-mcp' -AttributePath '.vscode/mcp.json' -McpRelPath '.vscode/mcp.json'
+            Write-Warning ("Rollback result: {0}. Investigate the Install-McpFilter warning above (likely missing bash, missing filter source files, or .git/info not writable) and re-run." -f $rollbackResult)
+            $writeVscode = $false
+        }
+    }
+
+    if (-not $useVscodeFilterStrategy -and $writeVscode) {
+        $xrayEntry = [ordered]@{
+            type    = 'stdio'
+            command = $xrayPath
+            args    = $xrayArgs
+        }
+
+        if ($vscodeAction -eq 'merge' -and $existingVscode) {
+            Warn-McpMergeLossyFields -Path $vscodeMcpPath -Client 'VS Code' -ExistingXrayEntry $existingVscode.servers.xray -ScriptManagedFields @('type','command','args')
+            $existingVscode.servers | Add-Member -NotePropertyName 'xray' -NotePropertyValue $xrayEntry -Force
+            $existingVscode | ConvertTo-Json -Depth 10 | Set-Content -Path $vscodeMcpPath -Encoding UTF8
+            Write-Host "Updated xray entry in $vscodeMcpPath (other servers preserved)" -ForegroundColor Green
+        }
+        else {
+            $vscodeConfig = [ordered]@{
+                servers = [ordered]@{
+                    xray = $xrayEntry
+                }
+            }
+            $vscodeConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $vscodeMcpPath -Encoding UTF8
+            Write-Host "Created $vscodeMcpPath" -ForegroundColor Green
+        }
     }
 }
 
@@ -1438,7 +1661,7 @@ if ($writeCopilotCli) {
             Pop-Location
         }
 
-        if (Install-McpFilter -RepoRoot $RepoPath -ScriptDir $scriptDir -SnapshotLine $snapshotLine) {
+        if (Install-McpFilter -RepoRoot $RepoPath -ScriptDir $scriptDir -SnapshotLine $snapshotLine -FilterName 'xray-mcp' -ContainerKey 'mcpServers' -AttributePath '.mcp.json') {
             $copilotCliFilterInstalled = $true
             $injected = Set-McpFileWithSnapshot -Path $copilotCliMcpPath -SnapshotLine $snapshotLine
             if ($injected) {
@@ -1471,7 +1694,7 @@ if ($writeCopilotCli) {
             Write-Warning 'Filter installation failed for the tracked upstream .mcp.json.'
             Write-Warning 'Refusing to fall back to JSON merge + skip-worktree (would corrupt upstream formatting and create silent diff hazards on future git operations).'
             Write-Warning 'Rolling back any partial filter artifacts and aborting the Copilot CLI install for this repo.'
-            $rollbackResult = Uninstall-McpFilter -RepoRoot $RepoPath
+            $rollbackResult = Uninstall-McpFilter -RepoRoot $RepoPath -FilterName 'xray-mcp' -AttributePath '.mcp.json' -McpRelPath '.mcp.json'
             Write-Warning ("Rollback result: {0}. Investigate the Install-McpFilter warning above (likely missing bash, missing filter source files, or .git/info not writable) and re-run." -f $rollbackResult)
             $writeCopilotCli = $false
         }
@@ -1534,7 +1757,7 @@ if ($isGitRepo) {
         }
 
         foreach ($mcpFile in @(
-                @{ Path = '.vscode/mcp.json'; Protect = ($writeVscode -and (Test-Path (Join-Path $RepoPath '.vscode/mcp.json'))) },
+                @{ Path = '.vscode/mcp.json'; Protect = ($writeVscode -and -not $vscodeFilterInstalled -and (Test-Path (Join-Path $RepoPath '.vscode/mcp.json'))) },
                 @{ Path = '.roo/mcp.json'; Protect = ($writeRoo -and (Test-Path (Join-Path $RepoPath '.roo/mcp.json'))) },
                 @{ Path = '.mcp.json'; Protect = ($writeCopilotCli -and -not $copilotCliFilterInstalled -and (Test-Path (Join-Path $RepoPath '.mcp.json'))) }
             )) {

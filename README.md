@@ -81,20 +81,40 @@ Inverted index + AST-based code intelligence engine for large-scale codebases. M
 
 ### Installation
 
-**Option A — Automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1) — it downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for the clients you opt into (VS Code Copilot Chat and/or GitHub Copilot CLI):
+**Option A — Automated setup (recommended).** Run the [setup script](scripts/setup-xray.ps1) — it downloads the latest `xray.exe`, detects your project's file extensions, and creates the MCP config for the clients you opt into (VS Code Copilot Chat and/or GitHub Copilot CLI).
+
+Three ways to launch it. Pick whichever fits — they all run the same script and accept the same parameters.
+
+**A1. One-liner (download + run inline).** Shortest. The script is fetched and executed in-memory; nothing is left on disk.
 
 ```powershell
-# From a clone of this repo, or download just the script:
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1').Content)) -RepoPath C:\Repos\MyProject
+```
+
+**A2. Download-then-run (recommended if you want to read the script first).** Saves the script to `%TEMP%` so you can audit it before running.
+
+```powershell
+$tmp = Join-Path $env:TEMP 'setup-xray.ps1'
+Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -OutFile $tmp
+& $tmp -RepoPath C:\Repos\MyProject
+```
+
+**A3. From a clone of this repo.** Use this if you want to pin a specific commit/tag, or if you're already iterating on the script locally.
+
+```powershell
 .\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject
 ```
+
+> Pin to a release tag instead of `main` for reproducibility — replace `main` in the URL with e.g. `v0.5.0`. Add `-EnableCopilotCli` and/or `-EnableVSCode` to skip the interactive client prompts.
 
 The script will:
 1. Download the latest `xray.exe` from [GitHub releases](https://github.com/pustynsky/xray/releases) to `%LOCALAPPDATA%\xray\`
 2. Scan the repo and suggest file extensions to index
 3. Create the MCP configs you opt into — `.vscode/mcp.json` for **VS Code Copilot Chat** and/or `.mcp.json` for **GitHub Copilot CLI** (each prompted separately, or via `-EnableVSCode` / `-EnableCopilotCli`)
 4. Protect configs from being clobbered by `git pull` and from leaking your local xray entry into commits:
-   - Tracked `.mcp.json` (shared-repo case) → per-clone **git smudge/clean filter** so `git status` stays clean and upstream changes apply silently
-   - Tracked `.vscode/mcp.json` → `git update-index --skip-worktree`
+   - Tracked `.mcp.json` (shared-repo case) → per-clone **git smudge/clean filter** (`xray-mcp`) so `git status` stays clean and upstream changes apply silently
+   - Tracked `.vscode/mcp.json` (shared-repo case) → identical per-clone filter (`xray-vscode-mcp`), bound to the VS Code-shape `servers` container
+   - Untracked `.vscode/mcp.json` → `git update-index --skip-worktree`
    - Untracked files → `.git/info/exclude`
 
 See the [Installation Guide](docs/installation.md) for the smudge/clean filter design, manual setup, Cline configuration, and the Roo Code note (the `-EnableRoo` switch is currently a no-op).

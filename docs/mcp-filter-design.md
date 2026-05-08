@@ -312,11 +312,88 @@ from scratch. We document this edge case in install summary.
 
 ## Out of scope
 
-* Filtering `.vscode/mcp.json` and `.roo/mcp.json`. These are
-  conventionally untracked and the existing `.git/info/exclude`
-  approach already meets all three goals there. Only `.mcp.json` (the
-  Copilot CLI canonical path) needs filter-based handling because it
-  is the only one commonly tracked upstream.
 * A general-purpose "merge my snippet into a tracked file" framework.
-  This design intentionally hardcodes the `mcpServers` JSON shape and
-  the `xray` server name. Generalizing later is possible but not now.
+  This design intentionally hardcodes the `xray` server name and the
+  set of supported container shapes (`mcpServers` for Copilot CLI,
+  `servers` for VS Code). Generalizing later is possible but not now.
+
+## Extension: tracked `.vscode/mcp.json`
+
+The same hazard class applies to `.vscode/mcp.json` whenever a shared
+repo tracks it (some teams check in shared MCP servers for their VS
+Code Copilot Chat workflow). The original "out of scope" note above
+assumed `.vscode/mcp.json` was always untracked; field experience
+proved otherwise (a tracked-upstream `.vscode/mcp.json` aborted
+`git pull` in exactly the same way that motivated the original
+filter migration).
+
+The fix mirrors the `.mcp.json` design with one parameterization:
+
+* Filter name: `xray-vscode-mcp` (separate `<git-common-dir>/xray-vscode-mcp/`
+  directory and separate `[filter "xray-vscode-mcp"]` config section
+  so the two installs are independent — installing/uninstalling one
+  must never affect the other).
+* Attribute path: `.vscode/mcp.json filter=xray-vscode-mcp`.
+* Container key (the JSON object that holds server entries):
+  `servers` instead of `mcpServers`. This is the only schema
+  difference between the two file shapes.
+* Snapshot entry shape: `{"type":"stdio","command":"...","args":[...],"_xrayMcpMarker":...}`
+  (note `type:"stdio"` is required by the VS Code schema; `env:{}` is
+  omitted because VS Code does not require it and including it would
+  diverge from upstream conventions).
+
+### How the parameterization is implemented
+
+`smudge.sh` takes the container key as its first positional argument:
+
+```bash
+exec bash "$(git rev-parse --git-common-dir)/xray-mcp/smudge.sh" mcpServers
+exec bash "$(git rev-parse --git-common-dir)/xray-vscode-mcp/smudge.sh" servers
+```
+
+Inside `smudge.sh`, the argument is validated against
+`/^[A-Za-z_][A-Za-z0-9_]*$/` before being spliced into a perl regex
+via `qr/"\Q$container_key\E"\s*:\s*\{\s*$/`. Defense-in-depth: the
+PowerShell-side `Install-McpFilter` function also `[ValidateSet]`s the
+key to `'mcpServers'` or `'servers'` so untrusted callers cannot
+inject arbitrary regex even before reaching the bash layer. With no
+argument, smudge defaults to `mcpServers` for backward compatibility
+with the original install (older `.git/config` filter sections
+written before this extension still work after the script update).
+
+`clean.sh` is unchanged: it strips any line containing the literal
+`_xrayMcpMarker` substring, regardless of which container the entry
+lives in. One source file, two filter installs, two container shapes.
+
+### Per-clone files for the second filter
+
+| Path | Tracked? | Purpose |
+|---|---|---|
+| `.vscode/mcp.json` | yes (upstream owns it) | working tree contains upstream + xray block; index contains upstream only |
+| `.git/info/attributes` (extra line) | no | `.vscode/mcp.json filter=xray-vscode-mcp` |
+| `.git/config` (`[filter "xray-vscode-mcp"]` section) | no | `clean = bash "$(git rev-parse --git-common-dir)/xray-vscode-mcp/clean.sh"`, `smudge = bash "$(git rev-parse --git-common-dir)/xray-vscode-mcp/smudge.sh" servers`, `required = false` |
+| `.git/xray-vscode-mcp/{smudge.sh,clean.sh,snapshot.txt}` | no | independent copy of the same source scripts; refreshing one filter never touches the other's directory |
+
+### Install/uninstall flow
+
+Identical to the `.mcp.json` flow above, with `Install-McpFilter` /
+`Uninstall-McpFilter` invoked twice with different `-FilterName`,
+`-ContainerKey`, `-AttributePath`, and `-McpRelPath` arguments. Each
+call's `git config` writes are independently exit-code-checked, and
+the same fail-closed rollback applies per file: a tracked
+`.vscode/mcp.json` whose filter install fails causes the VS Code
+section of the install to abort with rollback (rather than fall back
+to `ConvertTo-Json` + `skip-worktree`, which would re-introduce the
+original hazard). The other client's install proceeds independently.
+
+### Tests
+
+* `scripts/mcp-filter/test-roundtrip.ps1` — round-trip property
+  `clean(smudge(canonical)) == canonical` for both container shapes
+  including CRLF and the no-args backward-compat path. 11 fixtures.
+* `scripts/mcp-filter/test-vscode-tracked.ps1` — full lifecycle
+  reproduction of the original `.vscode/mcp.json` pull-abort scenario
+  proving the filter prevents it. Mirrors `test-e2e.ps1` for the
+  Copilot CLI side. 36 assertions covering install, upstream changes
+  + `git pull`, `git stash`/`pop`, `git reset --hard`, branch
+  switches, and clean uninstall.

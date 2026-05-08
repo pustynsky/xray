@@ -1,5 +1,56 @@
 # Changelog
 
+## Unreleased
+
+- **`scripts/setup-xray.ps1` — extend smudge/clean filter to tracked
+  `.vscode/mcp.json` (`xray-vscode-mcp`).** The original filter
+  migration covered only `.mcp.json` (Copilot CLI). Field deployment
+  hit the same `git pull` abort hazard on a shared repo where
+  `.vscode/mcp.json` is also tracked upstream — the legacy
+  skip-worktree fallback for VS Code masked local edits from
+  `git status` but not from the merge engine, so the next upstream
+  change to `.vscode/mcp.json` aborted the pull with the same
+  confusing "local changes would be overwritten" error. The fix
+  installs a second, parallel filter (`xray-vscode-mcp`,
+  `<git-common-dir>/xray-vscode-mcp/`) that uses the same
+  `smudge.sh`/`clean.sh` source scripts as the Copilot CLI filter,
+  parameterized by a positional container-key argument
+  (`mcpServers` for `.mcp.json`, `servers` for `.vscode/mcp.json`).
+  The bash arg is validated against `/^[A-Za-z_][A-Za-z0-9_]*$/`
+  before being spliced into the perl regex; the PowerShell
+  `Install-McpFilter` / `Uninstall-McpFilter` helpers
+  `[ValidateSet]` the key on the way in. Backward compat: smudge
+  with no args defaults to `mcpServers`, so existing
+  `.git/config` filter sections written by previous installs keep
+  working after the script update. The same fail-closed rollback
+  applies to the VS Code branch (a tracked-upstream
+  `.vscode/mcp.json` whose filter install fails refuses the legacy
+  `ConvertTo-Json` + skip-worktree fallback and aborts the VS Code
+  section of the install). The Uninstall flow tears down BOTH
+  filters in one pass (each independently exit-code-checked), and
+  the post-uninstall stat-cache refresh now covers both files so
+  `git status` is clean after `setup-xray.ps1 -Uninstall` on either
+  setup. Tests: `test-roundtrip.ps1` extended to 11 cases (5
+  Copilot CLI fixtures + 2 VS Code fixtures + CRLF byte-exact
+  variants for both shapes + backward-compat path + invalid-key
+  passthrough); new `test-vscode-tracked.ps1` (36 assertions)
+  reproduces the exact pull-abort scenario and proves the filter
+  prevents it through install, upstream pull, stash/pop, reset
+  --hard, branch switch, and clean uninstall. `test-e2e.ps1` and
+  `test-worktree.ps1` continue to pass unchanged.
+
+- **`README.md` / `docs/installation.md` — bootstrap commands for
+  `setup-xray.ps1` without cloning the repo.** Quick Setup now
+  documents three launch modes side-by-side: A1 a one-liner that
+  fetches and executes the script in-memory via
+  `[scriptblock]::Create((Invoke-WebRequest …).Content)`; A2 a
+  download-then-run form that saves the script to `%TEMP%` for
+  audit before running; A3 the original clone-and-run form.
+  All three accept the same parameters and resolve to the same
+  raw-content URL; the docs note how to pin a release tag instead
+  of `main` for reproducibility and how to skip the interactive
+  client prompts via `-EnableCopilotCli` / `-EnableVSCode`.
+
 ## v0.2.5 (2026-05-08)
 
 - **`docs/di-support.md` — canonical DI-resolution reference (new file)
