@@ -11,6 +11,16 @@
 !scripts/mcp-filter/test-worktree.ps1
 !scripts/mcp-filter/test-vscode-tracked.ps1
 !scripts/mcp-filter/test-install-from-worktree.ps1
+# Standalone-install regression suite: stages setup-xray.ps1 with no
+# mcp-filter sibling and asserts the embedded fallback + PS 5.1 quoting
+# fix both behave correctly. Mutation-killing for both fixes.
+!scripts/mcp-filter/test-standalone-install.ps1
+# Embedded-vs-disk byte-equality guard for the MCP filter scripts
+# (smudge.sh / clean.sh) embedded inside setup-xray.ps1.
+!scripts/mcp-filter/test-embedded-sync.ps1
+# Get-DetectedExtensions regression suite (mutation guard for setup-xray.ps1
+# scan rewrite — case-insensitive prune, hidden files, reparse-point skip).
+!scripts/test-detect-extensions.ps1
 todo*.md
 proptest-regressions/
 
