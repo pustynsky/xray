@@ -12,10 +12,10 @@ Three ways to launch it. Pick whichever fits — they all run the same script an
 
 ### A1. One-liner (download + run inline)
 
-Shortest. The script is fetched and executed in-memory; nothing is left on disk.
+Shortest. The script is fetched and executed in-memory; nothing is left on disk. The script will prompt for the target repository path; pass `-RepoPath <path>` to skip the prompt.
 
 ```powershell
-& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1').Content)) -RepoPath C:\Repos\MyProject
+& ([scriptblock]::Create((Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing).Content))
 ```
 
 ### A2. Download-then-run
@@ -24,8 +24,8 @@ Recommended if you want to read the script before executing it. Saves to `%TEMP%
 
 ```powershell
 $tmp = Join-Path $env:TEMP 'setup-xray.ps1'
-Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -OutFile $tmp
-& $tmp -RepoPath C:\Repos\MyProject
+Invoke-WebRequest 'https://raw.githubusercontent.com/pustynsky/xray/main/scripts/setup-xray.ps1' -UseBasicParsing -OutFile $tmp
+& $tmp
 ```
 
 ### A3. From a clone of this repo
@@ -35,12 +35,16 @@ Use this if you want to pin a specific commit/tag, or if you're iterating on the
 ```powershell
 git clone https://github.com/pustynsky/xray
 cd xray
-.\scripts\setup-xray.ps1 -RepoPath C:\Repos\MyProject
+.\scripts\setup-xray.ps1
 ```
 
 > **Pin a release.** Replace `main` in the URLs above with a tag (e.g. `v0.5.0`) to lock the script to a specific release for reproducibility.
 >
-> **Skip the prompts.** Add `-EnableCopilotCli` and/or `-EnableVSCode` to opt clients in non-interactively.
+> **Target a specific repo non-interactively.** Pass `-RepoPath <path>` to skip the path prompt.
+>
+> **Skip the client prompts.** Add `-EnableCopilotCli` and/or `-EnableVSCode` to opt clients in non-interactively.
+>
+> **`-UseBasicParsing`.** Required on Windows PowerShell 5.1 (the default `powershell.exe` on Windows) — without it, `Invoke-WebRequest` uses the IE rendering engine which blocks with a security prompt and can dump the script's `.SYNOPSIS` block to the console. It's a no-op on PowerShell 7+.
 
 **What it does:**
 
