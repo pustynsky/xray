@@ -1,12 +1,22 @@
 #!/usr/bin/env bash
-# smudge filter for .mcp.json (xray MCP per-clone setup).
-# Reads canonical (upstream-only) .mcp.json from stdin, writes enriched form
-# (with the local xray entry injected) to stdout.
+# smudge filter for xray-managed MCP config files (.mcp.json,
+# .vscode/mcp.json, ...). Reads the canonical (upstream-only) form from
+# stdin, writes the enriched form (with the local xray entry injected) to
+# stdout.
 #
-# Strategy: insert the snapshot line as the FIRST entry inside mcpServers,
-# immediately after the opening brace. This avoids matching the closing
-# brace, which would require brace-counting that is not safe against `{`
-# and `}` characters appearing inside JSON string values (common in args).
+# CONTAINER KEY (first positional argument):
+#   The JSON object key whose opening brace marks the injection point.
+#   - .mcp.json (Copilot CLI):     "mcpServers"  (default)
+#   - .vscode/mcp.json (VS Code): "servers"
+#   Defaults to "mcpServers" when no argument is passed, preserving
+#   backward compatibility with installs from the previous version of
+#   setup-xray.ps1 that wired the filter as `bash <path>` with no args.
+#
+# Strategy: insert the snapshot line as the FIRST entry inside the
+# container object, immediately after its opening brace. This avoids
+# matching the closing brace, which would require brace-counting that is
+# not safe against `{` and `}` characters appearing inside JSON string
+# values (common in args).
 #
 # Behavior:
 #   * snapshot.txt missing             -> passthrough (filter no-op)
@@ -35,6 +45,18 @@
 
 set -eu
 
+# First positional argument: container key (defaults to "mcpServers" for
+# backward compat with pre-vscode-extension installs that wired the filter
+# command as `bash <path>` with no args). Validate it's a non-empty
+# alphanumeric token so the value can be safely interpolated into the perl
+# regex below without escaping.
+container_key="${1:-mcpServers}"
+if ! printf '%s' "$container_key" | grep -Eq '^[A-Za-z_][A-Za-z0-9_]*$'; then
+    # Invalid container key -> degrade to passthrough rather than risk a
+    # regex injection or a perl die that would block git checkout.
+    exec cat
+fi
+
 snapshot_path="$(dirname "$0")/snapshot.txt"
 
 # Snapshot missing -> passthrough.
@@ -50,6 +72,7 @@ exec perl -e '
 
     # Read snapshot (single line; strip any trailing CR/LF).
     my $snapshot_path = $ARGV[0];
+    my $container_key = $ARGV[1];
     open my $sf, "<:raw", $snapshot_path or do { print while <STDIN>; exit 0 };
     my $snap = do { local $/; <$sf> };
     close $sf;
@@ -73,6 +96,11 @@ exec perl -e '
     # trailing empty strings are kept; structure is text,sep,text,sep,...
     my @parts = split /(\r?\n)/, $all, -1;
 
+    # Build the container-opening regex: "<key>"\s*:\s*\{\s*$
+    # The key is validated by the bash wrapper to be /^[A-Za-z_][A-Za-z0-9_]*$/
+    # so it is safe to splice into the regex without escaping.
+    my $open_re = qr/"\Q$container_key\E"\s*:\s*\{\s*$/;
+
     my @out;
     my $injected = 0;
     my $i = 0;
@@ -83,7 +111,7 @@ exec perl -e '
         push @out, $text;
         push @out, $line_sep if $line_sep ne "";
 
-        if (!$injected && $text =~ /"mcpServers"\s*:\s*\{\s*$/) {
+        if (!$injected && $text =~ $open_re) {
             # Peek next text segment (skip blank lines).
             my $j = $i + 2;  # next text index after sep
             while ($j < $n && $parts[$j] =~ /^\s*$/ && (($j + 1 < $n) ? $parts[$j + 1] ne "" : 0)) {
@@ -112,4 +140,4 @@ exec perl -e '
     }
 
     print join("", @out);
-' "$snapshot_path"
+' "$snapshot_path" "$container_key"

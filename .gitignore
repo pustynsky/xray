@@ -9,6 +9,8 @@
 !scripts/mcp-filter/test-e2e.ps1
 !scripts/mcp-filter/test-plain-uninstall.ps1
 !scripts/mcp-filter/test-worktree.ps1
+!scripts/mcp-filter/test-vscode-tracked.ps1
+!scripts/mcp-filter/test-install-from-worktree.ps1
 todo*.md
 proptest-regressions/
 
