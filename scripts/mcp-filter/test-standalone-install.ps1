@@ -115,6 +115,38 @@ function Test-BytesEqual {
     }
     return $true
 }
+function Assert-GitProtectedMcpState {
+    param(
+        [Parameter(Mandatory)] [string]$RuntimeLabel,
+        [Parameter(Mandatory)] [string]$RepoPath
+    )
+
+    Push-Location $RepoPath
+    try {
+        Local-Assert "$RuntimeLabel : VS Code mcp config created" (Test-Path '.vscode/mcp.json')
+
+        $excludePath = & git rev-parse --git-path info/exclude 2>$null
+        Local-Assert "$RuntimeLabel : git exclude path resolved" ($LASTEXITCODE -eq 0 -and -not [string]::IsNullOrWhiteSpace($excludePath))
+
+        $excludeLines = @()
+        if ($excludePath -and (Test-Path $excludePath)) {
+            $excludeLines = @(Get-Content -Path $excludePath -ErrorAction SilentlyContinue)
+        }
+        Local-Assert "$RuntimeLabel : untracked VS Code mcp config hidden via .git/info/exclude" ($excludeLines -contains '.vscode/mcp.json')
+
+        $statusLines = @(& git status --short -- '.mcp.json' '.vscode/mcp.json' 2>&1)
+        $statusText = ($statusLines -join "`n")
+        Local-Assert "$RuntimeLabel : git status stays clean for generated MCP configs" ([string]::IsNullOrWhiteSpace($statusText))
+        if (-not [string]::IsNullOrWhiteSpace($statusText)) {
+            $statusLines | ForEach-Object { Write-Host "  | git status: $_" -ForegroundColor Yellow }
+        }
+    }
+    finally {
+        Pop-Location
+    }
+}
+
+
 function Invoke-StandaloneInstall {
     <#
         Run a single install round in $RuntimeExe. Returns $true on
@@ -184,6 +216,7 @@ function Invoke-StandaloneInstall {
             -InstallDir $fakeInstallDir `
             -SkipDownload `
             -EnableCopilotCli `
+            -EnableVSCode `
             -Extensions cs, md `
             -Force *> $log
         $exit = $LASTEXITCODE
@@ -194,6 +227,10 @@ function Invoke-StandaloneInstall {
         if ($exit -ne 0 -and (Test-Path $log)) {
             Write-Host "  --- install log tail ---" -ForegroundColor Yellow
             Get-Content $log | Select-Object -Last 20 | ForEach-Object { Write-Host "  | $_" -ForegroundColor Yellow }
+        }
+
+        if ($exit -eq 0) {
+            Assert-GitProtectedMcpState -RuntimeLabel $RuntimeLabel -RepoPath $repo
         }
 
         # Filter scripts: present + byte-equal to canonical disk source.
@@ -296,10 +333,149 @@ function Invoke-StandaloneInstall {
     }
 }
 
+function Invoke-InMemoryInstall {
+    <#
+        Simulate the documented bootstrap one-liner B exactly:
+            & ([scriptblock]::Create((Invoke-WebRequest <url> -UseBasicParsing).Content))
+        i.e. the script body is loaded into memory and executed via
+        ScriptBlock::Create — there is NO file on disk, so
+        $MyInvocation.MyCommand.Path is $null.
+
+        This is the path that crashed in the field with
+            Split-Path : Cannot bind argument to parameter 'Path' because
+            it is null.
+        because the install code naively did
+            $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+        and Install-McpFilter then did
+            $srcFilterDir = Join-Path $ScriptDir 'mcp-filter'
+        — both abort on $null.
+
+        The tracked file-based standalone install test does NOT exercise
+        this scenario (it stages setup-xray.ps1 to %TEMP% and invokes
+        with `pwsh -File`, so $MyInvocation.MyCommand.Path is populated).
+        This separate function specifically covers the in-memory path.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$RuntimeLabel,
+        [Parameter(Mandatory)] [string]$RuntimeExe
+    )
+
+    Write-Host ("== {0}: in-memory install (scriptblock from memory, no file on disk) ==" -f $RuntimeLabel) -ForegroundColor Cyan
+
+    $repo = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-repo-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $fakeInstallDir = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-bin-" + [Guid]::NewGuid().ToString('N').Substring(0, 8))
+    $log = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-log-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".txt")
+
+    function Local-Assert {
+        param([string]$Msg, [bool]$Cond)
+        if ($Cond) { Write-Host ("  PASS  " + $Msg) -ForegroundColor Green }
+        else { Write-Host ("  FAIL  " + $Msg) -ForegroundColor Red; $script:localFails++; $script:failCount++ }
+    }
+    $script:localFails = 0
+
+    try {
+        # Fresh git repo with tracked .mcp.json so the filter strategy fires.
+        New-Item -ItemType Directory -Path $repo -Force | Out-Null
+        Push-Location $repo
+        try {
+            git init -q
+            git config user.email 'inmem@example.com'
+            git config user.name 'InMemory'
+            $minimal = "{`n  `"mcpServers`": {`n  }`n}`n"
+            [IO.File]::WriteAllText((Join-Path $repo '.mcp.json'), $minimal, [Text.UTF8Encoding]::new($false))
+            git add .mcp.json
+            git commit -q -m 'baseline mcp config' | Out-Null
+        }
+        finally {
+            Pop-Location
+        }
+
+        # Fake xray binary so -SkipDownload finds it.
+        New-Item -ItemType Directory -Path $fakeInstallDir -Force | Out-Null
+        $fakeXray = Join-Path $fakeInstallDir 'xray.exe'
+        'fake xray binary for in-memory install test' | Out-File -FilePath $fakeXray -Encoding ASCII
+
+        # Read the canonical setup script body and invoke it via
+        # ScriptBlock::Create from inside a fresh runtime — exact
+        # reproduction of the documented one-liner B form.
+        $body = [IO.File]::ReadAllText($canonicalSetup)
+
+        # Encode the script body so we can pass it to the child runtime
+        # without quoting/escaping hazards. The child does
+        #     & ([scriptblock]::Create($body)) -RepoPath ... -InstallDir ...
+        # which is byte-equivalent to the production
+        #     & ([scriptblock]::Create((iwr ...).Content)) -RepoPath ...
+        $b64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($body))
+
+        $childScript = @"
+`$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))
+`$sb = [scriptblock]::Create(`$body)
+& `$sb -RepoPath '$repo' -InstallDir '$fakeInstallDir' -SkipDownload -EnableCopilotCli -EnableVSCode -Extensions cs,md -Force
+exit `$LASTEXITCODE
+"@
+
+        $childPath = Join-Path ([IO.Path]::GetTempPath()) ("xray-inmem-driver-" + [Guid]::NewGuid().ToString('N').Substring(0, 8) + ".ps1")
+        try {
+            [IO.File]::WriteAllText($childPath, $childScript, [Text.UTF8Encoding]::new($false))
+            & $RuntimeExe -NoProfile -File $childPath *> $log
+            $exit = $LASTEXITCODE
+        }
+        finally {
+            Remove-Item -Path $childPath -Force -ErrorAction SilentlyContinue
+        }
+
+        Local-Assert "$RuntimeLabel : in-memory install exit code 0 (got $exit)" ($exit -eq 0)
+
+        # If the install failed, dump the tail for diagnostics.
+        if ($exit -ne 0 -and (Test-Path $log)) {
+            Write-Host "  --- in-memory install log tail ---" -ForegroundColor Yellow
+            Get-Content $log | Select-Object -Last 25 | ForEach-Object { Write-Host "  | $_" -ForegroundColor Yellow }
+        }
+
+        if ($exit -eq 0) {
+            Assert-GitProtectedMcpState -RuntimeLabel $RuntimeLabel -RepoPath $repo
+        }
+
+        # Filter scripts must still appear via embedded fallback even
+        # though $MyInvocation.MyCommand.Path was $null.
+        $filterDir = Join-Path $repo '.git\xray-mcp'
+        Local-Assert "$RuntimeLabel : in-memory: filter dir created" (Test-Path $filterDir)
+
+        foreach ($pair in @(
+                @{ Name = 'smudge.sh'; Canonical = $canonicalSmudge },
+                @{ Name = 'clean.sh'; Canonical = $canonicalClean }
+            )) {
+            $written = Join-Path $filterDir $pair.Name
+            Local-Assert "$RuntimeLabel : in-memory: $($pair.Name) written via embedded fallback" (Test-Path $written)
+            if (Test-Path $written) {
+                $a = Get-NormalizedFileBytes -Path $written
+                $b = Get-NormalizedFileBytes -Path $pair.Canonical
+                Local-Assert "$RuntimeLabel : in-memory: $($pair.Name) byte-equal to canonical disk source" (Test-BytesEqual $a $b)
+            }
+        }
+
+        return ($script:localFails -eq 0)
+    }
+    finally {
+        if (-not $KeepTempDir) {
+            Remove-Item -Path $repo -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $fakeInstallDir -Recurse -Force -ErrorAction SilentlyContinue
+            Remove-Item -Path $log -Force -ErrorAction SilentlyContinue
+        }
+        else {
+            Write-Host "  Kept: $repo" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $fakeInstallDir" -ForegroundColor DarkYellow
+            Write-Host "  Kept: $log" -ForegroundColor DarkYellow
+        }
+    }
+}
+
 # Round 1: current host runtime.
 $currentLabel = "PS $($PSVersionTable.PSVersion)"
 $currentExe = if ($PSVersionTable.PSVersion.Major -ge 6) { 'pwsh' } else { 'powershell.exe' }
 [void](Invoke-StandaloneInstall -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
+Write-Host ''
+[void](Invoke-InMemoryInstall -RuntimeLabel $currentLabel -RuntimeExe $currentExe)
 
 # Round 2: cross-runtime. The PS 5.1 install path has its own quoting
 # hazard; if we are running under PS 7 AND powershell.exe (5.1) is on
@@ -309,6 +485,8 @@ if ($PSVersionTable.PSVersion.Major -ge 6) {
     if ($ps51) {
         Write-Host ''
         [void](Invoke-StandaloneInstall -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
+        Write-Host ''
+        [void](Invoke-InMemoryInstall -RuntimeLabel 'PS 5.1' -RuntimeExe 'powershell.exe')
     }
     else {
         Write-Host ''
@@ -321,6 +499,8 @@ else {
     if ($pwsh) {
         Write-Host ''
         [void](Invoke-StandaloneInstall -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
+        Write-Host ''
+        [void](Invoke-InMemoryInstall -RuntimeLabel 'PS 7+' -RuntimeExe 'pwsh')
     }
     else {
         Write-Host ''

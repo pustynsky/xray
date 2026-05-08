@@ -78,6 +78,20 @@ Defer to `xray-script-reviewer` for installer scripts, PowerShell/bash/perl, `sc
 - **Invariant Preservation**: what invariants existed → which are strengthened/weakened/moved
 - **Test Coverage**: for each behavioral change — does a test exercise the new branch and fail if the condition is inverted or the fallback path is accidentally used?
 
+### Scope Skepticism (MANDATORY)
+
+Challenge the requester's scope before you judge the diff. The prompt and the added tests are both products of the requester's mental model; that mental model can be incomplete.
+
+For every non-trivial behavior change, re-derive the wider context yourself:
+
+- **Public surface matrix**: enumerate affected CLI flags, MCP tools, file formats, config shapes, cache/index states, and documented usage modes from README/docs/tool schemas, not just from the prompt.
+- **Mode matrix**: ask how the feature behaves in new, existing, corrupt, missing, stale, Windows/Linux path, empty-index, large-index, and fallback scenarios where relevant.
+- **Caller matrix**: use `xray_callers` / `xray_grep` to find every place the changed helper or invariant is consumed. Do not assume the changed call site is the only runtime path.
+- **Post-condition matrix**: verify the user-visible end state, not just that the command returns success. Examples: indexes are readable after reload, file lists are fresh after edit, response status flags match actual behavior, git status is clean when a script promises git protection.
+- **Test framing check**: for each new regression test, ask which real-world scenario it represents and which documented scenario it omits. Mutation tests only prove something inside the chosen scenario; they do not prove the scenario selection was complete.
+
+If the prompt frames the change as "fix scenario X," your review must still ask what happens in scenarios Y/Z/W. Missing evidence for a plausible documented mode is at least MAJOR; a green review of an incomplete threat model is a failed review.
+
 ### Project-Specific Hazards (HIGH PRIORITY)
 
 - **On-Disk Index Format** (CRITICAL): `bincode 1` is positional — field add/remove/reorder silently corrupts existing indexes. Version bump + migration required.
@@ -154,10 +168,13 @@ Recommendation:     <what to change>
 - Read full bodies for ownership/lifetime analysis
 - Mark assumptions: `Assumption: ...`
 - Search callers before claiming "safe to change"
+- Challenge the requester's scope and re-derive the wider public-surface / mode / caller / post-condition matrix before verdict
+- Treat tests as evidence for a specific scenario, not proof that the scenario selection is complete
 
 ### DON'T
 - Invent findings to look thorough — "None" is valid
 - Escalate by pattern alone — explain the concrete failure
 - Flag cosmetic issues when real bugs exist
 - Claim repo-wide safety without repo-wide evidence
+- Accept the requester's threat model at face value when public docs, tool schemas, or call graphs imply additional modes
 - Suggest "improvements" beyond what's being reviewed

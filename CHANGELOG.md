@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`scripts/setup-xray.ps1` hotfix — documented in-memory bootstrap no longer crashes before git protection.** The README A1 launch form (`& ([scriptblock]::Create((Invoke-WebRequest ...).Content))`) runs the script body from memory, where `$MyInvocation.MyCommand.Path` is `$null`. The merged `perf/setup-xray-scan-prune` path called `Split-Path -Parent $null` while configuring the MCP filter and aborted after creating `.vscode/mcp.json` but before the final git-protection block could add untracked generated configs to `.git/info/exclude`. The hotfix null-guards both filter call sites and lets `Install-McpFilter` accept `$null` / empty `-ScriptDir`, forcing the embedded filter fallback. `scripts/mcp-filter/test-standalone-install.ps1` now exercises both file-based and in-memory setup on PS 7 + PS 5.1, enables both VS Code and Copilot CLI, and asserts `.vscode/mcp.json` is hidden via `.git/info/exclude` with `git status --short` clean.
+
 - **`scripts/setup-xray.ps1` — four production install-path fixes
   (`perf/setup-xray-scan-prune`).**
   1. **`Get-DetectedExtensions` rewrite** (140–284× speed-up on
@@ -60,15 +62,17 @@
     * `scripts/mcp-filter/test-embedded-sync.ps1` (2 cases) —
       AST-extracts the embedded `.sh` constants from `setup-xray.ps1`
       and asserts byte-equality to the canonical disk source.
-    * `scripts/mcp-filter/test-standalone-install.ps1` (26 cases
-      across PS 7 + PS 5.1 rounds) — stages `setup-xray.ps1` to a
-      temp dir with NO `mcp-filter/` sibling, runs the production
-      install, asserts filter scripts written byte-equal via
-      `[IO.File]::ReadAllBytes`, snapshot.txt written, all three
-      filter config keys (`smudge`, `clean`, `required=false`)
-      wired, and — critical mutation guard for the PS 5.1 quoting
-      fix — forces `git checkout HEAD -- .mcp.json` and asserts
-      smudge actually fires (xray entry re-injected).
+    * `scripts/mcp-filter/test-standalone-install.ps1` (54 assertions
+      across PS 7 + PS 5.1 file-based and in-memory rounds) — stages
+      `setup-xray.ps1` to a temp dir with NO `mcp-filter/` sibling,
+      runs the production install, asserts filter scripts written
+      byte-equal via `[IO.File]::ReadAllBytes`, snapshot.txt written,
+      all three filter config keys (`smudge`, `clean`, `required=false`)
+      wired, asserts untracked `.vscode/mcp.json` is hidden via
+      `.git/info/exclude` with `git status --short` clean, and — critical
+      mutation guard for the PS 5.1 quoting fix — forces
+      `git checkout HEAD -- .mcp.json` and asserts smudge actually fires
+      (xray entry re-injected).
 
 - **`README.md` / `docs/installation.md` — fix the `setup-xray.ps1`
   bootstrap one-liner.** Two field-reported papercuts on Windows
