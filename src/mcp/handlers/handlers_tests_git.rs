@@ -247,6 +247,201 @@ fn test_git_history_cached_reversed_dates_returns_error() {
         "Error should mention 'after', got: {}", result.content[0].text);
 }
 
+// ─── HEAD-pinning: stale empty cache results auto-fall-through to CLI ──
+// User story 2026-05-10. Mock cache is built with fake head_hash
+// "abc123def456...". The workspace root (".") is a real git repo whose live
+// HEAD differs from that fake hash. Querying a file that is NOT in the
+// cache produces an empty cache result; the HEAD-pinning check detects
+// the snapshot/live HEAD mismatch and falls through to the CLI fallback.
+// The fingerprint of fall-through: the response hint does NOT contain
+// "(from cache)" — it carries the CLI hint (or empty string) instead.
+//
+// Why this is a regression-killer for the user story scenario:
+//  - Bug: file committed AFTER cache build → cache returns stale empty
+//    → LLM reports "no history" (false negative).
+//  - Fix: empty + HEAD moved → re-query via CLI → authoritative answer.
+
+#[test]
+fn test_git_history_empty_cache_with_stale_head_falls_through_to_cli() {
+    let ctx = make_ctx_with_git_cache();
+    // File definitely not in mock cache; workspace HEAD != fake "abc123...".
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
+        "repo": ".",
+        "file": "definitely_not_a_real_file_xyz_2026_05_10.rs",
+        "maxResults": 5
+    }));
+    if !result.is_error {
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let hint = output["summary"]["hint"].as_str().unwrap_or("");
+        assert!(!hint.contains("(from cache)"),
+            "Empty cache result with stale HEAD must fall through to CLI, got hint: {}", hint);
+    }
+    // Error path is also acceptable — CLI fallback may legitimately fail in some
+    // sandboxed test environments. Either way, the bug-killer is the absence of
+    // a stale cached empty being returned.
+}
+
+#[test]
+fn test_git_authors_empty_cache_with_stale_head_falls_through_to_cli() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "xray_git_authors", &json!({
+        "repo": ".",
+        "path": "definitely_not_a_real_dir_xyz_2026_05_10/",
+    }));
+    if !result.is_error {
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let hint = output["summary"]["hint"].as_str().unwrap_or("");
+        assert!(!hint.contains("(from cache)"),
+            "Empty cache authors with stale HEAD must fall through to CLI, got hint: {}", hint);
+    }
+}
+
+#[test]
+fn test_git_activity_empty_cache_with_stale_head_falls_through_to_cli() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "xray_git_activity", &json!({
+        "repo": ".",
+        "path": "definitely_not_a_real_dir_xyz_2026_05_10/",
+        "from": "1970-01-01",
+        "to": "1970-01-02",
+    }));
+    if !result.is_error {
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let hint = output["summary"]["hint"].as_str().unwrap_or("");
+        assert!(!hint.contains("(from cache)"),
+            "Empty cache activity with stale HEAD must fall through to CLI, got hint: {}", hint);
+    }
+}
+
+/// Non-empty cache results are NOT subject to HEAD-pinning fall-through —
+/// the cache is monotonic for files already known. This guards against an
+/// over-eager invalidation that would defeat the purpose of caching.
+#[test]
+fn test_git_history_nonempty_cache_with_stale_head_still_uses_cache() {
+    let ctx = make_ctx_with_git_cache();
+    // src/main.rs IS in the mock cache (3 commits). Even though live HEAD != cache HEAD,
+    // the non-empty branch must still serve from cache.
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
+        "repo": ".",
+        "file": "src/main.rs",
+        "maxResults": 5
+    }));
+    assert!(!result.is_error, "should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("cache"),
+        "Non-empty cache result must still serve from cache (HEAD-pinning is empty-only), got hint: {}", hint);
+    assert_eq!(output["commits"].as_array().unwrap().len(), 3);
+}
+
+/// REGRESSION-KILLER for code-reviewer's MAJOR finding (2026-05-10):
+/// Author-filter on a KNOWN cached file with no matching commits in cache must
+/// fall through to CLI when HEAD has moved \u2014 NOT serve a stale empty.
+/// Mock cache contains only Alice and Bob commits on src/main.rs. A query for
+/// `author=Carol` returns empty from cache; combined with a stale fake HEAD,
+/// the gate must fire even though src/main.rs IS a known cache key.
+///
+/// Mutation guard: if the gate is narrowed back to `path_unknown_to_cache`
+/// (i.e. the previous buggy version), this test fails because src/main.rs IS
+/// in cache.file_commits and the stale empty would be returned with hint
+/// `(from cache)`.
+#[test]
+fn test_git_history_known_path_author_filter_empty_with_stale_head_falls_through() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
+        "repo": ".",
+        "file": "src/main.rs",
+        "author": "Carol",
+        "maxResults": 5
+    }));
+    if !result.is_error {
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let hint = output["summary"]["hint"].as_str().unwrap_or("");
+        assert!(!hint.contains("(from cache)"),
+            "Empty cache result for known path with author filter and stale HEAD must \
+             fall through to CLI, got hint: {}", hint);
+    }
+    // CLI fallback may legitimately error in sandboxed envs \u2014 absence of stale
+    // cached empty is what we assert.
+}
+
+/// Same regression-killer for xray_git_authors: known whole-repo path with an
+/// author-filter that matches nothing in cache. Author filter is applied at
+/// the handler level via CLI, not via cache, but the message-filter case is
+/// equivalent and exercises the same gate.
+#[test]
+fn test_git_authors_known_path_message_filter_empty_with_stale_head_falls_through() {
+    let ctx = make_ctx_with_git_cache();
+    let result = dispatch_tool(&ctx, "xray_git_authors", &json!({
+        "repo": ".",
+        "path": "src/main.rs",
+        "message": "this_pattern_will_not_match_any_cached_commit_xyz_2026"
+    }));
+    if !result.is_error {
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let hint = output["summary"]["hint"].as_str().unwrap_or("");
+        assert!(!hint.contains("(from cache)"),
+            "Empty cache authors for known path with message filter and stale HEAD must \
+             fall through to CLI, got hint: {}", hint);
+    }
+}
+
+/// MUTATION-KILLER for the `cache_head_stale` predicate itself (addresses
+/// reviewer's MAJOR re: gate-mutation coverage):
+/// when the cache's snapshot HEAD MATCHES the live repo HEAD, an empty cache
+/// result must be served as `(from cache)` \u2014 the HEAD-pinning gate must NOT
+/// fire. If the gate is weakened to `total_count == 0` alone (dropping
+/// `cache_head_stale`), this test fails because the empty would fall through
+/// to CLI and lose the cache hint.
+#[test]
+fn test_git_history_empty_cache_with_fresh_head_serves_cached_empty() {
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
+    use crate::git::cache::*;
+    use std::io::Cursor;
+    use super::handlers_test_utils::make_empty_ctx;
+
+    // Get the live HEAD of the workspace repo so the mock cache's head_hash
+    // matches it \u2014 i.e. NOT stale.
+    let head_out = Command::new("git").args(["rev-parse", "HEAD"]).output();
+    let live_head = match head_out {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        _ => return, // not in a git repo \u2014 skip silently
+    };
+    if live_head.len() != 40 { return; }
+
+    // Build a cache pinned to the LIVE HEAD with a single fake file the test repo
+    // does not contain, so query_file_history returns empty for our query path.
+    let log = concat!(
+        "COMMIT:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\u{241E}1700000000\u{241E}alice@example.com\u{241E}Alice\u{241E}Initial\n",
+        "fake_seed_file_for_fresh_head_test.rs\n",
+        "\n",
+    );
+    let nul_input: Vec<u8> = log.bytes().map(|b| if b == b'\n' { 0 } else { b }).collect();
+    let mut builder = GitHistoryCache::builder();
+    parse_git_log_stream(Cursor::new(nul_input), &mut builder).unwrap();
+    let cache = GitHistoryCache::from_builder(builder, live_head, "main".to_string());
+
+    let mut ctx = make_empty_ctx();
+    *ctx.git_cache.write().unwrap() = Some(cache);
+    ctx.git_cache_ready = Arc::new(AtomicBool::new(true));
+
+    // Query a path that is not in the (1-file) cache; result is empty BUT HEAD is fresh.
+    let result = dispatch_tool(&ctx, "xray_git_history", &json!({
+        "repo": ".",
+        "file": "definitely_not_a_real_file_for_fresh_head_test_2026.rs",
+        "maxResults": 5
+    }));
+    assert!(!result.is_error, "should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(hint.contains("(from cache)"),
+        "Fresh-HEAD empty cache result MUST be served from cache (gate must NOT \
+         fire when HEAD matches), got hint: {}", hint);
+    assert_eq!(output["commits"].as_array().unwrap().len(), 0);
+}
+
 
 // ─── includeDeleted parameter (cache path) ──────────────────────────
 // Verifies that includeDeleted=true is wired through the cache code path,

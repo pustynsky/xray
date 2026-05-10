@@ -678,6 +678,30 @@ pub fn file_exists_in_current_head(repo: &str, file: &str) -> bool {
     }
 }
 
+/// Return the current HEAD commit hash of the repo, or `None` if git fails
+/// (bare repo with no commits, missing git, etc.).
+///
+/// Used by the cache-empty-result HEAD-pinning check (user story
+/// 2026-05-10): when a cached query returns empty AND the cache's snapshot
+/// HEAD differs from the live HEAD, the empty result is potentially stale
+/// (e.g. file committed AFTER cache build) and the caller falls through
+/// to the CLI fallback for an authoritative answer.
+///
+/// Cost: one `git rev-parse HEAD` (~1-3 ms). Called only on empty cache
+/// results, so non-empty queries pay zero overhead.
+pub fn current_head_hash(repo: &str) -> Option<String> {
+    let mut cmd = Command::new("git");
+    cmd.current_dir(repo).args(["rev-parse", "HEAD"]);
+    match run_git(&mut cmd) {
+        Ok(output) => {
+            let trimmed = output.trim();
+            if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+        }
+        Err(_) => None,
+    }
+}
+
+
 /// Backward-compatible alias for [`file_exists_in_current_head`].
 ///
 /// Kept for external callers and older code paths. Prefer the more explicit
