@@ -153,7 +153,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
 
         ToolDefinition {
             name: "xray_fast".to_string(),
-            description: "PREFERRED file lookup tool — searches pre-built file name index. Instant results (~35ms for 100K files). Auto-builds index if not present. Pass multiple patterns as an array (`pattern: [\"UserService\",\"OrderProcessor\"]`) for multi-file lookup with OR semantics. Supports `pattern=['*']` or an empty array with `dir` to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files or list_directory. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field.".to_string(),
+            description: "PREFERRED file lookup tool — searches pre-built file name index. Instant results (~35ms for 100K files). Auto-builds index if not present. Pass multiple patterns as an array (`pattern: [\"UserService\",\"OrderProcessor\"]`) for multi-file lookup with OR semantics. Supports `pattern=['*']` or an empty array with `dir` to list ALL files/directories (wildcard listing). Use with dirsOnly=true to list subdirectories. ALWAYS use this instead of built-in list_files or list_directory. When dirsOnly=true with wildcard, returns directories sorted by fileCount (largest modules first) and includes fileCount field. Result list is unbounded — for 'does X exist' / scale checks use `countOnly=true`; on large repos always scope with `dir=`/`ext=` or cap with `maxResults=`.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -429,7 +429,10 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                      interface, suggests re-running with class=IFoo to include interface-receiver call sites; \
                      (b) when 1–3 callers are returned (and the result was NOT truncated), suggests an \
                      'xray_grep terms=METHOD countOnly=true' cross-check to verify completeness against AST blind spots \
-                     (DI/dynamic dispatch). Suppressed when 'truncated' or 'perLevelTruncated' is true.",
+                     (DI/dynamic dispatch). Suppressed when 'truncated' or 'perLevelTruncated' is true. \
+                     SCOPING: for prod-only investigation pass `productionOnly=true` to exclude test files/methods from \
+                     both the call tree and resultStatus. If the response sets `perLevelTruncated=true`, reduce `depth=` \
+                     or tighten `class=`/`excludeDir=` instead of raising `maxCallersPerLevel`.",
                     lang_list
                 )
             },
