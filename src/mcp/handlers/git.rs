@@ -52,9 +52,36 @@ fn annotate_empty_git_result(output: &mut Value, repo: &str, path: &str, total_c
     } else {
         output["warning"] = json!(format!(
             "File never tracked in git: '{}'. Check the path spelling. \
-             If the file was deleted long ago, the exact historical path may differ.",
+             If the file was deleted long ago, the exact historical path may differ. \
+             Cache validity for empty results is HEAD-pinned: if the cache's snapshot HEAD \
+             differs from the live HEAD, the empty result auto-falls-through to a fresh git CLI query.",
             path
         ));
+    }
+}
+
+/// HEAD-pinning check for cached empty results (user story 2026-05-10).
+///
+/// Returns `true` when the cache's snapshot HEAD differs from the repo's live
+/// `git rev-parse HEAD`. Callers use this only when the cache returned an
+/// empty result for the underlying `query_*` call (BEFORE any handler-side
+/// post-filtering such as `includeDeleted`). An empty result is only
+/// authoritative relative to the HEAD it was built from — if HEAD has moved,
+/// new commits may match the query (e.g. file just committed, author's first
+/// commit landed, message-pattern's first match landed), so the handler
+/// falls through to the CLI fallback for an authoritative answer.
+///
+/// Returns `false` (i.e. "empty is trustworthy") when:
+/// - live HEAD matches the cache snapshot HEAD, OR
+/// - `git rev-parse HEAD` fails (bare repo / no commits) — we cannot prove
+///   staleness, so we do not invalidate (preserves prior behavior).
+///
+/// Takes the cache HEAD as `&str` (not `&GitHistoryCache`) so callers can
+/// snapshot it and drop the cache read-lock before spawning git.
+fn cache_head_stale(cache_head: &str, repo: &str) -> bool {
+    match git::current_head_hash(repo) {
+        Some(live) => live != cache_head,
+        None => false,
     }
 }
 
@@ -441,6 +468,11 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
 
                 let max = if max_results == 0 { None } else { Some(max_results) };
                 let (commits, total_count) = cache.query_file_history(&normalized, max, from_ts, to_ts, author_filter, message_filter);
+                // Snapshot what we need before deciding the fall-through, so we can drop the
+                // cache read-lock before spawning `git rev-parse HEAD` (lock-order hygiene:
+                // never hold git_cache.read while doing IO that could outlive the request).
+                let cache_head_snapshot = cache.head_hash.clone();
+                drop(cache_guard);
                 let elapsed = start.elapsed();
 
                 let commits_json: Vec<Value> = commits.iter().map(|c| {
@@ -471,16 +503,20 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
                     }
                 });
 
-                // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
-                // Files deleted from HEAD may still be in the cache (build() uses --name-only which
-                // traverses delete commits) — in that case total_count > 0 here. If total_count == 0,
-                // check whether the file ever existed to emit info vs warning. See user story
-                // 2026-04-17_git-deleted-files-support.md.
-                if total_count == 0 {
-                    annotate_empty_git_result(&mut output, repo, file, 0);
+                // HEAD-pinning (user story 2026-05-10): an empty cached result is only
+                // authoritative relative to the cache's snapshot HEAD. If HEAD has moved,
+                // new commits may now match (file just committed; author's first commit;
+                // message pattern's first match; date range that just became reachable),
+                // so fall through to CLI fallback. Non-empty results are NEVER re-checked
+                // (cache is monotonic for files+commits already known).
+                if total_count == 0 && cache_head_stale(&cache_head_snapshot, repo) {
+                    // intentional fall-through to CLI fallback below
+                } else {
+                    if total_count == 0 {
+                        annotate_empty_git_result(&mut output, repo, file, 0);
+                    }
+                    return ToolCallResult::success(json_to_string(&output));
                 }
-
-                return ToolCallResult::success(json_to_string(&output));
             }
 
     // ── CLI fallback ──
@@ -606,6 +642,9 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
                 // Truncate to top N
                 authors.truncate(top);
+                // Snapshot head + drop guard before spawning git (lock-order hygiene).
+                let cache_head_snapshot = cache.head_hash.clone();
+                drop(cache_guard);
                 let elapsed = start.elapsed();
 
                 let authors_json: Vec<Value> = authors.iter().enumerate().map(|(i, a)| {
@@ -632,12 +671,16 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     }
                 });
 
-                // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
-                if total_authors == 0 {
-                    annotate_empty_git_result(&mut output, repo, query_path, 0);
+                // HEAD-pinning (user story 2026-05-10) — see handle_git_history for rationale.
+                if total_authors == 0 && cache_head_stale(&cache_head_snapshot, repo) {
+                    // fall through to CLI
+                } else {
+                    // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
+                    if total_authors == 0 {
+                        annotate_empty_git_result(&mut output, repo, query_path, 0);
+                    }
+                    return ToolCallResult::success(json_to_string(&output));
                 }
-
-                return ToolCallResult::success(json_to_string(&output));
             }
 
     // ── CLI fallback ──
@@ -742,6 +785,19 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                 };
 
                 let mut activities = cache.query_activity(&normalized, from_ts, to_ts, author_filter, message_filter);
+                // Pre-`includeDeleted`-filter count. HEAD-pinning gates on THIS count, not
+                // post-filter `total_files`: a known path that `query_activity` returns N>0
+                // for but `includeDeleted=true` post-trims to 0 is an authoritative empty
+                // (CLI would compute the same), whereas a true zero-results-from-cache may
+                // be a stale false-negative if HEAD has moved.
+                let cache_pre_filter_count = activities.len();
+
+                // Snapshot all needed cache fields and DROP the read-guard before any git IO
+                // (lock-order hygiene: never hold git_cache.read() across `git ls-files` /
+                // `git rev-parse` subprocesses, which can briefly block cache writers).
+                let cache_head_snapshot = cache.head_hash.clone();
+                let cache_commits_count = cache.commits.len();
+                drop(cache_guard);
 
                 // includeDeleted filter: keep only files NOT in current HEAD.
                 // MUST use single git ls-files call — see user story 2026-04-17 section on
@@ -773,7 +829,7 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                         "tool": "xray_git_activity",
                         "filesChanged": total_files,
                         "totalEntries": total_entries,
-                        "commitsProcessed": cache.commits.len(),
+                        "commitsProcessed": cache_commits_count,
                         "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
                         "hint": if include_deleted {
                             "(from cache, filtered to files NOT in current HEAD)"
@@ -784,12 +840,19 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
                     }
                 });
 
-                // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
-                if total_files == 0 {
-                    annotate_empty_git_result(&mut output, repo, query_path, 0);
+                // HEAD-pinning (user story 2026-05-10) — see handle_git_history for rationale.
+                // Gate on the PRE-`includeDeleted`-filter cache result count: a known path
+                // post-trimmed to 0 by includeDeleted is authoritative, but a true empty
+                // from `query_activity` may be stale if HEAD has moved.
+                if cache_pre_filter_count == 0 && cache_head_stale(&cache_head_snapshot, repo) {
+                    // fall through to CLI
+                } else {
+                    // Empty results annotation: distinguish 'never existed' vs 'deleted from HEAD'.
+                    if total_files == 0 {
+                        annotate_empty_git_result(&mut output, repo, query_path, 0);
+                    }
+                    return ToolCallResult::success(json_to_string(&output));
                 }
-
-                return ToolCallResult::success(json_to_string(&output));
             }
 
     // ── CLI fallback ──
