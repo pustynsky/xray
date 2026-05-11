@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.6 (2026-05-11)
 
 - **MCP tool schema cues for unbounded outputs (`xray_callers`, `xray_fast`, `xray_git_history`).** Top-level tool descriptions only — no runtime, contract, or parameter changes. `xray_callers` description now points LLMs at `productionOnly=true` for prod-only call-tree investigations and tells them to reduce `depth=` / tighten `class=`/`excludeDir=` instead of raising `maxCallersPerLevel` when `perLevelTruncated=true` is returned (existing parameter was undersold in the schema, so agents kept missing it). `xray_fast` description now states the result list is unbounded and recommends `countOnly=true` for presence/scale checks plus `dir=`/`ext=`/`maxResults=` for scoping on large repos. `xray_git_history` replaces the soft "Use date filters to narrow results" line with an explicit unbounded-list cue mentioning `from=`/`to=`/`author=`/`message=`/`maxResults=`. Pure documentation/discoverability fix; `cargo check` clean.
 
