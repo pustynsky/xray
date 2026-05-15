@@ -339,6 +339,32 @@ fn test_xray_definitions_has_contains_line() {
     let defs = tools.iter().find(|t| t.name == "xray_definitions").unwrap();
     let props = defs.input_schema["properties"].as_object().unwrap();
     assert!(props.contains_key("containsLine"), "Should have containsLine parameter");
+
+    let attribute_description = props["attribute"]["description"].as_str().unwrap();
+    assert!(
+        attribute_description.contains("Omit this parameter when unset; empty strings are invalid"),
+        "attribute schema should tell callers to omit unset optional strings; got: {attribute_description}"
+    );
+
+    let base_type_description = props["baseType"]["description"].as_str().unwrap();
+    assert!(
+        base_type_description.contains("Omit this parameter when unset; empty strings are invalid"),
+        "baseType schema should tell callers to omit unset optional strings; got: {base_type_description}"
+    );
+
+    let contains_line_description = props["containsLine"]["description"].as_str().unwrap();
+    assert!(
+        contains_line_description.contains("Minimum value: 1"),
+        "containsLine schema should name the minimum line number; got: {contains_line_description}"
+    );
+    assert!(
+        contains_line_description.contains("Requires a real 'file' path"),
+        "containsLine schema should require a real file path; got: {contains_line_description}"
+    );
+    assert!(
+        contains_line_description.contains("switches the query into line-containment lookup"),
+        "containsLine schema should explain lookup mode; got: {contains_line_description}"
+    );
 }
 
 // --- maxResults=0 means unlimited tests ---
