@@ -478,6 +478,7 @@ fn test_prefilter_does_not_expand_by_base_types() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
         "Dispose",
@@ -1630,6 +1631,7 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
         "Process",
@@ -2146,6 +2148,7 @@ fn test_sql_caller_tree_who_calls_sp() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
         "usp_ValidateOrder",
@@ -2688,6 +2691,7 @@ fn test_impact_analysis_finds_test_methods() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
         "process", Some("OrderService"), 0, &initial_chain,
@@ -2735,6 +2739,7 @@ fn test_impact_analysis_finds_test_methods() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let production_callers = production_builder.build(
         "process", Some("OrderService"), 0, &initial_chain,
@@ -2854,6 +2859,7 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build(
         "process", Some("OrderService"), 0, &initial_chain,
@@ -3563,6 +3569,7 @@ fn test_per_level_truncation_reports_dropped_count() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let callers = builder.build("Process", None, 0, &[]);
 
@@ -3652,6 +3659,7 @@ fn test_per_level_truncation_not_set_when_under_limit() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let _ = builder.build("Process", Some("ClassA"), 0, &[]);
     assert_eq!(builder.per_level_dropped, 0, "Nothing should be dropped under the limit");
@@ -3694,6 +3702,10 @@ fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
             parent: None, signature: None, modifiers: vec![],
             attributes: vec![], base_types: vec![],
         },
+        // Method declared on the interface — required by the new
+        // `interfaces_declaring_method` gate (interface must declare a
+        // method with the searched name for the caveat to fire).
+        method_def(0, "UpsertMappingAsync", "IDatabaseClient", 5, 6),
         DefinitionEntry {
             file_id: 0, name: "DatabaseClient".to_string(),
             kind: DefinitionKind::Class, line_start: 30, line_end: 200,
@@ -3704,9 +3716,11 @@ fn test_advisory_interface_vias_emitted_when_class_implements_interface() {
     ];
     let mut def_idx = make_def_index(definitions, HashMap::new());
     // Wire base_type_index so interface_vias_caveat lookup succeeds.
+    // (Definitions order: 0=IDatabaseClient, 1=interface method, 2=DatabaseClient,
+    // 3=class method — DatabaseClient is at index 2.)
     def_idx.base_type_index
         .entry("idatabaseclient".to_string())
-        .or_default().push(1);
+        .or_default().push(2);
 
     let ctx = make_ctx_with_idx(def_idx);
     let result = handle_xray_callers(&ctx, &serde_json::json!({
@@ -4225,6 +4239,7 @@ fn test_impact_analysis_cap_sets_truncation_flag_when_collection_capped() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let _ = builder.build("Process", None, 0, &[]);
 
@@ -4267,6 +4282,7 @@ fn test_impact_analysis_bounded_collection_starves_late_test_callers() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let _ = builder.build("Process", None, 0, &[]);
 
@@ -4319,6 +4335,7 @@ fn test_impact_analysis_with_class_filter_avoids_starvation() {
         total_body_lines_emitted: 0,
         tests_found: Vec::new(),
         per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
     };
     let _ = builder.build("Process", Some("ClassA"), 0, &[]);
 
@@ -4331,3 +4348,413 @@ fn test_impact_analysis_with_class_filter_avoids_starvation() {
         "all 5 test callers must surface (not capped, not starved)");
 }
 
+
+// ─── Mid-tree interface expansion regression ──────────────────────
+// User story:
+//   user-stories/user-story_xray-callers-per-node-interface-advisory_2026-05-15.md
+// Pre-fix, expand_interface_callers ran ONLY at current_depth == 0, so
+// callers reachable through interfaces of intermediate (depth > 0) nodes
+// were silently dropped even with resolveInterfaces=true.
+
+#[test]
+fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
+    use crate::{ContentIndex, Posting};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::path::PathBuf;
+
+    // Code chain we are simulating:
+    //   Worker.Foo()  ←  Impl1.Mid()  ─(interface walk via IMid)→  Impl2.Mid()  ←  Consumer.Run()
+    //
+    //   * Worker.Foo is the search target (depth 0).
+    //   * Impl1.Mid is the only direct text caller of Worker.Foo (depth 1).
+    //   * Impl2.Mid does NOT call Worker.Foo, but it implements the same
+    //     interface (IMid) as Impl1, and Consumer.Run calls Impl2.Mid.
+    //
+    // Pre-fix tree (resolveInterfaces=true, depth=0 expansion only):
+    //   Worker.Foo
+    //     └─ Impl1.Mid     (Consumer.Run NEVER appears — depth-1 node had no
+    //                       interface walk)
+    //
+    // Post-fix tree (mid-tree expansion at depth 1 walks IMid→Impl2):
+    //   Worker.Foo
+    //     └─ Impl1.Mid
+    //          └─ Consumer.Run   (recovered via sibling-impl walk)
+
+    let definitions = vec![
+        // 0: Worker class (file 0)
+        class_def(0, "Worker", vec![]),
+        // 1: Worker.Foo
+        method_def(0, "Foo", "Worker", 5, 8),
+        // 2: IMid interface (file 1)
+        DefinitionEntry {
+            file_id: 1, name: "IMid".to_string(),
+            kind: DefinitionKind::Interface, line_start: 1, line_end: 5,
+            parent: None, signature: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        // 3: IMid.Mid (declares the method on the interface — required by
+        //    interfaces_declaring_method gate)
+        method_def(1, "Mid", "IMid", 3, 3),
+        // 4: Impl1 class : IMid (file 2)
+        class_def(2, "Impl1", vec!["IMid"]),
+        // 5: Impl1.Mid — calls Worker.Foo()
+        method_def(2, "Mid", "Impl1", 50, 60),
+        // 6: Impl2 class : IMid (file 3)
+        class_def(3, "Impl2", vec!["IMid"]),
+        // 7: Impl2.Mid — does NOT call Worker.Foo, but is invoked by Consumer
+        method_def(3, "Mid", "Impl2", 50, 60),
+        // 8: Consumer class (file 4)
+        class_def(4, "Consumer", vec![]),
+        // 9: Consumer.Run — calls Impl2.Mid()
+        method_def(4, "Run", "Consumer", 60, 70),
+    ];
+
+    // Wire concrete (AST-resolved) call sites.
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(5, vec![CallSite {
+        method_name: "Foo".to_string(),
+        receiver_type: Some("Worker".to_string()),
+        line: 55,
+        receiver_is_generic: false,
+    }]);
+    method_calls.insert(9, vec![CallSite {
+        method_name: "Mid".to_string(),
+        receiver_type: Some("Impl2".to_string()),
+        line: 65,
+        receiver_is_generic: false,
+    }]);
+
+    let mut def_idx = make_def_index(definitions, method_calls);
+    // make_def_index defaults files to 2 entries — replace with our 5.
+    def_idx.files = vec![
+        "src/Worker.cs".to_string(),
+        "src/IMid.cs".to_string(),
+        "src/Impl1.cs".to_string(),
+        "src/Impl2.cs".to_string(),
+        "src/Consumer.cs".to_string(),
+    ];
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, p) in def_idx.files.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(p), i as u32);
+    }
+    def_idx.path_to_id = path_to_id;
+    // Wire base_type_index so expand_interface_callers' impl walk finds
+    // Impl1 (idx 4) and Impl2 (idx 6) under "imid".
+    def_idx.base_type_index
+        .entry("imid".to_string())
+        .or_default()
+        .extend([4u32, 6u32]);
+
+    // --- Content index (token postings) ---
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    // "foo": def in Worker.cs (line 5) + call from Impl1.Mid (Impl1.cs line 55)
+    index.insert("foo".to_string(), vec![
+        Posting { file_id: 0, lines: vec![5] },
+        Posting { file_id: 2, lines: vec![55] },
+    ]);
+    // "mid": def in IMid.cs (3), Impl1.cs (50), Impl2.cs (50) + call in Consumer.cs (65)
+    index.insert("mid".to_string(), vec![
+        Posting { file_id: 1, lines: vec![3] },
+        Posting { file_id: 2, lines: vec![50] },
+        Posting { file_id: 3, lines: vec![50] },
+        Posting { file_id: 4, lines: vec![65] },
+    ]);
+    // Class-name tokens needed by parent_file_ids resolution.
+    index.insert("worker".to_string(), vec![
+        Posting { file_id: 0, lines: vec![1] },
+        Posting { file_id: 2, lines: vec![55] },
+    ]);
+    index.insert("impl2".to_string(), vec![
+        Posting { file_id: 3, lines: vec![1] },
+        Posting { file_id: 4, lines: vec![65] },
+    ]);
+
+    let files_list = def_idx.files.clone();
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; 5],
+        ..Default::default()
+    };
+
+    // --- Run with resolve_interfaces=true: mid-tree expansion ON ---
+    //
+    // max_depth=2 is intentional: it pins the depth-budget contract.
+    // Visible tree shape we expect:
+    //   Worker.Foo  (root, depth 0)
+    //     └─ Impl1.Mid              (depth 1, direct caller)
+    //          └─ Consumer.Run      (depth 2, recovered via mid-tree IMid walk)
+    //
+    // The interface walk is a *sibling search*: the recurse into Impl2 must
+    // happen at `current_depth` (not `current_depth + 1`), otherwise the
+    // recurse runs at depth 2, hits `current_depth >= max_depth` immediately,
+    // and silently drops Consumer.Run. This test fails if that off-by-one is
+    // reintroduced.
+    let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        resolve_interfaces: true,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
+    };
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 2,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let tree = builder.build("Foo", Some("Worker"), 0, &[]);
+
+    // Depth 1: exactly Impl1.Mid (Impl2 does not directly call Worker.Foo).
+    assert_eq!(tree.len(), 1, "expected exactly 1 direct caller, got: {:?}", tree);
+    let depth1 = &tree[0];
+    assert_eq!(depth1["method"].as_str().unwrap(), "Mid");
+    assert_eq!(depth1["class"].as_str().unwrap(), "Impl1");
+
+    // Depth 2: Consumer.Run must surface via the IMid→Impl2 mid-tree expansion.
+    let depth2 = depth1["callers"].as_array()
+        .expect("Impl1.Mid must have callers populated by mid-tree iface expansion");
+    let consumer_run = depth2.iter().find(|c| {
+        c["method"].as_str() == Some("Run") && c["class"].as_str() == Some("Consumer")
+    });
+    assert!(
+        consumer_run.is_some(),
+        "Consumer.Run must appear at depth 2 via IMid→Impl2 mid-tree expansion; got: {:?}",
+        depth2
+    );
+
+    // --- Negative control 1: resolve_interfaces=false → expansion OFF ---
+    // Without interface walk (root or mid-tree), Consumer.Run is unreachable.
+    let node_count2 = AtomicUsize::new(0);
+    let impact_truncated2 = AtomicBool::new(false);
+    let caller_ctx_off = CallerTreeContext {
+        resolve_interfaces: false,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count2, &impact_truncated2)
+    };
+    let mut builder_off = CallerTreeBuilder {
+        ctx: &caller_ctx_off,
+        max_depth: 2,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let tree_off = builder_off.build("Foo", Some("Worker"), 0, &[]);
+    let consumer_run_off = tree_off.first()
+        .and_then(|n| n["callers"].as_array())
+        .map(|cs| cs.iter().any(|c| c["method"].as_str() == Some("Run")))
+        .unwrap_or(false);
+    assert!(
+        !consumer_run_off,
+        "Consumer.Run must NOT surface when resolveInterfaces=false (no interface walk). \
+         Tree: {:?}", tree_off
+    );
+
+    // --- Negative control 2: max_depth=1 → mid-tree expand never runs ---
+    // The depth-1 build hits `current_depth >= max_depth` at entry and returns
+    // empty before reaching the expansion site, so Consumer.Run is absent for
+    // a trivial reason (budget exhausted). Pinned so a future regression that
+    // hoists the expansion above the early-return would be caught.
+    let node_count3 = AtomicUsize::new(0);
+    let impact_truncated3 = AtomicBool::new(false);
+    let caller_ctx_d1 = CallerTreeContext {
+        resolve_interfaces: true,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count3, &impact_truncated3)
+    };
+    let mut builder_d1 = CallerTreeBuilder {
+        ctx: &caller_ctx_d1,
+        max_depth: 1,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let tree_d1 = builder_d1.build("Foo", Some("Worker"), 0, &[]);
+    let depth1_d1 = &tree_d1[0];
+    assert!(
+        depth1_d1.get("callers").is_none()
+            || depth1_d1["callers"].as_array().map(|a| a.is_empty()).unwrap_or(true),
+        "max_depth=1 must leave Impl1.Mid without sub-callers (expansion skipped at entry); \
+         got: {:?}", depth1_d1
+    );
+}
+#[test]
+fn test_root_iface_expansion_honors_visible_depth_budget() {
+    // Regression for the pre-existing root-level depth-0 off-by-one in
+    // expand_interface_callers. Pre-fix the recurse was hardcoded `1`
+    // (== current_depth + 1 for current_depth=0), so the interface-walk
+    // branch consumed one MORE depth level than direct-caller branches —
+    // visible depth-N nodes on interface-receiver chains were silently
+    // dropped at max_depth boundaries.
+    //
+    // Chain we are simulating (root targets ConcreteImpl1.Method;
+    // ConcreteImpl1 has no direct callers but Caller.Run calls
+    // _impl2.Method via the IFoo-typed field):
+    //   ConcreteImpl1.Method  ←(root iface walk via IFoo→ConcreteImpl2)
+    //     └─ Caller.Run         (visible depth 1)
+    //          └─ RootCaller.Top  (visible depth 2)
+    //
+    // With max_depth=2 and post-fix `current_depth` recurse:
+    //   Caller.Run is visible at depth 1, RootCaller.Top at depth 2. ✓
+    // With max_depth=2 and pre-fix `current_depth + 1` recurse:
+    //   build("Method", "ConcreteImpl2", 1) → finds Caller.Run, recurses
+    //   build("Run", "Caller", 2) → 2 >= 2 → returns empty → RootCaller.Top
+    //   silently absent. ✗
+    //
+    // So the assertion `tree[0]["callers"][_] contains RootCaller.Top`
+    // fails if the root recurse is reverted to `current_depth + 1`.
+
+    use crate::{ContentIndex, Posting};
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+    use std::path::PathBuf;
+
+    let definitions = vec![
+        // 0: IFoo interface (file 0)
+        DefinitionEntry {
+            file_id: 0, name: "IFoo".to_string(),
+            kind: DefinitionKind::Interface, line_start: 1, line_end: 5,
+            parent: None, signature: None, modifiers: vec![],
+            attributes: vec![], base_types: vec![],
+        },
+        // 1: IFoo.Method (declares the method on the interface)
+        method_def(0, "Method", "IFoo", 3, 3),
+        // 2: ConcreteImpl1 : IFoo (file 1) — root search target
+        class_def(1, "ConcreteImpl1", vec!["IFoo"]),
+        // 3: ConcreteImpl1.Method
+        method_def(1, "Method", "ConcreteImpl1", 50, 60),
+        // 4: ConcreteImpl2 : IFoo (file 2) — sibling impl reached via root iface walk
+        class_def(2, "ConcreteImpl2", vec!["IFoo"]),
+        // 5: ConcreteImpl2.Method
+        method_def(2, "Method", "ConcreteImpl2", 50, 60),
+        // 6: Caller (file 3)
+        class_def(3, "Caller", vec![]),
+        // 7: Caller.Run — calls _impl2.Method() via IFoo-typed field
+        method_def(3, "Run", "Caller", 50, 60),
+        // 8: RootCaller (file 4)
+        class_def(4, "RootCaller", vec![]),
+        // 9: RootCaller.Top — calls _caller.Run()
+        method_def(4, "Top", "RootCaller", 50, 60),
+    ];
+
+    let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
+    method_calls.insert(7, vec![CallSite {
+        method_name: "Method".to_string(),
+        receiver_type: Some("ConcreteImpl2".to_string()),
+        line: 55,
+        receiver_is_generic: false,
+    }]);
+    method_calls.insert(9, vec![CallSite {
+        method_name: "Run".to_string(),
+        receiver_type: Some("Caller".to_string()),
+        line: 55,
+        receiver_is_generic: false,
+    }]);
+
+    let mut def_idx = make_def_index(definitions, method_calls);
+    def_idx.files = vec![
+        "src/IFoo.cs".to_string(),
+        "src/ConcreteImpl1.cs".to_string(),
+        "src/ConcreteImpl2.cs".to_string(),
+        "src/Caller.cs".to_string(),
+        "src/RootCaller.cs".to_string(),
+    ];
+    let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
+    for (i, p) in def_idx.files.iter().enumerate() {
+        path_to_id.insert(PathBuf::from(p), i as u32);
+    }
+    def_idx.path_to_id = path_to_id;
+    // Wire base_type_index so root iface walk's impl scan finds both impls.
+    def_idx.base_type_index
+        .entry("ifoo".to_string())
+        .or_default()
+        .extend([2u32, 4u32]);
+
+    // Content index: token postings used by parent_file_ids and posting scan.
+    let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
+    // "method": defs in IFoo.cs (3), ConcreteImpl1.cs (50), ConcreteImpl2.cs (50),
+    //          + call from Caller.Run (Caller.cs line 55).
+    index.insert("method".to_string(), vec![
+        Posting { file_id: 0, lines: vec![3] },
+        Posting { file_id: 1, lines: vec![50] },
+        Posting { file_id: 2, lines: vec![50] },
+        Posting { file_id: 3, lines: vec![55] },
+    ]);
+    // "run": def in Caller.cs (50), call from RootCaller.Top (RootCaller.cs line 55).
+    index.insert("run".to_string(), vec![
+        Posting { file_id: 3, lines: vec![50] },
+        Posting { file_id: 4, lines: vec![55] },
+    ]);
+    // Class-name tokens for parent_file_ids resolution.
+    index.insert("concreteimpl1".to_string(), vec![Posting { file_id: 1, lines: vec![1] }]);
+    index.insert("concreteimpl2".to_string(), vec![
+        Posting { file_id: 2, lines: vec![1] },
+        Posting { file_id: 3, lines: vec![55] },
+    ]);
+    index.insert("caller".to_string(), vec![
+        Posting { file_id: 3, lines: vec![1] },
+        Posting { file_id: 4, lines: vec![55] },
+    ]);
+
+    let files_list = def_idx.files.clone();
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files_list,
+        index,
+        total_tokens: 100,
+        extensions: vec!["cs".to_string()],
+        file_token_counts: vec![50; 5],
+        ..Default::default()
+    };
+
+    let limits = CallerLimits { max_callers_per_level: 50, max_total_nodes: 200 };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        resolve_interfaces: true,
+        ..CallerTreeContext::test_default(&content_index, &def_idx, &limits, &node_count, &impact_truncated)
+    };
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 2,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let tree = builder.build("Method", Some("ConcreteImpl1"), 0, &[]);
+
+    // Visible depth 1: Caller.Run (recovered via root IFoo→ConcreteImpl2 walk).
+    assert_eq!(
+        tree.len(), 1,
+        "expected exactly 1 caller via root iface walk, got: {:?}", tree
+    );
+    let depth1 = &tree[0];
+    assert_eq!(depth1["method"].as_str().unwrap(), "Run");
+    assert_eq!(depth1["class"].as_str().unwrap(), "Caller");
+
+    // Visible depth 2: RootCaller.Top — the discriminating assertion.
+    let depth2 = depth1["callers"].as_array()
+        .expect("Caller.Run must have sub-callers when root iface walk honors depth budget");
+    let root_top = depth2.iter().find(|c| {
+        c["method"].as_str() == Some("Top") && c["class"].as_str() == Some("RootCaller")
+    });
+    assert!(
+        root_top.is_some(),
+        "RootCaller.Top must appear at visible depth 2 — root iface walk must \
+         recurse at `current_depth` (NOT `current_depth + 1`); got: {:?}",
+        depth2
+    );
+}
