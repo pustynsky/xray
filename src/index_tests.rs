@@ -958,6 +958,7 @@ fn test_estimate_git_cache_memory_empty() {
         authors: vec![],
         subjects: String::new(),
         file_commits: std::collections::HashMap::new(),
+        shallow_fingerprint: None,
     };
     let estimate = crate::index::estimate_git_cache_memory(&cache);
     assert!(estimate.is_object());
@@ -1002,6 +1003,7 @@ fn test_estimate_git_cache_memory_nonempty() {
         ],
         subjects: "hellofix".to_string(),
         file_commits,
+        shallow_fingerprint: None,
     };
 
     let estimate = crate::index::estimate_git_cache_memory(&cache);

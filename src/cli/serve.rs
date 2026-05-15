@@ -1538,8 +1538,11 @@ fn build_git_cache_background(
                             {
                                 Ok(output) if output.status.success() => {
                                     let current_head = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                                    if disk_cache.is_valid_for(&current_head) {
-                                        // Cache is up to date
+                                    if disk_cache.is_valid_for_with_shallow(
+                                        &current_head,
+                                        crate::git::shallow_fingerprint(&bg_dir).as_deref(),
+                                    ) {
+                                        // Cache is up to date (HEAD + shallow boundaries match)
                                         cache_hit = true;
                                         let elapsed = start.elapsed();
                                         info!(

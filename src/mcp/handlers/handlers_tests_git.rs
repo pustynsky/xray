@@ -692,3 +692,89 @@ fn test_git_history_first_commit_nonexistent_returns_null() {
     assert_eq!(output["summary"]["mode"].as_str(), Some("firstCommit"));
 }
 
+
+// ─── Per-request shallow freshness gate (e2e) ─────────────────────
+//
+// These exercise the full handler path: a populated in-memory cache + a
+// live repo whose shallow state has drifted away from the cache's stamp.
+// The handler MUST bypass the cache and fall through to the `git log` CLI.
+
+fn make_real_git_repo_with_one_commit() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(dir.path())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    run(&["init", "-q", "-b", "main"]);
+    run(&["config", "user.email", "x@x"]);
+    run(&["config", "user.name", "X"]);
+    run(&["commit", "-q", "--allow-empty", "-m", "init"]);
+    dir
+}
+
+#[test]
+fn test_git_history_handler_bypasses_cache_when_shallow_drift() {
+    crate::git::shallow_cache_clear();
+    let dir = make_real_git_repo_with_one_commit();
+    let ctx = make_ctx_with_git_cache();
+
+    // Force the in-memory cache to look as if it was built from a shallow
+    // repo. The live repo is NOT shallow (no `.git/shallow` file), so the
+    // freshness gate must reject the cache and the handler must fall
+    // through to `git log` CLI.
+    {
+        let mut g = ctx.git_cache.write().unwrap();
+        g.as_mut().unwrap().shallow_fingerprint =
+            Some("forced-shallow-mismatch".to_string());
+    }
+
+    let result = dispatch_tool(
+        &ctx,
+        "xray_git_history",
+        &json!({
+            "repo": dir.path().to_str().unwrap(),
+            "file": "src/main.rs"
+        }),
+    );
+    assert!(
+        !result.is_error,
+        "handler must succeed (CLI fall-through), got error: {}",
+        result.content[0].text
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(
+        !hint.contains("from cache"),
+        "shallow drift must force CLI fall-through; instead got cache hint: {hint}"
+    );
+}
+
+#[test]
+fn test_git_history_handler_uses_cache_when_shallow_state_matches() {
+    crate::git::shallow_cache_clear();
+    let dir = make_real_git_repo_with_one_commit();
+    let ctx = make_ctx_with_git_cache();
+
+    // Cache built as non-shallow (default), live repo is non-shallow too.
+    // Freshness gate must NOT block: handler should use the cache.
+    let result = dispatch_tool(
+        &ctx,
+        "xray_git_history",
+        &json!({
+            "repo": dir.path().to_str().unwrap(),
+            "file": "src/main.rs"
+        }),
+    );
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["summary"]["hint"].as_str().unwrap_or("");
+    assert!(
+        hint.contains("from cache"),
+        "matching shallow state must allow cache use; got hint: {hint}"
+    );
+}
+

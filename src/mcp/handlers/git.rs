@@ -197,18 +197,107 @@ pub(crate) fn dispatch_git_tool(
     tool_name: &str,
     arguments: &Value,
 ) -> ToolCallResult {
-    match tool_name {
+    let mut result = match tool_name {
         "xray_git_history" => handle_git_history(ctx, arguments, false),
         "xray_git_diff" => handle_git_history(ctx, arguments, true),
         "xray_git_authors" => handle_git_authors(ctx, arguments),
         "xray_git_activity" => handle_git_activity(ctx, arguments),
         "xray_git_blame" => handle_git_blame(ctx, arguments),
         "xray_branch_status" => handle_branch_status(ctx, arguments),
-        _ => ToolCallResult::error(format!("Unknown git tool: {}", tool_name)),
-    }
+        _ => return ToolCallResult::error(format!("Unknown git tool: {}", tool_name)),
+    };
+    annotate_shallow_clone(&mut result, arguments);
+    result
 }
 
+/// Inject a `shallowClone` field into successful git tool responses so
+/// downstream LLM users notice when their local git view is truncated.
+///
+/// Pattern: post-process at the dispatch boundary instead of threading a
+/// `repo` argument through every handler's `json!` site. The `repo` arg is
+/// always the first parameter of every git tool, so we can extract it from
+/// `arguments` without parsing handler internals.
+///
+/// Behaviour:
+/// - No-op when the response is an error or not parseable as JSON.
+/// - No-op when the repo is not shallow.
+/// - Adds `output["shallowClone"] = { boundaries: [...], warning: "..." }`.
+/// - Escalation: if the response carries a `firstCommit` whose hash matches
+///   one of the shallow boundaries, marks `shallowClone.firstCommitAtBoundary
+///   = true` so callers know the "first commit" is almost certainly NOT the
+///   real one (real history is below the graft).
+fn annotate_shallow_clone(result: &mut ToolCallResult, arguments: &Value) {
+    if result.is_error {
+        return;
+    }
+    let Some(repo) = arguments.get("repo").and_then(|v| v.as_str()) else {
+        return;
+    };
+    let Some(info) = git::detect_shallow(repo) else {
+        return;
+    };
+    let Some(content) = result.content.first_mut() else {
+        return;
+    };
+    let Ok(mut value) = serde_json::from_str::<Value>(&content.text) else {
+        return;
+    };
+
+    let mut shallow = json!({
+        "isShallow": true,
+        "boundaries": info.boundaries,
+        "warning": info.warning_text(),
+    });
+
+    // Escalation: firstCommit equals a shallow boundary => almost certainly
+    // not the real first commit.
+    if let Some(first_hash) = value
+        .get("firstCommit")
+        .and_then(|fc| fc.get("hash"))
+        .and_then(|h| h.as_str())
+        && info.boundaries.iter().any(|b| b == first_hash)
+    {
+        shallow["firstCommitAtBoundary"] = json!(true);
+        shallow["warning"] = json!(format!(
+            "{} The reported `firstCommit` IS the graft boundary — it is NOT the \
+             real first commit, just the oldest one your local clone can see.",
+            info.warning_text()
+        ));
+    }
+
+    if let Value::Object(map) = &mut value {
+        map.insert("shallowClone".to_string(), shallow);
+    }
+    content.text = json_to_string(&value);
+}
+
+
 // ─── Date conversion helpers ────────────────────────────────────────
+
+/// Per-request freshness gate for the in-memory git cache.
+///
+/// The cache stores a `shallow_fingerprint` snapshot from when it was built.
+/// If the live repo state diverges (most commonly: `git fetch --unshallow`
+/// removes `.git/shallow` while the server is running), this returns
+/// `false` and forces the calling handler to fall through to the `git log`
+/// CLI path — which sees current reality by construction.
+///
+/// HEAD movement is intentionally NOT checked here: the cache's existing
+/// HEAD-pinning logic for empty results plus the background watcher-driven
+/// rebuild path already cover HEAD drift. Adding a HEAD `rev-parse` per
+/// request would cost an extra subprocess on the hot path. Shallow drift
+/// detection costs one stat + one read of `.git/shallow` per request
+/// (typically <1 KB, ~10–50 µs on Windows NTFS, ~2–10 µs on Linux);
+/// `git::shallow_fingerprint` memoises only the resolved file path, never
+/// the file contents — see its docstring for the coherency rationale.
+fn cache_is_fresh_for_shallow(
+    cache: &crate::git::cache::GitHistoryCache,
+    repo: &str,
+) -> bool {
+    let current = crate::git::shallow_fingerprint(repo);
+    cache.shallow_fingerprint.as_deref() == current.as_deref()
+}
+
 
 /// GIT-008: parse a positive integer argument with an explicit upper bound.
 ///
@@ -457,7 +546,8 @@ fn handle_git_history(ctx: &HandlerContext, args: &Value, include_diff: bool) ->
     // ── Cache path (history only, not diff — cache has no patch data) ──
     if !include_diff && !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
         && let Ok(cache_guard) = ctx.git_cache.read()
-            && let Some(cache) = cache_guard.as_ref() {
+            && let Some(cache) = cache_guard.as_ref()
+            && cache_is_fresh_for_shallow(cache, repo) {
                 let start = Instant::now();
                 let normalized = GitHistoryCache::normalize_path(file);
 
@@ -625,7 +715,8 @@ fn handle_git_authors(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // ── Cache path ──
     if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
         && let Ok(cache_guard) = ctx.git_cache.read()
-            && let Some(cache) = cache_guard.as_ref() {
+            && let Some(cache) = cache_guard.as_ref()
+            && cache_is_fresh_for_shallow(cache, repo) {
                 let start = Instant::now();
                 let normalized = GitHistoryCache::normalize_path(query_path);
 
@@ -772,7 +863,8 @@ fn handle_git_activity(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // ── Cache path ──
     if !no_cache && ctx.git_cache_ready.load(Ordering::Relaxed)
         && let Ok(cache_guard) = ctx.git_cache.read()
-            && let Some(cache) = cache_guard.as_ref() {
+            && let Some(cache) = cache_guard.as_ref()
+            && cache_is_fresh_for_shallow(cache, repo) {
                 let start = Instant::now();
 
                 // For activity, use empty string for whole-repo scope
@@ -1079,6 +1171,7 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     // g. Warning
     let warning = build_warning(&current_branch, is_main, &main_branch, behind_main);
+    let shallow_info = git::detect_shallow(repo);
 
     let elapsed = start.elapsed();
 
@@ -1094,6 +1187,8 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         "fetchAge": fetch_age,
         "fetchWarning": fetch_warning,
         "warning": warning,
+        "isShallow": shallow_info.is_some(),
+        "shallowBoundaries": shallow_info.as_ref().map(|s| s.boundaries.clone()),
         "summary": {
             "tool": "xray_branch_status",
             "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,

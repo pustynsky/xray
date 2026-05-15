@@ -1877,3 +1877,77 @@ fn test_save_to_disk_uses_unique_temp_filename() {
     // Cleanup.
     let _ = std::fs::remove_dir_all(&tmp_dir);
 }
+
+// ─── Shallow-clone cache invalidation tests ───────────────────
+
+#[test]
+fn test_is_valid_for_with_shallow_matches_when_both_none() {
+    let cache = parse_mock_log(multi_commit_log());
+    assert!(cache.is_valid_for_with_shallow(
+        "abc123def456abc123def456abc123def456abc1",
+        None,
+    ));
+}
+
+#[test]
+fn test_is_valid_for_with_shallow_matches_when_both_some() {
+    let mut cache = parse_mock_log(multi_commit_log());
+    cache.shallow_fingerprint = Some("deadbeef".to_string());
+    assert!(cache.is_valid_for_with_shallow(
+        "abc123def456abc123def456abc123def456abc1",
+        Some("deadbeef"),
+    ));
+}
+
+#[test]
+fn test_is_valid_for_with_shallow_invalidates_after_unshallow() {
+    // Cache built when repo was shallow; current state is unshallow.
+    let mut cache = parse_mock_log(multi_commit_log());
+    cache.shallow_fingerprint = Some("deadbeef".to_string());
+    assert!(
+        !cache.is_valid_for_with_shallow(
+            "abc123def456abc123def456abc123def456abc1",
+            None,
+        ),
+        "unshallowing must invalidate the cache (history extended below graft)"
+    );
+}
+
+#[test]
+fn test_is_valid_for_with_shallow_invalidates_when_boundary_changes() {
+    // User did `git fetch --depth=N` which added a new shallow boundary.
+    let mut cache = parse_mock_log(multi_commit_log());
+    cache.shallow_fingerprint = Some("aaa,bbb".to_string());
+    assert!(
+        !cache.is_valid_for_with_shallow(
+            "abc123def456abc123def456abc123def456abc1",
+            Some("aaa,bbb,ccc"),
+        ),
+        "new graft boundary must invalidate the cache"
+    );
+}
+
+#[test]
+fn test_is_valid_for_with_shallow_invalidates_when_becoming_shallow() {
+    // Old cache was full repo; current state is shallow (rare but possible).
+    let cache = parse_mock_log(multi_commit_log());
+    assert_eq!(cache.shallow_fingerprint, None);
+    assert!(
+        !cache.is_valid_for_with_shallow(
+            "abc123def456abc123def456abc123def456abc1",
+            Some("deadbeef"),
+        ),
+        "None -> Some(...) must invalidate"
+    );
+}
+
+#[test]
+fn test_is_valid_for_with_shallow_still_invalid_on_head_mismatch() {
+    let mut cache = parse_mock_log(multi_commit_log());
+    cache.shallow_fingerprint = Some("deadbeef".to_string());
+    assert!(
+        !cache.is_valid_for_with_shallow("different_head", Some("deadbeef")),
+        "HEAD mismatch must still invalidate even when shallow_fingerprint matches"
+    );
+}
+

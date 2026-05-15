@@ -56,7 +56,7 @@ pub(crate) fn validate_git_hash(hash: &str) -> Result<(), String> {
 // ─── Constants ──────────────────────────────────────────────────────
 
 /// Cache format version. Bump when struct layout changes incompatibly.
-pub const FORMAT_VERSION: u32 = 1;
+pub const FORMAT_VERSION: u32 = 2;
 
 /// Field separator in git log format — U+241E (SYMBOL FOR RECORD SEPARATOR).
 /// Same as used in [`mod.rs`](super) for consistency. Never appears in commit data.
@@ -116,6 +116,13 @@ pub struct GitHistoryCache {
     /// Main index: normalized file path → vec of commit indices.
     /// Keys are as-is from git output (forward slashes, repo-relative).
     pub file_commits: HashMap<String, Vec<u32>>,
+    /// Shallow-clone fingerprint at cache build time. `None` = full repo,
+    /// `Some("hash1,hash2,...")` = shallow with these graft boundaries
+    /// (sorted, deduped). Mismatch with current state forces a rebuild —
+    /// e.g. user runs `git fetch --unshallow` after the cache was built.
+    /// Defaults to `None` for caches loaded from older format versions.
+    #[serde(default)]
+    pub shallow_fingerprint: Option<String>,
 }
 
 // ─── Query return types ─────────────────────────────────────────────
@@ -271,9 +278,25 @@ impl GitHistoryCacheBuilder {
             authors: self.authors,
             subjects: self.subjects,
             file_commits: self.file_commits,
+            shallow_fingerprint: None,
         }
     }
+    /// Same as [`build`] but also stamps the shallow-clone fingerprint.
+    /// Prefer this in production code paths so cache invalidation correctly
+    /// fires when the user runs `git fetch --unshallow` (or further
+    /// `--depth` fetches change boundaries).
+    pub(crate) fn build_with_shallow(
+        self,
+        head_hash: String,
+        branch: String,
+        shallow_fingerprint: Option<String>,
+    ) -> GitHistoryCache {
+        let mut cache = self.build(head_hash, branch);
+        cache.shallow_fingerprint = shallow_fingerprint;
+        cache
+    }
 }
+
 
 // ─── Hex utilities ──────────────────────────────────────────────────
 
@@ -632,6 +655,19 @@ impl GitHistoryCache {
         // Get HEAD hash for the branch
         let head_hash = Self::get_branch_head(repo_path, branch)?;
 
+        // Sample the shallow fingerprint BEFORE spawning `git log`. If a
+        // race against `git fetch --unshallow` (or `--depth=N`) lands
+        // between this point and the end of the streaming parse, the cache
+        // contents will reflect the LATER state while the stored
+        // fingerprint reflects the EARLIER one. That mismatch is
+        // intentional — the next `is_valid_for_with_shallow` call will
+        // observe `current_fingerprint != stored_fingerprint` and trigger a
+        // clean rebuild, which is correct. Sampling AFTER the parse instead
+        // would silently stamp the new fingerprint over the old contents
+        // and freeze the stale cache forever.
+        let shallow_fp_at_build_start =
+            crate::git::shallow_fingerprint(repo_path.to_str().unwrap_or(""));
+
         // Spawn git log with streaming output.
         // `-z` switches output to NUL-terminated records: the format string is emitted
         // followed by NUL, then each filename followed by NUL. This makes it impossible
@@ -677,8 +713,7 @@ impl GitHistoryCache {
             return Err(format!("git log exited with status: {}", status));
         }
 
-        let cache = builder.build(head_hash, branch.to_string());
-
+        let cache = builder.build_with_shallow(head_hash, branch.to_string(), shallow_fp_at_build_start);
         eprintln!(
             "[git-cache] Built cache: {} commits, {} authors, {} files, subjects={} bytes",
             cache.commits.len(),
@@ -974,6 +1009,23 @@ impl GitHistoryCache {
     /// Check if cache is still valid for the given HEAD hash.
     pub fn is_valid_for(&self, head_hash: &str) -> bool {
         self.head_hash == head_hash && self.format_version == FORMAT_VERSION
+    }
+
+    /// Same as [`is_valid_for`] but additionally checks the shallow-clone
+    /// fingerprint. Use this in production code paths so the cache is
+    /// invalidated automatically after `git fetch --unshallow` or any other
+    /// change to `.git/shallow` (more `--depth` fetches, etc.).
+    ///
+    /// Backward compat: callers that don't care about shallow tracking can
+    /// keep using `is_valid_for(head)` — but the cache they accept may be
+    /// based on a now-truncated history.
+    pub fn is_valid_for_with_shallow(
+        &self,
+        head_hash: &str,
+        shallow_fingerprint: Option<&str>,
+    ) -> bool {
+        self.is_valid_for(head_hash)
+            && self.shallow_fingerprint.as_deref() == shallow_fingerprint
     }
 
     /// Detect the default branch name by trying main, master, develop, trunk.

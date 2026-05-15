@@ -727,3 +727,212 @@ fn test_detect_main_branch_name_prefers_main_over_local_master() {
     );
 }
 
+
+// ─── Shallow-clone annotation tests ─────────────────────────────
+
+/// Helper: create a `git init`-ed tempdir with a `shallow` file present.
+/// Uses a real repo so `git rev-parse --git-path shallow` resolves correctly.
+fn make_shallow_tempdir(boundaries: &[&str]) -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir.path())
+        .status()
+        .expect("git init must run");
+    assert!(status.success(), "git init failed");
+    let body = boundaries
+        .iter()
+        .map(|s| format!("{}\n", s))
+        .collect::<String>();
+    std::fs::write(dir.path().join(".git").join("shallow"), body).unwrap();
+    dir
+}
+
+#[test]
+fn test_annotate_shallow_clone_noop_when_repo_not_shallow() {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let mut result = ToolCallResult::success(r#"{"foo":1}"#.to_string());
+    let args = json!({ "repo": dir.path().to_str().unwrap() });
+    annotate_shallow_clone(&mut result, &args);
+    let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(body.get("shallowClone").is_none(), "non-shallow repo => no annotation");
+}
+
+#[test]
+fn test_annotate_shallow_clone_noop_for_error_results() {
+    let dir = make_shallow_tempdir(&["deadbeef"]);
+    let mut result = ToolCallResult::error("boom".to_string());
+    let args = json!({ "repo": dir.path().to_str().unwrap() });
+    annotate_shallow_clone(&mut result, &args);
+    // Error result content stays unchanged.
+    assert_eq!(result.content[0].text, "boom");
+    assert!(result.is_error);
+}
+
+#[test]
+fn test_annotate_shallow_clone_noop_when_no_repo_arg() {
+    let mut result = ToolCallResult::success(r#"{"foo":1}"#.to_string());
+    let args = json!({});
+    annotate_shallow_clone(&mut result, &args);
+    assert_eq!(result.content[0].text, r#"{"foo":1}"#);
+}
+
+#[test]
+fn test_annotate_shallow_clone_injects_warning_for_shallow_repo() {
+    let dir = make_shallow_tempdir(&["abc1230000000000000000000000000000000001"]);
+    let mut result = ToolCallResult::success(
+        json!({"commits": [], "summary": {}}).to_string(),
+    );
+    let args = json!({ "repo": dir.path().to_str().unwrap() });
+    annotate_shallow_clone(&mut result, &args);
+
+    let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let shallow = body.get("shallowClone").expect("shallowClone field added");
+    assert_eq!(shallow["isShallow"], json!(true));
+    assert_eq!(shallow["boundaries"].as_array().unwrap().len(), 1);
+    assert!(
+        shallow["warning"].as_str().unwrap().contains("git fetch --unshallow"),
+        "warning text mentions the fix command"
+    );
+    assert!(shallow.get("firstCommitAtBoundary").is_none());
+}
+
+#[test]
+fn test_annotate_shallow_clone_escalates_when_first_commit_at_boundary() {
+    let boundary = "abc1230000000000000000000000000000000001";
+    let dir = make_shallow_tempdir(&[boundary]);
+    let mut result = ToolCallResult::success(
+        json!({
+            "firstCommit": { "hash": boundary, "date": "2026-04-05", "author": "X" },
+            "summary": {}
+        })
+        .to_string(),
+    );
+    let args = json!({ "repo": dir.path().to_str().unwrap() });
+    annotate_shallow_clone(&mut result, &args);
+
+    let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let shallow = body.get("shallowClone").expect("shallowClone field");
+    assert_eq!(shallow["firstCommitAtBoundary"], json!(true));
+    assert!(
+        shallow["warning"].as_str().unwrap().contains("IS the graft boundary"),
+        "escalated warning explicitly calls out the issue"
+    );
+}
+
+#[test]
+fn test_annotate_shallow_clone_does_not_escalate_when_first_commit_below_boundary() {
+    let dir = make_shallow_tempdir(&["abc1230000000000000000000000000000000001"]);
+    let mut result = ToolCallResult::success(
+        json!({
+            "firstCommit": { "hash": "deadbeef00000000000000000000000000000000", "date": "2024", "author": "X" },
+            "summary": {}
+        })
+        .to_string(),
+    );
+    let args = json!({ "repo": dir.path().to_str().unwrap() });
+    annotate_shallow_clone(&mut result, &args);
+
+    let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let shallow = body.get("shallowClone").expect("shallowClone field");
+    assert!(shallow.get("firstCommitAtBoundary").is_none());
+}
+
+
+// ─── cache_is_fresh_for_shallow tests ───────────────────────
+//
+// These cover the per-request gate that forces handlers to bypass the
+// in-memory git cache after shallow-state drift (most importantly
+// `git fetch --unshallow` while the server is running).
+
+fn cache_with_fp(fp: Option<&str>) -> crate::git::cache::GitHistoryCache {
+    let mut cache = crate::git::cache::GitHistoryCache {
+        format_version: crate::git::cache::FORMAT_VERSION,
+        head_hash: "abc".to_string(),
+        branch: "main".to_string(),
+        built_at: 0,
+        commits: vec![],
+        authors: vec![],
+        subjects: String::new(),
+        file_commits: std::collections::HashMap::new(),
+        shallow_fingerprint: None,
+    };
+    cache.shallow_fingerprint = fp.map(str::to_string);
+    cache
+}
+
+#[test]
+fn test_cache_is_fresh_when_both_none_for_full_repo() {
+    crate::git::shallow_cache_clear();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let cache = cache_with_fp(None);
+    assert!(
+        cache_is_fresh_for_shallow(&cache, dir.path().to_str().unwrap()),
+        "non-git dir + cache built as non-shallow => fresh"
+    );
+}
+
+#[test]
+fn test_cache_is_stale_after_unshallow_drift() {
+    crate::git::shallow_cache_clear();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    // Cache was built when the repo was shallow with fingerprint "abc".
+    let cache = cache_with_fp(Some("abc"));
+    // Repo is currently NOT shallow (no .git, no shallow file).
+    assert!(
+        !cache_is_fresh_for_shallow(&cache, dir.path().to_str().unwrap()),
+        "cache stamped shallow vs. live non-shallow repo => STALE => fall through to CLI"
+    );
+}
+
+#[test]
+fn test_cache_is_stale_when_repo_became_shallow() {
+    crate::git::shallow_cache_clear();
+    // Build a real shallow-looking repo: `git init` + drop a shallow file.
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir.path())
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    std::fs::write(
+        dir.path().join(".git").join("shallow"),
+        "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n",
+    )
+    .unwrap();
+
+    // Cache predates the shallow fetch — has fingerprint None.
+    let cache = cache_with_fp(None);
+    assert!(
+        !cache_is_fresh_for_shallow(&cache, dir.path().to_str().unwrap()),
+        "cache stamped non-shallow vs. live shallow repo => STALE"
+    );
+}
+
+#[test]
+fn test_cache_is_fresh_when_fingerprints_match() {
+    crate::git::shallow_cache_clear();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir.path())
+        .status()
+        .expect("git init");
+    assert!(status.success());
+    std::fs::write(
+        dir.path().join(".git").join("shallow"),
+        "aaa\n",
+    )
+    .unwrap();
+
+    let cache = cache_with_fp(Some("aaa"));
+    assert!(
+        cache_is_fresh_for_shallow(&cache, dir.path().to_str().unwrap()),
+        "matching shallow_fingerprint => cache is fresh"
+    );
+}
+
