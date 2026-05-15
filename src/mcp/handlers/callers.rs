@@ -13,7 +13,7 @@ use crate::definitions::{CallSite, DefinitionEntry, DefinitionIndex, DefinitionK
 use code_xray::generate_trigrams;
 
 use super::HandlerContext;
-use super::advisory_hints::{interface_vias_caveat, low_count_caveat};
+use super::advisory_hints::{interface_vias_caveat, interfaces_declaring_method, low_count_caveat};
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
 use super::utils::{self, add_collection_accounting, attach_result_status, build_result_status, count_tree_nodes, inject_body_into_obj, inject_branch_warning, inject_index_degraded, json_to_string, name_similarity, read_enum_string_with_default, read_string, sorted_intersect};
 
@@ -606,6 +606,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             total_body_lines_emitted,
             tests_found: Vec::new(),
             per_level_dropped: 0,
+            interface_lookup_cache: HashMap::new(),
         };
         let tree = builder.build(
             &method_name,
@@ -1010,6 +1011,7 @@ fn handle_multi_method_callers(
                 total_body_lines_emitted,
                 tests_found: Vec::new(),
                 per_level_dropped: 0,
+                interface_lookup_cache: HashMap::new(),
             };
             let tree = builder.build(
                 method_name,
@@ -1661,14 +1663,38 @@ struct CallerTreeBuilder<'a> {
     /// Exposed in the summary as `perLevelTruncated` / `callersDroppedPerLevel` so
     /// LLM clients can distinguish "full result set" from "result set that was capped".
     per_level_dropped: usize,
+    /// Per-class cache of `interfaces_declaring_method` results. Keyed by
+    /// `(class_lower, method_lower)`. Mid-tree interface expansion calls this
+    /// once per (class, method) node to gate `expand_interface_callers`; the
+    /// cache keeps cost O(unique pairs) instead of O(nodes).
+    interface_lookup_cache: HashMap<(String, String), Vec<String>>,
 }
 
 impl CallerTreeBuilder<'_> {
+    /// Cached lookup over `interfaces_declaring_method`. Used by mid-tree
+    /// interface expansion to gate `expand_interface_callers` per node — the
+    /// helper itself is cheap, but skipping the call when the gate would be
+    /// empty avoids the heavier work of scanning `name_index[method_lower]`
+    /// inside `expand_interface_callers` for popular method names.
+    fn cached_interfaces_declaring(
+        &mut self,
+        class: &str,
+        method_lower: &str,
+    ) -> &Vec<String> {
+        let key = (class.to_lowercase(), method_lower.to_string());
+        if !self.interface_lookup_cache.contains_key(&key) {
+            let v = interfaces_declaring_method(class, method_lower, self.ctx.def_idx);
+            self.interface_lookup_cache.insert(key.clone(), v);
+        }
+        &self.interface_lookup_cache[&key]
+    }
+
     fn expand_interface_callers(
         &mut self,
         method_name: &str,
         method_lower: &str,
         parent_class: Option<&str>,
+        current_depth: usize,
         call_chain: &[String],
     ) -> Vec<Value> {
         let def_idx = self.ctx.def_idx;
@@ -1742,11 +1768,19 @@ impl CallerTreeBuilder<'_> {
                                         for &ii in impl_indices {
                                             if let Some(impl_def) = def_idx.definitions.get(ii as usize)
                                                 && (impl_def.kind == DefinitionKind::Class || impl_def.kind == DefinitionKind::Struct) {
-                                                    // current_depth=1 prevents re-expansion (requires current_depth==0)
+                                                    // Recurse at `current_depth` (NOT +1): the
+                                                    // interface walk produces a *sibling* search
+                                                    // ("callers of `method` on the OTHER impl
+                                                    // class") whose returned nodes are appended
+                                                    // to the same list as direct callers, i.e.
+                                                    // at the same visible tree level. Passing
+                                                    // `current_depth + 1` would consume an extra
+                                                    // depth level and silently drop nodes when
+                                                    // the visible level equals `max_depth`.
                                                     let impl_callers = self.build(
                                                                         method_name,
                                                                         Some(&impl_def.name),
-                                                                        1,
+                                                                        current_depth,
                                                                         call_chain,
                                                                     );
                                                     callers.extend(impl_callers);
@@ -2461,12 +2495,39 @@ impl CallerTreeBuilder<'_> {
             callers.push(node);
         }
 
-        // Interface resolution: expand to find callers via interface implementations
-        if self.ctx.resolve_interfaces && current_depth == 0 {
-            let iface_callers = self.expand_interface_callers(
-                method_name, &method_lower, parent_class, call_chain,
-            );
-            callers.extend(iface_callers);
+        // Interface resolution: expand to find callers via interface implementations.
+        //
+        // Root (current_depth == 0): always expand. The inner loop is naturally
+        // gated by `name_index[method_lower]` ∩ Interface parents, so noise from
+        // unrelated interfaces (e.g., `IDisposable` for a `DoWork` query) is
+        // already filtered there.
+        //
+        // Mid-tree (current_depth > 0): pre-gate via `interfaces_declaring_method`.
+        // Without the gate, every node would pay the cost of scanning
+        // `name_index[method_lower]` even when the caller's class implements
+        // no interface declaring that method. Dedup via `visited` so the same
+        // (class, method) pair is not re-expanded across multiple branches.
+        if self.ctx.resolve_interfaces {
+            let should_expand = if current_depth == 0 {
+                true
+            } else if let Some(pc) = parent_class {
+                let has_match = !self.cached_interfaces_declaring(pc, &method_lower).is_empty();
+                if !has_match {
+                    false
+                } else {
+                    let dedup_key =
+                        format!("iface_expand:{}:{}", pc.to_lowercase(), method_lower);
+                    self.visited.insert(dedup_key)
+                }
+            } else {
+                false
+            };
+            if should_expand {
+                let iface_callers = self.expand_interface_callers(
+                    method_name, &method_lower, parent_class, current_depth, call_chain,
+                );
+                callers.extend(iface_callers);
+            }
         }
 
         callers

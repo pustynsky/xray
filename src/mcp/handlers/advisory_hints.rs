@@ -31,6 +31,90 @@ use crate::definitions::{DefinitionEntry, DefinitionIndex, DefinitionKind};
 /// `generate_callers_hint` (nearest-match) path.
 pub(crate) const LOW_CALLER_THRESHOLD: usize = 3;
 
+/// Returns the (sorted, deduplicated) list of interfaces implemented by `class`
+/// that **declare a method named `method`** on the interface itself.
+///
+/// Semantic gate for both [`interface_vias_caveat`] (cuts noise like the false
+/// `class=IDisposable` recommendation when the searched method is unrelated to
+/// `Dispose`) and `xray_callers` mid-tree interface expansion (avoids walking
+/// every implementer of every base interface — only those whose interface
+/// actually declares the searched method).
+///
+/// Direct interfaces only — transitive interface inheritance (`I2 : I1`) is
+/// out of scope; `def_idx` stores only direct `base_types`.
+///
+/// Ambiguous short names (multiple concrete `Foo` types in different
+/// namespaces) are handled with union semantics, mirroring
+/// [`interface_vias_caveat`]'s behavior so both paths agree on what the
+/// caveat would surface.
+pub(crate) fn interfaces_declaring_method(
+    class: &str,
+    method: &str,
+    def_idx: &DefinitionIndex,
+) -> Vec<String> {
+    let cls_lower = class.to_lowercase();
+    let method_lower = method.to_lowercase();
+    let Some(class_def_indices) = def_idx.name_index.get(&cls_lower) else {
+        return Vec::new();
+    };
+
+    let mut interfaces: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+    for &di in class_def_indices {
+        let Some(def) = def_idx.definitions.get(di as usize) else { continue };
+        if !matches!(
+            def.kind,
+            DefinitionKind::Class | DefinitionKind::Struct | DefinitionKind::Record
+        ) {
+            continue;
+        }
+        for base in &def.base_types {
+            // Strip generic suffix `IFoo<T>` → `IFoo`.
+            let base_simple = base.split('<').next().unwrap_or(base).trim();
+            if base_simple.is_empty() {
+                continue;
+            }
+            let base_lower = base_simple.to_lowercase();
+            if !seen.insert(base_lower.clone()) {
+                continue;
+            }
+            let Some(iface_idxs) = def_idx.name_index.get(&base_lower) else { continue };
+            let is_interface = iface_idxs.iter().any(|&i| {
+                def_idx
+                    .definitions
+                    .get(i as usize)
+                    .is_some_and(|d| d.kind == DefinitionKind::Interface)
+            });
+            if !is_interface {
+                continue;
+            }
+            let declares_method = def_idx
+                .name_index
+                .get(&method_lower)
+                .is_some_and(|m_idxs| {
+                    m_idxs.iter().any(|&mi| {
+                        def_idx.definitions.get(mi as usize).is_some_and(|md| {
+                            matches!(
+                                md.kind,
+                                DefinitionKind::Method | DefinitionKind::Function
+                            ) && md
+                                .parent
+                                .as_deref()
+                                .is_some_and(|p| p.eq_ignore_ascii_case(base_simple))
+                        })
+                    })
+                });
+            if declares_method {
+                interfaces.push(base_simple.to_string());
+            }
+        }
+    }
+
+    interfaces.sort();
+    interfaces
+}
+
 /// AI 1 — interface-receiver caveat for `xray_callers class=Foo`.
 ///
 /// Returns a hint when the resolved class implements/extends one or more
@@ -80,38 +164,12 @@ pub(crate) fn interface_vias_caveat(
         return None;
     }
 
-    let mut interfaces: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for def in &concrete {
-        for base in &def.base_types {
-            // Strip generic suffix `IFoo<T>` → `IFoo` before lookup; tree-sitter
-            // captures generics in base type text and we want the bare type name.
-            let base_simple = base.split('<').next().unwrap_or(base).trim();
-            if base_simple.is_empty() {
-                continue;
-            }
-            let base_lower = base_simple.to_lowercase();
-            if !seen.insert(base_lower.clone()) {
-                continue;
-            }
-            let is_interface = def_idx
-                .name_index
-                .get(&base_lower)
-                .map(|idxs| {
-                    idxs.iter().any(|&i| {
-                        def_idx
-                            .definitions
-                            .get(i as usize)
-                            .is_some_and(|d| d.kind == DefinitionKind::Interface)
-                    })
-                })
-                .unwrap_or(false);
-            if is_interface {
-                interfaces.push(base_simple.to_string());
-            }
-        }
-    }
-
+    // Semantic gate: only surface interfaces that actually declare `method_name`.
+    // Without this, `Foo : IDisposable, IMyThing` with a `DoWork` query would
+    // recommend `class=IDisposable` — false positive. See
+    // `interfaces_declaring_method` for the shared filter used by mid-tree
+    // expansion in `xray_callers`.
+    let interfaces = interfaces_declaring_method(cls, method_name, def_idx);
     if interfaces.is_empty() {
         return None;
     }
@@ -126,11 +184,11 @@ pub(crate) fn interface_vias_caveat(
         // Unambiguous — keep the original concrete recommendation.
         let suggested = interfaces[0].as_str();
         return Some(format!(
-            "Filtered by concrete class `{cls}`. Class implements interface(s): {interface_list}. \
-             If `{method_name}` is invoked through a DI-injected interface field (e.g. `{cls}` \
-             is registered as `{suggested}` in DI), those callsites are excluded by the `class=` \
-             filter. Re-run without `class=` or with `class={suggested}` to include \
-             interface-receiver callsites."
+            "Filtered by concrete class `{cls}`. Class implements interface(s) declaring \
+             `{method_name}`: {interface_list}. If `{method_name}` is invoked through a \
+             DI-injected interface field (e.g. `{cls}` is registered as `{suggested}` in \
+             DI), those callsites are excluded by the `class=` filter. Re-run without \
+             `class=` or with `class={suggested}` to include interface-receiver callsites."
         ));
     }
 
@@ -153,11 +211,11 @@ pub(crate) fn interface_vias_caveat(
         .join(", ");
     Some(format!(
         "Filtered by concrete class `{cls}`, but {candidate_count} types named `{cls}` exist \
-         in the index: {candidates}. Across all of them, base types include interface(s): \
-         {interface_list} — some may not apply to the type you targeted. AST resolution cannot \
-         disambiguate from the short name alone. To narrow, re-run `xray_callers method=\
-         {method_name}` with the interface that matches your DI registration, or drop `class=` \
-         to include all callsites."
+         in the index: {candidates}. Across all of them, base types include interface(s) \
+         declaring `{method_name}`: {interface_list} — some may not apply to the type you \
+         targeted. AST resolution cannot disambiguate from the short name alone. To narrow, \
+         re-run `xray_callers method={method_name}` with the interface that matches your DI \
+         registration, or drop `class=` to include all callsites."
     ))
 }
 
@@ -322,6 +380,24 @@ mod tests {
         }
     }
 
+    /// Helper: build a `Method` def with `parent` set. Used to satisfy
+    /// `interfaces_declaring_method`'s gate (interface must declare a method
+    /// with the searched name) when wiring interface fixtures.
+    fn mk_method_on(name: &str, parent: &str) -> DefinitionEntry {
+        DefinitionEntry {
+            file_id: 0,
+            name: name.to_string(),
+            kind: DefinitionKind::Method,
+            line_start: 1,
+            line_end: 1,
+            parent: Some(parent.to_string()),
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        }
+    }
+
     fn build_index(defs: Vec<DefinitionEntry>) -> DefinitionIndex {
         let mut idx = DefinitionIndex {
             root: ".".to_string(),
@@ -354,6 +430,7 @@ mod tests {
     fn interface_vias_emits_for_class_implementing_interface() {
         let idx = build_index(vec![
             mk_def("IFoo", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Bar", "IFoo"),
             mk_def("Foo", DefinitionKind::Class, vec!["IFoo"], vec![]),
         ]);
         let hint = interface_vias_caveat("Bar", Some("Foo"), &idx)
@@ -367,6 +444,7 @@ mod tests {
     fn interface_vias_strips_generic_suffix() {
         let idx = build_index(vec![
             mk_def("IRepository", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Save", "IRepository"),
             mk_def(
                 "UserRepository",
                 DefinitionKind::Class,
@@ -413,12 +491,46 @@ mod tests {
     fn interface_vias_lists_multiple_interfaces() {
         let idx = build_index(vec![
             mk_def("IA", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Bar", "IA"),
             mk_def("IB", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Bar", "IB"),
             mk_def("Foo", DefinitionKind::Class, vec!["IA", "IB"], vec![]),
         ]);
         let hint = interface_vias_caveat("Bar", Some("Foo"), &idx).unwrap();
         assert!(hint.contains("`IA`"));
         assert!(hint.contains("`IB`"));
+    }
+
+    /// Regression for the new semantic gate: classes implementing
+    /// `IDisposable` (which only declares `Dispose`) must NOT trigger the
+    /// caveat for unrelated method names. Pre-fix the helper listed every
+    /// interface in `base_types` regardless of whether it declared the
+    /// searched method, recommending false `class=IDisposable` for arbitrary
+    /// methods on `Foo : IDisposable, IMyThing`.
+    #[test]
+    fn interface_vias_skips_interfaces_without_matching_method() {
+        let idx = build_index(vec![
+            mk_def("IDisposable", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Dispose", "IDisposable"),
+            mk_def("IMyThing", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("DoWork", "IMyThing"),
+            mk_def(
+                "Foo",
+                DefinitionKind::Class,
+                vec!["IDisposable", "IMyThing"],
+                vec![],
+            ),
+        ]);
+        let hint = interface_vias_caveat("DoWork", Some("Foo"), &idx)
+            .expect("expected hint for IMyThing-only interface match");
+        assert!(
+            hint.contains("`IMyThing`"),
+            "hint must include the interface that declares the method, got: {hint}"
+        );
+        assert!(
+            !hint.contains("IDisposable"),
+            "hint must NOT mention IDisposable when DoWork is not declared on it, got: {hint}"
+        );
     }
 
     /// Helper: build an index where each `(name, kind, parent, base_types)`
@@ -466,6 +578,73 @@ mod tests {
         idx
     }
 
+    // ── interfaces_declaring_method ────────────────────────────────────
+
+    #[test]
+    fn ifaces_declaring_method_empty_for_class_without_interfaces() {
+        let idx = build_index(vec![mk_def("Foo", DefinitionKind::Class, vec![], vec![])]);
+        assert!(interfaces_declaring_method("Foo", "Bar", &idx).is_empty());
+    }
+
+    #[test]
+    fn ifaces_declaring_method_empty_when_interface_lacks_method() {
+        let idx = build_index(vec![
+            mk_def("IDisposable", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Dispose", "IDisposable"),
+            mk_def("Foo", DefinitionKind::Class, vec!["IDisposable"], vec![]),
+        ]);
+        assert!(interfaces_declaring_method("Foo", "DoWork", &idx).is_empty());
+    }
+
+    #[test]
+    fn ifaces_declaring_method_returns_matching_interface() {
+        let idx = build_index(vec![
+            mk_def("IFoo", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Bar", "IFoo"),
+            mk_def("Foo", DefinitionKind::Class, vec!["IFoo"], vec![]),
+        ]);
+        assert_eq!(
+            interfaces_declaring_method("Foo", "Bar", &idx),
+            vec!["IFoo".to_string()]
+        );
+    }
+
+    #[test]
+    fn ifaces_declaring_method_sorted_when_multiple_match() {
+        let idx = build_index(vec![
+            mk_def("IZeta", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Bar", "IZeta"),
+            mk_def("IAlpha", DefinitionKind::Interface, vec![], vec![]),
+            mk_method_on("Bar", "IAlpha"),
+            mk_def("Foo", DefinitionKind::Class, vec!["IZeta", "IAlpha"], vec![]),
+        ]);
+        assert_eq!(
+            interfaces_declaring_method("Foo", "Bar", &idx),
+            vec!["IAlpha".to_string(), "IZeta".to_string()],
+            "result must be deterministically sorted"
+        );
+    }
+
+    #[test]
+    fn ifaces_declaring_method_unions_across_ambiguous_short_names() {
+        // Two `Foo` classes in different namespaces: A : IFoo, B : IBar.
+        // Both interfaces declare `Bar`. The helper unions interfaces from
+        // every concrete `Foo` (matching `interface_vias_caveat`'s union
+        // semantics in the ambiguous path).
+        let idx = build_index_with_parents(vec![
+            ("IFoo", DefinitionKind::Interface, None, vec![], "i_foo.cs"),
+            ("Bar", DefinitionKind::Method, Some("IFoo"), vec![], "i_foo.cs"),
+            ("IBar", DefinitionKind::Interface, None, vec![], "i_bar.cs"),
+            ("Bar", DefinitionKind::Method, Some("IBar"), vec![], "i_bar.cs"),
+            ("Foo", DefinitionKind::Class, Some("Ns.A"), vec!["IFoo"], "a/Foo.cs"),
+            ("Foo", DefinitionKind::Class, Some("Ns.B"), vec!["IBar"], "b/Foo.cs"),
+        ]);
+        assert_eq!(
+            interfaces_declaring_method("Foo", "Bar", &idx),
+            vec!["IBar".to_string(), "IFoo".to_string()]
+        );
+    }
+
     /// Regression for `user-stories/xray-advisory-hints-namespace-collision-and-yml-gap.md`
     /// (Problem 1). Two unrelated `Foo` classes in different namespaces must
     /// not have their interface lists merged into a single sentence that
@@ -475,7 +654,9 @@ mod tests {
     fn interface_vias_emits_ambiguity_notice_for_duplicate_short_name() {
         let idx = build_index_with_parents(vec![
             ("IFoo", DefinitionKind::Interface, None, vec![], "i_foo.cs"),
+            ("Bar", DefinitionKind::Method, Some("IFoo"), vec![], "i_foo.cs"),
             ("IBar", DefinitionKind::Interface, None, vec![], "i_bar.cs"),
+            ("Bar", DefinitionKind::Method, Some("IBar"), vec![], "i_bar.cs"),
             ("Foo", DefinitionKind::Class, Some("Ns.A"), vec!["IFoo"], "a/Foo.cs"),
             ("Foo", DefinitionKind::Class, Some("Ns.B"), vec!["IBar"], "b/Foo.cs"),
         ]);
