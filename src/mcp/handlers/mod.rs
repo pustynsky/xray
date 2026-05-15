@@ -2209,9 +2209,39 @@ fn rebuild_git_cache_for_workspace(ctx: &HandlerContext, dir: &str) {
             }
         };
         let cache_path = GitHistoryCache::cache_path_for(&bg_dir, &bg_idx_base);
-        // Try load from disk first
+        // Try load from disk first. Accept ONLY if the on-disk cache is
+        // still valid for the CURRENT branch HEAD AND the current shallow
+        // state. Without this check a cache built before `git fetch
+        // --unshallow` (or any new `--depth=N` fetch) would be silently
+        // republished on workspace switch — HEAD does not move during
+        // unshallow, so the legacy validity check alone cannot see it.
         let cache = if cache_path.exists() {
-            GitHistoryCache::load_from_disk(&cache_path).ok()
+            let disk_cache = GitHistoryCache::load_from_disk(&cache_path).ok();
+            match disk_cache {
+                Some(c) => {
+                    let current_head = std::process::Command::new("git")
+                        .args(["rev-parse", &branch])
+                        .current_dir(&repo_path)
+                        .output()
+                        .ok()
+                        .and_then(|out| {
+                            if out.status.success() {
+                                Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+                            } else {
+                                None
+                            }
+                        });
+                    let current_shallow_fp = crate::git::shallow_fingerprint(&bg_dir);
+                    match current_head {
+                        Some(head) if c.is_valid_for_with_shallow(
+                            &head,
+                            current_shallow_fp.as_deref(),
+                        ) => Some(c),
+                        _ => None,
+                    }
+                }
+                None => None,
+            }
         } else {
             None
         };

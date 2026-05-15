@@ -1114,3 +1114,205 @@ fn test_file_first_commit_renamed_then_deleted_traces_to_original_create() {
     );
 }
 
+
+// ─── Shallow-clone detection tests ──────────────────────
+
+/// Build a tempdir initialised as a real git repo. Required because
+/// `detect_shallow` / `shallow_fingerprint` now resolve the shallow file
+/// location via `git rev-parse --git-path shallow`, which fails on a
+/// synthetic `.git/` directory that was never `git init`ed.
+fn make_real_git_repo() -> tempfile::TempDir {
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let status = std::process::Command::new("git")
+        .arg("init")
+        .arg("-q")
+        .current_dir(dir.path())
+        .status()
+        .expect("git init must run");
+    assert!(status.success(), "git init failed");
+    dir
+}
+
+#[test]
+fn test_detect_shallow_returns_none_for_non_git_dir() {
+    shallow_cache_clear();
+    let dir = tempfile::TempDir::new().expect("tempdir");
+    let info = detect_shallow(dir.path().to_str().unwrap());
+    assert!(info.is_none(), "non-git dir is not shallow");
+}
+
+#[test]
+fn test_detect_shallow_returns_none_when_no_shallow_file() {
+    shallow_cache_clear();
+    let dir = make_real_git_repo();
+    let info = detect_shallow(dir.path().to_str().unwrap());
+    assert!(info.is_none(), "no .git/shallow => not shallow");
+}
+
+#[test]
+fn test_detect_shallow_reads_boundaries() {
+    shallow_cache_clear();
+    let dir = make_real_git_repo();
+    std::fs::write(
+        dir.path().join(".git").join("shallow"),
+        "abc1230000000000000000000000000000000001\nabc1230000000000000000000000000000000002\n",
+    )
+    .unwrap();
+
+    let info = detect_shallow(dir.path().to_str().unwrap()).expect("shallow detected");
+    assert_eq!(info.boundaries.len(), 2);
+    assert!(info.boundaries[0].starts_with("abc123"));
+}
+
+#[test]
+fn test_detect_shallow_ignores_blank_lines() {
+    shallow_cache_clear();
+    let dir = make_real_git_repo();
+    std::fs::write(dir.path().join(".git").join("shallow"), "\n\n  \n").unwrap();
+    assert!(
+        detect_shallow(dir.path().to_str().unwrap()).is_none(),
+        "only-whitespace shallow file == not shallow"
+    );
+}
+
+#[test]
+fn test_shallow_fingerprint_is_sorted_and_deduped() {
+    shallow_cache_clear();
+    let dir = make_real_git_repo();
+    std::fs::write(
+        dir.path().join(".git").join("shallow"),
+        "bbb\naaa\nbbb\nccc\n",
+    )
+    .unwrap();
+
+    let fp = shallow_fingerprint(dir.path().to_str().unwrap()).expect("fp");
+    assert_eq!(fp, "aaa,bbb,ccc", "fingerprint must be sorted and deduped");
+}
+
+#[test]
+fn test_shallow_fingerprint_changes_when_unshallowed() {
+    shallow_cache_clear();
+    let dir = make_real_git_repo();
+    let shallow_path = dir.path().join(".git").join("shallow");
+
+    std::fs::write(&shallow_path, "abc\n").unwrap();
+    let before = shallow_fingerprint(dir.path().to_str().unwrap());
+    assert_eq!(before.as_deref(), Some("abc"));
+
+    // Bump mtime so the memo notices the change. Without the sleep, the
+    // remove below can land in the same FS tick as the create on fast disks.
+    std::thread::sleep(std::time::Duration::from_millis(15));
+
+    // Simulate `git fetch --unshallow`: shallow file goes away.
+    std::fs::remove_file(&shallow_path).unwrap();
+    let after = shallow_fingerprint(dir.path().to_str().unwrap());
+    assert_eq!(after, None, "after unshallow, fingerprint becomes None");
+}
+
+#[test]
+fn test_shallow_fingerprint_resolves_path_via_git() {
+    shallow_cache_clear();
+    let dir = make_real_git_repo();
+    // Mirror what worktrees do: ask git where shallow would live, then
+    // write there. This proves we are not hard-coding `<repo>/.git/shallow`.
+    let resolved = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", "shallow"])
+        .current_dir(dir.path())
+        .output()
+        .expect("git rev-parse");
+    let target = String::from_utf8(resolved.stdout).unwrap();
+    let target_path = dir.path().join(target.trim());
+    std::fs::write(&target_path, "abc\n").unwrap();
+
+    let fp = shallow_fingerprint(dir.path().to_str().unwrap());
+    assert_eq!(
+        fp.as_deref(),
+        Some("abc"),
+        "shallow_fingerprint must read via git-resolved path"
+    );
+}
+
+#[test]
+fn test_shallow_warning_text_mentions_unshallow_command() {
+    let info = ShallowInfo {
+        boundaries: vec!["deadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string()],
+    };
+    let text = info.warning_text();
+    assert!(text.contains("shallow-cloned"));
+    assert!(text.contains("git fetch --unshallow"));
+    // Truncated preview (12 chars).
+    assert!(text.contains("deadbeefdead"));
+}
+
+#[test]
+fn test_shallow_warning_text_truncates_when_many_boundaries() {
+    let info = ShallowInfo {
+        boundaries: (0..5).map(|i| format!("{:040x}", i)).collect(),
+    };
+    let text = info.warning_text();
+    assert!(text.contains("+2 more"), "more-than-3 boundaries should show +N more, got: {text}");
+}
+
+
+#[test]
+fn test_shallow_fingerprint_resolves_path_for_real_worktree() {
+    shallow_cache_clear();
+
+    // Build a parent repo with one commit so `worktree add` succeeds.
+    let parent = make_real_git_repo();
+    let run = |args: &[&str]| {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(parent.path())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {:?} failed", args);
+    };
+    run(&["config", "user.email", "x@x"]);
+    run(&["config", "user.name", "X"]);
+    run(&["commit", "-q", "--allow-empty", "-m", "init"]);
+
+    // Create a linked worktree. `git worktree add` writes a `.git` FILE
+    // (gitfile pointing at <parent>/.git/worktrees/<name>/), not a dir.
+    let wt_path = parent.path().join("linked-worktree");
+    let status = std::process::Command::new("git")
+        .args(["worktree", "add", "-q", "-b", "feat-branch"])
+        .arg(&wt_path)
+        .current_dir(parent.path())
+        .status()
+        .expect("git worktree add");
+    assert!(status.success(), "git worktree add failed");
+
+    // Sanity-check: worktree's `.git` is a gitfile, not a directory — this is
+    // the exact case the hard-coded `<repo>/.git/shallow` path used to miss.
+    let dot_git = wt_path.join(".git");
+    assert!(
+        std::fs::metadata(&dot_git).unwrap().is_file(),
+        "worktree's .git must be a gitfile, not a directory"
+    );
+
+    // Drop a shallow file at the gitdir location git resolves to.
+    let resolved = std::process::Command::new("git")
+        .args(["rev-parse", "--git-path", "shallow"])
+        .current_dir(&wt_path)
+        .output()
+        .expect("git rev-parse");
+    assert!(resolved.status.success(), "git rev-parse failed");
+    let rel = String::from_utf8(resolved.stdout).unwrap();
+    let target = wt_path.join(rel.trim());
+    if let Some(pd) = target.parent() {
+        std::fs::create_dir_all(pd).ok();
+    }
+    std::fs::write(&target, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n").unwrap();
+
+    // Hard-coded `<repo>/.git/shallow` would have looked at a path that does
+    // NOT exist (worktree's .git is a file). The git-resolved path lives
+    // under the parent's .git/worktrees/<name>/shallow.
+    let fp = shallow_fingerprint(wt_path.to_str().unwrap());
+    assert_eq!(
+        fp.as_deref(),
+        Some("deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"),
+        "shallow_fingerprint must resolve via git for linked worktrees"
+    );
+}
+

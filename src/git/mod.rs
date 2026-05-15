@@ -702,6 +702,173 @@ pub fn current_head_hash(repo: &str) -> Option<String> {
 }
 
 
+/// Information about a shallow-cloned repository.
+///
+/// Set when the repository was created via `git clone --depth=N` (or had a
+/// later `--depth` fetch added). The boundaries are commit hashes that mark
+/// where git's local view of history ends — anything older is invisible to
+/// `git log`, `git blame`, `git diff`, etc., even though it exists on the
+/// remote.
+///
+/// Source: contents of `<repo>/.git/shallow` (one hex hash per line).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShallowInfo {
+    /// Commit hashes at which history is grafted (truncated). Each entry is
+    /// the OLDEST commit visible on its history branch — its parents are not
+    /// in the local object store.
+    pub boundaries: Vec<String>,
+}
+
+impl ShallowInfo {
+    /// Format a single-line warning suitable for embedding in tool responses.
+    pub fn warning_text(&self) -> String {
+        if self.boundaries.is_empty() {
+            return String::new();
+        }
+        let preview: Vec<&str> = self
+            .boundaries
+            .iter()
+            .take(3)
+            .map(|s| s.get(..s.len().min(12)).unwrap_or(s.as_str()))
+            .collect();
+        let more = if self.boundaries.len() > 3 {
+            format!(" (+{} more)", self.boundaries.len() - 3)
+        } else {
+            String::new()
+        };
+        format!(
+            "Repository is shallow-cloned (graft boundary: {}{}). \
+             History before these commits is INVISIBLE to git locally — counts \
+             and authorship may be incomplete. Run `git fetch --unshallow` for \
+             the full history.",
+            preview.join(", "),
+            more
+        )
+    }
+}
+
+// ─── Shallow-clone state cache ───────────────────────────────────
+//
+// Per-repo memo of where this repo's `shallow` file lives. The path itself
+// is stable for the lifetime of the process (gitdir does not move) and
+// resolving it costs one `git rev-parse --git-path shallow` subprocess
+// (~5 ms cold), so caching the path saves the subprocess on every
+// subsequent call. The shallow file CONTENTS are NOT memoised — every
+// call to `shallow_fingerprint` re-reads the (typically <1 KB) file. This
+// trades ~10–50 µs per request for the strongest possible coherency
+// guarantee: no undocumented dependency on filesystem mtime resolution,
+// no risk of preserving a stale fingerprint after `git fetch --depth=N`
+// rewrites the file with an unchanged mtime.
+
+struct ShallowState {
+    /// Resolved absolute path to the `shallow` file. Computed once per repo
+    /// via `git rev-parse --git-path shallow` so worktrees and submodules
+    /// (where `.git` is a gitfile pointing at a separate gitdir) work.
+    /// `None` if the resolution failed (not a git repo, missing git binary).
+    shallow_path: Option<std::path::PathBuf>,
+}
+
+static SHALLOW_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, ShallowState>>,
+> = std::sync::OnceLock::new();
+
+fn shallow_cache() -> &'static std::sync::Mutex<HashMap<String, ShallowState>> {
+    SHALLOW_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Resolve where this repo's `shallow` file would live. Works for normal
+/// repos AND worktrees/submodules (`<repo>/.git` may be a gitfile pointing
+/// elsewhere). Returns the path even when the file does not currently
+/// exist; callers must `stat`/`read` it to detect presence.
+fn resolve_shallow_path(repo: &str) -> Option<std::path::PathBuf> {
+    let out = Command::new("git")
+        .current_dir(repo)
+        .args(["rev-parse", "--git-path", "shallow"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8(out.stdout).ok()?;
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = std::path::Path::new(trimmed);
+    Some(if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        std::path::Path::new(repo).join(p)
+    })
+}
+
+/// Resolve (and memoise) the path to this repo's shallow file.
+fn cached_shallow_path(repo: &str) -> Option<std::path::PathBuf> {
+    let mut map = shallow_cache().lock().ok()?;
+    let state = map.entry(repo.to_string()).or_insert_with(|| ShallowState {
+        shallow_path: resolve_shallow_path(repo),
+    });
+    state.shallow_path.clone()
+}
+
+fn read_boundaries(path: &std::path::Path) -> Option<Vec<String>> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let bs: Vec<String> = content
+        .lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .collect();
+    if bs.is_empty() { None } else { Some(bs) }
+}
+
+fn fingerprint_from_boundaries(mut bs: Vec<String>) -> String {
+    bs.sort();
+    bs.dedup();
+    bs.join(",")
+}
+
+/// Read shallow-clone info from this repo's `shallow` file. Returns `None`
+/// if the repo is not shallow (file missing or empty).
+///
+/// Resolves the actual shallow-file path via `git rev-parse --git-path
+/// shallow` (memoised per repo) so worktrees and submodules whose `.git`
+/// is a gitfile work correctly.
+pub fn detect_shallow(repo: &str) -> Option<ShallowInfo> {
+    let shallow_path = cached_shallow_path(repo)?;
+    let boundaries = read_boundaries(&shallow_path)?;
+    Some(ShallowInfo { boundaries })
+}
+
+/// Stable canonical representation of shallow boundaries for cache keying.
+///
+/// Returns `Some("hash1,hash2,...")` (sorted, deduped) when the repo is
+/// shallow, `None` otherwise. A change in this value between cache build
+/// time and load time MUST invalidate the cache — see
+/// [`crate::git::cache::GitHistoryCache::is_valid_for_with_shallow`].
+///
+/// Cost per call: one stat + one read of `.git/shallow` (typically <1 KB).
+/// On warm Windows NTFS this is ~10–50 µs; on Linux ~2–10 µs. The shallow
+/// file is intentionally NOT memoised by content/mtime — reading on every
+/// call removes any reliance on `modified()` resolution and guarantees we
+/// observe `git fetch --unshallow` and `--depth=N` boundary changes
+/// immediately, even when the filesystem reports an unchanged mtime.
+pub fn shallow_fingerprint(repo: &str) -> Option<String> {
+    let path = cached_shallow_path(repo)?;
+    let bs = read_boundaries(&path)?;
+    Some(fingerprint_from_boundaries(bs))
+}
+
+#[cfg(test)]
+pub fn shallow_cache_clear() {
+    if let Some(m) = SHALLOW_CACHE.get()
+        && let Ok(mut g) = m.lock()
+    {
+        g.clear();
+    }
+}
+
+
 /// Backward-compatible alias for [`file_exists_in_current_head`].
 ///
 /// Kept for external callers and older code paths. Prefer the more explicit
