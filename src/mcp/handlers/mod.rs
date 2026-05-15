@@ -289,11 +289,11 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "attribute": {
                         "type": "string",
-                        "description": "Filter by C# attribute name."
+                        "description": "Filter by C# attribute name. Omit this parameter when unset; empty strings are invalid."
                     },
                     "baseType": {
                         "type": "string",
-                        "description": "Filter by base type or implemented interface (substring match — 'IAccessTable' finds IAccessTable<Model>, IAccessTable<Report>, etc.)."
+                        "description": "Filter by base type or implemented interface (substring match — 'IAccessTable' finds IAccessTable<Model>, IAccessTable<Report>, etc.). Omit this parameter when unset; empty strings are invalid."
                     },
                     "baseTypeTransitive": {
                         "type": "boolean",
@@ -311,7 +311,7 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "containsLine": {
                         "type": "integer",
-                        "description": "Find definition(s) containing this line number. Returns innermost method + parent class. Requires 'file' parameter. With includeBody=true, body is emitted ONLY for the innermost (most specific) definition; parent definitions get 'bodyOmitted' hint instead — this maximizes body budget for the target method."
+                        "description": "Find definition(s) containing this line number. Minimum value: 1. Requires a real 'file' path and switches the query into line-containment lookup. Returns innermost method + parent class. With includeBody=true, body is emitted ONLY for the innermost (most specific) definition; parent definitions get 'bodyOmitted' hint instead — this maximizes body budget for the target method."
                     },
                     "regex": {
                         "type": "boolean",
