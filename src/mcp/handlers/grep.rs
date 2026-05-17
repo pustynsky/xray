@@ -2055,6 +2055,20 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
     let use_phrase = args.get("phrase").and_then(|v| v.as_bool()).unwrap_or(false);
     let use_line_regex = args.get("lineRegex").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    // Explicit regex + phrase combination is meaningless: regex matches token
+    // names in the inverted index, phrase matches a literal multi-char string
+    // in raw file content. Pre-fix the conflict was silently resolved by
+    // letting phrase win and dropping regex on the floor — the caller would
+    // get phrase-mode results without any warning. Reject explicitly,
+    // symmetric with the existing `lineRegex + phrase` mutex below.
+    if use_regex && use_phrase {
+        return Err(ToolCallResult::error(
+            "regex=true and phrase=true are mutually exclusive. \
+             Choose one: regex matches token names in the inverted index, \
+             phrase matches a literal multi-character string in raw file content.".to_string(),
+        ));
+    }
+
     // Validate lineRegex compatibility:
     // - lineRegex implies regex=true (auto-promoted with a note: explicit error
     //   would be hostile to LLMs that forget the implication).

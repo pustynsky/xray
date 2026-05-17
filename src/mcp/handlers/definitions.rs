@@ -405,6 +405,33 @@ pub(crate) fn handle_xray_definitions(ctx: &HandlerContext, args: &Value) -> Too
 
 // ─── Audit mode ──────────────────────────────────────────────────────
 
+/// Sniff the first 4 KB of a file for common macro-invocation markers whose
+/// body the tree-sitter parser does not descend into. Returns a comma-joined
+/// marker list (e.g. `"proptest!, quickcheck!"`) or `None` if the file does
+/// not exist / has no recognised markers. Best-effort — read failures are
+/// silently treated as "no marker", since this is a diagnostic hint, not
+/// a correctness check.
+pub(super) fn detect_macro_definition_markers(path: &str) -> Option<String> {
+    use std::fs::File;
+    use std::io::Read;
+    let mut buf = [0u8; 4096];
+    let n = File::open(path).ok()?.read(&mut buf).ok()?;
+    let head = std::str::from_utf8(&buf[..n]).ok()?;
+    const MARKERS: &[&str] = &[
+        "proptest! {",
+        "quickcheck! {",
+        "#[proptest",
+        "#[quickcheck]",
+        "lazy_static! {",
+        "thread_local! {",
+    ];
+    let found: Vec<&str> = MARKERS.iter()
+        .filter(|m| head.contains(*m))
+        .copied()
+        .collect();
+    if found.is_empty() { None } else { Some(found.join(", ")) }
+}
+
 fn handle_audit_mode(
     index: &DefinitionIndex,
     args: &DefinitionSearchArgs,
@@ -418,7 +445,22 @@ fn handle_audit_mode(
         .filter(|(_, size)| *size > args.audit_min_bytes)
         .map(|(fid, size)| {
             let path = index.files.get(*fid as usize).map(|s| s.as_str()).unwrap_or("?");
-            json!({ "file": path, "bytes": size })
+            let mut entry = json!({ "file": path, "bytes": size });
+            // Sniff for known macro patterns whose body the tree-sitter parser
+            // doesn't descend into — the file looks empty to the index even
+            // though it defines real functions inside the macro. Saves the user
+            // a manual `xray_grep` to figure out why a >500-byte file produced
+            // zero definitions. Best-effort: read at most 4 KB, no error on
+            // failure (file may have been deleted between index build and now).
+            if let Some(markers) = detect_macro_definition_markers(path) {
+                entry["hint"] = json!(format!(
+                    "file contains macro invocation(s) ({markers}) whose body is \
+                     not parsed by tree-sitter; function definitions inside the \
+                     macro are invisible to xray_definitions. Use xray_grep \
+                     terms=[\"fn \"] file=[\"{path}\"] to enumerate them."
+                ));
+            }
+            entry
         })
         .collect();
 
@@ -482,11 +524,13 @@ fn handle_contains_line_mode(
     let mut file_cache: HashMap<String, Option<String>> = HashMap::new();
     let mut total_body_lines_emitted: usize = 0;
     let mut total_body_lines_available: usize = 0;
+    let mut matched_any_file = false;
 
     for (file_id, file_path) in index.files.iter().enumerate() {
         if !file_path.replace('\\', "/").to_lowercase().contains(&file_substr) {
             continue;
         }
+        matched_any_file = true;
         // A2 fix: Apply excludeDir filter using pre-computed patterns
         if !args.exclude_patterns.is_empty() {
             let path_lower = file_path.to_lowercase().replace('\\', "/");
@@ -591,7 +635,7 @@ fn handle_contains_line_mode(
     }
     inject_branch_warning(&mut summary, ctx);
     inject_index_degraded(&mut summary, index.worker_panics);
-    let output = json!({
+    let mut output = json!({
         "containingDefinitions": containing_defs,
         "query": {
             "file": file_filter,
@@ -599,7 +643,57 @@ fn handle_contains_line_mode(
         },
         "summary": summary,
     });
+
+    // Diagnostic hint: if the substring matched zero indexed file paths AND
+    // it looks like a basename with a non-supported extension, the silent
+    // empty result is almost certainly a parser-support issue, not a
+    // "no definition at this line" answer. Detection uses the runtime-active
+    // `ctx.def_extensions` (intersection of --ext and parser support) so a
+    // server started with `--ext cs` correctly hints on `.rs` queries even
+    // though the binary was built with `lang-rust`. Bare-basename filters
+    // (no dot) are intentionally NOT classified — they are legitimate
+    // substring queries against multiple indexed files.
+    if !matched_any_file
+        && let Some(ext) = unsupported_extension_hint_candidate(&file_substr, &ctx.def_extensions)
+    {
+        let active_list = if ctx.def_extensions.is_empty() {
+            "(none active in this server)".to_string()
+        } else {
+            ctx.def_extensions.join(", ")
+        };
+        output["hint"] = json!(format!(
+            "file '{file_filter}' has extension '.{ext}' with no active definition \
+             parser in this server; containsLine returns no results regardless of \
+             line number. Active extensions: {active_list}. Use \
+             xray_info file=[\"{file_filter}\"] to confirm parser activation."
+        ));
+    }
+
     ToolCallResult::success(json_to_string(&output))
+}
+
+/// Classify `file_substr` (already lowercased, slashes normalised) as a
+/// basename-with-unsupported-extension when it looks like `<prefix>.<ext>`
+/// with a short alphanumeric `ext` not present in `active_exts`. Returns
+/// `None` for bare basenames (no dot), dotted directory/version fragments
+/// (`net8.0`, `My.Project`, where the suffix is too long or non-alphanumeric
+/// to be a real extension), or extensions that are active in the index.
+/// The strict heuristic is deliberate: false-positive hints would surface
+/// on every dotted substring filter (a documented public contract).
+pub(super) fn unsupported_extension_hint_candidate<'a>(file_substr: &'a str, active_exts: &[String]) -> Option<&'a str> {
+    let (prefix, suffix) = file_substr.rsplit_once('.')?;
+    if prefix.is_empty()
+        || prefix.contains('.')
+        || suffix.is_empty()
+        || suffix.len() > 5
+        || !suffix.chars().all(|c| c.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    if active_exts.iter().any(|e| e.eq_ignore_ascii_case(suffix)) {
+        return None;
+    }
+    Some(suffix)
 }
 
 // ─── Candidate collection (index-based filtering) ────────────────────
