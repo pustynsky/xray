@@ -1,6 +1,44 @@
+# Default policy: text files are normalized to LF in the repo, OS-native in
+# the working tree. Run `git add --renormalize .` in a dedicated chore commit
+# before relying on this — otherwise existing CRLF files stay CRLF until next
+# write.
+* text=auto eol=lf
+
 # Shell scripts MUST have LF line endings on every clone, even on Windows.
 # clean.sh / smudge.sh are invoked by git itself as filter drivers (via
 # .git/xray-mcp/, copied from scripts/mcp-filter/ by setup-xray.ps1). On
 # Windows the bundled bash interpreter chokes on CRLF in the shebang
 # (`/usr/bin/env\r: No such file or directory`).
 *.sh text eol=lf
+
+# Windows-only scripts: keep CRLF.
+*.ps1 text eol=crlf
+*.psm1 text eol=crlf
+*.psd1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binaries — never normalize.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.pptx binary
+*.xlsx binary
+*.docx binary
+*.zip binary
+*.gz binary
+*.tar binary
+*.exe binary
+*.dll binary
+
+# Xray on-disk index artefacts: byte-exact, never normalize.
+*.code-structure binary
+*.word-search binary
+*.file-list binary
+*.code-structure.meta text eol=lf
+*.word-search.meta text eol=lf
+*.file-list.meta text eol=lf

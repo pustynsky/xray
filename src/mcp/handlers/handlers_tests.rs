@@ -180,9 +180,8 @@ fn test_dispatch_grep_unknown_arg_warning_in_summary() {
     // Default (no env): unknown args are surfaced as a warning in summary,
     // but the tool still runs successfully so existing scripts don't break.
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _strict_env = EnvVarGuard::remove("XRAY_STRICT_ARGS");
     let ctx = make_empty_ctx();
-    // SAFETY: serial single-threaded test; restored at end.
-    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
     let result = dispatch_tool(
         &ctx,
         "xray_grep",
@@ -202,15 +201,13 @@ fn test_dispatch_grep_unknown_arg_warning_in_summary() {
 #[test]
 fn test_dispatch_grep_unknown_arg_strict_mode_hard_errors() {
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _strict_env = EnvVarGuard::set("XRAY_STRICT_ARGS", "1");
     let ctx = make_empty_ctx();
-    // SAFETY: serial single-threaded test; restored at end.
-    unsafe { std::env::set_var("XRAY_STRICT_ARGS", "1") };
     let result = dispatch_tool(
         &ctx,
         "xray_grep",
         &json!({"terms": ["HttpClient"], "includePattern": "src/**"}),
     );
-    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
     assert!(result.is_error, "strict mode should hard-error on unknown arg");
     let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(body["error"], "UNKNOWN_ARGS");
@@ -220,6 +217,7 @@ fn test_dispatch_grep_unknown_arg_strict_mode_hard_errors() {
 }
 
 use super::arg_validation::STRICT_ARGS_ENV_LOCK;
+use super::tests_misc::EnvVarGuard;
 
 #[test]
 fn test_dispatch_grep_with_results() {
@@ -589,8 +587,7 @@ fn test_dispatch_surfaces_unknown_arg_warning_in_summary() {
     // schema-guard short-circuits to the generic Jaro-Winkler hint and we
     // can assert without touching git infrastructure.
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
-    // SAFETY: serial single-threaded test; restored at end.
-    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
+    let _strict_env = EnvVarGuard::remove("XRAY_STRICT_ARGS");
     let ctx = make_empty_ctx();
     let result = dispatch_tool(
         &ctx,

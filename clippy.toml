@@ -1,0 +1,5 @@
+# Clippy thresholds. Enforced in CI via `cargo clippy -- -D warnings`.
+# Raising any number is a deliberate decision — document in the PR.
+too-many-arguments-threshold = 7
+cognitive-complexity-threshold = 50
+type-complexity-threshold = 250

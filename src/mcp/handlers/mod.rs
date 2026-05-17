@@ -798,6 +798,12 @@ pub fn determine_initial_binding(dir: &str, extensions: &[String], respect_git_e
         }
     }
 }
+
+/// Per-workspace cache of `git rev-parse --abbrev-ref HEAD` results, keyed by
+/// workspace dir; see [`HandlerContext::current_branch_cache`].
+pub type CurrentBranchCache =
+    Arc<RwLock<std::collections::HashMap<String, (Instant, Option<String>)>>>;
+
 pub struct HandlerContext {
     pub index: Arc<RwLock<ContentIndex>>,
     pub def_index: Option<Arc<RwLock<DefinitionIndex>>>,
@@ -920,8 +926,7 @@ pub struct HandlerContext {
     /// back to [`HandlerContext::current_branch`] (the value captured at
     /// server startup) so behaviour is never worse than before this cache
     /// existed.
-    pub current_branch_cache:
-        Arc<RwLock<std::collections::HashMap<String, (Instant, Option<String>)>>>,
+    pub current_branch_cache: CurrentBranchCache,
     /// Whether `branch_warning` should perform the live `git rev-parse` probe
     /// described above. Set to `true` by [`crate::cli::serve::cmd_serve`] for
     /// long-running MCP servers; left `false` for tests and CLI subcommands

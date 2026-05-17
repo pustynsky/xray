@@ -67,10 +67,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: feature-matrix
-      # `cargo check` instead of `cargo test` keeps the matrix fast enough for
-      # every push. Full test runs across the matrix are too slow (~N× the
-      # default test job); the base `test` job already covers functional
-      # correctness under default features.
+      # Clippy is NOT run here yet: several `pub(crate)` helpers in
+      # `mcp/handlers/callers.rs` and a `#[cfg(test)]` helper in
+      # `definitions/incremental.rs` surface as `dead_code` / `unused_imports`
+      # when language-parser features are turned off in isolation. Re-enable
+      # this step (`cargo clippy --workspace --all-targets ${{ matrix.features }}
+      # --locked -- -D warnings`) after gating those items with `#[cfg(...)]`.
       - name: cargo check ${{ matrix.features }}
         run: cargo check --workspace ${{ matrix.features }} --locked
 

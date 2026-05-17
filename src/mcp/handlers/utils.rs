@@ -267,26 +267,26 @@ fn add_generic_accounting_from_output(result_status: &mut Value, output: &Value)
         }
     }
 
-    if let Some(definitions) = output.get("definitions").and_then(Value::as_array) {
-        if let Some(total_results) = summary.get("totalResults").and_then(Value::as_u64) {
-            add_collection_accounting(
-                result_status,
-                json!({ "definitions": definitions.len() }),
-                json!({ "definitions": total_results }),
-            );
-            return;
-        }
+    if let Some(definitions) = output.get("definitions").and_then(Value::as_array)
+        && let Some(total_results) = summary.get("totalResults").and_then(Value::as_u64)
+    {
+        add_collection_accounting(
+            result_status,
+            json!({ "definitions": definitions.len() }),
+            json!({ "definitions": total_results }),
+        );
+        return;
     }
 
-    if let Some(call_tree) = output.get("callTree").and_then(Value::as_array) {
-        if let Some(total_nodes) = summary.get("totalNodes").and_then(Value::as_u64) {
-            add_collection_accounting(
-                result_status,
-                json!({ "nodes": count_tree_nodes(call_tree) }),
-                json!({ "nodes": total_nodes }),
-            );
-            return;
-        }
+    if let Some(call_tree) = output.get("callTree").and_then(Value::as_array)
+        && let Some(total_nodes) = summary.get("totalNodes").and_then(Value::as_u64)
+    {
+        add_collection_accounting(
+            result_status,
+            json!({ "nodes": count_tree_nodes(call_tree) }),
+            json!({ "nodes": total_nodes }),
+        );
+        return;
     }
 
     result_status["totalKnown"] = json!(false);
@@ -1129,7 +1129,7 @@ fn guidance_prefix_env_value_enabled(value: Option<&str>) -> bool {
 
 #[cfg(test)]
 thread_local! {
-    static GUIDANCE_PREFIX_TEST_OVERRIDE: std::cell::Cell<Option<bool>> = std::cell::Cell::new(None);
+    static GUIDANCE_PREFIX_TEST_OVERRIDE: std::cell::Cell<Option<bool>> = const { std::cell::Cell::new(None) };
 }
 
 #[cfg(test)]
@@ -1144,8 +1144,8 @@ pub(crate) fn set_guidance_prefix_override_for_test(value: Option<bool>) -> Opti
 pub(crate) fn guidance_prefix_enabled() -> bool {
     #[cfg(test)]
     {
-        return GUIDANCE_PREFIX_TEST_OVERRIDE
-            .with(|override_value| override_value.get().unwrap_or(false));
+        GUIDANCE_PREFIX_TEST_OVERRIDE
+            .with(|override_value| override_value.get().unwrap_or(false))
     }
 
     #[cfg(not(test))]
