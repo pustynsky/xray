@@ -67,6 +67,14 @@ fn send_request(writer: &mut impl io::Write, state: &mut ServerState, method: &s
 fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerContext) {
     let id = raw.get("id").and_then(|v| v.as_u64());
 
+    // Test seam: a response with this id panics so the panic-guard chain in
+    // `run_server_with_io` can be exercised end-to-end. Never compiled into
+    // release builds.
+    #[cfg(test)]
+    if id == Some(TEST_PANIC_PENDING_RESPONSE_ID) {
+        panic!("test panic from pending-response with id={TEST_PANIC_PENDING_RESPONSE_ID}");
+    }
+
     // Check if this is the roots/list response
     if let Some(pending_id) = state.pending_roots_request_id
         && id == Some(pending_id) {
@@ -77,6 +85,14 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
                     if let Some(first_root) = roots.first()
                         && let Some(uri) = first_root.get("uri").and_then(|u| u.as_str())
                             && let Some(path) = uri_to_path(uri) {
+                                // Snapshot workspace + ready flags BEFORE touching
+                                // them. On panic-unwind the guard restores the
+                                // snapshot so the workspace cannot be left in a
+                                // half-mutated (status=Reindexing + new dir +
+                                // ready=true) state that wedges every subsequent
+                                // tool call. dismiss() at the end of the
+                                // mutating block commits the switch.
+                                let mut state_guard = PendingResponseStateGuard::new(ctx);
                                 let mut ws = ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
                                 let old_dir = ws.dir.clone();
                                 if !code_xray::path_eq(&path, &old_dir) {
@@ -100,6 +116,9 @@ fn handle_pending_response(raw: &Value, state: &mut ServerState, ctx: &HandlerCo
                                     ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
                                     info!(dir = %path, "Workspace confirmed by roots/list (same dir)");
                                 }
+                                // Successful switch: disarm the guard so its
+                                // Drop will not roll back the new state.
+                                state_guard.dismiss();
                             }
                     if roots.len() > 1 {
                         warn!(count = roots.len(), "Multiple roots received, using first one");
@@ -132,6 +151,65 @@ fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
         s.clone()
     } else {
         "<non-string panic payload>".to_string()
+    }
+}
+
+/// Reserved JSON-RPC id used by `handle_pending_response`'s `#[cfg(test)]`
+/// panic seam. Tests send a server-initiated response with this id to drive
+/// the panic-guard chain end-to-end. Never observable in release builds.
+#[cfg(test)]
+pub(crate) const TEST_PANIC_PENDING_RESPONSE_ID: u64 = 0xDEAD_BEEF;
+
+/// Snapshot-and-restore guard for workspace state mutated by
+/// [`handle_pending_response`]. On panic-unwind (`std::thread::panicking()`
+/// returns `true`), restores the snapshot — dir, mode, status, generation,
+/// and `{content,def}_ready` atomics — so the workspace cannot be left
+/// half-mutated and wedged in `Reindexing` for the lifetime of the server.
+/// `dismiss()` at the end of the successful mutation path commits the
+/// switch so the Drop is a no-op on normal return.
+struct PendingResponseStateGuard<'a> {
+    ctx: &'a HandlerContext,
+    dir: String,
+    mode: handlers::WorkspaceBindingMode,
+    status: handlers::WorkspaceStatus,
+    generation: u64,
+    content_ready: bool,
+    def_ready: bool,
+    dismissed: bool,
+}
+
+impl<'a> PendingResponseStateGuard<'a> {
+    fn new(ctx: &'a HandlerContext) -> Self {
+        let ws = ctx.workspace.read().unwrap_or_else(|e| e.into_inner());
+        Self {
+            ctx,
+            dir: ws.dir.clone(),
+            mode: ws.mode,
+            status: ws.status,
+            generation: ws.generation,
+            content_ready: ctx.content_ready.load(std::sync::atomic::Ordering::Acquire),
+            def_ready: ctx.def_ready.load(std::sync::atomic::Ordering::Acquire),
+            dismissed: false,
+        }
+    }
+
+    fn dismiss(&mut self) {
+        self.dismissed = true;
+    }
+}
+
+impl Drop for PendingResponseStateGuard<'_> {
+    fn drop(&mut self) {
+        if self.dismissed || !std::thread::panicking() {
+            return;
+        }
+        let mut ws = self.ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+        ws.set_dir(self.dir.clone());
+        ws.mode = self.mode;
+        ws.status = self.status;
+        ws.generation = self.generation;
+        self.ctx.content_ready.store(self.content_ready, std::sync::atomic::Ordering::Release);
+        self.ctx.def_ready.store(self.def_ready, std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -520,8 +598,24 @@ fn run_server_with_io<R: BufRead, W: Write>(
                         break "error";
                     }
                 } else if raw.get("result").is_some() || raw.get("error").is_some() {
-                    // Response to a server-initiated request
-                    handle_pending_response(&raw, &mut state, &ctx);
+                    // Response to a server-initiated request. Wrap in
+                    // `catch_unwind` so a panic inside the response handler
+                    // (e.g. workspace mutation in roots/list) cannot kill the
+                    // MCP server; the dispatcher panic guard only covers
+                    // `tools/call`. State is rolled back by the inner
+                    // `PendingResponseStateGuard`; this catch is the outer
+                    // safety net that keeps the event loop alive.
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        handle_pending_response(&raw, &mut state, &ctx);
+                    }));
+                    if let Err(payload) = result {
+                        let panic_msg = panic_payload_to_string(payload.as_ref());
+                        error!(panic = %panic_msg, "Server-response handler panicked; loop continues");
+                        crate::index::log_protocol_event("response/panic", &[
+                            ("id", id_for_protocol(&raw)),
+                            ("reason", panic_msg),
+                        ]);
+                    }
                 } else {
                     warn!("Received message with no 'method', 'result', or 'error' field");
                     crate::index::log_protocol_event("message/invalid", &[

@@ -2,6 +2,60 @@
 
 ## Unreleased
 
+- **MCP server-initiated response panic guard (P0-1 follow-up).** Closes the
+  remaining gap acknowledged in the P0-1a / P0-1 follow-up shipping rounds:
+  `handle_pending_response` (the entry point that consumes server-initiated
+  response payloads such as the client's `roots/list` reply in
+  `src/mcp/server.rs`) ran directly inside `run_server_with_io` with no panic
+  protection. The dispatcher panic guard from PR #283 only wraps
+  `tools/call`; a panic in workspace-mutation, URI parsing, or response
+  payload validation here would propagate up through the event loop, kill the
+  MCP server, and surface to the client as an abrupt stdio EOF — losing the
+  in-memory indexes. Worse, the handler mutates 5 `WorkspaceBinding` fields
+  (`dir / canonical_dir / mode / status / generation`) plus 2
+  `Arc<AtomicBool>` ready flags between the `workspace.write()` and the final
+  successful exit; a panic mid-block could leave the server pinned to a new
+  dir with `status = Reindexing` and `content_ready = true` forever, so every
+  subsequent tool call returns `WORKSPACE_REINDEXING` until restart. This
+  commit:
+  - Wraps the `handle_pending_response(...)` call site in
+    `std::panic::catch_unwind(AssertUnwindSafe(...))`; on caught panic
+    emits a structured `error!` + `crate::index::log_protocol_event(
+    "response/panic", ...)` and continues the event loop (no JSON-RPC
+    response is written — this branch handles incoming responses, not
+    requests, so stdout stays clean).
+  - Adds a new RAII type `PendingResponseStateGuard` next to the existing
+    panic-guard helpers. `new(ctx)` snapshots
+    `dir/mode/status/generation/content_ready/def_ready` under a brief read
+    lock; `dismiss(&mut self)` flips an internal flag. `Drop` returns early
+    if `dismissed || !std::thread::panicking()`; on panic-unwind it
+    restores all 5 workspace fields (via `ws.set_dir(...)` so the cached
+    `canonical_dir` recomputes correctly) and both ready atomics
+    (`Ordering::Acquire` on snapshot, `Ordering::Release` on restore,
+    matching the rest of the file).
+  - Installs the guard inside `handle_pending_response` immediately before
+    `ctx.workspace.write()`; calls `state_guard.dismiss()` at the very end
+    of the successful mutation block so a late panic in the trailing
+    `if roots.len() > 1` warn or surrounding event-loop code cannot undo
+    the committed workspace switch. `WorkspaceBindingMode` and
+    `WorkspaceStatus` are already `Copy`, so the snapshot does not require
+    a new `#[derive(Clone)]` on `WorkspaceBinding`.
+  - `#[cfg(test)] pub(crate) const TEST_PANIC_PENDING_RESPONSE_ID: u64 =
+    0xDEAD_BEEF;` is the test seam: `handle_pending_response` panics at
+    entry if the incoming response id matches. Never compiled into release.
+  - 4 new tests in `src/mcp/server_tests.rs`: `_no_op_on_normal_drop` (pins
+    both the `dismissed` and `std::thread::panicking()` checks),
+    `_rolls_back_workspace_on_panic` (panic mid-mutation restores all 5
+    fields + both atomics from snapshot), `_dismiss_blocks_rollback_on_panic`
+    (late panic after `dismiss()` leaves new state intact), and
+    `_continues_after_pending_response_panic` (end-to-end: server-initiated
+    response with `TEST_PANIC_PENDING_RESPONSE_ID` followed by `ping`;
+    asserts the ping reply still arrives — proves loop survival). Reviewer
+    note: the e2e test fires before the guard is armed (acceptable optional
+    hardening — the 3 unit tests above already cover the rollback wiring
+    end-to-end on the guard surface). With this PR the entire MCP event
+    loop — `tools/call` AND server-initiated responses — is panic-isolated.
+
 - **Workspace-switch panic-rollback (P0-1 follow-up).** Companion to the
   previous MCP dispatcher panic guard: a panic *inside* `handle_xray_reindex`
   or `handle_xray_reindex_definitions`, caught by

@@ -476,3 +476,158 @@ fn test_panic_payload_to_string_handles_str_and_string() {
     let payload = s_panic.unwrap_err();
     assert_eq!(panic_payload_to_string(payload.as_ref()), "owned string payload");
 }
+
+// ── P0-1 follow-up: handle_pending_response panic guard ─────────────────
+
+#[test]
+fn test_pending_response_state_guard_no_op_on_normal_drop() {
+    // The guard must NOT touch workspace state on normal scope-exit (success
+    // commit OR plain return). Pins the dual contract: dismissed flag AND
+    // std::thread::panicking() check — either one being broken would
+    // silently undo every successful workspace switch via roots/list.
+    let ctx = make_ctx();
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir("/original/dir".to_string());
+        ws.mode = handlers::WorkspaceBindingMode::ManualOverride;
+        ws.generation = 3;
+        ws.status = handlers::WorkspaceStatus::Resolved;
+    }
+
+    {
+        let _guard = PendingResponseStateGuard::new(&ctx);
+        // Simulate a successful mutation.
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir("/new/dir".to_string());
+        ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
+        ws.generation = 4;
+        ws.status = handlers::WorkspaceStatus::Reindexing;
+        drop(ws);
+        // Guard drops normally here (no panic, no dismiss). Drop must be no-op.
+    }
+
+    let ws = ctx.workspace.read().unwrap();
+    assert_eq!(ws.dir, "/new/dir",
+        "normal-drop guard must NOT roll back dir (would undo successful switch)");
+    assert_eq!(ws.generation, 4, "normal-drop guard must NOT roll back generation");
+    assert_eq!(ws.status, handlers::WorkspaceStatus::Reindexing,
+        "normal-drop guard must NOT touch status");
+}
+
+#[test]
+fn test_pending_response_state_guard_rolls_back_workspace_on_panic() {
+    // Reproduces the original gap: a panic inside the workspace-mutation
+    // block of handle_pending_response (between set_dir and the final
+    // eady flag stores) would leave the workspace pinned to a new dir
+    // with status=Reindexing AND content_ready=true — every subsequent
+    // tool call would return WORKSPACE_REINDEXING forever. The guard's
+    // Drop must restore the full snapshot.
+    let ctx = make_ctx();
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir("/original/dir".to_string());
+        ws.mode = handlers::WorkspaceBindingMode::ManualOverride;
+        ws.generation = 3;
+        ws.status = handlers::WorkspaceStatus::Resolved;
+    }
+    ctx.content_ready.store(true, std::sync::atomic::Ordering::Release);
+    ctx.def_ready.store(true, std::sync::atomic::Ordering::Release);
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = PendingResponseStateGuard::new(&ctx);
+        // Simulate the mid-flight mutation path before panic.
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir("/half/built".to_string());
+            ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
+            ws.generation = 4;
+            ws.status = handlers::WorkspaceStatus::Reindexing;
+        }
+        ctx.content_ready.store(false, std::sync::atomic::Ordering::Release);
+        panic!("simulated panic mid-handle_pending_response");
+    }));
+    assert!(result.is_err(), "panic should have been caught");
+
+    let ws = ctx.workspace.read().unwrap();
+    assert_eq!(ws.dir, "/original/dir",
+        "panic-rollback must restore dir to the pre-mutation snapshot");
+    assert_eq!(ws.mode, handlers::WorkspaceBindingMode::ManualOverride,
+        "panic-rollback must restore mode");
+    assert_eq!(ws.generation, 3, "panic-rollback must restore generation");
+    assert_eq!(ws.status, handlers::WorkspaceStatus::Resolved,
+        "panic-rollback must force status back to Resolved so tools are not blocked");
+    assert!(ctx.content_ready.load(std::sync::atomic::Ordering::Acquire),
+        "panic-rollback must restore content_ready");
+    assert!(ctx.def_ready.load(std::sync::atomic::Ordering::Acquire),
+        "panic-rollback must restore def_ready");
+}
+
+#[test]
+fn test_pending_response_state_guard_dismiss_blocks_rollback_on_panic() {
+    // After dismiss() the guard must NOT roll back even on a subsequent
+    // panic. Pins the post-commit contract: once handle_pending_response
+    // has finished the workspace mutation block, any later panic (e.g. in
+    // the trailing if roots.len() > 1 warn! or the surrounding event
+    // loop) must leave the new workspace state intact.
+    let ctx = make_ctx();
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir("/original/dir".to_string());
+        ws.mode = handlers::WorkspaceBindingMode::ManualOverride;
+        ws.generation = 3;
+        ws.status = handlers::WorkspaceStatus::Resolved;
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let mut guard = PendingResponseStateGuard::new(&ctx);
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir("/new/dir".to_string());
+            ws.mode = handlers::WorkspaceBindingMode::ClientRoots;
+            ws.generation = 4;
+            ws.status = handlers::WorkspaceStatus::Reindexing;
+        }
+        guard.dismiss();
+        panic!("simulated panic after commit point");
+    }));
+    assert!(result.is_err(), "panic should have been caught");
+
+    let ws = ctx.workspace.read().unwrap();
+    assert_eq!(ws.dir, "/new/dir",
+        "after dismiss(), panic must NOT roll dir back");
+    assert_eq!(ws.generation, 4,
+        "after dismiss(), generation must stay at the new value");
+    assert_eq!(ws.status, handlers::WorkspaceStatus::Reindexing,
+        "after dismiss(), status must NOT be forced back to Resolved");
+}
+
+#[test]
+fn test_run_server_with_io_continues_after_pending_response_panic() {
+    // End-to-end: a server-initiated response carrying the test-panic id
+    // must NOT kill the event loop. A subsequent ping must be answered.
+    // Pre-fix the panic in handle_pending_response would propagate up and
+    // terminate the loop, dropping the ping.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ctx = make_ctx();
+    ctx.index_base = tmp.path().to_path_buf();
+
+    let input = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":{},\"result\":{{\"roots\":[]}}}}\n{{\"jsonrpc\":\"2.0\",\"id\":42,\"method\":\"ping\"}}\n",
+        TEST_PANIC_PENDING_RESPONSE_ID,
+    );
+    let mut reader = std::io::Cursor::new(input.into_bytes());
+    let mut output = Vec::new();
+
+    run_server_with_io(ctx, &mut reader, &mut output, false);
+
+    let stdout = String::from_utf8(output).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    // The pending-response branch emits no response (it's handling an
+    // incoming response, not a request). The ping reply is the only line.
+    assert_eq!(lines.len(), 1,
+        "expected exactly the ping response after the panicking pending-response, got: {stdout}");
+    let ping_resp: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(ping_resp["id"], 42);
+    assert!(ping_resp["result"].is_object(),
+        "ping after pending-response panic must succeed: {stdout}");
+}
