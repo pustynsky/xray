@@ -1846,6 +1846,67 @@ impl Drop for BuildingFlagGuard<'_> {
     }
 }
 
+/// Drop-rolls-back workspace state when the reindex handler unwinds via
+/// panic. Pairs with `dispatch_request_with_panic_guard` so a panic mid
+/// `handle_xray_reindex(_definitions)_inner` cannot leave the workspace
+/// stuck in `WorkspaceStatus::Reindexing` (and, on workspace-switch, pinned
+/// to a half-built directory) for the lifetime of the server.
+///
+/// Existing explicit error branches keep their own `rollback_workspace_state`
+/// calls. This guard only fires when `std::thread::panicking()` is true at
+/// Drop time, so normal early-returns are a no-op.
+struct WorkspaceSwitchPanicGuard<'a> {
+    ctx: &'a HandlerContext,
+    previous_dir: String,
+    old_mode: WorkspaceBindingMode,
+    old_generation: u64,
+    workspace_changed: bool,
+    dismissed: bool,
+}
+
+impl<'a> WorkspaceSwitchPanicGuard<'a> {
+    fn new(
+        ctx: &'a HandlerContext,
+        previous_dir: String,
+        old_mode: WorkspaceBindingMode,
+        old_generation: u64,
+        workspace_changed: bool,
+    ) -> Self {
+        Self { ctx, previous_dir, old_mode, old_generation, workspace_changed, dismissed: false }
+    }
+
+    /// Disarm the guard once the new index has been published and the
+    /// workspace is in a coherent committed state. After this, a panic in
+    /// best-effort post-commit work (cross-load definitions, watcher
+    /// restart, git-cache rebuild) will NOT roll back the now-correct
+    /// workspace fields and create an index/workspace mismatch.
+    fn dismiss(&mut self) {
+        self.dismissed = true;
+    }
+}
+
+impl Drop for WorkspaceSwitchPanicGuard<'_> {
+    fn drop(&mut self) {
+        if self.dismissed || !std::thread::panicking() {
+            return;
+        }
+        if self.workspace_changed {
+            rollback_workspace_state(
+                self.ctx,
+                &self.previous_dir,
+                self.old_mode,
+                self.old_generation,
+            );
+        } else {
+            // No dir change to revert, but status may have advanced to
+            // Reindexing inside the reindex path; force it back so the
+            // workspace is not wedged on unwind.
+            let mut ws = self.ctx.workspace.write().unwrap_or_else(|e| e.into_inner());
+            ws.status = WorkspaceStatus::Resolved;
+        }
+    }
+}
+
 
 fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     // Concurrent build protection: prevent two reindex calls from running simultaneously.
@@ -2351,6 +2412,17 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         }
     }
 
+    // Panic-rollback safety: covers the window from here through the
+    // `ws.status = Resolved` commit point below. Pairs with the dispatcher
+    // panic guard in `mcp::server::dispatch_request_with_panic_guard`.
+    let mut switch_panic_guard = WorkspaceSwitchPanicGuard::new(
+        ctx,
+        previous_dir.clone(),
+        old_mode,
+        old_generation,
+        workspace_changed,
+    );
+
     info!(dir = %dir, ext = %ext, "Rebuilding content index");
     let start = Instant::now();
 
@@ -2422,6 +2494,10 @@ fn handle_xray_reindex_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResu
         ws.status = WorkspaceStatus::Resolved;
     }
     ctx.content_ready.store(true, Ordering::Release);
+    // Workspace + content index are now coherent; best-effort post-commit
+    // work below (cross-load defs, watcher restart, git cache) MUST NOT
+    // trigger a rollback if it panics.
+    switch_panic_guard.dismiss();
 
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();
@@ -2542,6 +2618,15 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         info!(dir = %dir, previous = %previous_dir, generation = ws.generation, "Workspace switched via xray_reindex_definitions");
     }
 
+    // Panic-rollback safety: see `handle_xray_reindex_inner` for rationale.
+    let mut switch_panic_guard = WorkspaceSwitchPanicGuard::new(
+        ctx,
+        previous_dir.clone(),
+        old_mode,
+        old_generation,
+        workspace_changed,
+    );
+
     info!(dir = %dir, ext = %ext, "Rebuilding definition index");
     let start = Instant::now();
 
@@ -2620,6 +2705,10 @@ fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> 
         ws.status = WorkspaceStatus::Resolved;
     }
     ctx.def_ready.store(true, Ordering::Release);
+    // Workspace + def index are now coherent; disarm the panic guard so
+    // any panic in best-effort post-commit work below cannot roll the
+    // workspace back into a state incoherent with the published index.
+    switch_panic_guard.dismiss();
 
     // Force mimalloc to return freed pages (old index) to OS
     crate::index::force_mimalloc_collect();

@@ -12,7 +12,7 @@
 #![allow(clippy::field_reassign_with_default)]
 
 use super::{
-    HandlerContext, WorkspaceBindingMode, WorkspaceStatus,
+    HandlerContext, WorkspaceBindingMode, WorkspaceStatus, WorkspaceSwitchPanicGuard,
     cross_load_content_index, cross_load_definition_index,
     handle_xray_reindex_definitions_inner, handle_xray_reindex_inner,
     rollback_workspace_state,
@@ -1074,3 +1074,160 @@ fn test_handle_xray_reindex_definitions_inner_save_failure_does_not_publish_stal
 
 
 
+
+
+// ── P0-1 follow-up: WorkspaceSwitchPanicGuard rolls back on panic ─────────
+
+/// On panic during a workspace-switch reindex, the RAII guard MUST restore
+/// dir/mode/generation/status — otherwise the server is stuck in
+/// `Reindexing` (and pinned to a half-built dir) for the rest of its life.
+/// Reproduces the failure mode flagged by the second review round on
+/// PR P0-1a, where the dispatcher panic guard caught the panic but the
+/// reindex inner had already advanced workspace state past the rollback
+/// branches.
+#[test]
+fn test_workspace_switch_panic_guard_rolls_back_on_unwind() {
+    let ctx = HandlerContext::default();
+
+    let original_dir = "/good/workspace".to_string();
+    let original_mode = WorkspaceBindingMode::ManualOverride;
+    let original_generation: u64 = 7;
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(original_dir.clone());
+        ws.mode = original_mode;
+        ws.generation = original_generation;
+        ws.status = WorkspaceStatus::Resolved;
+    }
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Simulate the production reindex flow: flip workspace into the
+        // mid-flight state, install the guard, then panic.
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir("/bad/half_built".to_string());
+            ws.mode = WorkspaceBindingMode::DotBootstrap;
+            ws.generation = 999;
+            ws.status = WorkspaceStatus::Reindexing;
+        }
+        let _guard = WorkspaceSwitchPanicGuard::new(
+            &ctx,
+            original_dir.clone(),
+            original_mode,
+            original_generation,
+            true,
+        );
+        panic!("simulated handler panic mid-reindex");
+    }));
+    assert!(result.is_err(), "panic should have been caught");
+
+    let ws = ctx.workspace.read().unwrap();
+    assert_eq!(ws.dir, original_dir,
+        "panic-rollback must restore dir to the pre-switch value");
+    assert_eq!(ws.mode, original_mode,
+        "panic-rollback must restore mode");
+    assert_eq!(ws.generation, original_generation,
+        "panic-rollback must restore generation");
+    assert_eq!(ws.status, WorkspaceStatus::Resolved,
+        "panic-rollback must force status=Resolved so subsequent tools are not blocked");
+}
+
+/// The guard MUST NOT touch workspace state on normal scope-exit. This
+/// pins the `std::thread::panicking()` check inside Drop: regressing it
+/// (e.g. by removing the check) would silently undo every successful
+/// reindex.
+#[test]
+fn test_workspace_switch_panic_guard_no_op_on_normal_drop() {
+    let ctx = HandlerContext::default();
+
+    let original_dir = "/good/workspace".to_string();
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(original_dir.clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+        ws.generation = 5;
+        ws.status = WorkspaceStatus::Resolved;
+    }
+
+    let new_dir = "/new/workspace".to_string();
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(new_dir.clone());
+        ws.mode = WorkspaceBindingMode::ManualOverride;
+        ws.generation = 6;
+        ws.status = WorkspaceStatus::Resolved;
+    }
+
+    {
+        // Guard goes out of scope normally; Drop runs but must NOT rollback.
+        let _guard = WorkspaceSwitchPanicGuard::new(
+            &ctx,
+            original_dir.clone(),
+            WorkspaceBindingMode::ManualOverride,
+            5,
+            true,
+        );
+    }
+
+    let ws = ctx.workspace.read().unwrap();
+    assert_eq!(ws.dir, new_dir,
+        "normal drop must NOT rollback dir (would undo a successful switch)");
+    assert_eq!(ws.generation, 6,
+        "normal drop must NOT rollback generation");
+    assert_eq!(ws.status, WorkspaceStatus::Resolved,
+        "normal drop must NOT touch status");
+}
+
+/// After dismiss() the guard MUST behave as a no-op on Drop, even when
+/// unwinding. Pins the post-commit safety contract: if the new index has
+/// already been published and ws.status = Resolved, a panic in
+/// best-effort post-commit work (cross-load defs, watcher restart, git
+/// cache) must NOT roll the workspace back into a state incoherent with
+/// the published index.
+#[test]
+fn test_workspace_switch_panic_guard_dismiss_blocks_rollback_on_panic() {
+    let ctx = HandlerContext::default();
+
+    let original_dir = "/good/workspace".to_string();
+    let original_mode = WorkspaceBindingMode::ManualOverride;
+    let original_generation: u64 = 7;
+    {
+        let mut ws = ctx.workspace.write().unwrap();
+        ws.set_dir(original_dir.clone());
+        ws.mode = original_mode;
+        ws.generation = original_generation;
+        ws.status = WorkspaceStatus::Resolved;
+    }
+
+    let new_dir = "/new/workspace".to_string();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // Simulate the production flow: switch workspace, set up the guard,
+        // reach the commit point, dismiss, THEN something panics in the
+        // post-commit phase.
+        {
+            let mut ws = ctx.workspace.write().unwrap();
+            ws.set_dir(new_dir.clone());
+            ws.mode = WorkspaceBindingMode::ManualOverride;
+            ws.generation = original_generation + 1;
+            ws.status = WorkspaceStatus::Resolved; // commit point
+        }
+        let mut guard = WorkspaceSwitchPanicGuard::new(
+            &ctx,
+            original_dir.clone(),
+            original_mode,
+            original_generation,
+            true,
+        );
+        guard.dismiss();
+        panic!("simulated panic in post-commit work (e.g. watcher restart)");
+    }));
+    assert!(result.is_err(), "panic should have been caught");
+
+    let ws = ctx.workspace.read().unwrap();
+    assert_eq!(ws.dir, new_dir,
+        "after dismiss(), panic must NOT roll dir back to the previous workspace");
+    assert_eq!(ws.generation, original_generation + 1,
+        "after dismiss(), generation must stay at the new value");
+    assert_eq!(ws.status, WorkspaceStatus::Resolved,
+        "after dismiss(), status must remain Resolved");
+}
