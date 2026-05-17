@@ -180,9 +180,8 @@ fn test_dispatch_grep_unknown_arg_warning_in_summary() {
     // Default (no env): unknown args are surfaced as a warning in summary,
     // but the tool still runs successfully so existing scripts don't break.
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _strict_env = EnvVarGuard::remove("XRAY_STRICT_ARGS");
     let ctx = make_empty_ctx();
-    // SAFETY: serial single-threaded test; restored at end.
-    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
     let result = dispatch_tool(
         &ctx,
         "xray_grep",
@@ -202,15 +201,13 @@ fn test_dispatch_grep_unknown_arg_warning_in_summary() {
 #[test]
 fn test_dispatch_grep_unknown_arg_strict_mode_hard_errors() {
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
+    let _strict_env = EnvVarGuard::set("XRAY_STRICT_ARGS", "1");
     let ctx = make_empty_ctx();
-    // SAFETY: serial single-threaded test; restored at end.
-    unsafe { std::env::set_var("XRAY_STRICT_ARGS", "1") };
     let result = dispatch_tool(
         &ctx,
         "xray_grep",
         &json!({"terms": ["HttpClient"], "includePattern": "src/**"}),
     );
-    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
     assert!(result.is_error, "strict mode should hard-error on unknown arg");
     let body: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(body["error"], "UNKNOWN_ARGS");
@@ -220,6 +217,7 @@ fn test_dispatch_grep_unknown_arg_strict_mode_hard_errors() {
 }
 
 use super::arg_validation::STRICT_ARGS_ENV_LOCK;
+use super::tests_misc::EnvVarGuard;
 
 #[test]
 fn test_dispatch_grep_with_results() {
@@ -589,8 +587,7 @@ fn test_dispatch_surfaces_unknown_arg_warning_in_summary() {
     // schema-guard short-circuits to the generic Jaro-Winkler hint and we
     // can assert without touching git infrastructure.
     let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
-    // SAFETY: serial single-threaded test; restored at end.
-    unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
+    let _strict_env = EnvVarGuard::remove("XRAY_STRICT_ARGS");
     let ctx = make_empty_ctx();
     let result = dispatch_tool(
         &ctx,
@@ -694,3 +691,34 @@ fn test_dispatch_help_works_while_index_building() {
     assert!(!result.is_error, "xray_info should work during index build");
 }
 
+
+// ── P0-1a regression: reindex building flags must reset after handler panic ─
+
+#[test]
+fn test_building_flag_guard_resets_flag_on_panic() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Mirrors the production pattern inside handle_xray_reindex /
+    // handle_xray_reindex_definitions: a panic inside the guarded scope
+    // (caught later by dispatch_request_with_panic_guard) must NOT leave
+    // the build flag stuck at true. Without the RAII guard the second
+    // reindex call would return ALREADY_BUILDING_MSG forever.
+    let flag = AtomicBool::new(false);
+    assert!(flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok());
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _g = super::BuildingFlagGuard::new(&flag);
+        panic!("simulated handler panic inside reindex inner");
+    }));
+    assert!(result.is_err(), "panic should have been caught");
+    assert!(!flag.load(Ordering::Acquire),
+        "BuildingFlagGuard must reset flag on unwind so the next reindex isn't blocked");
+
+    // Sanity: a fresh compare_exchange now succeeds.
+    assert!(flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok(),
+        "next reindex must observe flag=false and acquire the build slot");
+}

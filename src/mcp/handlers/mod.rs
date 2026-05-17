@@ -798,6 +798,12 @@ pub fn determine_initial_binding(dir: &str, extensions: &[String], respect_git_e
         }
     }
 }
+
+/// Per-workspace cache of `git rev-parse --abbrev-ref HEAD` results, keyed by
+/// workspace dir; see [`HandlerContext::current_branch_cache`].
+pub type CurrentBranchCache =
+    Arc<RwLock<std::collections::HashMap<String, (Instant, Option<String>)>>>;
+
 pub struct HandlerContext {
     pub index: Arc<RwLock<ContentIndex>>,
     pub def_index: Option<Arc<RwLock<DefinitionIndex>>>,
@@ -920,8 +926,7 @@ pub struct HandlerContext {
     /// back to [`HandlerContext::current_branch`] (the value captured at
     /// server startup) so behaviour is never worse than before this cache
     /// existed.
-    pub current_branch_cache:
-        Arc<RwLock<std::collections::HashMap<String, (Instant, Option<String>)>>>,
+    pub current_branch_cache: CurrentBranchCache,
     /// Whether `branch_warning` should perform the live `git rev-parse` probe
     /// described above. Set to `true` by [`crate::cli::serve::cmd_serve`] for
     /// long-running MCP servers; left `false` for tests and CLI subcommands
@@ -1821,6 +1826,25 @@ fn detect_line_ending_utf16(body: &[u8], big_endian: bool) -> &'static str {
     }
 }
 
+/// Drop-resets an `AtomicBool` build flag to `false`. Used by reindex
+/// handlers so a panic in the inner build path — caught by
+/// `dispatch_request_with_panic_guard` — cannot leave the flag stuck at
+/// `true` and block every subsequent reindex with `ALREADY_BUILDING_MSG`.
+struct BuildingFlagGuard<'a> {
+    flag: &'a std::sync::atomic::AtomicBool,
+}
+
+impl<'a> BuildingFlagGuard<'a> {
+    fn new(flag: &'a std::sync::atomic::AtomicBool) -> Self {
+        Self { flag }
+    }
+}
+
+impl Drop for BuildingFlagGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
 
 
 fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
@@ -1830,10 +1854,12 @@ fn handle_xray_reindex(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
     }
 
-    // SAFETY: from this point, content_building=true. We MUST reset it on ALL exit paths.
-    let result = handle_xray_reindex_inner(ctx, args);
-    ctx.content_building.store(false, Ordering::Release);
-    result
+    // RAII reset: covers normal return, ?-early-return, AND panics caught
+    // upstream by `dispatch_request_with_panic_guard`. Without the guard a
+    // handler panic would leave `content_building=true` forever and block
+    // every future reindex until process restart.
+    let _guard = BuildingFlagGuard::new(&ctx.content_building);
+    handle_xray_reindex_inner(ctx, args)
 }
 
 /// Rolls back workspace state to pre-switch values after a failed reindex.
@@ -2453,9 +2479,10 @@ fn handle_xray_reindex_definitions(ctx: &HandlerContext, args: &Value) -> ToolCa
         return ToolCallResult::error(ALREADY_BUILDING_MSG.to_string());
     }
 
-    let result = handle_xray_reindex_definitions_inner(ctx, args);
-    ctx.def_building.store(false, Ordering::Release);
-    result
+    // RAII reset — see handle_xray_reindex for rationale (panic-safety under
+    // the dispatcher panic guard).
+    let _guard = BuildingFlagGuard::new(&ctx.def_building);
+    handle_xray_reindex_definitions_inner(ctx, args)
 }
 
 fn handle_xray_reindex_definitions_inner(ctx: &HandlerContext, args: &Value) -> ToolCallResult {

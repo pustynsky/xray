@@ -401,3 +401,78 @@ fn test_uri_to_path_unix_style() {
             "Should contain unix path, got: {}", path);
     }
 }
+
+// ── P0-1a: panic guard around handle_request dispatch ─────────────────
+
+#[test]
+fn test_dispatch_request_with_panic_guard_returns_internal_error_on_panic() {
+    // `$test/panic` is a #[cfg(test)]-only method in handle_request that
+    // unconditionally panics. The guard must convert the panic into a
+    // JSON-RPC -32603 response carrying the panic message, NOT propagate it.
+    let ctx = make_ctx();
+    let response = dispatch_request_with_panic_guard(&ctx, "$test/panic", &None, json!(7));
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 7);
+    assert_eq!(response["error"]["code"], -32603);
+    let message = response["error"]["message"].as_str().expect("error.message string");
+    assert!(message.contains("handler panicked"), "expected panic marker, got: {message}");
+    assert!(message.contains("$test/panic"), "expected panic payload in message, got: {message}");
+}
+
+#[test]
+fn test_dispatch_request_with_panic_guard_passes_through_normal_response() {
+    // Sanity: non-panicking branches must round-trip the inner handle_request
+    // value untouched (no wrapping, no extra fields).
+    let ctx = make_ctx();
+    let response = dispatch_request_with_panic_guard(&ctx, "ping", &None, json!(11));
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 11);
+    assert!(response["result"].is_object());
+    assert!(response.get("error").is_none(), "ping response must not carry an error");
+}
+
+#[test]
+fn test_run_server_with_io_continues_after_handler_panic() {
+    // End-to-end: a `$test/panic` request must emit a -32603 response AND the
+    // server loop must keep going to process the next request. Pre-P0-1a the
+    // panic propagated up through the loop and killed the process; the
+    // subsequent ping would never be answered.
+    let tmp = tempfile::tempdir().unwrap();
+    let mut ctx = make_ctx();
+    ctx.index_base = tmp.path().to_path_buf();
+
+    let input = [
+        r#"{"jsonrpc":"2.0","id":1,"method":"$test/panic"}"#,
+        r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#,
+    ].join("\n") + "\n";
+    let mut reader = std::io::Cursor::new(input.into_bytes());
+    let mut output = Vec::new();
+
+    run_server_with_io(ctx, &mut reader, &mut output, false);
+
+    let stdout = String::from_utf8(output).unwrap();
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 2,
+        "expected two responses (panic-error + ping) but loop terminated early: {stdout}");
+
+    let panic_resp: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(panic_resp["id"], 1);
+    assert_eq!(panic_resp["error"]["code"], -32603);
+    assert!(panic_resp["error"]["message"].as_str().unwrap().contains("handler panicked"));
+
+    let ping_resp: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(ping_resp["id"], 2);
+    assert!(ping_resp["result"].is_object(), "ping after panic must succeed");
+}
+
+#[test]
+fn test_panic_payload_to_string_handles_str_and_string() {
+    let s_panic = std::panic::catch_unwind(|| panic!("literal str payload"));
+    let payload = s_panic.unwrap_err();
+    assert_eq!(panic_payload_to_string(payload.as_ref()), "literal str payload");
+
+    let owned = "owned".to_string();
+    let s_panic = std::panic::catch_unwind(move || panic!("{owned} string payload"));
+    let payload = s_panic.unwrap_err();
+    assert_eq!(panic_payload_to_string(payload.as_ref()), "owned string payload");
+}

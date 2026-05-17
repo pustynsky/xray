@@ -1,5 +1,66 @@
 # Changelog
 
+## Unreleased
+
+- **MCP server panic guard (P0-1a).** A `panic!()` inside any tool handler used
+  to propagate up through `run_server_with_io`, kill the server process, and
+  surface to the MCP client (VS Code / Claude / Cursor) as an abrupt EOF on
+  stdio — losing the in-memory indexes and the entire session context. The
+  per-request dispatch is now wrapped in
+  `dispatch_request_with_panic_guard(...)` which runs `handle_request` inside
+  `std::panic::catch_unwind(AssertUnwindSafe(...))` and returns a JSON-RPC
+  `-32603 Internal error: handler panicked: {msg}` on caught panic (built via
+  the existing `safe_to_value(JsonRpcErrorResponse::new(...))` path so the
+  wire format is unchanged). A new `panic_payload_to_string` helper extracts
+  `&'static str` and `String` panic payloads (`panic!("literal")` and
+  `panic!("{}", x)` shapes); other payload types collapse to a
+  `<non-string panic payload>` marker. The event loop continues with the next
+  request, structured `error!` log + `crate::index::log_protocol_event("handler/panic", …)`
+  are emitted (stderr only; stdout stays reserved for JSON-RPC). Companion
+  RAII fix in `src/mcp/handlers/mod.rs`: `handle_xray_reindex` and
+  `handle_xray_reindex_definitions` used to reset their `content_building` /
+  `def_building` `AtomicBool` flags only on the normal return path, so a
+  panic-converted-to-error would leave the flag stuck at `true` and block
+  every subsequent reindex with `ALREADY_BUILDING_MSG` until process restart;
+  a new `BuildingFlagGuard` RAII type now resets the flag on every exit path
+  (normal, `?`-early-return, unwind). 5 new tests in `src/mcp/server_tests.rs`
+  and `src/mcp/handlers/handlers_tests.rs` lock the contract:
+  direct guard, pass-through, end-to-end loop survival, panic-payload
+  extraction, and build-flag reset on unwind. A `#[cfg(test)]`-only
+  `"$test/panic"` method in `handle_request` is the test seam; never compiled
+  into release builds. Known follow-up: `WorkspaceStatus::Reindexing` is NOT
+  reset on workspace-switch panic — recovery still works because the build
+  flag guard lets the next `xray_reindex` proceed, but the status field
+  itself needs its own RAII rollback (separate user story).
+
+- **Contributor tooling cleanup (chore).** Fixed 22 pre-existing
+  `cargo clippy --workspace --all-targets --locked -- -D warnings` errors on
+  `main` (`manual_pattern_char_comparison`, `collapsible_if` x3 collapsed via
+  Rust 2024 `&& let` chains, `missing_const_for_thread_local`,
+  `needless_return`, `manual_repeat_n` x2, `field_reassign_with_default` x6,
+  `type_complexity` x2 — extracted `CurrentBranchCache` and
+  `LoadOrBuildDefinitionIndexResult` type aliases). Added `clippy.toml` with
+  thresholds `too-many-arguments=7`, `cognitive-complexity=50`,
+  `type-complexity=250` so the CI gate stays representative as the codebase
+  grows. Extended `.gitattributes` with a full LF/CRLF/binary policy (renormalize
+  pass is intentionally deferred to a separate PR to keep this diff
+  reviewable). Consolidated every `unsafe { std::env::set_var/remove_var }`
+  call site in tests into a single `EnvVarGuard` helper
+  (`src/mcp/handlers/handlers_tests_misc.rs`) — made it `pub(crate)`, added a
+  `set(key, value)` constructor next to the existing `remove(key)`, and
+  migrated 7 raw call sites in `handlers_tests.rs` and `arg_validation.rs` to
+  use the guard; the only 4 remaining raw env-mut calls in the repo are
+  inside the helper itself. Serialization via the existing
+  `STRICT_ARGS_ENV_LOCK` (re-export of `PROCESS_ENV_LOCK`) is unchanged. CI
+  workflow doc-comment documents why `cargo clippy` is not yet wired into the
+  `feature-matrix` job (pre-existing `dead_code` / `unused_imports` under
+  `--no-default-features` from `pub(crate)` helpers in
+  `mcp/handlers/callers.rs` and a `#[cfg(test)]` helper in
+  `definitions/incremental.rs` — gating those with `#[cfg(...)]` is the
+  follow-up). All 2760 tests pass; `cargo clippy --workspace --all-targets
+  --locked -- -D warnings` clean on default + `--all-features` (which are
+  identical for this crate today).
+
 ## 0.2.7 (2026-05-16)
 
 - **Shallow-clone awareness across all `xray_git_*` tools.** All git tool responses (`xray_git_history`, `xray_git_diff`, `xray_git_authors`, `xray_git_activity`, `xray_git_blame`, `xray_branch_status`) now inject a `shallowClone` field when the repo's `.git/shallow` file exists — carries `isShallow=true`, `boundaries: ["<hash>", ...]`, and a single-line `warning` that names the graft hashes (first 12 chars), explains that history before them is locally invisible, and tells the user to run `git fetch --unshallow`. Solves a recurring debugging trap where investigations on shallow clones (common with VS / `az repos` / dev-box bootstraps that silently use `--depth=N`) silently returned 1-commit-per-file histories that looked like real “file created on this date” evidence — the LLM had no signal that the rest was truncated. Escalation: when a response carries `firstCommit.hash` equal to a graft boundary, the warning is rewritten to explicitly state the reported `firstCommit` IS the graft boundary (NOT the real first commit). `xray_branch_status` additionally exposes `isShallow` + `shallowBoundaries` as native top-level fields. Implementation is a single post-process at `dispatch_git_tool` boundary (`annotate_shallow_clone`) so handlers stay unchanged. Pure addition — no existing field renamed/removed; tools on full-history repos return identical JSON. **Worktree / submodule / gitfile support:** the shallow file path is resolved via `git rev-parse --git-path shallow` (memoised per repo), so linked worktrees and submodules whose `<repo>/.git` is a gitfile pointing at a separate gitdir work correctly — the previous hardcoded `<repo>/.git/shallow` lookup silently returned “not shallow” for them. **Cache invalidation — multi-layer:** `GitHistoryCache` stores a `shallow_fingerprint` (sorted, deduped graft hashes joined by `,`) AND a new per-request freshness gate (`cache_is_fresh_for_shallow`) runs ahead of every cached read in `xray_git_history` / `_authors` / `_activity`, so `git fetch --unshallow` performed against a running server is observed on the very next request (HEAD does NOT move on unshallow, so the existing HEAD-pinning alone would have served stale truncated history forever). The same fingerprint check (`is_valid_for_with_shallow`) gates startup disk-cache load AND workspace-switch reload, so a cache published after switching workspaces also respects current shallow state. **TOCTOU closed in `GitHistoryCache::build`:** the shallow fingerprint is sampled BEFORE spawning `git log`, not after — a race against `--unshallow` during the streaming parse stamps the OLDER fingerprint into the cache, so the next request observes mismatch and triggers a clean rebuild instead of silently freezing the stale snapshot. **Coherency design:** `git::shallow_fingerprint` memoises ONLY the resolved file path (one subprocess per repo, ~5 ms cold) and re-reads the (typically <1 KB) shallow file on every call — ~10–50 µs on Windows NTFS, ~2–10 µs on Linux. No mtime/size memo, no undocumented dependency on filesystem timestamp resolution: a `--depth=N` fetch that rewrites `.git/shallow` with new boundaries is detected even if the filesystem reports an unchanged mtime. `FORMAT_VERSION` bumped 1 → 2 to force a one-time rebuild of pre-existing on-disk caches. **Tests (32 new across 4 files):** `git/git_tests.rs` covers detect/no-detect, blank-line tolerance, fingerprint sort+dedup, fingerprint-changes-on-unshallow, warning-text invariants, real `git rev-parse --git-path shallow` resolution, AND a real `git worktree add` regression that asserts `<repo>/.git` is a gitfile and that the shallow file at the resolved gitdir path is picked up (the exact case the hardcoded path used to miss). `git/cache_tests.rs` covers the full predicate matrix: both-None, both-Some, after-unshallow, boundary-changes, became-shallow, HEAD-mismatch-wins. `mcp/handlers/git_handler_tests.rs` covers `annotate_shallow_clone` (no-op for non-shallow / error / missing-repo, injection for shallow, escalation when `firstCommit.hash` equals boundary, no escalation otherwise) AND the freshness predicate (both-None, after-unshallow drift, became-shallow, fingerprints match). `mcp/handlers/handlers_tests_git.rs` adds two real e2e dispatch tests against `xray_git_history`: cache stamped Some + live repo non-shallow asserts the response hint does NOT contain `from cache` (CLI fall-through), and the positive control with matching shallow state asserts the cache IS used. All 2760 tests pass; clippy clean on all changed files.

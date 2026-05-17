@@ -1160,6 +1160,13 @@ fn load_or_build_content_index(
     (index, effective_respect_git_exclude)
 }
 
+type LoadOrBuildDefinitionIndexResult = (
+    Option<Arc<RwLock<definitions::DefinitionIndex>>>,
+    Vec<String>,
+    Vec<String>,
+    bool,
+);
+
 #[allow(clippy::too_many_arguments)]
 fn load_or_build_definition_index(
     dir_str: &str,
@@ -1173,7 +1180,7 @@ fn load_or_build_definition_index(
     def_building: &Arc<AtomicBool>,
     respect_git_exclude: bool,
     build_threads: usize,
-) -> (Option<Arc<RwLock<definitions::DefinitionIndex>>>, Vec<String>, Vec<String>, bool) {
+) -> LoadOrBuildDefinitionIndexResult {
     // Use compile-time definition extensions based on enabled Cargo features
     let supported_def_langs = definitions::definition_extensions();
     let def_exts = supported_def_langs.iter()

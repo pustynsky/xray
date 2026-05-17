@@ -11,15 +11,27 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
 
-struct EnvVarGuard {
+pub(crate) struct EnvVarGuard {
     key: &'static str,
     previous: Option<String>,
 }
 
 impl EnvVarGuard {
-    fn remove(key: &'static str) -> Self {
+    /// Unset `key` for the lifetime of the guard, restoring the original
+    /// value (or `None`) on drop. Caller MUST hold `STRICT_ARGS_ENV_LOCK`
+    /// (or another serializing mutex) — env-var mutation is `unsafe` since
+    /// Rust 2024 and races with concurrent `getenv`.
+    pub(crate) fn remove(key: &'static str) -> Self {
         let previous = std::env::var(key).ok();
         unsafe { std::env::remove_var(key) };
+        Self { key, previous }
+    }
+
+    /// Set `key=value` for the lifetime of the guard, restoring the original
+    /// value (or `None`) on drop. Same locking requirement as [`Self::remove`].
+    pub(crate) fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        unsafe { std::env::set_var(key, value) };
         Self { key, previous }
     }
 }

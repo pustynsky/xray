@@ -521,17 +521,17 @@ mod tests {
     #[test]
     fn strict_args_enabled_recognises_truthy_values() {
         let _guard = STRICT_ARGS_ENV_LOCK.lock().unwrap();
-        // SAFETY: Setting/removing env vars is `unsafe` since Rust 2024 because it can
-        // race with other threads reading env. Serialized via STRICT_ARGS_ENV_LOCK.
         for truthy in ["1", "true", "yes", "on", "TRUE", "On"] {
-            unsafe { std::env::set_var("XRAY_STRICT_ARGS", truthy) };
+            let _g = super::super::tests_misc::EnvVarGuard::set("XRAY_STRICT_ARGS", truthy);
             assert!(strict_args_enabled(), "value `{truthy}` should be truthy");
         }
         for falsy in ["0", "false", "no", "off", ""] {
-            unsafe { std::env::set_var("XRAY_STRICT_ARGS", falsy) };
+            let _g = super::super::tests_misc::EnvVarGuard::set("XRAY_STRICT_ARGS", falsy);
             assert!(!strict_args_enabled(), "value `{falsy}` should be falsy");
         }
-        unsafe { std::env::remove_var("XRAY_STRICT_ARGS") };
+        // Force-unset for the final assertion: the per-iteration guard above
+        // has already restored the pre-test value, which may itself be set.
+        let _g = super::super::tests_misc::EnvVarGuard::remove("XRAY_STRICT_ARGS");
         assert!(!strict_args_enabled(), "unset should be falsy");
     }
 

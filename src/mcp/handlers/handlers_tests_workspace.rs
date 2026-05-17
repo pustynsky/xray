@@ -7,6 +7,10 @@
 //! they can call the private (`fn`, not `pub`) helpers directly without exposing
 //! them in the public API surface.
 
+// Test setup constructs HandlerContext::default() then assigns a couple of fields
+// per test; converting each to a struct-literal would obscure which fields differ.
+#![allow(clippy::field_reassign_with_default)]
+
 use super::{
     HandlerContext, WorkspaceBindingMode, WorkspaceStatus,
     cross_load_content_index, cross_load_definition_index,

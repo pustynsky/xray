@@ -1891,7 +1891,7 @@ fn test_find_nearest_match_multiline_budget_caps_runtime_on_large_file() {
     let line = "fn foo() { /* lorem ipsum */ }\n"; // 32 bytes incl. newline
     let large = line.repeat(8_000); // ~256 KB across ~8000 lines
     let absent_search: String = std::iter::once("fn nonexistent_helper() {")
-        .chain(std::iter::repeat("  call_some_function();").take(49))
+        .chain(std::iter::repeat_n("  call_some_function();", 49))
         .collect::<Vec<_>>()
         .join("\n"); // 50-line search, ~1.2 KB
 
@@ -2077,7 +2077,7 @@ fn test_find_nearest_match_prefilter_handles_non_ascii_search() {
     // threshold becomes ((10+10)*40)/200 = 4, intersection is 4 ('a' × 4),
     // so the candidate passes the prefilter and Myers fires.
     let needle: String = std::iter::once('a').cycle().take(4)
-        .chain(std::iter::repeat('😀').take(6))
+        .chain(std::iter::repeat_n('😀', 6))
         .collect();
     let file_body = "aaaabbbbbb\nunrelated trailing line\n";
 

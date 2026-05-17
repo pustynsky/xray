@@ -1071,7 +1071,7 @@ struct ParsedVersionedName {
 }
 
 fn trim_version_base(base: &str) -> String {
-    base.trim_end_matches(|ch: char| ch == '_' || ch == '-' || ch == '.')
+    base.trim_end_matches(['_', '-', '.'])
         .to_lowercase()
 }
 
@@ -1417,10 +1417,9 @@ fn format_search_output(
                 .and_then(Value::as_bool)
                 .unwrap_or(false)
         })
+        && let Some(reasons) = result_status.get_mut("reasons").and_then(Value::as_array_mut)
     {
-        if let Some(reasons) = result_status.get_mut("reasons").and_then(Value::as_array_mut) {
-            reasons.push(json!("versioned_name_exact_miss"));
-        }
+        reasons.push(json!("versioned_name_exact_miss"));
     }
 
     let suggested_for_queries = suggestions.clone();
