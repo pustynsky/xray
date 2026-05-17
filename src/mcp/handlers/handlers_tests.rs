@@ -691,3 +691,34 @@ fn test_dispatch_help_works_while_index_building() {
     assert!(!result.is_error, "xray_info should work during index build");
 }
 
+
+// ── P0-1a regression: reindex building flags must reset after handler panic ─
+
+#[test]
+fn test_building_flag_guard_resets_flag_on_panic() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    // Mirrors the production pattern inside handle_xray_reindex /
+    // handle_xray_reindex_definitions: a panic inside the guarded scope
+    // (caught later by dispatch_request_with_panic_guard) must NOT leave
+    // the build flag stuck at true. Without the RAII guard the second
+    // reindex call would return ALREADY_BUILDING_MSG forever.
+    let flag = AtomicBool::new(false);
+    assert!(flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok());
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _g = super::BuildingFlagGuard::new(&flag);
+        panic!("simulated handler panic inside reindex inner");
+    }));
+    assert!(result.is_err(), "panic should have been caught");
+    assert!(!flag.load(Ordering::Acquire),
+        "BuildingFlagGuard must reset flag on unwind so the next reindex isn't blocked");
+
+    // Sanity: a fresh compare_exchange now succeeds.
+    assert!(flag
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok(),
+        "next reindex must observe flag=false and acquire the build slot");
+}

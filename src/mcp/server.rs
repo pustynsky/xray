@@ -121,6 +121,56 @@ fn json_rpc_id_for_log(id: &Value) -> String {
     }
 }
 
+/// Extract a human-readable message from a panic payload (as returned by
+/// `std::panic::catch_unwind`). Handles the two common cases (`&'static str`
+/// from `panic!("literal")` and `String` from `panic!("{}", x)`); falls back
+/// to a generic marker for anything else.
+fn panic_payload_to_string(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
+    }
+}
+
+/// Run `handle_request` under `catch_unwind` so a handler panic returns a
+/// JSON-RPC `-32603 Internal error` response instead of killing the server
+/// process. The MCP event loop continues with the next request.
+fn dispatch_request_with_panic_guard(
+    ctx: &HandlerContext,
+    method: &str,
+    params: &Option<Value>,
+    id: Value,
+) -> Value {
+    let id_for_handler = id.clone();
+    let id_for_error = id.clone();
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        handle_request(ctx, method, params, id_for_handler)
+    }));
+    match result {
+        Ok(v) => v,
+        Err(payload) => {
+            let panic_msg = panic_payload_to_string(payload.as_ref());
+            error!(method = %method, panic = %panic_msg, "Handler panicked; returning JSON-RPC -32603");
+            crate::index::log_protocol_event("handler/panic", &[
+                ("id", json_rpc_id_for_log(&id_for_error)),
+                ("method", method.to_string()),
+                ("reason", panic_msg.clone()),
+            ]);
+            safe_to_value(
+                JsonRpcErrorResponse::new(
+                    id_for_error,
+                    -32603,
+                    format!("Internal error: handler panicked: {}", panic_msg),
+                ),
+                &Value::Null,
+            )
+        }
+    }
+}
+
 fn initialize_capabilities(params: &Option<Value>) -> (bool, bool) {
     let has_roots = params
         .as_ref()
@@ -441,7 +491,7 @@ fn run_server_with_io<R: BufRead, W: Write>(
                     // But we need to trigger roots/list after initialize response.
                     // We do this after sending the initialize response below.
 
-                    let response = handle_request(&ctx, &request.method, &request.params, id.clone());
+                    let response = dispatch_request_with_panic_guard(&ctx, &request.method, &request.params, id.clone());
 
                     let resp_str = match serde_json::to_string(&response) {
                         Ok(s) => s,
@@ -649,6 +699,10 @@ fn handle_request(
         }
         "ping" => {
             safe_to_value(JsonRpcResponse::new(id, json!({})), &Value::Null)
+        }
+        #[cfg(test)]
+        "$test/panic" => {
+            panic!("test panic from $test/panic method");
         }
         _ => {
             safe_to_value(JsonRpcErrorResponse::new(

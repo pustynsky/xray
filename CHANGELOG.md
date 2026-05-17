@@ -2,6 +2,37 @@
 
 ## Unreleased
 
+- **MCP server panic guard (P0-1a).** A `panic!()` inside any tool handler used
+  to propagate up through `run_server_with_io`, kill the server process, and
+  surface to the MCP client (VS Code / Claude / Cursor) as an abrupt EOF on
+  stdio — losing the in-memory indexes and the entire session context. The
+  per-request dispatch is now wrapped in
+  `dispatch_request_with_panic_guard(...)` which runs `handle_request` inside
+  `std::panic::catch_unwind(AssertUnwindSafe(...))` and returns a JSON-RPC
+  `-32603 Internal error: handler panicked: {msg}` on caught panic (built via
+  the existing `safe_to_value(JsonRpcErrorResponse::new(...))` path so the
+  wire format is unchanged). A new `panic_payload_to_string` helper extracts
+  `&'static str` and `String` panic payloads (`panic!("literal")` and
+  `panic!("{}", x)` shapes); other payload types collapse to a
+  `<non-string panic payload>` marker. The event loop continues with the next
+  request, structured `error!` log + `crate::index::log_protocol_event("handler/panic", …)`
+  are emitted (stderr only; stdout stays reserved for JSON-RPC). Companion
+  RAII fix in `src/mcp/handlers/mod.rs`: `handle_xray_reindex` and
+  `handle_xray_reindex_definitions` used to reset their `content_building` /
+  `def_building` `AtomicBool` flags only on the normal return path, so a
+  panic-converted-to-error would leave the flag stuck at `true` and block
+  every subsequent reindex with `ALREADY_BUILDING_MSG` until process restart;
+  a new `BuildingFlagGuard` RAII type now resets the flag on every exit path
+  (normal, `?`-early-return, unwind). 5 new tests in `src/mcp/server_tests.rs`
+  and `src/mcp/handlers/handlers_tests.rs` lock the contract:
+  direct guard, pass-through, end-to-end loop survival, panic-payload
+  extraction, and build-flag reset on unwind. A `#[cfg(test)]`-only
+  `"$test/panic"` method in `handle_request` is the test seam; never compiled
+  into release builds. Known follow-up: `WorkspaceStatus::Reindexing` is NOT
+  reset on workspace-switch panic — recovery still works because the build
+  flag guard lets the next `xray_reindex` proceed, but the status field
+  itself needs its own RAII rollback (separate user story).
+
 - **Contributor tooling cleanup (chore).** Fixed 22 pre-existing
   `cargo clippy --workspace --all-targets --locked -- -D warnings` errors on
   `main` (`manual_pattern_char_comparison`, `collapsible_if` x3 collapsed via
