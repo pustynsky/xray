@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **Workspace-switch panic-rollback (P0-1 follow-up).** Companion to the
+  previous MCP dispatcher panic guard: a panic *inside* `handle_xray_reindex`
+  or `handle_xray_reindex_definitions`, caught by
+  `dispatch_request_with_panic_guard`, could leave the workspace pinned to a
+  half-built directory with `WorkspaceStatus::Reindexing` for the rest of the
+  server's life — every tool call after that would return
+  `WORKSPACE_REINDEXING`. A new RAII type `WorkspaceSwitchPanicGuard` snapshots
+  the pre-switch `dir / mode / generation` before the workspace binding is
+  mutated; its `Drop` impl checks `std::thread::panicking()` and (only on
+  unwind) calls the existing `rollback_workspace_state` (or, for
+  no-dir-change reindexes, forces `status = Resolved`). The guard exposes a
+  `dismiss()` method which both reindex inners call immediately after the
+  coherency commit point (`ws.status = Resolved` + `{content,def}_ready =
+  true`), so best-effort post-commit work (cross-load definitions, watcher
+  restart, git-cache rebuild) cannot roll the workspace back into a state
+  incoherent with the newly-published index. Existing explicit
+  `rollback_workspace_state` calls in error branches are untouched (guard is
+  panic-only safety, idempotent with manual rollback). 3 new regression
+  tests in `src/mcp/handlers/handlers_tests_workspace.rs` cover:
+  rollback-on-unwind (panic before dismiss restores dir/mode/generation/status),
+  no-op-on-normal-drop (pins the `thread::panicking()` check — regressing it
+  would silently undo every successful reindex), and dismiss-blocks-rollback
+  (panic after dismiss leaves the new workspace state intact). Known
+  remaining gap: `handle_pending_response` in `src/mcp/server.rs` sets
+  `WorkspaceStatus::Reindexing` on the client-roots workspace-switch path
+  without the same RAII protection — separate follow-up.
+
 - **MCP server panic guard (P0-1a).** A `panic!()` inside any tool handler used
   to propagate up through `run_server_with_io`, kill the server process, and
   surface to the MCP client (VS Code / Claude / Cursor) as an abrupt EOF on
