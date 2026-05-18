@@ -2,6 +2,33 @@
 
 ## Unreleased
 
+- **`xray_definitions regex=true` is now case-sensitive (behaviour change).**
+  Previously the regex engine was hard-wired to `case_insensitive(true)`,
+  which silently made character classes `[A-Z]` and `[a-z]` equivalent
+  and produced spurious matches for anchored patterns
+  (`^Execute[A-Z][a-z]+Async$` matched `ExecuteWithCacheAsideAsync`).
+  Regex is now applied to the original-case `DefinitionEntry::name`
+  (not the lowercased `name_index` key) and respects case as written.
+  Migration: prepend `(?i)` for case-insensitive matching, e.g.
+  `(?i)^execute.*async$`. Aligns with `xray_grep` regex behaviour.
+- **`xray_fast` glob patterns ending in `*` or `?` now match files with
+  extensions (behaviour change).** `maybe_glob_to_regex` previously
+  produced fully-anchored `^…$`, so `Capacit?es_V?` could never match
+  `Capacities_V0.sql` (length-exact rejection). The trailing `$` anchor
+  is dropped ONLY when the pattern ends with a glob wildcard (`*` /
+  `?`). Patterns ending in a literal character keep strict-suffix
+  semantics: `*.cs` still rejects `.csproj` and `.css`; `Use?Service`
+  (internal `?`) still requires exact length. New behaviour:
+  `Capacit?es_V?` matches `Capacities_V0.sql`; `Order*` matches both
+  `Order` and `Order123.cs`.
+- **`xray_definitions` autoSummary no longer collapses into a single
+  `"C:"` bucket on Windows.** When `file=` was omitted, the directory
+  grouper took the first path component of the absolute path, which on
+  Windows is the drive letter. `build_auto_summary` now passes
+  `index.root` as the relativization base when no `file=` scope is
+  provided, and `extract_group_directory` strips a stray `X:` segment
+  defensively. Grouping now uses real workspace top-level directories.
+
 - **MCP arg-validation hardening (chore).** Three UX/discoverability gaps
   found during edge-case probing of the public tool surface, all in
   `src/mcp/handlers/`. Pure additions — wire format and existing behaviour
