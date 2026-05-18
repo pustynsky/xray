@@ -13,7 +13,15 @@ use super::utils::{best_match_tier, inject_branch_warning, json_to_string};
 
 /// Convert a simple glob pattern (containing * or ?) to a regex string.
 /// Returns None if the pattern has no glob characters.
-/// Only applies to filename matching — anchored to match the full name.
+///
+/// Anchoring: always prefix-anchored (`^`). End-anchor (`$`) is kept ONLY when
+/// the pattern ends with a literal character — preserving strict-suffix
+/// semantics for `*.cs` (rejects `.csproj`/`.css`), `Foo.txt`, etc. When the
+/// pattern ends with a glob wildcard (`*` or `?`), the `$` anchor is dropped
+/// so the trailing wildcard is open-ended: `Capacit?es_V?` matches
+/// `Capacities_V0.sql`, `Order*` matches `Order123.cs`. Without this
+/// asymmetry a trailing `?` could never match files with extensions (length
+/// mismatch from the anchored `$`).
 fn maybe_glob_to_regex(pattern: &str) -> Option<String> {
     if pattern == "*" {
         return None; // Special wildcard-all case, handled separately
@@ -35,7 +43,12 @@ fn maybe_glob_to_regex(pattern: &str) -> Option<String> {
             _ => regex.push(ch),
         }
     }
-    regex.push('$');
+    // Keep `$` only when the pattern's last character is a literal — open
+    // trailing wildcards stay unanchored at the tail.
+    let last = pattern.chars().next_back();
+    if !matches!(last, Some('*') | Some('?')) {
+        regex.push('$');
+    }
     Some(regex)
 }
 
@@ -542,7 +555,38 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
 #[cfg(test)]
 mod fast_unit_tests {
-    use super::extract_glob_literal;
+    use super::{extract_glob_literal, maybe_glob_to_regex};
+    use regex::Regex;
+
+    fn glob_matches(pattern: &str, name: &str) -> bool {
+        let re = Regex::new(&maybe_glob_to_regex(pattern).expect("glob expected")).unwrap();
+        re.is_match(name)
+    }
+
+    #[test]
+    fn test_glob_literal_suffix_keeps_end_anchor() {
+        // `*.cs` must reject `.csproj` and `.css`, accept `.cs` only.
+        assert!(glob_matches("*.cs", "Foo.cs"));
+        assert!(!glob_matches("*.cs", "Foo.csproj"));
+        assert!(!glob_matches("*.cs", "Foo.css"));
+        assert!(glob_matches("*Helper.cs", "MyHelper.cs"));
+        assert!(!glob_matches("*Helper.cs", "MyHelper.csproj"));
+    }
+
+    #[test]
+    fn test_glob_trailing_wildcard_drops_end_anchor() {
+        // Trailing `?` / `*` are open-ended so extensions can follow.
+        assert!(glob_matches("Capacit?es_V?", "Capacities_V0.sql"));
+        assert!(glob_matches("Order*", "Order123.cs"));
+        assert!(glob_matches("Order*", "Order"));
+    }
+
+    #[test]
+    fn test_glob_internal_question_mark_strict() {
+        // `?` in the middle keeps the suffix strict via end anchor.
+        assert!(glob_matches("Use?Service", "UserService"));
+        assert!(!glob_matches("Use?Service", "UserService.cs"));
+    }
 
     #[test]
     fn test_extract_glob_literal_no_glob() {
