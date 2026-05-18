@@ -2,6 +2,64 @@
 
 ## Unreleased
 
+- **MCP arg-validation hardening (chore).** Three UX/discoverability gaps
+  found during edge-case probing of the public tool surface, all in
+  `src/mcp/handlers/`. Pure additions — wire format and existing behaviour
+  on the happy path are unchanged.
+  - `xray_grep regex=true phrase=true` used to silently drop `regex` and
+    return phrase results — caller had zero indication their query was
+    rewritten. Now hard-errors symmetric with the existing `lineRegex +
+    phrase` mutex; the error message names both flags and explains the
+    semantic difference (regex against the token index vs phrase against
+    raw file content).
+  - `xray_definitions containsLine file=["Cargo.toml"]` (or any other
+    extension without an active definition parser) used to return an
+    empty `containingDefinitions` array silently — indistinguishable
+    from a real "no definition at this line" answer. `handle_contains_line_mode`
+    now classifies the filter via a tight heuristic
+    (`unsupported_extension_hint_candidate`): rejects bare basenames
+    (no dot), dotted directory/version fragments (`My.Project`,
+    `net8.0`, multi-dotted names), `.gitignore`-style leading-dot
+    entries, and suffixes longer than 5 chars or containing
+    non-alphabetic characters — only fires on plausible `<base>.<ext>`
+    shapes whose suffix is not in the **runtime** `ctx.def_extensions`
+    (intersection of `--ext` and parser support). The hint is attached
+    AFTER the file-path scan so a substring filter that DOES match
+    indexed files (e.g. `User.cs` on a workspace where `cs` is active)
+    proceeds normally and only emits the hint on empty results. The
+    hint names the extension, lists active extensions, and points at
+    `xray_info` for confirmation. A server with `--ext cs` correctly
+    hints on `.rs` queries even though the binary was built with
+    `lang-rust` (regression of the compile-time-vs-runtime split is
+    trapped by a dispatch-level test with a negative assertion against
+    the pre-fix wording).
+  - `xray_definitions audit=true` already flagged suspicious files
+    (size > `auditMinBytes` with zero definitions), but the reason was
+    invisible. The audit handler now best-effort sniffs each suspicious
+    file's first 4 KB for known macro markers (`proptest! {`,
+    `quickcheck! {`, `#[proptest`, `#[quickcheck]`, `lazy_static! {`,
+    `thread_local! {`) and attaches a per-file `hint` naming the
+    detected markers plus pointing at `xray_grep terms=["fn "]` for
+    enumeration. Read failures are silently treated as "no marker" —
+    audit is a diagnostic command, not a correctness gate. Helper
+    `detect_macro_definition_markers` is `pub(super)` for direct unit
+    testing without building a real definition-index fixture.
+  9 new tests in `src/mcp/handlers/handlers_tests_misc.rs`: phrase+regex
+  mutex, unsupported-ext hint (Cargo.toml integration), no-hint-for-bare-
+  basename regression guard, classification matrix (11 assertions
+  covering bare basenames, supported extensions, real unsupported
+  extensions, restricted-`--ext` server, dotted substring filters,
+  edge cases), dispatch-level `Active extensions:` runtime-list pin,
+  and three marker-detection cases (proptest, quickcheck, missing
+  file, plain-rust negative). `cargo clippy --workspace --all-targets
+  --locked -- -D warnings` clean; full suite 2673 passed (was 2664 on
+  main, +7 new arg-validation tests). Known optional follow-up: three
+  marker strings in `detect_macro_definition_markers` (`#[proptest`,
+  `lazy_static!`, `thread_local!`) are not pinned by positive
+  fixtures — removing them from the marker list would not fail the
+  current tests; adding a single combined fixture covers the gap if
+  ever needed.
+
 - **MCP server-initiated response panic guard (P0-1 follow-up).** Closes the
   remaining gap acknowledged in the P0-1a / P0-1 follow-up shipping rounds:
   `handle_pending_response` (the entry point that consumes server-initiated

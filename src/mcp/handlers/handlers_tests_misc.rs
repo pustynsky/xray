@@ -2010,3 +2010,222 @@ fn test_all_migrated_keys_reject_bare_string_form() {
         );
     }
 }
+
+// ── arg-validation hardening (chore/mcp-arg-validation-hardening) ─────
+
+#[test]
+fn test_xray_grep_phrase_and_regex_mutually_exclusive() {
+    // Pre-fix: regex=true + phrase=true silently dropped `regex` and returned
+    // phrase results. Caller had no indication their query was rewritten.
+    // Symmetric with the existing lineRegex + phrase mutex error.
+    let ctx = make_empty_ctx();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["foo"],
+        "regex": true,
+        "phrase": true,
+    }));
+    assert!(result.is_error, "regex=true + phrase=true must hard-error, not silently pick one");
+    let text = result.content[0].text.as_str();
+    assert!(text.contains("mutually exclusive"),
+        "error message must call out mutual exclusion, got: {text}");
+    assert!(text.contains("regex") && text.contains("phrase"),
+        "error message must name both flags, got: {text}");
+}
+
+#[test]
+fn test_xray_definitions_contains_line_warns_on_unsupported_extension() {
+    // Pre-fix: containsLine on a file whose extension has no active parser
+    // (e.g. `Cargo.toml`) returned an empty array silently — indistinguishable
+    // from "line is inside no definition", but the cause is parser support,
+    // not query semantics. Now returns a `hint` naming the problem and
+    // suggesting xray_info to confirm.
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
+        "file": ["Cargo.toml"],
+        "containsLine": 5,
+    }));
+    assert!(!result.is_error, "unsupported-ext containsLine must be a success-with-hint, not an error");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["containingDefinitions"].as_array().unwrap().is_empty(),
+        "containingDefinitions must be empty for unsupported extension");
+    let hint = output["hint"].as_str().expect("hint field must be present");
+    assert!(hint.contains(".toml"), "hint must name the unsupported extension, got: {hint}");
+    assert!(hint.contains("active definition parser"),
+        "hint must explain the cause is parser support, got: {hint}");
+    assert!(hint.contains("xray_info"),
+        "hint must point at xray_info for confirmation, got: {hint}");
+}
+
+#[test]
+fn test_xray_definitions_contains_line_no_hint_for_bare_basename() {
+    // Regression guard: the contract for `file=[\"Foo\"]` (bare basename,
+    // no dot) is substring match against multiple files. The unsupported-ext
+    // hint MUST NOT fire here, or all existing C# / TS tests using bare
+    // basenames break with hint-only empty responses.
+    let ctx = make_ctx_with_defs();
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
+        "file": ["NonExistentService"],
+        "containsLine": 42,
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // No hint field — the bare basename path proceeds normally and finds
+    // nothing because no file in the (empty) index matches.
+    assert!(output.get("hint").is_none(),
+        "bare-basename containsLine must NOT emit the unsupported-ext hint, got: {output}");
+}
+
+#[test]
+fn test_detect_macro_definition_markers_recognises_proptest_and_quickcheck() {
+    use super::definitions::detect_macro_definition_markers;
+    use std::io::Write;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_string_lossy().to_string();
+    let mut file = std::fs::File::create(&path).unwrap();
+    writeln!(file, "use proptest::prelude::*;").unwrap();
+    writeln!(file, "proptest! {{").unwrap();
+    writeln!(file, "    fn some_property(x in 0u32..1000) {{").unwrap();
+    writeln!(file, "    }}").unwrap();
+    writeln!(file, "}}").unwrap();
+    drop(file);
+
+    let markers = detect_macro_definition_markers(&path)
+        .expect("must detect proptest! marker");
+    assert!(markers.contains("proptest!"), "expected proptest! in markers, got: {markers}");
+}
+
+#[test]
+fn test_detect_macro_definition_markers_returns_none_for_plain_rust() {
+    use super::definitions::detect_macro_definition_markers;
+    use std::io::Write;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_string_lossy().to_string();
+    let mut file = std::fs::File::create(&path).unwrap();
+    writeln!(file, "pub fn ordinary_function() -> u32 {{ 42 }}").unwrap();
+    drop(file);
+
+    let markers = detect_macro_definition_markers(&path);
+    assert!(markers.is_none(),
+        "plain-rust file must not trigger any macro marker, got: {markers:?}");
+}
+
+#[test]
+fn test_detect_macro_definition_markers_returns_none_for_missing_file() {
+    use super::definitions::detect_macro_definition_markers;
+    let markers = detect_macro_definition_markers("/nonexistent/path/that/does/not/exist.rs");
+    assert!(markers.is_none(),
+        "missing file must return None (best-effort), not panic, got: {markers:?}");
+}
+
+#[test]
+fn test_unsupported_extension_hint_candidate_classification() {
+    use super::definitions::unsupported_extension_hint_candidate;
+
+    let active: Vec<String> = vec!["cs".to_string(), "ts".to_string()];
+    let active_with_rs: Vec<String> = vec!["cs".to_string(), "rs".to_string()];
+
+    // Bare basename (no dot) → never a candidate.
+    assert_eq!(unsupported_extension_hint_candidate("queryservice", &active), None,
+        "bare basename must not be classified as unsupported-ext");
+
+    // Supported extension (active in this server) → never a candidate.
+    assert_eq!(unsupported_extension_hint_candidate("user.cs", &active), None,
+        "active extension '.cs' must not be classified as unsupported");
+    assert_eq!(unsupported_extension_hint_candidate("index.ts", &active), None,
+        ".ts in active list must not be classified as unsupported");
+
+    // Real unsupported extension → candidate.
+    assert_eq!(unsupported_extension_hint_candidate("cargo.toml", &active), Some("toml"),
+        ".toml is not in active list → fire hint");
+    assert_eq!(unsupported_extension_hint_candidate("foo.json", &active), Some("json"),
+        ".json is not in active list → fire hint");
+
+    // Restricted-extension server: binary supports rs but server limited to {cs,ts}.
+    // Critical correctness check: the runtime active list must drive the hint, not
+    // the global compile-time supported list (MAJOR finding from reviewer round 1).
+    assert_eq!(unsupported_extension_hint_candidate("foo.rs", &active), Some("rs"),
+        ".rs not in this server's active list → fire hint (even if binary supports lang-rust)");
+    assert_eq!(unsupported_extension_hint_candidate("foo.rs", &active_with_rs), None,
+        ".rs IS in active list → no hint");
+
+    // Dotted substring filters (regression guard for MAJOR finding from reviewer round 1):
+    // `My.Project`, `net8.0`, version fragments must NOT be classified as unsupported-ext.
+    assert_eq!(unsupported_extension_hint_candidate("my.project", &active), None,
+        "'My.Project' substring is too long to be a real extension; must not fire hint");
+    assert_eq!(unsupported_extension_hint_candidate("net8.0", &active), None,
+        "'net8.0' version fragment: digits in suffix disqualify (only alphabetic ext allowed)");
+    assert_eq!(unsupported_extension_hint_candidate("foo.bar.baz", &active), None,
+        "multi-dotted substring 'foo.bar.baz' must not fire (prefix contains another dot)");
+
+    // Empty/edge cases.
+    assert_eq!(unsupported_extension_hint_candidate(".gitignore", &active), None,
+        "leading-dot file '.gitignore' has empty prefix → no hint");
+    assert_eq!(unsupported_extension_hint_candidate("file.", &active), None,
+        "trailing dot 'file.' has empty suffix → no hint");
+    assert_eq!(unsupported_extension_hint_candidate("script.verylongext", &active), None,
+        "suffix longer than 5 chars → not a typical extension, no hint");
+}
+
+#[test]
+fn test_xray_definitions_contains_line_hint_uses_runtime_active_extensions() {
+    // Dispatch-level pin for MAJOR #2 from review round 2: the handler MUST
+    // base the hint on `ctx.def_extensions` (runtime intersection of --ext
+    // and parser support), NOT the compile-time `definition_extensions()`.
+    // Without this test a regression that swaps the source back to the
+    // compile-time global would pass every helper-level test (because the
+    // helper takes `active_exts` as an argument and is unit-tested
+    // exhaustively) AND the Cargo.toml integration test (because `.toml`
+    // is not in either list).
+    //
+    // Setup: ctx where `def_extensions = ["cs"]` only. Query a `.rs` file.
+    // The binary supports lang-rust at compile time, but the server is
+    // restricted to C# at runtime. A regression to compile-time lookup
+    // would NOT emit the hint here (false silence).
+    let mut ctx = make_ctx_with_defs();
+    ctx.def_extensions = vec!["cs".to_string()];
+    let result = dispatch_tool(&ctx, "xray_definitions", &json!({
+        "file": ["foo.rs"],
+        "containsLine": 1,
+    }));
+    assert!(!result.is_error,
+        "restricted-ext + unsupported file must be success-with-hint, not error");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let hint = output["hint"].as_str()
+        .expect("hint MUST fire when runtime ctx.def_extensions excludes the queried extension");
+    assert!(hint.contains(".rs"),
+        "hint must name the unsupported extension '.rs', got: {hint}");
+    assert!(hint.contains("Active extensions: cs"),
+        "hint must report the RUNTIME active extension list (regression guard for \
+         compile-time vs runtime lookup), got: {hint}");
+    // Negative assertion — the pre-fix wording must NOT appear. Keeps a
+    // future revert from accidentally satisfying the positive assertions
+    // above via a different (compile-time) code path.
+    assert!(!hint.contains("Supported extensions (this build)"),
+        "hint must use runtime-active wording, not compile-time 'this build', got: {hint}");
+}
+
+#[test]
+fn test_detect_macro_definition_markers_recognises_quickcheck() {
+    use super::definitions::detect_macro_definition_markers;
+    use std::io::Write;
+
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let path = tmp.path().to_string_lossy().to_string();
+    let mut file = std::fs::File::create(&path).unwrap();
+    writeln!(file, "use quickcheck::*;").unwrap();
+    writeln!(file, "quickcheck! {{").unwrap();
+    writeln!(file, "    fn some_property(x: u32) -> bool {{ true }}").unwrap();
+    writeln!(file, "}}").unwrap();
+    writeln!(file, "#[quickcheck]").unwrap();
+    writeln!(file, "fn attr_property(x: u32) -> bool {{ true }}").unwrap();
+    drop(file);
+
+    let markers = detect_macro_definition_markers(&path)
+        .expect("must detect quickcheck markers");
+    assert!(markers.contains("quickcheck!"),
+        "expected 'quickcheck!' in markers, got: {markers}");
+    assert!(markers.contains("#[quickcheck]"),
+        "expected '#[quickcheck]' attribute marker, got: {markers}");
+}
