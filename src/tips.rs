@@ -259,8 +259,8 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
         },
         Tip {
             rule: "Regex pattern search".into(),
-            why: "Full regex for pattern matching. Also works in xray_definitions name parameter.".into(),
-            example: "xray grep \"I[A-Z]\\w+Cache\" -e cs --regex  |  MCP: terms=[\"I[A-Z]\\w+Cache\"], regex=true".into(),
+            why: "Full regex for pattern matching. Also works in xray_definitions name parameter. Case-sensitive in both tools; use inline flag `(?i)` for case-insensitive matching.".into(),
+            example: "xray grep \"I[A-Z]\\w+Cache\" -e cs --regex  |  MCP: terms=[\"I[A-Z]\\w+Cache\"], regex=true. CI: terms=[\"(?i)icache\"], regex=true".into(),
         },
         Tip {
             rule: "lineRegex is more expensive than substring (trigram prefilter is best-effort) -- use terms=[...] when possible".into(),

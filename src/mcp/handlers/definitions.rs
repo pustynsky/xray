@@ -798,8 +798,13 @@ fn collect_candidates(
                     MAX_REGEX_LEN
                 ));
             }
+            // Case-sensitive by default (consistent with `xray_grep` regex and
+            // Rust regex convention). Users wanting case-insensitive matching
+            // can opt in via inline flag `(?i)` — e.g. `(?i)^execute.*async$`.
+            // Prior behaviour silently forced `case_insensitive(true)`, which
+            // made character classes `[A-Z]`/`[a-z]` semantically identical and
+            // returned spurious matches for anchored patterns.
             let re = match regex::RegexBuilder::new(name)
-                .case_insensitive(true)
                 .size_limit(REGEX_SIZE_LIMIT)
                 .dfa_size_limit(REGEX_DFA_SIZE_LIMIT)
                 .build()
@@ -807,18 +812,25 @@ fn collect_candidates(
                 Ok(r) => r,
                 Err(e) => return Err(format!("Invalid regex '{}': {}", name, e)),
             };
+            // `name_index` keys are lowercased, so match against the original-case
+            // `DefinitionEntry::name` (looked up via `definitions[idx]`) — required
+            // for case-sensitive regex correctness.
             let mut matching_indices = Vec::new();
-            for (n, indices) in &index.name_index {
-                if re.is_match(n) {
-                    matching_indices.extend(indices);
+            for indices in index.name_index.values() {
+                for idx in indices {
+                    if let Some(def) = index.definitions.get(*idx as usize)
+                        && re.is_match(&def.name)
+                    {
+                        matching_indices.push(*idx);
+                    }
                 }
             }
             candidate_indices = Some(match candidate_indices {
                 Some(existing) => {
-                    let set: std::collections::HashSet<u32> = matching_indices.into_iter().cloned().collect();
+                    let set: std::collections::HashSet<u32> = matching_indices.into_iter().collect();
                     existing.into_iter().filter(|i| set.contains(i)).collect()
                 }
-                None => matching_indices.into_iter().cloned().collect(),
+                None => matching_indices,
             });
         } else {
             let terms: Vec<String> = name.split(',')
@@ -2569,6 +2581,14 @@ fn build_auto_summary(
     ctx: &HandlerContext,
 ) -> ToolCallResult {
     let file_filter_base = args.file_filter.as_deref().unwrap_or("");
+    // When the caller did not narrow with `file=`, group relative to the
+    // workspace root so absolute paths don't collapse into a single "C:"
+    // (Windows drive letter) or "" bucket.
+    let group_base: &str = if file_filter_base.is_empty() {
+        index.root.as_str()
+    } else {
+        file_filter_base
+    };
     let mut groups: HashMap<String, AutoSummaryGroup> = HashMap::new();
 
     for (_, def) in results {
@@ -2576,7 +2596,7 @@ fn build_auto_summary(
             Some(p) => p.as_str(),
             None => continue,
         };
-        let group_key = extract_group_directory(file_path, file_filter_base);
+        let group_key = extract_group_directory(file_path, group_base);
         groups.entry(group_key).or_default().add(def);
     }
 
@@ -2679,12 +2699,40 @@ fn extract_group_directory(file_path: &str, file_filter_base: &str) -> String {
     // Strip leading slash
     let relative = relative.strip_prefix('/').unwrap_or(relative);
 
+    // Defensive strip of a Windows drive prefix (e.g. `C:`) left over when
+    // the input was an absolute Windows path and no base relativization
+    // happened (no `file=` scope, or base not found in path). Without this,
+    // every absolute Windows path collapses to a single `C:` bucket.
+    // Only fires when the ORIGINAL path actually started with `X:/` — avoids
+    // mis-stripping a legitimate Unix directory literally named `c:`.
+    let relative = if path_is_absolute_windows(&normalized) {
+        match relative.split_once('/') {
+            Some((head, tail)) if is_windows_drive(head) => tail,
+            _ => relative,
+        }
+    } else {
+        relative
+    };
+
     // Take first path component as group
     if let Some(sep_pos) = relative.find('/') {
         relative[..sep_pos].to_string()
     } else {
         "(root)".to_string()
     }
+}
+
+fn is_windows_drive(segment: &str) -> bool {
+    let bytes = segment.as_bytes();
+    bytes.len() == 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
+}
+
+fn path_is_absolute_windows(normalized: &str) -> bool {
+    let bytes = normalized.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && bytes[2] == b'/'
 }
 
 /// Check if a file (by file_id) matches a comma-separated file filter string.
