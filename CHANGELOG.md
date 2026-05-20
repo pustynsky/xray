@@ -2,26 +2,35 @@
 
 ## Unreleased
 
+- **`save_sharded` streams directly to disk — eliminates transient compressed
+  buffers.**
+  Rewrites `save_sharded` from parallel in-memory shard compression
+  (`Vec<u8>` per shard) to sequential streaming through
+  `FrameEncoder<&mut BufWriter<File>>`. Head and per-shard compressed
+  sizes are written as placeholders, then patched by seeking back.
+  Shards are drained one at a time so entries are freed before the next
+  shard starts serializing. A `TempFileGuard` drop guard ensures the
+  temp file is removed on any early exit. On-disk format is unchanged —
+  `load_sharded` reads new files without modification.
+  Measured on Shared (693 MB compressed content-index, 3.88M entries):
+  autosave WS spike during save reduced from hundreds of MB to ~19 MB;
+  `serializeLoopMs` ~3.3–3.9 s (sequential) vs ~1.1 s (prior parallel)
+  — acceptable trade for the memory win. `T: Sync` bound removed since
+  threads are no longer used. `fileWriteMs` metric removed (merged into
+  `serializeLoopMs`).
+
 - **Git cache background builds now fail open instead of hanging silently.**
   Startup git-cache warmup now bounds git metadata probes and cold `git log`
   builds, including the stdout parser path. If primary indexes or git
   subprocesses stall, `xray serve` marks the cache path terminal and emits a
   `gitCacheReady` reason instead of leaving `gitCache=absent` forever.
 
-- **Autosave no longer leaves a ~+2 GB transient working-set spike.**
-  After `save_sharded`'s 4-shard parallel `std::thread::scope` ends,
-  `periodic_autosave` now calls `force_mimalloc_collect()` so the
-  per-thread lz4/bincode buffers (~GB-scale per shard) are returned to
-  the OS immediately instead of being retained by mimalloc for ~50 s.
-  Measured on a 1.7 GB content index: WS spike +2118 MB → ~+900 MB,
-  mean WS 4500 → 3913 MB, steady-state autosave wall-clock 50 s → 2 s.
-  Runs on every save path that allocated (success or failure), skipping
-  only the genuine empty-index no-op. New diagnostic background thread
-  `xray-mem-snapshot` emits a `memorySnapshot` phase line every
-  `XRAY_MEM_SNAPSHOT_SEC` seconds (default 60, 0 disables) with
-  WS/peak/commit + per-cache entry counts; uses non-blocking `try_read`
-  so a stuck or poisoned lock surfaces as `<locked>` / `<poisoned>`
-  rather than blocking the diagnostic itself.
+- **Autosave transient memory reduced further by streaming save.**
+  `save_sharded` now streams directly to disk (see above), so
+  `periodic_autosave` no longer produces GB-scale transient compressed
+  buffers. `force_mimalloc_collect()` is retained for residual encoder
+  allocations. Measured on Shared: autosave WS spike ~+19 MB (was
+  ~+900 MB after the previous mimalloc-collect fix, ~+2 GB before that).
 
 - **`xray_grep` adds `filesOnly=true`, `invert=true`, and a literal-glob
   warning for `file=`.**

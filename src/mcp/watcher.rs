@@ -1155,16 +1155,13 @@ fn periodic_autosave(
 
     // Content + definition saves run concurrently under `std::thread::scope`.
     // They take SEPARATE RwLocks (different indexes) and write to SEPARATE
-    // files — no contention. Combined with the parallel per-shard serialize
-    // in `save_sharded` and the 1 MB BufWriter in the same function, this
-    // brought Shared autosave from ~12.3s sequential to ~2.4s wall-clock
-    // (~5× faster). The smaller def-index save (~0.7s) overlaps entirely
-    // inside the content-index save (~2.1s), so wall-clock here is
-    // dominated by the content branch.
+    // files — no contention. `save_sharded` streams each shard sequentially
+    // through `FrameEncoder` directly to disk (no intermediate compressed
+    // buffers). The smaller def-index save overlaps entirely inside the
+    // content-index save, so wall-clock is dominated by the content branch.
     //
-    // The historical hold-read-lock-during-serialize choice still applies
-    // per-thread: cloning a ~1.7 GB content index doubled peak RSS by ~2 GB
-    // on Shared and risked OOM on 16 GB dev machines (see
+    // Serialization holds a read lock: cloning a ~1.7 GB content index
+    // doubled peak RSS on Shared and risked OOM on 16 GB dev machines (see
     // user-stories/user-story_xray-autosave-clone-peak_2026-05-02.md).
     // RwLock is std::sync::RwLock — concurrent readers (`xray_grep`,
     // `xray_definitions`) keep working; only WRITERS (watcher incremental
@@ -1278,16 +1275,11 @@ fn periodic_autosave(
         );
     }
 
-    // Release transient lz4/bincode buffers retained by mimalloc's per-thread
-    // heaps after the `std::thread::scope` in save_sharded ends. Run on EVERY
-    // exit path that did real work (succeeded OR failed), because a save
-    // that errored after compression still leaves the ~GB-scale buffers in
-    // the allocator. Skip only when both branches were genuine no-ops
-    // (empty indexes — no allocation happened to collect).
+    // Release transient bincode/lz4 encoder buffers retained by mimalloc.
+    // Streaming save eliminated the large compressed Vec<u8> buffers, but
+    // the encoder and BufWriter still allocate per-thread. Run on EVERY
+    // exit path that did real work (succeeded OR failed).
     if content_did_save || def_did_save || !all_ok {
-        // Measured on Shared (~693 MB compressed content index): each
-        // autosave wave spiked WS by ~+2 GB and took ~50 s to return to
-        // baseline without this hint.
         crate::index::force_mimalloc_collect();
     }
 
