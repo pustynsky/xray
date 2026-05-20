@@ -2,6 +2,28 @@
 
 ## Unreleased
 
+- **`xray_grep` adds `filesOnly=true`, `invert=true`, and a literal-glob
+  warning for `file=`.**
+  - `filesOnly=true` strips per-file payload to `{path, occurrences}` only
+    (no `lines` / `lineContent` / `score`), letting callers ask the
+    `grep -l` question without tripping the global response byte cap or
+    paying for line bodies. Works across `substring`, `phrase`,
+    `lineRegex`, and the normal token mode.
+  - `invert=true` lists in-scope files that did NOT match (`grep -L`).
+    Implies `filesOnly=true`. Strictly requires an explicit scope
+    (`file=`, `dir=`, `ext=`, or an exact file path) — without one, the
+    inverted complement would silently span the entire indexed corpus,
+    which is rarely intended. Adds `summary.totalFilesInScope` and
+    `summary.totalFilesWithMatches` for transparency.
+  - When `file=` contains glob metachars (`*`, `?`, `[`, `{`) AND the
+    search returns zero files, a one-shot
+    `summary.warnings.fileFilterLiteralGlob` warning fires. `file=`
+    entries are case-insensitive substrings, not globs — the warning
+    points users to `ext=` and substring forms instead of letting them
+    assume the corpus has no matches.
+  - Truncation hint (`summary.hint` on oversize `files` responses) now
+    mentions `filesOnly=true` as a remediation alongside `countOnly=true`
+    and dir/ext/exclude narrowing.
 - **`xray_definitions regex=true` is now case-sensitive (behaviour change).**
   Previously the regex engine was hard-wired to `case_insensitive(true)`,
   which silently made character classes `[A-Z]` and `[a-z]` equivalent

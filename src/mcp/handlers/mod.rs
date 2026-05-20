@@ -145,6 +145,14 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "maxOccurrencesPerTerm": {
                         "type": "integer",
                         "description": "Explicit cap (in dominant-only files) for auto-balance. Default 0 = derived from `2 * second_max` clamped to [20, 100]. Only consulted when autoBalance triggers."
+                    },
+                    "filesOnly": {
+                        "type": "boolean",
+                        "description": "Paths only (`grep -l`)."
+                    },
+                    "invert": {
+                        "type": "boolean",
+                        "description": "Files NOT matching (`grep -L`). Implies filesOnly; requires scope; excludes countOnly."
                     }
                 },
                 "required": ["terms"]

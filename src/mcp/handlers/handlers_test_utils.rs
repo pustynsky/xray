@@ -253,5 +253,7 @@ pub(crate) fn make_params_default<'a>() -> GrepSearchParams<'a> {
         lock_wait_ms: 0.0,
         trigram_stale: false,
         requested_mode: "substring",
+        files_only: false,
+        invert_cap: 0,
     }
 }
