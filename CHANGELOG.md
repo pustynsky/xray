@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.8 (2026-05-20)
 
 - **`save_sharded` streams directly to disk — eliminates transient compressed
   buffers.**
