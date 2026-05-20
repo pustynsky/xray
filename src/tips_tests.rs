@@ -219,11 +219,12 @@ fn test_tool_definitions_token_budget() {
     let word_count = json.split_whitespace().count();
     let approx_tokens = (word_count as f64 / 0.75) as usize;
 
-    // Budget: ~5000 tokens (down from ~6500 before optimization)
+    // Budget: ~5550 tokens (originally 5000; +50 in 0.2.7 for xray_grep
+    // `filesOnly`/`invert` schema entries — kept as minimal as possible).
     assert!(
-        approx_tokens < 5500,
+        approx_tokens < 5550,
         "Tool definitions exceed token budget: ~{} tokens ({} words). \
-         Target: <5500. Shorten parameter descriptions or move examples to xray_help.",
+         Target: <5550. Shorten parameter descriptions or move examples to xray_help.",
         approx_tokens, word_count
     );
 }
