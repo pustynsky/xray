@@ -64,3 +64,10 @@ user-stories/
 
 # Temp artifacts
 docs/pr-description.md
+
+# Workspace-root scratch / debug artefacts (cleanup 2026-05-20)
+*.log
+test_out*.txt
+test_output.txt
+check-*.txt
+
