@@ -371,8 +371,189 @@ pub fn cmd_serve(args: ServeArgs) {
         trigram_build_gate: Arc::clone(&trigram_build_gate),
         autosave_dirty: Arc::clone(&autosave_dirty),
     };
+
+    // Periodic memory + cache-size snapshot for leak diagnosis.
+    // Interval via XRAY_MEM_SNAPSHOT_SEC (default 60, 0 = disabled).
+    spawn_memory_snapshot_thread(
+        Arc::clone(&ctx.index),
+        ctx.def_index.as_ref().map(Arc::clone),
+        Arc::clone(&ctx.git_cache),
+        Arc::clone(&ctx.file_index),
+        Arc::clone(&ctx.watcher_stats),
+    );
+
     mcp::server::run_server(ctx);
     crate::index::log_memory("serve: event loop exited");
+}
+
+/// Spawn a background thread that emits one `memorySnapshot` phase log
+/// every `XRAY_MEM_SNAPSHOT_SEC` seconds (default 60). Set to 0 to disable.
+///
+/// Captures: WS/peak/commit, per-cache entry counts, and uses `try_read`
+/// so a stuck cache lock surfaces as `<locked>` instead of blocking the
+/// diagnostic thread itself. Designed for leak triage — emit one line per
+/// minute, correlate growth between consecutive lines to the cache that
+/// changed.
+#[allow(clippy::type_complexity)]
+fn spawn_memory_snapshot_thread(
+    index: Arc<RwLock<crate::ContentIndex>>,
+    def_index: Option<Arc<RwLock<crate::definitions::DefinitionIndex>>>,
+    git_cache: Arc<RwLock<Option<crate::git::cache::GitHistoryCache>>>,
+    file_index: Arc<RwLock<Option<crate::FileIndex>>>,
+    watcher_stats: Arc<crate::mcp::watcher::WatcherStats>,
+) {
+    let interval_secs: u64 = std::env::var("XRAY_MEM_SNAPSHOT_SEC")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(60);
+    if interval_secs == 0 {
+        return;
+    }
+
+    if let Err(e) = std::thread::Builder::new()
+        .name("xray-mem-snapshot".to_string())
+        .spawn(move || {
+            // Stagger first snapshot so it lands after warmup, not during.
+            std::thread::sleep(Duration::from_secs(interval_secs));
+            loop {
+                emit_memory_snapshot(&index, &def_index, &git_cache, &file_index, &watcher_stats);
+                std::thread::sleep(Duration::from_secs(interval_secs));
+            }
+        })
+    {
+        warn!(error = %e, "Failed to spawn xray-mem-snapshot thread; diagnostics disabled");
+    }
+}
+
+#[allow(clippy::type_complexity)]
+fn emit_memory_snapshot(
+    index: &Arc<RwLock<crate::ContentIndex>>,
+    def_index: &Option<Arc<RwLock<crate::definitions::DefinitionIndex>>>,
+    git_cache: &Arc<RwLock<Option<crate::git::cache::GitHistoryCache>>>,
+    file_index: &Arc<RwLock<Option<crate::FileIndex>>>,
+    watcher_stats: &Arc<crate::mcp::watcher::WatcherStats>,
+) {
+    use std::sync::atomic::Ordering;
+
+    let mut fields: Vec<(&str, String)> = Vec::with_capacity(20);
+
+    // Memory (Windows only — log_memory body, repeated here so values land
+    // in the same phase line for easy correlation).
+    let mem = crate::index::get_process_memory_info();
+    if let Some(ws) = mem.get("workingSetMB").and_then(|v| v.as_f64()) {
+        fields.push(("wsMB", format!("{:.1}", ws)));
+    }
+    if let Some(p) = mem.get("peakWorkingSetMB").and_then(|v| v.as_f64()) {
+        fields.push(("peakWsMB", format!("{:.1}", p)));
+    }
+    if let Some(c) = mem.get("commitMB").and_then(|v| v.as_f64()) {
+        fields.push(("commitMB", format!("{:.1}", c)));
+    }
+
+    // Distinguish contention (`<locked>`) from poisoning (`<poisoned>`) — a
+    // poisoned lock means some earlier writer panicked and the partial state
+    // is questionable; we don't want that signal hidden behind normal
+    // writer-contention output.
+    use std::sync::TryLockError;
+    fn lock_marker<T>(e: TryLockError<T>) -> &'static str {
+        match e {
+            TryLockError::WouldBlock => "<locked>",
+            TryLockError::Poisoned(_) => "<poisoned>",
+        }
+    }
+
+    // ContentIndex — try_read so a stuck write-lock surfaces clearly.
+    match index.try_read() {
+        Ok(idx) => {
+            fields.push(("contentTokens", idx.index.len().to_string()));
+            fields.push(("contentFiles", idx.files.len().to_string()));
+            fields.push(("trigramKeys", idx.trigram.trigram_map.len().to_string()));
+            fields.push(("trigramTokens", idx.trigram.tokens.len().to_string()));
+            fields.push(("trigramDirty", idx.trigram_dirty.to_string()));
+        }
+        Err(e) => {
+            fields.push(("contentIndex", lock_marker(e).to_string()));
+        }
+    }
+
+    // DefinitionIndex.
+    if let Some(def) = def_index.as_ref() {
+        match def.try_read() {
+            Ok(d) => {
+                fields.push(("defCount", d.definitions.len().to_string()));
+                fields.push(("defFiles", d.files.len().to_string()));
+            }
+            Err(e) => {
+                fields.push(("defIndex", lock_marker(e).to_string()));
+            }
+        }
+    }
+
+    // GitHistoryCache.
+    match git_cache.try_read() {
+        Ok(g) => match g.as_ref() {
+            Some(c) => {
+                fields.push(("gitCommits", c.commits.len().to_string()));
+                fields.push(("gitFiles", c.file_commits.len().to_string()));
+                fields.push(("gitAuthors", c.authors.len().to_string()));
+                fields.push(("gitSubjectsBytes", c.subjects.len().to_string()));
+            }
+            None => {
+                fields.push(("gitCache", "absent".to_string()));
+            }
+        },
+        Err(e) => {
+            fields.push(("gitCache", lock_marker(e).to_string()));
+        }
+    }
+
+    // FileIndex.
+    match file_index.try_read() {
+        Ok(f) => match f.as_ref() {
+            Some(fi) => {
+                fields.push(("fileIndexEntries", fi.entries.len().to_string()));
+            }
+            None => {
+                fields.push(("fileIndex", "absent".to_string()));
+            }
+        },
+        Err(e) => {
+            fields.push(("fileIndex", lock_marker(e).to_string()));
+        }
+    }
+
+    // Watcher counters — monotonic, snapshot raw values.
+    fields.push((
+        "watcherEvents",
+        watcher_stats.events_total.load(Ordering::Relaxed).to_string(),
+    ));
+    fields.push((
+        "watcherEmptyPaths",
+        watcher_stats
+            .events_empty_paths
+            .load(Ordering::Relaxed)
+            .to_string(),
+    ));
+    fields.push((
+        "watcherErrors",
+        watcher_stats.events_errors.load(Ordering::Relaxed).to_string(),
+    ));
+    fields.push((
+        "rescanTotal",
+        watcher_stats
+            .periodic_rescan_total
+            .load(Ordering::Relaxed)
+            .to_string(),
+    ));
+    fields.push((
+        "rescanDrift",
+        watcher_stats
+            .periodic_rescan_drift_events
+            .load(Ordering::Relaxed)
+            .to_string(),
+    ));
+
+    crate::index::log_phase("memorySnapshot", &fields);
 }
 
 fn init_logging(args: &ServeArgs, dir_str: &str, exts_for_load: &str, idx_base: &Path) {

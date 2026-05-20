@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+- **Autosave no longer leaves a ~+2 GB transient working-set spike.**
+  After `save_sharded`'s 4-shard parallel `std::thread::scope` ends,
+  `periodic_autosave` now calls `force_mimalloc_collect()` so the
+  per-thread lz4/bincode buffers (~GB-scale per shard) are returned to
+  the OS immediately instead of being retained by mimalloc for ~50 s.
+  Measured on a 1.7 GB content index: WS spike +2118 MB → ~+900 MB,
+  mean WS 4500 → 3913 MB, steady-state autosave wall-clock 50 s → 2 s.
+  Runs on every save path that allocated (success or failure), skipping
+  only the genuine empty-index no-op. New diagnostic background thread
+  `xray-mem-snapshot` emits a `memorySnapshot` phase line every
+  `XRAY_MEM_SNAPSHOT_SEC` seconds (default 60, 0 disables) with
+  WS/peak/commit + per-cache entry counts; uses non-blocking `try_read`
+  so a stuck or poisoned lock surfaces as `<locked>` / `<poisoned>`
+  rather than blocking the diagnostic itself.
+
 - **`xray_grep` adds `filesOnly=true`, `invert=true`, and a literal-glob
   warning for `file=`.**
   - `filesOnly=true` strips per-file payload to `{path, occurrences}` only
