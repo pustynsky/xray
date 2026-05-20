@@ -1719,13 +1719,8 @@ fn build_git_cache_background(
                             None
                         } else {
                             // Check current HEAD
-                            match std::process::Command::new("git")
-                                .args(["rev-parse", &branch])
-                                .current_dir(&repo_path)
-                                .output()
-                            {
-                                Ok(output) if output.status.success() => {
-                                    let current_head = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                            match GitHistoryCache::get_branch_head(&repo_path, &branch) {
+                                Ok(current_head) => {
                                     if disk_cache.is_valid_for_with_shallow(
                                         &current_head,
                                         crate::git::shallow_fingerprint(&bg_dir).as_deref(),
@@ -1759,8 +1754,8 @@ fn build_git_cache_background(
                                         None
                                     }
                                 }
-                                _ => {
-                                    warn!("Failed to get current HEAD, full rebuild");
+                                Err(e) => {
+                                    warn!(error = %e, "Failed to get current HEAD, full rebuild");
                                     None
                                 }
                             }
@@ -1780,13 +1775,23 @@ fn build_git_cache_background(
             let cache = match cache {
                 Some(c) => c,
                 None => {
-                    wait_for_primary_indexes_before_git_cache_rebuild(
+                    if !wait_for_primary_indexes_before_git_cache_rebuild(
                         &readiness.content_terminal,
                         &readiness.def_terminal,
                         &readiness.content_ready,
                         &readiness.def_ready,
                         readiness.wait_for_def_terminal,
-                    );
+                    ) {
+                        bg_git_ready.store(true, Ordering::Release);
+                        crate::index::log_phase("gitCacheReady", &[
+                            ("cacheHitGit", "false".to_string()),
+                            ("gitCacheSkipped", "true".to_string()),
+                            ("gitCacheReadyAtMs", format!("{:.1}", crate::index::debug_elapsed_ms().unwrap_or(0.0))),
+                            ("gitCacheTotalMs", crate::index::format_duration_ms(start.elapsed())),
+                            ("reason", "primaryIndexesWaitTimeout".to_string()),
+                        ]);
+                        return;
+                    }
                     crate::index::log_phase("gitCacheColdBuildStarted", &[
                         ("branch", branch.clone()),
                     ]);
@@ -1860,8 +1865,9 @@ fn wait_for_primary_indexes_before_git_cache_rebuild(
     content_ready: &AtomicBool,
     def_ready: &AtomicBool,
     wait_for_def_terminal: bool,
-) {
+) -> bool {
     let wait_start = Instant::now();
+    let max_wait = Duration::from_secs(300);
     if primary_indexes_terminal_for_git_cache_rebuild(content_terminal, def_terminal, wait_for_def_terminal) {
         crate::index::log_phase("gitCachePrimaryWait", &[
             ("gitCachePrimaryWaitMs", "0.0".to_string()),
@@ -1869,8 +1875,9 @@ fn wait_for_primary_indexes_before_git_cache_rebuild(
             ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
             ("contentTerminal", content_terminal.load(Ordering::Acquire).to_string()),
             ("definitionsTerminal", def_terminal.load(Ordering::Acquire).to_string()),
+            ("timedOut", "false".to_string()),
         ]);
-        return;
+        return true;
     }
 
     info!("Git cache cold rebuild deferred until primary index builds finish");
@@ -1884,6 +1891,19 @@ fn wait_for_primary_indexes_before_git_cache_rebuild(
     // Only cold rebuilds wait here. A valid persisted git cache is loaded earlier,
     // so this removes cold-start contention without delaying cache hits.
     while !primary_indexes_terminal_for_git_cache_rebuild(content_terminal, def_terminal, wait_for_def_terminal) {
+        if wait_start.elapsed() >= max_wait {
+            warn!("Git cache cold rebuild wait timed out; skipping cold rebuild");
+            crate::index::log_phase("gitCachePrimaryWait", &[
+                ("gitCachePrimaryWaitMs", crate::index::format_duration_ms(wait_start.elapsed())),
+                ("contentReady", content_ready.load(Ordering::Acquire).to_string()),
+                ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
+                ("contentTerminal", content_terminal.load(Ordering::Acquire).to_string()),
+                ("definitionsTerminal", def_terminal.load(Ordering::Acquire).to_string()),
+                ("timedOut", "true".to_string()),
+                ("waitTimeoutSec", max_wait.as_secs().to_string()),
+            ]);
+            return false;
+        }
         std::thread::sleep(Duration::from_millis(100));
     }
     crate::index::log_phase("gitCachePrimaryWait", &[
@@ -1892,8 +1912,10 @@ fn wait_for_primary_indexes_before_git_cache_rebuild(
         ("definitionsReady", def_ready.load(Ordering::Acquire).to_string()),
         ("contentTerminal", content_terminal.load(Ordering::Acquire).to_string()),
         ("definitionsTerminal", def_terminal.load(Ordering::Acquire).to_string()),
+        ("timedOut", "false".to_string()),
     ]);
     info!("Primary index builds reached terminal state; starting deferred git cache cold rebuild");
+    true
 }
 
 
