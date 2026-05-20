@@ -1261,6 +1261,10 @@ fn periodic_autosave(
     });
 
     let mut saved = Vec::new();
+    // Capture whether each branch produced output BEFORE we move the strings
+    // out of the outcome tuples (we re-use these flags for the collect gate).
+    let content_did_save = content_outcome.0.is_some();
+    let def_did_save = def_outcome.0.is_some();
     if let Some(s) = content_outcome.0 { saved.push(s); }
     if let Some(s) = def_outcome.0 { saved.push(s); }
     let all_ok = content_outcome.1 && def_outcome.1;
@@ -1272,6 +1276,19 @@ fn periodic_autosave(
             saved = %saved.join(", "),
             "Periodic autosave complete"
         );
+    }
+
+    // Release transient lz4/bincode buffers retained by mimalloc's per-thread
+    // heaps after the `std::thread::scope` in save_sharded ends. Run on EVERY
+    // exit path that did real work (succeeded OR failed), because a save
+    // that errored after compression still leaves the ~GB-scale buffers in
+    // the allocator. Skip only when both branches were genuine no-ops
+    // (empty indexes — no allocation happened to collect).
+    if content_did_save || def_did_save || !all_ok {
+        // Measured on Shared (~693 MB compressed content index): each
+        // autosave wave spiked WS by ~+2 GB and took ~50 s to return to
+        // baseline without this hint.
+        crate::index::force_mimalloc_collect();
     }
 
     all_ok
