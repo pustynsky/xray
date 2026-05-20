@@ -603,14 +603,14 @@ impl GitHistoryCache {
         if validate_git_hash(old_head).is_err() || validate_git_hash(new_head).is_err() {
             return false;
         }
-        Command::new("git")
-            .args(["merge-base", "--is-ancestor", old_head, new_head])
-            .current_dir(repo_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        Self::git_status_with_timeout(
+            repo_path,
+            &["merge-base", "--is-ancestor", old_head, new_head],
+            std::time::Duration::from_secs(15),
+            "git merge-base --is-ancestor",
+        )
+        .map(|s| s.success())
+        .unwrap_or(false)
     }
 
     /// Check if a git object exists in the repository.
@@ -624,14 +624,14 @@ impl GitHistoryCache {
         if validate_git_hash(hash).is_err() {
             return false;
         }
-        Command::new("git")
-            .args(["cat-file", "-t", hash])
-            .current_dir(repo_path)
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
+        Self::git_status_with_timeout(
+            repo_path,
+            &["cat-file", "-t", hash],
+            std::time::Duration::from_secs(15),
+            "git cat-file -t",
+        )
+        .map(|s| s.success())
+        .unwrap_or(false)
     }
 
     /// Build cache by running `git log` and parsing output.
@@ -690,7 +690,7 @@ impl GitHistoryCache {
             ])
             .current_dir(repo_path)
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
+            .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("Failed to spawn git log: {}", e))?;
 
@@ -699,15 +699,34 @@ impl GitHistoryCache {
             .take()
             .ok_or_else(|| "Failed to capture git log stdout".to_string())?;
 
-        let reader = std::io::BufReader::new(stdout);
-        let mut builder = GitHistoryCacheBuilder::new();
+        // Apply the same deadline to both git and stdout parsing.
+        let git_log_timeout = std::time::Duration::from_secs(300);
+        let git_log_start = std::time::Instant::now();
+        let (parser_tx, parser_rx) = std::sync::mpsc::channel();
+        let _parser = std::thread::spawn(move || {
+            let reader = std::io::BufReader::new(stdout);
+            let mut builder = GitHistoryCacheBuilder::new();
+            let result = parse_git_log_stream(reader, &mut builder).map(|_| builder);
+            let _ = parser_tx.send(result);
+        });
 
-        parse_git_log_stream(reader, &mut builder)?;
+        let status = Self::wait_with_timeout(&mut child, git_log_timeout, "git log")?;
 
-        // Wait for git to finish
-        let status = child
-            .wait()
-            .map_err(|e| format!("Failed to wait for git log: {}", e))?;
+        let remaining = git_log_timeout
+            .checked_sub(git_log_start.elapsed())
+            .unwrap_or(std::time::Duration::ZERO);
+        let builder = match parser_rx.recv_timeout(remaining) {
+            Ok(result) => result?,
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "git log parser timed out after {:.1}s",
+                    git_log_timeout.as_secs_f64()
+                ));
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                return Err("git log parser thread panicked".to_string());
+            }
+        };
 
         if !status.success() {
             return Err(format!("git log exited with status: {}", status));
@@ -1031,14 +1050,17 @@ impl GitHistoryCache {
     /// Detect the default branch name by trying main, master, develop, trunk.
     pub fn detect_default_branch(repo_path: &Path) -> Result<String, String> {
         for branch in &["main", "master", "develop", "trunk"] {
-            let output = Command::new("git")
-                .args(["rev-parse", "--verify", branch])
-                .current_dir(repo_path)
-                .stdout(Stdio::null())
-                .stderr(Stdio::null())
-                .status();
+            let status = match Self::git_status_with_timeout(
+                repo_path,
+                &["rev-parse", "--verify", branch],
+                std::time::Duration::from_secs(15),
+                "git rev-parse --verify",
+            ) {
+                Ok(status) => status,
+                Err(_) => continue,
+            };
 
-            if output.map(|s| s.success()).unwrap_or(false) {
+            if status.success() {
                 return Ok(branch.to_string());
             }
         }
@@ -1065,13 +1087,14 @@ impl GitHistoryCache {
     /// `branch="--upload-pack=cmd"` cannot reach `git rev-parse`'s option parser.
     /// (Note: `git rev-parse` does not accept `--` as an end-of-options marker for
     /// positional refs — validation is the sole gate here.)
-    fn get_branch_head(repo_path: &Path, branch: &str) -> Result<String, String> {
+    pub(crate) fn get_branch_head(repo_path: &Path, branch: &str) -> Result<String, String> {
         validate_git_ref(branch)?;
-        let output = Command::new("git")
-            .args(["rev-parse", branch])
-            .current_dir(repo_path)
-            .output()
-            .map_err(|e| format!("Failed to run git rev-parse: {}", e))?;
+        let output = Self::git_output_with_timeout(
+            repo_path,
+            &["rev-parse", branch],
+            std::time::Duration::from_secs(15),
+            "git rev-parse",
+        )?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1079,6 +1102,81 @@ impl GitHistoryCache {
         }
 
         Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn git_status_with_timeout(
+        repo_path: &Path,
+        args: &[&str],
+        timeout: std::time::Duration,
+        context: &str,
+    ) -> Result<std::process::ExitStatus, String> {
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn {}: {}", context, e))?;
+
+        Self::wait_with_timeout(&mut child, timeout, context)
+    }
+
+    fn git_output_with_timeout(
+        repo_path: &Path,
+        args: &[&str],
+        timeout: std::time::Duration,
+        context: &str,
+    ) -> Result<std::process::Output, String> {
+        let mut child = Command::new("git")
+            .args(args)
+            .current_dir(repo_path)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|e| format!("Failed to spawn {}: {}", context, e))?;
+
+        let status = Self::wait_with_timeout(&mut child, timeout, context)?;
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        if let Some(mut out) = child.stdout.take() {
+            use std::io::Read as _;
+            let _ = out.read_to_end(&mut stdout);
+        }
+        if let Some(mut err) = child.stderr.take() {
+            use std::io::Read as _;
+            let _ = err.read_to_end(&mut stderr);
+        }
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
+    }
+
+    fn wait_with_timeout(
+        child: &mut std::process::Child,
+        timeout: std::time::Duration,
+        context: &str,
+    ) -> Result<std::process::ExitStatus, String> {
+        let start = std::time::Instant::now();
+        loop {
+            match child
+                .try_wait()
+                .map_err(|e| format!("Failed to wait for {}: {}", context, e))?
+            {
+                Some(status) => return Ok(status),
+                None if start.elapsed() >= timeout => {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(format!(
+                        "{} timed out after {:.1}s",
+                        context,
+                        timeout.as_secs_f64()
+                    ));
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(10)),
+            }
+        }
     }
 
     /// Convert a [`CommitMeta`] to a [`CachedCommit`] (resolving indices).

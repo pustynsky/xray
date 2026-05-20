@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+- **Git cache background builds now fail open instead of hanging silently.**
+  Startup git-cache warmup now bounds git metadata probes and cold `git log`
+  builds, including the stdout parser path. If primary indexes or git
+  subprocesses stall, `xray serve` marks the cache path terminal and emits a
+  `gitCacheReady` reason instead of leaving `gitCache=absent` forever.
+
 - **Autosave no longer leaves a ~+2 GB transient working-set spike.**
   After `save_sharded`'s 4-shard parallel `std::thread::scope` ends,
   `periodic_autosave` now calls `force_mimalloc_collect()` so the
