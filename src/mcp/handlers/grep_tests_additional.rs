@@ -1267,3 +1267,70 @@ fn test_auto_balance_returns_none_when_nothing_to_drop() {
     assert!(info.is_none(), "no dominant-only files → nothing to drop");
     assert_eq!(results.len(), 1);
 }
+
+#[test]
+fn test_invert_partition_contract_forward_and_invert_partition_scope() {
+    // Forward filesOnly + invert must partition the scoped universe byte-exactly.
+    let scope = vec![
+        "C:/test/A.cs", "C:/test/B.cs", "C:/test/C.cs",
+        "C:/test/D.cs", "C:/test/E.cs",
+    ];
+    let ctx = make_grep_ctx(
+        vec![
+            ("httpclient", 0, vec![5]),
+            ("httpclient", 1, vec![5]),
+            ("httpclient", 2, vec![5]),
+            // file_ids 3, 4 (D.cs, E.cs) have no `httpclient` token.
+        ],
+        scope.clone(),
+        vec!["cs"],
+    );
+
+    let run = |invert: bool| -> Value {
+        let result = handle_xray_grep(&ctx, &json!({
+            "terms": ["httpclient"],
+            "substring": true,
+            "filesOnly": true,
+            "invert": invert,
+            "ext": ["cs"],
+        }));
+        assert!(!result.is_error,
+            "grep (invert={}) should not error: {}", invert, result.content[0].text);
+        serde_json::from_str(&result.content[0].text).unwrap()
+    };
+
+    let forward = run(false);
+    let inverted = run(true);
+
+    let collect_paths = |out: &Value| -> HashSet<String> {
+        out["files"].as_array().unwrap().iter()
+            .map(|f| f["path"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let fwd_paths = collect_paths(&forward);
+    let inv_paths = collect_paths(&inverted);
+    // Exact sets (subsumes disjointness + union = scope).
+    let expected_fwd: HashSet<String> = ["C:/test/A.cs", "C:/test/B.cs", "C:/test/C.cs"]
+        .into_iter().map(String::from).collect();
+    let expected_inv: HashSet<String> = ["C:/test/D.cs", "C:/test/E.cs"]
+        .into_iter().map(String::from).collect();
+    assert_eq!(fwd_paths, expected_fwd, "forward set mismatch");
+    assert_eq!(inv_paths, expected_inv, "invert set mismatch");
+
+    // filesOnly on both, exhaustive (no truncation/caps) on both.
+    for (label, out) in [("forward", &forward), ("invert", &inverted)] {
+        assert_eq!(out["summary"]["filesOnly"], json!(true),
+            "{} summary.filesOnly", label);
+        let status = &out["resultStatus"];
+        assert_eq!(status["status"], json!("complete"),
+            "{} resultStatus.status", label);
+        assert_eq!(status["complete"], json!(true),
+            "{} resultStatus.complete", label);
+        assert_eq!(status["safeForExhaustiveClaims"], json!(true),
+            "{} resultStatus.safeForExhaustiveClaims", label);
+        assert!(status["reasons"].as_array().unwrap().is_empty(),
+            "{} resultStatus.reasons must be empty: {:?}", label, status["reasons"]);
+    }
+    // totalFilesInScope is invert-only; reflects the post-filter universe.
+    assert_eq!(inverted["summary"]["totalFilesInScope"], json!(scope.len()));
+}
