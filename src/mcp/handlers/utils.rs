@@ -1656,7 +1656,7 @@ fn inject_truncation_metadata(output: &mut Value, reasons: &[String], original_b
     let hint = if has_definitions {
         "Response truncated. Narrow your search with more specific name, kind, file, or parent filters, or reduce maxResults."
     } else if has_files {
-        "Use countOnly=true for broad queries, or narrow with dir/ext/exclude filters"
+        "Use countOnly=true for aggregate totals, filesOnly=true to keep the file list without line bodies, or narrow with dir/ext/exclude filters"
     } else {
         "Response truncated. Use more specific filters to reduce result size."
     };

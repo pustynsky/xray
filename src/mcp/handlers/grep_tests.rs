@@ -29,6 +29,8 @@ fn make_params<'a>(
         lock_wait_ms: 0.0,
         trigram_stale: false,
         requested_mode: "token",
+        files_only: false,
+        invert_cap: 0,
     }
 }
 
@@ -724,6 +726,8 @@ fn test_line_regex_file_scan_single_file_match() {
         lock_wait_ms: 0.0,
         trigram_stale: false,
         requested_mode: "substring",
+        files_only: false,
+        invert_cap: 0,
     };
 
     let output = scan_line_regex_file(

@@ -85,6 +85,17 @@ pub(crate) struct GrepSearchParams<'a> {
     pub trigram_stale: bool,
     /// User-visible mode requested before any internal auto-switch.
     pub requested_mode: &'a str,
+    /// When true, strip per-file payload to {path, occurrences} in the final
+    /// response (no `lines`, `lineContent`, `score`, etc.). Lets callers ask
+    /// the `grep -l` question without tripping the global response byte cap.
+    /// `count_only=true` still takes precedence (returns no per-file detail).
+    pub files_only: bool,
+    /// User-requested `maxResults` saved here when `invert=true`, since the
+    /// inner forward search must run uncapped (every dispatcher truncates
+    /// before serializing `files`, which would silently misclassify
+    /// truncated matches as non-matches). `apply_invert` applies this cap
+    /// to the FINAL complement. `0` (the default) means no invert cap.
+    pub invert_cap: usize,
 }
 
 pub(crate) struct FileScoreEntry {
@@ -583,9 +594,206 @@ fn finalize_grep_output(
     output = Value::Object(ordered);
     output = super::utils::attach_result_status(output, result_status);
     add_grep_next_queries(&mut output, terms, params);
+    if params.files_only {
+        apply_files_only(&mut output);
+    }
+    maybe_emit_file_glob_warning(&mut output, params);
     output
 }
 
+/// Strip every per-file entry in `output.files` down to `{path, occurrences}`
+/// and tag `summary.filesOnly=true`. Lets callers ask the `grep -l` question
+/// without paying for line bodies (and without tripping the global response
+/// byte cap, which truncates the `files` array first when oversize).
+///
+/// `count_only=true` short-circuits earlier and never builds a `files`
+/// array, so this helper is a no-op for that path.
+fn apply_files_only(output: &mut Value) {
+    if let Some(files) = output.get_mut("files").and_then(|f| f.as_array_mut()) {
+        for entry in files.iter_mut() {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.retain(|k, _| matches!(k.as_str(), "path" | "occurrences"));
+            }
+        }
+    }
+    if let Some(summary) = output.get_mut("summary").and_then(|s| s.as_object_mut()) {
+        summary.insert("filesOnly".to_string(), Value::Bool(true));
+    }
+}
+
+/// Detect a common UX trap: `file=["**/*.rs"]` or `file=["foo*.toml"]` with
+/// zero matches. `passes_file_filters` treats `file=` entries as
+/// case-insensitive substrings, so a literal glob metachar (`*`, `?`, `[`, `{`)
+/// silently filters out everything. When the user clearly typed a glob AND
+/// got zero file hits, surface a one-line warning in `summary.warnings`
+/// rather than letting them assume the corpus has no matches.
+///
+/// Only fires when `totalFiles == 0` to avoid false positives — if any glob
+/// entry happens to substring-match real paths, the result is correct.
+fn maybe_emit_file_glob_warning(output: &mut Value, params: &GrepSearchParams) {
+    if params.file_filter.is_empty() {
+        return;
+    }
+    let total_files = output
+        .get("summary")
+        .and_then(|s| s.get("totalFiles"))
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0);
+    if total_files != 0 {
+        return;
+    }
+    let glob_entries: Vec<String> = params
+        .file_filter
+        .iter()
+        .filter(|e| e.chars().any(|c| matches!(c, '*' | '?' | '[' | '{')))
+        .cloned()
+        .collect();
+    if glob_entries.is_empty() {
+        return;
+    }
+    let Some(summary) = output.get_mut("summary").and_then(|s| s.as_object_mut()) else {
+        return;
+    };
+    let warnings = summary
+        .entry("warnings".to_string())
+        .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    if let Some(map) = warnings.as_object_mut() {
+        map.insert(
+            "fileFilterLiteralGlob".to_string(),
+            serde_json::json!({
+                "entries": glob_entries,
+                "hint": "file= entries are matched as case-insensitive substrings, \
+                         not glob patterns. Replace e.g. file=[\"**/*.rs\"] with \
+                         ext=[\"rs\"], or file=[\"foo*.toml\"] with file=[\"foo\"] \
+                         ext=[\"toml\"].",
+            }),
+        );
+    }
+}
+
+/// Invert (`grep -L`) post-process: turn the result of a normal grep into
+/// the list of in-scope files that did NOT match. Mutates `result` in place
+/// by parsing the embedded JSON, replacing the `files` array with the
+/// complement (filtered by `passes_file_filters`), and rewriting summary +
+/// resultStatus accounting. Set by `parse_grep_args` only when `invert=true`
+/// AND an explicit scope is present (file=, dir=, ext=, or exact_file_path).
+///
+/// Always implies `files_only=true` (enforced at parse time); the per-file
+/// payload is just `{path}`.
+///
+/// Pre-truncation count is preserved as `summary.totalFilesInScope` so the
+/// caller can see the universe size even after `max_results` capping.
+fn apply_invert(
+    mut result: ToolCallResult,
+    index: &ContentIndex,
+    params: &GrepSearchParams,
+) -> ToolCallResult {
+    let Some(content) = result.content.first_mut() else { return result; };
+    let mut output: Value = match serde_json::from_str(&content.text) {
+        Ok(v) => v,
+        Err(_) => return result,
+    };
+
+    // 1. Collect paths that DID match from the inner result.
+    let mut matched: HashSet<String> = HashSet::new();
+    if let Some(files) = output.get("files").and_then(|f| f.as_array()) {
+        for entry in files {
+            if let Some(path) = entry.get("path").and_then(|p| p.as_str()) {
+                matched.insert(path.to_string());
+            }
+        }
+    }
+
+    // 2. Walk index.files, build complement filtered by passes_file_filters.
+    //    Reuses the same scope rules as the forward search so the user sees a
+    //    consistent universe definition (file=, dir=, ext=, exclude=).
+    let mut complement: Vec<String> = Vec::new();
+    let mut total_in_scope: usize = 0;
+    for file_path in index.files.iter() {
+        if !passes_file_filters(file_path, params) {
+            continue;
+        }
+        total_in_scope += 1;
+        if matched.contains(file_path) {
+            continue;
+        }
+        complement.push(file_path.clone());
+    }
+    let total_complement = complement.len();
+    let cap = params.invert_cap;
+    let truncated = cap > 0 && total_complement > cap;
+    if truncated {
+        complement.truncate(cap);
+    }
+    let shown_files = complement.len();
+
+    // 3. Replace files array with stripped `{path}` entries. apply_files_only
+    //    runs afterwards in finalize_grep_output for the forward path, but the
+    //    inverted listing skips that pipeline — so emit the final shape here.
+    let files_json: Vec<Value> = complement
+        .into_iter()
+        .map(|p| serde_json::json!({ "path": p }))
+        .collect();
+    output["files"] = Value::Array(files_json);
+
+    // 4. Rewrite summary accounting. Preserve search timing, mode, index
+    //    stats; overwrite the file/occurrence counters and add invert flags.
+    if let Some(summary) = output.get_mut("summary").and_then(|s| s.as_object_mut()) {
+        summary.insert("invert".to_string(), Value::Bool(true));
+        summary.insert("filesOnly".to_string(), Value::Bool(true));
+        summary.insert("totalFiles".to_string(), serde_json::json!(total_complement));
+        summary.insert("totalFilesInScope".to_string(), serde_json::json!(total_in_scope));
+        summary.insert(
+            "totalFilesWithMatches".to_string(),
+            serde_json::json!(matched.len()),
+        );
+        summary.insert("totalOccurrences".to_string(), serde_json::json!(0));
+    }
+
+    // 5. Rewrite resultStatus shown/total/omitted so completeness flags reflect
+    //    the inverted (post-cap) result, not the inner forward search.
+    if let Some(rs) = output.get_mut("resultStatus").and_then(|r| r.as_object_mut()) {
+        rs.insert(
+            "shown".to_string(),
+            serde_json::json!({ "files": shown_files, "occurrences": 0 }),
+        );
+        rs.insert(
+            "total".to_string(),
+            serde_json::json!({ "files": total_complement, "occurrences": 0 }),
+        );
+        rs.insert(
+            "omitted".to_string(),
+            serde_json::json!({
+                "files": if truncated { total_complement - shown_files } else { 0 },
+                "occurrences": 0,
+            }),
+        );
+        rs.insert(
+            "status".to_string(),
+            Value::String(if truncated { "partial".to_string() } else { "complete".to_string() }),
+        );
+        rs.insert("complete".to_string(), Value::Bool(!truncated));
+        // The inner forward search ran uncapped (`max_results=0`) under invert,
+        // so its `safeForExhaustiveClaims=true` reflects the matched set, not
+        // the inverted listing. Recompute against the post-cap complement so
+        // downstream consumers can trust the flag for "did any files miss".
+        rs.insert(
+            "safeForExhaustiveClaims".to_string(),
+            Value::Bool(!truncated),
+        );
+        // Mirror the standard `reasons` contract: empty when complete, list
+        // `max_results` when the cap dropped some of the complement.
+        let reasons: Vec<Value> = if truncated {
+            vec![Value::String("max_results".to_string())]
+        } else {
+            Vec::new()
+        };
+        rs.insert("reasons".to_string(), Value::Array(reasons));
+    }
+
+    content.text = json_to_string(&output);
+    result
+}
 
 /// Threshold (milliseconds) above which a `lineRegex` scan is considered slow
 /// enough to warrant a performance hint in the response. Patterns that reduce
@@ -1935,6 +2143,15 @@ struct ParsedGrepArgs {
     /// Optional explicit per-term file cap for the dominant-only group when
     /// auto-balance triggers. `None` = derived from `2 * second_max`.
     max_occurrences_per_term: Option<usize>,
+    /// Strip per-file payload to `{path, occurrences}` in the final response.
+    /// Set by `filesOnly=true` OR implicitly by `invert=true`.
+    files_only: bool,
+    /// List in-scope files that DID NOT match (`grep -L`). Implies `files_only`.
+    /// Validated against scope-required rule in `parse_grep_args`.
+    invert: bool,
+    /// Saved user-requested `max_results` when `invert=true`, applied to the
+    /// FINAL complement by `apply_invert`. `0` if invert is off.
+    invert_cap: usize,
 }
 
 /// Parse and validate all grep parameters from JSON args.
@@ -2145,6 +2362,58 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         Err(e) => return Err(ToolCallResult::error(e)),
     };
 
+    // `filesOnly`/`invert` shape the OUTPUT, not the search. Read both up-front
+    // so the scope-required check below sees the final `invert` value.
+    // `invert=true` always implies `files_only=true` (the inverted listing has
+    // no per-file line data to show); record the implication explicitly.
+    let invert = args.get("invert").and_then(|v| v.as_bool()).unwrap_or(false);
+    let files_only = args.get("filesOnly").and_then(|v| v.as_bool()).unwrap_or(false) || invert;
+
+    // Strict scope-required for `invert=true`. Without an explicit scope
+    // (`file=`, `dir=`, `ext=`, or auto-converted `exact_file_path`) the
+    // inverted set is `index.files \ matched` — i.e. nearly the entire repo
+    // for any narrow term, which is rarely the user's intent. Aligned with
+    // the strictness of `parse_bounded_usize` and the regex/phrase mutex.
+    if invert {
+        let has_scope = !file_filter.is_empty()
+            || dir_filter.is_some()
+            || !ext_filter.is_empty()
+            || exact_file_path.is_some();
+        if !has_scope {
+            return Err(ToolCallResult::error(
+                "invert=true requires an explicit scope to avoid inverting against \
+                 the entire indexed corpus. Add one of: file=[\"<substring>\"], \
+                 dir=\"<path>\", or ext=[\"<extension>\"]. Example: \
+                 invert=true terms=[\"TODO\"] ext=[\"rs\"] returns all .rs files \
+                 without TODO.".to_string(),
+            ));
+        }
+        // `invert=true` + `countOnly=true` is incoherent: count-only deliberately
+        // omits the `files` array, so `apply_invert` would compute the complement
+        // against an empty matched set and silently return the whole scoped
+        // universe as "did not match". Reject up-front instead of producing
+        // misleading output.
+        if count_only {
+            return Err(ToolCallResult::error(
+                "invert=true and countOnly=true are mutually exclusive: countOnly \
+                 omits the matched file list that invert needs to compute the \
+                 complement. Drop one of them.".to_string(),
+            ));
+        }
+    }
+
+    // When `invert=true`, the inner forward search MUST run uncapped — every
+    // built-in dispatcher truncates `results` to `max_results` BEFORE the
+    // response is serialized, and `apply_invert` derives the matched set from
+    // that already-truncated `files` array. With the default `maxResults=50`,
+    // a scoped query producing >50 matches would have the hidden matches
+    // mis-classified as non-matches and erroneously included in the inverted
+    // listing. Save the user's intended cap into `invert_cap` and apply it to
+    // the FINAL complement inside `apply_invert`; the inner pipeline sees
+    // `max_results=0` (treated as unlimited by every builder).
+    let invert_cap = if invert { max_results } else { 0 };
+    let max_results = if invert { 0 } else { max_results };
+
     Ok(ParsedGrepArgs {
         terms,
         dir_filter,
@@ -2166,6 +2435,9 @@ fn parse_grep_args(args: &Value, server_dir: &str) -> Result<ParsedGrepArgs, Too
         dir_auto_converted_note,
         auto_balance,
         max_occurrences_per_term,
+        files_only,
+        invert,
+        invert_cap,
     })
 }
 
@@ -2541,6 +2813,8 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         lock_wait_ms,
         trigram_stale,
         requested_mode,
+        files_only: parsed.files_only,
+        invert_cap: parsed.invert_cap,
     };
 
 
@@ -2548,6 +2822,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     if parsed.use_substring {
         let mut result = handle_substring_search(ctx, &index, &parsed.terms, &grep_params);
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+        if parsed.invert {
+            result = apply_invert(result, &index, &grep_params);
+        }
         return result;
     }
 
@@ -2560,6 +2837,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         }
         let mut result = handle_multi_phrase_search(ctx, &index, &phrases, &grep_params);
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+        if parsed.invert {
+            result = apply_invert(result, &index, &grep_params);
+        }
         return result;
     }
 
@@ -2571,6 +2851,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         let patterns: Vec<String> = parsed.terms.clone();
         let mut result = handle_line_regex_search(ctx, &index, patterns, &grep_params);
         inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
+        if parsed.invert {
+            result = apply_invert(result, &index, &grep_params);
+        }
         return result;
     }
 
@@ -2641,6 +2924,9 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     inject_grep_ext_hint(&mut result, &parsed.ext_filter, ctx);
 
+    if parsed.invert {
+        result = apply_invert(result, &index, &grep_params);
+    }
     result
 }
 

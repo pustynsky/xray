@@ -823,6 +823,325 @@ fn test_intersect_sorted_unique_subset() {
     assert_eq!(intersect_sorted_unique(&b, &a), vec![5, 10, 15]);
 }
 
+// ─── filesOnly / invert / file-glob-warning tests ─────────────────────
+//
+// These cover the contract added by `filesOnly=true`, `invert=true`, and the
+// `file=` literal-glob warning. They use the same `make_grep_ctx` shape as
+// `make_substring_ctx` from `handlers_tests_grep.rs` (kept local here to
+// avoid cross-module re-export).
+
+use crate::index::build_trigram_index;
+use crate::Posting;
+use super::super::handlers_test_utils::HandlerContextBuilder;
+
+fn make_grep_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&str>, exts: Vec<&str>) -> HandlerContext {
+    let mut index_map: HashMap<String, Vec<Posting>> = HashMap::new();
+    for (token, file_id, lines) in &tokens_to_files {
+        index_map
+            .entry(token.to_string())
+            .or_default()
+            .push(Posting { file_id: *file_id, lines: lines.clone() });
+    }
+    let file_token_counts: Vec<u32> = {
+        let mut counts = vec![0u32; files.len()];
+        for (_, file_id, lines) in &tokens_to_files {
+            if (*file_id as usize) < counts.len() {
+                counts[*file_id as usize] += lines.len() as u32;
+            }
+        }
+        counts
+    };
+    let total_tokens: u64 = file_token_counts.iter().map(|&c| c as u64).sum();
+    let trigram = build_trigram_index(&index_map);
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: files.iter().map(|s| s.to_string()).collect(),
+        index: index_map,
+        total_tokens,
+        extensions: exts.iter().map(|s| s.to_string()).collect(),
+        file_token_counts,
+        trigram,
+        ..Default::default()
+    };
+    HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .build()
+}
+
+#[test]
+fn test_files_only_strips_lines_and_score() {
+    let ctx = make_grep_ctx(
+        vec![("httpclient", 0, vec![5, 12]), ("httpclient", 1, vec![3])],
+        vec!["C:/test/A.cs", "C:/test/B.cs"],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "filesOnly": true,
+        "showLines": true,
+    }));
+    assert!(!result.is_error, "grep should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["filesOnly"], json!(true));
+    let files = output["files"].as_array().expect("files array");
+    assert_eq!(files.len(), 2);
+    for f in files {
+        let obj = f.as_object().expect("file entry is object");
+        assert!(obj.contains_key("path"), "path must remain: {:?}", obj);
+        // Only `path` and `occurrences` allowed; lines / lineContent / score must be stripped.
+        for key in obj.keys() {
+            assert!(
+                matches!(key.as_str(), "path" | "occurrences"),
+                "filesOnly should strip key `{}` from file entry: {:?}",
+                key, obj
+            );
+        }
+    }
+}
+
+#[test]
+fn test_files_only_with_count_only_count_only_wins() {
+    // countOnly returns no files array — filesOnly is then a no-op (summary tagged).
+    let ctx = make_grep_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:/test/A.cs"],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "filesOnly": true,
+        "countOnly": true,
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    // countOnly path doesn't build a files array.
+    assert!(output.get("files").is_none() || output["files"].as_array().is_some_and(|a| a.is_empty()));
+}
+
+#[test]
+fn test_invert_without_scope_errors() {
+    let ctx = make_grep_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:/test/A.cs"],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "invert": true,
+    }));
+    assert!(result.is_error, "invert without scope must error");
+    let msg = &result.content[0].text;
+    assert!(
+        msg.contains("invert=true requires an explicit scope"),
+        "error should explain scope requirement, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_invert_with_ext_lists_files_without_match() {
+    // 3 .cs files; only A contains the term — invert should list B and C.
+    let ctx = make_grep_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:/test/A.cs", "C:/test/B.cs", "C:/test/C.cs"],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "invert": true,
+        "ext": ["cs"],
+    }));
+    assert!(!result.is_error, "invert with scope should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["invert"], json!(true));
+    assert_eq!(output["summary"]["filesOnly"], json!(true));
+    assert_eq!(output["summary"]["totalFiles"], json!(2), "complement has 2 files");
+    assert_eq!(output["summary"]["totalFilesInScope"], json!(3));
+    assert_eq!(output["summary"]["totalFilesWithMatches"], json!(1));
+    let paths: HashSet<String> = output["files"]
+        .as_array().unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+    assert!(paths.contains("C:/test/B.cs"));
+    assert!(paths.contains("C:/test/C.cs"));
+    assert!(!paths.contains("C:/test/A.cs"));
+    // Non-truncated invert is exhaustive over the scoped universe.
+    assert_eq!(output["resultStatus"]["status"], json!("complete"));
+    assert_eq!(output["resultStatus"]["complete"], json!(true));
+    assert_eq!(output["resultStatus"]["safeForExhaustiveClaims"], json!(true));
+    assert!(output["resultStatus"]["reasons"].as_array().unwrap().is_empty());
+}
+
+#[test]
+fn test_file_filter_literal_glob_emits_warning_when_zero_matches() {
+    // file=["**/*.cs"] is a glob, treated as a substring — matches nothing.
+    let ctx = make_grep_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:/test/A.cs"],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "file": ["**/*.cs"],
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], json!(0));
+    let warning = &output["summary"]["warnings"]["fileFilterLiteralGlob"];
+    assert!(warning.is_object(), "glob warning should be emitted, got summary: {}", output["summary"]);
+    let entries = warning["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0], json!("**/*.cs"));
+}
+
+#[test]
+fn test_file_filter_literal_substring_no_warning_when_matches_exist() {
+    // file=["A"] is a plain substring — matches A.cs, no warning expected.
+    let ctx = make_grep_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:/test/A.cs"],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "file": ["A"],
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], json!(1));
+    // No glob metachar in `file=`, so no warning regardless of match count.
+    assert!(
+        output["summary"].get("warnings").is_none()
+            || output["summary"]["warnings"].get("fileFilterLiteralGlob").is_none(),
+        "non-glob file filter must not trigger the literal-glob warning: {}",
+        output["summary"]
+    );
+}
+
+#[test]
+fn test_invert_with_count_only_errors() {
+    // countOnly omits the matched-files list that apply_invert needs to
+    // compute the complement; the combo would silently return the whole
+    // scoped universe as "did not match". Reject up-front.
+    let ctx = make_grep_ctx(
+        vec![("httpclient", 0, vec![5])],
+        vec!["C:/test/A.cs"],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "invert": true,
+        "ext": ["cs"],
+        "countOnly": true,
+    }));
+    assert!(result.is_error, "invert + countOnly must error");
+    let msg = &result.content[0].text;
+    assert!(
+        msg.contains("mutually exclusive"),
+        "error should mention mutual exclusivity, got: {}",
+        msg
+    );
+}
+
+#[test]
+fn test_invert_complement_correct_when_matches_exceed_max_results() {
+    // 4 .cs files match the term, 1 does not. With user-requested maxResults=2,
+    // the inner search would (without the fix) truncate `files` to 2,
+    // making apply_invert mis-classify the 2 hidden matches as non-matches
+    // and return a 3-file complement. The fix runs the inner search uncapped
+    // when invert=true so the complement is the true single non-matching file.
+    let ctx = make_grep_ctx(
+        vec![
+            ("httpclient", 0, vec![5]),
+            ("httpclient", 1, vec![5]),
+            ("httpclient", 2, vec![5]),
+            ("httpclient", 3, vec![5]),
+            // file_id=4 has no `httpclient` token — the only true miss.
+        ],
+        vec!["C:/test/A.cs", "C:/test/B.cs", "C:/test/C.cs", "C:/test/D.cs", "C:/test/E.cs"],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "invert": true,
+        "ext": ["cs"],
+        "maxResults": 2,
+    }));
+    assert!(!result.is_error, "invert should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["invert"], json!(true));
+    assert_eq!(output["summary"]["totalFilesInScope"], json!(5));
+    assert_eq!(output["summary"]["totalFilesWithMatches"], json!(4),
+        "inner search must run uncapped under invert");
+    assert_eq!(output["summary"]["totalFiles"], json!(1),
+        "complement is exactly the single non-matching file");
+    let paths: HashSet<String> = output["files"]
+        .as_array().unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap().to_string())
+        .collect();
+    assert!(paths.contains("C:/test/E.cs"));
+    assert!(!paths.contains("C:/test/A.cs"));
+}
+
+#[test]
+fn test_invert_caps_complement_at_user_max_results() {
+    // 5 files match, 5 do not. User asks for maxResults=2. Inner search runs
+    // uncapped (so all 5 matches are visible), then the FINAL complement is
+    // truncated to 2 with truncated=true reported in the summary.
+    let ctx = make_grep_ctx(
+        vec![
+            ("httpclient", 0, vec![5]),
+            ("httpclient", 1, vec![5]),
+            ("httpclient", 2, vec![5]),
+            ("httpclient", 3, vec![5]),
+            ("httpclient", 4, vec![5]),
+            // file_ids 5..=9 have no `httpclient` token.
+        ],
+        vec![
+            "C:/test/A.cs", "C:/test/B.cs", "C:/test/C.cs", "C:/test/D.cs", "C:/test/E.cs",
+            "C:/test/F.cs", "C:/test/G.cs", "C:/test/H.cs", "C:/test/I.cs", "C:/test/J.cs",
+        ],
+        vec!["cs"],
+    );
+    let result = handle_xray_grep(&ctx, &json!({
+        "terms": ["httpclient"],
+        "substring": true,
+        "invert": true,
+        "ext": ["cs"],
+        "maxResults": 2,
+    }));
+    assert!(!result.is_error);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFilesWithMatches"], json!(5));
+    // totalFiles surfaces the TRUE complement size (5), regardless of the cap.
+    assert_eq!(output["summary"]["totalFiles"], json!(5));
+    // resultStatus reflects the post-cap delivered slice.
+    assert_eq!(output["resultStatus"]["shown"]["files"], json!(2),
+        "complement delivered capped at maxResults=2");
+    assert_eq!(output["resultStatus"]["total"]["files"], json!(5));
+    assert_eq!(output["resultStatus"]["omitted"]["files"], json!(3));
+    // Capped invert MUST flip exhaustive-claim guards so downstream consumers
+    // do not treat the partial listing as a definitive "did any files miss".
+    assert_eq!(output["resultStatus"]["status"], json!("partial"));
+    assert_eq!(output["resultStatus"]["complete"], json!(false));
+    assert_eq!(output["resultStatus"]["safeForExhaustiveClaims"], json!(false));
+    let reasons = output["resultStatus"]["reasons"].as_array().unwrap();
+    assert!(reasons.iter().any(|r| r == "max_results"),
+        "capped invert should cite max_results in reasons: {:?}", reasons);
+    // And the actual files array honors the cap.
+    assert_eq!(output["files"].as_array().unwrap().len(), 2);
+}
+
 #[test]
 fn test_intersect_sorted_unique_single_element() {
     assert_eq!(intersect_sorted_unique(&[42u32], &[42u32]), vec![42]);
