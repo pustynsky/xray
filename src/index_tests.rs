@@ -1862,4 +1862,58 @@ fn test_content_index_save_load_roundtrip_via_sharded_path() {
     }
 }
 
+#[test]
+fn test_sharded_streaming_large_head_and_entries() {
+    // Exercises the streaming placeholder-patch path with a non-trivial head
+    // and enough entries to fill all shards with real data.
+    use serde::{Deserialize, Serialize};
+    #[derive(Serialize, Deserialize, Debug, PartialEq)]
+    struct Head {
+        root: String,
+        format_version: u32,
+        padding: Vec<u8>,
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("streaming_large.bin");
+    let head = Head {
+        root: "/large/repo".to_string(),
+        format_version: 5,
+        padding: vec![0xAB; 4096],
+    };
+    let entries: Vec<(u32, String)> =
+        (0..10_000u32).map(|i| (i, format!("entry-{i}-payload"))).collect();
+
+    crate::index::save_sharded(&path, &head, entries.clone(), "streaming-test").unwrap();
+    let (loaded_head, loaded): (Head, Vec<(u32, String)>) =
+        crate::index::load_sharded(&path, "streaming-test").unwrap();
+    assert_eq!(loaded_head, head);
+    assert_eq!(loaded.len(), entries.len());
+    assert_eq!(loaded, entries);
+}
+
+#[test]
+fn test_sharded_temp_file_cleaned_on_serialize_failure() {
+    use serde::ser::{self, Serializer};
+
+    struct FailSerialize;
+    impl serde::Serialize for FailSerialize {
+        fn serialize<S: Serializer>(&self, _s: S) -> Result<S::Ok, S::Error> {
+            Err(ser::Error::custom("intentional failure"))
+        }
+    }
+
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("fail.bin");
+    let result = crate::index::save_sharded(&path, &42u32, vec![FailSerialize], "fail-test");
+    assert!(result.is_err());
+
+    let leftovers: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.file_name().to_string_lossy().contains("xray_tmp"))
+        .collect();
+    assert!(leftovers.is_empty(), "TempFileGuard must clean up on failure: {:?}", leftovers);
+}
+
 
