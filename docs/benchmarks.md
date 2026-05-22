@@ -4,7 +4,7 @@ All numbers in this document are **measured**, not estimated. Criterion benchmar
 
 > **Last measured: 2026-03.** Refactors landed since then (April 2026: complexity reduction in `apply_text_edits` / `handle_xray_fast` / `handle_xray_reindex_inner` / `cmd_serve`, periodic watcher rescan, Rust parser via `lang-rust`; May 2026: lock-order RAII enforcement in `mcp::lock_order`, on-demand XML parser via `lang-xml`, doc-audit pass) have **not** been re-benchmarked against the production C# corpus. Treat the absolute numbers as a March baseline; relative comparisons (xray vs ripgrep, index vs live walk) remain representative.
 
-## Test Environments
+## Test environments
 
 Benchmarks were measured on two machines to show hardware-dependent variability:
 
@@ -19,7 +19,7 @@ Benchmarks were measured on two machines to show hardware-dependent variability:
 
 Unless noted, numbers are from Machine 1. Cross-machine comparisons are shown where available.
 
-## Codebase Under Test
+## Codebase under test
 
 Real production C# codebase (enterprise backend monorepo):
 
@@ -48,7 +48,7 @@ Single-term search for `HttpClient` across the full codebase. xray.exe token mat
 
 > **Note:** In MCP server mode, the index is loaded once at startup. All subsequent queries pay only the search+rank cost (0.6–4ms depending on hardware), not the load cost.
 
-## CLI Search Latency (index pre-loaded from disk)
+## CLI search latency (index pre-loaded from disk)
 
 Measured via `xray grep` on 48,779-file C# index (754K unique tokens). Search+Rank is the pure in-memory search time; total CLI time also includes index load from disk (~1.2s, LZ4 decompress + bincode deserialize):
 
@@ -159,7 +159,7 @@ Comprehensive comparison of MCP `tools/call` JSON-RPC queries vs `rg` (ripgrep v
   → Returns 48-node hierarchical call tree in ~0.5–11ms (varies by direction and graph density)
 - **rg**: No equivalent. Would require 7+ sequential `rg` + `read_file` calls (estimated 5+ minutes of agent round-trips)
 
-## File Count Differences: MCP vs ripgrep
+## File count differences: MCP vs ripgrep
 
 > **Update:** Since the introduction of `substring=true` as the default in MCP mode, most file count mismatches between MCP and ripgrep have been eliminated. The table below documents the **historical** differences that existed when the default was exact token match, and explains why `substring=false` mode still shows different counts.
 
@@ -217,7 +217,7 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 > ¹ `rg` only provides flat text search — it cannot build a call tree. The 52s is for a single `rg` query; building a 3-level tree manually would require 3–7 sequential queries totaling 150–350 seconds.
 > ² For containsLine, `rg` only reads a single file (not the full repo), so the speedup is smaller.
 
-## Performance Summary by Search Mode
+## Performance summary by search mode
 
 | Mode                               | Latency (MCP, in-memory) | Speedup vs rg        | Notes                                                      |
 | ---------------------------------- | ------------------------ | -------------------- | ---------------------------------------------------------- |
@@ -235,7 +235,7 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 
 **Note:** Callee traversal (direction=down) remains at ~0.5ms. Caller traversal (direction=up) is ~3–11ms due to DI resolution, test deprioritization, and popularity sorting features added since the initial benchmarks. Content search and index lookups remain stable.
 
-### Unique Capabilities (no rg equivalent)
+### Unique capabilities (no rg equivalent)
 
 | Capability             | Tool                 | What it does                                                                                                         |
 | ---------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------- |
@@ -244,14 +244,14 @@ Measured via MCP `tools/call` JSON-RPC with index pre-loaded in RAM. No disk I/O
 | **Structured results** | `xray_grep`        | TF-IDF ranked files with occurrence counts, line numbers, context groups                                             |
 | **Substring matching** | `xray_grep`        | Default `substring=true` matches inside compound identifiers (e.g., `UserMapper` finds `DeleteUserMapperCacheEntry`) |
 
-### When to Use ripgrep Instead
+### When to use ripgrep instead
 
 - Searching **non-indexed file types** (XML, SQL, JSON, YAML, `.csproj`) — unless they are included in `--ext`
 - Exact **raw substring** matching needed when `substring=true` behaves differently than expected (MCP tokenizes, so `m_` prefix is a separate token)
 - xray MCP server is not running
 - One-off searches where index build time (7–16s) is not justified
 
-## MCP Tool Latency Summary
+## MCP tool latency summary
 
 Verified measurements from two machines:
 
@@ -272,7 +272,7 @@ Verified measurements from two machines:
 | `xray_callers`     | Call tree — callees (down)             | 0.5 ms                 | —                      |
 | `xray_callers`     | Call tree — callers (up, depth 3)      | 3–11 ms                | —                      |
 
-## File Name Search
+## File name search
 
 Searching for `notepad` in 333,875 indexed entries (C:\Windows):
 
@@ -282,7 +282,7 @@ Searching for `notepad` in 333,875 indexed entries (C:\Windows):
 
 Index load: 0.055s, search: 0.036s.
 
-## Index Build Times
+## Index build times
 
 Three distinct indexes, each built independently:
 
@@ -338,7 +338,7 @@ Run with `cargo bench`. Uses synthetic data for cross-machine reproducibility.
 
 Scoring time scales linearly with posting list size (number of files containing the term).
 
-### Regex Token Scan
+### Regex token scan
 
 | Pattern                     | 1K files | 10K files | 50K files |
 | --------------------------- | -------- | --------- | --------- |
@@ -405,9 +405,9 @@ Measured on 5,000-file synthetic index (15.9 MB serialized):
 
 Extrapolated for real 241.7 MB index: ~700ms deserialize (matches measured 689ms load time).
 
-> **Note:** Since Feb 2026, all index files are LZ4 frame-compressed on disk. The serialization benchmarks above measure raw bincode without compression. Actual load times include LZ4 decompression — see [Index Load Times](#index-load-times-measured) for compressed load measurements.
+> **Note:** Since Feb 2026, all index files are LZ4 frame-compressed on disk. The serialization benchmarks above measure raw bincode without compression. Actual load times include LZ4 decompression — see [Index load times](#index-load-times-measured) for compressed load measurements.
 
-## Index Load Times (measured)
+## Index load times (measured)
 
 | Index Type             | Files   | Disk Size (LZ4) | Load Time (LZ4 decompress + deserialize) |
 | ---------------------- | ------- | --------------- | ---------------------------------------- |
@@ -433,7 +433,7 @@ Measured on 48,779-file C# codebase (see `docs/run-benchmarks.ps1` for automated
 | Disk overhead                   | None    | ~327 MB (LZ4 compressed content+defs) | —                     |
 | RAM (server mode, estimated)    | None    | ~600–800 MB (estimated, varies by repo size; e.g. ContentIndex ~350 MB + DefinitionIndex ~324 MB uncompressed in-memory for the 48,599-file C# corpus — see [storage.md](storage.md#sizes-on-disk)) | —                     |
 
-## Bottlenecks and Scaling Limits
+## Bottlenecks and scaling limits
 
 | Bottleneck              | Measured Value          | Cause                                          | Mitigation                                  |
 | ----------------------- | ----------------------- | ---------------------------------------------- | ------------------------------------------- |
@@ -444,7 +444,7 @@ Measured on 48,779-file C# codebase (see `docs/run-benchmarks.ps1` for automated
 | Content index build     | 7.0s                    | Parallel I/O + tokenization                    | Already parallelized (24 threads)           |
 | Def index build         | 16.1s                   | tree-sitter parsing CPU-bound                  | Already parallelized (24 threads)           |
 
-## Cross-Machine Variability
+## Cross-machine variability
 
 Benchmarks measured on two machines using the same benchmark script (`run-benchmarks.ps1`). Machine 2 is an Azure VM with DevDrive (ReFS) on NVMe-backed storage:
 

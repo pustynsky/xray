@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **Docs: humanize README and `docs/` pass — strip AI-fingerprint patterns from prose.**
+  Cosmetic pass over `README.md` and 5 docs (`docs/architecture.md`,
+  `docs/benchmarks.md`, `docs/mcp-guide.md`, `docs/storage.md`,
+  `docs/tradeoffs.md`). Two mechanical normalizations:
+  - Bullet `- **Label** — desc` / `- Word — desc` → colon form
+    (`- **Label:** desc` / `- Word: desc`). Removed the dominant
+    AI-style em-dash separator from ~140 bullets across
+    `docs/tradeoffs.md` (sections 1–14), `docs/storage.md`,
+    `docs/mcp-guide.md`, and `README.md`.
+  - Title Case `##` / `###` headings → sentence case (e.g.
+    `## Index File Layout` → `## Index file layout`). Acronyms and
+    product names preserved (VS Code, AI, MCP, CLI, AST, TF-IDF, LZ4,
+    DI, HEAD, SQL, XML, C#, TSX, JSON, YAML). ~30 headings total.
+  Tables, code blocks, mermaid diagrams, links, file paths, and the
+  numbered section titles in `docs/tradeoffs.md` (`## 1. Index Storage:
+  Bincode + LZ4`, etc.) were intentionally left as-is. No content,
+  factual, or structural changes — prose intent is unchanged.
+
 ## 0.2.8 (2026-05-20)
 
 - **`save_sharded` streams directly to disk — eliminates transient compressed

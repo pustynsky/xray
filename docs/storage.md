@@ -1,6 +1,6 @@
 # Storage Model
 
-## Index File Layout
+## Index file layout
 
 All indexes are stored under a platform-specific data directory:
 
@@ -19,7 +19,7 @@ xray/
 └── rust_search_aabb0011.code-structure                 ← DefinitionIndex (rs)
 ```
 
-### File Naming Scheme
+### File naming scheme
 
 Each index file is named with a human-readable semantic prefix and a truncated hash:
 
@@ -41,7 +41,7 @@ Where:
 | `.code-structure`   | DefinitionIndex | AST definitions & callers (`xray_definitions`, `xray_callers`) |
 | `.git-history`      | GitHistoryCache | Git commit history cache (`xray_git_history`, `xray_git_authors`, `xray_git_activity`) |
 
-### Semantic Prefix Rules
+### Semantic prefix rules
 
 The prefix is extracted from the canonicalized directory path by `extract_semantic_prefix()`:
 
@@ -83,7 +83,7 @@ let filename = format!("{}_{:08x}.git-history", prefix, hash as u32);
 
 FNV-1a provides 64-bit hashes, truncated to 32 bits for the filename. Hash collisions are possible but extremely unlikely for realistic use — birthday bound is ~77K directories for 50% collision probability. No collision detection is implemented — a collision would silently overwrite the previous index.
 
-## Serialization Format
+## Serialization format
 
 All indexes use [bincode](https://docs.rs/bincode/1/bincode/) v1 for serialization, wrapped in [LZ4 frame compression](https://crates.io/crates/lz4_flex) for reduced disk usage and faster I/O.
 
@@ -171,7 +171,7 @@ Per-shard decode is timed and reported in the debug log via
 | Compression | LZ4 frame compression (`lz4_flex`); single-frame magic `LZ4S` or sharded magic `XRYS`   |
 | Atomicity   | Whole-file write to a unique temp sibling (`.<file>.xray_tmp.<pid>.<nanos>.<counter>`) then `rename` over the target |
 
-### Sizes on Disk
+### Sizes on disk
 
 Measured on a real codebase (LZ4-compressed disk size; uncompressed in-memory is larger — see [benchmarks.md](benchmarks.md) for raw bincode sizes):
 
@@ -183,7 +183,7 @@ Measured on a real codebase (LZ4-compressed disk size; uncompressed in-memory is
 
 In-memory size is larger than the uncompressed bincode column due to HashMap overhead and struct alignment, but has not been separately measured.
 
-## Data Structures on Disk
+## Data structures on disk
 
 ### FileIndex
 
@@ -280,7 +280,7 @@ struct CallSite {
 }
 ```
 
-## Staleness Model
+## Staleness model
 
 Each index stores `created_at` and `max_age_secs`. Staleness check:
 
@@ -300,11 +300,11 @@ fn is_stale(&self) -> bool {
 
 Default max age: 24 hours (`--max-age-hours 24`).
 
-## Index Discovery
+## Index discovery
 
 When loading a content index, the system tries two strategies:
 
-### 1. Exact Match
+### 1. Exact match
 
 Hash the directory + extensions to get the exact filename:
 
@@ -315,7 +315,7 @@ fn load_content_index(dir: &str, exts: &str) -> Result<ContentIndex, SearchError
 }
 ```
 
-### 2. Directory Scan (Fallback)
+### 2. Directory scan (fallback)
 
 If exact match fails (e.g., user indexed with `cs` but queries without specifying extensions), scan all `.word-search` files and check the `root` field:
 
@@ -336,9 +336,9 @@ fn find_content_index_for_dir(dir: &str) -> Option<ContentIndex> {
 
 This scan reads and deserializes each `.word-search` file header — slow if many indexes exist. In practice, users have 1-5 indexes.
 
-## Incremental Update Mechanics
+## Incremental update mechanics
 
-### Content Index Update (single file)
+### Content index update (single file)
 
 ```
 1. path_to_id[path] → file_id
@@ -356,7 +356,7 @@ This scan reads and deserializes each `.word-search` file header — slow if man
 
 **Time complexity:** O(old_tokens + new_tokens + Σ posting_list_scans). The ~5ms per file figure is from watcher log output during development, not a formal benchmark.
 
-### Definition Index Update (single file)
+### Definition index update (single file)
 
 ```
 1. path_to_id[path] → file_id
@@ -401,10 +401,10 @@ struct AuthorEntry {
 
 **Key properties:**
 
-- **Not extension-dependent** — the git cache is scoped to the repository directory only (no extension in hash), unlike ContentIndex/DefinitionIndex which include extensions in their hash
-- **HEAD validation** — on load, the cache checks if `head_hash` matches current HEAD via `git rev-parse`. Mismatches trigger a rebuild
-- **Atomic write** — saved via temp file (`path.tmp`) + rename to prevent corruption on crash/disk-full
-- **Background build** — built in a separate thread on server startup, ~59 sec for 50K commits. Does not block the event loop
+- **Not extension-dependent:** the git cache is scoped to the repository directory only (no extension in hash), unlike ContentIndex/DefinitionIndex which include extensions in their hash.
+- **HEAD validation:** on load, the cache checks if `head_hash` matches current HEAD via `git rev-parse`. Mismatches trigger a rebuild.
+- **Atomic write:** saved via temp file (`path.tmp`) + rename to prevent corruption on crash/disk-full.
+- **Background build:** built in a separate thread on server startup, ~59 sec for 50K commits. Does not block the event loop.
 
 **Memory vs Disk:**
 

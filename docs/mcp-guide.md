@@ -44,14 +44,14 @@ The MCP server starts its event loop **immediately** and responds to `initialize
    > **Tip:** Include non-code file extensions like `csproj`, `xml`, `config`, `manifestxml` in `--ext` to search NuGet dependencies, project settings, connection strings, and other configuration files alongside your code.
 
 4. **Restart VS Code** — the MCP server starts automatically. Your MCP-compatible AI agent (Roo Code, Cline, etc.) now has access to all MCP tools. The server also sends an `instructions` field during MCP initialization with best practices for tool selection. The instructions include:
-   - **INTENT → TOOL MAPPING** — compact positive-framed lookup (`"see context around a match" → xray_grep showLines`, `"read source code" → xray_definitions includeBody`, etc.). Placed immediately after `CRITICAL OVERRIDE` so intent-first models see it before reaching NEVER-rules.
-   - **TASK ROUTING table** — maps user tasks to recommended tools (auto-generated, context-aware based on indexed file extensions)
-   - **MANDATORY PRE-FLIGHT CHECK** — Q1/Q2/Q3 questions the model should answer in `<thinking>` before ANY built-in tool call (read_file, apply_diff, search_files, write_to_file, list_files, list_directory, directory_tree, search_and_replace, insert_content). Explicit "habit/familiarity → UNJUSTIFIED" rule.
-   - **COST REALITY** — measured token/round-trip ratios (5x, 24x, 3x fewer) for common built-in patterns vs the xray equivalent. Rule of thumb: 2 built-in calls in a row on the same file = you should have used xray.
-   - **DECISION TRIGGERs** — hard prohibitions for file reading and editing that redirect LLM to xray tools
-   - **Fallback rule** — guidance for uncertain file types
-   - **Strategy Recipes** — the top-3 most common multi-step workflow patterns (Architecture Exploration, Call Chain Investigation, Stack Trace / Bug Investigation). The remaining 4 recipes (Code History, Code Health Scan, Code Review, Angular Component Hierarchy) are available via `xray_help` to keep the system-prompt budget under control.
-   - **Named policy anchor** — the instructions are wrapped in `=== XRAY_POLICY ===` / `================================` so the agent sees a stable, reusable policy name during MCP initialization
+   - **INTENT → TOOL MAPPING:** compact positive-framed lookup (`"see context around a match" → xray_grep showLines`, `"read source code" → xray_definitions includeBody`, etc.). Placed immediately after `CRITICAL OVERRIDE` so intent-first models see it before reaching NEVER-rules.
+   - **TASK ROUTING table:** maps user tasks to recommended tools (auto-generated, context-aware based on indexed file extensions).
+   - **MANDATORY PRE-FLIGHT CHECK:** Q1/Q2/Q3 questions the model should answer in `<thinking>` before ANY built-in tool call (read_file, apply_diff, search_files, write_to_file, list_files, list_directory, directory_tree, search_and_replace, insert_content). Explicit "habit/familiarity → UNJUSTIFIED" rule.
+   - **COST REALITY:** measured token/round-trip ratios (5x, 24x, 3x fewer) for common built-in patterns vs the xray equivalent. Rule of thumb: 2 built-in calls in a row on the same file = you should have used xray.
+   - **DECISION TRIGGERs:** hard prohibitions for file reading and editing that redirect LLM to xray tools.
+   - **Fallback rule:** guidance for uncertain file types.
+   - **Strategy Recipes:** the top-3 most common multi-step workflow patterns (Architecture Exploration, Call Chain Investigation, Stack Trace / Bug Investigation). The remaining 4 recipes (Code History, Code Health Scan, Code Review, Angular Component Hierarchy) are available via `xray_help` to keep the system-prompt budget under control.
+   - **Named policy anchor:** the instructions are wrapped in `=== XRAY_POLICY ===` / `================================` so the agent sees a stable, reusable policy name during MCP initialization.
 
 5. **Verify** — ask the AI: _"Use xray_grep to find all files containing HttpClient"_
 
@@ -77,7 +77,7 @@ The MCP server starts its event loop **immediately** and responds to `initialize
 | `xray_git_blame`           | Line-level attribution (`git blame`) for a file or line range. Returns commit hash, author, date, and content per line                   |
 | `xray_branch_status`       | Shows current git branch status: branch name, main/master check, behind/ahead counts, dirty files, fetch age. Call before investigating production bugs |
 
-## What the AI Agent Sees
+## What the AI agent sees
 
 When the AI connects, it discovers tools with full JSON schemas. Each tool has a detailed description with required/optional parameters and examples.
 
@@ -92,7 +92,7 @@ AI:  "Found 1,082 files. The most relevant is CustomHttpClient.cs (score: 0.49).
 
 ---
 
-## Response Guidance Fields
+## Response guidance fields
 
 Successful **JSON** MCP tool responses may include guidance fields inside `summary`:
 
@@ -110,7 +110,7 @@ Behavior rules:
 - `xray_help` includes `policyReminder` but intentionally omits `nextStepHint`
 - Response truncation preserves `summary.policyReminder` and `summary.nextStepHint`
 
-### `nextStepHint` Dictionary
+### `nextStepHint` dictionary
 
 The `nextStepHint` value depends on which tool was called:
 
@@ -357,7 +357,7 @@ Traces who calls a method (or what a method calls) and builds a hierarchical cal
 | `maxTotalBodyLines`  | Max total body lines across all methods in the tree (default: 300, 0=unlimited)                                                                      |
 | `impactAnalysis`     | When `true` with `direction=up`, identifies test methods covering the target. Returns `testsCovering` array with full file path, `depth`, and `callChain`. Test nodes marked `isTest: true`. Recursion stops at tests. Tests detected via C# `[Test]`/`[Fact]`/`[Theory]`/`[TestMethod]`, Rust `#[test]`, TS `*.spec.ts`/`*.test.ts` files. (default: false) |
 
-### Impact Analysis
+### Impact analysis
 
 Find which tests cover a method — one call replaces manual multi-step investigation.
 
@@ -402,7 +402,7 @@ Find which tests cover a method — one call replaces manual multi-step investig
 
 `callChain` shows the method-by-method path from target to test. Short chain (depth 1-2) = direct test. Long chain (depth 4+) = transitive via helpers — may be less relevant.
 
-### Response Fields with `includeBody`
+### Response fields with `includeBody`
 
 When `includeBody: true`, each node in the call tree includes source code:
 
@@ -450,7 +450,7 @@ When `includeBody: true`, each node in the call tree includes source code:
 | `callSite`        | Always (caller nodes)                            | Line number of the first call site                   |
 | `callSites`       | >1 call sites in same caller                     | Array of all call site line numbers (e.g., `[273, 475, 486]`). Only present when a method is called multiple times within the same caller method. `callSite` is always the first element. |
 
-### Multi-Method Batch
+### Multi-method batch
 
 Query multiple methods in a single call to reduce MCP round trips. Each method gets its own independent call tree with its own `maxTotalNodes` budget. `maxTotalBodyLines` is shared across all methods.
 
@@ -505,7 +505,7 @@ Query multiple methods in a single call to reduce MCP round trips. Each method g
 
 ### Limitations
 
-- **Interface vs concrete class name** — when searching for callers, always use the **interface name** (e.g., `class: "IUserService"`) rather than the concrete class name (e.g., `class: "UserService"`). Calls through DI use the interface type as the receiver. Searching with the concrete class returns 0 callers if all call sites use the interface. Alternatively, set `resolveInterfaces: true` to auto-resolve implementations.
+- **Interface vs concrete class name:** when searching for callers, always use the **interface name** (e.g., `class: "IUserService"`) rather than the concrete class name (e.g., `class: "UserService"`). Calls through DI use the interface type as the receiver. Searching with the concrete class returns 0 callers if all call sites use the interface. Alternatively, set `resolveInterfaces: true` to auto-resolve implementations.
 
 - **Local variable calls — partially tracked.** The C#/TS analysers do infer the type of a local for explicit annotations (`IFoo x = ...`), `new` expressions (`var x = new FooImpl()`), casts (`var x = (IFoo)expr`), `as` expressions (`var x = expr as IFoo`), same-class method return types (`var x = SameClassMethod()`), `await Task<T>` unwrap (`var x = await GetAsync()`), and pattern matching (`if (obj is FooImpl named)`). Cross-class method return types and service-locator chains (`sp.GetRequiredService<IFoo>().X()`, `scope.Resolve<IFoo>().X()`, `factory.Create().X()`) are **not** resolved. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported. See [DI Support](di-support.md) for the full matrix.
 
@@ -597,9 +597,9 @@ With `includeBody=true`:
 
 Retrieve the actual source code of definitions without a separate `read_file` call. Three-level protection prevents response explosion:
 
-- **`maxBodyLines`** — caps lines per individual definition (default: 100, 0 = unlimited)
-- **`maxTotalBodyLines`** — caps total body lines across all results (default: 500, 0 = unlimited)
-- **`maxResults`** — caps the number of definitions returned (default: 100)
+- **`maxBodyLines`:** caps lines per individual definition (default: 100, 0 = unlimited).
+- **`maxTotalBodyLines`:** caps total body lines across all results (default: 500, 0 = unlimited).
+- **`maxResults`:** caps the number of definitions returned (default: 100).
 
 When a definition's body exceeds `maxBodyLines`, the `body` array is truncated and `bodyTruncated: true` is set. When the global `maxTotalBodyLines` budget is exhausted, remaining definitions receive `bodyOmitted: true` with a `bodyWarning` message. If the source file cannot be read, `bodyError` is returned instead.
 
@@ -725,7 +725,7 @@ Check if all files in the repository are properly indexed. Files >500 bytes with
 
 > **Note:** Most "suspicious" files are legitimate — `AssemblyInfo.cs` and `GlobalSuppressions.cs` contain assembly-level attributes that the parser doesn't extract as definitions. Use `auditMinBytes` to raise the threshold if needed.
 
-### Zero-Result Hints
+### Zero-result hints
 
 When `xray_definitions` returns 0 results, the response `summary` may include a `hint` field with a contextual suggestion to help correct the query. This is particularly useful for LLM agents that may use wrong `kind` values across languages or confuse `xray_definitions` with `xray_grep`.
 
@@ -770,7 +770,7 @@ For name corrections, the object also includes `"similarity": "95%"`.
 
 If auto-correction produces 0 results, it falls through to the regular hint system described above.
 
-### Missing Terms Detection
+### Missing terms detection
 
 When a multi-name query with a `kind` filter returns results but some terms are silently dropped due to kind mismatch, the response `summary` includes a `missingTerms` array:
 
@@ -801,7 +801,7 @@ Possible `reason` values:
 - `"kind mismatch: found as <actual_kind>, not <requested_kind>"` — the term exists but with a different kind
 - `"not found in index"` — the term doesn't exist in the definition index at all
 
-### Auto-Summary for Broad Queries
+### Auto-summary for broad queries
 
 When `xray_definitions` finds more results than `maxResults` and **no `name` filter** is set (and `includeBody` is false, and `sortBy` is not set), it automatically returns a **directory-grouped summary** instead of truncated entries. This eliminates the need for preliminary `xray_fast dirsOnly=true` calls when exploring unfamiliar code modules.
 
@@ -1212,7 +1212,7 @@ For full parameter documentation, see `xray_help` → `parameterExamples` → `x
 
 ---
 
-## Git History Tools
+## Git history tools
 
 Six MCP tools for querying git history. Always available — no flags needed. When the in-memory git history cache is ready (built automatically in the background on server startup), `xray_git_history`, `xray_git_authors`, and `xray_git_activity` use sub-millisecond cache lookups. When the cache is not ready (first ~60 sec on cold start), these tools transparently fall back to CLI `git log` commands (~2–6 sec). `xray_git_diff` and `xray_git_blame` always use CLI.
 
@@ -1289,9 +1289,9 @@ Get commit history with full diff/patch for a specific file. Same as `xray_git_h
 Get top authors for a file, directory, or entire repository ranked by number of commits. Shows who changed the code the most, with commit count and date range of their changes.
 
 The `path` parameter (or its backward-compatible alias `file`) accepts:
-- **File path** — authors for a single file (e.g., `"path": "src/main.rs"`)
-- **Directory path** — authors across all files in a directory (e.g., `"path": "src/controllers"`)
-- **Omitted** — authors across the entire repository
+- **File path:** authors for a single file (e.g., `"path": "src/main.rs"`).
+- **Directory path:** authors across all files in a directory (e.g., `"path": "src/controllers"`).
+- **Omitted:** authors across the entire repository.
 
 ```json
 // Request — single file
@@ -1319,9 +1319,9 @@ The `path` parameter (or its backward-compatible alias `file`) accepts:
 Get activity across files in a repository for a date range. Returns a list of changed files with their commit counts. Useful for answering "what changed this week?" Date filters are recommended to keep results manageable.
 
 The optional `path` parameter filters activity to a specific file or directory:
-- **File path** — activity for a single file (e.g., `"path": "src/main.rs"`)
-- **Directory path** — activity across all files in a directory (e.g., `"path": "src/controllers"`)
-- **Omitted** — activity across the entire repository
+- **File path:** activity for a single file (e.g., `"path": "src/main.rs"`).
+- **Directory path:** activity across all files in a directory (e.g., `"path": "src/controllers"`).
+- **Omitted:** activity across the entire repository.
 
 Path filtering uses native `git log -- <pathspec>` for efficiency — git itself filters commits at the source.
 
@@ -1412,7 +1412,7 @@ Shows whether you're on the right branch before investigating production bugs. R
 
 ---
 
-## File Not Found Warning vs Deleted File Info
+## File not found warning vs deleted file info
 
 The git tools distinguish two distinct cases when a file path returns 0 results:
 
@@ -1433,7 +1433,7 @@ This helps distinguish between "no commits in the date range" and "wrong file pa
 
 ---
 
-## Branch Warning
+## Branch warning
 
 When the MCP server is started on a branch other than `main` or `master`, all index-based tool responses (`xray_grep`, `xray_definitions`, `xray_callers`, `xray_fast`) include a `branchWarning` field in the `summary` object:
 
@@ -1455,7 +1455,7 @@ The branch is detected **once at server startup** via `git rev-parse --abbrev-re
 
 ---
 
-## Deleted Files Support
+## Deleted files support
 
 All three high-level git tools (`xray_git_history`, `xray_git_authors`, `xray_git_activity`) handle deleted files natively — no separate `git log --all --diff-filter=D` call is required from the LLM.
 

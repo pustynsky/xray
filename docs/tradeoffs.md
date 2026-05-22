@@ -8,12 +8,12 @@ Every architectural decision has alternatives. This document captures what was c
 
 **Why:**
 
-- Zero-config — serialize any Rust struct with `#[derive(Serialize, Deserialize)]`
-- Fast — near-zero overhead deserialization, close to raw memory layout
-- Single-file — each index is one `.file-list`/`.word-search`/`.code-structure`/`.git-history` file
-- No runtime dependencies — no database process, no WAL, no compaction
-- LZ4 compression reduces disk footprint by **~35-45%** (corpus-dependent; e.g. the 48,599-file C# benchmark corpus: ~350 MB uncompressed → 223.7 MB LZ4 — see [benchmarks.md](benchmarks.md#index-build-times)) with negligible decompression overhead (~100ms)
-- Backward-compatible — auto-detects legacy uncompressed files on load
+- Zero-config: serialize any Rust struct with `#[derive(Serialize, Deserialize)]`.
+- Fast: near-zero overhead deserialization, close to raw memory layout.
+- Single-file: each index is one `.file-list`/`.word-search`/`.code-structure`/`.git-history` file.
+- No runtime dependencies: no database process, no WAL, no compaction.
+- LZ4 compression reduces disk footprint by **~35-45%** (corpus-dependent; e.g. the 48,599-file C# benchmark corpus: ~350 MB uncompressed → 223.7 MB LZ4, see [benchmarks.md](benchmarks.md#index-build-times)) with negligible decompression overhead (~100ms).
+- Backward-compatible: auto-detects legacy uncompressed files on load.
 
 **Rejected alternatives:**
 
@@ -29,9 +29,9 @@ Every architectural decision has alternatives. This document captures what was c
 
 **Known limitations:**
 
-- Bincode format is not stable across major versions — index files are not portable between bincode 1.x and 2.x
-- No incremental writes to disk — entire index must be serialized/deserialized atomically (in-memory incremental updates via watcher are supported)
-- No memory-mapped I/O — full deserialization into heap on load
+- Bincode format is not stable across major versions: index files are not portable between bincode 1.x and 2.x.
+- No incremental writes to disk: entire index must be serialized/deserialized atomically (in-memory incremental updates via watcher are supported).
+- No memory-mapped I/O: full deserialization into heap on load.
 
 **When to reconsider:** If indexes exceed available RAM (>4GB), a memory-mapped approach (e.g., FST for the token map + mmap'd postings) would be necessary.
 
@@ -41,11 +41,11 @@ Every architectural decision has alternatives. This document captures what was c
 
 **Why:**
 
-- **90× faster than a live filesystem walk** — `xray_fast` scans the in-memory vec in ~35ms for 100K files. A live walk over the same files takes ~3s. The vec scan replaces disk I/O, not a faster algorithm.
-- Simple — no secondary data structures to build, maintain, or invalidate
-- Cache-friendly — sequential scan over a contiguous `Vec` has excellent CPU cache locality
-- Flexible matching — supports substring, regex, case-insensitive, comma-separated multi-term OR — all patterns that are hard to pre-index efficiently
-- Small index — `Vec<FileEntry>` is **~2.6 MB on disk (LZ4) for ~99K entries** (e.g. a Shared C# repo) and tens of MB in-memory due to per-entry `String` allocations; still significantly less than a content inverted index (~224 MB LZ4 for the same repo)
+- **90× faster than a live filesystem walk:** `xray_fast` scans the in-memory vec in ~35ms for 100K files. A live walk over the same files takes ~3s. The vec scan replaces disk I/O, not a faster algorithm.
+- Simple: no secondary data structures to build, maintain, or invalidate.
+- Cache-friendly: sequential scan over a contiguous `Vec` has excellent CPU cache locality.
+- Flexible matching: supports substring, regex, case-insensitive, and comma-separated multi-term OR. All patterns that are hard to pre-index efficiently.
+- Small index: `Vec<FileEntry>` is **~2.6 MB on disk (LZ4) for ~99K entries** (e.g. a Shared C# repo) and tens of MB in-memory due to per-entry `String` allocations; still significantly less than a content inverted index (~224 MB LZ4 for the same repo).
 
 **Rejected alternatives:**
 
@@ -57,8 +57,8 @@ Every architectural decision has alternatives. This document captures what was c
 
 **Known limitations:**
 
-- O(n) means performance degrades linearly with file count — 1M files would take ~350ms
-- No pre-filtering — every entry is checked even if the pattern could be pre-narrowed
+- O(n) means performance degrades linearly with file count: 1M files would take ~350ms.
+- No pre-filtering: every entry is checked even if the pattern could be pre-narrowed.
 
 **When to reconsider:** If file counts exceed ~500K and the ~175ms+ scan time becomes noticeable in interactive use, adding a trigram index on filenames (similar to `ContentIndex.trigram`) would reduce search to O(k) candidates.
 
@@ -68,10 +68,10 @@ Every architectural decision has alternatives. This document captures what was c
 
 **Why:**
 
-- O(1) exact token lookup — the primary query pattern
-- Simple to implement incremental updates (insert/remove postings)
-- Rust's `HashMap` is high-performance (SwissTable implementation since 1.36)
-- Easy to serialize with bincode
+- O(1) exact token lookup: the primary query pattern.
+- Simple to implement incremental updates (insert/remove postings).
+- Rust's `HashMap` is high-performance (SwissTable implementation since 1.36).
+- Easy to serialize with bincode.
 
 **Rejected alternatives:**
 
@@ -84,9 +84,9 @@ Every architectural decision has alternatives. This document captures what was c
 
 **Known limitations:**
 
-- No prefix/fuzzy search without scanning all keys (regex mode does this, measured 44ms for 754K tokens)
-- Memory usage is O(unique_tokens × avg_posting_size) — for the 48,599-file C# benchmark corpus this is 223.7 MB LZ4 on disk (~350 MB uncompressed)
-- Hash collisions can degrade under adversarial inputs (not a concern for code search)
+- No prefix/fuzzy search without scanning all keys (regex mode does this, measured 44ms for 754K tokens).
+- Memory usage is O(unique_tokens × avg_posting_size): for the 48,599-file C# benchmark corpus this is 223.7 MB LZ4 on disk (~350 MB uncompressed).
+- Hash collisions can degrade under adversarial inputs (not a concern for code search).
 
 **When to reconsider:** If we add fuzzy/typo-tolerant search, an FST or Levenshtein automaton would be much more efficient than regex scanning all keys.
 
@@ -100,10 +100,10 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 
 **Why:**
 
-- Simple — one formula, no tunable parameters
-- Effective for code search — code is more structured than natural language, simple TF-IDF works well
-- Fast — single pass over postings, no normalization constants to precompute
-- Predictable — developers can reason about why a result ranks higher
+- Simple: one formula, no tunable parameters.
+- Effective for code search: code is more structured than natural language, and simple TF-IDF works well.
+- Fast: single pass over postings, no normalization constants to precompute.
+- Predictable: developers can reason about why a result ranks higher.
 
 **Rejected alternatives:**
 
@@ -115,9 +115,9 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 
 **Known limitations:**
 
-- No field boosting — a match in class name vs. method body has equal weight
-- No position proximity — `HttpClient` on line 1 and line 500 contribute equally
-- TF normalization by file size means a 10-line file mentioning `HttpClient` once will rank above a 1000-line file mentioning it 5 times
+- No field boosting: a match in class name vs. method body has equal weight.
+- No position proximity: `HttpClient` on line 1 and line 500 contribute equally.
+- TF normalization by file size means a 10-line file mentioning `HttpClient` once will rank above a 1000-line file mentioning it 5 times.
 
 **When to reconsider:** If user feedback shows ranking quality issues, BM25 with default parameters (k1=1.2, b=0.75) would be a minimal-effort upgrade.
 
@@ -127,10 +127,10 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 
 **Why:**
 
-- Simple correctness — Rust's type system enforces exclusive writes
-- Appropriate for the access pattern: many reads (search queries), rare writes (watcher updates)
-- `RwLock` allows concurrent reads with no contention
-- Single writer (watcher thread) means no write contention
+- Simple correctness: Rust's type system enforces exclusive writes.
+- Appropriate for the access pattern: many reads (search queries), rare writes (watcher updates).
+- `RwLock` allows concurrent reads with no contention.
+- Single writer (watcher thread) means no write contention.
 
 **Rejected alternatives:**
 
@@ -143,9 +143,9 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 
 **Known limitations:**
 
-- Writer starvation is theoretically possible if search queries are continuous, but MCP queries are human-driven (~1/sec max) so this doesn't happen in practice
-- `RwLock` on Windows is not fair — but our usage pattern (rare writes) makes this irrelevant
-- Poisoned lock handling: watcher thread exits gracefully on poisoned lock instead of looping forever (fixed 2026-02-28)
+- Writer starvation is theoretically possible if search queries are continuous, but MCP queries are human-driven (~1/sec max) so this doesn't happen in practice.
+- `RwLock` on Windows is not fair, but our usage pattern (rare writes) makes this irrelevant.
+- Poisoned lock handling: watcher thread exits gracefully on poisoned lock instead of looping forever (fixed 2026-02-28).
 
 ## 6. Tree-sitter vs Regex for Code Parsing
 
@@ -153,13 +153,13 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 
 **Why:**
 
-- Full syntactic understanding — correctly handles nested classes, partial classes, multi-line signatures
-- Modifiers, attributes, base types extracted as structured data
-- Line range tracking enables `containsLine` queries (which method is on line N?)
-- Call-graph extraction — AST walk of method bodies extracts `CallSite` data (method name, receiver type, line) for `xray_callers` "down" direction. Resolves field types (e.g., `_userService` → `IUserService`) for DI-aware call trees. This would be impossible with regex.
-- Code complexity metrics — cyclomatic/cognitive complexity, nesting depth, params, returns, calls, lambdas computed during AST walk via shared `walk_code_stats()` with per-language `CodeStatsConfig`
-- Language grammars maintained by the community, handle edge cases we'd never cover with regex
-- SQL uses a regex-based parser (no tree-sitter grammar needed) — sufficient for DDL/DML extraction where the syntax is regular enough
+- Full syntactic understanding: correctly handles nested classes, partial classes, multi-line signatures.
+- Modifiers, attributes, base types extracted as structured data.
+- Line range tracking enables `containsLine` queries (which method is on line N?).
+- Call-graph extraction: AST walk of method bodies extracts `CallSite` data (method name, receiver type, line) for `xray_callers` "down" direction. Resolves field types (e.g., `_userService` → `IUserService`) for DI-aware call trees. This would be impossible with regex.
+- Code complexity metrics: cyclomatic/cognitive complexity, nesting depth, params, returns, calls, lambdas computed during AST walk via shared `walk_code_stats()` with per-language `CodeStatsConfig`.
+- Language grammars maintained by the community, handle edge cases we'd never cover with regex.
+- SQL uses a regex-based parser (no tree-sitter grammar needed), sufficient for DDL/DML extraction where the syntax is regular enough.
 
 **Supported languages:**
 
@@ -171,7 +171,7 @@ score = (occurrences / file_token_count) × ln(total_files / files_with_term)
 | XML             | tree-sitter | `lang-xml`        | ✅            | on-demand (per MCP query)   |
 | SQL             | regex       | _(always built)_  | ✅            | persisted definition index |
 
-XML parsing is on-demand only — no XML definitions are persisted to the
+XML parsing is on-demand only: no XML definitions are persisted to the
 code-structure index. The SQL parser is regex-based and always compiled
 (no Cargo feature gate).
 
@@ -186,10 +186,10 @@ code-structure index. The SQL parser is regex-based and always compiled
 
 **Known limitations:**
 
-- tree-sitter grammars are large (C# grammar adds ~2MB to binary)
-- Adding a new language requires a new tree-sitter grammar crate (or regex parser) + parser implementation (~200 LOC per language)
-- Each language parser is an optional Cargo feature — custom builds can exclude unused parsers
-- SQL parser (regex-based) cannot extract call sites from dynamic SQL strings or complex procedural logic
+- tree-sitter grammars are large (C# grammar adds ~2MB to binary).
+- Adding a new language requires a new tree-sitter grammar crate (or regex parser) + parser implementation (~200 LOC per language).
+- Each language parser is an optional Cargo feature: custom builds can exclude unused parsers.
+- SQL parser (regex-based) cannot extract call sites from dynamic SQL strings or complex procedural logic.
 
 ## 7. Tokenization: Simple Split vs Language-Aware
 
@@ -203,11 +203,11 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 
 **Why:**
 
-- Language-agnostic — works for C#, SQL, Rust, Python, JavaScript, prose
-- Fast — no regex, no Unicode normalization, single pass
-- Predictable — developers know exactly what tokens are indexed
-- Preserves underscores — `_client` stays as one token
-- Case-insensitive via lowercase — `HttpClient` and `httpclient` are the same token
+- Language-agnostic: works for C#, SQL, Rust, Python, JavaScript, prose.
+- Fast: no regex, no Unicode normalization, single pass.
+- Predictable: developers know exactly what tokens are indexed.
+- Preserves underscores: `_client` stays as one token.
+- Case-insensitive via lowercase: `HttpClient` and `httpclient` are the same token.
 
 **Rejected alternatives:**
 
@@ -220,10 +220,10 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 
 **Known limitations:**
 
-- `HttpClient` becomes one token `httpclient` — cannot search for files using specifically `Http` but not `HttpClient`
+- `HttpClient` becomes one token `httpclient`: cannot search for files using specifically `Http` but not `HttpClient`.
 - Numbers are included: `int32` is one token. This is usually desirable for code.
-- Very short tokens (1 char) are excluded by default (min_len=2)
-- Terms containing punctuation (e.g., `#[cfg(test)]`, `System.IO`) are auto-switched to phrase search since no indexed token contains non-alphanumeric characters
+- Very short tokens (1 char) are excluded by default (min_len=2).
+- Terms containing punctuation (e.g., `#[cfg(test)]`, `System.IO`) are auto-switched to phrase search since no indexed token contains non-alphanumeric characters.
 
 ## 8. MCP Transport: Stdio vs HTTP
 
@@ -231,10 +231,10 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 
 **Why:**
 
-- Zero configuration — no port conflicts, no firewall rules, no TLS
-- Lowest latency — direct pipe, no TCP overhead
-- VS Code native — built-in process spawning, no external server to manage
-- Security — no network exposure, process isolation by OS
+- Zero configuration: no port conflicts, no firewall rules, no TLS.
+- Lowest latency: direct pipe, no TCP overhead.
+- VS Code native: built-in process spawning, no external server to manage.
+- Security: no network exposure, process isolation by OS.
 
 **Rejected alternatives:**
 
@@ -246,9 +246,9 @@ line.split(|c: char| !c.is_alphanumeric() && c != '_')
 
 **Known limitations:**
 
-- Single client — only one process can read stdin at a time
-- No remote access — must run on same machine as the AI agent
-- Debugging requires stderr logging — cannot use stdout for diagnostics
+- Single client: only one process can read stdin at a time.
+- No remote access: must run on same machine as the AI agent.
+- Debugging requires stderr logging: cannot use stdout for diagnostics.
 
 ## 9. Positioning: xray vs Existing Code Search Tools
 
@@ -309,16 +309,16 @@ xray occupies the **"fast enough for interactive AI agents, structured enough fo
 
 **Why:**
 
-- At depth 0, the user's target method may be defined on an interface (e.g., `IUserService.GetUser`). Expanding to all implementations (`UserService.GetUser`, `MockUserService.GetUser`) is essential — without it, the caller tree would be empty since no code calls the interface method directly.
+- At depth 0, the user's target method may be defined on an interface (e.g., `IUserService.GetUser`). Expanding to all implementations (`UserService.GetUser`, `MockUserService.GetUser`) is essential: without it, the caller tree would be empty since no code calls the interface method directly.
 - At deeper levels (depth > 0), callers are found via `verify_call_site_target()` which already handles interface-based calls through multiple heuristics:
-  - **Direct naming match** — `IFoo`↔`Foo` prefix matching
-  - **Inheritance via `base_types`** — if `UserService` lists `IUserService` in its base types, calls to `IUserService.GetUser` match `UserService.GetUser`
-  - **Fuzzy DI matching** — `is_implementation_of()` detects dependency injection patterns (field types, constructor parameters) to resolve `_userService.GetUser()` → `IUserService.GetUser`
-- Expanding sibling implementations at every depth level risks **combinatorial explosion**: an interface with 5 implementations would multiply the tree width by 5× at each level, consuming the `max_total_nodes` budget on breadth instead of depth
+  - **Direct naming match:** `IFoo`↔`Foo` prefix matching.
+  - **Inheritance via `base_types`:** if `UserService` lists `IUserService` in its base types, calls to `IUserService.GetUser` match `UserService.GetUser`.
+  - **Fuzzy DI matching:** `is_implementation_of()` detects dependency injection patterns (field types, constructor parameters) to resolve `_userService.GetUser()` → `IUserService.GetUser`.
+- Expanding sibling implementations at every depth level risks **combinatorial explosion**: an interface with 5 implementations would multiply the tree width by 5× at each level, consuming the `max_total_nodes` budget on breadth instead of depth.
 
 **The gap:**
 
-The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserService.GetUser`) with no naming relationship to its interface, called by concrete type at depth > 0. This is a narrow edge case — in practice, if a class implements `IUserService`, `verify_call_site_target()` will match it via `base_types` or naming heuristics.
+The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserService.GetUser`) with no naming relationship to its interface, called by concrete type at depth > 0. This is a narrow edge case. In practice, if a class implements `IUserService`, `verify_call_site_target()` will match it via `base_types` or naming heuristics.
 
 **Rejected alternative:**
 
@@ -334,12 +334,12 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Why:**
 
-- **Sub-millisecond queries** vs 2-6 seconds per `git log` CLI call
-- Compact representation — ~7.6 MB for 50K commits × 65K files (`CommitMeta` at 40 bytes/commit)
-- Streaming parser — parses `git log --name-only` output line-by-line, no 163 MB intermediate buffer
-- Background build — does not block server startup; tools fall back to CLI until cache is ready
-- Disk persistence — LZ4-compressed bincode, loads in ~100ms vs ~59 sec full rebuild
-- HEAD validation — detects stale caches (force push, rebase, re-clone) and triggers rebuild
+- **Sub-millisecond queries** vs 2-6 seconds per `git log` CLI call.
+- Compact representation: ~7.6 MB for 50K commits × 65K files (`CommitMeta` at 40 bytes/commit).
+- Streaming parser: parses `git log --name-only` output line-by-line, no 163 MB intermediate buffer.
+- Background build: does not block server startup; tools fall back to CLI until cache is ready.
+- Disk persistence: LZ4-compressed bincode, loads in ~100ms vs ~59 sec full rebuild.
+- HEAD validation: detects stale caches (force push, rebase, re-clone) and triggers rebuild.
 
 **Rejected alternatives:**
 
@@ -352,9 +352,9 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Known limitations:**
 
-- No patch/diff data in cache — `xray_git_diff` always uses CLI (patches are too large to cache efficiently)
-- Author pool capped at 65,535 unique authors (u16 index) — sufficient for any single repository
-- Cache is per-repository — multi-repo setups have separate caches
+- No patch/diff data in cache: `xray_git_diff` always uses CLI (patches are too large to cache efficiently).
+- Author pool capped at 65,535 unique authors (u16 index), sufficient for any single repository.
+- Cache is per-repository: multi-repo setups have separate caches.
 
 **When to reconsider:** If repos exceed ~500K commits, the linear scan in `query_file_history()` may need optimization (e.g., per-file posting lists instead of per-commit file lists).
 
@@ -364,10 +364,10 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Why:**
 
-- **O(1) removal** — removing a file's definitions only requires updating secondary indexes (HashMap lookups), not shifting Vec elements
-- No reindexing needed per file change — secondary indexes (`name_index`, `kind_index`, etc.) are updated in-place
-- Compaction is rare and fast — ~100ms for 846K definitions, <1MB additional memory
-- Simple correctness — `file_index` is the source of truth for active definitions; tombstones are invisible to queries
+- **O(1) removal:** removing a file's definitions only requires updating secondary indexes (HashMap lookups), not shifting Vec elements.
+- No reindexing needed per file change: secondary indexes (`name_index`, `kind_index`, etc.) are updated in-place.
+- Compaction is rare and fast: ~100ms for 846K definitions, <1MB additional memory.
+- Simple correctness: `file_index` is the source of truth for active definitions; tombstones are invisible to queries.
 
 **Rejected alternatives:**
 
@@ -379,9 +379,9 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Known limitations:**
 
-- Between compactions, `definitions.len()` can be up to 3× the active definition count
-- All 9 secondary indexes must be remapped during compaction (atomic operation, not interruptible)
-- Compaction holds a write lock for ~100ms — blocks concurrent reads during this time
+- Between compactions, `definitions.len()` can be up to 3× the active definition count.
+- All 9 secondary indexes must be remapped during compaction (atomic operation, not interruptible).
+- Compaction holds a write lock for ~100ms, blocking concurrent reads during this time.
 
 **When to reconsider:** If watch-mode sessions exceed 24 hours with continuous high-churn changes, the auto-compaction threshold (67% waste) may need tuning. In practice, VS Code restarts rebuild the index cleanly.
 
@@ -391,11 +391,11 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Why:**
 
-- **Zero additional dependencies** — complexity metrics are computed as part of the existing AST traversal
-- Minimal overhead — ~2-5% additional CPU during index build (already walking the AST for definitions/call-sites)
-- 7 metrics per method: cyclomatic complexity, cognitive complexity (SonarSource algorithm), max nesting depth, parameter count, return/throw count, call count (fan-out), lambda count
-- Language-agnostic walker — adding a new language requires only a static `CodeStatsConfig` struct with AST node names, no code duplication
-- Queryable — `sortBy`, `minComplexity`, `minCognitive`, `minNesting`, `minParams` enable instant "find worst methods" queries
+- **Zero additional dependencies:** complexity metrics are computed as part of the existing AST traversal.
+- Minimal overhead: ~2-5% additional CPU during index build (already walking the AST for definitions/call-sites).
+- 7 metrics per method: cyclomatic complexity, cognitive complexity (SonarSource algorithm), max nesting depth, parameter count, return/throw count, call count (fan-out), lambda count.
+- Language-agnostic walker: adding a new language requires only a static `CodeStatsConfig` struct with AST node names, no code duplication.
+- Queryable: `sortBy`, `minComplexity`, `minCognitive`, `minNesting`, `minParams` enable instant "find worst methods" queries.
 
 **Rejected alternatives:**
 
@@ -408,9 +408,9 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Known limitations:**
 
-- No data flow complexity — metrics are syntactic (AST-based), not semantic
-- Cognitive complexity algorithm differs slightly from SonarSource's reference implementation for some edge cases (e.g., C# and TypeScript handle else-if nesting differently due to tree-sitter grammar differences)
-- Metrics are per-method — no file-level or class-level aggregation
+- No data flow complexity: metrics are syntactic (AST-based), not semantic.
+- Cognitive complexity algorithm differs slightly from SonarSource's reference implementation for some edge cases (e.g., C# and TypeScript handle else-if nesting differently due to tree-sitter grammar differences).
+- Metrics are per-method: no file-level or class-level aggregation.
 
 **When to reconsider:** If users need coupling metrics (afferent/efferent coupling, instability), these require cross-file analysis beyond what the current per-method walker provides.
 
@@ -420,10 +420,10 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Why:**
 
-- **LLM context window efficiency** — large responses waste tokens. A 1MB response consumes ~250K tokens, leaving little room for reasoning.
-- Tool-specific budgets: 16KB default, 64KB for `includeBody=true`, 32KB for `xray_help`
-- Progressive — truncates results one-by-one from the end, preserving the most relevant (highest-scored) results
-- `maxResults`, `maxBodyLines`, `maxTotalBodyLines` give users fine-grained control before truncation kicks in
+- **LLM context window efficiency:** large responses waste tokens. A 1MB response consumes ~250K tokens, leaving little room for reasoning.
+- Tool-specific budgets: 16KB default, 64KB for `includeBody=true`, 32KB for `xray_help`.
+- Progressive: truncates results one-by-one from the end, preserving the most relevant (highest-scored) results.
+- `maxResults`, `maxBodyLines`, `maxTotalBodyLines` give users fine-grained control before truncation kicks in.
 
 **Rejected alternatives:**
 
@@ -436,8 +436,8 @@ The only scenario NOT covered: a sibling implementation (e.g., `AlternativeUserS
 
 **Known limitations:**
 
-- Truncation is opaque to the LLM — it sees fewer results but may not realize more exist (mitigated by `totalResults` field in summary)
-- Budget thresholds are hardcoded — not configurable via MCP protocol
+- Truncation is opaque to the LLM: it sees fewer results but may not realize more exist (mitigated by `totalResults` field in summary).
+- Budget thresholds are hardcoded: not configurable via MCP protocol.
 
 **When to reconsider:** If LLM context windows grow significantly (>500K tokens), the default budgets should be increased proportionally. If MCP protocol adds pagination support, server-side truncation could be replaced with client-driven pagination.
 
