@@ -1,8 +1,8 @@
 # Architecture
 
-> High-performance code search engine with inverted indexing, AST-based definition extraction, and an MCP server for AI agent integration.
+> A code search engine built on inverted indexing, AST-based definition extraction, and an MCP server for AI agent integration.
 
-## System Overview
+## System overview
 
 ```mermaid
 graph TB
@@ -66,11 +66,11 @@ graph TB
     GC --> DISK
 ```
 
-## Component Architecture
+## Component architecture
 
-### 1. Index Layer
+### 1. Index layer
 
-Three independent index types plus a git history cache, each optimized for a different query pattern:
+Three independent index types plus a git history cache. Each is tuned for a different query pattern:
 
 | Index             | File    | Data Structure                  | Lookup                  | Purpose                  |
 | ----------------- | ------- | ------------------------------- | ----------------------- | ------------------------ |
@@ -79,17 +79,17 @@ Three independent index types plus a git history cache, each optimized for a dif
 | `DefinitionIndex` | `.code-structure` | Multi-index `HashMap` set       | O(1) per name/kind/attr | Structural code search   |
 | `GitHistoryCache` | `.git-history` | `HashMap<String, Vec<u32>>` + commit/author pools | O(1) per file path | Git history queries (sub-millisecond) |
 
-All indexes are:
+All indexes share these properties:
 
-- **Serialized with bincode** — fast binary format, zero-copy deserialization
-- **LZ4 frame-compressed on disk** — all index files (`.file-list`, `.word-search`, `.code-structure`) are wrapped in LZ4 frame compression via the `lz4_flex` crate (`FrameEncoder`/`FrameDecoder`). Files start with a 4-byte `LZ4S` magic header for format identification. Compression is streaming (no intermediate full buffer in memory). Typical compression ratio is ~4–5× (e.g., 697 MB → ~150 MB for content indexes). Legacy uncompressed files are still supported — auto-detected on load by checking the magic header for backward compatibility.
-- **Stored deterministically** — file path is `hash(canonical_dir [+ extensions])` as hex
-- **Self-describing** — each index embeds its root directory, creation timestamp, and staleness threshold
-- **Independent** — can be built, loaded, or deleted without affecting other indexes
+- **Serialized with bincode**: fast binary format, zero-copy deserialization.
+- **LZ4 frame-compressed on disk**: all index files (`.file-list`, `.word-search`, `.code-structure`) are wrapped in LZ4 frame compression via the `lz4_flex` crate (`FrameEncoder` / `FrameDecoder`). Files start with a 4-byte `LZ4S` magic header for format identification. Compression streams (no full intermediate buffer in memory). Typical ratio is ~4–5× (697 MB → ~150 MB for content indexes). Legacy uncompressed files still load; the loader detects the format by checking the magic header.
+- **Stored deterministically**: file path is `hash(canonical_dir [+ extensions])` as hex.
+- **Self-describing**: each index embeds its root directory, creation timestamp, and staleness threshold.
+- **Independent**: can be built, loaded, or deleted without affecting the others.
 
-### 2. Content Index (Inverted Index)
+### 2. Content index (inverted index)
 
-The core data structure. Maps every token to the files and line numbers where it appears. **Language-agnostic** — the tokenizer splits on non-alphanumeric boundaries and lowercases, requiring no language grammar. Works with any text file.
+The core data structure. Maps every token to the files and line numbers where it appears. **Language-agnostic**. The tokenizer splits on non-alphanumeric boundaries and lowercases the result. It needs no language grammar and works on any text file.
 
 ```
 Forward view (conceptual):
@@ -103,23 +103,23 @@ Inverted view (actual storage):
 
 **Key properties:**
 
-- Token lookup is a single `HashMap::get()` — O(1)
-- Each `Posting` stores both `file_id` and `lines` — enables line-level results without file I/O
-- File paths stored in a separate `Vec<String>` indexed by `file_id` — deduplication
-- `file_token_counts[file_id]` stores per-file token count for TF normalization
+- Token lookup is a single `HashMap::get()`. O(1).
+- Each `Posting` stores `file_id` and `lines`, so line-level results need no file I/O.
+- File paths live in a separate `Vec<String>` indexed by `file_id` for deduplication.
+- `file_token_counts[file_id]` stores per-file token count for TF normalization.
 
 **Watch-mode fields:**
 
-- `path_to_id: Option<HashMap<PathBuf, u32>>` — path-based file lookup for watcher events (populated only with `--watch`)
+- `path_to_id: Option<HashMap<PathBuf, u32>>`: path-based file lookup for watcher events (populated only with `--watch`).
 
 **Error tracking fields:**
 
-- `read_errors: usize` — number of files that failed to read during indexing (IO errors)
-- `lossy_file_count: usize` — number of files that required lossy UTF-8 conversion
+- `read_errors: usize`: number of files that failed to read during indexing (IO errors).
+- `lossy_file_count: usize`: number of files that required lossy UTF-8 conversion.
 
-### 3. Definition Index (AST Index)
+### 3. Definition index (AST index)
 
-**Language-specific** structural code search using tree-sitter AST parsing (C#, TypeScript/TSX, Rust) and regex parsing (SQL). Ten cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus pre-computed call graphs and code complexity metrics:
+**Language-specific** structural code search. Tree-sitter AST parsing for C#, TypeScript/TSX, Rust; regex parsing for SQL. Ten cross-referencing indexes over the same `Vec<DefinitionEntry>`, plus pre-computed call graphs and code complexity metrics:
 
 ```mermaid
 graph LR
@@ -161,7 +161,7 @@ Each `DefinitionEntry` contains: `name`, `kind`, `file_id`, `line_start..line_en
 
 Each `CallSite` contains: `method_name`, `receiver_type` (resolved via field/constructor type declarations, DI-aware), `line`.
 
-**Secondary indexes (Category A)** — store `Vec<u32>` where each `u32` is a def_idx into `definitions`:
+**Secondary indexes (Category A)** store `Vec<u32>` where each `u32` is a def_idx into `definitions`:
 
 | Index | Key | Purpose |
 |-------|-----|---------|
@@ -169,10 +169,10 @@ Each `CallSite` contains: `method_name`, `receiver_type` (resolved via field/con
 | `kind_index` | `DefinitionKind` enum | Filter by class/method/interface/etc. |
 | `attribute_index` | lowercased attribute | C# attribute lookup (e.g., `[Test]`, `[ServiceProvider]`) |
 | `base_type_index` | lowercased base type | Find implementations of an interface or base class |
-| `file_index` | file_id | All definitions in a file — source of truth for active definitions |
+| `file_index` | file_id | All definitions in a file; source of truth for active definitions |
 | `selector_index` | Angular component selector | Map `<app-user-list>` to the `@Component` class |
 
-**Data indexes (Category B)** — store data keyed by def_idx:
+**Data indexes (Category B)** store data keyed by def_idx:
 
 | Index | Value | Purpose |
 |-------|-------|---------|
@@ -190,13 +190,13 @@ Each `CallSite` contains: `method_name`, `receiver_type` (resolved via field/con
 | `lossy_file_count` | Files read with lossy UTF-8 conversion |
 | `empty_file_ids` | Files parsed but producing 0 definitions |
 
-The `method_calls` map stores pre-computed call sites for each method/constructor, extracted during `def-index` build by walking AST `invocation_expression` and `member_access_expression` nodes. This enables instant callee lookups (direction "down") without runtime file I/O.
+The `method_calls` map stores pre-computed call sites for each method/constructor, extracted during `def-index` build by walking AST `invocation_expression` and `member_access_expression` nodes. Callee lookups (direction "down") need no runtime file I/O.
 
-The multi-index design enables compound queries: "find all public async methods in classes that implement `IQueryHandler` and have `[ServiceProvider]` attribute" — resolved via set intersection of index lookups.
+The multi-index design supports compound queries: "find all public async methods in classes that implement `IQueryHandler` and have `[ServiceProvider]` attribute" resolves through set intersection of index lookups.
 
-### 4. Code Stats (Complexity Metrics)
+### 4. Code stats (complexity metrics)
 
-Each method/constructor/function gets complexity metrics computed during AST parsing via `walk_code_stats()` in `tree_sitter_utils.rs`. The metrics are stored in `DefinitionIndex.code_stats` keyed by def_idx.
+Each method, constructor, or function gets complexity metrics computed during AST parsing via `walk_code_stats()` in `tree_sitter_utils.rs`. Metrics are stored in `DefinitionIndex.code_stats` keyed by def_idx.
 
 ```rust
 pub struct CodeStats {
@@ -210,19 +210,19 @@ pub struct CodeStats {
 }
 ```
 
-**Language-agnostic walker** — `CodeStatsConfig` struct defines which AST node names correspond to branching, case, return, etc. for each language. Currently configured for C#, TypeScript/TSX, and Rust.
+**Language-agnostic walker.** `CodeStatsConfig` declares which AST node names correspond to branching, case, return, etc. for each language. Currently configured for C#, TypeScript/TSX, and Rust.
 
 **Query API** (via `xray_definitions`):
 
-- `sortBy` — sort results by any metric descending (e.g., `sortBy='cognitiveComplexity'` for worst methods first)
-- `minComplexity`, `minCognitive`, `minNesting`, `minParams`, `minReturns`, `minCalls` — filter thresholds (combine with AND)
-- `includeCodeStats` — include metrics in response (auto-enabled by `sortBy`/`min*`)
+- `sortBy`: sort results by any metric, descending (e.g., `sortBy='cognitiveComplexity'` for worst methods first).
+- `minComplexity`, `minCognitive`, `minNesting`, `minParams`, `minReturns`, `minCalls`: filter thresholds, combined with AND.
+- `includeCodeStats`: include metrics in the response (auto-enabled by `sortBy` or any `min*`).
 
-### 5. Trigram Index (Substring Search)
+### 5. Trigram index (substring search)
 
-The trigram index enables fast substring matching within indexed tokens. It solves the compound-identifier problem: when the tokenizer produces a single token like `databaseconnectionfactory`, a search for `DatabaseConnection` would fail with exact token lookup. The trigram index makes this possible in ~0.07ms.
+The trigram index supports fast substring matching inside indexed tokens. It solves the compound-identifier problem: when the tokenizer produces a single token like `databaseconnectionfactory`, a search for `DatabaseConnection` would fail with exact token lookup. The trigram index makes it work in ~0.07ms.
 
-#### Data Structure
+#### Data structure
 
 ```rust
 pub struct TrigramIndex {
@@ -233,7 +233,7 @@ pub struct TrigramIndex {
 }
 ```
 
-The `TrigramIndex` is a field of `ContentIndex` (not `Option` — always built):
+The `TrigramIndex` is a field of `ContentIndex`, not an `Option`. It is always built:
 
 ```rust
 pub struct ContentIndex {
@@ -243,7 +243,7 @@ pub struct ContentIndex {
 }
 ```
 
-#### How It Works
+#### How it works
 
 A **trigram** is a 3-character sliding window over a string:
 
@@ -261,12 +261,12 @@ The trigram index maps each trigram to all tokens containing it:
 
 **Searching for substring** `"httpcli"`:
 
-1. Generate query trigrams: `"htt"`, `"ttp"`, `"tpc"`, `"pcl"`, `"cli"`
-2. Intersect posting lists (sorted merge) — only tokens in ALL lists survive
-3. Verify candidates with `token.contains("httpcli")` — filters trigram false positives
-4. Look up verified tokens in the main inverted index → file postings + TF-IDF scoring
+1. Generate query trigrams: `"htt"`, `"ttp"`, `"tpc"`, `"pcl"`, `"cli"`.
+2. Intersect posting lists (sorted merge). Only tokens in ALL lists survive.
+3. Verify candidates with `token.contains("httpcli")`. This filters trigram false positives.
+4. Look up verified tokens in the main inverted index to get file postings + TF-IDF scoring.
 
-#### Index Build
+#### Index build
 
 The trigram index is built automatically at the end of `build_content_index()` in [`index.rs`](../src/index.rs):
 
@@ -277,11 +277,11 @@ graph LR
     C -->|sort + dedup token-idx lists| D[TrigramIndex]
 ```
 
-The `dedup` step removes **duplicate token indices that arise from sliding-window overlap within a single token** (e.g. token `"abcabc"` produces trigram `"abc"` twice via the sliding window, so its token-index would be pushed into the `"abc"` posting list twice without dedup). It is **not** dedup of the underlying file-level work — each surviving token-index still resolves to its full posting list of `(file_id, lines)` entries downstream. The benefit is a smaller, sorted posting list that supports cheap intersection during query.
+The `dedup` step removes **duplicate token indices that come from sliding-window overlap inside a single token**. Token `"abcabc"` produces trigram `"abc"` twice through the sliding window, so its token-index would be pushed into the `"abc"` posting list twice without dedup. This is not dedup of underlying file-level work. Each surviving token-index still resolves to its full posting list of `(file_id, lines)` entries downstream. The benefit is a smaller, sorted posting list that supports cheap intersection during query.
 
-Build time is ~200ms for 754K tokens — negligible compared to the main index build (~7–16s).
+Build time is ~200ms for 754K tokens. Negligible next to the main index build (~7–16s).
 
-#### Memory Overhead
+#### Memory overhead
 
 | Component               | Size       |
 | ----------------------- | ---------- |
@@ -291,17 +291,17 @@ Build time is ~200ms for 754K tokens — negligible compared to the main index b
 | HashMap overhead         | ~5 MB      |
 | **Total trigram index**  | **~56 MB** |
 
-This is ~23% overhead on top of the 242 MB content index.
+That's ~23% overhead on top of the 242 MB content index.
 
-#### Watcher Integration (Lazy Rebuild)
+#### Watcher integration (lazy rebuild)
 
-Rather than performing complex incremental updates to the trigram index on every file change, the watcher uses a **lazy rebuild strategy**:
+The watcher uses a **lazy rebuild strategy** rather than incrementally maintaining the trigram index on every file change:
 
 1. On file change: watcher updates the main inverted index incrementally (as before) and sets `trigram_dirty = true`.
-2. On next substring search: if `trigram_dirty`, the trigram index is rebuilt from scratch and swapped in. Then `trigram_dirty = false`.
+2. On the next substring search: if `trigram_dirty`, the trigram index is rebuilt from scratch and swapped in. Then `trigram_dirty = false`.
 3. On bulk reindex (changes > threshold): trigram is rebuilt alongside the main index.
 
-**Locking discipline (`ensure_trigram_index` in [`src/mcp/handlers/grep.rs`](../src/mcp/handlers/grep.rs)):** the rebuild work itself runs under the `ContentIndex` **read lock** — it does **not** block other readers (concurrent `xray_grep` / `xray_callers` queries continue without contention). Only the final pointer swap takes the **write lock**, and a double-checked `trigram_dirty` re-test inside the write critical section guards against duplicate work when two readers race into rebuild. The historical "~200ms write-lock stall on rebuild" no longer applies; the write critical section is microseconds (assignment + flag flip), the rebuild itself is the dominant cost but does not stall readers.
+**Locking discipline (`ensure_trigram_index` in [`src/mcp/handlers/grep.rs`](../src/mcp/handlers/grep.rs)).** The rebuild work itself runs under the `ContentIndex` **read lock**. It does not block other readers. Concurrent `xray_grep` / `xray_callers` queries continue without contention. Only the final pointer swap takes the **write lock**, and a double-checked `trigram_dirty` re-test inside the write critical section guards against duplicate work when two readers race into rebuild. The historical "~200ms write-lock stall on rebuild" no longer applies. The write critical section is microseconds (assignment + flag flip). The rebuild itself is the dominant cost but does not stall readers.
 
 ```text
 (reader path on a dirty trigram)
@@ -312,7 +312,7 @@ Rather than performing complex incremental updates to the trigram index on every
 
 This keeps the watcher fast (no O(n) index shifting) and keeps reader latency bounded even when a rebuild is in flight.
 
-### 6. Git History Cache
+### 6. Git history cache
 
 Background-built compact in-memory cache for sub-millisecond git history queries. Replaces 2–6 sec CLI calls with HashMap lookups when the cache is ready.
 
@@ -324,16 +324,16 @@ Arc<RwLock<Option<GitHistoryCache>>>
 
 **Key properties:**
 
-- **Background build** — spawned in a separate thread on server startup (same pattern as content/definition index). Does not block the event loop.
-- **Build-then-swap** — new cache is built in a separate allocation (~59 sec for 50K commits), then swapped in under a write lock in microseconds (pointer swap)
-- **CLI fallback** — while the cache is building, all git history queries transparently fall back to CLI `git log` commands (Phase 1 behavior, zero regression)
-- **Disk persistence** — saved to `.git-history` file (bincode + LZ4, same format as `.word-search` and `.code-structure`). ~100 ms load on subsequent starts vs ~59 sec rebuild
-- **HEAD validation** — on startup, checks if cached HEAD matches current HEAD. If HEAD changed (fast-forward) → rebuild; if force push/rebase → rebuild; if repo re-cloned → rebuild
-- **Compact representation** — ~7.6 MB RAM for 50K commits × 65K files:
-  - `CommitMeta`: 40 bytes per commit (`[u8;20]` hash, `i64` timestamp, `u16` author index, `u32` subject offset/length)
-  - Author pool: deduplicated `(name, email)` pairs
-  - Subject pool: concatenated commit subjects
-  - `file_commits: HashMap<String, Vec<u32>>` — normalized file path → commit IDs
+- **Background build:** spawned on server startup in a separate thread (same pattern as the content and definition index). Does not block the event loop.
+- **Build-then-swap:** the new cache is built in a separate allocation (~59 sec for 50K commits), then swapped in under a write lock in microseconds (pointer swap).
+- **CLI fallback:** while the cache is building, all git history queries transparently fall back to CLI `git log` commands (Phase 1 behavior, zero regression).
+- **Disk persistence:** saved to a `.git-history` file (bincode + LZ4, same format as `.word-search` and `.code-structure`). ~100 ms load on subsequent starts vs ~59 sec rebuild.
+- **HEAD validation:** on startup, the loader checks if cached HEAD matches current HEAD. If HEAD changed (fast-forward) → rebuild. Force push or rebase → rebuild. Repo re-cloned → rebuild.
+- **Compact representation:** ~7.6 MB RAM for 50K commits × 65K files.
+  - `CommitMeta`: 40 bytes per commit (`[u8;20]` hash, `i64` timestamp, `u16` author index, `u32` subject offset/length).
+  - Author pool: deduplicated `(name, email)` pairs.
+  - Subject pool: concatenated commit subjects.
+  - `file_commits: HashMap<String, Vec<u32>>`: normalized file path → commit IDs.
 
 **Query API:**
 
@@ -354,11 +354,11 @@ Arc<RwLock<Option<GitHistoryCache>>>
 | `xray_git_blame` | ❌ Always CLI | git blame | Blame data not cached |
 | `xray_branch_status` | ❌ Always CLI | git status / rev-list | Branch metadata, not file-specific |
 
-**Module:** [`src/git/cache.rs`](../src/git/cache.rs) — self-contained, zero imports from `index.rs`, `definitions/`, or `mcp/`. Depends only on `std`, `serde`, `bincode`, `lz4_flex`.
+**Module:** [`src/git/cache.rs`](../src/git/cache.rs). Self-contained, zero imports from `index.rs`, `definitions/`, or `mcp/`. Depends only on `std`, `serde`, `bincode`, `lz4_flex`.
 
-### 7. MCP Server
+### 7. MCP server
 
-JSON-RPC 2.0 event loop over stdio. Designed for AI agent integration (VS Code Copilot, Roo, Claude).
+JSON-RPC 2.0 event loop over stdio. For AI agent integration (VS Code Copilot, Roo, Claude).
 
 ```mermaid
 sequenceDiagram
@@ -404,16 +404,16 @@ sequenceDiagram
 
 **Design decisions:**
 
-- **Stdio transport** — no HTTP overhead, direct pipe from VS Code process manager
-- **Async startup** — event loop starts immediately with empty indexes; pre-built indexes load synchronously from disk (< 3s), otherwise build in background threads. `AtomicBool` flags (`content_ready`, `def_ready`) gate search tools — they return "index is building" until ready. `initialize`, `tools/list`, `xray_help`, and `xray_info` work immediately.
-- **Single-threaded event loop** — JSON-RPC is sequential; index reads use `RwLock` for watcher concurrency
-- **Indexes held in `Arc<RwLock<T>>`** — watcher thread writes, server thread reads; background build thread writes once at completion
-- **All logging to stderr** — stdout is exclusively for JSON-RPC protocol messages
-- **Response size truncation** — all tool responses are capped at **~16KB (~4K tokens)** to prevent filling LLM context windows. Progressive truncation: cap line arrays → remove lineContent → cap matchedTokens → remove lines → reduce file count. Truncation metadata (`responseTruncated`, `truncationReason`, `hint`) is injected into the summary so the LLM knows to narrow its query.
+- **Stdio transport:** no HTTP overhead, direct pipe from the VS Code process manager.
+- **Async startup:** the event loop starts immediately with empty indexes. Pre-built indexes load synchronously from disk (< 3s); otherwise they build in background threads. `AtomicBool` flags (`content_ready`, `def_ready`) gate the search tools, which return "index is building" until ready. `initialize`, `tools/list`, `xray_help`, and `xray_info` work right away.
+- **Single-threaded event loop:** JSON-RPC is sequential. Index reads use `RwLock` for watcher concurrency.
+- **Indexes held in `Arc<RwLock<T>>`:** watcher thread writes, server thread reads. Background build thread writes once at completion.
+- **All logging to stderr:** stdout is exclusively for JSON-RPC protocol messages.
+- **Response size truncation:** all tool responses are capped at **~16KB (~4K tokens)** so they don't fill LLM context windows. Progressive truncation: cap line arrays → remove lineContent → cap matchedTokens → remove lines → reduce file count. Truncation metadata (`responseTruncated`, `truncationReason`, `hint`) is injected into the summary so the LLM knows to narrow its query.
 
-### 8. File Watcher
+### 8. File watcher
 
-OS-level filesystem notifications (via `notify` crate / `ReadDirectoryChangesW` on Windows) with debounced batch processing, backed by a periodic rescan fail-safe.
+OS-level filesystem notifications (via the `notify` crate / `ReadDirectoryChangesW` on Windows) with debounced batch processing, backed by a periodic rescan fail-safe.
 
 ```mermaid
 stateDiagram-v2
@@ -427,24 +427,24 @@ stateDiagram-v2
     FullReindex --> Watching
 ```
 
-**Periodic rescan fail-safe.** A separate background thread (`start_periodic_rescan`) ticks every `--rescan-interval-sec` (default 5 min, min 10 s) and walks the workspace to detect drift between disk state and the in-memory `ContentIndex` / `FileIndex`. Drift triggers reconciliation via the same code paths as the live event loop. This bounds the worst-case index staleness when the OS drops events under load (e.g., `git checkout && git pull` overflowing the `ReadDirectoryChangesW` buffer). Counters surfaced in `xray_info["watcher"]["periodicRescanDriftEvents"]`. See [`docs/concurrency.md`](concurrency.md#periodic-rescan-fail-safe-for-missed-events) for the full design.
+**Periodic rescan fail-safe.** A separate background thread (`start_periodic_rescan`) ticks every `--rescan-interval-sec` (default 5 min, min 10 s) and walks the workspace to detect drift between disk state and the in-memory `ContentIndex` / `FileIndex`. Drift triggers reconciliation through the same code paths as the live event loop. This bounds worst-case index staleness when the OS drops events under load, for example `git checkout && git pull` overflowing the `ReadDirectoryChangesW` buffer. Counters are surfaced in `xray_info["watcher"]["periodicRescanDriftEvents"]`. See [`docs/concurrency.md`](concurrency.md#periodic-rescan-fail-safe-for-missed-events) for the full design.
 
-**Incremental update path** (per file, ~50-100ms):
+**Incremental update path** (per file, ~50–100ms):
 
-1. Read file content from disk
-2. Remove old postings from inverted index (brute-force scan of all tokens for the file_id — no forward index needed, saves ~1.5 GB RAM)
-3. Re-tokenize file
-4. Add new tokens to inverted index
-5. If definition index is loaded: re-parse with tree-sitter, update definition entries
+1. Read file content from disk.
+2. Remove old postings from the inverted index (brute-force scan of all tokens for the file_id — no forward index needed, saves ~1.5 GB RAM).
+3. Re-tokenize the file.
+4. Add new tokens to the inverted index.
+5. If the definition index is loaded: re-parse with tree-sitter, update definition entries.
 
-**Full reindex path** (triggered by large batch of changes):
+**Full reindex path** (triggered by a large batch of changes):
 
-- Full rebuild of content index from scratch
-- Triggered by git checkout, branch switch, large merges
+- Full rebuild of the content index from scratch.
+- Triggered by git checkout, branch switch, large merges.
 
-## Data Flow
+## Data flow
 
-### Index Build Pipeline
+### Index build pipeline
 
 ```mermaid
 graph LR
@@ -463,7 +463,7 @@ graph LR
     J -->|bincode serialize| K[.code-structure file]
 ```
 
-### Query Pipeline
+### Query pipeline
 
 ```mermaid
 graph LR
@@ -486,9 +486,9 @@ IDF = ln(total_files / files_containing_term)
 
 Multi-term: scores are summed across matching terms. Files matching more terms rank higher naturally.
 
-### Relevance Ranking
+### Relevance ranking
 
-Results from `xray_definitions`, `xray_fast`, and `xray_grep` (phrase mode) are sorted by relevance using a multi-key tiered sort algorithm. This ensures that exact matches appear first, followed by prefix matches, then substring/contains matches — critical for AI agents that rely on the first 5–10 results.
+Results from `xray_definitions`, `xray_fast`, and `xray_grep` (phrase mode) are sorted by relevance using a multi-key tiered sort. Exact matches come first, then prefix matches, then substring/contains matches. This matters because AI agents rely on the first 5–10 results.
 
 #### Algorithm: `best_match_tier()`
 
@@ -496,13 +496,13 @@ Shared function in `utils.rs` that classifies a name against search terms (case-
 
 | Tier | Match Type | Example (query: `UserService`) |
 |------|-----------|-------------------------------|
-| 0    | **Exact** — name equals a search term | `UserService` |
-| 1    | **Prefix** — name starts with a search term | `UserServiceFactory`, `UserServiceHelper` |
-| 2    | **Contains** — name contains a search term | `IUserService`, `BaseUserService` |
+| 0    | **Exact:** name equals a search term | `UserService` |
+| 1    | **Prefix:** name starts with a search term | `UserServiceFactory`, `UserServiceHelper` |
+| 2    | **Contains:** name contains a search term | `IUserService`, `BaseUserService` |
 
 For comma-separated multi-term queries, the **best** (lowest) tier across all terms is used.
 
-#### Sort Keys by Tool
+#### Sort keys by tool
 
 **`xray_definitions`** (when `name` filter is active, non-regex):
 
@@ -521,19 +521,19 @@ For comma-separated multi-term queries, the **best** (lowest) tier across all te
 3. Full path:    alphabetical tiebreaker
 ```
 
-**`xray_grep` phrase mode**: sorted by occurrence count (descending).
+**`xray_grep` phrase mode:** sorted by occurrence count (descending).
 
-**Not ranked**: `xray_grep` token/substring mode (uses TF-IDF), regex mode in `xray_definitions` (no "exact match" semantics).
+**Not ranked:** `xray_grep` token/substring mode (uses TF-IDF), regex mode in `xray_definitions` (no "exact match" semantics).
 
-#### Design Decisions
+#### Design decisions
 
-- **No numeric score in JSON** — LLM agents use result **order**, not absolute score values. No `relevanceScore` field is emitted.
-- **Kind is a tiebreaker, not a primary key** — a method `GetUser` (exact, tier 0) always outranks a class `GetUserService` (prefix, tier 1). Kind only matters within the same tier.
-- **Case-insensitive comparison** — `best_match_tier()` lowercases both the name and terms internally, so ranking works correctly regardless of input casing.
+- **No numeric score in JSON.** LLM agents use result **order**, not absolute score values. No `relevanceScore` field is emitted.
+- **Kind is a tiebreaker, not a primary key.** A method `GetUser` (exact, tier 0) always outranks a class `GetUserService` (prefix, tier 1). Kind only matters within the same tier.
+- **Case-insensitive comparison.** `best_match_tier()` lowercases both the name and terms internally, so ranking works regardless of input casing.
 
 Design rationale lives inline in `src/mcp/handlers/utils.rs::best_match_tier` doc-comments and the surrounding ranking helpers.
 
-### Call Tree Pipeline (xray_callers)
+### Call tree pipeline (xray_callers)
 
 **Direction "up" (find callers):**
 ```mermaid
@@ -555,51 +555,51 @@ graph TB
     D -->|collect| E[Hierarchical callee tree]
 ```
 
-Direction "up" combines the content index (where does this token appear?) with the definition index (which method spans this line range?). Supports `class` parameter for disambiguation and `resolveInterfaces` for DI-aware tracing. When a `class` filter is specified, file candidates are pre-computed via exact token lookup + **trigram substring matching** (`collect_substring_file_ids`) to handle field naming patterns like `m_orderProcessor`, `_userService` where the class name appears as a substring of a larger token.
+Direction "up" combines the content index (where does this token appear?) with the definition index (which method spans this line range?). Supports `class` for disambiguation and `resolveInterfaces` for DI-aware tracing. When a `class` filter is specified, file candidates are pre-computed via exact token lookup plus **trigram substring matching** (`collect_substring_file_ids`) to handle field naming patterns like `m_orderProcessor` and `_userService`, where the class name appears as a substring of a larger token.
 
-Direction "down" uses the pre-computed call graph — zero runtime file I/O. Call sites are extracted during `def-index` build with field type resolution (DI constructor parameter types → field types → receiver types).
+Direction "down" uses the pre-computed call graph. Zero runtime file I/O. Call sites are extracted during `def-index` build with field type resolution (DI constructor parameter types → field types → receiver types).
 
 **Advanced features:**
 
-- **`includeBody`** — returns source code of each method in the call tree inline, plus a `rootMethod` object with the searched method's own body. Eliminates separate `xray_definitions` calls.
-- **`includeDocComments`** — expands body upward to include doc-comments (`///` in C#/Rust, `/** */` JSDoc in TypeScript). Implies `includeBody=true`.
-- **`impactAnalysis`** — when `direction='up'`, identifies test methods in the caller chain. Test methods (detected via `[Test]`/`[Fact]`/`[Theory]`/`[TestMethod]`/`#[test]` attributes or `*.spec.ts`/`*.test.ts` file patterns) are marked with `isTest=true` and collected in a `testsCovering` array with full file path, depth, and call chain. Recursion stops at test methods.
+- **`includeBody`:** returns the source code of each method in the call tree inline, plus a `rootMethod` object with the searched method's own body. Removes the need for separate `xray_definitions` calls.
+- **`includeDocComments`:** expands body upward to include doc-comments (`///` in C#/Rust, `/** */` JSDoc in TypeScript). Implies `includeBody=true`.
+- **`impactAnalysis`:** when `direction='up'`, identifies test methods in the caller chain. Test methods (detected via `[Test]` / `[Fact]` / `[Theory]` / `[TestMethod]` / `#[test]` attributes, or `*.spec.ts` / `*.test.ts` file patterns) are marked `isTest=true` and collected in a `testsCovering` array with full file path, depth, and call chain. Recursion stops at test methods.
 
-#### Caller Tree Verification
+#### Caller tree verification
 
-The `xray_callers` tool builds call trees by tracing method invocations through AST-parsed call-site data. Key design points:
+`xray_callers` builds call trees by tracing method invocations through AST-parsed call-site data. Key design points:
 
-- **Call-site verification is mandatory** — methods without parsed call-site data are filtered out (no false-positive fallback)
-- **Expression body properties supported** — C# expression body properties (`public string Name => _service.GetName();`) have their call sites extracted and verified
-- **Lambda / arrow function calls captured** — call sites inside lambdas (C#) and arrow functions (TypeScript) in argument lists are recursively parsed
-- **Pre-filter uses class name and method name only** — base types and interfaces are not expanded during the pre-filter phase; inheritance verification happens during call-site validation via receiver type matching
-- **`direction=down` cross-class scoping** — when building callee trees, unqualified calls without a receiver type resolve only to methods in the caller's own class (prevents cross-class pollution at depth ≥ 2)
-- **Generic arity mismatch filter** — `new Foo<T>()` call sites skip non-generic classes with the same name (e.g., `new List<CatalogEntry>()` won't resolve to a non-generic `List` class)
-- **Built-in type blocklist** — 60+ built-in receiver types (Promise, Array, Map, String, Object, etc.) are excluded from `direction=down` resolution, preventing false positives like `Promise.resolve()` matching `Deferred.resolve()`
-- **Fuzzy DI interface matching** — finds callers through non-standard interface naming conventions (e.g., `IDataModelService` → `DataModelWebService`) using suffix-tolerant matching against the `base_type_index`
-- **Type inference for local variables** — cast expressions (`(Type)expr`), `as` expressions (`expr as Type`), method return types (`var x = GetStream()`), `await`/`Task<T>` unwrap (`var x = await GetStreamAsync()`), pattern matching (`if (obj is Type name)`, `case Type name:`), and extension method detection. Cross-class method return types are NOT resolved (only same-class methods)
-- **Local variable limitation** — calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be detected when the return type cannot be inferred. DI-injected fields, `this`/`base` calls, and direct receiver calls are fully supported
+- **Call-site verification is mandatory.** Methods without parsed call-site data are filtered out (no false-positive fallback).
+- **Expression body properties supported.** C# expression body properties (`public string Name => _service.GetName();`) have their call sites extracted and verified.
+- **Lambda / arrow function calls captured.** Call sites inside lambdas (C#) and arrow functions (TypeScript) in argument lists are recursively parsed.
+- **Pre-filter uses class name and method name only.** Base types and interfaces are not expanded during the pre-filter phase. Inheritance verification happens during call-site validation via receiver type matching.
+- **`direction=down` cross-class scoping.** When building callee trees, unqualified calls without a receiver type resolve only to methods in the caller's own class. This prevents cross-class pollution at depth ≥ 2.
+- **Generic arity mismatch filter.** `new Foo<T>()` call sites skip non-generic classes with the same name. `new List<CatalogEntry>()` won't resolve to a non-generic `List` class.
+- **Built-in type blocklist.** 60+ built-in receiver types (Promise, Array, Map, String, Object, etc.) are excluded from `direction=down` resolution. This prevents false positives like `Promise.resolve()` matching `Deferred.resolve()`.
+- **Fuzzy DI interface matching.** Finds callers through non-standard interface naming conventions (e.g., `IDataModelService` → `DataModelWebService`) using suffix-tolerant matching against the `base_type_index`.
+- **Type inference for local variables.** Cast expressions (`(Type)expr`), `as` expressions (`expr as Type`), method return types (`var x = GetStream()`), `await` / `Task<T>` unwrap (`var x = await GetStreamAsync()`), pattern matching (`if (obj is Type name)`, `case Type name:`), and extension method detection. Cross-class method return types are NOT resolved (only same-class methods).
+- **Local variable limitation.** Calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may go undetected when the return type cannot be inferred. DI-injected fields, `this` / `base` calls, and direct receiver calls are fully supported.
 
 For the full canonical matrix of which DI patterns and which .NET DI containers are resolved automatically (and which aren't), see [DI Support](di-support.md).
 
-#### Angular Template Metadata
+#### Angular template metadata
 
 Angular `@Component` class definitions are automatically enriched with template metadata during definition indexing:
 
-- **What it does** — extracts `selector` and `templateUrl` from the `@Component()` decorator, reads the paired `.html` file, and scans for custom elements (tags with hyphens) used in the template
-- **`xray_definitions`** — Angular components include `selector` (e.g., `"app-user-profile"`) and `templateChildren` (list of child component selectors found in the HTML)
-- **Component tree navigation via `xray_callers`**:
-  - `direction='down'` with a component class name → shows child components from the HTML template (recursive with `depth`)
-  - `direction='up'` with a selector (e.g., `"app-footer"`) → finds parent components that use it in their templates
-- **HTML content search** — add `html` to `--ext` / `ext` parameter for `xray_grep` to search HTML template content
+- **What it does:** extracts `selector` and `templateUrl` from the `@Component()` decorator, reads the paired `.html` file, and scans for custom elements (tags with hyphens) used in the template.
+- **`xray_definitions`:** Angular components include `selector` (e.g., `"app-user-profile"`) and `templateChildren` (list of child component selectors found in the HTML).
+- **Component tree navigation via `xray_callers`:**
+  - `direction='down'` with a component class name → shows child components from the HTML template (recursive with `depth`).
+  - `direction='up'` with a selector (e.g., `"app-footer"`) → finds parent components that use it in their templates.
+- **HTML content search:** add `html` to `--ext` / `ext` parameter for `xray_grep` to search HTML template content.
 
-**Limitations:** Only external templates (`templateUrl`), not inline `template:`. Only tags with hyphens (custom elements per HTML spec). `ng-*` tags are excluded (Angular built-ins). Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
+**Limitations.** Only external templates (`templateUrl`), not inline `template:`. Only tags with hyphens (custom elements per HTML spec). `ng-*` tags are excluded (Angular built-ins). Template metadata updates on full `def-index` rebuild, not incrementally on `.html` changes.
 
-## Indexing Triggers — When Does Indexing Happen?
+## Indexing triggers — when does indexing happen?
 
 A single consolidated reference for all indexing scenarios. For detailed internals, see [Storage Model](storage.md), [Concurrency](concurrency.md), and [CLI Reference](cli-reference.md).
 
-### Full Index Build
+### Full index build
 
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
@@ -610,15 +610,15 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 | `xray_reindex` (MCP tool) | Full rebuild + reload in-memory | ContentIndex | ~7–16s |
 | `xray_reindex_definitions` (MCP tool) | Full rebuild + reload in-memory | DefinitionIndex | ~16–32s |
 
-### Incremental Update (Watcher)
+### Incremental update (watcher)
 
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
 | File saved in IDE | Watcher detects change after debounce window (`--debounce-ms`, default 500ms), updates inverted index + re-parses AST | ContentIndex + DefinitionIndex | ~50–100ms per file |
-| File created | Same as file save — added to both indexes | ContentIndex + DefinitionIndex | ~50–100ms |
+| File created | Same as file save; added to both indexes | ContentIndex + DefinitionIndex | ~50–100ms |
 | File deleted | Postings purged from inverted index (brute-force scan); definitions removed from def index | ContentIndex + DefinitionIndex | ~50–100ms |
 
-### Lazy / On-Demand Rebuild
+### Lazy / on-demand rebuild
 
 | Trigger | What Happens | Indexes Affected | Time |
 |---------|-------------|-----------------|------|
@@ -626,28 +626,28 @@ A single consolidated reference for all indexing scenarios. For detailed interna
 | `xray fast` with stale FileIndex | Auto-rebuild if `--auto-reindex true` (default) | FileIndex | ~2–4s |
 | `xray grep` with stale ContentIndex | Auto-rebuild if `--auto-reindex true` (default) | ContentIndex | ~7–16s |
 
-### Load From Disk (No Rebuild)
+### Load from disk (no rebuild)
 
 | Trigger | What Happens | Time |
 |---------|-------------|------|
 | MCP server start (index exists on disk) | Synchronous load of LZ4-compressed bincode files | < 3s |
 | `xray grep` / `xray fast` (index exists, not stale) | Load from disk | < 3s |
 
-### What Does NOT Trigger Re-indexing
+### What does NOT trigger re-indexing
 
 | Scenario | Why |
 |----------|-----|
 | Upgrading `xray.exe` binary (runtime logic changes only) | Index format unchanged → existing `.word-search` / `.code-structure` files are fully compatible |
-| Upgrading `xray.exe` binary (parser changes — new definition types, new call site patterns) | Old index loads fine but may have stale/incomplete data → **manual `xray_reindex_definitions`** recommended |
+| Upgrading `xray.exe` binary (parser changes — new definition types, new call site patterns) | Old index loads fine but may have stale or incomplete data → **manual `xray_reindex_definitions`** recommended |
 | Upgrading `xray.exe` binary (index format changes — e.g., new field added to struct) | Bincode deserialization fails → index is rebuilt automatically on next server start |
 | Restarting VS Code / MCP server | Index loads from disk (if saved); no rebuild |
 | Opening a different VS Code workspace | Each workspace has its own MCP server instance with its own index |
 
-### Graceful Shutdown — Saving Incremental Changes
+### Graceful shutdown — saving incremental changes
 
-When the MCP server shuts down (stdin closes), it saves both in-memory indexes to disk. This preserves all incremental watcher updates that were only held in memory. On next startup, the saved indexes are loaded — no rebuild needed for changes made during the previous session.
+When the MCP server shuts down (stdin closes), it saves both in-memory indexes to disk. This preserves all incremental watcher updates that were only held in memory. On the next startup, the saved indexes load directly. No rebuild is needed for changes made during the previous session.
 
-## Module Structure
+## Module structure
 
 ```
 src/
@@ -741,82 +741,51 @@ src/
         └── utils_tests.rs          # Utils/truncation unit tests
 ```
 
-**Dependency direction:** `cli/*` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions/*`. No circular dependencies. MCP layer depends on core index types but core has no knowledge of MCP. `main.rs` delegates to `cli::run()`.
+**Dependency direction.** `cli/*` → `index.rs` → `lib.rs` (types). `mcp/*` → `index.rs` + `definitions/*`. No circular dependencies. The MCP layer depends on core index types, but core has no knowledge of MCP. `main.rs` delegates to `cli::run()`.
 
-## Language Support
+## Language support
 
 The engine has two layers with **different language coverage**:
 
 | Layer | Tools | Language Support | How it works |
 | ----- | ----- | ---------------- | ------------ |
-| **Content search** | `xray grep`, `content-index`, `xray_grep` (MCP) | **Any text file** — language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, etc. |
-| **AST / structural search (persisted index)** | `xray def-index`, `xray_definitions`, `xray_callers` (MCP) | **C#, TypeScript/TSX, Rust** (tree-sitter, optional features), **SQL** (regex, always-on) | Uses tree-sitter to parse source into an AST, extracts classes, methods, interfaces, call sites. Tree-sitter parsers are optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-rust`). The SQL parser is regex-based and always compiled in (no feature flag). |
-| **AST / structural search (on-demand, no persisted index)** | `xray_definitions` for `.xml` / `.csproj` / `.config` | **XML** (tree-sitter, optional `lang-xml` feature, on by default) | Parses XML on each request — no entries stored in the on-disk `.code-structure` index. Returns elements/attributes that match the requested name and supports `containsLine` to locate the element wrapping a given line. |
+| **Content search** | `xray grep`, `content-index`, `xray_grep` (MCP) | **Any text file**, language-agnostic | Splits text on non-alphanumeric boundaries, lowercases tokens, builds an inverted index. No language grammar needed. Works equally well with C#, Rust, Python, JS/TS, XML, JSON, Markdown, config files, and so on. |
+| **AST / structural search (persisted index)** | `xray def-index`, `xray_definitions`, `xray_callers` (MCP) | **C#, TypeScript/TSX, Rust** (tree-sitter, optional features), **SQL** (regex, always-on) | Uses tree-sitter to parse source into an AST and extract classes, methods, interfaces, call sites. Tree-sitter parsers are optional via Cargo features (`lang-csharp`, `lang-typescript`, `lang-rust`). The SQL parser is regex-based and always compiled in (no feature flag). |
+| **AST / structural search (on-demand, no persisted index)** | `xray_definitions` for `.xml` / `.csproj` / `.config` | **XML** (tree-sitter, optional `lang-xml` feature, on by default) | Parses XML on each request. No entries stored in the on-disk `.code-structure` index. Returns elements/attributes that match the requested name and supports `containsLine` to locate the element wrapping a given line. |
 
-### AST Parser Status
+### AST parser status
 
 | Language          | Parser                       | Definition Types                                                                                           | Status |
 | ----------------- | ---------------------------- | ---------------------------------------------------------------------------------------------------------- | ------ |
 | C# (.cs)          | tree-sitter-c-sharp          | class, interface, struct, enum, record, method, constructor, property, field, delegate, event, enum member | ✅ Active (default; optional: `--features lang-csharp`) |
 | TypeScript (.ts)  | tree-sitter-typescript       | class, interface, enum, method, constructor, property, field, function, type alias, variable (exported), enum member | ✅ Active (default; optional: `--features lang-typescript`) |
 | TSX (.tsx)         | tree-sitter-typescript (TSX) | *(same as TypeScript)*                                                                                     | ✅ Active (default; optional: `--features lang-typescript`) |
-| SQL (.sql)        | regex-based (no tree-sitter) | stored procedure, table, view, function, user-defined type, column, index                                  | ✅ Active (always compiled in — no Cargo feature) |
+| SQL (.sql)        | regex-based (no tree-sitter) | stored procedure, table, view, function, user-defined type, column, index                                  | ✅ Active (always compiled in; no Cargo feature) |
 | Rust (.rs)        | tree-sitter-rust             | struct, enum, trait (→Interface), method (impl block), constructor (new/default), function, field, enum variant, const/static (→Variable), type alias | ✅ Active (default; optional: `--features lang-rust`) |
-| XML (.xml, .csproj, .config) | tree-sitter-xml | element, attribute (on-demand parse — not stored in `.code-structure`)                          | ✅ Active (default; optional: `--features lang-xml`) |
+| XML (.xml, .csproj, .config) | tree-sitter-xml | element, attribute (on-demand parse; not stored in `.code-structure`)                          | ✅ Active (default; optional: `--features lang-xml`) |
 
-> **Key takeaway:** You can use `content-index` / `xray_grep` on **any** codebase regardless of language. Only `def-index` / `xray_definitions` / `xray_callers` require a supported parser (currently C#, TypeScript/TSX, Rust, XML via tree-sitter; SQL via regex). Tree-sitter parsers are optional Cargo features — build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-rust,lang-xml` for Rust + XML, etc. SQL is always available (no feature flag).
+> **Key takeaway:** `content-index` / `xray_grep` work on **any** codebase regardless of language. Only `def-index` / `xray_definitions` / `xray_callers` need a supported parser (currently C#, TypeScript/TSX, Rust, XML via tree-sitter; SQL via regex). Tree-sitter parsers are optional Cargo features. Build with `--no-default-features --features lang-csharp` for C#-only, `--features lang-rust,lang-xml` for Rust + XML, and so on. SQL is always available (no feature flag).
 
 
-## Shutdown Semantics and Ctrl+C Handling
+## Shutdown semantics and Ctrl+C handling
 
 **MINOR-15 documentation.**
 
-The MCP server is a stdio-based daemon: it reads newline-framed JSON-RPC
-requests from `stdin` in a blocking `BufReader::read_line()` loop on the
-main thread. Graceful shutdown is triggered by **EOF on stdin** — i.e.,
-the MCP client closing its write end of the pipe. On shutdown, the server
-flushes both `ContentIndex` and `DefinitionIndex` to disk so that
-incremental watcher updates survive the next launch.
+The MCP server is a stdio-based daemon. It reads newline-framed JSON-RPC requests from `stdin` in a blocking `BufReader::read_line()` loop on the main thread. Graceful shutdown is triggered by **EOF on stdin**, that is, the MCP client closing its write end of the pipe. On shutdown, the server flushes both `ContentIndex` and `DefinitionIndex` to disk so that incremental watcher updates survive the next launch.
 
-### Known limitation — `Ctrl+C` inside a terminal session
+### Known limitation: `Ctrl+C` inside a terminal session
 
-If `xray serve` is launched manually in a terminal (not as a child
-process of an MCP client) and the operator presses `Ctrl+C`, the
-terminating `SIGINT` / Windows console control event reaches the
-process **while the main thread is parked inside the blocking
-`read_line()` syscall**. Rust's default `Ctrl+C` handler simply aborts
-the process; the shutdown path that writes the in-memory incremental
-index updates to disk is skipped. Concretely:
+If `xray serve` is launched manually in a terminal (not as a child process of an MCP client) and the operator presses `Ctrl+C`, the terminating `SIGINT` / Windows console control event reaches the process **while the main thread is parked inside the blocking `read_line()` syscall**. Rust's default `Ctrl+C` handler simply aborts the process. The shutdown path that writes the in-memory incremental index updates to disk is skipped. Concretely:
 
-- Any file events that have been tokenized/applied since the last full
-  index rebuild but have NOT yet been persisted via the debounced
-  watcher save are lost. On next start the indexes are reloaded from
-  the on-disk snapshot, so the loss is equivalent to ~1 debounce
-  window (default 500 ms) of file changes.
-- Search correctness is not affected — the watcher will re-apply
-  those events on the next startup because the FS `mtime`s are still
-  newer than the index `mtime`.
+- Any file events that have been tokenized and applied since the last full index rebuild but have NOT yet been persisted via the debounced watcher save are lost. On next start the indexes are reloaded from the on-disk snapshot, so the loss is equivalent to ~1 debounce window (default 500 ms) of file changes.
+- Search correctness is not affected. The watcher will re-apply those events on the next startup because the FS `mtime`s are still newer than the index `mtime`.
 
 ### Recommended operator workflow
 
-- **Preferred:** close `stdin` (e.g., `Ctrl+D` on Unix, `Ctrl+Z<Enter>`
-  on Windows cmd) to trigger the full graceful shutdown path.
-- **From an MCP client:** closing the client (VS Code, Claude Desktop,
-  etc.) closes the pipe automatically — no operator action needed.
-- **Inside a CI script:** send `SIGTERM` only after closing the child
-  process's stdin pipe; on Windows, send
-  `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)` only as a last
-  resort.
+- **Preferred:** close `stdin` (`Ctrl+D` on Unix, `Ctrl+Z<Enter>` on Windows cmd) to trigger the full graceful shutdown path.
+- **From an MCP client:** closing the client (VS Code, Claude Desktop, etc.) closes the pipe automatically. No operator action needed.
+- **Inside a CI script:** send `SIGTERM` only after closing the child process's stdin pipe. On Windows, send `GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0)` only as a last resort.
 
 ### Why we don't install a custom `Ctrl+C` handler
 
-A custom handler would need to inject a "shutdown" message into the
-blocking `read_line()` loop. On Unix this would require swapping to
-`poll()`-based stdin reads; on Windows the equivalent is
-`WaitForMultipleObjects` on the stdin handle plus a signal event.
-Both approaches add platform-specific complexity and a non-trivial
-test surface for a behaviour (operator-initiated `Ctrl+C` on a
-manually launched serve) that is explicitly out of the supported
-deployment mode (MCP client → child process over pipes). The stdin-close
-workaround above covers 100% of production usage.
-
+A custom handler would need to inject a "shutdown" message into the blocking `read_line()` loop. On Unix that requires switching to `poll()`-based stdin reads. On Windows the equivalent is `WaitForMultipleObjects` on the stdin handle plus a signal event. Both approaches add platform-specific complexity and a non-trivial test surface for a behavior (operator-initiated `Ctrl+C` on a manually launched serve) that is explicitly out of the supported deployment mode (MCP client → child process over pipes). The stdin-close workaround above covers 100% of production usage.
