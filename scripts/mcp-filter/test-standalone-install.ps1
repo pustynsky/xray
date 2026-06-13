@@ -529,7 +529,7 @@ function Read-Host {
 }
 `$body = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$b64'))
 `$sb = [scriptblock]::Create(`$body)
-& `$sb -RepoPath '$repo' -InstallDir '$fakeInstallDir' -SkipDownload -EnableVSCode -Extensions cs,md
+& `$sb -RepoPath '$repo' -InstallDir '$fakeInstallDir' -SkipDownload -EnableVSCode -Extensions cs,md -GitVisibility Hidden
 exit `$LASTEXITCODE
 "@
 

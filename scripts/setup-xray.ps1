@@ -15,7 +15,10 @@
     All xray tools are enabled by default EXCEPT xray_edit.
 
 .PARAMETER RepoPath
-    Path to the target repository. If not specified, will prompt interactively.
+    Path to the LOCAL project repository you want to use xray with (the folder
+    xray will index and serve over MCP) - e.g. C:\Repos\MyProject. This is NOT
+    where xray.exe is installed (see -InstallDir). If not specified, the script
+    prompts for it interactively.
 
 .PARAMETER InstallDir
     Where to install xray.exe. Defaults to %LOCALAPPDATA%\xray.
@@ -47,6 +50,19 @@
     and .github/mcp.json are NOT read by Copilot CLI as of writing.
     Without this, Copilot CLI is prompted interactively unless -Force is used,
     in which case Copilot CLI setup is skipped.
+
+.PARAMETER GitVisibility
+    Controls how the xray entry written into mcp.json relates to git. One of:
+      - Visible: write the xray entry directly into mcp.json (preserving existing
+        formatting and other servers) with a "//" warning field. NO smudge/clean
+        filter, NO skip-worktree, NO .git/info/exclude. If the file is git-tracked
+        the change appears in 'git status' and YOU decide whether to commit/push it.
+      - Hidden: the previous behavior. Installs a smudge/clean filter on tracked
+        files (or .git/info/exclude / skip-worktree fallback) so the xray entry
+        never shows in 'git status' and cannot leak upstream.
+    When omitted: interactive runs prompt (default Visible); -Force defaults to
+    Hidden to preserve existing automation behavior; outside a git repo the mode
+    is Visible (there is nothing to hide).
 
 .PARAMETER Force
     Run non-interactively where possible: overwrite existing xray entry, overwrite
@@ -130,6 +146,8 @@ param(
     [switch]$EnableVSCode,
     [switch]$EnableRoo,
     [switch]$EnableCopilotCli,
+    [ValidateSet('Visible', 'Hidden')]
+    [string]$GitVisibility,
     [switch]$Force,
     [switch]$KillRunning,
     [switch]$Restore,
@@ -435,6 +453,12 @@ function Remove-GitProtection {
 
 $Script:XrayMcpMarker = 'managed-by-setup-xray.ps1-do-not-edit'
 
+# Human-facing warning embedded as a "//" field inside the xray entry in
+# VISIBLE git mode. Unlike the _xrayMcpMarker sentinel (which drives the
+# smudge/clean round-trip in hidden mode), this is meant to be SEEN by anyone
+# reviewing a git diff of mcp.json.
+$Script:XrayVisibleWarning = 'xray MCP entry added by setup-xray.ps1 (embeds a per-machine local path). If this file is git-tracked, MAKE SURE you want to commit/push this change.'
+
 # -----------------------------------------------------------------------------
 # Embedded MCP filter scripts (smudge / clean).
 # -----------------------------------------------------------------------------
@@ -668,6 +692,201 @@ function New-XraySnapshotLine {
         return ('    "xray":{"type":"stdio","command":' + $cmdJson + ',"args":[' + $argsJson + '],"_xrayMcpMarker":' + $markerJson + '}')
     }
     return ('    "xray":{"command":' + $cmdJson + ',"args":[' + $argsJson + '],"env":{},"_xrayMcpMarker":' + $markerJson + '}')
+}
+
+function New-XrayVisibleEntryLine {
+    <#
+        Builds the single-line JSON xray entry for VISIBLE git mode. Same shape
+        as New-XraySnapshotLine, but:
+          - carries a human-facing "//" warning field FIRST (so it is the most
+            prominent token in a git diff) instead of the _xrayMcpMarker sentinel;
+          - is a normal entry the user is expected to see in 'git status'.
+        Indented with 4 spaces to match server entries nested two levels deep.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$XrayPath,
+        [Parameter(Mandatory)] [string[]]$XrayArgs,
+        [ValidateSet('CopilotCli', 'VsCode')]
+        [string]$Shape = 'CopilotCli'
+    )
+
+    $argsJson = (@($XrayArgs) | ForEach-Object { ConvertTo-Json -InputObject $_ -Compress }) -join ','
+    $cmdJson  = ConvertTo-Json -InputObject $XrayPath -Compress
+    $warnJson = ConvertTo-Json -InputObject $Script:XrayVisibleWarning -Compress
+    if ($Shape -eq 'VsCode') {
+        return ('    "xray": { "//": ' + $warnJson + ', "type": "stdio", "command": ' + $cmdJson + ', "args": [' + $argsJson + '] }')
+    }
+    return ('    "xray": { "//": ' + $warnJson + ', "command": ' + $cmdJson + ', "args": [' + $argsJson + '], "env": {} }')
+}
+
+function Set-McpFileVisibleViaJson {
+    <#
+        Fallback writer for VISIBLE git mode. Used only when the formatting-
+        preserving line-injection path in Set-McpFileVisibleEntry cannot apply
+        cleanly (container key absent, inline `{}` container, or a pre-existing
+        MULTI-LINE xray block from a legacy plain-merge install). Parses the
+        file, sets/replaces the xray entry (with the "//" warning field first),
+        and reserializes. This reformats the whole file, so it is intentionally
+        the slow path; the common first-install case keeps upstream formatting.
+        Returns $true on success.
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [ValidateSet('mcpServers', 'servers')] [string]$ContainerKey,
+        [Parameter(Mandatory)] [string]$XrayPath,
+        [Parameter(Mandatory)] [string[]]$XrayArgs,
+        [ValidateSet('CopilotCli', 'VsCode')] [string]$Shape,
+        [string]$Sep = "`n"
+    )
+
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+
+    $obj = $null
+    if (Test-Path $Path) {
+        try { $obj = (Get-Content -Path $Path -Raw) | ConvertFrom-Json -ErrorAction Stop } catch { $obj = $null }
+    }
+    if (-not $obj) { $obj = [pscustomobject]@{} }
+
+    if (-not ($obj.PSObject.Properties.Name -contains $ContainerKey)) {
+        $obj | Add-Member -NotePropertyName $ContainerKey -NotePropertyValue ([pscustomobject]@{}) -Force
+    }
+
+    if ($Shape -eq 'VsCode') {
+        $entry = [ordered]@{ '//' = $Script:XrayVisibleWarning; type = 'stdio'; command = $XrayPath; args = $XrayArgs }
+    }
+    else {
+        $entry = [ordered]@{ '//' = $Script:XrayVisibleWarning; command = $XrayPath; args = $XrayArgs; env = [ordered]@{} }
+    }
+    $obj.$ContainerKey | Add-Member -NotePropertyName 'xray' -NotePropertyValue ([pscustomobject]$entry) -Force
+
+    $json = $obj | ConvertTo-Json -Depth 10
+    $json = $json -replace "`r`n", "`n"
+    if ($Sep -eq "`r`n") { $json = $json -replace "`n", "`r`n" }
+    [IO.File]::WriteAllText($Path, $json + $Sep, $utf8NoBom)
+    return $true
+}
+
+function Set-McpFileVisibleEntry {
+    <#
+        Writes the xray entry into an MCP config file in VISIBLE git mode.
+        Preserves existing formatting and other servers by injecting the
+        single-line $EntryLine as the FIRST entry of the container object
+        (same line-surgery approach as Set-McpFileWithSnapshot, minus the
+        smudge/clean marker). Idempotent across re-runs and mode switches:
+          - strips any prior hidden snapshot line (_xrayMcpMarker), so switching
+            from hidden -> visible re-injects a clean visible entry;
+          - replaces a prior single-line visible xray entry in place;
+          - for any other pre-existing xray shape (multi-line block) or unusual
+            container shape, falls back to Set-McpFileVisibleViaJson.
+        Output preserves the file's dominant line separator (CRLF vs LF).
+        Returns $true on success, $false if the file exists but is not parseable
+        as JSON (in which case it is left untouched).
+    #>
+    param(
+        [Parameter(Mandatory)] [string]$Path,
+        [Parameter(Mandatory)] [string]$EntryLine,
+        [ValidateSet('mcpServers', 'servers')] [string]$ContainerKey = 'mcpServers',
+        [Parameter(Mandatory)] [string]$XrayPath,
+        [Parameter(Mandatory)] [string[]]$XrayArgs,
+        [ValidateSet('CopilotCli', 'VsCode')] [string]$Shape = 'CopilotCli'
+    )
+
+    $utf8NoBom = [Text.UTF8Encoding]::new($false)
+
+    if (-not (Test-Path $Path)) {
+        $body = "{`n  ""$ContainerKey"": {`n$EntryLine`n  }`n}`n"
+        [IO.File]::WriteAllText($Path, $body, $utf8NoBom)
+        return $true
+    }
+
+    $raw = [IO.File]::ReadAllText($Path, $utf8NoBom)
+    $sep = if ($raw -match "`r`n") { "`r`n" } else { "`n" }
+
+    # Validate JSON; never corrupt an unparseable file.
+    try { $null = $raw | ConvertFrom-Json -ErrorAction Stop }
+    catch {
+        Write-Warning ("Cannot parse {0} as JSON; leaving it untouched. Add the xray entry manually." -f $Path)
+        return $false
+    }
+
+    $normalized = $raw -replace "`r`n", "`n"
+
+    # 1. Strip any prior hidden snapshot line(s). After this, a former hidden
+    #    install has no xray line in the text, so step 3 injects a clean one.
+    if ($normalized -match '_xrayMcpMarker') {
+        $kept = @(($normalized -split "`n") | Where-Object { $_ -notmatch '_xrayMcpMarker' })
+        $normalized = ($kept -join "`n")
+    }
+
+    $lines = $normalized -split "`n"
+
+    # Locate the container-open line and its first non-blank member.
+    $openPattern = '"' + $ContainerKey + '"\s*:\s*\{\s*$'
+    $openIdx = -1
+    for ($i = 0; $i -lt $lines.Length; $i++) {
+        if ($lines[$i] -match $openPattern) { $openIdx = $i; break }
+    }
+    $firstMemberIdx = -1
+    if ($openIdx -ge 0) {
+        $k = $openIdx + 1
+        while ($k -lt $lines.Length -and $lines[$k] -match '^\s*$') { $k++ }
+        if ($k -lt $lines.Length) { $firstMemberIdx = $k }
+    }
+
+    # 2. Remove a prior single-line visible xray entry in place ONLY when it is
+    #    the FIRST container member. Removing a non-first single-line entry would
+    #    orphan the preceding entry's trailing comma and yield strict-JSON-invalid
+    #    output (ConvertFrom-Json tolerates a trailing comma, but Copilot CLI's
+    #    strict parser rejects it). A multi-line/legacy xray block, OR a
+    #    single-line xray that is not first, defers to the JSON reserialize
+    #    fallback which removes/repositions xray safely.
+    $singleLineXrayPattern = '^\s*"xray"\s*:\s*\{.*\}\s*,?\s*$'
+    $multiLineXrayOpen = '^\s*"xray"\s*:\s*\{\s*$'
+    $singleIdx = -1
+    $multiOpenIdx = -1
+    for ($i = 0; $i -lt $lines.Length; $i++) {
+        if ($singleIdx -lt 0 -and $lines[$i] -match $singleLineXrayPattern) { $singleIdx = $i }
+        if ($multiOpenIdx -lt 0 -and $lines[$i] -match $multiLineXrayOpen) { $multiOpenIdx = $i }
+    }
+
+    if ($singleIdx -ge 0) {
+        if ($singleIdx -ne $firstMemberIdx) {
+            # Not the first member: line-removal would leave a dangling comma.
+            # Reserialize via JSON, which removes/repositions xray safely.
+            return (Set-McpFileVisibleViaJson -Path $Path -ContainerKey $ContainerKey -XrayPath $XrayPath -XrayArgs $XrayArgs -Shape $Shape -Sep $sep)
+        }
+        # Safe: removing the first member never orphans a preceding entry's comma.
+        # The fresh entry is re-injected at the top in step 3.
+        $before = if ($singleIdx -gt 0) { $lines[0..($singleIdx - 1)] } else { @() }
+        $after = if ($singleIdx -lt $lines.Length - 1) { $lines[($singleIdx + 1)..($lines.Length - 1)] } else { @() }
+        $lines = @($before) + @($after)
+    }
+    elseif ($multiOpenIdx -ge 0) {
+        return (Set-McpFileVisibleViaJson -Path $Path -ContainerKey $ContainerKey -XrayPath $XrayPath -XrayArgs $XrayArgs -Shape $Shape -Sep $sep)
+    }
+
+    # 3. Inject $EntryLine as the first entry after the container opening brace.
+    $newLines = New-Object System.Collections.Generic.List[string]
+    $injected = $false
+    for ($i = 0; $i -lt $lines.Length; $i++) {
+        $newLines.Add($lines[$i])
+        if (-not $injected -and $lines[$i] -match $openPattern) {
+            $j = $i + 1
+            while ($j -lt $lines.Length -and $lines[$j] -match '^\s*$') { $j++ }
+            $emptyServers = ($j -lt $lines.Length -and $lines[$j] -match '^\s*\}\s*,?\s*$')
+            if ($emptyServers) { $newLines.Add($EntryLine) }
+            else { $newLines.Add($EntryLine + ',') }
+            $injected = $true
+        }
+    }
+
+    if (-not $injected) {
+        # Container is inline ({}), absent, or not at end of line -> JSON fallback.
+        return (Set-McpFileVisibleViaJson -Path $Path -ContainerKey $ContainerKey -XrayPath $XrayPath -XrayArgs $XrayArgs -Shape $Shape -Sep $sep)
+    }
+
+    [IO.File]::WriteAllText($Path, ($newLines -join $sep), $utf8NoBom)
+    return $true
 }
 
 function Get-GitWorkTreeRoot {
@@ -1521,7 +1740,10 @@ function Get-DetectedExtensions {
 }
 
 if (-not $RepoPath) {
-    $RepoPath = Read-Host 'Enter the path to the target repository'
+    Write-Host 'Target repository = the LOCAL project folder you want to use xray with' -ForegroundColor Cyan
+    Write-Host '(the repo xray will index and serve over MCP - NOT where xray.exe is installed).' -ForegroundColor Cyan
+    Write-Host 'Example: C:\Repos\MyProject' -ForegroundColor DarkGray
+    $RepoPath = Read-Host 'Enter the path to the target repository (e.g. C:\Repos\MyProject)'
 }
 
 try {
@@ -1874,7 +2096,7 @@ else {
         Write-Host 'Force enabled; accepting suggested extensions.' -ForegroundColor Yellow
     }
     else {
-        $userInput = Read-Host '`nAccept suggested extensions, or enter your own (comma-separated) [Enter = accept]'
+        $userInput = Read-Host "`nAccept suggested extensions, or enter your own (comma-separated) [Enter = accept]"
         if ([string]::IsNullOrWhiteSpace($userInput)) {
             $selectedExts = $suggested
         }
@@ -1903,6 +2125,40 @@ $xrayArgs = @(
     '--metrics',
     '--debug-log'
 )
+
+# Resolve the git visibility mode for the xray entry written into mcp.json.
+#   Visible: write a normal, user-visible change (with a "//" warning) - no
+#     smudge/clean filter, no skip-worktree, no .git/info/exclude. If the file
+#     is git-tracked the user sees it in 'git status' and decides about it.
+#   Hidden: install the smudge/clean filter (or skip-worktree / .git/info/exclude
+#     fallback) so the entry never shows in git.
+# Explicit -GitVisibility always wins. Outside a git repo there is nothing to
+# hide, so default to Visible without prompting.
+if ($GitVisibility) {
+    $visibleMode = ($GitVisibility -eq 'Visible')
+}
+elseif (-not $isGitRepo) {
+    $visibleMode = $true
+}
+elseif ($Force) {
+    $visibleMode = $false
+}
+else {
+    $visibleMode = Read-YesNo -Prompt 'Write the xray entry as a normal VISIBLE change to mcp.json (you decide whether to commit it)? Answer No to hide it from git' -Default $true
+}
+Write-Host ("Git visibility mode: {0}" -f $(if ($visibleMode) { 'Visible (normal git change)' } else { 'Hidden (filter / skip-worktree)' })) -ForegroundColor Cyan
+
+# In visible mode we may need to lift a prior hidden install's protection so
+# the file actually shows in git. Resolve .git/info/exclude once for that.
+$visibleExcludePath = $null
+if ($isGitRepo -and $visibleMode) {
+    Push-Location $RepoPath
+    try {
+        $visibleExcludePath = & git rev-parse --git-path info/exclude 2>$null
+        if ($LASTEXITCODE -ne 0) { $visibleExcludePath = $null }
+    }
+    finally { Pop-Location }
+}
 
 $vscodeMcpDir = Join-Path $RepoPath '.vscode'
 $vscodeMcpPath = Join-Path $vscodeMcpDir 'mcp.json'
@@ -1954,19 +2210,50 @@ if ($writeVscode) {
 
     Backup-McpJson -Path $vscodeMcpPath
 
-    # Decide between two strategies (mirrors the .mcp.json install logic):
-    #   - Filter strategy (.vscode/mcp.json is tracked in a git repo): install
-    #     smudge/clean filter so 'git pull' merges upstream changes silently
-    #     and 'git status' stays clean.
-    #   - Plain JSON strategy (no git repo, OR file is untracked): merge xray
-    #     entry via JSON parse+rewrite, fall back on .git/info/exclude or
-    #     skip-worktree (handled later in the git-protect block).
-    $useVscodeFilterStrategy = $false
     $vscodeFilterInstalled = $false
-    if ($isGitRepo) {
-        $isVscodeTracked = Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath '.vscode/mcp.json'
-        $useVscodeFilterStrategy = [bool]$isVscodeTracked
+
+    if ($visibleMode) {
+        # VISIBLE mode: write a normal, user-visible xray entry into
+        # .vscode/mcp.json. Preserve existing formatting and other servers via
+        # line-injection, and never hide the change from git. If the file is
+        # tracked, the user sees it in 'git status' and owns the commit decision.
+        $vscodeEntryLine = New-XrayVisibleEntryLine -XrayPath $xrayPath -XrayArgs $xrayArgs -Shape 'VsCode'
+
+        # Lift any prior hidden protection (skip-worktree on tracked files,
+        # .git/info/exclude on untracked) so the visible write shows in git.
+        if ($isGitRepo) {
+            Push-Location $RepoPath
+            try { [void](Remove-GitProtection -RelativePath '.vscode/mcp.json' -ExcludePath $visibleExcludePath) }
+            finally { Pop-Location }
+        }
+
+        $vscodeVisibleOk = Set-McpFileVisibleEntry -Path $vscodeMcpPath -EntryLine $vscodeEntryLine -ContainerKey 'servers' -XrayPath $xrayPath -XrayArgs $xrayArgs -Shape 'VsCode'
+        if ($vscodeVisibleOk) {
+            # Tear down any prior hidden smudge/clean filter so the switch to
+            # visible is clean (no-op when no filter was installed).
+            if ($isGitRepo) {
+                [void](Uninstall-McpFilter -RepoRoot $RepoPath -FilterName 'xray-vscode-mcp' -AttributePath '.vscode/mcp.json' -McpRelPath '.vscode/mcp.json')
+            }
+            Write-Host "Configured xray (visible) in $vscodeMcpPath. If this file is git-tracked, the change shows in 'git status' - you decide whether to commit it." -ForegroundColor Green
+        }
+        else {
+            Write-Warning "Could not write a visible xray entry to $vscodeMcpPath (left untouched). See the warning above."
+            $writeVscode = $false
+        }
     }
+    else {
+        # Decide between two strategies (mirrors the .mcp.json install logic):
+        #   - Filter strategy (.vscode/mcp.json is tracked in a git repo): install
+        #     smudge/clean filter so 'git pull' merges upstream changes silently
+        #     and 'git status' stays clean.
+        #   - Plain JSON strategy (no git repo, OR file is untracked): merge xray
+        #     entry via JSON parse+rewrite, fall back on .git/info/exclude or
+        #     skip-worktree (handled later in the git-protect block).
+        $useVscodeFilterStrategy = $false
+        if ($isGitRepo) {
+            $isVscodeTracked = Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath '.vscode/mcp.json'
+            $useVscodeFilterStrategy = [bool]$isVscodeTracked
+        }
 
     if ($useVscodeFilterStrategy) {
         # In-memory invocation (e.g. `& ([scriptblock]::Create((iwr ...).Content))`
@@ -2056,6 +2343,7 @@ if ($writeVscode) {
             $vscodeConfig | ConvertTo-Json -Depth 5 | Set-Content -Path $vscodeMcpPath -Encoding UTF8
             Write-Host "Created $vscodeMcpPath" -ForegroundColor Green
         }
+    }
     }
 }
 
@@ -2187,20 +2475,51 @@ if ($writeCopilotCli) {
     # .mcp.json lives in the repo root, which always exists - no mkdir needed.
     Backup-McpJson -Path $copilotCliMcpPath
 
-    # Decide between two strategies:
-    #   - Filter strategy (.mcp.json is tracked OR exists with upstream content
-    #     in a git repo): install smudge/clean filter so 'git pull' merges
-    #     upstream changes silently and 'git status' stays clean.
-    #   - Plain JSON strategy (no git repo, OR file is untracked AND we're
-    #     creating it fresh): merge xray entry via JSON parse+rewrite, fall
-    #     back on .git/info/exclude or skip-worktree (handled later in the
-    #     git-protect block).
-    $useFilterStrategy = $false
     $copilotCliFilterInstalled = $false
-    if ($isGitRepo) {
-        $isTracked = Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath '.mcp.json'
-        $useFilterStrategy = [bool]$isTracked
+
+    if ($visibleMode) {
+        # VISIBLE mode: write a normal, user-visible xray entry into .mcp.json.
+        # Preserve existing formatting and other servers via line-injection, and
+        # never hide the change from git. If the file is tracked, the user sees
+        # it in 'git status' and owns the commit decision.
+        $copilotCliEntryLine = New-XrayVisibleEntryLine -XrayPath $xrayPath -XrayArgs $xrayArgs -Shape 'CopilotCli'
+
+        # Lift any prior hidden protection (skip-worktree on tracked files,
+        # .git/info/exclude on untracked) so the visible write shows in git.
+        if ($isGitRepo) {
+            Push-Location $RepoPath
+            try { [void](Remove-GitProtection -RelativePath '.mcp.json' -ExcludePath $visibleExcludePath) }
+            finally { Pop-Location }
+        }
+
+        $copilotCliVisibleOk = Set-McpFileVisibleEntry -Path $copilotCliMcpPath -EntryLine $copilotCliEntryLine -ContainerKey 'mcpServers' -XrayPath $xrayPath -XrayArgs $xrayArgs -Shape 'CopilotCli'
+        if ($copilotCliVisibleOk) {
+            # Tear down any prior hidden smudge/clean filter so the switch to
+            # visible is clean (no-op when no filter was installed).
+            if ($isGitRepo) {
+                [void](Uninstall-McpFilter -RepoRoot $RepoPath -FilterName 'xray-mcp' -AttributePath '.mcp.json' -McpRelPath '.mcp.json')
+            }
+            Write-Host "Configured xray (visible) in $copilotCliMcpPath. If this file is git-tracked, the change shows in 'git status' - you decide whether to commit it." -ForegroundColor Green
+        }
+        else {
+            Write-Warning "Could not write a visible xray entry to $copilotCliMcpPath (left untouched). See the warning above."
+            $writeCopilotCli = $false
+        }
     }
+    else {
+        # Decide between two strategies:
+        #   - Filter strategy (.mcp.json is tracked OR exists with upstream content
+        #     in a git repo): install smudge/clean filter so 'git pull' merges
+        #     upstream changes silently and 'git status' stays clean.
+        #   - Plain JSON strategy (no git repo, OR file is untracked AND we're
+        #     creating it fresh): merge xray entry via JSON parse+rewrite, fall
+        #     back on .git/info/exclude or skip-worktree (handled later in the
+        #     git-protect block).
+        $useFilterStrategy = $false
+        if ($isGitRepo) {
+            $isTracked = Test-IsTrackedFile -RepoRoot $RepoPath -RelativePath '.mcp.json'
+            $useFilterStrategy = [bool]$isTracked
+        }
 
     if ($useFilterStrategy) {
         # In-memory invocation (e.g. `& ([scriptblock]::Create((iwr ...).Content))`
@@ -2291,9 +2610,13 @@ if ($writeCopilotCli) {
             Write-Host "Created $copilotCliMcpPath" -ForegroundColor Green
         }
     }
+    }
 }
 
-if ($isGitRepo) {
+# Hidden mode only: install git protection (skip-worktree / .git/info/exclude)
+# so the xray entry never shows in 'git status'. In visible mode we intentionally
+# leave the change visible, so this entire block is skipped.
+if ($isGitRepo -and -not $visibleMode) {
     Push-Location $RepoPath
     try {
         $skipWorktreeFiles = @()
@@ -2412,6 +2735,7 @@ Write-Host "`n=== Setup complete ===" -ForegroundColor Cyan
 Write-Host "xray binary:    $xrayPath"
 Write-Host "Target repo:    $RepoPath"
 Write-Host "Extensions:     $selectedExts"
+Write-Host ("Git visibility: {0}" -f $(if ($visibleMode) { 'Visible (normal git change)' } else { 'Hidden from git' }))
 if ($writeVscode) {
     Write-Host "VS Code (Copilot) config: $vscodeMcpPath"
 }
@@ -2426,6 +2750,9 @@ if (-not ($writeVscode -or $writeRoo -or $writeCopilotCli)) {
 }
 else {
     Write-Host "`nReopen the repo / restart the MCP host to activate xray." -ForegroundColor Yellow
+    if ($visibleMode) {
+        Write-Host "Visible mode: the xray entry is a normal change in mcp.json. If the file is git-tracked, review 'git status' / 'git diff' and decide whether to commit it." -ForegroundColor Yellow
+    }
 }
 
 exit 0
