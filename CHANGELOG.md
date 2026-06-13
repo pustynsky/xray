@@ -2,6 +2,39 @@
 
 ## Unreleased
 
+- **`scripts/setup-xray.ps1`: new `-GitVisibility Visible|Hidden` switch for the `xray` entry in `mcp.json`.**
+  Adds a Visible mode (the new interactive default) that writes the `xray`
+  server entry directly into `mcp.json` as a normal, user-visible change — no
+  smudge/clean filter, no `skip-worktree`, no `.git/info/exclude`. The entry
+  carries a `"//"` warning field ("…MAKE SURE you want to commit/push this
+  change…") so it stands out in `git diff`; if the file is tracked the user
+  decides whether to commit it. Hidden mode is the previous behavior
+  (smudge/clean filter on tracked files, with `.git/info/exclude` /
+  `skip-worktree` fallback) and remains the default under `-Force` to preserve
+  existing automation. Mode resolution: explicit `-GitVisibility` always wins;
+  otherwise interactive runs prompt (default Visible), `-Force` defaults to
+  Hidden, and outside a git repo the mode is Visible. Visible writes preserve
+  existing formatting and other servers via single-line injection — idempotent
+  across re-runs and hidden→visible switches (strips the old `_xrayMcpMarker`
+  line and tears down any prior filter), with a JSON-reserialize fallback for
+  multi-line/legacy entries and unusual container shapes; unparseable files are
+  left untouched. Switching an existing Hidden install to Visible tears down the
+  smudge/clean filter and lifts `skip-worktree` / `.git/info/exclude` so the file
+  actually surfaces in git. New `scripts/mcp-filter/test-visible-mode.ps1` covers
+  Visible on tracked `.mcp.json` / `.vscode/mcp.json`, the `-Force`→Hidden default,
+  both hidden↔visible transitions, and uninstall; the partial-rerun recovery case
+  in `test-standalone-install.ps1` now pins `-GitVisibility Hidden` (it exercises
+  the hidden-mode git-protection path). The Visible writer only removes a prior
+  single-line `xray` entry in place when it is the FIRST container member;
+  otherwise it defers to a JSON reserialize so a non-first entry never orphans the
+  preceding entry's trailing comma (which `ConvertFrom-Json` tolerates but Copilot
+  CLI's strict parser rejects) — covered by a strict-JSON regression (validated
+  with `System.Text.Json`). The interactive `RepoPath` prompt now explains it is
+  the local project folder xray will index (with a `C:\Repos\MyProject` example).
+  Also fixes a pre-existing cosmetic bug where the extension-selection prompt
+  showed a literal `` `n `` (backtick-n in a single-quoted string) instead of a
+  leading blank line.
+
 - **Docs: humanize README and `docs/` pass — strip AI-fingerprint patterns from prose.**
   Cosmetic pass over `README.md` and 5 docs (`docs/architecture.md`,
   `docs/benchmarks.md`, `docs/mcp-guide.md`, `docs/storage.md`,
