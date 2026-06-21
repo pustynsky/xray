@@ -396,20 +396,20 @@ fn test_compute_fetch_warning_thresholds() {
 
 #[test]
 fn test_build_warning_on_main_up_to_date() {
-    let w = build_warning("main", true, &Some("main".to_string()), Some(0));
+    let w = build_warning("main", true, &Some("main".to_string()), Some(0), false);
     assert!(w.is_none(), "No warning when on main and up-to-date");
 }
 
 #[test]
 fn test_build_warning_on_main_behind() {
-    let w = build_warning("main", true, &Some("main".to_string()), Some(5));
+    let w = build_warning("main", true, &Some("main".to_string()), Some(5), false);
     assert!(w.is_some());
     assert!(w.as_ref().unwrap().contains("5 commits behind"));
 }
 
 #[test]
 fn test_build_warning_on_feature_branch() {
-    let w = build_warning("dev/my-feature", false, &Some("master".to_string()), Some(47));
+    let w = build_warning("dev/my-feature", false, &Some("master".to_string()), Some(47), false);
     assert!(w.is_some());
     let warning = w.unwrap();
     assert!(warning.contains("dev/my-feature"), "Warning should mention branch name");
@@ -419,7 +419,7 @@ fn test_build_warning_on_feature_branch() {
 
 #[test]
 fn test_build_warning_on_feature_branch_no_behind() {
-    let w = build_warning("dev/my-feature", false, &Some("main".to_string()), Some(0));
+    let w = build_warning("dev/my-feature", false, &Some("main".to_string()), Some(0), false);
     assert!(w.is_some());
     let warning = w.unwrap();
     assert!(warning.contains("dev/my-feature"));
@@ -428,10 +428,21 @@ fn test_build_warning_on_feature_branch_no_behind() {
 
 #[test]
 fn test_build_warning_on_feature_branch_no_remote() {
-    let w = build_warning("dev/my-feature", false, &Some("main".to_string()), None);
+    let w = build_warning("dev/my-feature", false, &Some("main".to_string()), None, false);
     assert!(w.is_some());
     let warning = w.unwrap();
     assert!(warning.contains("dev/my-feature"));
+}
+
+#[test]
+fn test_build_warning_unrelated_histories() {
+    // When histories are unrelated the count is suppressed; the warning must
+    // explain why instead of implying "0 commits behind".
+    let w = build_warning("master", true, &Some("main".to_string()), None, true);
+    assert!(w.is_some());
+    let warning = w.unwrap();
+    assert!(warning.contains("unrelated histories"), "got: {warning}");
+    assert!(warning.contains("origin/main"), "should name the trunk remote");
 }
 
 // ── git_authors file-not-found warning tests ──────────────────────
@@ -725,6 +736,169 @@ fn test_detect_main_branch_name_prefers_main_over_local_master() {
          legacy 4-probe semantics, lost when a refname-sorted \
          for-each-ref output was treated as if it were arg-ordered"
     );
+}
+
+/// Run `git` in `repo` with a fixed test identity; assert success; return
+/// trimmed stdout. Shared by the trunk/orphan/shallow branch-status fixtures.
+fn git_in(repo: &std::path::Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .args(args)
+        .current_dir(repo)
+        .env("GIT_AUTHOR_NAME", "T")
+        .env("GIT_AUTHOR_EMAIL", "t@example.com")
+        .env("GIT_COMMITTER_NAME", "T")
+        .env("GIT_COMMITTER_EMAIL", "t@example.com")
+        .output()
+        .expect("git must be on PATH for this test");
+    assert!(
+        out.status.success(),
+        "git {:?} failed: {}",
+        args,
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// Build a temp repo on `master` whose `origin/main` is an unrelated orphan
+/// root commit (no common ancestor with HEAD). When `master_remote_related`
+/// is true, `origin/master` points at HEAD (shares history); when false it
+/// points at a *second* unrelated orphan root, so NO well-known trunk remote
+/// shares history with HEAD. Returns the TempDir — keep it alive for the test.
+fn make_dual_trunk_repo(master_remote_related: bool) -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    git_in(repo, &["init", "--quiet", "-b", "master"]);
+    std::fs::write(repo.join("seed.txt"), "x").unwrap();
+    git_in(repo, &["add", "seed.txt"]);
+    git_in(repo, &["commit", "--quiet", "-m", "init"]);
+
+    // `git commit-tree <tree>` with no `-p` makes a parentless root commit — a
+    // history wholly unrelated to HEAD (also a root commit), exactly the
+    // orphan-trunk shape that produced the bogus "65028 behind" reports.
+    let tree = git_in(repo, &["rev-parse", "HEAD^{tree}"]);
+    let orphan_main = git_in(repo, &["commit-tree", &tree, "-m", "orphan-main"]);
+    git_in(repo, &["update-ref", "refs/remotes/origin/main", &orphan_main]);
+
+    if master_remote_related {
+        git_in(repo, &["update-ref", "refs/remotes/origin/master", "HEAD"]);
+    } else {
+        let orphan_master = git_in(repo, &["commit-tree", &tree, "-m", "orphan-master"]);
+        git_in(repo, &["update-ref", "refs/remotes/origin/master", &orphan_master]);
+    }
+
+    tmp
+}
+
+/// Bug A regression: a repo on `master` whose orphan ref is `origin/main` must
+/// NOT report a bogus distance against the unrelated `main`. The handler must
+/// fall back to the related `origin/master`, report it as `mainBranch`, and
+/// produce a real (here: 0) `behindMain` instead of tens of thousands.
+#[test]
+fn test_branch_status_falls_back_to_related_trunk_when_main_unrelated() {
+    let tmp = make_dual_trunk_repo(true);
+    let ctx = make_git_test_ctx();
+    let args = json!({ "repo": tmp.path().to_str().unwrap() });
+    let result = handle_branch_status(&ctx, &args);
+    assert!(!result.is_error, "Should succeed");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(
+        output["mainBranch"].as_str(),
+        Some("master"),
+        "must compare against the related trunk, not the orphan main"
+    );
+    assert_eq!(
+        output["behindMain"].as_u64(),
+        Some(0),
+        "HEAD == origin/master, so behind must be 0 — not a bogus orphan count"
+    );
+    assert_eq!(output["unrelatedHistories"].as_bool(), Some(false));
+}
+
+/// Bug B regression: when NO well-known trunk remote shares history with HEAD,
+/// the symmetric-difference count is meaningless. The handler must suppress
+/// `behindMain`/`aheadOfMain` (null) and raise `unrelatedHistories=true` plus
+/// an explanatory warning, instead of emitting the bogus number.
+#[test]
+fn test_branch_status_suppresses_count_for_unrelated_histories() {
+    let tmp = make_dual_trunk_repo(false);
+    let ctx = make_git_test_ctx();
+    let args = json!({ "repo": tmp.path().to_str().unwrap() });
+    let result = handle_branch_status(&ctx, &args);
+    assert!(!result.is_error, "Should succeed");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(
+        output["behindMain"].is_null(),
+        "behindMain must be suppressed for unrelated histories, got {:?}",
+        output["behindMain"]
+    );
+    assert!(output["aheadOfMain"].is_null(), "aheadOfMain must be suppressed too");
+    assert_eq!(output["unrelatedHistories"].as_bool(), Some(true));
+    let warning = output["warning"].as_str().unwrap_or("");
+    assert!(
+        warning.contains("unrelated histories"),
+        "warning should explain the suppression, got: {warning}"
+    );
+}
+
+/// Reviewer guard (Bug B refinement): on a SHALLOW clone a missing merge-base
+/// can be an artifact of the truncated graft, NOT genuinely unrelated history.
+/// `origin/main` here really is an orphan, but because the repo is flagged
+/// shallow the handler must NOT claim `unrelatedHistories` — it suppresses the
+/// count without an orphan-trunk claim it cannot substantiate (the separate
+/// shallow warning covers the truncation).
+#[test]
+fn test_branch_status_shallow_missing_merge_base_not_flagged_unrelated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    git_in(repo, &["init", "--quiet", "-b", "master"]);
+    std::fs::write(repo.join("seed.txt"), "x").unwrap();
+    git_in(repo, &["add", "seed.txt"]);
+    git_in(repo, &["commit", "--quiet", "-m", "init"]);
+    let tree = git_in(repo, &["rev-parse", "HEAD^{tree}"]);
+    let orphan = git_in(repo, &["commit-tree", &tree, "-m", "orphan-main"]);
+    git_in(repo, &["update-ref", "refs/remotes/origin/main", &orphan]);
+    // Mark the repo shallow using HEAD's real hash as the graft boundary, so
+    // every git command still resolves while detect_shallow() reports shallow.
+    let head = git_in(repo, &["rev-parse", "HEAD"]);
+    std::fs::write(repo.join(".git").join("shallow"), format!("{head}\n")).unwrap();
+
+    let ctx = make_git_test_ctx();
+    let args = json!({ "repo": repo.to_str().unwrap() });
+    let result = handle_branch_status(&ctx, &args);
+    assert!(!result.is_error, "Should succeed");
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["isShallow"].as_bool(), Some(true), "repo must be detected shallow");
+    assert_eq!(
+        output["unrelatedHistories"].as_bool(),
+        Some(false),
+        "a shallow graft can hide the real ancestor — must NOT claim unrelated"
+    );
+    assert!(
+        output["behindMain"].is_null(),
+        "count still suppressed on a shallow no-merge-base"
+    );
+}
+
+/// Reviewer guard (Bug B refinement): an UNBORN HEAD (no commits) produces no
+/// merge-base against an existing `origin/main`, but that is "nothing to
+/// compare", NOT unrelated histories. Exercised directly because the handler
+/// errors earlier on an unborn HEAD (`rev-parse --abbrev-ref HEAD` exits 128),
+/// so only the helper itself can be observed in this state.
+#[test]
+fn test_resolve_behind_ahead_unborn_head_not_unrelated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    git_in(repo, &["init", "--quiet", "-b", "master"]);
+    // origin/main is a real commit (built from the empty tree); HEAD is unborn.
+    let empty_tree = git_in(repo, &["write-tree"]);
+    let commit = git_in(repo, &["commit-tree", &empty_tree, "-m", "remote-main"]);
+    git_in(repo, &["update-ref", "refs/remotes/origin/main", &commit]);
+
+    let (behind, ahead, effective, unrelated) =
+        resolve_behind_ahead(repo.to_str().unwrap(), "main", false);
+    assert!(behind.is_none() && ahead.is_none(), "no count for an unborn HEAD");
+    assert_eq!(effective.as_deref(), Some("main"));
+    assert!(!unrelated, "unborn HEAD is not 'unrelated histories'");
 }
 
 
