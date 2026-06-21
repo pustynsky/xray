@@ -1145,42 +1145,87 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let start = Instant::now();
 
     // a. Current branch
+    let t = Instant::now();
     let current_branch = match run_git_command(repo, &["rev-parse", "--abbrev-ref", "HEAD"]) {
         Ok(b) => b,
         Err(e) => return ToolCallResult::error(format!("Failed to get current branch: {}", e)),
     };
+    let current_branch_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     // b. Is main branch
     let is_main = is_main_branch(&current_branch);
 
     // c. Determine main branch name
+    let t = Instant::now();
     let main_branch = detect_main_branch_name(_ctx, repo);
+    let main_branch_ms = t.elapsed().as_secs_f64() * 1000.0;
 
-    // d. Behind/ahead of main
-    let (behind_main, ahead_of_main) = if let Some(ref mb) = main_branch {
-        compute_behind_ahead(repo, mb)
-    } else {
-        (None, None)
-    };
+    // Shallow detection runs before behind/ahead: a shallow graft can truncate a
+    // real common ancestor and make `git merge-base` look empty, which must NOT
+    // be misread as "unrelated histories". Computed once and reused for output.
+    let t = Instant::now();
+    let shallow_info = git::detect_shallow(repo);
+    let shallow_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    // d. Behind/ahead of main — history-aware trunk selection.
+    //
+    // `main_branch` is only the *nominal* trunk name (priority main→master). A
+    // repo can carry BOTH `main` and `master` where one is an unrelated orphan
+    // (stale GitHub default, migration leftover). Comparing HEAD against an
+    // unrelated trunk yields a meaningless symmetric-difference count (tens of
+    // thousands "behind") that never shrinks on pull. So we compare against the
+    // trunk whose remote actually shares history with HEAD and surface the
+    // *effective* trunk + an `unrelatedHistories` flag instead of a bogus count.
+    let t = Instant::now();
+    let (behind_main, ahead_of_main, effective_main, unrelated_histories) =
+        if let Some(ref mb) = main_branch {
+            resolve_behind_ahead(repo, mb, shallow_info.is_some())
+        } else {
+            (None, None, None, false)
+        };
+    let behind_ahead_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     // e. Dirty files
+    let t = Instant::now();
     let dirty_files = get_dirty_files(repo);
+    let dirty_files_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     // f. Last fetch time
+    let t = Instant::now();
     let (last_fetch_time, fetch_age, fetch_warning) = get_fetch_info(repo);
+    let fetch_info_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     // g. Warning
-    let warning = build_warning(&current_branch, is_main, &main_branch, behind_main);
-    let shallow_info = git::detect_shallow(repo);
+    let warning = build_warning(
+        &current_branch,
+        is_main,
+        &effective_main,
+        behind_main,
+        unrelated_histories,
+    );
 
     let elapsed = start.elapsed();
+    let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+
+    crate::index::log_phase("branchStatus", &[
+        ("elapsedMs", format!("{:.1}", elapsed_ms)),
+        ("currentBranchMs", format!("{:.1}", current_branch_ms)),
+        ("mainBranchMs", format!("{:.1}", main_branch_ms)),
+        ("behindAheadMs", format!("{:.1}", behind_ahead_ms)),
+        ("dirtyFilesMs", format!("{:.1}", dirty_files_ms)),
+        ("fetchInfoMs", format!("{:.1}", fetch_info_ms)),
+        ("shallowMs", format!("{:.1}", shallow_ms)),
+        ("dirtyFileCount", dirty_files.len().to_string()),
+        ("repo", repo.to_string()),
+    ]);
 
     let output = json!({
         "currentBranch": current_branch,
         "isMainBranch": is_main,
-        "mainBranch": main_branch,
+        "mainBranch": effective_main,
         "behindMain": behind_main,
         "aheadOfMain": ahead_of_main,
+        "unrelatedHistories": unrelated_histories,
         "dirtyFiles": dirty_files,
         "dirtyFileCount": dirty_files.len(),
         "lastFetchTime": last_fetch_time,
@@ -1191,7 +1236,15 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         "shallowBoundaries": shallow_info.as_ref().map(|s| s.boundaries.clone()),
         "summary": {
             "tool": "xray_branch_status",
-            "elapsedMs": (elapsed.as_secs_f64() * 1000.0 * 100.0).round() / 100.0,
+            "elapsedMs": (elapsed_ms * 100.0).round() / 100.0,
+            "subTimings": {
+                "currentBranchMs": (current_branch_ms * 100.0).round() / 100.0,
+                "mainBranchMs": (main_branch_ms * 100.0).round() / 100.0,
+                "behindAheadMs": (behind_ahead_ms * 100.0).round() / 100.0,
+                "dirtyFilesMs": (dirty_files_ms * 100.0).round() / 100.0,
+                "fetchInfoMs": (fetch_info_ms * 100.0).round() / 100.0,
+                "shallowMs": (shallow_ms * 100.0).round() / 100.0,
+            }
         }
     });
 
@@ -1321,13 +1374,85 @@ fn probe_main_branch_name(repo: &str) -> Option<String> {
     }
 }
 
-/// Compute how far behind/ahead the current HEAD is relative to origin/<main_branch>.
-/// Returns (behind, ahead). Both are None if the remote ref doesn't exist.
-fn compute_behind_ahead(repo: &str, main_branch: &str) -> (Option<u64>, Option<u64>) {
-    let remote_ref = format!("origin/{}", main_branch);
+/// Resolve how far HEAD is behind/ahead of the repository trunk, choosing the
+/// trunk remote that actually shares history with HEAD.
+///
+/// Returns `(behind, ahead, effectiveTrunk, unrelatedHistories)`:
+/// - `behind`/`ahead`: symmetric-difference counts vs `origin/<effectiveTrunk>`,
+///   or `None` when no related trunk remote exists.
+/// - `effectiveTrunk`: the trunk actually compared against — may differ from the
+///   nominal `primary` when `primary` is an unrelated orphan ref.
+/// - `unrelatedHistories`: `true` ONLY with positive evidence of genuinely
+///   unrelated histories — a trunk remote exists, HEAD resolves to a commit, the
+///   repo is not shallow, yet no candidate shares a merge-base with HEAD. The
+///   count is suppressed because it would otherwise be a meaningless "entire
+///   other history" number that never shrinks on pull.
+///
+/// `repo_is_shallow` gates the flag: a shallow graft can truncate a real common
+/// ancestor and make `merge-base` look empty, so we never claim "unrelated" on a
+/// shallow clone (the count is still suppressed, just without the orphan claim).
+/// An unborn HEAD likewise yields no merge-base but is not "unrelated", so we
+/// require HEAD to resolve before flagging (the handler errors earlier on unborn
+/// HEAD today, but this keeps the helper self-correct).
+///
+/// Candidate order: the detected `primary` first, then the alternate well-known
+/// trunk (`main`↔`master`). This recovers the real trunk when a repo carries
+/// both refs and the detected one is an orphan.
+fn resolve_behind_ahead(
+    repo: &str,
+    primary: &str,
+    repo_is_shallow: bool,
+) -> (Option<u64>, Option<u64>, Option<String>, bool) {
+    let alternate = match primary {
+        "main" => Some("master"),
+        "master" => Some("main"),
+        _ => None,
+    };
+    let candidates = std::iter::once(primary).chain(alternate);
+
+    let mut remote_exists_no_merge_base = false;
+    for cand in candidates {
+        let remote_ref = format!("origin/{}", cand);
+        // `git merge-base HEAD <ref>` succeeds (non-empty) iff the two share a
+        // common ancestor. It exits non-zero with no output for unrelated
+        // histories, a missing ref, AND an unborn/invalid HEAD, so a failure
+        // alone cannot tell those apart — we disambiguate after the loop.
+        match run_git_command(repo, &["merge-base", "HEAD", &remote_ref]) {
+            Ok(mb) if !mb.is_empty() => {
+                let (behind, ahead) = count_left_right(repo, &remote_ref);
+                return (behind, ahead, Some(cand.to_string()), false);
+            }
+            _ => {
+                if ref_exists(repo, &remote_ref) {
+                    remote_exists_no_merge_base = true;
+                }
+            }
+        }
+    }
+
+    // Claim "unrelated histories" only with positive evidence: a trunk remote
+    // exists, the repo is not shallow (a graft can hide the real ancestor), and
+    // HEAD is a real commit (not unborn). Otherwise the count is simply "cannot
+    // compute", not an orphan trunk — suppress it WITHOUT the misleading claim.
+    let unrelated =
+        remote_exists_no_merge_base && !repo_is_shallow && ref_exists(repo, "HEAD");
+
+    (None, None, Some(primary.to_string()), unrelated)
+}
+
+/// True if `git_ref` (e.g. `origin/main` or `HEAD`) resolves to a commit in `repo`.
+fn ref_exists(repo: &str, git_ref: &str) -> bool {
+    run_git_command(repo, &["rev-parse", "--verify", "--quiet", git_ref])
+        .map(|s| !s.is_empty())
+        .unwrap_or(false)
+}
+
+/// Count how far HEAD is behind/ahead of `remote_ref` via the symmetric
+/// difference `HEAD...<remote_ref>`. Returns `(behind, ahead)`.
+fn count_left_right(repo: &str, remote_ref: &str) -> (Option<u64>, Option<u64>) {
     match run_git_command(repo, &["rev-list", "--left-right", "--count", &format!("HEAD...{}", remote_ref)]) {
         Ok(output) => {
-            // Output format: "3\t47" where 3=ahead, 47=behind
+            // Output format: "3\t47" where 3=ahead (left, HEAD), 47=behind (right).
             let parts: Vec<&str> = output.split('\t').collect();
             if parts.len() == 2 {
                 let ahead = parts[0].trim().parse::<u64>().ok();
@@ -1429,7 +1554,17 @@ pub(crate) fn build_warning(
     is_main: bool,
     main_branch: &Option<String>,
     behind_main: Option<u64>,
+    unrelated_histories: bool,
 ) -> Option<String> {
+    // Unrelated histories take precedence: behind/ahead were suppressed, so any
+    // "N commits behind" message would be both absent and misleading.
+    if unrelated_histories {
+        return Some(format!(
+            "HEAD and origin/{} have unrelated histories (no common ancestor). \
+             behind/ahead suppressed — the repo likely carries an orphan trunk ref.",
+            main_branch.as_deref().unwrap_or("main/master")
+        ));
+    }
     if is_main {
         // On main/master — warn only if behind
         match behind_main {
