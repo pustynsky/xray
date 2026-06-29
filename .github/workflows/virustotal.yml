@@ -1,0 +1,24 @@
+name: VirusTotal Scan
+
+on:
+  release:
+    types: [published]
+
+jobs:
+  virustotal:
+    name: Scan release assets
+    runs-on: ubuntu-latest
+    permissions:
+      # required so the action can append the analysis links to the release body
+      contents: write
+    steps:
+      - name: VirusTotal Scan
+        uses: crazy-max/ghaction-virustotal@v5
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          update_release_body: true
+          # free public API key: cap at 4 requests/minute
+          request_rate: 4
+          files: |
+            \.exe$
