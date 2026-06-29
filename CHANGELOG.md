@@ -12,9 +12,9 @@
   VirusTotal on `release: published` and appends the analysis links to the
   release body (`contents: write`, `request_rate: 4` for the free public API,
   `github_token` passed explicitly as the action requires it for release
-  events). Adds a VirusTotal badge to `README.md` pointing at the latest
-  release's scan. A `workflow_dispatch` (`tag`) input also scans an existing
-  release's assets on demand.
+  events). Adds a VirusTotal badge + caption to `README.md` linking directly
+  to the VirusTotal file report. A `workflow_dispatch` (`tag`) input also scans
+  an existing release's assets on demand.
 
 ## 0.2.9 (2026-06-29)
 
