@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- **Security: bump `anyhow` to `1.0.103` (RUSTSEC-2026-0190).** Resolves an
+  unsoundness in `Error::downcast_mut()` (undefined behavior when downcasting a
+  mutable reference after `Error::context`). Lockfile-only bump — `anyhow` is a
+  transitive dependency; the advisory's patched range is `>=1.0.103`.
+
 - **CI: scan release `.exe` assets with VirusTotal + README badge (chore).**
   New `.github/workflows/virustotal.yml` uploads `.exe` release assets to
   VirusTotal on `release: published` and appends the analysis links to the
