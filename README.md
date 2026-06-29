@@ -1,6 +1,8 @@
 # Xray — code intelligence engine
 
-[![VirusTotal](https://badges.cssnr.com/vt/pustynsky/xray/xray.exe)](https://github.com/pustynsky/xray/releases/latest)
+[![VirusTotal](https://badges.cssnr.com/vt/pustynsky/xray/xray.exe)](https://www.virustotal.com/gui/file/21b54628fe9363f7cb224b60986ab2085412dd9ed69ada19d595053391fe5012)
+
+_Scanned by VirusTotal — no threats found._
 
 An inverted index and AST-based code intelligence engine for large codebases. It runs millisecond content searches, walks call trees, analyzes git history, and exposes a native MCP server for AI agents. One statically linked Rust binary, no runtime deps. Agents get direct structural access to the code instead of guessing through shallow text search.
 
