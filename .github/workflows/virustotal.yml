@@ -3,6 +3,11 @@ name: VirusTotal Scan
 on:
   release:
     types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag whose .exe assets to scan (e.g. v0.2.9)
+        required: true
 
 jobs:
   virustotal:
@@ -12,7 +17,15 @@ jobs:
       # required so the action can append the analysis links to the release body
       contents: write
     steps:
-      - name: VirusTotal Scan
+      - name: Download release assets (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --pattern '*.exe' --dir dist
+
+      - name: VirusTotal Scan (release)
+        if: github.event_name == 'release'
         uses: crazy-max/ghaction-virustotal@v5
         with:
           vt_api_key: ${{ secrets.VT_API_KEY }}
@@ -22,3 +35,12 @@ jobs:
           request_rate: 4
           files: |
             \.exe$
+
+      - name: VirusTotal Scan (manual run)
+        if: github.event_name == 'workflow_dispatch'
+        uses: crazy-max/ghaction-virustotal@v5
+        with:
+          vt_api_key: ${{ secrets.VT_API_KEY }}
+          request_rate: 4
+          files: |
+            dist/*.exe
