@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.10 (2026-07-08)
 
 - **`xray_grep`: `showLines` no longer renders stale line content, and phrase
   search no longer silently misses matches, when a file changed after indexing.**
