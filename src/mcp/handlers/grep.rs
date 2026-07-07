@@ -15,7 +15,8 @@ use code_xray::generate_trigrams;
 #[allow(unused_imports)] // `self` needed by test submodules for utils::ExcludePatterns
 use super::utils::{self,
     build_line_content_from_matches, inject_branch_warning, is_under_dir, json_to_string,
-    matches_ext_filter, read_enum_string_with_default, sorted_intersect, validate_search_dir,
+    matches_ext_filter, partition_verified_lines, read_enum_string_with_default, sorted_intersect,
+    stale_lines_warning, stale_phrase_warning, validate_search_dir,
 };
 use super::HandlerContext;
 
@@ -2555,6 +2556,8 @@ fn build_grep_response(
         return ToolCallResult::success(json_to_string(&output));
     }
 
+    let terms_lower: Vec<String> = terms.iter().map(|t| t.to_lowercase()).collect();
+    let mut stale_line_files = 0usize;
     let files_json: Vec<Value> = results.iter().map(|r| {
         let mut file_obj = json!({
             "path": r.file_path,
@@ -2566,7 +2569,19 @@ fn build_grep_response(
 
         if params.show_lines
             && let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(&r.file_path)) {
-                file_obj["lineContent"] = build_line_content_from_matches(&content, &r.lines, params.context_lines);
+                // Index-staleness guard: verify posting lines against the
+                // freshly-read content and drop any the file no longer
+                // corroborates, so lineContent never shows a stale,
+                // non-matching line.
+                let (verified, stale) = partition_verified_lines(&content, &r.lines, &terms_lower);
+                file_obj["lineContent"] = build_line_content_from_matches(&content, &verified, params.context_lines);
+                // Keep the machine-readable `lines` consistent with the verified
+                // lineContent so a consumer never acts on a stale line number.
+                file_obj["lines"] = json!(verified);
+                if stale > 0 {
+                    file_obj["staleLineNumbers"] = json!(stale);
+                    stale_line_files += 1;
+                }
             }
 
         file_obj
@@ -2578,6 +2593,9 @@ fn build_grep_response(
         index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
+    if stale_line_files > 0 {
+        summary["warnings"] = json!([stale_lines_warning(stale_line_files)]);
+    }
 
     // XML structural context hint: if results contain XML files, suggest containsLine
     #[cfg(feature = "lang-xml")]
@@ -3178,6 +3196,7 @@ fn build_substring_response(
     }
 
     let json_start = Instant::now();
+    let mut stale_line_files = 0usize;
     let files_json: Vec<Value> = results.iter().map(|r| {
         let mut file_obj = json!({
             "path": r.file_path,
@@ -3188,7 +3207,19 @@ fn build_substring_response(
 
         if params.show_lines
             && let Ok((content, _lossy)) = read_file_lossy(std::path::Path::new(&r.file_path)) {
-                file_obj["lineContent"] = build_line_content_from_matches(&content, &r.lines, params.context_lines);
+                // Index-staleness guard: verify posting lines against the
+                // freshly-read content and drop any the file no longer
+                // corroborates, so lineContent never shows a stale,
+                // non-matching line. raw_terms are already lowercased.
+                let (verified, stale) = partition_verified_lines(&content, &r.lines, raw_terms);
+                file_obj["lineContent"] = build_line_content_from_matches(&content, &verified, params.context_lines);
+                // Keep the machine-readable `lines` consistent with the verified
+                // lineContent so a consumer never acts on a stale line number.
+                file_obj["lines"] = json!(verified);
+                if stale > 0 {
+                    file_obj["staleLineNumbers"] = json!(stale);
+                    stale_line_files += 1;
+                }
             }
 
         file_obj
@@ -3199,8 +3230,13 @@ fn build_substring_response(
         &search_mode_label, index, search_start.elapsed(), ctx, false, params.lock_wait_ms,
     );
     summary["matchedTokens"] = json!(all_matched_tokens);
-    if !warnings.is_empty() {
-        summary["warnings"] = json!(warnings);
+    // Combine caller warnings (e.g. short-query) with any staleness warning.
+    let mut combined_warnings: Vec<String> = warnings.to_vec();
+    if stale_line_files > 0 {
+        combined_warnings.push(stale_lines_warning(stale_line_files));
+    }
+    if !combined_warnings.is_empty() {
+        summary["warnings"] = json!(combined_warnings);
     }
     if let Some(ab) = auto_balance_info {
         inject_auto_balance(&mut summary, ab);
@@ -3392,6 +3428,7 @@ fn handle_phrase_search(
         let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
         let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
         inject_phrase_diagnostic_note(&mut summary, &diag);
+        inject_stale_phrase_warning(&mut summary, diag.stale_candidate_files);
         let output = finalize_grep_output(
             json!({ "summary": summary }),
             result_status,
@@ -3435,6 +3472,7 @@ fn handle_phrase_search(
     );
     let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
     inject_phrase_diagnostic_note(&mut summary, &diag);
+    inject_stale_phrase_warning(&mut summary, diag.stale_candidate_files);
     let output = finalize_grep_output(
         json!({
             "files": files_json,
@@ -3464,6 +3502,7 @@ pub(crate) struct PhraseSearchDiag {
     pub file_verify_ms: f64,
     pub files_read: usize,
     pub result_count: usize,
+    pub stale_candidate_files: usize,
 }
 
 impl PhraseSearchDiag {
@@ -3481,6 +3520,9 @@ impl PhraseSearchDiag {
         });
         if !self.missing_tokens.is_empty() {
             value["missingTokens"] = json!(self.missing_tokens);
+        }
+        if self.stale_candidate_files > 0 {
+            value["staleCandidateFiles"] = json!(self.stale_candidate_files);
         }
         value
     }
@@ -3523,6 +3565,22 @@ fn append_search_mode_note(summary: &mut Value, note: String) {
 fn inject_phrase_diagnostic_note(summary: &mut Value, diag: &PhraseSearchDiag) {
     if let Some(note) = diag.missing_tokens_note() {
         append_search_mode_note(summary, note);
+    }
+}
+
+/// Surface an index-staleness warning for phrase search: candidate lines the
+/// index pointed at no longer contain the phrase tokens, so matches may be
+/// missed. Appends to `summary["warnings"]` (consistent with token/substring).
+fn inject_stale_phrase_warning(summary: &mut Value, stale_files: usize) {
+    if stale_files == 0 {
+        return;
+    }
+    let warning = stale_phrase_warning(stale_files);
+    match summary.get_mut("warnings").and_then(Value::as_array_mut) {
+        Some(arr) => arr.push(Value::String(warning)),
+        None => {
+            summary["warnings"] = json!([warning]);
+        }
     }
 }
 
@@ -3714,7 +3772,8 @@ fn collect_phrase_matches(
     let chunk_size = candidates.len().div_ceil(num_threads).max(1);
     let file_verify_start = Instant::now();
 
-    let results: Vec<PhraseFileMatch> = std::thread::scope(|scope| {
+    let phrase_tokens_ref: &[String] = &phrase_tokens;
+    let (results, stale_candidate_files): (Vec<PhraseFileMatch>, usize) = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for chunk in candidates.chunks(chunk_size) {
             let phrase_re_ref = &phrase_re;
@@ -3723,6 +3782,7 @@ fn collect_phrase_matches(
             let chunk_owned: Vec<(u32, Vec<u32>)> = chunk.to_vec();
             let handle = scope.spawn(move || {
                 let mut local: Vec<PhraseFileMatch> = Vec::with_capacity(chunk_owned.len());
+                let mut local_stale = 0usize;
                 for (file_id, candidate_lines) in chunk_owned {
                     let file_path = &index_ref.files[file_id as usize];
                     let (content, _lossy) = match read_file_lossy(std::path::Path::new(file_path)) {
@@ -3731,6 +3791,7 @@ fn collect_phrase_matches(
                     };
                     let candidate_set: HashSet<u32> = candidate_lines.into_iter().collect();
                     let mut matching_lines = Vec::new();
+                    let mut had_stale_candidate = false;
                     for (line_num, line) in content.lines().enumerate() {
                         let line_no = (line_num + 1) as u32;
                         // Tier-B: only verify lines that the index says contain ALL
@@ -3741,13 +3802,19 @@ fn collect_phrase_matches(
                         if !candidate_set.contains(&line_no) {
                             continue;
                         }
+                        let line_lower = line.to_lowercase();
                         let hit = if phrase_has_punctuation {
-                            line.to_lowercase().contains(phrase_lower_ref)
+                            line_lower.contains(phrase_lower_ref)
                         } else {
                             phrase_re_ref.is_match(line)
                         };
                         if hit {
                             matching_lines.push(line_no);
+                        } else if !phrase_tokens_ref.iter().all(|t| line_lower.contains(t.as_str())) {
+                            // The index selected this line because it claimed all
+                            // phrase tokens sit on it; the fresh line lacks a token,
+                            // so the postings for this file are stale.
+                            had_stale_candidate = true;
                         }
                     }
                     if !matching_lines.is_empty() {
@@ -3756,17 +3823,26 @@ fn collect_phrase_matches(
                             lines: matching_lines,
                             content: if show_lines { Some(content) } else { None },
                         });
+                    } else if had_stale_candidate {
+                        // File dropped from results, but a stale candidate line
+                        // means the phrase may still be present at a shifted
+                        // position the stale index no longer points to.
+                        local_stale += 1;
                     }
                 }
-                local
+                (local, local_stale)
             });
             handles.push(handle);
         }
         let mut all = Vec::new();
+        let mut stale_total = 0usize;
         let mut worker_panics: usize = 0;
         for h in handles {
             match h.join() {
-                Ok(local) => all.extend(local),
+                Ok((local, local_stale)) => {
+                    all.extend(local);
+                    stale_total += local_stale;
+                }
                 // Bug 9 (consolidated plan 2026-04-23): a panic in a phrase-
                 // verification worker silently dropped that chunk's results.
                 // Now we count panics and emit a `tracing::warn!` so the issue
@@ -3781,12 +3857,13 @@ fn collect_phrase_matches(
                 "phrase verification worker(s) panicked; result set may be incomplete"
             );
         }
-        all
+        (all, stale_total)
     });
 
     diag.file_verify_ms = file_verify_start.elapsed().as_secs_f64() * 1000.0;
     diag.files_read = results.len();
     diag.result_count = results.iter().map(|r| r.lines.len()).sum();
+    diag.stale_candidate_files = stale_candidate_files;
 
     info!(
         phrase = %phrase,
@@ -3858,6 +3935,7 @@ fn handle_multi_phrase_search(
     let mut last_diag = PhraseSearchDiag::default();
     let mut phrase_warnings: Vec<Value> = Vec::new();
     let mut phrase_warnings_omitted = 0usize;
+    let mut total_stale_candidate_files = 0usize;
 
     for phrase in phrases {
         match collect_phrase_matches(index, phrase, params) {
@@ -3869,6 +3947,7 @@ fn handle_multi_phrase_search(
                         phrase_warnings_omitted += 1;
                     }
                 }
+                total_stale_candidate_files += diag.stale_candidate_files;
                 last_diag = diag;
                 per_phrase_results.push(matches);
                 searched_terms.push(phrase);
@@ -3914,6 +3993,7 @@ fn handle_multi_phrase_search(
         let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
         let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
         inject_multi_phrase_warnings(&mut summary, &phrase_warnings, phrase_warnings_omitted);
+        inject_stale_phrase_warning(&mut summary, total_stale_candidate_files);
         let output = finalize_grep_output(
             json!({ "summary": summary }),
             result_status,
@@ -3953,6 +4033,7 @@ fn handle_multi_phrase_search(
     );
     let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
     inject_multi_phrase_warnings(&mut summary, &phrase_warnings, phrase_warnings_omitted);
+    inject_stale_phrase_warning(&mut summary, total_stale_candidate_files);
     let output = finalize_grep_output(
         json!({
             "files": files_json,

@@ -565,6 +565,66 @@ pub(crate) fn build_line_content_from_matches(
     build_grouped_line_content(&lines_to_show, &lines_vec, &match_lines_set)
 }
 
+/// Split index posting line numbers into those still corroborated by the
+/// freshly-read file content, plus a count of stale ones that no longer match.
+///
+/// The inverted index records physical line numbers captured at index time,
+/// but `lineContent` is rendered against content read fresh from disk. When the
+/// file changed after indexing (lines inserted/removed), a posting line can
+/// point at content that no longer contains the search term. Keeping only
+/// corroborated lines guarantees the rendered `lineContent` never shows a
+/// stale, non-matching line.
+///
+/// `terms_lower` MUST already be lowercased; each candidate line is matched
+/// case-insensitively as a raw substring, mirroring token/substring search.
+pub(crate) fn partition_verified_lines(
+    content: &str,
+    candidate_lines: &[u32],
+    terms_lower: &[String],
+) -> (Vec<u32>, usize) {
+    let lines_vec: Vec<&str> = content.lines().collect();
+    let total_lines = lines_vec.len();
+    let mut verified = Vec::with_capacity(candidate_lines.len());
+    let mut stale = 0usize;
+    for &ln in candidate_lines {
+        let idx = (ln as usize).saturating_sub(1);
+        let corroborated = idx < total_lines && {
+            let lower = lines_vec[idx].to_lowercase();
+            terms_lower.iter().any(|t| lower.contains(t.as_str()))
+        };
+        if corroborated {
+            verified.push(ln);
+        } else {
+            stale += 1;
+        }
+    }
+    (verified, stale)
+}
+
+/// Warning surfaced when `partition_verified_lines` dropped stale posting lines
+/// from `lineContent` for one or more files (index stale vs. on-disk content).
+pub(crate) fn stale_lines_warning(file_count: usize) -> String {
+    format!(
+        "{} file(s): some indexed line numbers no longer match on-disk content \
+         (file changed since indexing). lineContent shows only lines that still \
+         contain the search term; stale line numbers are omitted. Reindex \
+         (xray_reindex) for up-to-date positions.",
+        file_count
+    )
+}
+
+/// Warning surfaced when phrase search found candidate lines whose fresh content
+/// no longer contains the phrase tokens (index stale vs. on-disk content) — the
+/// phrase may still exist at a shifted position the stale index cannot point to.
+pub(crate) fn stale_phrase_warning(file_count: usize) -> String {
+    format!(
+        "{} file(s): the index pointed phrase candidates at lines that no longer \
+         contain the phrase tokens (file changed since indexing); matches may be \
+         missed. Reindex (xray_reindex), or use lineRegex=true to scan raw lines.",
+        file_count
+    )
+}
+
 /// Groups consecutive lines into compact chunks: `[{startLine, lines[], matchIndices[]}]`.
 pub(crate) fn build_grouped_line_content(
     lines_to_show: &BTreeSet<usize>,
