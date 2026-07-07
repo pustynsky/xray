@@ -481,6 +481,242 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     cleanup_tmp(&tmp_dir);
 }
 
+// Reproduction for the 2026-07-07 staleness report: substring `showLines`
+// renders `lineContent` from posting line numbers captured at index time, but
+// reads the file fresh from disk. When lines are inserted above a match after
+// indexing (and before re-index), the stale posting points at an unrelated
+// line, so the tool shows a line that does NOT contain the search term.
+//
+// TDD (red now / green after the Phase-1 verify-and-drop fix): the invariant
+// asserted here — "no line lacking the search term may be shown in
+// lineContent" — FAILS today because the inserted filler line is rendered.
+// File size is irrelevant; staleness, not size, is the cause.
+#[test] fn e2e_substring_show_lines_stale_index_shows_wrong_line() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_stale_lc_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let file = tmp_dir.join("Switches.cs");
+
+    // Index time: the unique needle token sits on line 2.
+    { let mut f = std::fs::File::create(&file).unwrap();
+      writeln!(f, "public class Alpha {{}}").unwrap();               // 1
+      writeln!(f, "public class ZzNeedleUniqueToken {{}}").unwrap(); // 2  <- indexed here
+      writeln!(f, "public class Beta {{}}").unwrap(); }              // 3
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    // User edit: insert 3 lines at the top WITHOUT reindexing. The needle now
+    // lives on line 5, but the index posting still records line 2 (now filler).
+    { let mut f = std::fs::File::create(&file).unwrap();
+      writeln!(f, "// FillerOnlyMarker aaa").unwrap();               // 1
+      writeln!(f, "// FillerOnlyMarker bbb").unwrap();               // 2  <- stale posting -> here
+      writeln!(f, "// FillerOnlyMarker ccc").unwrap();               // 3
+      writeln!(f, "public class Alpha {{}}").unwrap();               // 4
+      writeln!(f, "public class ZzNeedleUniqueToken {{}}").unwrap(); // 5  (real match now)
+      writeln!(f, "public class Beta {{}}").unwrap(); }              // 6
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["zzneedleuniquetoken"], "substring": true, "showLines": true,
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    // Counts are index-derived and remain correct: the file is still found.
+    assert_eq!(output["summary"]["totalFiles"], 1,
+        "stale index still contains the token, so the file must be found: {}", output);
+
+    // Invariant the fix must enforce: no line lacking the search term may be
+    // shown. Fails today because stale line 2 (a filler line) is rendered.
+    let files = output["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    let file0 = serde_json::to_string(&files[0]).unwrap();
+    assert!(!file0.contains("FillerOnlyMarker"),
+        "lineContent must NOT show a stale, non-matching line; got: {}", file0);
+
+    // Staleness is surfaced honestly, not silently swallowed.
+    assert!(files[0].get("staleLineNumbers").is_some(),
+        "stale posting line must be flagged per-file: {}", files[0]);
+    assert!(output["summary"]["warnings"].is_array(),
+        "a staleness warning must be surfaced in summary: {}", output["summary"]);
+    // The stale line number is removed from the machine-readable `lines` too, so
+    // a consumer that reads `lines` (not lineContent) cannot act on it.
+    assert!(files[0]["lines"].as_array().unwrap().is_empty(),
+        "stale line number must be removed from `lines`: {}", files[0]);
+
+    cleanup_tmp(&tmp_dir);
+}
+
+// Companion to the staleness reproduction: on a FRESH (unmutated) index the
+// verify-and-drop pass must be a no-op — every real match line is kept and NO
+// staleness signal is emitted. Guards against false-positive staleness.
+#[test] fn e2e_substring_show_lines_fresh_index_no_false_staleness() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_fresh_lc_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    { let mut f = std::fs::File::create(tmp_dir.join("Fresh.cs")).unwrap();
+      writeln!(f, "public class Alpha {{}}").unwrap();
+      writeln!(f, "public class ZzNeedleUniqueToken {{}}").unwrap();
+      writeln!(f, "public class Beta {{}}").unwrap(); }
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["zzneedleuniquetoken"], "substring": true, "showLines": true,
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let files = output["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    let file0 = serde_json::to_string(&files[0]).unwrap();
+    assert!(file0.to_lowercase().contains("zzneedleuniquetoken"),
+        "fresh index must show the real match line: {}", file0);
+    assert!(files[0].get("staleLineNumbers").is_none(),
+        "fresh index must NOT flag stale lines: {}", files[0]);
+    assert!(output["summary"].get("warnings").is_none(),
+        "fresh index must NOT emit a staleness warning: {}", output["summary"]);
+    // The real match line survives verification in `lines`.
+    assert!(files[0]["lines"].as_array().unwrap().iter().any(|l| l.as_u64() == Some(2)),
+        "fresh index must keep the real match line in `lines`: {}", files[0]);
+    cleanup_tmp(&tmp_dir);
+}
+
+// Same staleness guard for the exact-token search path (substring=false,
+// build_grep_response): a posting line the file no longer corroborates must be
+// dropped from lineContent and flagged.
+#[test] fn e2e_token_show_lines_stale_index_drops_wrong_line() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_stale_tok_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let file = tmp_dir.join("Switches.cs");
+    { let mut f = std::fs::File::create(&file).unwrap();
+      writeln!(f, "public class Alpha {{}}").unwrap();
+      writeln!(f, "zzneedleuniquetoken").unwrap();                 // line 2 at index time
+      writeln!(f, "public class Beta {{}}").unwrap(); }
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+    { let mut f = std::fs::File::create(&file).unwrap();
+      writeln!(f, "// FillerOnlyMarker aaa").unwrap();
+      writeln!(f, "// FillerOnlyMarker bbb").unwrap();
+      writeln!(f, "// FillerOnlyMarker ccc").unwrap();
+      writeln!(f, "public class Alpha {{}}").unwrap();
+      writeln!(f, "zzneedleuniquetoken").unwrap();                 // now line 5
+      writeln!(f, "public class Beta {{}}").unwrap(); }
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["zzneedleuniquetoken"], "substring": false, "showLines": true,
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 1, "token still indexed: {}", output);
+    let files = output["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    let file0 = serde_json::to_string(&files[0]).unwrap();
+    assert!(!file0.contains("FillerOnlyMarker"),
+        "token-path lineContent must NOT show a stale, non-matching line: {}", file0);
+    assert!(files[0].get("staleLineNumbers").is_some(),
+        "token-path stale line must be flagged: {}", files[0]);
+    assert!(files[0]["lines"].as_array().unwrap().is_empty(),
+        "token-path stale line number must be removed from `lines`: {}", files[0]);
+    cleanup_tmp(&tmp_dir);
+}
+
+// Fix B (Symptom 1): phrase search on a stale index picks candidate lines from
+// stale postings, then verifies against fresh content. When the phrase moved
+// (lines inserted above), the stale candidate no longer matches → phrase is not
+// found there. Instead of a silent not_found, staleness must be surfaced so the
+// user knows to reindex rather than concluding the phrase is absent.
+#[test] fn e2e_phrase_stale_index_warns_on_missed_match() {
+    use std::io::Write;
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!("xray_stale_phrase_{}_{}", std::process::id(), id));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let file = tmp_dir.join("Switches.cs");
+    { let mut f = std::fs::File::create(&file).unwrap();
+      writeln!(f, "public class Alpha {{}}").unwrap();
+      writeln!(f, "public class ZzNeedleUniqueToken {{}}").unwrap();  // line 2 at index time
+      writeln!(f, "public class Beta {{}}").unwrap(); }
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(tmp_dir.to_string_lossy().to_string())
+        .with_index_base(tmp_dir.join(".index"))
+        .build();
+
+    // Fresh index: phrase is found, and no staleness warning is emitted.
+    let fresh = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken"], "phrase": true,
+    }));
+    assert!(!fresh.is_error, "phrase grep failed: {}", fresh.content[0].text);
+    let fresh_out: Value = serde_json::from_str(&fresh.content[0].text).unwrap();
+    assert_eq!(fresh_out["summary"]["totalFiles"], 1, "fresh phrase must match: {}", fresh_out);
+    assert!(fresh_out["summary"].get("warnings").is_none(),
+        "fresh phrase must NOT warn: {}", fresh_out["summary"]);
+
+    // Insert 3 lines at the top WITHOUT reindexing → phrase moves to line 5, but
+    // the stale index still points phrase candidates at line 2 (now filler).
+    { let mut f = std::fs::File::create(&file).unwrap();
+      writeln!(f, "// FillerOnlyMarker aaa").unwrap();
+      writeln!(f, "// FillerOnlyMarker bbb").unwrap();
+      writeln!(f, "// FillerOnlyMarker ccc").unwrap();
+      writeln!(f, "public class Alpha {{}}").unwrap();
+      writeln!(f, "public class ZzNeedleUniqueToken {{}}").unwrap();  // now line 5
+      writeln!(f, "public class Beta {{}}").unwrap(); }
+
+    let stale = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken"], "phrase": true,
+    }));
+    assert!(!stale.is_error, "phrase grep failed: {}", stale.content[0].text);
+    let stale_out: Value = serde_json::from_str(&stale.content[0].text).unwrap();
+    // Symptom 1: the phrase is no longer found at the stale candidate position...
+    assert_eq!(stale_out["summary"]["totalFiles"], 0,
+        "stale candidate position no longer matches: {}", stale_out);
+    // ...but instead of a silent not_found, staleness is surfaced honestly.
+    assert!(stale_out["summary"]["warnings"].is_array(),
+        "stale phrase must surface a warning, not a silent not_found: {}", stale_out["summary"]);
+    assert!(stale_out["summary"]["phraseDetail"]["staleCandidateFiles"].as_u64().unwrap_or(0) >= 1,
+        "phraseDetail must report the stale candidate file: {}", stale_out["summary"]["phraseDetail"]);
+
+    cleanup_tmp(&tmp_dir);
+}
+
 #[test] fn e2e_reindex_rebuilds_trigram() {
     use std::io::Write;
     let (ctx, tmp_dir) = make_e2e_substring_ctx();
