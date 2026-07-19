@@ -2,28 +2,22 @@
 
 ## 0.2.10 (2026-07-08)
 
-- **`xray_grep`: `showLines` no longer renders stale line content, and phrase
-  search no longer silently misses matches, when a file changed after indexing.**
-  The inverted index records physical line numbers captured at index time, but
-  `lineContent` is rendered against the file read fresh from disk. If lines were
-  inserted/removed after indexing and before the watcher re-tokenized, a posting
-  line could point at unrelated content — substring/token `showLines` displayed a
-  wrong, non-matching line (a real risk of editing the wrong location), and phrase
-  search verified stale candidate lines and returned a false `not_found`.
-  **Fix (verify-and-drop + detect-and-warn):** for substring and exact-token
-  search, each posting line is now verified against the freshly-read content and
-  any line that no longer contains the search term is dropped from `lineContent`
-  and the machine-readable `lines` array (surfaced per-file as `staleLineNumbers`
-  + a summary `warnings` entry pointing to `xray_reindex`); for phrase search, candidate lines whose fresh content no
-  longer contains the phrase tokens are detected and surfaced
-  (`phraseDetail.staleCandidateFiles` + a `warnings` entry) instead of a silent
-  miss. On a fresh index the verification is a no-op — guaranteed by the tokenizer
-  (an indexed token is always a substring of its lowercased source line). Match
-  counts (`occurrences`/`totalFiles`) remain index-derived. **Tests:**
-  `e2e_substring_show_lines_stale_index_shows_wrong_line`,
-  `e2e_substring_show_lines_fresh_index_no_false_staleness`,
-  `e2e_token_show_lines_stale_index_drops_wrong_line`,
-  `e2e_phrase_stale_index_warns_on_missed_match`.
+- **`xray_grep`: stale line evidence is never returned, and phrase search
+  recovers matches moved by on-disk edits.** The inverted index records physical
+  line numbers captured at index time, while result context is read from the
+  current file. Substring and exact-token searches verify posting lines against
+  fresh content and drop stale entries from both `lineContent` and `files[].lines`.
+  Phrase search now rescans the already-loaded candidate content when indexed
+  lines no longer describe the current phrase locations, without a second disk
+  read. Recovered matches return their current lines; removed matches no longer
+  produce a trustworthy `not_found`. Detected staleness sets `resultStatus` to
+  `partial` with reason `stale_index` and `totalKnown=false`, while
+  `phraseDetail` reports stale, recovered, and unresolved unique file counts.
+  Multi-phrase diagnostics aggregate across every phrase instead of exposing only
+  the last one. Unreadable candidates and worker failures now also produce partial
+  results with `file_read_error` or `worker_panic`. The regression matrix covers
+  line insertion/deletion, removed phrases, count-only, multiple occurrences,
+  punctuation, multi-phrase OR/AND, truncation, read failures, and worker failure.
 
 - **Security: bump `anyhow` to `1.0.103` (RUSTSEC-2026-0190).** Resolves an
   unsoundness in `Error::downcast_mut()` (undefined behavior when downcasting a

@@ -966,3 +966,25 @@ fn test_apply_literal_prefilter_summary_no_reason_leaves_default_hint() {
         "perfHint must be preserved when prefilter was not attempted (reason=None)");
 }
 
+
+#[test]
+fn test_phrase_worker_panic_marks_result_partial() {
+    let panic_result: std::thread::Result<PhraseWorkerOutput> = Err(Box::new("worker panic"));
+    let merged = merge_phrase_worker_results([panic_result]);
+    assert_eq!(merged.worker_panics, 1);
+
+    let diag = PhraseSearchDiag {
+        worker_panics: merged.worker_panics,
+        ..Default::default()
+    };
+    let mut status = build_grep_result_status(0, 0, 0, 0, false);
+    mark_phrase_incomplete_result_status(&mut status, &diag);
+
+    assert_eq!(status["status"], "partial");
+    assert_eq!(status["totalKnown"], false);
+    assert!(status["reasons"].as_array().unwrap()
+        .iter().any(|reason| reason == "worker_panic"));
+    assert!(!status["reasons"].as_array().unwrap()
+        .iter().any(|reason| reason == "no_matches"));
+    assert_eq!(diag.to_json()["workerPanics"], 1);
+}
