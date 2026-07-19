@@ -18,7 +18,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use serde_json::{json, Value};
 
 use crate::git;
-use crate::git::cache::GitHistoryCache;
+use crate::git::cache::{validate_git_ref, GitHistoryCache};
 use crate::mcp::protocol::ToolCallResult;
 
 use super::HandlerContext;
@@ -179,11 +179,12 @@ pub(crate) fn git_tool_definitions() -> Vec<crate::mcp::protocol::ToolDefinition
         },
         crate::mcp::protocol::ToolDefinition {
             name: "xray_branch_status".to_string(),
-            description: "Shows the current git branch status: branch name, whether it's main/master, how far behind/ahead of remote, uncommitted changes, and how fresh the last fetch is. Call this before investigating production bugs to ensure you're looking at the right code.".to_string(),
+            description: "Shows branch, exact HEAD, ahead/behind, dirty state, and fetch age. With expectedRef, resolves a local Git object and reports match status. Never fetches or changes the worktree. Use before production investigations or remote reviews.".to_string(),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "repo": { "type": "string", "description": "Path to git repository" }
+                    "repo": { "type": "string", "description": "Path to git repository" },
+                    "expectedRef": { "type": "string", "description": "Optional local Git ref, branch, tag, or commit to compare with HEAD. No fetch or checkout." }
                 },
                 "required": ["repo"]
             }),
@@ -1135,12 +1136,62 @@ fn handle_git_blame(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 // ─── Branch status handler ──────────────────────────────────────────
 
 /// Handle xray_branch_status — shows current branch, ahead/behind, dirty files, fetch age.
+fn is_full_object_id(value: &str) -> bool {
+    matches!(value.len(), 40 | 64)
+        && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn ancestry_base(revision: &str) -> Option<&str> {
+    let operator = revision.find(['~', '^'])?;
+    let base = revision.get(..operator)?;
+    if base.is_empty() || base.contains("..") {
+        return None;
+    }
+
+    let suffix = revision.get(operator..)?;
+    let mut chars = suffix.chars().peekable();
+    while let Some(operator) = chars.next() {
+        if !matches!(operator, '~' | '^') {
+            return None;
+        }
+        while chars.next_if(|ch| ch.is_ascii_digit()).is_some() {}
+        if chars.peek().is_some_and(|ch| !matches!(ch, '~' | '^')) {
+            return None;
+        }
+    }
+    Some(base)
+}
+
+fn revision_may_be_hidden_by_shallow(repo: &str, expected_ref: &str) -> bool {
+    if is_full_object_id(expected_ref) {
+        return true;
+    }
+    let Some(base) = ancestry_base(expected_ref) else {
+        return false;
+    };
+    if is_full_object_id(base) {
+        return true;
+    }
+    let base_commit = format!("{}^{{commit}}", base);
+    run_git_command(repo, &["rev-parse", "--verify", &base_commit]).is_ok()
+}
+
+
 fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let repo = match read_required_string(args, "repo") {
         Ok(r) => r,
         Err(e) => return ToolCallResult::error(e),
     };
     let repo = repo.as_str();
+    let expected_ref = match read_string(args, "expectedRef") {
+        Ok(value) => value,
+        Err(error) => return ToolCallResult::error(error),
+    };
+    if let Some(expected_ref) = expected_ref.as_deref()
+        && let Err(error) = validate_git_ref(expected_ref)
+    {
+        return ToolCallResult::error(error);
+    }
 
     let start = Instant::now();
 
@@ -1151,6 +1202,13 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         Err(e) => return ToolCallResult::error(format!("Failed to get current branch: {}", e)),
     };
     let current_branch_ms = t.elapsed().as_secs_f64() * 1000.0;
+
+    let t = Instant::now();
+    let actual_head = match run_git_command(repo, &["rev-parse", "--verify", "HEAD^{commit}"]) {
+        Ok(head) => head,
+        Err(e) => return ToolCallResult::error(format!("Failed to resolve HEAD: {}", e)),
+    };
+    let actual_head_ms = t.elapsed().as_secs_f64() * 1000.0;
 
     // b. Is main branch
     let is_main = is_main_branch(&current_branch);
@@ -1189,6 +1247,48 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     let t = Instant::now();
     let dirty_files = get_dirty_files(repo);
     let dirty_files_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let worktree_dirty = !dirty_files.is_empty();
+
+    let t = Instant::now();
+    let (expected_head, revision_matches, revision_status, revision_warning) =
+        match expected_ref.as_deref() {
+            None => (None, None, "not_requested", None),
+            Some(expected_ref) => {
+                let revision = format!("{}^{{commit}}", expected_ref);
+                match run_git_command(repo, &["rev-parse", "--verify", &revision]) {
+                    Ok(expected_head) => {
+                        let matches = actual_head == expected_head;
+                        let status = if matches { "match" } else { "mismatch" };
+                        let warning = (!matches).then(|| format!(
+                            "Expected ref '{}' resolves to {}, but the local checkout is at {}.",
+                            expected_ref, expected_head, actual_head,
+                        ));
+                        (Some(expected_head), Some(matches), status, warning)
+                    }
+                    Err(_) if shallow_info.is_some()
+                        && revision_may_be_hidden_by_shallow(repo, expected_ref) => (
+                            None,
+                            None,
+                            "shallow_history",
+                            Some(format!(
+                                "Expected revision '{}' is not available locally; shallow history may hide the required ancestor or object.",
+                                expected_ref,
+                            )),
+                        ),
+                    Err(_) => (
+                        None,
+                        None,
+                        "unresolved_ref",
+                        Some(format!(
+                            "Expected ref '{}' is not available in the local Git object database.",
+                            expected_ref,
+                        )),
+                    ),
+                }
+            }
+        };
+    let expected_ref_ms = t.elapsed().as_secs_f64() * 1000.0;
+    let revision_ms = actual_head_ms + expected_ref_ms;
 
     // f. Last fetch time
     let t = Instant::now();
@@ -1210,6 +1310,7 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
     crate::index::log_phase("branchStatus", &[
         ("elapsedMs", format!("{:.1}", elapsed_ms)),
         ("currentBranchMs", format!("{:.1}", current_branch_ms)),
+        ("revisionMs", format!("{:.1}", revision_ms)),
         ("mainBranchMs", format!("{:.1}", main_branch_ms)),
         ("behindAheadMs", format!("{:.1}", behind_ahead_ms)),
         ("dirtyFilesMs", format!("{:.1}", dirty_files_ms)),
@@ -1221,6 +1322,13 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
 
     let output = json!({
         "currentBranch": current_branch,
+        "actualHead": actual_head,
+        "expectedRef": expected_ref,
+        "expectedHead": expected_head,
+        "revisionMatches": revision_matches,
+        "revisionStatus": revision_status,
+        "revisionWarning": revision_warning,
+        "worktreeDirty": worktree_dirty,
         "isMainBranch": is_main,
         "mainBranch": effective_main,
         "behindMain": behind_main,
@@ -1239,6 +1347,7 @@ fn handle_branch_status(_ctx: &HandlerContext, args: &Value) -> ToolCallResult {
             "elapsedMs": (elapsed_ms * 100.0).round() / 100.0,
             "subTimings": {
                 "currentBranchMs": (current_branch_ms * 100.0).round() / 100.0,
+                "revisionMs": (revision_ms * 100.0).round() / 100.0,
                 "mainBranchMs": (main_branch_ms * 100.0).round() / 100.0,
                 "behindAheadMs": (behind_ahead_ms * 100.0).round() / 100.0,
                 "dirtyFilesMs": (dirty_files_ms * 100.0).round() / 100.0,
