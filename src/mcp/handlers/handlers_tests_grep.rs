@@ -657,13 +657,14 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
 // (lines inserted above), the stale candidate no longer matches → phrase is not
 // found there. Instead of a silent not_found, staleness must be surfaced so the
 // user knows to reindex rather than concluding the phrase is absent.
-#[test] fn e2e_phrase_stale_index_warns_on_missed_match() {
+#[test] fn e2e_phrase_stale_index_recovers_moved_match() {
     use std::io::Write;
     static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tmp_dir = std::env::temp_dir().join(format!("xray_stale_phrase_{}_{}", std::process::id(), id));
     let _ = std::fs::remove_dir_all(&tmp_dir);
     std::fs::create_dir_all(&tmp_dir).unwrap();
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
     let file = tmp_dir.join("Switches.cs");
     { let mut f = std::fs::File::create(&file).unwrap();
       writeln!(f, "public class Alpha {{}}").unwrap();
@@ -701,18 +702,26 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
       writeln!(f, "public class Beta {{}}").unwrap(); }
 
     let stale = dispatch_tool(&ctx, "xray_grep", &json!({
-        "terms": ["class ZzNeedleUniqueToken"], "phrase": true,
+        "terms": ["class ZzNeedleUniqueToken"], "phrase": true, "showLines": true,
     }));
     assert!(!stale.is_error, "phrase grep failed: {}", stale.content[0].text);
     let stale_out: Value = serde_json::from_str(&stale.content[0].text).unwrap();
-    // Symptom 1: the phrase is no longer found at the stale candidate position...
-    assert_eq!(stale_out["summary"]["totalFiles"], 0,
-        "stale candidate position no longer matches: {}", stale_out);
-    // ...but instead of a silent not_found, staleness is surfaced honestly.
-    assert!(stale_out["summary"]["warnings"].is_array(),
-        "stale phrase must surface a warning, not a silent not_found: {}", stale_out["summary"]);
-    assert!(stale_out["summary"]["phraseDetail"]["staleCandidateFiles"].as_u64().unwrap_or(0) >= 1,
-        "phraseDetail must report the stale candidate file: {}", stale_out["summary"]["phraseDetail"]);
+    assert_eq!(stale_out["summary"]["totalFiles"], 1,
+        "fresh-file fallback must recover the moved phrase: {}", stale_out);
+    assert_eq!(stale_out["resultStatus"]["status"], "partial");
+    assert_eq!(stale_out["resultStatus"]["totalKnown"], false);
+    assert!(stale_out["resultStatus"]["reasons"].as_array().unwrap()
+        .iter().any(|reason| reason == "stale_index"));
+
+    let files = stale_out["files"].as_array().unwrap();
+    assert_eq!(files.len(), 1);
+    assert_eq!(files[0]["lines"], json!([5]));
+    assert!(files[0]["lineContent"].to_string().contains("ZzNeedleUniqueToken"));
+    assert!(stale_out["summary"]["warnings"].is_array());
+    let detail = &stale_out["summary"]["phraseDetail"];
+    assert_eq!(detail["staleCandidateFiles"], 1);
+    assert_eq!(detail["recoveredStaleFiles"], 1);
+    assert_eq!(detail["unresolvedStaleFiles"], 0);
 
     cleanup_tmp(&tmp_dir);
 }
@@ -1156,6 +1165,8 @@ fn make_phrase_postfilter_ctx() -> (HandlerContext, std::path::PathBuf) {
     let files = output["files"].as_array().unwrap();
     let path = files[0]["path"].as_str().unwrap();
     assert!(path.contains("Logger.xml"), "Should match Logger.xml, got {}", path);
+    assert_eq!(output["resultStatus"]["status"], "complete");
+    assert!(output["summary"]["phraseDetail"].get("staleCandidateFiles").is_none());
     cleanup_tmp(&tmp);
 }
 
@@ -4516,3 +4527,293 @@ fn test_xray_grep_literal_prefilter_scope_aware_counters_with_ext_scope() {
     cleanup_tmp(&tmp_dir);
 }
 
+
+fn make_stale_phrase_test_context(
+    label: &str,
+    initial_content: &str,
+) -> (HandlerContext, std::path::PathBuf, std::path::PathBuf) {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let temp_root = std::env::temp_dir().join(format!(
+        "xray_stale_phrase_{}_{}_{}",
+        label,
+        std::process::id(),
+        id,
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let temp_root = crate::canonicalize_test_root(&temp_root);
+    let file = temp_root.join("Orders.cs");
+    std::fs::write(&file, initial_content).unwrap();
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: temp_root.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(temp_root.to_string_lossy().to_string())
+        .with_index_base(temp_root.join(".index"))
+        .build();
+    (ctx, temp_root, file)
+}
+
+fn assert_stale_phrase_partial(output: &Value, recovered: u64, unresolved: u64) {
+    assert_eq!(output["resultStatus"]["status"], "partial");
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert_eq!(output["resultStatus"]["safeForExhaustiveClaims"], false);
+    assert!(output["resultStatus"]["reasons"].as_array().unwrap()
+        .iter().any(|reason| reason == "stale_index"));
+    let detail = &output["summary"]["phraseDetail"];
+    assert!(detail["staleCandidateFiles"].as_u64().unwrap_or(0) >= 1);
+    assert_eq!(detail["recoveredStaleFiles"], recovered);
+    assert_eq!(detail["unresolvedStaleFiles"], unresolved);
+}
+
+#[test]
+fn e2e_phrase_stale_removed_match_is_partial() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "removed",
+        "public class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class Beta {}\n",
+    );
+    std::fs::write(
+        &file,
+        "// FillerOnlyMarker aaa\n// FillerOnlyMarker bbb\npublic class Alpha {}\npublic class Beta {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken"], "phrase": true,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 0);
+    assert_stale_phrase_partial(&output, 0, 1);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_phrase_stale_count_only_recovers_moved_match() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "count_only",
+        "public class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class Beta {}\n",
+    );
+    std::fs::write(
+        &file,
+        "// FillerOnlyMarker aaa\n// FillerOnlyMarker bbb\n// FillerOnlyMarker ccc\npublic class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class Beta {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken"], "phrase": true, "countOnly": true,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 1);
+    assert_eq!(output["summary"]["totalOccurrences"], 1);
+    assert_stale_phrase_partial(&output, 1, 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_phrase_stale_recovers_match_shifted_up() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "shifted_up",
+        "// filler a\n// filler b\n// filler c\npublic class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class Beta {}\n",
+    );
+    std::fs::write(
+        &file,
+        "public class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class Beta {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken"], "phrase": true, "showLines": true,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["files"][0]["lines"], json!([2]));
+    assert_stale_phrase_partial(&output, 1, 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_phrase_stale_recovers_all_current_occurrences() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "multiple",
+        "public class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class Middle {}\npublic class More {}\npublic class ZzNeedleUniqueToken {}\npublic class Omega {}\n",
+    );
+    std::fs::write(
+        &file,
+        "// filler a\n// filler b\n// filler c\npublic class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class Middle {}\npublic class More {}\npublic class ZzNeedleUniqueToken {}\npublic class Omega {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken"], "phrase": true, "showLines": true,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["files"][0]["lines"], json!([5, 8]));
+    assert_stale_phrase_partial(&output, 1, 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_multi_phrase_stale_or_recovers_matches() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "multi_or",
+        "public class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class OtherUniqueToken {}\npublic class Beta {}\n",
+    );
+    std::fs::write(
+        &file,
+        "// filler a\n// filler b\n// filler c\npublic class Alpha {}\npublic class ZzNeedleUniqueToken {}\npublic class OtherUniqueToken {}\npublic class Beta {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken", "class OtherUniqueToken"],
+        "phrase": true,
+        "mode": "or",
+        "showLines": true,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["files"][0]["lines"], json!([5, 6]));
+    assert_stale_phrase_partial(&output, 1, 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_phrase_stale_punctuation_recovers_exact_match() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "punctuation",
+        "public class Alpha {}\n<Switch name=\"Contoso_BE\" />\npublic class Beta {}\n",
+    );
+    std::fs::write(
+        &file,
+        "// filler a\n// name Contoso_BE\n// filler c\npublic class Alpha {}\n<Switch name=\"Contoso_BE\" />\npublic class Beta {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["name=\"Contoso_BE\""], "phrase": true, "showLines": true,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["files"][0]["lines"], json!([5]), "{}", output);
+    assert_stale_phrase_partial(&output, 1, 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_multi_phrase_stale_non_last_diagnostics_are_aggregated() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "multi_non_last",
+        "public class Alpha {}\npublic class FirstUniqueToken {}\npublic class Middle {}\npublic class SecondUniqueToken {}\n",
+    );
+    std::fs::write(
+        &file,
+        "public class Alpha {}\n// FirstUniqueToken filler\npublic class FirstUniqueToken {}\npublic class SecondUniqueToken {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class FirstUniqueToken", "class SecondUniqueToken"],
+        "phrase": true,
+        "mode": "or",
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_stale_phrase_partial(&output, 1, 0);
+    assert_eq!(output["summary"]["phraseDetail"]["staleCandidateFiles"], 1);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_phrase_candidate_read_error_is_partial() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "read_error",
+        "public class ZzNeedleUniqueToken {}\n",
+    );
+    std::fs::remove_file(&file).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken"], "phrase": true,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "partial");
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert!(output["resultStatus"]["reasons"].as_array().unwrap()
+        .iter().any(|reason| reason == "file_read_error"));
+    assert_eq!(output["summary"]["phraseDetail"]["readErrorFiles"], 1);
+    assert!(output["summary"]["warnings"].as_array().unwrap()
+        .iter().any(|warning| warning.as_str().unwrap().contains("could not be read")));
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_phrase_review_multi_and_count_only_uses_aggregate_diagnostics() {
+    let (ctx, temp_root, file) = make_stale_phrase_test_context(
+        "multi_and_count",
+        "public class Alpha {}\npublic class FirstUniqueToken {}\npublic class Middle {}\npublic class SecondUniqueToken {}\n",
+    );
+    std::fs::write(
+        &file,
+        "public class Alpha {}\n// FirstUniqueToken filler\npublic class FirstUniqueToken {}\npublic class SecondUniqueToken {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class FirstUniqueToken", "class SecondUniqueToken"],
+        "phrase": true,
+        "mode": "and",
+        "countOnly": true,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 1);
+    assert_stale_phrase_partial(&output, 1, 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_phrase_review_max_results_preserves_stale_reason() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let temp_root = std::env::temp_dir().join(format!(
+        "xray_phrase_max_results_{}_{}",
+        std::process::id(),
+        id,
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let temp_root = crate::canonicalize_test_root(&temp_root);
+    let first_file = temp_root.join("OrdersA.cs");
+    let second_file = temp_root.join("OrdersB.cs");
+    let initial = "public class Alpha {}\npublic class ZzNeedleUniqueToken {}\n";
+    std::fs::write(&first_file, initial).unwrap();
+    std::fs::write(&second_file, initial).unwrap();
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: temp_root.to_string_lossy().to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(temp_root.to_string_lossy().to_string())
+        .with_index_base(temp_root.join(".index"))
+        .build();
+    std::fs::write(
+        &first_file,
+        "// filler a\n// filler b\npublic class Alpha {}\npublic class ZzNeedleUniqueToken {}\n",
+    ).unwrap();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["class ZzNeedleUniqueToken"],
+        "phrase": true,
+        "maxResults": 1,
+    }));
+    assert!(!result.is_error, "phrase grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 2);
+    assert_eq!(output["files"].as_array().unwrap().len(), 1);
+    let reasons = output["resultStatus"]["reasons"].as_array().unwrap();
+    assert!(reasons.iter().any(|reason| reason == "max_results"));
+    assert!(reasons.iter().any(|reason| reason == "stale_index"));
+    assert_stale_phrase_partial(&output, 1, 0);
+    cleanup_tmp(&temp_root);
+}

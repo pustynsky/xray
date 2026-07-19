@@ -3425,10 +3425,12 @@ fn handle_phrase_search(
         );
         apply_dir_auto_converted_note(&mut summary, params);
         summary["phraseDetail"] = diag.to_json();
-        let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        let mut result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        mark_phrase_incomplete_result_status(&mut result_status, &diag);
         let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
         inject_phrase_diagnostic_note(&mut summary, &diag);
         inject_stale_phrase_warning(&mut summary, diag.stale_candidate_files);
+        inject_phrase_verification_warnings(&mut summary, &diag);
         let output = finalize_grep_output(
             json!({ "summary": summary }),
             result_status,
@@ -3463,16 +3465,18 @@ fn handle_phrase_search(
     apply_dir_auto_converted_note(&mut summary, params);
     summary["phraseDetail"] = diag.to_json();
     let returned_occurrences = results.iter().map(|result| result.lines.len()).sum();
-    let result_status = build_grep_result_status(
+    let mut result_status = build_grep_result_status(
         results.len(),
         returned_occurrences,
         total_files,
         total_occurrences,
         false,
     );
+    mark_phrase_incomplete_result_status(&mut result_status, &diag);
     let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
     inject_phrase_diagnostic_note(&mut summary, &diag);
     inject_stale_phrase_warning(&mut summary, diag.stale_candidate_files);
+    inject_phrase_verification_warnings(&mut summary, &diag);
     let output = finalize_grep_output(
         json!({
             "files": files_json,
@@ -3503,6 +3507,14 @@ pub(crate) struct PhraseSearchDiag {
     pub files_read: usize,
     pub result_count: usize,
     pub stale_candidate_files: usize,
+    pub recovered_stale_files: usize,
+    pub unresolved_stale_files: usize,
+    pub read_error_files: usize,
+    pub worker_panics: usize,
+    stale_candidate_paths: std::collections::BTreeSet<String>,
+    recovered_stale_paths: std::collections::BTreeSet<String>,
+    unresolved_stale_paths: std::collections::BTreeSet<String>,
+    read_error_paths: std::collections::BTreeSet<String>,
 }
 
 impl PhraseSearchDiag {
@@ -3523,8 +3535,61 @@ impl PhraseSearchDiag {
         }
         if self.stale_candidate_files > 0 {
             value["staleCandidateFiles"] = json!(self.stale_candidate_files);
+            value["recoveredStaleFiles"] = json!(self.recovered_stale_files);
+            value["unresolvedStaleFiles"] = json!(self.unresolved_stale_files);
+        }
+        if self.read_error_files > 0 {
+            value["readErrorFiles"] = json!(self.read_error_files);
+        }
+        if self.worker_panics > 0 {
+            value["workerPanics"] = json!(self.worker_panics);
         }
         value
+    }
+
+    fn sync_file_counts(&mut self) {
+        self.stale_candidate_paths.extend(self.recovered_stale_paths.iter().cloned());
+        self.stale_candidate_paths.extend(self.unresolved_stale_paths.iter().cloned());
+        self.stale_candidate_files = self.stale_candidate_paths.len();
+        self.unresolved_stale_files = self.unresolved_stale_paths.len();
+        self.recovered_stale_files = self.recovered_stale_paths
+            .difference(&self.unresolved_stale_paths)
+            .count();
+        self.read_error_files = self.read_error_paths.len();
+    }
+
+    fn merge_from(&mut self, mut other: Self) {
+        self.token_count += other.token_count;
+        self.per_token.append(&mut other.per_token);
+        self.missing_tokens.append(&mut other.missing_tokens);
+        self.missing_tokens.sort();
+        self.missing_tokens.dedup();
+        self.posting_scan_ms += other.posting_scan_ms;
+        self.intersection_ms += other.intersection_ms;
+        self.candidates_after_intersection += other.candidates_after_intersection;
+        self.file_verify_ms += other.file_verify_ms;
+        self.files_read += other.files_read;
+        self.result_count += other.result_count;
+        self.worker_panics += other.worker_panics;
+        self.stale_candidate_paths.append(&mut other.stale_candidate_paths);
+        self.recovered_stale_paths.append(&mut other.recovered_stale_paths);
+        self.unresolved_stale_paths.append(&mut other.unresolved_stale_paths);
+        self.read_error_paths.append(&mut other.read_error_paths);
+        self.sync_file_counts();
+    }
+
+    fn incomplete_reasons(&self) -> Vec<&'static str> {
+        let mut reasons = Vec::new();
+        if self.stale_candidate_files > 0 {
+            reasons.push("stale_index");
+        }
+        if self.read_error_files > 0 {
+            reasons.push("file_read_error");
+        }
+        if self.worker_panics > 0 {
+            reasons.push("worker_panic");
+        }
+        reasons
     }
 
     fn has_missing_tokens(&self) -> bool {
@@ -3571,16 +3636,53 @@ fn inject_phrase_diagnostic_note(summary: &mut Value, diag: &PhraseSearchDiag) {
 /// Surface an index-staleness warning for phrase search: candidate lines the
 /// index pointed at no longer contain the phrase tokens, so matches may be
 /// missed. Appends to `summary["warnings"]` (consistent with token/substring).
+fn push_phrase_warning(summary: &mut Value, warning: String) {
+    match summary.get_mut("warnings").and_then(Value::as_array_mut) {
+        Some(warnings) => warnings.push(Value::String(warning)),
+        None => summary["warnings"] = json!([warning]),
+    }
+}
+
 fn inject_stale_phrase_warning(summary: &mut Value, stale_files: usize) {
-    if stale_files == 0 {
+    if stale_files > 0 {
+        push_phrase_warning(summary, stale_phrase_warning(stale_files));
+    }
+}
+
+fn inject_phrase_verification_warnings(summary: &mut Value, diag: &PhraseSearchDiag) {
+    if diag.read_error_files > 0 {
+        push_phrase_warning(summary, format!(
+            "{} phrase candidate file(s) could not be read; results are incomplete.",
+            diag.read_error_files,
+        ));
+    }
+    if diag.worker_panics > 0 {
+        push_phrase_warning(summary, format!(
+            "{} phrase verification worker(s) failed; results are incomplete.",
+            diag.worker_panics,
+        ));
+    }
+}
+
+fn mark_phrase_incomplete_result_status(result_status: &mut Value, diag: &PhraseSearchDiag) {
+    let incomplete_reasons = diag.incomplete_reasons();
+    if incomplete_reasons.is_empty() {
         return;
     }
-    let warning = stale_phrase_warning(stale_files);
-    match summary.get_mut("warnings").and_then(Value::as_array_mut) {
-        Some(arr) => arr.push(Value::String(warning)),
-        None => {
-            summary["warnings"] = json!([warning]);
+    result_status["status"] = json!("partial");
+    result_status["complete"] = json!(false);
+    result_status["safeForExactSemantics"] = json!(false);
+    result_status["safeForExhaustiveClaims"] = json!(false);
+    result_status["totalKnown"] = json!(false);
+    if let Some(reasons) = result_status.get_mut("reasons").and_then(Value::as_array_mut) {
+        reasons.retain(|reason| reason.as_str() != Some("no_matches"));
+        for reason in incomplete_reasons {
+            if !reasons.iter().any(|existing| existing.as_str() == Some(reason)) {
+                reasons.push(json!(reason));
+            }
         }
+    } else {
+        result_status["reasons"] = json!(incomplete_reasons);
     }
 }
 
@@ -3620,6 +3722,40 @@ fn inject_multi_phrase_warnings(summary: &mut Value, phrase_warnings: &[Value], 
 
 /// Core phrase-matching logic: finds files containing the given phrase.
 /// Extracted to allow reuse by both single-phrase and multi-phrase search.
+#[derive(Default)]
+struct PhraseWorkerOutput {
+    matches: Vec<PhraseFileMatch>,
+    stale_paths: std::collections::BTreeSet<String>,
+    recovered_paths: std::collections::BTreeSet<String>,
+    unresolved_paths: std::collections::BTreeSet<String>,
+    read_error_paths: std::collections::BTreeSet<String>,
+    files_read: usize,
+    worker_panics: usize,
+}
+
+fn merge_phrase_worker_results<I>(results: I) -> PhraseWorkerOutput
+where
+    I: IntoIterator<Item = std::thread::Result<PhraseWorkerOutput>>,
+{
+    let mut merged = PhraseWorkerOutput::default();
+    for result in results {
+        match result {
+            Ok(mut output) => {
+                merged.matches.append(&mut output.matches);
+                merged.stale_paths.append(&mut output.stale_paths);
+                merged.recovered_paths.append(&mut output.recovered_paths);
+                merged.unresolved_paths.append(&mut output.unresolved_paths);
+                merged.read_error_paths.append(&mut output.read_error_paths);
+                merged.files_read += output.files_read;
+                merged.worker_panics += output.worker_panics;
+            }
+            Err(_) => merged.worker_panics += 1,
+        }
+    }
+    merged
+}
+
+
 fn collect_phrase_matches(
     index: &ContentIndex,
     phrase: &str,
@@ -3773,7 +3909,7 @@ fn collect_phrase_matches(
     let file_verify_start = Instant::now();
 
     let phrase_tokens_ref: &[String] = &phrase_tokens;
-    let (results, stale_candidate_files): (Vec<PhraseFileMatch>, usize) = std::thread::scope(|scope| {
+    let worker_output = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for chunk in candidates.chunks(chunk_size) {
             let phrase_re_ref = &phrase_re;
@@ -3782,39 +3918,68 @@ fn collect_phrase_matches(
             let chunk_owned: Vec<(u32, Vec<u32>)> = chunk.to_vec();
             let handle = scope.spawn(move || {
                 let mut local: Vec<PhraseFileMatch> = Vec::with_capacity(chunk_owned.len());
-                let mut local_stale = 0usize;
+                let mut local_stale = std::collections::BTreeSet::new();
+                let mut local_recovered = std::collections::BTreeSet::new();
+                let mut local_unresolved = std::collections::BTreeSet::new();
+                let mut local_read_errors = std::collections::BTreeSet::new();
+                let mut local_files_read = 0usize;
                 for (file_id, candidate_lines) in chunk_owned {
                     let file_path = &index_ref.files[file_id as usize];
                     let (content, _lossy) = match read_file_lossy(std::path::Path::new(file_path)) {
                         Ok(c) => c,
-                        Err(_) => continue,
+                        Err(_) => {
+                            local_read_errors.insert(file_path.clone());
+                            continue;
+                        }
                     };
+                    local_files_read += 1;
                     let candidate_set: HashSet<u32> = candidate_lines.into_iter().collect();
+                    let matches_phrase = |line: &str, line_lower: &str| {
+                        if phrase_has_punctuation {
+                            line_lower.contains(phrase_lower_ref)
+                        } else {
+                            phrase_re_ref.is_match(line)
+                        }
+                    };
                     let mut matching_lines = Vec::new();
                     let mut had_stale_candidate = false;
+                    let mut had_unmatched_candidate = false;
+                    let mut current_line_count = 0u32;
                     for (line_num, line) in content.lines().enumerate() {
                         let line_no = (line_num + 1) as u32;
-                        // Tier-B: only verify lines that the index says contain ALL
-                        // phrase tokens. Other lines cannot satisfy the phrase regex
-                        // (which requires every token, separated by whitespace, on
-                        // a single line) nor the lowercase-substring punctuation
-                        // path (which also matches single-line content).
+                        current_line_count = line_no;
                         if !candidate_set.contains(&line_no) {
                             continue;
                         }
                         let line_lower = line.to_lowercase();
-                        let hit = if phrase_has_punctuation {
-                            line_lower.contains(phrase_lower_ref)
-                        } else {
-                            phrase_re_ref.is_match(line)
-                        };
-                        if hit {
+                        if matches_phrase(line, &line_lower) {
                             matching_lines.push(line_no);
-                        } else if !phrase_tokens_ref.iter().all(|t| line_lower.contains(t.as_str())) {
-                            // The index selected this line because it claimed all
-                            // phrase tokens sit on it; the fresh line lacks a token,
-                            // so the postings for this file are stale.
+                        } else {
+                            had_unmatched_candidate = true;
+                            if !phrase_tokens_ref.iter().all(|t| line_lower.contains(t.as_str())) {
+                                had_stale_candidate = true;
+                            }
+                        }
+                    }
+                    had_stale_candidate |= candidate_set.iter().any(|line| *line > current_line_count);
+                    if had_stale_candidate || had_unmatched_candidate {
+                        let rescanned_lines: Vec<u32> = content.lines().enumerate()
+                            .filter_map(|(line_num, line)| {
+                                let line_lower = line.to_lowercase();
+                                matches_phrase(line, &line_lower).then_some((line_num + 1) as u32)
+                            })
+                            .collect();
+                        if had_stale_candidate || rescanned_lines != matching_lines {
                             had_stale_candidate = true;
+                            matching_lines = rescanned_lines;
+                        }
+                    }
+                    if had_stale_candidate {
+                        local_stale.insert(file_path.clone());
+                        if matching_lines.is_empty() {
+                            local_unresolved.insert(file_path.clone());
+                        } else {
+                            local_recovered.insert(file_path.clone());
                         }
                     }
                     if !matching_lines.is_empty() {
@@ -3823,47 +3988,47 @@ fn collect_phrase_matches(
                             lines: matching_lines,
                             content: if show_lines { Some(content) } else { None },
                         });
-                    } else if had_stale_candidate {
-                        // File dropped from results, but a stale candidate line
-                        // means the phrase may still be present at a shifted
-                        // position the stale index no longer points to.
-                        local_stale += 1;
                     }
                 }
-                (local, local_stale)
+                PhraseWorkerOutput {
+                    matches: local,
+                    stale_paths: local_stale,
+                    recovered_paths: local_recovered,
+                    unresolved_paths: local_unresolved,
+                    read_error_paths: local_read_errors,
+                    files_read: local_files_read,
+                    worker_panics: 0,
+                }
             });
             handles.push(handle);
         }
-        let mut all = Vec::new();
-        let mut stale_total = 0usize;
-        let mut worker_panics: usize = 0;
-        for h in handles {
-            match h.join() {
-                Ok((local, local_stale)) => {
-                    all.extend(local);
-                    stale_total += local_stale;
-                }
-                // Bug 9 (consolidated plan 2026-04-23): a panic in a phrase-
-                // verification worker silently dropped that chunk's results.
-                // Now we count panics and emit a `tracing::warn!` so the issue
-                // surfaces in logs / metrics instead of returning quietly
-                // with fewer matches than the user expects.
-                Err(_) => worker_panics += 1,
-            }
-        }
-        if worker_panics > 0 {
-            tracing::warn!(
-                worker_panics = worker_panics,
-                "phrase verification worker(s) panicked; result set may be incomplete"
-            );
-        }
-        (all, stale_total)
+        merge_phrase_worker_results(handles.into_iter().map(|handle| handle.join()))
     });
 
+    if worker_output.worker_panics > 0 {
+        tracing::warn!(
+            worker_panics = worker_output.worker_panics,
+            "phrase verification worker(s) panicked; result set may be incomplete"
+        );
+    }
+    let PhraseWorkerOutput {
+        matches: results,
+        stale_paths,
+        recovered_paths,
+        unresolved_paths,
+        read_error_paths,
+        files_read,
+        worker_panics,
+    } = worker_output;
     diag.file_verify_ms = file_verify_start.elapsed().as_secs_f64() * 1000.0;
-    diag.files_read = results.len();
+    diag.files_read = files_read;
     diag.result_count = results.iter().map(|r| r.lines.len()).sum();
-    diag.stale_candidate_files = stale_candidate_files;
+    diag.stale_candidate_paths = stale_paths;
+    diag.recovered_stale_paths = recovered_paths;
+    diag.unresolved_stale_paths = unresolved_paths;
+    diag.read_error_paths = read_error_paths;
+    diag.worker_panics = worker_panics;
+    diag.sync_file_counts();
 
     info!(
         phrase = %phrase,
@@ -3932,10 +4097,9 @@ fn handle_multi_phrase_search(
     // Collect matches for each phrase independently
     let mut per_phrase_results: Vec<Vec<PhraseFileMatch>> = Vec::new();
     let mut searched_terms: Vec<&str> = Vec::new();
-    let mut last_diag = PhraseSearchDiag::default();
+    let mut aggregate_diag = PhraseSearchDiag::default();
     let mut phrase_warnings: Vec<Value> = Vec::new();
     let mut phrase_warnings_omitted = 0usize;
-    let mut total_stale_candidate_files = 0usize;
 
     for phrase in phrases {
         match collect_phrase_matches(index, phrase, params) {
@@ -3947,8 +4111,7 @@ fn handle_multi_phrase_search(
                         phrase_warnings_omitted += 1;
                     }
                 }
-                total_stale_candidate_files += diag.stale_candidate_files;
-                last_diag = diag;
+                aggregate_diag.merge_from(diag);
                 per_phrase_results.push(matches);
                 searched_terms.push(phrase);
             }
@@ -3989,11 +4152,13 @@ fn handle_multi_phrase_search(
             index, search_elapsed, ctx, true, params.lock_wait_ms,
         );
         apply_dir_auto_converted_note(&mut summary, params);
-        summary["phraseDetail"] = last_diag.to_json();
-        let result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        summary["phraseDetail"] = aggregate_diag.to_json();
+        let mut result_status = build_grep_result_status(0, 0, total_files, total_occurrences, true);
+        mark_phrase_incomplete_result_status(&mut result_status, &aggregate_diag);
         let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
         inject_multi_phrase_warnings(&mut summary, &phrase_warnings, phrase_warnings_omitted);
-        inject_stale_phrase_warning(&mut summary, total_stale_candidate_files);
+        inject_stale_phrase_warning(&mut summary, aggregate_diag.stale_candidate_files);
+        inject_phrase_verification_warnings(&mut summary, &aggregate_diag);
         let output = finalize_grep_output(
             json!({ "summary": summary }),
             result_status,
@@ -4022,18 +4187,20 @@ fn handle_multi_phrase_search(
         index, search_elapsed, ctx, true, params.lock_wait_ms,
     );
     apply_dir_auto_converted_note(&mut summary, params);
-    summary["phraseDetail"] = last_diag.to_json();
+    summary["phraseDetail"] = aggregate_diag.to_json();
     let returned_occurrences = results.iter().map(|result| result.lines.len()).sum();
-    let result_status = build_grep_result_status(
+    let mut result_status = build_grep_result_status(
         results.len(),
         returned_occurrences,
         total_files,
         total_occurrences,
         false,
     );
+    mark_phrase_incomplete_result_status(&mut result_status, &aggregate_diag);
     let execution = build_grep_execution(params, search_mode, None, false, Some(total_files), None);
     inject_multi_phrase_warnings(&mut summary, &phrase_warnings, phrase_warnings_omitted);
-    inject_stale_phrase_warning(&mut summary, total_stale_candidate_files);
+    inject_stale_phrase_warning(&mut summary, aggregate_diag.stale_candidate_files);
+    inject_phrase_verification_warnings(&mut summary, &aggregate_diag);
     let output = finalize_grep_output(
         json!({
             "files": files_json,
