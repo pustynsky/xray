@@ -1992,6 +1992,27 @@ impl Drop for TrigramBuildGuard {
 
 /// Check if a file passes all grep filters (dir, ext, excludeDir, exclude).
 /// Returns true if the file should be included in results.
+fn passes_common_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
+    if !params.ext_filter.is_empty() {
+        let joined = params.ext_filter.join(",");
+        if !matches_ext_filter(file_path, &joined) { return false; }
+    }
+
+    let needs_lower = !params.exclude_patterns.is_empty() || !params.exclude_lower.is_empty();
+    let path_lower = if needs_lower {
+        file_path.to_lowercase().replace('\\', "/")
+    } else {
+        String::new()
+    };
+    if !params.exclude_patterns.is_empty()
+        && params.exclude_patterns.matches(&path_lower) { return false; }
+    if params.exclude_lower.iter().any(|exclude| path_lower.contains(exclude.as_str())) {
+        return false;
+    }
+    true
+}
+
+
 fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
     // Exact-file mode (set ONLY by the `dir=<file>` auto-convert branch).
     // Supersedes dir/file_filter scoping — the user's intent was unambiguously
@@ -2050,33 +2071,22 @@ fn passes_file_filters(file_path: &str, params: &GrepSearchParams) -> bool {
         }
     }
 
-    // Extension filter (array form). Empty Vec = no filter; otherwise the
-    // file's extension must match any entry (case-insensitive). We keep
-    // `matches_ext_filter` accepting a comma-joined string for now — file
-    // extensions never contain `,`, so the round-trip is lossless.
-    if !params.ext_filter.is_empty() {
-        let joined = params.ext_filter.join(",");
-        if !matches_ext_filter(file_path, &joined) { return false; }
+    passes_common_file_filters(file_path, params)
+}
+
+fn passes_file_filters_for_coverage(file_path: &str, params: &GrepSearchParams) -> bool {
+    if let Some(target) = params.exact_file_path {
+        let path_key = grep_scope_path_key(file_path);
+        let logical_key = grep_scope_path_key(target);
+        let canonical_match = params.exact_file_path_canonical
+            .as_ref()
+            .is_some_and(|canonical| path_key == grep_scope_path_key(canonical));
+        if path_key != logical_key && !canonical_match {
+            return false;
+        }
+        return passes_common_file_filters(file_path, params);
     }
-
-    // Pre-compute lowercased + normalized path once for all exclude checks
-    let needs_lower = !params.exclude_patterns.is_empty() || !params.exclude_lower.is_empty();
-    let path_lower = if needs_lower {
-        file_path.to_lowercase().replace('\\', "/")
-    } else {
-        String::new()
-    };
-
-    // Exclude dir filter — use pre-computed patterns (zero per-file allocations for patterns)
-    if !params.exclude_patterns.is_empty()
-        && params.exclude_patterns.matches(&path_lower) { return false; }
-
-    // Exclude pattern filter — use pre-lowercased excludes
-    if params.exclude_lower.iter().any(|excl| {
-        path_lower.contains(excl.as_str())
-    }) { return false; }
-
-    true
+    passes_file_filters(file_path, params)
 }
 
 /// Returns true when any scoping filter (`dir`/`file`/`exact_file_path`/`ext`/
@@ -2652,6 +2662,180 @@ fn build_grep_response(
 ///      `parser_xml::is_xml_extension`). Without this hint, agents that hit `0 matches
 ///      with ext=["xml"]` typically fall back to PowerShell `Get-ChildItem + [xml]`
 ///      instead of `xray_definitions` on-demand.
+#[derive(Debug)]
+struct GrepScopeCoverage {
+    matched_files: usize,
+    indexed_files: usize,
+    unindexed_files: usize,
+    extensions: Vec<String>,
+    extension_not_indexed: bool,
+}
+
+impl GrepScopeCoverage {
+    fn primary_reason(&self) -> &'static str {
+        if self.matched_files == 0 {
+            "scope_not_found"
+        } else if self.extension_not_indexed {
+            "extension_not_indexed"
+        } else {
+            "file_not_indexed"
+        }
+    }
+}
+
+fn grep_has_explicit_scope(parsed: &ParsedGrepArgs) -> bool {
+    !parsed.file_filter.is_empty()
+        || parsed.exact_file_path.is_some()
+        || !parsed.ext_filter.is_empty()
+        || parsed.dir_filter.is_some()
+}
+
+fn grep_scope_path_key(path: &str) -> String {
+    crate::clean_path(path).to_lowercase()
+}
+
+fn collect_grep_scope_coverage(
+    ctx: &HandlerContext,
+    index: &ContentIndex,
+    params: &GrepSearchParams,
+) -> Result<GrepScopeCoverage, String> {
+    let guard = ctx.file_index.read()
+        .map_err(|error| format!("Failed to read file index: {}", error))?;
+    let file_index = guard.as_ref()
+        .ok_or_else(|| "File index not available after build".to_string())?;
+
+    let mut matched_paths = std::collections::BTreeMap::new();
+    for entry in file_index.entries.iter().filter(|entry| !entry.is_dir) {
+        if passes_file_filters_for_coverage(&entry.path, params) {
+            matched_paths.insert(grep_scope_path_key(&entry.path), entry.path.clone());
+        }
+    }
+
+    let mut indexed_paths = std::collections::BTreeSet::new();
+    for path in index.files.iter().filter(|path| passes_file_filters_for_coverage(path, params)) {
+        let key = grep_scope_path_key(path);
+        indexed_paths.insert(key.clone());
+        matched_paths.entry(key).or_insert_with(|| path.clone());
+    }
+
+    let unindexed_paths: Vec<&String> = matched_paths.iter()
+        .filter_map(|(key, path)| (!indexed_paths.contains(key)).then_some(path))
+        .collect();
+    let extensions: std::collections::BTreeSet<String> = unindexed_paths.iter()
+        .filter_map(|path| std::path::Path::new(path.as_str()).extension())
+        .filter_map(|extension| extension.to_str())
+        .map(|extension| extension.to_lowercase())
+        .collect();
+    let active_extensions: std::collections::BTreeSet<String> = ctx.server_ext
+        .split(|character: char| character == ',' || character.is_whitespace())
+        .filter(|extension| !extension.is_empty())
+        .map(|extension| extension.to_lowercase())
+        .collect();
+    let extension_not_indexed = !extensions.is_empty()
+        && extensions.iter().all(|extension| !active_extensions.contains(extension));
+
+    Ok(GrepScopeCoverage {
+        matched_files: matched_paths.len(),
+        indexed_files: indexed_paths.len(),
+        unindexed_files: unindexed_paths.len(),
+        extensions: extensions.into_iter().collect(),
+        extension_not_indexed,
+    })
+}
+
+fn apply_grep_scope_coverage(
+    result: &mut ToolCallResult,
+    coverage: Option<&GrepScopeCoverage>,
+) {
+    let Some(coverage) = coverage else { return; };
+    if result.is_error { return; }
+    let Some(content) = result.content.first_mut() else { return; };
+    let Ok(mut output) = serde_json::from_str::<Value>(&content.text) else { return; };
+
+    output["coverage"] = json!({
+        "matchedFiles": coverage.matched_files,
+        "indexedFiles": coverage.indexed_files,
+        "unindexedFiles": coverage.unindexed_files,
+        "extensions": coverage.extensions,
+    });
+
+    if coverage.matched_files > 0 && coverage.unindexed_files == 0 {
+        content.text = json_to_string(&output);
+        return;
+    }
+
+    let primary_reason = coverage.primary_reason();
+    let (status_name, warning) = if coverage.matched_files == 0 {
+        ("scope_not_found", "No workspace file matched the explicit grep scope.".to_string())
+    } else if coverage.indexed_files == 0 {
+        ("unindexed_scope", format!(
+            "The file-list reports {} scoped file(s) outside the content index.",
+            coverage.unindexed_files,
+        ))
+    } else {
+        ("partial", format!(
+            "Searched {} indexed file(s); the file-list reports {} additional matching file(s) outside the content index.",
+            coverage.indexed_files,
+            coverage.unindexed_files,
+        ))
+    };
+
+    if let Some(status) = output.get_mut("resultStatus").and_then(Value::as_object_mut) {
+        status.insert("status".to_string(), json!(status_name));
+        status.insert("complete".to_string(), json!(false));
+        status.insert("safeForExactSemantics".to_string(), json!(false));
+        status.insert("safeForExhaustiveClaims".to_string(), json!(false));
+        status.insert("totalKnown".to_string(), json!(false));
+        if coverage.unindexed_files > 0 {
+            status.insert("accountingScope".to_string(), json!("indexed_only"));
+            status.insert("unknownFiles".to_string(), json!(coverage.unindexed_files));
+        }
+        let mut reasons: Vec<String> = if status_name == "partial" {
+            status.get("reasons").and_then(Value::as_array)
+                .into_iter().flatten()
+                .filter_map(Value::as_str)
+                .filter(|reason| *reason != "no_matches")
+                .map(str::to_string)
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if status_name == "partial" && !reasons.iter().any(|reason| reason == "partial_index_coverage") {
+            reasons.push("partial_index_coverage".to_string());
+        }
+        if !reasons.iter().any(|reason| reason == primary_reason) {
+            reasons.push(primary_reason.to_string());
+        }
+        status.insert("reasons".to_string(), json!(reasons));
+    }
+
+    output["coverageWarning"] = json!({
+        "reason": primary_reason,
+        "message": warning,
+    });
+    if let Some(summary) = output.get_mut("summary").and_then(Value::as_object_mut) {
+        let xml_hint = summary.remove("xmlOnDemandHint").and_then(|value| value.as_str().map(str::to_string));
+        summary.remove("hint");
+        let next_step = xml_hint.unwrap_or_else(|| {
+            if coverage.matched_files == 0 {
+                "Use xray_fast to verify the requested path or file filter.".to_string()
+            } else if coverage.matched_files == 1 {
+                "Use read_file for the requested file because it is outside the content index.".to_string()
+            } else if coverage.extension_not_indexed {
+                format!(
+                    "Restart Xray with '{}' included in --ext to search the omitted files.",
+                    coverage.extensions.join(","),
+                )
+            } else {
+                "Use read_file for the omitted files because they are outside the content index.".to_string()
+            }
+        });
+        summary.insert("nextStepHint".to_string(), json!(next_step));
+    }
+    content.text = json_to_string(&output);
+}
+
+
 fn inject_grep_ext_hint(
     result: &mut ToolCallResult,
     ext_filter: &[String],
@@ -2769,6 +2953,12 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // for a 2-file scope is pure waste (~40-70s on large repos).
     let scope_already_narrow = !parsed.file_filter.is_empty()
         || parsed.exact_file_path.is_some();
+    let coverage_requested = grep_has_explicit_scope(&parsed) || args.get("dir").is_some();
+    if coverage_requested
+        && let Err(error) = super::utils::ensure_workspace_file_index(ctx)
+    {
+        return ToolCallResult::error(error);
+    }
     let trigram_skipped = will_auto_switch_to_phrase || scope_already_narrow;
     if (parsed.use_substring || parsed.use_line_regex)
         && !will_auto_switch_to_phrase
@@ -2834,7 +3024,14 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         files_only: parsed.files_only,
         invert_cap: parsed.invert_cap,
     };
-
+    let scope_coverage = if coverage_requested {
+        match collect_grep_scope_coverage(ctx, &index, &grep_params) {
+            Ok(coverage) => Some(coverage),
+            Err(error) => return ToolCallResult::error(error),
+        }
+    } else {
+        None
+    };
 
     // --- Substring search mode
     if parsed.use_substring {
@@ -2843,6 +3040,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         if parsed.invert {
             result = apply_invert(result, &index, &grep_params);
         }
+        apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
         return result;
     }
 
@@ -2858,6 +3056,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         if parsed.invert {
             result = apply_invert(result, &index, &grep_params);
         }
+        apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
         return result;
     }
 
@@ -2872,6 +3071,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         if parsed.invert {
             result = apply_invert(result, &index, &grep_params);
         }
+        apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
         return result;
     }
 
@@ -2945,6 +3145,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     if parsed.invert {
         result = apply_invert(result, &index, &grep_params);
     }
+    apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
     result
 }
 

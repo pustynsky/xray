@@ -29,9 +29,24 @@ fn make_substring_ctx(tokens_to_files: Vec<(&str, u32, Vec<u32>)>, files: Vec<&s
         total_tokens, extensions: vec!["cs".to_string()], file_token_counts,
         trigram, ..Default::default()
     };
-    HandlerContextBuilder::new()
+    let ctx = HandlerContextBuilder::new()
         .with_content_index(content_index)
-        .build()
+        .build();
+    *ctx.file_index.write().unwrap() = Some(crate::FileIndex {
+        root: ".".to_string(),
+        format_version: 0,
+        created_at: 0,
+        max_age_secs: 3600,
+        entries: files.iter().map(|path| crate::FileEntry {
+            path: path.to_string(),
+            size: 0,
+            modified: 0,
+            is_dir: false,
+        }).collect(),
+        respect_git_exclude: false,
+    });
+    ctx.file_index_dirty.store(false, std::sync::atomic::Ordering::Relaxed);
+    ctx
 }
 
 #[test] fn test_substring_xray_finds_partial_match() {
@@ -4815,5 +4830,333 @@ fn e2e_phrase_review_max_results_preserves_stale_reason() {
     assert!(reasons.iter().any(|reason| reason == "max_results"));
     assert!(reasons.iter().any(|reason| reason == "stale_index"));
     assert_stale_phrase_partial(&output, 1, 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_explicit_unindexed_file_returns_coverage_status() {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let temp_root = std::env::temp_dir().join(format!(
+        "xray_unindexed_scope_{}_{}",
+        std::process::id(),
+        id,
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let temp_root = crate::canonicalize_test_root(&temp_root);
+    std::fs::write(temp_root.join("Orders.cs"), "public class Orders {}\n").unwrap();
+    std::fs::write(temp_root.join("Cargo.toml"), "[package]\nname = \"contoso-orders\"\n").unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: temp_root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(temp_root.to_string_lossy().to_string())
+        .with_server_ext("cs")
+        .with_index_base(temp_root.join(".index"))
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["package"],
+        "file": ["Cargo.toml"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "unindexed_scope", "{}", output);
+    assert_eq!(output["resultStatus"]["complete"], false);
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert!(output["resultStatus"]["reasons"].as_array().unwrap()
+        .iter().any(|reason| reason == "extension_not_indexed"));
+    assert_eq!(output["coverage"]["matchedFiles"], 1);
+    assert_eq!(output["coverage"]["indexedFiles"], 0);
+    assert_eq!(output["coverage"]["unindexedFiles"], 1);
+    assert_eq!(output["coverage"]["extensions"], json!(["toml"]));
+    assert_eq!(output["coverageWarning"]["reason"], "extension_not_indexed");
+    assert!(output["summary"]["nextStepHint"].as_str().unwrap().contains("read_file"));
+    cleanup_tmp(&temp_root);
+}
+
+fn make_grep_scope_coverage_context(
+    label: &str,
+) -> (HandlerContext, std::path::PathBuf) {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let temp_root = std::env::temp_dir().join(format!(
+        "xray_scope_coverage_{}_{}_{}",
+        label,
+        std::process::id(),
+        id,
+    ));
+    let _ = std::fs::remove_dir_all(&temp_root);
+    std::fs::create_dir_all(&temp_root).unwrap();
+    let temp_root = crate::canonicalize_test_root(&temp_root);
+    std::fs::write(
+        temp_root.join("ScopeIndexed.cs"),
+        "public class SharedNeedle {}\n",
+    ).unwrap();
+    std::fs::write(
+        temp_root.join("ScopeUnindexed.toml"),
+        "[package]\nname = \"sharedneedle\"\n",
+    ).unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: temp_root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(temp_root.to_string_lossy().to_string())
+        .with_server_ext("cs")
+        .with_index_base(temp_root.join(".index"))
+        .build();
+    (ctx, temp_root)
+}
+
+#[test]
+fn e2e_grep_scope_coverage_missing_file_is_not_search_not_found() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("missing");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["sharedneedle"],
+        "file": ["Missing.toml"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "scope_not_found");
+    assert_eq!(output["resultStatus"]["complete"], false);
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert_eq!(output["resultStatus"]["reasons"], json!(["scope_not_found"]));
+    assert_eq!(output["coverage"]["matchedFiles"], 0);
+    assert!(output["summary"]["nextStepHint"].as_str().unwrap().contains("xray_fast"));
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_mixed_scope_is_partial() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("mixed");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["sharedneedle"],
+        "file": ["Scope"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "partial");
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    let reasons = output["resultStatus"]["reasons"].as_array().unwrap();
+    assert!(reasons.iter().any(|reason| reason == "partial_index_coverage"));
+    assert!(reasons.iter().any(|reason| reason == "extension_not_indexed"));
+    assert_eq!(output["coverage"]["matchedFiles"], 2);
+    assert_eq!(output["coverage"]["indexedFiles"], 1);
+    assert_eq!(output["coverage"]["unindexedFiles"], 1);
+    assert_eq!(output["files"].as_array().unwrap().len(), 1);
+    assert!(output["summary"]["nextStepHint"].as_str().unwrap().contains("--ext"));
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_count_only_has_no_trusted_zero() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("count_only");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["sharedneedle"],
+        "file": ["ScopeUnindexed.toml"],
+        "countOnly": true,
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "unindexed_scope");
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert_eq!(output["coverage"]["unindexedFiles"], 1);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_indexed_no_match_stays_not_found() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("indexed_no_match");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["absenttoken"],
+        "file": ["ScopeIndexed.cs"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "not_found");
+    assert_eq!(output["resultStatus"]["complete"], true);
+    assert_eq!(output["resultStatus"]["totalKnown"], true);
+    assert_eq!(output["coverage"]["matchedFiles"], 1);
+    assert_eq!(output["coverage"]["indexedFiles"], 1);
+    assert_eq!(output["coverage"]["unindexedFiles"], 0);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_explicit_extension_is_typed() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("extension");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["sharedneedle"],
+        "ext": ["toml"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "unindexed_scope");
+    assert_eq!(output["resultStatus"]["reasons"], json!(["extension_not_indexed"]));
+    assert_eq!(output["coverage"]["extensions"], json!(["toml"]));
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_explicit_directory_is_partial() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("directory");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["sharedneedle"],
+        "dir": temp_root.to_string_lossy(),
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "partial");
+    assert_eq!(output["coverage"]["matchedFiles"], 2);
+    assert_eq!(output["coverage"]["indexedFiles"], 1);
+    assert_eq!(output["coverage"]["unindexedFiles"], 1);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_all_search_modes_are_typed() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("modes");
+    let cases = [
+        json!({"terms": ["sharedneedle"], "file": ["ScopeUnindexed.toml"]}),
+        json!({"terms": ["shared needle"], "file": ["ScopeUnindexed.toml"], "phrase": true}),
+        json!({"terms": ["sharedneedle"], "file": ["ScopeUnindexed.toml"], "lineRegex": true}),
+        json!({"terms": ["shared.*"], "file": ["ScopeUnindexed.toml"], "regex": true}),
+        json!({"terms": ["sharedneedle"], "file": ["ScopeUnindexed.toml"], "substring": false}),
+    ];
+    for args in cases {
+        let result = dispatch_tool(&ctx, "xray_grep", &args);
+        assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert_eq!(output["resultStatus"]["status"], "unindexed_scope", "{}", output);
+        assert_eq!(output["resultStatus"]["totalKnown"], false);
+    }
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_broad_search_does_not_build_file_index() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("broad");
+    assert!(ctx.file_index.read().unwrap().is_none());
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["sharedneedle"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    assert!(ctx.file_index.read().unwrap().is_none());
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_exact_dir_file_is_typed() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("exact_dir_file");
+    let file = temp_root.join("ScopeUnindexed.toml");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["sharedneedle"],
+        "dir": file.to_string_lossy(),
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "unindexed_scope");
+    assert_eq!(output["coverage"]["matchedFiles"], 1);
+    assert_eq!(output["coverage"]["unindexedFiles"], 1);
+    assert!(output["summary"]["dirAutoConverted"].as_str().unwrap().contains("exactly that one file"));
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_active_extension_file_uses_file_reason() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("active_extension");
+    std::fs::write(
+        temp_root.join("LateAdded.cs"),
+        "public class LateNeedle {}\n",
+    ).unwrap();
+    ctx.file_index_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["lateneedle"],
+        "file": ["LateAdded.cs"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "unindexed_scope");
+    assert_eq!(output["resultStatus"]["reasons"], json!(["file_not_indexed"]));
+    assert_eq!(output["coverageWarning"]["reason"], "file_not_indexed");
+    assert_eq!(output["coverage"]["extensions"], json!(["cs"]));
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_mixed_no_indexed_matches_is_partial() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("mixed_no_indexed_match");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["package"],
+        "file": ["Scope"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert!(output["files"].as_array().unwrap().is_empty());
+    let status = &output["resultStatus"];
+    assert_eq!(status["status"], "partial");
+    assert_eq!(status["totalKnown"], false);
+    let reasons = status["reasons"].as_array().unwrap();
+    assert!(reasons.iter().any(|reason| reason == "partial_index_coverage"));
+    assert!(!reasons.iter().any(|reason| reason == "no_matches"));
+    assert_eq!(status["accountingScope"], "indexed_only");
+    assert_eq!(status["unknownFiles"], 1);
+
+    let coverage = &output["coverage"];
+    assert_eq!(coverage["matchedFiles"], 2);
+    assert_eq!(coverage["indexedFiles"], 1);
+    assert_eq!(coverage["unindexedFiles"], 1);
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_regex_invert_keeps_unindexed_status() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("regex_invert");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["shared.*"],
+        "regex": true,
+        "invert": true,
+        "ext": ["toml"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "unindexed_scope", "{}", output);
+    assert_eq!(output["resultStatus"]["complete"], false);
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert_eq!(output["coverageWarning"]["reason"], "extension_not_indexed");
+    assert!(output["summary"].get("hint").is_none(), "{}", output["summary"]);
+    assert!(output["summary"]["nextStepHint"].as_str().unwrap().contains("read_file"));
+    cleanup_tmp(&temp_root);
+}
+
+#[test]
+fn e2e_grep_scope_coverage_token_invert_keeps_unindexed_status() {
+    let (ctx, temp_root) = make_grep_scope_coverage_context("token_invert");
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["sharedneedle"],
+        "substring": false,
+        "invert": true,
+        "file": ["ScopeUnindexed.toml"],
+    }));
+    assert!(!result.is_error, "grep failed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["resultStatus"]["status"], "unindexed_scope", "{}", output);
+    assert_eq!(output["resultStatus"]["complete"], false);
+    assert_eq!(output["resultStatus"]["totalKnown"], false);
+    assert_eq!(output["coverageWarning"]["reason"], "extension_not_indexed");
+    assert!(output["summary"].get("hint").is_none(), "{}", output["summary"]);
     cleanup_tmp(&temp_root);
 }
