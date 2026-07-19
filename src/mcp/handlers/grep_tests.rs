@@ -988,3 +988,28 @@ fn test_phrase_worker_panic_marks_result_partial() {
         .iter().any(|reason| reason == "no_matches"));
     assert_eq!(diag.to_json()["workerPanics"], 1);
 }
+
+#[test]
+fn test_coverage_exact_path_uses_precomputed_canonical_alias() {
+    let no_dir = None;
+    let logical = Some("C:/Users/RUNNER~1/project/Orders.cs".to_string());
+    let canonical = Some("C:/Users/runneradmin/project/Orders.cs".to_string());
+    let params = GrepSearchParams {
+        exact_file_path: &logical,
+        exact_file_path_canonical: &canonical,
+        ..make_params(&no_dir, &[], &[], &[])
+    };
+
+    assert!(passes_file_filters_for_coverage(
+        "C:/Users/RUNNER~1/project/Orders.cs",
+        &params,
+    ));
+    assert!(passes_file_filters_for_coverage(
+        "C:/Users/runneradmin/project/Orders.cs",
+        &params,
+    ));
+    assert!(!passes_file_filters_for_coverage(
+        "C:/Users/runneradmin/project/Other.cs",
+        &params,
+    ));
+}

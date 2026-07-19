@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **`xray_grep`: explicit file/directory/extension scopes no longer report a false `not_found` when matching files are outside the content index.** Scoped requests now cross-check the shared lazy file-list index and return typed `unindexed_scope`, `scope_not_found`, or mixed `partial` status with `totalKnown=false`, structured `coverage` counts, `coverageWarning`, and one actionable fallback. Partial accounting is explicitly marked `accountingScope: "indexed_only"` with `unknownFiles`. This is an intentional response-contract change: mixed `dir`/`ext` scopes that previously appeared `complete` now report `partial`, so consumers should inspect `resultStatus` instead of assuming scoped totals are exhaustive. Fully indexed scopes keep the existing search status, while broad unscoped grep does not initialize or scan the file-list index. `xray_fast` and `xray_grep` now share the same single-flight file-index builder. Fourteen end-to-end tests and one unit test cover exact and substring file scopes, explicit directories/extensions, mixed coverage with and without indexed matches, active-extension drift, `countOnly`, every search mode, `invert`, canonical aliases, and the broad-path no-overhead contract.
+
 ## 0.2.10 (2026-07-08)
 
 - **`xray_grep`: stale line evidence is never returned, and phrase search

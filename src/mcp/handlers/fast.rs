@@ -4,7 +4,6 @@ use std::path::Path;
 use std::time::Instant;
 
 use serde_json::{json, Value};
-use tracing::info;
 
 use crate::mcp::protocol::ToolCallResult;
 
@@ -395,24 +394,7 @@ pub(crate) fn handle_xray_fast(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     // build via Mutex+Condvar; other waiters block until completion and
     // then read the freshly-built index. See
     // `HandlerContext.file_index_build_gate` for the contract.
-    let server_dir_for_build = server_dir.clone();
-    let respect_git_exclude = ctx.respect_git_exclude;
-    let index_base = ctx.index_base.clone();
-    if let Err(e) = super::utils::ensure_file_index(ctx, || {
-        info!(dir = %server_dir_for_build, "Building file-list index (dirty or first use)");
-        let new_index = crate::build_index(&crate::IndexArgs {
-            dir: server_dir_for_build.clone(),
-            max_age_hours: 24,
-            hidden: false,
-            no_ignore: false,
-            respect_git_exclude,
-            threads: 0,
-        })
-        .map_err(|e| format!("Failed to build file index: {}", e))?;
-        // Save to disk for CLI/other consumers.
-        let _ = crate::save_index(&new_index, &index_base);
-        Ok(new_index)
-    }) {
+    if let Err(e) = super::utils::ensure_workspace_file_index(ctx) {
         return ToolCallResult::error(e);
     }
 

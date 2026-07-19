@@ -903,6 +903,27 @@ where
     }
 }
 
+pub fn ensure_workspace_file_index(ctx: &HandlerContext) -> Result<(), String> {
+    let server_dir = ctx.server_dir();
+    let respect_git_exclude = ctx.respect_git_exclude;
+    let index_base = ctx.index_base.clone();
+    ensure_file_index(ctx, || {
+        tracing::info!(dir = %server_dir, "Building file-list index (dirty or first use)");
+        let new_index = crate::build_index(&crate::IndexArgs {
+            dir: server_dir,
+            max_age_hours: 24,
+            hidden: false,
+            no_ignore: false,
+            respect_git_exclude,
+            threads: 0,
+        })
+        .map_err(|error| format!("Failed to build file index: {}", error))?;
+        let _ = crate::save_index(&new_index, &index_base);
+        Ok(new_index)
+    })
+}
+
+
 /// Maximum number of line numbers to include per file entry.
 const MAX_LINES_PER_FILE: usize = 10;
 
