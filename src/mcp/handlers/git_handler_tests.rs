@@ -1110,3 +1110,219 @@ fn test_cache_is_fresh_when_fingerprints_match() {
     );
 }
 
+
+#[test]
+fn test_ancestry_base_accepts_only_single_revision_ancestry_grammar() {
+    for (revision, expected_base) in [
+        ("HEAD~1^2", "HEAD"),
+        ("HEAD^^^", "HEAD"),
+        ("refs/heads/main~", "refs/heads/main"),
+    ] {
+        assert_eq!(ancestry_base(revision), Some(expected_base), "{revision}");
+    }
+
+    for revision in [
+        "HEAD~1a",
+        "HEAD^{commit}",
+        "main..HEAD~1",
+        "^main",
+        "HEAD@{1}",
+    ] {
+        assert_eq!(ancestry_base(revision), None, "{revision}");
+    }
+
+    assert!(is_full_object_id("0123456789abcdef0123456789abcdef01234567"));
+    assert!(is_full_object_id(
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    ));
+    assert!(!is_full_object_id("deadbeef"));
+}
+
+
+fn commit_revision(repo: &std::path::Path, content: &str, message: &str) -> String {
+    std::fs::write(repo.join("revision.txt"), content).unwrap();
+    git_in(repo, &["add", "revision.txt"]);
+    git_in(repo, &["commit", "--quiet", "-m", message]);
+    git_in(repo, &["rev-parse", "HEAD"])
+}
+
+fn make_revision_status_repo() -> (tempfile::TempDir, std::path::PathBuf, String) {
+    let temp = tempfile::tempdir().unwrap();
+    let repo = crate::canonicalize_test_root(temp.path());
+    git_in(&repo, &["init", "--quiet", "-b", "main"]);
+    let first_head = commit_revision(&repo, "first\n", "first");
+    (temp, repo, first_head)
+}
+
+fn branch_status_output(repo: &std::path::Path, expected_ref: Option<&str>) -> Value {
+    let ctx = make_git_test_ctx();
+    let mut args = json!({ "repo": repo.to_string_lossy() });
+    if let Some(expected_ref) = expected_ref {
+        args["expectedRef"] = json!(expected_ref);
+    }
+    let result = handle_branch_status(&ctx, &args);
+    assert!(!result.is_error, "branch status failed: {}", result.content[0].text);
+    serde_json::from_str(&result.content[0].text).unwrap()
+}
+
+#[test]
+fn test_branch_status_expected_ref_mismatch() {
+    let (_temp, repo, expected_head) = make_revision_status_repo();
+    let actual_head = commit_revision(&repo, "second\n", "second");
+    let output = branch_status_output(&repo, Some(&expected_head));
+    assert_eq!(output["actualHead"], actual_head);
+    assert_eq!(output["expectedRef"], expected_head);
+    assert_eq!(output["expectedHead"], expected_head);
+    assert_eq!(output["revisionMatches"], false);
+    assert_eq!(output["revisionStatus"], "mismatch");
+    assert!(output["revisionWarning"].as_str().unwrap().contains("local checkout"));
+    assert_eq!(output["worktreeDirty"], false);
+    assert!(output["summary"]["subTimings"]["revisionMs"].as_f64().is_some());
+}
+
+#[test]
+fn test_branch_status_expected_ref_match_keeps_dirty_separate() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    std::fs::write(repo.join("untracked.txt"), "dirty\n").unwrap();
+    let output = branch_status_output(&repo, Some("HEAD"));
+    assert_eq!(output["actualHead"], head);
+    assert_eq!(output["expectedHead"], head);
+    assert_eq!(output["revisionMatches"], true);
+    assert_eq!(output["revisionStatus"], "match");
+    assert!(output["revisionWarning"].is_null());
+    assert_eq!(output["worktreeDirty"], true);
+}
+
+#[test]
+fn test_branch_status_expected_ref_unresolved() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    let output = branch_status_output(&repo, Some("refs/heads/missing"));
+    assert_eq!(output["actualHead"], head);
+    assert!(output["expectedHead"].is_null());
+    assert!(output["revisionMatches"].is_null());
+    assert_eq!(output["revisionStatus"], "unresolved_ref");
+    assert!(output["revisionWarning"].as_str().unwrap().contains("local Git object database"));
+}
+
+#[test]
+fn test_branch_status_expected_ref_remote_only_resolves() {
+    let (_temp, repo, first_head) = make_revision_status_repo();
+    git_in(&repo, &["update-ref", "refs/remotes/origin/review", &first_head]);
+    let actual_head = commit_revision(&repo, "second\n", "second");
+    let output = branch_status_output(&repo, Some("origin/review"));
+    assert_eq!(output["actualHead"], actual_head);
+    assert_eq!(output["expectedHead"], first_head);
+    assert_eq!(output["revisionStatus"], "mismatch");
+}
+
+#[test]
+fn test_branch_status_expected_ref_detached_head_matches() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    git_in(&repo, &["checkout", "--quiet", "--detach", &head]);
+    let output = branch_status_output(&repo, Some("HEAD"));
+    assert_eq!(output["currentBranch"], "HEAD");
+    assert_eq!(output["actualHead"], head);
+    assert_eq!(output["expectedHead"], head);
+    assert_eq!(output["revisionStatus"], "match");
+}
+
+#[test]
+fn test_branch_status_expected_ref_missing_named_ref_stays_unresolved_when_shallow() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    std::fs::write(repo.join(".git").join("shallow"), format!("{head}\n")).unwrap();
+    let output = branch_status_output(&repo, Some("refs/remotes/origin/missing"));
+    assert_eq!(output["isShallow"], true);
+    assert_eq!(output["revisionStatus"], "unresolved_ref");
+    assert!(output["revisionWarning"].as_str().unwrap().contains("not available"));
+    assert!(output["expectedHead"].is_null());
+    assert!(output["revisionMatches"].is_null());
+}
+
+#[test]
+fn test_branch_status_expected_ref_shallow_history_for_missing_ancestor() {
+    let (_temp, repo, first_head) = make_revision_status_repo();
+    let actual_head = commit_revision(&repo, "second\n", "second");
+    std::fs::write(repo.join(".git").join("shallow"), format!("{actual_head}\n")).unwrap();
+    let output = branch_status_output(&repo, Some("HEAD~1"));
+    assert_eq!(output["isShallow"], true);
+    assert_eq!(output["actualHead"], actual_head);
+    assert_ne!(first_head, actual_head);
+    assert_eq!(output["revisionStatus"], "shallow_history");
+    assert!(output["revisionWarning"].as_str().unwrap().contains("shallow history"));
+    assert!(output["expectedHead"].is_null());
+    assert!(output["revisionMatches"].is_null());
+}
+
+#[test]
+fn test_branch_status_expected_ref_hex_like_name_stays_unresolved_when_shallow() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    std::fs::write(repo.join(".git").join("shallow"), format!("{head}\n")).unwrap();
+    let output = branch_status_output(&repo, Some("deadbeef"));
+    assert_eq!(output["revisionStatus"], "unresolved_ref");
+}
+
+#[test]
+fn test_branch_status_expected_ref_reflog_failure_stays_unresolved_when_shallow() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    std::fs::write(repo.join(".git").join("shallow"), format!("{head}\n")).unwrap();
+    let output = branch_status_output(&repo, Some("HEAD@{999999}"));
+    assert_eq!(output["revisionStatus"], "unresolved_ref");
+}
+
+
+#[test]
+fn test_branch_status_expected_ref_shallow_history_for_missing_object_id() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    std::fs::write(repo.join(".git").join("shallow"), format!("{head}\n")).unwrap();
+    let missing_object = "0123456789abcdef0123456789abcdef01234567";
+    let output = branch_status_output(&repo, Some(missing_object));
+    assert_eq!(output["revisionStatus"], "shallow_history");
+    assert!(output["revisionWarning"].as_str().unwrap().contains("may hide"));
+}
+
+
+#[test]
+fn test_branch_status_expected_ref_peels_annotated_and_lightweight_tags() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    git_in(&repo, &["tag", "lightweight-review", &head]);
+    git_in(&repo, &["tag", "-a", "annotated-review", "-m", "review", &head]);
+
+    for tag in ["lightweight-review", "annotated-review"] {
+        let output = branch_status_output(&repo, Some(tag));
+        assert_eq!(output["expectedRef"], tag);
+        assert_eq!(output["expectedHead"], head);
+        assert_eq!(output["revisionMatches"], true);
+        assert_eq!(output["revisionStatus"], "match");
+    }
+}
+
+#[test]
+fn test_branch_status_expected_ref_rejects_option_injection() {
+    let (_temp, repo, _head) = make_revision_status_repo();
+    let ctx = make_git_test_ctx();
+    let result = handle_branch_status(&ctx, &json!({
+        "repo": repo.to_string_lossy(),
+        "expectedRef": "--upload-pack=evil.sh",
+    }));
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("must not start with '-'"));
+}
+
+#[test]
+fn test_branch_status_expected_ref_omitted_is_backward_compatible() {
+    let (_temp, repo, head) = make_revision_status_repo();
+    let output = branch_status_output(&repo, None);
+    assert_eq!(output["actualHead"], head);
+    assert!(output["expectedRef"].is_null());
+    assert!(output["expectedHead"].is_null());
+    assert!(output["revisionMatches"].is_null());
+    assert_eq!(output["revisionStatus"], "not_requested");
+}
+
+#[test]
+fn test_branch_status_expected_ref_is_advertised_in_schema() {
+    let tool = git_tool_definitions().into_iter()
+        .find(|tool| tool.name == "xray_branch_status")
+        .unwrap();
+    assert!(tool.input_schema["properties"]["expectedRef"].is_object());
+}

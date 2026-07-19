@@ -353,9 +353,9 @@ pub fn tips(def_extensions: &[String]) -> Vec<Tip> {
             example: "Step 1: xray_definitions name=[\"OrderService\",\"IOrderService\"] includeBody=true (map + read). Step 2: xray_callers method=[\"ProcessOrder\"] class='OrderService' (call chain). Done in 2 calls.".into(),
         },
         Tip {
-            rule: "Check branch status before investigating production bugs".into(),
-            why: "Call xray_branch_status first to verify you're on the right branch and your data is up-to-date. Avoids wasted investigation on stale or wrong-branch data.".into(),
-            example: "MCP: xray_branch_status repo='.' -> shows branch, behind/ahead counts, fetch age, dirty files".into(),
+            rule: "Check branch and expected revision before production investigations or remote reviews".into(),
+            why: "Call xray_branch_status first. Pass expectedRef for a PR, branch, tag, or commit so Xray can distinguish the intended revision from the current local checkout without fetching or changing the worktree.".into(),
+            example: "MCP: xray_branch_status repo='.' expectedRef='origin/feature/example' -> compare expectedHead with actualHead and require revisionStatus='match' before source-level conclusions".into(),
         },
         Tip {
             rule: "Use noCache=true when git results seem stale".into(),
