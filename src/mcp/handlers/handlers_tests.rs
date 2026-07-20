@@ -254,7 +254,12 @@ fn test_xray_callers_no_def_index() {
     let ctx = make_empty_ctx();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({"method": ["Foo"]}));
     assert!(result.is_error);
-    assert!(result.content[0].text.contains("Definition index not available"));
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["error"].as_str().unwrap().contains("Definition index not available"));
+    assert_eq!(
+        output["analysisContext"]["source"]["targetKind"],
+        "local_worktree"
+    );
 }
 
 // --- xray_reindex_definitions tests ---
@@ -675,6 +680,11 @@ fn test_dispatch_fast_while_content_index_building() {
     assert!(!result.is_error,
         "xray_fast should not be blocked by content_ready=false, got: {}",
         result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(
+        output["analysisContext"]["source"]["targetKind"],
+        "local_worktree"
+    );
 }
 
 #[test]

@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- **Index-backed responses now declare local-worktree provenance.** `xray_grep`, `xray_definitions`, `xray_callers`, and `xray_fast` return a top-level `analysisContext` (`schemaVersion: 1`) with canonical workspace root, workspace status/binding mode/binding generation, branch name/source, `targetKind: local_worktree`, and `revisionEvidence: not_verified`. The context survives error wrapping and response truncation, uses the existing branch TTL cache, and does not add a per-response Git probe. **Response contract migration:** these four tools no longer duplicate `serverDir`, `workspaceStatus`, `workspaceSource`, or `workspaceGeneration` in `summary`; consumers must read `analysisContext.source.workspaceRoot`, `workspaceStatus`, `workspaceBindingMode`, and `workspaceBindingGeneration`. Other tools retain their existing summary fields.
+
 ## 0.2.11 (2026-07-20)
 
 - **`xray_grep`: stale phrase candidates now recover matches from current file content.** If indexed line numbers drift after insertions or deletions, phrase search rescans the already-loaded candidate file without extra disk I/O, returns current line numbers, and marks results `partial` with `stale_index` instead of returning a false `not_found`. Multi-phrase, count-only, punctuation, read-error, and worker-failure paths share the same machine-readable diagnostics.
