@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 (2026-07-21)
 
 
 - **`xray_edit` now preserves result fidelity for large and mixed-ending files.** Files over 2,000 lines return bounded real diff hunks instead of an all-or-nothing omission marker, with explicit rendered/omitted line and hunk counts; these bounded previews are intentionally not patch-applicable. Any rendered diff over 256 KB is truncated within that byte cap, including its explanatory footer. Existing files that mix LF and CRLF are rejected before dry-run or write processing rather than silently normalizing untouched lines; pure LF and CRLF behavior is unchanged.

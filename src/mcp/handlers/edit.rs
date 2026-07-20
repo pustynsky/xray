@@ -2569,7 +2569,6 @@ fn has_mixed_line_endings(content: &str) -> bool {
 
 /// Detect whether the file uses CRLF or LF line endings.
 /// Returns "\r\n" for CRLF, "\n" for LF (default).
-
 fn detect_line_ending(content: &str) -> &'static str {
     // Count CRLF vs bare LF
     let crlf_count = content.matches("\r\n").count();
