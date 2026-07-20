@@ -621,6 +621,10 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     "expectedLineCount": {
                         "type": "integer",
                         "description": "Safety check: if file has a different line count, abort. Counts the same way editors and xray_definitions/xray_grep do (1-based, trailing newline = terminator, NOT an extra empty line). Reusable from a previous response's `newLineCount`. Honored in both Mode A and Mode B."
+                    },
+                    "allowBreakHardLinks": {
+                        "type": "boolean",
+                        "description": "Allow replacing a multiply-linked file, breaking hard-link identity (default: false)."
                     }
                 },
                 "required": []

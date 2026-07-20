@@ -2,7 +2,7 @@
 //! - Mode A (operations): line-range splice, applied bottom-up to avoid offset cascade
 //! - Mode B (edits): text find-replace, literal or regex, with insert after/before support
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use regex::Regex;
@@ -159,6 +159,9 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let is_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let expected_line_count = args.get("expectedLineCount").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let allow_break_hard_links = args.get("allowBreakHardLinks")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // ── Validate mode and construct EditMode ──
     let mode = match (operations, edits) {
@@ -178,10 +181,26 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
 
     // ── Dispatch single vs multi-file ──
     if let Some(paths_array) = multi_paths {
-        handle_multi_file_edit(ctx, paths_array, &mode, is_regex, dry_run, expected_line_count)
+        handle_multi_file_edit(
+            ctx,
+            paths_array,
+            &mode,
+            is_regex,
+            dry_run,
+            expected_line_count,
+            allow_break_hard_links,
+        )
     } else {
         let path_str = single_path.unwrap(); // validated above
-        handle_single_file_edit(ctx, path_str, &mode, is_regex, dry_run, expected_line_count)
+        handle_single_file_edit(
+            ctx,
+            path_str,
+            &mode,
+            is_regex,
+            dry_run,
+            expected_line_count,
+            allow_break_hard_links,
+        )
     }
 }
 
@@ -196,6 +215,7 @@ const KNOWN_EDIT_PARAMS: &[&str] = &[
     "regex",
     "dryRun",
     "expectedLineCount",
+    "allowBreakHardLinks",
 ];
 
 /// Per-edit fields accepted inside `edits[]` / `operations[]` (used both for
@@ -528,6 +548,11 @@ fn check_top_level_param_types(obj: &serde_json::Map<String, Value>) -> Option<S
     {
         return Some(err("dryRun", "a boolean (true/false)", v));
     }
+    if let Some(v) = obj.get("allowBreakHardLinks")
+        && !v.is_boolean()
+    {
+        return Some(err("allowBreakHardLinks", "a boolean (true/false)", v));
+    }
     if let Some(v) = obj.get("expectedLineCount")
         && v.as_u64().is_none()
     {
@@ -635,68 +660,207 @@ struct EditResult {
     brace_balance_warnings: Vec<String>,
 }
 
-/// Read and validate a file, returning its content and line ending style.
-/// Returns `(resolved_path, normalized_content, line_ending, file_existed_before_edit)`.
-///
-/// `file_existed_before_edit` is computed BEFORE any directory creation or write —
-/// this lets the caller distinguish "edited an existing file" from "created a new file"
-/// reliably (without relying on `normalized.is_empty()` which is also true for
-/// existing-but-empty files).
-///
-/// `dry_run` skips parent-directory creation for non-existent files. Without this,
-/// a `dryRun=true` preview against a non-existent path leaves empty parent
-/// directories on disk — violating the "preview without writing" contract (EDIT-003).
-fn read_and_validate_file(server_dir: &str, path_str: &str, dry_run: bool) -> Result<(PathBuf, String, &'static str, bool), String> {
-    let resolved = resolve_path(server_dir, path_str);
-    let file_existed = resolved.exists();
-    if !file_existed {
-        // File doesn't exist — treat as empty (allows creation via insert operations).
-        // EDIT-003: only create parent dirs on a real write. dryRun must be a pure preview.
+#[derive(Debug)]
+struct PreparedEditTarget {
+    logical_path: PathBuf,
+    write_path: PathBuf,
+    normalized_content: String,
+    line_ending: &'static str,
+    file_existed: bool,
+    symlink_followed: bool,
+    hard_link_count: u64,
+    physical_key: String,
+}
+
+impl PreparedEditTarget {
+    fn hard_link_broken(&self) -> bool {
+        self.file_existed && self.hard_link_count > 1
+    }
+}
+
+#[cfg(unix)]
+fn target_identity(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+) -> Result<(u64, String), String> {
+    use std::os::unix::fs::MetadataExt;
+    let _ = path;
+    Ok((metadata.nlink(), format!("unix:{}:{}", metadata.dev(), metadata.ino())))
+}
+
+#[cfg(windows)]
+fn target_identity(
+    path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(u64, String), String> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION,
+        GetFileInformationByHandle,
+    };
+
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot open target for identity check: {}", error))?;
+    let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
+    // SAFETY: `file` owns a valid handle and `info` is writable for the call.
+    let succeeded = unsafe {
+        GetFileInformationByHandle(file.as_raw_handle() as _, info.as_mut_ptr())
+    };
+    if succeeded == 0 {
+        return Err(format!(
+            "cannot read target identity: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: Win32 initialized `info` because the call succeeded.
+    let info = unsafe { info.assume_init() };
+    let file_index = ((info.nFileIndexHigh as u64) << 32) | info.nFileIndexLow as u64;
+    Ok((
+        info.nNumberOfLinks as u64,
+        format!("windows:{}:{}", info.dwVolumeSerialNumber, file_index),
+    ))
+}
+
+#[cfg(not(any(unix, windows)))]
+fn target_identity(
+    path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(u64, String), String> {
+    // Unsupported targets cannot detect hard-link identity.
+    Ok((1, format!("path:{}", crate::clean_path(&path.to_string_lossy()))))
+}
+
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(normalized.components().next_back(), Some(std::path::Component::Normal(_))) {
+                    normalized.pop();
+                } else if !path.is_absolute() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
+}
+
+
+fn missing_file_key(path: &Path) -> String {
+    let normalized = lexical_normalize(path);
+    let mut existing_ancestor = normalized.clone();
+    let mut missing_suffix = Vec::new();
+    while !existing_ancestor.exists() {
+        if let Some(name) = existing_ancestor.file_name() {
+            missing_suffix.push(name.to_os_string());
+        }
+        if !existing_ancestor.pop() {
+            break;
+        }
+    }
+    let mut physical = std::fs::canonicalize(&existing_ancestor)
+        .unwrap_or(existing_ancestor);
+    for component in missing_suffix.iter().rev() {
+        physical.push(component);
+    }
+    let value = crate::clean_path(&physical.to_string_lossy());
+    #[cfg(windows)]
+    return format!("path:{}", value.to_lowercase());
+    #[cfg(not(windows))]
+    format!("path:{}", value)
+}
+
+/// Read a logical edit path while preserving the physical object that receives the write.
+fn read_and_validate_file(
+    server_dir: &str,
+    path_str: &str,
+    dry_run: bool,
+    allow_break_hard_links: bool,
+) -> Result<PreparedEditTarget, String> {
+    let logical_path = resolve_path(server_dir, path_str);
+    let logical_metadata = match std::fs::symlink_metadata(&logical_path) {
+        Ok(metadata) => Some(metadata),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+        Err(error) => return Err(format!("Failed to inspect file '{}': {}", path_str, error)),
+    };
+
+    let Some(logical_metadata) = logical_metadata else {
         if !dry_run
-            && let Some(parent) = resolved.parent()
+            && let Some(parent) = logical_path.parent()
         {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("Failed to create directories for '{}': {}", path_str, e))?;
         }
-        return Ok((resolved, String::new(), "\n", false));
-    }
-    if resolved.is_dir() {
+        return Ok(PreparedEditTarget {
+            physical_key: missing_file_key(&logical_path),
+            write_path: logical_path.clone(),
+            logical_path,
+            normalized_content: String::new(),
+            line_ending: "\n",
+            file_existed: false,
+            symlink_followed: false,
+            hard_link_count: 0,
+        });
+    };
+
+    let symlink_followed = logical_metadata.file_type().is_symlink();
+    let write_path = if symlink_followed {
+        std::fs::canonicalize(&logical_path).map_err(|error| {
+            format!(
+                "Path is a dangling symbolic link or its target cannot be resolved: {} ({})",
+                path_str, error
+            )
+        })?
+    } else {
+        logical_path.clone()
+    };
+    let metadata = std::fs::metadata(&write_path)
+        .map_err(|error| format!("Failed to inspect file '{}': {}", path_str, error))?;
+    if metadata.is_dir() {
         return Err(format!("Path is a directory, not a file: {}", path_str));
     }
 
-    let raw_bytes = std::fs::read(&resolved)
-        .map_err(|e| format!("Failed to read file '{}': {}", path_str, e))?;
+    let (hard_link_count, physical_key) = target_identity(&write_path, &metadata)
+        .map_err(|error| format!("Failed to inspect file '{}': {}", path_str, error))?;
+    if hard_link_count > 1 && !allow_break_hard_links {
+        return Err(format!(
+            "File '{}' has {} hard links; atomic replacement would break link identity. Pass allowBreakHardLinks=true to proceed explicitly.",
+            path_str, hard_link_count
+        ));
+    }
 
-    // Binary detection: check for null bytes in first 8KB
+    let raw_bytes = std::fs::read(&write_path)
+        .map_err(|error| format!("Failed to read file '{}': {}", path_str, error))?;
     let check_len = raw_bytes.len().min(8192);
     if raw_bytes[..check_len].contains(&0) {
         return Err(format!("Binary file detected, not editable: {}", path_str));
     }
-
-    // EDIT-004: strict UTF-8. Lossy fallback (replacing invalid bytes with U+FFFD)
-    // would silently corrupt non-UTF-8 source files (Windows-1251, Shift-JIS,
-    // GB2312, Latin-1) on the next write. Refuse to edit instead — preserves
-    // original bytes and surfaces the encoding mismatch to the caller.
-    let content = match std::str::from_utf8(&raw_bytes) {
-        Ok(s) => s.to_string(),
-        Err(e) => {
-            return Err(format!(
-                "File '{}' is not valid UTF-8 (invalid byte at offset {}): refuse to edit to avoid silent corruption.",
-                path_str, e.valid_up_to()
-            ));
-        }
-    };
-
+    let content = std::str::from_utf8(&raw_bytes)
+        .map_err(|error| format!(
+            "File '{}' is not valid UTF-8 (invalid byte at offset {}): refuse to edit to avoid silent corruption.",
+            path_str, error.valid_up_to()
+        ))?
+        .to_string();
     let line_ending = detect_line_ending(&content);
-
-    // Normalize to LF for processing
-    let normalized = if line_ending == "\r\n" {
+    let normalized_content = if line_ending == "\r\n" {
         content.replace("\r\n", "\n")
     } else {
         content
     };
 
-    Ok((resolved, normalized, line_ending, true))
+    Ok(PreparedEditTarget {
+        physical_key,
+        logical_path,
+        write_path,
+        normalized_content,
+        line_ending,
+        file_existed: true,
+        symlink_followed,
+        hard_link_count,
+    })
 }
 
 /// Sync-reindex eligibility check used after a successful edit/write.
@@ -1039,36 +1203,58 @@ fn handle_single_file_edit(
     is_regex: bool,
     dry_run: bool,
     expected_line_count: Option<usize>,
+    allow_break_hard_links: bool,
 ) -> ToolCallResult {
     let edit_start = std::time::Instant::now();
     // Read and validate. `file_existed` is captured BEFORE the write so we can
     // accurately set `fileCreated` and `fileListInvalidated` in the response.
     // Pass dry_run so a preview against a non-existent path doesn't create empty
     // parent directories (EDIT-003).
-    let (resolved, normalized, line_ending, file_existed) = match read_and_validate_file(&ctx.server_dir(), path_str, dry_run) {
-        Ok(r) => r,
-        Err(e) => return ToolCallResult::error(e),
+    let target = match read_and_validate_file(
+        &ctx.server_dir(),
+        path_str,
+        dry_run,
+        allow_break_hard_links,
+    ) {
+        Ok(target) => target,
+        Err(error) => return ToolCallResult::error(error),
     };
-    let file_created = !file_existed;
+    let file_created = !target.file_existed;
 
     // Apply edits
-    let edit_result = match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count, file_existed) {
-        Ok(r) => r,
-        Err(e) => return ToolCallResult::error(e),
+    let edit_result = match apply_edits_to_content(
+        path_str,
+        &target.normalized_content,
+        mode,
+        is_regex,
+        expected_line_count,
+        target.file_existed,
+    ) {
+        Ok(result) => result,
+        Err(error) => return ToolCallResult::error(error),
     };
 
     // Write file (unless dryRun)
     if !dry_run
-        && let Err(e) = write_file_with_endings(&resolved, &edit_result.modified_content, line_ending) {
-            return ToolCallResult::error(e);
-        }
+        && let Err(error) = write_file_with_endings(
+            &target.write_path,
+            &edit_result.modified_content,
+            target.line_ending,
+        )
+    {
+        return ToolCallResult::error(error);
+    }
 
-    // Post-write verification: re-read the file and confirm its bytes match what
-    // we intended to write. This enforces the tool's "diff ↔ content" guarantee.
+    // Post-write verification: re-read the physical target and confirm its bytes.
     if !dry_run
-        && let Err(e) = verify_written_file(&resolved, &edit_result.modified_content, line_ending) {
-            return ToolCallResult::error(e);
-        }
+        && let Err(error) = verify_written_file(
+            &target.write_path,
+            &edit_result.modified_content,
+            target.line_ending,
+        )
+    {
+        return ToolCallResult::error(error);
+    }
 
     // Build response
     let mut response = json!({
@@ -1080,7 +1266,7 @@ fn handle_single_file_edit(
         "dryRun": dry_run,
         // Fix 4: expose line ending so clients can reconcile tool-diff (LF) with
         // on-disk bytes (LF or CRLF). Prevents "diff disagrees with git diff" confusion.
-        "lineEnding": if line_ending == "\r\n" { "CRLF" } else { "LF" },
+        "lineEnding": if target.line_ending == "\r\n" { "CRLF" } else { "LF" },
         // INSERT-after-EOF idiom hint: agents can read these values directly
         // from a previous response instead of guessing from stale state.
         "appendRangeHint": {
@@ -1133,6 +1319,12 @@ fn handle_single_file_edit(
     if file_created {
         response["fileCreated"] = json!(true);
     }
+    if target.symlink_followed {
+        response["symlinkFollowed"] = json!(true);
+    }
+    if !dry_run && target.hard_link_broken() {
+        response["hardLinkBroken"] = json!(true);
+    }
 
     // ── Edit timing: capture before reindex ──
     let edit_elapsed_ms = edit_start.elapsed().as_secs_f64() * 1000.0;
@@ -1158,7 +1350,11 @@ fn handle_single_file_edit(
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
-        match classify_for_sync_reindex(&ctx.canonical_server_dir(), &server_extensions, &resolved) {
+        match classify_for_sync_reindex(
+            &ctx.canonical_server_dir(),
+            &server_extensions,
+            &target.logical_path,
+        ) {
             Some(reason) => {
                 response["contentIndexUpdated"] = json!(false);
                 response["defIndexUpdated"] = json!(false);
@@ -1172,7 +1368,7 @@ fn handle_single_file_edit(
                 let stats = crate::mcp::watcher::reindex_paths_sync(
                     &ctx.index,
                     &ctx.def_index,
-                    std::slice::from_ref(&resolved),
+                    std::slice::from_ref(&target.logical_path),
                     &[],
                     &server_extensions,
                 );
@@ -1231,6 +1427,7 @@ fn handle_multi_file_edit(
     is_regex: bool,
     dry_run: bool,
     expected_line_count: Option<usize>,
+    allow_break_hard_links: bool,
 ) -> ToolCallResult {
     let edit_start = std::time::Instant::now();
     // Validate paths array
@@ -1253,44 +1450,42 @@ fn handle_multi_file_edit(
         Err(e) => return ToolCallResult::error(e),
     };
 
-    // Phase 1: Read all files (with duplicate path detection).
-    // We carry `file_existed` through the pipeline so each per-file response
-    // can correctly report `fileCreated` and `fileListInvalidated`.
-    let mut file_data: Vec<(&str, PathBuf, String, &'static str, bool)> = Vec::with_capacity(path_strings.len());
-    let mut seen_paths: HashSet<PathBuf> = HashSet::with_capacity(path_strings.len());
+    // Phase 1: Read all files and reject aliases of the same physical object.
+    let mut file_data: Vec<(&str, PreparedEditTarget)> = Vec::with_capacity(path_strings.len());
+    let mut seen_targets: HashMap<String, &str> = HashMap::with_capacity(path_strings.len());
     for path_str in &path_strings {
-        match read_and_validate_file(&ctx.server_dir(), path_str, dry_run) {
-            Ok((resolved, normalized, line_ending, file_existed)) => {
-                // Normalize path to handle ./file.txt vs file.txt
-                let normalized_path: PathBuf = resolved.components().collect();
-                if !seen_paths.insert(normalized_path.clone()) {
-                    // Find the original path string that resolved to the same file
-                    let original = file_data.iter()
-                        .find(|(_, r, _, _, _)| {
-                            let nr: PathBuf = r.components().collect();
-                            nr == normalized_path
-                        })
-                        .map(|(p, _, _, _, _)| *p)
-                        .unwrap_or("?");
-                    return ToolCallResult::error(format!(
-                        "Duplicate path: '{}' and '{}' resolve to the same file",
-                        original, path_str
-                    ));
-                }
-                file_data.push((path_str, resolved, normalized, line_ending, file_existed));
-            }
-            Err(e) => return ToolCallResult::error(format!("File '{}': {}", path_str, e)),
+        let target = match read_and_validate_file(
+            &ctx.server_dir(),
+            path_str,
+            dry_run,
+            allow_break_hard_links,
+        ) {
+            Ok(target) => target,
+            Err(error) => return ToolCallResult::error(format!("File '{}': {}", path_str, error)),
+        };
+        if let Some(original) = seen_targets.insert(target.physical_key.clone(), path_str) {
+            return ToolCallResult::error(format!(
+                "Duplicate path: '{}' and '{}' resolve to the same physical file",
+                original, path_str
+            ));
         }
+        file_data.push((path_str, target));
     }
 
     // Phase 2: Apply edits to all (in memory)
-    let mut edit_results: Vec<(&str, PathBuf, EditResult, &'static str, bool)> = Vec::with_capacity(file_data.len());
-    for (path_str, resolved, normalized, line_ending, file_existed) in file_data {
-        match apply_edits_to_content(path_str, &normalized, mode, is_regex, expected_line_count, file_existed) {
-            Ok(result) => {
-                edit_results.push((path_str, resolved, result, line_ending, file_existed));
-            }
-            Err(e) => return ToolCallResult::error(format!("File '{}': {}", path_str, e)),
+    let mut edit_results: Vec<(&str, PreparedEditTarget, EditResult)> =
+        Vec::with_capacity(file_data.len());
+    for (path_str, target) in file_data {
+        match apply_edits_to_content(
+            path_str,
+            &target.normalized_content,
+            mode,
+            is_regex,
+            expected_line_count,
+            target.file_existed,
+        ) {
+            Ok(result) => edit_results.push((path_str, target, result)),
+            Err(error) => return ToolCallResult::error(format!("File '{}': {}", path_str, error)),
         }
     }
 
@@ -1298,16 +1493,20 @@ fn handle_multi_file_edit(
     if !dry_run {
         // Phase 3a: Write to temp files (validates I/O before touching originals)
         let mut temp_files: Vec<(&str, PathBuf, PathBuf)> = Vec::with_capacity(edit_results.len());
-        for (path_str, resolved, result, line_ending, _file_existed) in &edit_results {
-            let temp = temp_path_for(resolved);
-            if let Err(e) = write_file_with_endings(&temp, &result.modified_content, line_ending) {
+        for (path_str, target, result) in &edit_results {
+            let temp = temp_path_for(&target.write_path);
+            if let Err(e) = write_file_with_endings(
+                &temp,
+                &result.modified_content,
+                target.line_ending,
+            ) {
                 // Clean up temp files already written
                 for (_, _, tp) in &temp_files {
                     let _ = std::fs::remove_file(tp);
                 }
                 return ToolCallResult::error(format!("File '{}': {}", path_str, e));
             }
-            temp_files.push((path_str, resolved.clone(), temp));
+            temp_files.push((path_str, target.write_path.clone(), temp));
         }
 
         // Phase 3b: Rename temp files to targets (fast, unlikely to fail)
@@ -1337,8 +1536,12 @@ fn handle_multi_file_edit(
         // Phase 3c-pre: Post-write verification across the whole batch.
         // A failure here means an on-disk file diverged from the diff we are about
         // to return — surface it before the response goes out.
-        for (path_str, resolved, result, line_ending, _) in &edit_results {
-            if let Err(e) = verify_written_file(resolved, &result.modified_content, line_ending) {
+        for (path_str, target, result) in &edit_results {
+            if let Err(e) = verify_written_file(
+                &target.write_path,
+                &result.modified_content,
+                target.line_ending,
+            ) {
                 return ToolCallResult::error(format!("File '{}': {}", path_str, e));
             }
         }
@@ -1360,11 +1563,15 @@ fn handle_multi_file_edit(
     let mut eligible_paths: Vec<PathBuf> = Vec::new();
     let mut any_file_created_eligible = false;
     if !dry_run {
-        for (_, resolved, _, _, file_existed) in &edit_results {
-            let skip = classify_for_sync_reindex(&canonical_root, &server_extensions, resolved);
+        for (_, target, _) in &edit_results {
+            let skip = classify_for_sync_reindex(
+                &canonical_root,
+                &server_extensions,
+                &target.logical_path,
+            );
             if skip.is_none() {
-                eligible_paths.push(resolved.clone());
-                if !*file_existed { any_file_created_eligible = true; }
+                eligible_paths.push(target.logical_path.clone());
+                if !target.file_existed { any_file_created_eligible = true; }
             }
             per_file_skip.push(skip);
         }
@@ -1400,7 +1607,7 @@ fn handle_multi_file_edit(
     // Phase 4: Build response with per-file results
     let mut total_applied: usize = 0;
     let mut results_array = Vec::new();
-    for (i, (path_str, _, result, line_ending, file_existed)) in edit_results.iter().enumerate() {
+    for (i, (path_str, target, result)) in edit_results.iter().enumerate() {
         total_applied += result.applied;
         let mut file_result = json!({
             "path": path_str,
@@ -1408,7 +1615,7 @@ fn handle_multi_file_edit(
             "linesAdded": result.lines_added,
             "linesRemoved": result.lines_removed,
             "newLineCount": result.new_line_count,
-            "lineEnding": if *line_ending == "\r\n" { "CRLF" } else { "LF" },
+            "lineEnding": if target.line_ending == "\r\n" { "CRLF" } else { "LF" },
             // INSERT-after-EOF idiom hint: agents can read these values directly
             // from a previous response instead of guessing from stale state.
             "appendRangeHint": {
@@ -1448,8 +1655,14 @@ fn handle_multi_file_edit(
         } else {
             file_result["diff"] = json!("(no changes)");
         }
-        if !*file_existed {
+        if !target.file_existed {
             file_result["fileCreated"] = json!(true);
+        }
+        if target.symlink_followed {
+            file_result["symlinkFollowed"] = json!(true);
+        }
+        if !dry_run && target.hard_link_broken() {
+            file_result["hardLinkBroken"] = json!(true);
         }
         // Per-file sync-reindex outcome.
         if !dry_run {
@@ -1489,7 +1702,7 @@ fn handle_multi_file_edit(
                         ctx.def_index.is_some()
                             && batch_stats.as_ref().is_some_and(|s| s.def_updated > 0)
                     );
-                    file_result["fileListInvalidated"] = json!(!*file_existed);
+                    file_result["fileListInvalidated"] = json!(!target.file_existed);
                 }
             }
         }
