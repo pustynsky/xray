@@ -661,6 +661,128 @@ struct EditResult {
 }
 
 #[derive(Debug)]
+struct FileMetadataSnapshot {
+    #[cfg(unix)]
+    permissions: std::fs::Permissions,
+    #[cfg(windows)]
+    file_attributes: u32,
+    #[cfg(not(any(unix, windows)))]
+    unsupported: (),
+}
+
+#[cfg(windows)]
+const WINDOWS_PRESERVED_ATTRIBUTES: u32 =
+    windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY
+        | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_HIDDEN
+        | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_SYSTEM
+        | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_ARCHIVE
+        | windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+
+#[cfg(windows)]
+fn windows_path(path: &Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+}
+
+#[cfg(windows)]
+fn get_windows_file_attributes(path: &Path) -> Result<u32, String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFileAttributesW,
+        INVALID_FILE_ATTRIBUTES,
+    };
+    let path_wide = windows_path(path);
+    // SAFETY: `path_wide` is a NUL-terminated UTF-16 buffer valid for the call.
+    let attributes = unsafe { GetFileAttributesW(path_wide.as_ptr()) };
+    if attributes == INVALID_FILE_ATTRIBUTES {
+        return Err(format!(
+            "cannot read Windows file attributes for '{}': {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(attributes)
+}
+
+#[cfg(windows)]
+fn set_windows_file_attributes(path: &Path, attributes: u32) -> Result<(), String> {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_ATTRIBUTE_NORMAL,
+        SetFileAttributesW,
+    };
+    let path_wide = windows_path(path);
+    let attributes = if attributes == 0 { FILE_ATTRIBUTE_NORMAL } else { attributes };
+    // SAFETY: `path_wide` is a NUL-terminated UTF-16 buffer valid for the call.
+    if unsafe { SetFileAttributesW(path_wide.as_ptr(), attributes) } == 0 {
+        return Err(format!(
+            "cannot set Windows file attributes for '{}': {}",
+            path.display(),
+            std::io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+impl FileMetadataSnapshot {
+    fn capture(path: &Path, metadata: &std::fs::Metadata) -> Result<Self, String> {
+        #[cfg(unix)]
+        {
+            let _ = path;
+            Ok(Self { permissions: metadata.permissions() })
+        }
+        #[cfg(windows)]
+        {
+            let _ = metadata;
+            Ok(Self {
+                file_attributes: get_windows_file_attributes(path)?
+                    & WINDOWS_PRESERVED_ATTRIBUTES,
+            })
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (path, metadata);
+            Ok(Self { unsupported: () })
+        }
+    }
+
+    fn apply_to_staged_file(&self, path: &Path) -> Result<(), String> {
+        #[cfg(unix)]
+        {
+            std::fs::set_permissions(path, self.permissions.clone()).map_err(|error| {
+                format!("cannot preserve permissions for '{}': {}", path.display(), error)
+            })
+        }
+        #[cfg(windows)]
+        {
+            set_windows_file_attributes(path, self.file_attributes)
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (self.unsupported, path);
+            Ok(())
+        }
+    }
+
+    fn prepare_destination_for_replace(&self, path: &Path) -> Result<bool, String> {
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
+            if self.file_attributes & FILE_ATTRIBUTE_READONLY == 0 {
+                return Ok(false);
+            }
+            let attributes = get_windows_file_attributes(path)?;
+            set_windows_file_attributes(path, attributes & !FILE_ATTRIBUTE_READONLY)?;
+            Ok(true)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (self, path);
+            Ok(false)
+        }
+    }
+}
+
+
+#[derive(Debug)]
 struct PreparedEditTarget {
     logical_path: PathBuf,
     write_path: PathBuf,
@@ -670,6 +792,7 @@ struct PreparedEditTarget {
     symlink_followed: bool,
     hard_link_count: u64,
     physical_key: String,
+    metadata: Option<FileMetadataSnapshot>,
 }
 
 impl PreparedEditTarget {
@@ -803,6 +926,7 @@ fn read_and_validate_file(
             file_existed: false,
             symlink_followed: false,
             hard_link_count: 0,
+            metadata: None,
         });
     };
 
@@ -823,6 +947,8 @@ fn read_and_validate_file(
         return Err(format!("Path is a directory, not a file: {}", path_str));
     }
 
+    let metadata_snapshot = FileMetadataSnapshot::capture(&write_path, &metadata)
+        .map_err(|error| format!("Failed to preserve metadata for '{}': {}", path_str, error))?;
     let (hard_link_count, physical_key) = target_identity(&write_path, &metadata)
         .map_err(|error| format!("Failed to inspect file '{}': {}", path_str, error))?;
     if hard_link_count > 1 && !allow_break_hard_links {
@@ -860,6 +986,7 @@ fn read_and_validate_file(
         file_existed: true,
         symlink_followed,
         hard_link_count,
+        metadata: Some(metadata_snapshot),
     })
 }
 
@@ -1015,8 +1142,24 @@ fn apply_edits_to_content(
     })
 }
 
-/// Write modified content back to file, restoring original line endings.
-fn write_file_with_endings(resolved: &Path, content: &str, line_ending: &str) -> Result<(), String> {
+fn remove_file_best_effort(path: &Path) {
+    #[cfg(windows)]
+    if let Ok(attributes) = get_windows_file_attributes(path) {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
+        if attributes & FILE_ATTRIBUTE_READONLY != 0 {
+            let _ = set_windows_file_attributes(path, attributes & !FILE_ATTRIBUTE_READONLY);
+        }
+    }
+    let _ = std::fs::remove_file(path);
+}
+
+
+fn stage_file_with_endings(
+    path: &Path,
+    content: &str,
+    line_ending: &str,
+    metadata: Option<&FileMetadataSnapshot>,
+) -> Result<(), String> {
     use std::io::Write;
 
     let output = if line_ending == "\r\n" {
@@ -1024,28 +1167,43 @@ fn write_file_with_endings(resolved: &Path, content: &str, line_ending: &str) ->
     } else {
         content.to_string()
     };
+    let staged = (|| -> std::io::Result<()> {
+        let mut file = std::fs::File::create(path)?;
+        file.write_all(output.as_bytes())?;
+        file.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = staged {
+        remove_file_best_effort(path);
+        return Err(format!("Failed to write file: {}", error));
+    }
+    if let Some(metadata) = metadata
+        && let Err(error) = metadata.apply_to_staged_file(path)
+    {
+        remove_file_best_effort(path);
+        return Err(error);
+    }
+    Ok(())
+}
 
+
+/// Write modified content back to file, restoring original line endings.
+fn write_file_with_endings(
+    resolved: &Path,
+    content: &str,
+    line_ending: &str,
+    metadata: Option<&FileMetadataSnapshot>,
+) -> Result<(), String> {
     // Atomic write: stage into a sibling temp file, fsync, then rename over the target.
     // Plain `std::fs::write` does open(O_TRUNC) + write_all, leaving the file empty/partial
     // if the process is killed between those two steps. The rename below is atomic on POSIX
     // and best-effort-atomic on Windows (see `rename_replace` for the remove+rename fallback).
     let tmp = temp_path_for(resolved);
+    stage_file_with_endings(&tmp, content, line_ending, metadata)?;
 
-    let staged = (|| -> std::io::Result<()> {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(output.as_bytes())?;
-        f.sync_all()?;
-        Ok(())
-    })();
-
-    if let Err(e) = staged {
-        let _ = std::fs::remove_file(&tmp); // best-effort cleanup
-        return Err(format!("Failed to write file: {}", e));
-    }
-
-    if let Err(e) = rename_replace(&tmp, resolved) {
-        let _ = std::fs::remove_file(&tmp); // best-effort cleanup
-        return Err(e);
+    if let Err(error) = rename_replace(&tmp, resolved, metadata) {
+        remove_file_best_effort(&tmp);
+        return Err(error);
     }
 
     // Crash-durability: fsync the parent directory so the rename itself is
@@ -1146,51 +1304,89 @@ fn backup_path_for(target: &Path) -> PathBuf {
 /// holding a handle, OneDrive sync, transient I/O), the target is gone forever.
 /// We mitigate by copying the original to a sibling backup first, restoring it
 /// on rename failure. The backup is removed on success.
-fn rename_replace(src: &Path, dst: &Path) -> Result<(), String> {
+fn rename_replace(
+    src: &Path,
+    dst: &Path,
+    metadata: Option<&FileMetadataSnapshot>,
+) -> Result<(), String> {
+    // `src` is fully staged, synced, and metadata-complete before this call.
     // Try direct rename first (atomic on POSIX, sometimes works on Windows).
+    let mut rename_error = match std::fs::rename(src, dst) {
+        Ok(()) => return Ok(()),
+        Err(error) => error,
+    };
+    if !dst.exists() {
+        return Err(format!("Cannot rename temp to '{}': {}", dst.display(), rename_error));
+    }
+
+    let destination_prepared = match metadata {
+        Some(metadata) => metadata.prepare_destination_for_replace(dst)?,
+        None => false,
+    };
+    if destination_prepared {
+        match std::fs::rename(src, dst) {
+            Ok(()) => return Ok(()),
+            Err(error) => rename_error = error,
+        }
+    }
+
+    let result = rename_replace_fallback(src, dst, &rename_error);
+    if result.is_err()
+        && dst.exists()
+        && let Some(metadata) = metadata
+        && let Err(restore_error) = metadata.apply_to_staged_file(dst)
+    {
+        return Err(format!(
+            "{}; also failed to restore metadata: {}",
+            result.unwrap_err(), restore_error
+        ));
+    }
+    result
+}
+
+fn rename_replace_fallback(
+    src: &Path,
+    dst: &Path,
+    original_error: &std::io::Error,
+) -> Result<(), String> {
+    // EDIT-007: stage a backup of the original before remove+rename.
+    let backup = backup_path_for(dst);
+    if let Err(error) = std::fs::copy(dst, &backup) {
+        return Err(format!(
+            "Cannot stage backup for '{}': {} (original error: {})",
+            dst.display(), error, original_error
+        ));
+    }
+    if let Err(error) = std::fs::remove_file(dst) {
+        remove_file_best_effort(&backup);
+        return Err(format!("Cannot remove original '{}': {}", dst.display(), error));
+    }
     match std::fs::rename(src, dst) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            if !dst.exists() {
-                return Err(format!("Cannot rename temp to '{}': {}", dst.display(), e));
-            }
-            // EDIT-007: stage a backup of the original before remove+rename.
-            let backup = backup_path_for(dst);
-            if let Err(e2) = std::fs::copy(dst, &backup) {
-                return Err(format!(
-                    "Cannot stage backup for '{}': {} (original error: {})",
-                    dst.display(), e2, e
-                ));
-            }
-            if let Err(e2) = std::fs::remove_file(dst) {
-                let _ = std::fs::remove_file(&backup); // best-effort cleanup
-                return Err(format!("Cannot remove original '{}': {}", dst.display(), e2));
-            }
-            match std::fs::rename(src, dst) {
-                Ok(()) => {
-                    let _ = std::fs::remove_file(&backup); // best-effort cleanup
-                    Ok(())
-                }
-                Err(e2) => {
-                    // Restore the backup so the target is not lost.
-                    if let Err(e3) = std::fs::rename(&backup, dst) {
-                        // Last resort: copy back, then remove backup.
-                        if let Err(e4) = std::fs::copy(&backup, dst) {
-                            return Err(format!(
-                                "Cannot rename temp to '{}': {} (original error: {}); \
-                                 also failed to restore backup '{}': rename={}, copy={}",
-                                dst.display(), e2, e, backup.display(), e3, e4
-                            ));
-                        }
-                        let _ = std::fs::remove_file(&backup);
-                    }
-                    Err(format!(
+        Ok(()) => {
+            remove_file_best_effort(&backup);
+            Ok(())
+        }
+        Err(rename_error) => {
+            if let Err(restore_rename_error) = std::fs::rename(&backup, dst) {
+                if let Err(restore_copy_error) = std::fs::copy(&backup, dst) {
+                    return Err(format!(
                         "Cannot rename temp to '{}': {} (original error: {}); \
-                         original file restored from backup.",
-                        dst.display(), e2, e
-                    ))
+                         also failed to restore backup '{}': rename={}, copy={}",
+                        dst.display(),
+                        rename_error,
+                        original_error,
+                        backup.display(),
+                        restore_rename_error,
+                        restore_copy_error
+                    ));
                 }
+                remove_file_best_effort(&backup);
             }
+            Err(format!(
+                "Cannot rename temp to '{}': {} (original error: {}); \
+                 original file restored from backup.",
+                dst.display(), rename_error, original_error
+            ))
         }
     }
 }
@@ -1240,6 +1436,7 @@ fn handle_single_file_edit(
             &target.write_path,
             &edit_result.modified_content,
             target.line_ending,
+            target.metadata.as_ref(),
         )
     {
         return ToolCallResult::error(error);
@@ -1492,36 +1689,39 @@ fn handle_multi_file_edit(
     // Phase 3: Write all (only if !dry_run) — atomic multi-file via temp+rename
     if !dry_run {
         // Phase 3a: Write to temp files (validates I/O before touching originals)
-        let mut temp_files: Vec<(&str, PathBuf, PathBuf)> = Vec::with_capacity(edit_results.len());
-        for (path_str, target, result) in &edit_results {
+        let mut temp_files: Vec<(usize, &str, PathBuf, PathBuf)> =
+            Vec::with_capacity(edit_results.len());
+        for (edit_index, (path_str, target, result)) in edit_results.iter().enumerate() {
             let temp = temp_path_for(&target.write_path);
-            if let Err(e) = write_file_with_endings(
+            if let Err(e) = stage_file_with_endings(
                 &temp,
                 &result.modified_content,
                 target.line_ending,
+                target.metadata.as_ref(),
             ) {
                 // Clean up temp files already written
-                for (_, _, tp) in &temp_files {
-                    let _ = std::fs::remove_file(tp);
+                for (_, _, _, temp_path) in &temp_files {
+                    remove_file_best_effort(temp_path);
                 }
                 return ToolCallResult::error(format!("File '{}': {}", path_str, e));
             }
-            temp_files.push((path_str, target.write_path.clone(), temp));
+            temp_files.push((edit_index, path_str, target.write_path.clone(), temp));
         }
 
         // Phase 3b: Rename temp files to targets (fast, unlikely to fail)
-        for (renamed, (path_str, resolved, temp)) in temp_files.iter().enumerate() {
-            if let Err(e) = rename_replace(temp, resolved) {
+        for (renamed, (edit_index, path_str, resolved, temp)) in temp_files.iter().enumerate() {
+            let metadata = edit_results[*edit_index].1.metadata.as_ref();
+            if let Err(e) = rename_replace(temp, resolved, metadata) {
                 // Best-effort cleanup of remaining temp files
-                for (_, _, tp) in &temp_files[renamed..] {
-                    let _ = std::fs::remove_file(tp);
+                for (_, _, _, temp_path) in &temp_files[renamed..] {
+                    remove_file_best_effort(temp_path);
                 }
                 // Build the list of files that already committed (renames
                 // succeeded for indices 0..renamed). These cannot be rolled back
                 // by this tool — surface them so the caller can `git restore`.
                 let committed_files: Vec<String> = temp_files[..renamed]
                     .iter()
-                    .map(|(p, _, _)| (*p).to_string())
+                    .map(|(_, path, _, _)| (*path).to_string())
                     .collect();
                 let committed_json = serde_json::to_string(&committed_files)
                     .unwrap_or_else(|_| "[]".to_string());

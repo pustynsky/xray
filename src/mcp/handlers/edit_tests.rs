@@ -3396,6 +3396,291 @@ mod audit_regression_tests {
         }
     }
 
+
+    #[cfg(windows)]
+    fn windows_path(path: &std::path::Path) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str().encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    #[cfg(windows)]
+    fn get_windows_attributes(path: &std::path::Path) -> u32 {
+        use windows_sys::Win32::Storage::FileSystem::{
+            GetFileAttributesW,
+            INVALID_FILE_ATTRIBUTES,
+        };
+        let path = windows_path(path);
+        // SAFETY: `path` is a NUL-terminated UTF-16 buffer valid for the call.
+        let attributes = unsafe { GetFileAttributesW(path.as_ptr()) };
+        assert_ne!(attributes, INVALID_FILE_ATTRIBUTES);
+        attributes
+    }
+
+    #[cfg(windows)]
+    fn set_windows_attributes(path: &std::path::Path, attributes: u32) {
+        use windows_sys::Win32::Storage::FileSystem::SetFileAttributesW;
+        let path = windows_path(path);
+        // SAFETY: `path` is a NUL-terminated UTF-16 buffer valid for the call.
+        assert_ne!(unsafe { SetFileAttributesW(path.as_ptr(), attributes) }, 0);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_single_edit_preserves_windows_file_attributes() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_ARCHIVE,
+            FILE_ATTRIBUTE_HIDDEN,
+            FILE_ATTRIBUTE_NOT_CONTENT_INDEXED,
+            FILE_ATTRIBUTE_READONLY,
+            FILE_ATTRIBUTE_SYSTEM,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let target = root.join("attributes.txt");
+        std::fs::write(&target, "before\n").unwrap();
+        let original = get_windows_attributes(&target);
+        let mask = FILE_ATTRIBUTE_ARCHIVE
+            | FILE_ATTRIBUTE_HIDDEN
+            | FILE_ATTRIBUTE_SYSTEM
+            | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED;
+        let expected = (original | mask) & !FILE_ATTRIBUTE_READONLY;
+        set_windows_attributes(&target, expected);
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "attributes.txt",
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+        let attributes_after = get_windows_attributes(&target);
+        set_windows_attributes(&target, original & !FILE_ATTRIBUTE_READONLY);
+
+        assert!(!result.is_error, "edit should succeed: {}", result.content[0].text);
+        assert_eq!(attributes_after & mask, expected & mask);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "after\n");
+    }
+
+
+    #[cfg(windows)]
+    #[test]
+    fn test_symlink_edit_preserves_target_windows_attributes() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN,
+            FILE_ATTRIBUTE_READONLY,
+            FILE_ATTRIBUTE_SYSTEM,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let target = root.join("target.txt");
+        let link = root.join("alias.txt");
+        std::fs::write(&target, "before\n").unwrap();
+        if !create_test_file_symlink(&target, &link) {
+            return;
+        }
+        let original = get_windows_attributes(&target);
+        let mask = FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM;
+        set_windows_attributes(&target, (original | mask) & !FILE_ATTRIBUTE_READONLY);
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "alias.txt",
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+        let attributes_after = get_windows_attributes(&target);
+        set_windows_attributes(&target, original & !FILE_ATTRIBUTE_READONLY);
+
+        assert!(!result.is_error, "symlink edit should succeed: {}", result.content[0].text);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(attributes_after & mask, mask);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_single_edit_preserves_readonly_attribute() {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let target = root.join("readonly.txt");
+        std::fs::write(&target, "before\n").unwrap();
+        let original = get_windows_attributes(&target);
+        set_windows_attributes(&target, original | FILE_ATTRIBUTE_READONLY);
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "readonly.txt",
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+        let attributes_after = get_windows_attributes(&target);
+        set_windows_attributes(&target, original & !FILE_ATTRIBUTE_READONLY);
+
+        assert!(!result.is_error, "readonly edit should succeed: {}", result.content[0].text);
+        assert_ne!(attributes_after & FILE_ATTRIBUTE_READONLY, 0);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "after\n");
+    }
+
+
+    #[cfg(windows)]
+    #[test]
+    fn test_best_effort_cleanup_removes_readonly_temp() {
+        use windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_READONLY;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("readonly.tmp");
+        std::fs::write(&path, "staged").unwrap();
+        let attributes = get_windows_attributes(&path);
+        set_windows_attributes(&path, attributes | FILE_ATTRIBUTE_READONLY);
+
+        remove_file_best_effort(&path);
+
+        assert!(!path.exists());
+    }
+
+
+    #[cfg(windows)]
+    #[test]
+    fn test_readonly_destination_metadata_can_be_restored() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN,
+            FILE_ATTRIBUTE_READONLY,
+            FILE_ATTRIBUTE_SYSTEM,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("readonly.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let original = get_windows_attributes(&path);
+        let expected = original
+            | FILE_ATTRIBUTE_HIDDEN
+            | FILE_ATTRIBUTE_SYSTEM
+            | FILE_ATTRIBUTE_READONLY;
+        set_windows_attributes(&path, expected);
+        let metadata = std::fs::metadata(&path).unwrap();
+        let snapshot = FileMetadataSnapshot::capture(&path, &metadata).unwrap();
+
+        assert!(snapshot.prepare_destination_for_replace(&path).unwrap());
+        let prepared = get_windows_attributes(&path);
+        assert_eq!(prepared & FILE_ATTRIBUTE_READONLY, 0);
+        assert_ne!(prepared & FILE_ATTRIBUTE_HIDDEN, 0);
+        assert_ne!(prepared & FILE_ATTRIBUTE_SYSTEM, 0);
+
+        snapshot.apply_to_staged_file(&path).unwrap();
+        let restored = get_windows_attributes(&path);
+        set_windows_attributes(&path, original & !FILE_ATTRIBUTE_READONLY);
+        assert_eq!(restored & WINDOWS_PRESERVED_ATTRIBUTES, expected & WINDOWS_PRESERVED_ATTRIBUTES);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn test_multi_file_edit_preserves_windows_file_attributes() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN,
+            FILE_ATTRIBUTE_READONLY,
+            FILE_ATTRIBUTE_SYSTEM,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let first = root.join("first.txt");
+        let second = root.join("second.txt");
+        std::fs::write(&first, "before\n").unwrap();
+        std::fs::write(&second, "before\n").unwrap();
+        let first_original = get_windows_attributes(&first);
+        let second_original = get_windows_attributes(&second);
+        set_windows_attributes(&first, first_original | FILE_ATTRIBUTE_HIDDEN);
+        set_windows_attributes(
+            &second,
+            second_original | FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_READONLY,
+        );
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "paths": ["first.txt", "second.txt"],
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+        let first_after = get_windows_attributes(&first);
+        let second_after = get_windows_attributes(&second);
+        set_windows_attributes(&first, first_original & !FILE_ATTRIBUTE_READONLY);
+        set_windows_attributes(&second, second_original & !FILE_ATTRIBUTE_READONLY);
+
+        assert!(!result.is_error, "multi-file edit should succeed: {}", result.content[0].text);
+        assert_ne!(first_after & FILE_ATTRIBUTE_HIDDEN, 0);
+        assert_ne!(second_after & FILE_ATTRIBUTE_SYSTEM, 0);
+        assert_ne!(second_after & FILE_ATTRIBUTE_READONLY, 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_single_edit_preserves_unix_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let target = root.join("script.sh");
+        std::fs::write(&target, "before\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap();
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "script.sh",
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+
+        assert!(!result.is_error, "edit should succeed: {}", result.content[0].text);
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o7777, 0o751);
+    }
+
+
+    #[cfg(unix)]
+    #[test]
+    fn test_symlink_edit_preserves_target_unix_mode() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let target = root.join("target.sh");
+        let link = root.join("alias.sh");
+        std::fs::write(&target, "before\n").unwrap();
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o751)).unwrap();
+        assert!(create_test_file_symlink(&target, &link));
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "alias.sh",
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+
+        assert!(!result.is_error, "symlink edit should succeed: {}", result.content[0].text);
+        assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o7777, 0o751);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_multi_file_edit_preserves_unix_modes() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let first = root.join("first.sh");
+        let second = root.join("second.sh");
+        std::fs::write(&first, "before\n").unwrap();
+        std::fs::write(&second, "before\n").unwrap();
+        std::fs::set_permissions(&first, std::fs::Permissions::from_mode(0o750)).unwrap();
+        std::fs::set_permissions(&second, std::fs::Permissions::from_mode(0o640)).unwrap();
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "paths": ["first.sh", "second.sh"],
+            "edits": [{ "search": "before", "replace": "after" }],
+        }));
+
+        assert!(!result.is_error, "multi-file edit should succeed: {}", result.content[0].text);
+        assert_eq!(std::fs::metadata(&first).unwrap().mode() & 0o7777, 0o750);
+        assert_eq!(std::fs::metadata(&second).unwrap().mode() & 0o7777, 0o640);
+    }
+
     #[test]
     fn test_write_file_with_endings_succeeds_even_if_stale_temp_exists() {
         // Simulates recovery from a previous crash that left a stale
@@ -4474,8 +4759,14 @@ fn test_file_symlink_edit_reindexes_logical_path() {
     assert!(!result.is_error, "symlink edit should succeed: {}", result.content[0].text);
     let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(response["contentIndexUpdated"], true);
-    let logical = PathBuf::from(crate::clean_path(&link.to_string_lossy()));
-    let physical = PathBuf::from(crate::clean_path(&target.to_string_lossy()));
+    let logical = crate::clean_path(&link.to_string_lossy());
+    let physical = crate::clean_path(&target.to_string_lossy());
+    #[cfg(windows)]
+    let logical = logical.to_lowercase();
+    #[cfg(windows)]
+    let physical = physical.to_lowercase();
+    let logical = PathBuf::from(logical);
+    let physical = PathBuf::from(physical);
     let index = ctx.index.read().unwrap();
     assert!(index.path_to_id.as_ref().unwrap().contains_key(&logical));
     assert!(!index.path_to_id.as_ref().unwrap().contains_key(&physical));
@@ -4952,7 +5243,7 @@ fn test_edit007_rename_replace_succeeds_when_target_exists() {
     std::fs::write(&target, b"old").unwrap();
     std::fs::write(&src, b"new").unwrap();
 
-    super::rename_replace(&src, &target).expect("rename should succeed");
+    super::rename_replace(&src, &target, None).expect("rename should succeed");
     assert_eq!(std::fs::read(&target).unwrap(), b"new");
     assert!(!src.exists(), "src temp must be consumed by rename");
 
@@ -4973,7 +5264,7 @@ fn test_edit007_rename_replace_to_nonexistent_target() {
     std::fs::write(&src, b"new").unwrap();
     assert!(!target.exists());
 
-    super::rename_replace(&src, &target).expect("rename should succeed");
+    super::rename_replace(&src, &target, None).expect("rename should succeed");
     assert_eq!(std::fs::read(&target).unwrap(), b"new");
     assert!(!src.exists());
 }
