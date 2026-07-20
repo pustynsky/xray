@@ -386,6 +386,9 @@ fn test_xray_edit_description_starts_with_override() {
          Current start: '{}'",
         &edit_tool.description[..80.min(edit_tool.description.len())]
     );
+    assert!(edit_tool.description.contains(">2,000-line files return bounded"));
+    assert!(edit_tool.description.contains("non-patchable hunks"));
+    assert!(edit_tool.description.contains("Mixed LF/CRLF files are rejected"));
 }
 
 /// Mode A schema must teach BOTH the insert-before-line idiom (endLine = startLine-1)
@@ -1537,6 +1540,9 @@ fn test_tool_help_xray_edit_includes_canonical_examples() {
     let parameters = val.get("parameters").expect("should have parameters");
     assert!(parameters.get("expectedMatchCount").is_some());
     assert!(parameters.get("allowGitInternals").is_some());
+    let fidelity = parameters["_resultFidelity"].as_str().unwrap();
+    assert!(fidelity.contains("not patch-applicable"));
+    assert!(fidelity.contains("256 KB"));
 }
 
 #[test]
