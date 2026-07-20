@@ -2269,7 +2269,7 @@ impl CallerTreeBuilder<'_> {
                 continue;
             }
 
-            let def_fid = match self.ctx.def_idx.path_to_id.get(&std::path::PathBuf::from(file_path)).copied() {
+            let def_fid = match self.ctx.def_idx.path_to_id.get(&crate::path_identity_key(std::path::Path::new(file_path))).copied() {
                 Some(id) => id,
                 None => continue,
             };

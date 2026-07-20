@@ -664,8 +664,8 @@ fn make_ctx_test_deprioritization() -> super::super::HandlerContext {
         file_index.entry(def.file_id).or_default().push(idx);
     }
 
-    path_to_id.insert(PathBuf::from("C:/src/Utils.rs"), 0);
-    path_to_id.insert(PathBuf::from("C:/src/utils_tests.rs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:/src/Utils.rs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:/src/utils_tests.rs")), 1);
 
     let def_index = crate::definitions::DefinitionIndex {
         root: ".".to_string(),
@@ -874,8 +874,8 @@ fn test_callers_only_tests_no_production() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:/src/helpers.rs"), 0);
-    path_to_id.insert(PathBuf::from("C:/src/helpers_tests.rs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:/src/helpers.rs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:/src/helpers_tests.rs")), 1);
 
     let def_index = crate::definitions::DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -1100,8 +1100,8 @@ mod builder_state_tests {
 
         let (name_index, kind_index, file_index) = build_indexes(&definitions);
         let mut path_to_id = HashMap::new();
-        path_to_id.insert(PathBuf::from("C:/src/UserService.rs"), 0);
-        path_to_id.insert(PathBuf::from("C:/src/user_service_tests.rs"), 1);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:/src/UserService.rs")), 0);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:/src/user_service_tests.rs")), 1);
 
         let def_index = DefinitionIndex {
             root: ".".to_string(),
@@ -1262,7 +1262,7 @@ mod builder_state_tests {
 
         let (name_index, kind_index, file_index) = build_indexes(&definitions);
         let mut path_to_id = HashMap::new();
-        path_to_id.insert(PathBuf::from("C:/src/MutualRecursion.rs"), 0);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:/src/MutualRecursion.rs")), 0);
 
         let def_index = DefinitionIndex {
             root: ".".to_string(),
@@ -1451,7 +1451,7 @@ mod builder_state_tests {
 
         let (name_index, kind_index, file_index) = build_indexes(&definitions);
         let mut path_to_id = HashMap::new();
-        path_to_id.insert(PathBuf::from(&file_path_str), 0);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(&file_path_str)), 0);
 
         let def_index = DefinitionIndex {
             root: tmp_dir.to_string_lossy().to_string(),
@@ -1681,7 +1681,7 @@ mod builder_state_tests {
 
         let (name_index, kind_index, file_index) = build_indexes(&definitions);
         let mut path_to_id = HashMap::new();
-        path_to_id.insert(PathBuf::from(&file_path_str), 0);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(&file_path_str)), 0);
 
         let def_index = DefinitionIndex {
             root: tmp_dir.to_string_lossy().to_string(),

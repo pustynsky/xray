@@ -100,6 +100,19 @@ fn test_path_eq_case_sensitive_on_unix() {
     assert!(!path_eq("/repos/Xray", "/repos/xray"));
 }
 
+#[test]
+fn test_path_identity_key_matches_platform_path_semantics() {
+    let mixed = std::path::Path::new(r"C:\Repos\Xray\File.rs");
+    let normalized = std::path::Path::new("c:/repos/xray/file.rs");
+
+    if cfg!(windows) {
+        assert_eq!(path_identity_key(mixed), path_identity_key(normalized));
+    } else {
+        assert_ne!(path_identity_key(mixed), path_identity_key(normalized));
+    }
+}
+
+
 // ─── stable_hash tests ──────────────────────────────────────
 
 #[test]

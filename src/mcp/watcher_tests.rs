@@ -187,7 +187,7 @@ fn test_incremental_update_existing_file() {
         file_token_counts: vec![5],
         path_to_id: Some({
             let mut m = HashMap::new();
-            m.insert(PathBuf::from(&clean), 0u32);
+            m.insert(crate::path_identity_key(std::path::Path::new(&clean)), 0u32);
             m
         }),
         ..Default::default()
@@ -348,7 +348,7 @@ fn test_update_existing_file_without_forward_index() {
         file_token_counts: vec![5],
         path_to_id: Some({
             let mut m = HashMap::new();
-            m.insert(PathBuf::from(&clean), 0u32);
+            m.insert(crate::path_identity_key(std::path::Path::new(&clean)), 0u32);
             m
         }),
         ..Default::default()
@@ -636,7 +636,7 @@ fn test_watch_update_lazily_rebuilds_file_tokens() {
     assert!(result.ok);
     let idx = index.read().unwrap();
     let file_id = idx.path_to_id.as_ref().unwrap()
-        .get(&content_path_key(&file_a)).copied().unwrap();
+        .get(&crate::path_identity_key(&file_a)).copied().unwrap();
     assert!(idx.file_tokens_authoritative);
     assert!(!idx.file_tokens.is_empty());
     assert!(idx.file_tokens[file_id as usize].contains(&"delta".to_string()));
@@ -682,7 +682,7 @@ fn test_total_tokens_decremented_on_update() {
         file_token_counts: vec![4],
         path_to_id: Some({
             let mut m = HashMap::new();
-            m.insert(PathBuf::from(&clean), 0u32);
+            m.insert(crate::path_identity_key(std::path::Path::new(&clean)), 0u32);
             m
         }),
         ..Default::default()
@@ -819,6 +819,7 @@ fn make_batch_test_setup()
     let clean_a = crate::clean_path(&file_a.to_string_lossy());
     let clean_b = crate::clean_path(&file_b.to_string_lossy());
 
+
     let mut inverted = HashMap::new();
     inverted.insert("alpha".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
     inverted.insert("httpclient".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
@@ -845,8 +846,8 @@ fn make_batch_test_setup()
         file_token_counts: vec![10, 10],
         path_to_id: Some({
             let mut m = HashMap::new();
-            m.insert(PathBuf::from(&clean_a), 0u32);
-            m.insert(PathBuf::from(&clean_b), 1u32);
+            m.insert(crate::path_identity_key(&file_a), 0u32);
+            m.insert(crate::path_identity_key(&file_b), 1u32);
             m
         }),
         ..Default::default()
@@ -856,6 +857,48 @@ fn make_batch_test_setup()
 
     (tmp, dir, Arc::new(RwLock::new(index)))
 }
+
+#[test]
+fn test_process_watcher_batch_preserves_index_scope() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    std::fs::create_dir(root.join(".git")).unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+    std::fs::create_dir(root.join("ignored")).unwrap();
+    std::fs::create_dir(root.join(".generated")).unwrap();
+    let ignored = root.join("ignored/ignored.cs");
+    let hidden = root.join(".generated/hidden.cs");
+    std::fs::write(&ignored, "class WatcherIgnored {}\n").unwrap();
+    std::fs::write(&hidden, "class WatcherHidden {}\n").unwrap();
+
+    let def_index = Arc::new(RwLock::new(crate::definitions::DefinitionIndex::default()));
+    let mut dirty = HashSet::from([ignored, hidden]);
+    let mut removed = HashSet::new();
+    let extensions = vec!["cs".to_string()];
+
+    assert!(process_watcher_batch(
+        &index,
+        &Some(Arc::clone(&def_index)),
+        &mut dirty,
+        &mut removed,
+        &root.to_string_lossy(),
+        &extensions,
+        &extensions,
+        false,
+        &test_trigram_build_gate(),
+    ));
+
+    let content = index.read().unwrap();
+    assert_eq!(content.live_file_count(), 2);
+    assert!(!content.index.contains_key("watcherignored"));
+    assert!(!content.index.contains_key("watcherhidden"));
+    drop(content);
+
+    let definitions = def_index.read().unwrap();
+    assert_eq!(definitions.live_file_count(), 1);
+    assert!(!definitions.name_index.contains_key("watcherignored"));
+    assert!(definitions.name_index.contains_key("watcherhidden"));
+}
+
 
 #[test]
 fn test_process_batch_empty() {
@@ -989,8 +1032,8 @@ fn test_process_batch_removed_file() {
     assert!(idx.index.contains_key("beta"),
         "token 'beta' from untouched file should remain");
     // path_to_id should not contain the removed file
-    let clean_a = crate::clean_path(&root.join("a.cs").to_string_lossy());
-    assert!(!idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_a)),
+    let path_key = crate::path_identity_key(&root.join("a.cs"));
+    assert!(!idx.path_to_id.as_ref().unwrap().contains_key(&path_key),
         "removed file should not be in path_to_id");
     // removed set should be drained
     assert!(removed.is_empty(), "removed set should be drained after process_batch");
@@ -1032,10 +1075,10 @@ fn test_process_batch_mixed_dirty_and_removed() {
 
 #[test]
 fn test_process_batch_new_file_in_dirty() {
-    let (tmp, _root, index) = make_batch_test_setup();
+    let (_tmp, root, index) = make_batch_test_setup();
 
     // Create a brand new file
-    let file_c = tmp.path().join("c.cs");
+    let file_c = root.join("c.cs");
     std::fs::write(&file_c, "class Gamma { UniqueToken gamma; }").unwrap();
 
     let mut dirty = HashSet::new();
@@ -1056,8 +1099,8 @@ fn test_process_batch_new_file_in_dirty() {
     assert!(idx.index.contains_key("beta"),
         "old token 'beta' should remain");
     // New file should be in path_to_id
-    let clean_c = content_path_key(&tmp.path().join("c.cs"));
-    assert!(idx.path_to_id.as_ref().unwrap().contains_key(&clean_c),
+    let path_key = crate::path_identity_key(&root.join("c.cs"));
+    assert!(idx.path_to_id.as_ref().unwrap().contains_key(&path_key),
         "new file should be in path_to_id");
     assert_eq!(idx.files.len(), 3, "should have 3 files after adding new one");
 }
@@ -1750,7 +1793,7 @@ fn make_indexed_content(files: &[(&Path, &str)], extensions: Vec<String>) -> Con
     let mut file_token_counts = Vec::new();
     for (i, (path, _content)) in files.iter().enumerate() {
         let clean = crate::clean_path(&path.to_string_lossy());
-        path_to_id.insert(PathBuf::from(&clean), i as u32);
+        path_to_id.insert(crate::path_identity_key(path), i as u32);
         file_strs.push(clean);
         file_token_counts.push(0);
     }
@@ -2501,10 +2544,9 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
         "autosave_dirty must be set when content drift triggers reconcile");
 
     // Verify the reconciler actually inserted the file into path_to_id.
-    let clean_new = content_path_key(&new_file);
     let idx = index.read().unwrap();
     assert!(
-        idx.path_to_id.as_ref().unwrap().contains_key(&clean_new),
+        idx.path_to_id.as_ref().unwrap().contains_key(&crate::path_identity_key(&new_file)),
         "reconcile_content_index must have indexed the new file"
     );
     drop(idx);
@@ -2576,8 +2618,6 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
     let (_tmp, root, index) = make_batch_test_setup();
     let file_a = root.join("a.cs");
     let file_b = root.join("b.cs");
-    let clean_a = crate::clean_path(&file_a.to_string_lossy());
-    let clean_b = crate::clean_path(&file_b.to_string_lossy());
 
     // Reduce the fixture to a single indexed file so the rescan has exactly one
     // content drift: a modified a.cs. That keeps the assertion sharp; no added
@@ -2589,7 +2629,7 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
         idx.file_token_counts.truncate(1);
         idx.total_tokens = idx.file_token_counts.iter().map(|&count| count as u64).sum();
         if let Some(ref mut p2id) = idx.path_to_id {
-            p2id.remove(&content_path_key(Path::new(&clean_b)));
+            p2id.remove(&crate::path_identity_key(&file_b));
         }
         for postings in idx.index.values_mut() {
             postings.retain(|posting| posting.file_id == 0);
@@ -2635,8 +2675,7 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
         "failed content apply must not checkpoint the stale content snapshot");
 
     let idx = index.read().unwrap();
-    assert!(idx.path_to_id.as_ref().unwrap()
-        .contains_key(&content_path_key(Path::new(&clean_a))));
+    assert!(idx.path_to_id.as_ref().unwrap().contains_key(&crate::path_identity_key(&file_a)));
     assert!(idx.index.contains_key("alpha"), "old postings stay searchable until a later successful retry");
     assert_eq!(idx.file_token_counts[0], 10);
     assert_eq!(idx.created_at, 0, "failed apply must leave the retry watermark untouched");
@@ -2655,7 +2694,6 @@ fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
     let file_a = root.join("a.cs");
     let file_b = root.join("b.cs");
     let clean_a = crate::clean_path(&file_a.to_string_lossy());
-    let clean_b = crate::clean_path(&file_b.to_string_lossy());
 
     // Isolate one dirty file exactly like the content-only regression above.
     // Content reconcile will apply zero changes, while definition reconcile will
@@ -2667,7 +2705,7 @@ fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
         idx.file_token_counts.truncate(1);
         idx.total_tokens = idx.file_token_counts.iter().map(|&count| count as u64).sum();
         if let Some(ref mut p2id) = idx.path_to_id {
-            p2id.remove(&content_path_key(Path::new(&clean_b)));
+            p2id.remove(&crate::path_identity_key(&file_b));
         }
         for postings in idx.index.values_mut() {
             postings.retain(|posting| posting.file_id == 0);
@@ -2685,7 +2723,7 @@ fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
     let mut file_def_index = HashMap::new();
     file_def_index.insert(0u32, vec![0]);
     let mut path_to_id = HashMap::new();
-    path_to_id.insert(PathBuf::from(&clean_a), 0u32);
+    path_to_id.insert(crate::path_identity_key(&file_a), 0u32);
     let def_index = Arc::new(RwLock::new(crate::definitions::DefinitionIndex {
         root: root.to_string_lossy().to_string(),
         created_at: 0,
@@ -2745,7 +2783,7 @@ fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
     assert!(!def_idx.file_index.contains_key(&0),
         "definition reconcile removes stale definitions when dirty parse fails");
     assert!(!def_idx.name_index.contains_key("alpha"));
-    assert!(def_idx.path_to_id.contains_key(&PathBuf::from(&clean_a)),
+    assert!(def_idx.path_to_id.contains_key(&crate::path_identity_key(&file_a)),
         "dirty parse failure is not a deletion; path mapping stays for retry");
     assert!(def_idx.created_at > 0,
         "definition reconcile advances its own watermark and needs autosave");

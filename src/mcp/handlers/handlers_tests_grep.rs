@@ -412,7 +412,7 @@ fn test_xray_edit_schedules_background_trigram_rebuild() {
     index_map.insert("beforeneedle".to_string(), vec![Posting { file_id: 0, lines: vec![1] }]);
     let trigram = build_trigram_index(&index_map);
     let mut path_to_id = HashMap::new();
-    path_to_id.insert(std::path::PathBuf::from(clean_file_path.clone()), 0);
+    path_to_id.insert(crate::path_identity_key(&std::path::PathBuf::from(clean_file_path.clone())), 0);
     let content_index = ContentIndex {
         root: clean_path(&temp_dir.path().to_string_lossy()),
         files: vec![clean_file_path],

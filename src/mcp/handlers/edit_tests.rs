@@ -4135,6 +4135,7 @@ fn make_ctx_with_ext(dir: &std::path::Path, ext: &str) -> HandlerContext {
         index: Arc::new(RwLock::new(content)),
         workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(dir.to_string_lossy().to_string()))),
         server_ext: ext.to_string(),
+        def_extensions: extensions,
         ..HandlerContext::default()
     }
 }
@@ -4196,6 +4197,121 @@ fn test_sync_reindex_dry_run_omits_reindex_fields() {
 }
 
 #[test]
+fn test_sync_reindex_skips_gitignored_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(root.join(".git")).unwrap();
+    std::fs::write(root.join(".gitignore"), "ignored/\n").unwrap();
+    std::fs::create_dir(root.join("ignored")).unwrap();
+
+    let mut ctx = make_ctx_with_ext(&root, "cs");
+    ctx.def_index = Some(Arc::new(RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "ignored/fixture.cs",
+        "operations": [{"startLine": 1, "endLine": 0, "content": "class IgnoredFixture {}\n"}],
+    }));
+    assert!(!result.is_error, "write failed: {}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(response["writeStatus"], json!("committed"));
+    assert_eq!(response["reindexStatus"], json!("skipped"));
+    assert_eq!(response["reindexSkipReason"], json!("ignoredByIndexRules"));
+    assert_eq!(response["contentIndexUpdated"], json!(false));
+    assert_eq!(response["defIndexUpdated"], json!(false));
+    assert_eq!(response["fileListInvalidated"], json!(false));
+    assert!(root.join("ignored/fixture.cs").exists());
+    assert_eq!(ctx.index.read().unwrap().live_file_count(), 0);
+    assert_eq!(ctx.def_index.as_ref().unwrap().read().unwrap().live_file_count(), 0);
+}
+
+
+#[test]
+fn test_sync_reindex_hidden_file_updates_definitions_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(root.join(".generated")).unwrap();
+
+    let mut ctx = make_ctx_with_ext(&root, "cs");
+    ctx.def_index = Some(Arc::new(RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": ".generated/fixture.cs",
+        "operations": [{"startLine": 1, "endLine": 0, "content": "class HiddenDefinition {}\n"}],
+    }));
+    assert!(!result.is_error, "write failed: {}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(response["reindexStatus"], json!("completed"));
+    assert_eq!(response["contentIndexUpdated"], json!(false));
+    assert_eq!(response["defIndexUpdated"], json!(true));
+    assert_eq!(response["fileListInvalidated"], json!(false));
+    assert_eq!(ctx.index.read().unwrap().live_file_count(), 0);
+    let definitions = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert_eq!(definitions.live_file_count(), 1);
+    assert!(definitions.name_index.contains_key("hiddendefinition"));
+}
+
+#[test]
+fn test_sync_reindex_honors_gitignore_negation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(root.join(".git")).unwrap();
+    std::fs::write(root.join(".gitignore"), "*.cs\n!keep.cs\n").unwrap();
+
+    let ctx = make_ctx_with_ext(&root, "cs");
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "keep.cs",
+        "operations": [{"startLine": 1, "endLine": 0, "content": "class KeptByNegation {}\n"}],
+    }));
+    assert!(!result.is_error, "write failed: {}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(response["reindexStatus"], json!("completed"));
+    assert_eq!(response["contentIndexUpdated"], json!(true));
+    assert_eq!(response["fileListInvalidated"], json!(true));
+    assert_eq!(ctx.index.read().unwrap().live_file_count(), 1);
+}
+
+
+#[test]
+fn test_sync_reindex_respects_git_exclude_setting() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir_all(root.join(".git/info")).unwrap();
+    std::fs::write(root.join(".git/info/exclude"), "excluded-*.cs\n").unwrap();
+
+    let included_ctx = make_ctx_with_ext(&root, "cs");
+    let included = handle_xray_edit(&included_ctx, &json!({
+        "path": "excluded-off.cs",
+        "operations": [{"startLine": 1, "endLine": 0, "content": "class IncludedByDefault {}\n"}],
+    }));
+    assert!(!included.is_error);
+    let included_response: serde_json::Value =
+        serde_json::from_str(&included.content[0].text).unwrap();
+    assert_eq!(included_response["reindexStatus"], json!("completed"));
+    assert_eq!(included_ctx.index.read().unwrap().live_file_count(), 1);
+
+    let mut excluded_ctx = make_ctx_with_ext(&root, "cs");
+    excluded_ctx.respect_git_exclude = true;
+    let excluded = handle_xray_edit(&excluded_ctx, &json!({
+        "path": "excluded-on.cs",
+        "operations": [{"startLine": 1, "endLine": 0, "content": "class ExcludedWhenEnabled {}\n"}],
+    }));
+    assert!(!excluded.is_error);
+    let excluded_response: serde_json::Value =
+        serde_json::from_str(&excluded.content[0].text).unwrap();
+    assert_eq!(excluded_response["reindexStatus"], json!("skipped"));
+    assert_eq!(excluded_response["reindexSkipReason"], json!("ignoredByIndexRules"));
+    assert_eq!(excluded_ctx.index.read().unwrap().live_file_count(), 0);
+}
+
+
+#[test]
 fn test_sync_reindex_file_created_invalidates_file_list() {
     let tmp = tempfile::tempdir().unwrap();
     let ctx = make_ctx_with_ext(tmp.path(), "cs");
@@ -4218,6 +4334,64 @@ fn test_sync_reindex_file_created_invalidates_file_list() {
     assert!(ctx.file_index_dirty.load(std::sync::atomic::Ordering::Relaxed),
         "file_index_dirty atomic flag must be set to true");
 }
+
+#[cfg(windows)]
+#[test]
+fn test_sync_reindex_case_variant_path_reuses_and_removes_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let mut ctx = make_ctx_with_ext(&root, "cs");
+    ctx.def_index = Some(Arc::new(RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+
+    let path = root.join("CaseVariant.cs");
+    let create = handle_xray_edit(&ctx, &json!({
+        "path": path,
+        "operations": [{
+            "startLine": 1,
+            "endLine": 0,
+            "content": "class OriginalCaseVariant {}\n"
+        }],
+    }));
+    assert!(!create.is_error, "create failed: {}", create.content[0].text);
+
+    let case_variant = std::path::PathBuf::from(path.to_string_lossy().to_ascii_lowercase());
+    let update = handle_xray_edit(&ctx, &json!({
+        "path": case_variant,
+        "edits": [{"search": "OriginalCaseVariant", "replace": "ChangedCaseVariant"}],
+    }));
+    assert!(!update.is_error, "update failed: {}", update.content[0].text);
+
+    {
+        let content = ctx.index.read().unwrap();
+        assert_eq!(content.live_file_count(), 1);
+        assert_eq!(content.files.iter().filter(|path| !path.is_empty()).count(), 1);
+        assert!(content.index.contains_key("changedcasevariant"));
+        assert!(!content.index.contains_key("originalcasevariant"));
+    }
+    {
+        let definitions = ctx.def_index.as_ref().unwrap().read().unwrap();
+        assert_eq!(definitions.live_file_count(), 1);
+        assert!(definitions.name_index.contains_key("changedcasevariant"));
+        assert!(!definitions.name_index.contains_key("originalcasevariant"));
+    }
+
+    std::fs::remove_file(&path).unwrap();
+    crate::mcp::watcher::reindex_paths_sync(
+        &ctx.index,
+        &ctx.def_index,
+        &[],
+        &[path],
+        &["cs".to_string()],
+    );
+
+    assert_eq!(ctx.index.read().unwrap().live_file_count(), 0);
+    let definitions = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert_eq!(definitions.live_file_count(), 0);
+    assert!(!definitions.name_index.contains_key("changedcasevariant"));
+}
+
 
 #[test]
 fn test_sync_reindex_existing_file_does_not_invalidate_file_list() {
@@ -4425,6 +4599,46 @@ fn test_write_status_multi_file_mixed_per_file() {
     // Legacy alias preserved per-file, same value as the new field.
     assert_eq!(bad["skippedReason"], json!("extensionNotIndexed"),
         "deprecated skippedReason alias must still appear on the per-file entry");
+}
+
+
+#[test]
+fn test_sync_reindex_multi_file_splits_hidden_definition_scope() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(root.join(".generated")).unwrap();
+    std::fs::write(root.join("visible.cs"), "class VisibleBefore {}\n").unwrap();
+    std::fs::write(root.join(".generated/hidden.cs"), "class HiddenBefore {}\n").unwrap();
+    std::fs::write(root.join("visible.json"), "{\"value\":\"Before\"}\n").unwrap();
+
+    let mut ctx = make_ctx_with_ext(&root, "cs,json");
+    ctx.def_extensions = vec!["cs".to_string()];
+    ctx.def_index = Some(Arc::new(RwLock::new(
+        crate::definitions::DefinitionIndex::default(),
+    )));
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["visible.cs", ".generated/hidden.cs", "visible.json"],
+        "edits": [{"search": "Before", "replace": "After"}],
+    }));
+    assert!(!result.is_error, "multi-edit failed: {}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let results = response["results"].as_array().unwrap();
+    let visible = results.iter().find(|result| result["path"] == "visible.cs").unwrap();
+    let hidden = results.iter().find(|result| result["path"] == ".generated/hidden.cs").unwrap();
+    let content_only = results.iter().find(|result| result["path"] == "visible.json").unwrap();
+
+    assert_eq!(visible["contentIndexUpdated"], json!(true));
+    assert_eq!(visible["defIndexUpdated"], json!(true));
+    assert_eq!(hidden["contentIndexUpdated"], json!(false));
+    assert_eq!(hidden["defIndexUpdated"], json!(true));
+    assert_eq!(hidden["fileListInvalidated"], json!(false));
+    assert_eq!(content_only["contentIndexUpdated"], json!(true));
+    assert_eq!(content_only["defIndexUpdated"], json!(false));
+    assert_eq!(ctx.index.read().unwrap().live_file_count(), 2);
+    let definitions = ctx.def_index.as_ref().unwrap().read().unwrap();
+    assert_eq!(definitions.live_file_count(), 2);
+    assert!(definitions.name_index.contains_key("visibleafter"));
+    assert!(definitions.name_index.contains_key("hiddenafter"));
 }
 
 
@@ -4745,12 +4959,13 @@ fn test_classify_for_sync_reindex_through_symlinked_subdir() {
     let extensions: Vec<String> = vec!["md".to_string()];
     let resolved = root.join("personal").join("foo.md");
 
-    let skip = classify_for_sync_reindex(&canonical_server_dir, &extensions, &resolved);
-    assert!(
-        skip.is_none(),
+    let scope = classify_for_sync_reindex(&canonical_server_dir, &extensions, &resolved, false);
+    assert_eq!(
+        scope,
+        SyncReindexScope::Both,
         "File in symlinked subdir must NOT be classified as outsideServerDir. \
-         Got skipReason: {:?}, resolved={}, server_dir={}",
-        skip, resolved.display(), canonical_server_dir
+         Got scope: {:?}, resolved={}, server_dir={}",
+        scope, resolved.display(), canonical_server_dir
     );
 }
 
@@ -5352,10 +5567,10 @@ fn test_classify_for_sync_reindex_genuine_outside_still_rejected() {
     let extensions: Vec<String> = vec!["md".to_string()];
     let resolved = outside.join("bar.md");
 
-    let skip = classify_for_sync_reindex(&canonical_server_dir, &extensions, &resolved);
+    let scope = classify_for_sync_reindex(&canonical_server_dir, &extensions, &resolved, false);
     assert_eq!(
-        skip,
-        Some("outsideServerDir"),
+        scope,
+        SyncReindexScope::Skip("outsideServerDir"),
         "Genuine outside-workspace file must be classified as outsideServerDir. \
          resolved={}, server_dir={}",
         resolved.display(), canonical_server_dir

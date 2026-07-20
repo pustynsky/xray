@@ -34,7 +34,7 @@ fn make_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
     let mut file_index: HashMap<u32, Vec<u32>> = HashMap::new();
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
     for (i, def) in definitions.iter().enumerate() { let idx = i as u32; name_index.entry(def.name.to_lowercase()).or_default().push(idx); kind_index.entry(def.kind).or_default().push(idx); file_index.entry(def.file_id).or_default().push(idx); }
-    path_to_id.insert(file0_path, 0); path_to_id.insert(file1_path, 1);
+    path_to_id.insert(crate::path_identity_key(&file0_path), 0); path_to_id.insert(crate::path_identity_key(&file1_path), 1);
     let def_index = DefinitionIndex { root: tmp_dir.to_string_lossy().to_string(), created_at: 0, extensions: vec!["cs".to_string()], files: vec![file0_str.clone(), file1_str.clone()], definitions, name_index, kind_index, file_index, path_to_id, ..Default::default() };
     let content_index = ContentIndex { root: tmp_dir.to_string_lossy().to_string(), files: vec![file0_str, file1_str], extensions: vec!["cs".to_string()], file_token_counts: vec![0, 0], ..Default::default() };
     let ctx = HandlerContext { index: Arc::new(RwLock::new(content_index)), def_index: Some(Arc::new(RwLock::new(def_index))), workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(tmp_dir.to_string_lossy().to_string()))), ..Default::default() };
@@ -252,8 +252,8 @@ fn test_xray_definitions_exclude_dir() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\main\\UserService.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\tests\\UserServiceTests.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\main\\UserService.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\tests\\UserServiceTests.cs")), 1);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -378,7 +378,7 @@ fn test_xray_definitions_struct_kind() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\Models.cs"), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Models.cs")), 0);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -466,7 +466,7 @@ fn test_xray_definitions_base_type_filter() {
             base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
         }
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\Controllers.cs"), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Controllers.cs")), 0);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -574,7 +574,7 @@ fn test_xray_definitions_enum_member_kind() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\Enums.cs"), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Enums.cs")), 0);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -1323,7 +1323,7 @@ fn test_xray_definitions_sort_by_cognitive_complexity() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\Services.cs"), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Services.cs")), 0);
 
     // Create code stats: ComplexMethod(50) > MediumMethod(15) > SimpleMethod(2)
     let mut code_stats: HashMap<u32, CodeStats> = HashMap::new();

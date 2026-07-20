@@ -1126,30 +1126,63 @@ fn read_and_validate_file(
 ///   1. Outside server `--dir` → skip (not in our index scope).
 ///   2. Extension not in server `--ext` → skip (matches watcher filter).
 ///   3. Inside any `.git/` directory → skip (matches watcher filter).
+///   4. Excluded from every active index by standard ignore rules → skip.
+///   5. Hidden paths remain eligible for the definition index only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SyncReindexScope {
+    Both,
+    ContentOnly,
+    DefinitionsOnly,
+    Skip(&'static str),
+}
+
+fn constrain_definition_scope(
+    scope: SyncReindexScope,
+    definition_eligible: bool,
+) -> SyncReindexScope {
+    match (scope, definition_eligible) {
+        (SyncReindexScope::Both, false) => SyncReindexScope::ContentOnly,
+        (SyncReindexScope::DefinitionsOnly, false) => {
+            SyncReindexScope::Skip("ignoredByIndexRules")
+        }
+        _ => scope,
+    }
+}
+
+
 fn classify_for_sync_reindex(
     canonical_server_dir: &str,
     server_extensions: &[String],
     resolved: &Path,
-) -> Option<&'static str> {
-    // 1. Outside server_dir — most common skip reason for cross-project edits.
-    //    Uses `code_xray::is_path_within`, which performs a logical-path comparison
-    //    first (matching what the indexer sees via `WalkBuilder::follow_links`).
-    //    Without this, files in a symlinked subdirectory like `docs/personal`
-    //    (target outside the workspace) would be wrongly classified as
-    //    `outsideServerDir`, because plain `canonicalize()` resolves the symlink.
+    respect_git_exclude: bool,
+) -> SyncReindexScope {
     let resolved_str = resolved.to_string_lossy();
     if !crate::is_path_within(&resolved_str, canonical_server_dir) {
-        return Some("outsideServerDir");
+        return SyncReindexScope::Skip("outsideServerDir");
     }
-    // 2. Extension filter — server only indexes a subset of extensions.
     if !crate::mcp::watcher::matches_extensions(resolved, server_extensions) {
-        return Some("extensionNotIndexed");
+        return SyncReindexScope::Skip("extensionNotIndexed");
     }
-    // 3. .git internals — never indexed.
     if crate::mcp::watcher::is_inside_git_dir(resolved) {
-        return Some("insideGitDir");
+        return SyncReindexScope::Skip("insideGitDir");
     }
-    None
+    if crate::mcp::watcher::is_included_by_index_rules(
+        canonical_server_dir,
+        resolved,
+        respect_git_exclude,
+        false,
+    ) {
+        return SyncReindexScope::Both;
+    }
+    if crate::mcp::watcher::is_included_by_index_rules(
+        canonical_server_dir,
+        resolved,
+        respect_git_exclude,
+        true,
+    ) {
+        return SyncReindexScope::DefinitionsOnly;
+    }
+    SyncReindexScope::Skip("ignoredByIndexRules")
 }
 
 /// Count contentful lines in `s` using the same convention editors and
@@ -1922,12 +1955,20 @@ fn handle_single_file_edit(
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
             .collect();
-        match classify_for_sync_reindex(
+        let mut reindex_scope = classify_for_sync_reindex(
             &ctx.canonical_server_dir(),
             &server_extensions,
             &target.logical_path,
-        ) {
-            Some(reason) => {
+            ctx.respect_git_exclude,
+        );
+        let definition_eligible = ctx.def_index.is_some()
+            && crate::mcp::watcher::matches_extensions(
+                &target.logical_path,
+                &ctx.def_extensions,
+            );
+        reindex_scope = constrain_definition_scope(reindex_scope, definition_eligible);
+        match reindex_scope {
+            SyncReindexScope::Skip(reason) => {
                 response["contentIndexUpdated"] = json!(false);
                 response["defIndexUpdated"] = json!(false);
                 response["fileListInvalidated"] = json!(false);
@@ -1935,12 +1976,30 @@ fn handle_single_file_edit(
                 response["reindexSkipReason"] = json!(reason);
                 response["skippedReason"] = json!(reason); // deprecated alias of reindexSkipReason
             }
-            None => {
+            scope @ (SyncReindexScope::Both
+                | SyncReindexScope::ContentOnly
+                | SyncReindexScope::DefinitionsOnly) => {
                 response["reindexStatus"] = json!("completed");
-                let stats = crate::mcp::watcher::reindex_paths_sync(
+                let content_dirty = if matches!(
+                    scope,
+                    SyncReindexScope::Both | SyncReindexScope::ContentOnly
+                ) {
+                    std::slice::from_ref(&target.logical_path)
+                } else {
+                    &[]
+                };
+                let stats = crate::mcp::watcher::reindex_paths_sync_scoped(
                     &ctx.index,
                     &ctx.def_index,
-                    std::slice::from_ref(&target.logical_path),
+                    content_dirty,
+                    if matches!(
+                        scope,
+                        SyncReindexScope::Both | SyncReindexScope::DefinitionsOnly
+                    ) {
+                        std::slice::from_ref(&target.logical_path)
+                    } else {
+                        &[]
+                    },
                     &[],
                     &server_extensions,
                 );
@@ -1967,7 +2026,9 @@ fn handle_single_file_edit(
                     );
                 }
                 // New file → invalidate file-list cache (xray_fast).
-                if file_created {
+                if file_created
+                    && matches!(scope, SyncReindexScope::Both | SyncReindexScope::ContentOnly)
+                {
                     ctx.file_index_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
                     response["fileListInvalidated"] = json!(true);
                 } else {
@@ -2148,37 +2209,63 @@ fn handle_multi_file_edit(
         .filter(|s| !s.is_empty())
         .collect();
     let canonical_root = ctx.canonical_server_dir();
-    let mut per_file_skip: Vec<Option<&'static str>> = Vec::with_capacity(edit_results.len());
-    let mut eligible_paths: Vec<PathBuf> = Vec::new();
-    let mut any_file_created_eligible = false;
+    let mut per_file_scope: Vec<SyncReindexScope> = Vec::with_capacity(edit_results.len());
+    let mut content_eligible_paths: Vec<PathBuf> = Vec::new();
+    let mut definition_eligible_paths: Vec<PathBuf> = Vec::new();
+    let mut any_file_created_content_eligible = false;
     if !dry_run {
         for (_, target, _) in &edit_results {
-            let skip = classify_for_sync_reindex(
+            let mut scope = classify_for_sync_reindex(
                 &canonical_root,
                 &server_extensions,
                 &target.logical_path,
+                ctx.respect_git_exclude,
             );
-            if skip.is_none() {
-                eligible_paths.push(target.logical_path.clone());
-                if !target.file_existed { any_file_created_eligible = true; }
+            let definition_eligible = ctx.def_index.is_some()
+                && crate::mcp::watcher::matches_extensions(
+                    &target.logical_path,
+                    &ctx.def_extensions,
+                );
+            scope = constrain_definition_scope(scope, definition_eligible);
+            match scope {
+                SyncReindexScope::Both => {
+                    content_eligible_paths.push(target.logical_path.clone());
+                    definition_eligible_paths.push(target.logical_path.clone());
+                    if !target.file_existed {
+                        any_file_created_content_eligible = true;
+                    }
+                }
+                SyncReindexScope::ContentOnly => {
+                    content_eligible_paths.push(target.logical_path.clone());
+                    if !target.file_existed {
+                        any_file_created_content_eligible = true;
+                    }
+                }
+                SyncReindexScope::DefinitionsOnly => {
+                    definition_eligible_paths.push(target.logical_path.clone());
+                }
+                SyncReindexScope::Skip(_) => {}
             }
-            per_file_skip.push(skip);
+            per_file_scope.push(scope);
         }
     } else {
-        for _ in &edit_results { per_file_skip.push(None); }
+        for _ in &edit_results { per_file_scope.push(SyncReindexScope::Both); }
     }
-    let batch_stats = if !dry_run && !eligible_paths.is_empty() {
-        Some(crate::mcp::watcher::reindex_paths_sync(
+    let batch_stats = if !dry_run
+        && (!content_eligible_paths.is_empty() || !definition_eligible_paths.is_empty())
+    {
+        Some(crate::mcp::watcher::reindex_paths_sync_scoped(
             &ctx.index,
             &ctx.def_index,
-            &eligible_paths,
+            &content_eligible_paths,
+            &definition_eligible_paths,
             &[],
             &server_extensions,
         ))
     } else {
         None
     };
-    if !dry_run && any_file_created_eligible {
+    if !dry_run && any_file_created_content_eligible {
         ctx.file_index_dirty.store(true, std::sync::atomic::Ordering::Relaxed);
     }
     // Signal watcher thread that indexes were mutated outside its event loop.
@@ -2269,8 +2356,8 @@ fn handle_multi_file_edit(
             // unconditionally here — mid-batch rename failures return earlier
             // with an explicit error and never reach this builder.
             file_result["writeStatus"] = json!("committed");
-            match per_file_skip[i] {
-                Some(reason) => {
+            match per_file_scope[i] {
+                SyncReindexScope::Skip(reason) => {
                     file_result["contentIndexUpdated"] = json!(false);
                     file_result["defIndexUpdated"] = json!(false);
                     file_result["fileListInvalidated"] = json!(false);
@@ -2278,7 +2365,9 @@ fn handle_multi_file_edit(
                     file_result["reindexSkipReason"] = json!(reason);
                     file_result["skippedReason"] = json!(reason); // deprecated alias
                 }
-                None => {
+                scope @ (SyncReindexScope::Both
+                | SyncReindexScope::ContentOnly
+                | SyncReindexScope::DefinitionsOnly) => {
                     file_result["reindexStatus"] = json!("completed");
                     // Mirror the single-file path: derive `contentIndexUpdated`
                     // from the actual batch outcome, NOT from "we tried". When
@@ -2291,13 +2380,17 @@ fn handle_multi_file_edit(
                     // staleness checks (e.g. follow-up `xray_grep` looking for
                     // the new symbol) would then be ignored.
                     file_result["contentIndexUpdated"] = json!(
-                        batch_stats.as_ref().is_some_and(|s| s.content_updated > 0)
+                        matches!(scope, SyncReindexScope::Both | SyncReindexScope::ContentOnly)
+                            && batch_stats.as_ref().is_some_and(|s| s.content_updated > 0)
                     );
                     file_result["defIndexUpdated"] = json!(
-                        ctx.def_index.is_some()
+                        matches!(scope, SyncReindexScope::Both | SyncReindexScope::DefinitionsOnly)
                             && batch_stats.as_ref().is_some_and(|s| s.def_updated > 0)
                     );
-                    file_result["fileListInvalidated"] = json!(!target.file_existed);
+                    file_result["fileListInvalidated"] = json!(
+                        matches!(scope, SyncReindexScope::Both | SyncReindexScope::ContentOnly)
+                            && !target.file_existed
+                    );
                 }
             }
         }

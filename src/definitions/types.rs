@@ -220,7 +220,7 @@ pub struct CallSite {
 
 /// Format version for DefinitionIndex. Bump when changing the struct layout.
 /// Loading an index with a different version triggers a rebuild.
-pub const DEFINITION_INDEX_VERSION: u32 = 4;
+pub const DEFINITION_INDEX_VERSION: u32 = 5;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[derive(Default)]

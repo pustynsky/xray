@@ -310,7 +310,7 @@ fn test_incremental_update_existing_file() {
         name_index: { let mut m = HashMap::new(); m.insert("oldclass".to_string(), vec![0]); m },
         kind_index: { let mut m = HashMap::new(); m.insert(DefinitionKind::Class, vec![0]); m },
         file_index: { let mut m = HashMap::new(); m.insert(0, vec![0]); m },
-        path_to_id: { let mut m = HashMap::new(); m.insert(clean.clone(), 0u32); m },
+        path_to_id: { let mut m = HashMap::new(); m.insert(crate::path_identity_key(&clean), 0u32); m },
         ..Default::default()
     };
 

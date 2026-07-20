@@ -69,6 +69,15 @@ pub fn clean_path(p: &str) -> String {
     p.strip_prefix(r"\\?\").unwrap_or(p).replace('\\', "/")
 }
 
+#[must_use]
+pub fn path_identity_key(path: &std::path::Path) -> std::path::PathBuf {
+    if cfg!(windows) {
+        std::path::PathBuf::from(clean_path(&path.to_string_lossy()).to_lowercase())
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// Compare two path strings using platform-appropriate case sensitivity.
 ///
 /// On Windows the comparison is case-insensitive (ASCII), matching the

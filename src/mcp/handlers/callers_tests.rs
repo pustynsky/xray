@@ -397,13 +397,13 @@ fn test_prefilter_does_not_expand_by_base_types() {
         "src/ResourceManager.cs".to_string(),
         "src/Caller.cs".to_string(),
     ];
-    path_to_id.insert(PathBuf::from("src/ResourceManager.cs"), 0);
-    path_to_id.insert(PathBuf::from("src/Caller.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/ResourceManager.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/Caller.cs")), 1);
 
     for i in 2..num_files {
         let path = format!("src/Service{}.cs", i);
         files_list.push(path.clone());
-        path_to_id.insert(PathBuf::from(&path), i);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(&path)), i);
     }
 
     let def_idx = DefinitionIndex {
@@ -1558,7 +1558,7 @@ fn test_caller_tree_preserves_class_filter_during_recursion() {
         "src/ClassE.cs".to_string(),
     ];
     for (i, f) in files_list.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
 
     let def_idx = DefinitionIndex {
@@ -1762,8 +1762,8 @@ fn test_xray_callers_no_hint_when_results_found() {
     ]);
 
     let mut def_idx = make_def_index(definitions, method_calls);
-    def_idx.path_to_id.insert(PathBuf::from("src/OrderController.ts"), 0);
-    def_idx.path_to_id.insert(PathBuf::from("src/OrderValidator.ts"), 1);
+    def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderController.ts")), 0);
+    def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderValidator.ts")), 1);
 
     let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
     index.insert("process".to_string(), vec![
@@ -2087,8 +2087,8 @@ fn test_sql_caller_tree_who_calls_sp() {
         "sql/usp_ProcessBatch.sql".to_string(),
         "sql/usp_ValidateOrder.sql".to_string(),
     ];
-    path_to_id.insert(PathBuf::from("sql/usp_ProcessBatch.sql"), 0);
-    path_to_id.insert(PathBuf::from("sql/usp_ValidateOrder.sql"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("sql/usp_ProcessBatch.sql")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("sql/usp_ValidateOrder.sql")), 1);
 
     let def_idx = DefinitionIndex {
         root: ".".to_string(),
@@ -2635,8 +2635,8 @@ fn test_impact_analysis_finds_test_methods() {
         "src/OrderService.cs".to_string(),
         "src/OrderTests.cs".to_string(),
     ];
-    path_to_id.insert(PathBuf::from("src/OrderService.cs"), 0);
-    path_to_id.insert(PathBuf::from("src/OrderTests.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderService.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderTests.cs")), 1);
 
     let def_idx = DefinitionIndex {
         root: ".".to_string(),
@@ -2797,7 +2797,7 @@ fn test_impact_analysis_non_test_method_recurses_normally() {
         "test/ControllerTests.cs".to_string(),
     ];
     for (i, f) in files_list.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
 
     let def_idx = DefinitionIndex {
@@ -3183,8 +3183,8 @@ fn test_include_grep_references_finds_extra_files() {
     ]);
 
     let mut def_idx = make_def_index(definitions, method_calls_map);
-    def_idx.path_to_id.insert(PathBuf::from("src/OrderController.ts"), 0);
-    def_idx.path_to_id.insert(PathBuf::from("src/OrderValidator.ts"), 1);
+    def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderController.ts")), 0);
+    def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderValidator.ts")), 1);
 
     let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
     index.insert("processorder".to_string(), vec![
@@ -3260,8 +3260,8 @@ fn test_grep_references_excludes_definition_file() {
     let mut def_idx = make_def_index(definitions, method_calls_map);
     // Override files to match content_index paths (make_def_index has hardcoded .ts names)
     def_idx.files = vec!["src/OrderService.cs".to_string(), "src/Consumer.cs".to_string()];
-    def_idx.path_to_id.insert(PathBuf::from("src/OrderService.cs"), 0);
-    def_idx.path_to_id.insert(PathBuf::from("src/Consumer.cs"), 1);
+    def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderService.cs")), 0);
+    def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/Consumer.cs")), 1);
 
     // Content index: "processorder" appears in 3 files:
     // - file 0: OrderService.cs (DEFINITION file → should be excluded by A3)
@@ -3434,8 +3434,8 @@ fn test_callers_hint_not_shown_when_results_exist() {
     ]);
 
     let mut def_idx = make_def_index(definitions, method_calls_map);
-    def_idx.path_to_id.insert(PathBuf::from("src/OrderController.ts"), 0);
-    def_idx.path_to_id.insert(PathBuf::from("src/OrderValidator.ts"), 1);
+    def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderController.ts")), 0);
+    def_idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderValidator.ts")), 1);
 
     let mut index: HashMap<String, Vec<Posting>> = HashMap::new();
     index.insert("process".to_string(), vec![
@@ -3514,7 +3514,7 @@ fn test_per_level_truncation_reports_dropped_count() {
         .collect();
     let mut path_to_id = HashMap::new();
     for (i, f) in files_list.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
     let def_idx = DefinitionIndex {
         root: ".".to_string(),
@@ -3608,7 +3608,7 @@ fn test_per_level_truncation_not_set_when_under_limit() {
     let files_list: Vec<String> = (0..3).map(|i| format!("src/File{}.cs", i)).collect();
     let mut path_to_id = HashMap::new();
     for (i, f) in files_list.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
     let def_idx = DefinitionIndex {
         root: ".".to_string(),
@@ -3828,8 +3828,8 @@ fn test_advisory_low_count_emitted_for_few_callers() {
         "src/OrderService.cs".to_string(),
         "src/Caller.cs".to_string(),
     ];
-    path_to_id.insert(PathBuf::from("src/OrderService.cs"), 0);
-    path_to_id.insert(PathBuf::from("src/Caller.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderService.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/Caller.cs")), 1);
 
     let def_idx = DefinitionIndex {
         root: ".".to_string(),
@@ -3960,7 +3960,7 @@ fn build_callers_fixture_with_n_callers(num_callers: usize) -> super::HandlerCon
         file_index.entry(def.file_id).or_default().push(idx);
     }
     for (i, p) in files_list.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(p), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(p)), i as u32);
     }
 
     let def_idx = DefinitionIndex {
@@ -4167,7 +4167,7 @@ fn build_impact_starvation_fixture(prod_count: usize, test_count: usize)
     }
     let mut path_to_id = HashMap::new();
     for (i, f) in files_list.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
 
     let def_idx = crate::definitions::DefinitionIndex {
@@ -4435,7 +4435,7 @@ fn test_mid_tree_iface_expansion_finds_caller_through_sibling_impl() {
     ];
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
     for (i, p) in def_idx.files.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(p), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(p)), i as u32);
     }
     def_idx.path_to_id = path_to_id;
     // Wire base_type_index so expand_interface_callers' impl walk finds
@@ -4671,7 +4671,7 @@ fn test_root_iface_expansion_honors_visible_depth_budget() {
     ];
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
     for (i, p) in def_idx.files.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(p), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(p)), i as u32);
     }
     def_idx.path_to_id = path_to_id;
     // Wire base_type_index so root iface walk's impl scan finds both impls.

@@ -315,7 +315,7 @@ pub fn build_definition_index(args: &DefIndexArgs) -> DefinitionIndex {
     // ─── Initialize index BEFORE chunked parsing ─────────────
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::with_capacity(files.len());
     for (file_id, file_path) in files.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(file_path), file_id as u32);
+        path_to_id.insert(crate::path_identity_key(std::path::Path::new(file_path)), file_id as u32);
     }
 
     let mut index = DefinitionIndex {
