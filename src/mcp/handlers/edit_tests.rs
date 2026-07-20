@@ -4399,6 +4399,271 @@ fn test_classify_for_sync_reindex_through_symlinked_subdir() {
     );
 }
 
+
+fn create_test_file_symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_file(target, link).is_ok();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+    #[cfg(not(any(unix, windows)))]
+    false
+}
+
+
+fn create_test_dir_symlink(target: &std::path::Path, link: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    return std::os::windows::fs::symlink_dir(target, link).is_ok();
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).unwrap();
+        true
+    }
+    #[cfg(not(any(unix, windows)))]
+    false
+}
+
+#[test]
+fn test_file_symlink_edit_preserves_link_and_updates_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let target = root.join("target.txt");
+    let link = root.join("alias.txt");
+    std::fs::write(&target, "before\n").unwrap();
+    if !create_test_file_symlink(&target, &link) {
+        return;
+    }
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "alias.txt",
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(!result.is_error, "symlink edit should succeed: {}", result.content[0].text);
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "after\n");
+    assert_eq!(std::fs::read_to_string(&link).unwrap(), "after\n");
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["symlinkFollowed"], true);
+}
+
+
+#[test]
+fn test_file_symlink_edit_reindexes_logical_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(&tmp.path().join("root"));
+    let external = crate::canonicalize_test_root(&tmp.path().join("external"));
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::create_dir_all(&external).unwrap();
+    let target = external.join("target.cs");
+    let link = root.join("alias.cs");
+    std::fs::write(&target, "class BeforeIdentity {}\n").unwrap();
+    if !create_test_file_symlink(&target, &link) {
+        return;
+    }
+    let ctx = make_ctx_with_ext(&root, "cs");
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "alias.cs",
+        "edits": [{ "search": "BeforeIdentity", "replace": "AfterIdentity" }],
+    }));
+
+    assert!(!result.is_error, "symlink edit should succeed: {}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["contentIndexUpdated"], true);
+    let logical = PathBuf::from(crate::clean_path(&link.to_string_lossy()));
+    let physical = PathBuf::from(crate::clean_path(&target.to_string_lossy()));
+    let index = ctx.index.read().unwrap();
+    assert!(index.path_to_id.as_ref().unwrap().contains_key(&logical));
+    assert!(!index.path_to_id.as_ref().unwrap().contains_key(&physical));
+    assert!(index.index.contains_key("afteridentity"));
+}
+
+#[test]
+fn test_dangling_file_symlink_is_rejected_without_replacing_link() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let missing = root.join("missing.txt");
+    let link = root.join("alias.txt");
+    if !create_test_file_symlink(&missing, &link) {
+        return;
+    }
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "alias.txt",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "created" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("dangling symbolic link"));
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+    assert!(!missing.exists());
+}
+
+#[test]
+fn test_hard_link_edit_requires_explicit_break_opt_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let target = root.join("target.txt");
+    let alias = root.join("alias.txt");
+    std::fs::write(&target, "before\n").unwrap();
+    std::fs::hard_link(&target, &alias).unwrap();
+    let ctx = make_ctx(&root);
+
+    let rejected = handle_xray_edit(&ctx, &json!({
+        "path": "alias.txt",
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+    assert!(rejected.is_error);
+    assert!(
+        rejected.content[0].text.contains("hard links"),
+        "unexpected rejection: {}",
+        rejected.content[0].text,
+    );
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "before\n");
+    assert_eq!(std::fs::read_to_string(&alias).unwrap(), "before\n");
+
+    let allowed = handle_xray_edit(&ctx, &json!({
+        "path": "alias.txt",
+        "allowBreakHardLinks": true,
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+    assert!(!allowed.is_error, "explicit hard-link break should succeed: {}", allowed.content[0].text);
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "before\n");
+    assert_eq!(std::fs::read_to_string(&alias).unwrap(), "after\n");
+    let response: serde_json::Value = serde_json::from_str(&allowed.content[0].text).unwrap();
+    assert_eq!(response["hardLinkBroken"], true);
+}
+
+
+#[test]
+fn test_hard_link_dry_run_does_not_claim_link_was_broken() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let target = root.join("target.txt");
+    let alias = root.join("alias.txt");
+    std::fs::write(&target, "before\n").unwrap();
+    std::fs::hard_link(&target, &alias).unwrap();
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "alias.txt",
+        "allowBreakHardLinks": true,
+        "dryRun": true,
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(!result.is_error, "hard-link preview should succeed: {}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(response.get("hardLinkBroken").is_none());
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "before\n");
+    assert_eq!(std::fs::read_to_string(&alias).unwrap(), "before\n");
+}
+
+#[test]
+fn test_multi_file_rejects_paths_with_same_physical_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let target = root.join("target.txt");
+    let link = root.join("alias.txt");
+    std::fs::write(&target, "before\n").unwrap();
+    if !create_test_file_symlink(&target, &link) {
+        return;
+    }
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["target.txt", "alias.txt"],
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("same physical file"));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "before\n");
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+}
+
+
+#[test]
+fn test_multi_file_rejects_hard_link_aliases_with_opt_in() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let target = root.join("target.txt");
+    let alias = root.join("alias.txt");
+    std::fs::write(&target, "before\n").unwrap();
+    std::fs::hard_link(&target, &alias).unwrap();
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["target.txt", "alias.txt"],
+        "allowBreakHardLinks": true,
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("same physical file"));
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "before\n");
+    assert_eq!(std::fs::read_to_string(&alias).unwrap(), "before\n");
+}
+
+#[test]
+fn test_multi_file_normalizes_parent_components_for_missing_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["nested/../new.txt", "new.txt"],
+        "dryRun": true,
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "created" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("same physical file"));
+    assert!(!root.join("new.txt").exists());
+}
+
+
+#[test]
+fn test_multi_file_resolves_symlinked_parent_for_missing_targets() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let real = root.join("real");
+    let alias = root.join("alias");
+    std::fs::create_dir_all(&real).unwrap();
+    if !create_test_dir_symlink(&real, &alias) {
+        return;
+    }
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["alias/new.txt", "real/new.txt"],
+        "dryRun": true,
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "created" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("same physical file"));
+    assert!(!real.join("new.txt").exists());
+}
+
+
+#[test]
+fn test_lexical_normalize_preserves_stacked_leading_parent_components() {
+    assert_eq!(
+        lexical_normalize(std::path::Path::new("../../foo")),
+        PathBuf::from("../../foo"),
+    );
+    assert_eq!(
+        lexical_normalize(std::path::Path::new("a/../../foo")),
+        PathBuf::from("../foo"),
+    );
+}
+
 #[test]
 fn test_classify_for_sync_reindex_genuine_outside_still_rejected() {
     // Sanity check: real outside-workspace files must still be rejected.
@@ -4951,6 +5216,25 @@ fn test_top_level_dry_run_wrong_type_rejected() {
     assert!(result.is_error, "Numeric `dryRun` must be rejected");
     let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
     assert!(msg.contains("'dryRun'"), "msg should name the offending key: {}", msg);
+    assert!(msg.contains("boolean"), "msg should name the expected type: {}", msg);
+}
+
+
+#[test]
+fn test_top_level_allow_break_hard_links_wrong_type_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "a\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "a", "replace": "z" }],
+        "allowBreakHardLinks": "true",
+    }));
+
+    assert!(result.is_error, "String `allowBreakHardLinks` must be rejected");
+    let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
+    assert!(msg.contains("'allowBreakHardLinks'"), "msg should name the key: {}", msg);
     assert!(msg.contains("boolean"), "msg should name the expected type: {}", msg);
 }
 
