@@ -60,6 +60,14 @@ const UNIFIED_DIFF_MAX_LINES: usize = 2_000;
 /// a bounded response.
 const UNIFIED_DIFF_MAX_BYTES: usize = 256 * 1024; // 256 KB
 
+const UNIFIED_DIFF_MAX_RENDERED_LINES: usize = 200;
+
+const UNIFIED_DIFF_MAX_RENDERED_HUNKS: usize = 16;
+const UNIFIED_DIFF_FOOTER_RESERVE_BYTES: usize = 1_024;
+const UNIFIED_DIFF_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(100);
+
+const UNIFIED_DIFF_MISSING_NEWLINE_HINT: &str = "\n\\ No newline at end of file\n";
+
 
 /// Cheap byte-bag prefilter ratio for `find_nearest_match`, expressed in
 /// percent and tied to `NEAREST_MATCH_MIN_SIMILARITY` (40 %).
@@ -1150,6 +1158,12 @@ fn read_and_validate_file(
             path_str, error.valid_up_to()
         ))?
         .to_string();
+    if has_mixed_line_endings(&content) {
+        return Err(format!(
+            "File '{}' uses mixed LF and CRLF line endings; xray_edit refuses to normalize unchanged lines. Normalize the file to one line-ending style before editing.",
+            path_str
+        ));
+    }
     let line_ending = detect_line_ending(&content);
     let normalized_content = if line_ending == "\r\n" {
         content.replace("\r\n", "\n")
@@ -2545,8 +2559,17 @@ fn resolve_path(server_dir: &str, path: &str) -> PathBuf {
 
 // ─── Line ending detection ───────────────────────────────────────────
 
+/// Returns true when content contains both CRLF and bare LF endings.
+fn has_mixed_line_endings(content: &str) -> bool {
+    let crlf_count = content.matches("\r\n").count();
+    let bare_lf_count = content.matches('\n').count() - crlf_count;
+    crlf_count > 0 && bare_lf_count > 0
+}
+
+
 /// Detect whether the file uses CRLF or LF line endings.
 /// Returns "\r\n" for CRLF, "\n" for LF (default).
+
 fn detect_line_ending(content: &str) -> &'static str {
     // Count CRLF vs bare LF
     let crlf_count = content.matches("\r\n").count();
@@ -4065,6 +4088,138 @@ fn is_prose_extension(path_str: &str) -> bool {
 ///   response object — the inline diff is a convenience, not a contract.
 /// - Files within the line cap but whose rendered diff exceeds
 ///   `UNIFIED_DIFF_MAX_BYTES` are truncated at the cap with a footer marker.
+fn render_bounded_unified_diff<'a>(
+    path: &str,
+    diff: &similar::TextDiff<'a, 'a, 'a, str>,
+    source_lines: usize,
+) -> String {
+    let mut formatter = diff.unified_diff();
+    formatter.context_radius(3);
+    let total_hunks = formatter.iter_hunks().count();
+    let total_diff_lines = formatter
+        .iter_hunks()
+        .map(|hunk| hunk.iter_changes().count())
+        .sum::<usize>();
+    let mut output = format!("--- a/{path}\n+++ b/{path}\n");
+    let mut rendered_hunks = 0;
+    let mut rendered_lines = 0;
+
+    let hunks_to_render = total_hunks.min(UNIFIED_DIFF_MAX_RENDERED_HUNKS);
+    'hunks: for (hunk_index, hunk) in formatter
+        .iter_hunks()
+        .take(hunks_to_render)
+        .enumerate()
+    {
+        let remaining_lines = UNIFIED_DIFF_MAX_RENDERED_LINES - rendered_lines;
+        let remaining_hunks = hunks_to_render - hunk_index;
+        let hunk_budget = remaining_lines / remaining_hunks;
+        if hunk_budget == 0 {
+            break;
+        }
+
+        let header = format!("{}\n", hunk.header());
+        if output.len() + header.len() + UNIFIED_DIFF_FOOTER_RESERVE_BYTES
+            > UNIFIED_DIFF_MAX_BYTES
+        {
+            break;
+        }
+        output.push_str(&header);
+        rendered_hunks += 1;
+
+        let (hunk_line_count, delete_count, insert_count, equal_count) = hunk
+            .iter_changes()
+            .fold((0, 0, 0, 0), |(total, deleted, inserted, equal), change| {
+                match change.tag() {
+                    similar::ChangeTag::Delete => (total + 1, deleted + 1, inserted, equal),
+                    similar::ChangeTag::Insert => (total + 1, deleted, inserted + 1, equal),
+                    similar::ChangeTag::Equal => (total + 1, deleted, inserted, equal + 1),
+                }
+            });
+        let equal_budget = if hunk_line_count > hunk_budget {
+            equal_count.min(6).min(hunk_budget / 4)
+        } else {
+            0
+        };
+        let changed_budget = hunk_budget - equal_budget;
+        let (delete_budget, insert_budget) = match (delete_count > 0, insert_count > 0) {
+            (true, true) => (changed_budget / 2, changed_budget - changed_budget / 2),
+            (true, false) => (changed_budget, 0),
+            (false, true) => (0, changed_budget),
+            (false, false) => (0, 0),
+        };
+        let mut deleted = 0;
+        let mut inserted = 0;
+        let mut equal = 0;
+        let mut last_rendered_index = None;
+
+        for (change_index, change) in hunk.iter_changes().enumerate() {
+            let selected = hunk_line_count <= hunk_budget
+                || match change.tag() {
+                    similar::ChangeTag::Delete if deleted < delete_budget => {
+                        deleted += 1;
+                        true
+                    }
+                    similar::ChangeTag::Insert if inserted < insert_budget => {
+                        inserted += 1;
+                        true
+                    }
+                    similar::ChangeTag::Equal if equal < equal_budget => {
+                        equal += 1;
+                        true
+                    }
+                    _ => false,
+                };
+            if !selected {
+                continue;
+            }
+
+            let value = change.value();
+            let gap_marker = if last_rendered_index
+                .map_or(change_index > 0, |previous| change_index > previous + 1)
+            {
+                "# ... diff lines omitted within hunk ...\n"
+            } else {
+                ""
+            };
+            let missing_newline_bytes = if value.ends_with('\n') {
+                0
+            } else {
+                UNIFIED_DIFF_MISSING_NEWLINE_HINT.len()
+            };
+            let required = gap_marker.len() + 1 + value.len() + missing_newline_bytes;
+            if output.len() + required + UNIFIED_DIFF_FOOTER_RESERVE_BYTES
+                > UNIFIED_DIFF_MAX_BYTES
+            {
+                break 'hunks;
+            }
+            output.push_str(gap_marker);
+            output.push(match change.tag() {
+                similar::ChangeTag::Equal => ' ',
+                similar::ChangeTag::Delete => '-',
+                similar::ChangeTag::Insert => '+',
+            });
+            output.push_str(value);
+            if !value.ends_with('\n') {
+                output.push_str(UNIFIED_DIFF_MISSING_NEWLINE_HINT);
+            }
+            rendered_lines += 1;
+            last_rendered_index = Some(change_index);
+        }
+    }
+
+    let omitted_lines = total_diff_lines.saturating_sub(rendered_lines);
+    let footer = format!(
+        "# diff bounded: file has {source_lines} lines; rendered {rendered_lines} of \
+         {total_diff_lines} diff lines across {rendered_hunks} of {total_hunks} hunks; \
+         omitted {omitted_lines} diff lines. Preview only: bounded hunks are not patch-applicable. \
+         Authoritative counts: linesAdded / linesRemoved / newLineCount. Re-run dryRun on a narrower \
+         range to inspect omitted changes.\n"
+    );
+    debug_assert!(footer.len() <= UNIFIED_DIFF_FOOTER_RESERVE_BYTES);
+    output.push_str(&footer);
+    output
+}
+
 fn generate_unified_diff(path: &str, original: &str, modified: &str) -> String {
     if original == modified {
         return String::new();
@@ -4074,17 +4229,10 @@ fn generate_unified_diff(path: &str, original: &str, modified: &str) -> String {
     let modified_lines = modified.lines().count();
     let max_lines = orig_lines.max(modified_lines);
     if max_lines > UNIFIED_DIFF_MAX_LINES {
-        return format!(
-            "--- a/{path}\n+++ b/{path}\n# diff omitted: file has {max_lines} lines, exceeds UNIFIED_DIFF_MAX_LINES ({cap}). \
-             This is a FILE-SIZE cap, not an edit-size cap — the edit is valid (and was applied unless `dryRun: true`). \
-             Authoritative change counts: see linesAdded / linesRemoved / newLineCount on the response. \
-             To inspect the actual change: re-run with `dryRun: true` AND a narrower `startLine`/`endLine` \
-             range, or read the post-edit region with `xray_definitions file=[...] containsLine=N includeBody=true`. \
-             Do NOT retry the same edit hoping the diff appears.\n",
-            path = path,
-            max_lines = max_lines,
-            cap = UNIFIED_DIFF_MAX_LINES,
-        );
+        let mut config = similar::TextDiff::configure();
+        config.timeout(UNIFIED_DIFF_TIMEOUT);
+        let diff = config.diff_lines(original, modified);
+        return render_bounded_unified_diff(path, &diff, max_lines);
     }
 
     let diff = similar::TextDiff::from_lines(original, modified)
@@ -4092,18 +4240,20 @@ fn generate_unified_diff(path: &str, original: &str, modified: &str) -> String {
         .header(&format!("a/{}", path), &format!("b/{}", path))
         .to_string();
     if diff.len() > UNIFIED_DIFF_MAX_BYTES {
-        let cut = diff.floor_char_boundary(UNIFIED_DIFF_MAX_BYTES);
-        return format!(
-            "{}\n# diff truncated: rendered diff is {} bytes, exceeds UNIFIED_DIFF_MAX_BYTES ({}). \
+        let prefix_budget = UNIFIED_DIFF_MAX_BYTES - UNIFIED_DIFF_FOOTER_RESERVE_BYTES;
+        let cut = diff.floor_char_boundary(prefix_budget);
+        let footer = format!(
+            "\n# diff truncated: rendered diff is {} bytes, exceeds UNIFIED_DIFF_MAX_BYTES ({}). \
              This is a payload cap, not an edit-size cap — the edit is valid (and was applied unless `dryRun: true`). \
              Authoritative counts: linesAdded / linesRemoved / newLineCount. The portion of the \
              diff above is the leading {} bytes; the remainder was discarded. To inspect the \
              tail, re-run `dryRun: true` on a narrower line range.",
-            &diff[..cut],
             diff.len(),
             UNIFIED_DIFF_MAX_BYTES,
             cut,
         );
+        debug_assert!(footer.len() <= UNIFIED_DIFF_FOOTER_RESERVE_BYTES);
+        return format!("{}{}", &diff[..cut], footer);
     }
     diff
 }

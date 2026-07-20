@@ -379,6 +379,54 @@ fn test_crlf_preservation() {
     assert!(content.contains("REPLACED\r\n"), "Replaced line should have CRLF ending");
 }
 
+
+#[test]
+fn test_mixed_line_endings_are_rejected_without_writing() {
+    let original = b"first\r\nsecond\nthird\r\n";
+    for dry_run in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let path = root.join("mixed.txt");
+        std::fs::write(&path, original).unwrap();
+        let ctx = make_ctx(&root);
+
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": "mixed.txt",
+            "dryRun": dry_run,
+            "edits": [{ "search": "second", "replace": "changed" }],
+        }));
+
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("mixed LF and CRLF"));
+        assert_eq!(std::fs::read(&path).unwrap(), original);
+    }
+}
+
+
+#[test]
+fn test_mixed_line_endings_abort_multi_file_batch() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let clean_path = root.join("clean.txt");
+    let mixed_path = root.join("mixed.txt");
+    std::fs::write(&clean_path, b"target\n").unwrap();
+    std::fs::write(&mixed_path, b"target\r\nmiddle\ntail\r\n").unwrap();
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["clean.txt", "mixed.txt"],
+        "edits": [{ "search": "target", "replace": "changed" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("mixed LF and CRLF"));
+    assert_eq!(std::fs::read(&clean_path).unwrap(), b"target\n");
+    assert_eq!(
+        std::fs::read(&mixed_path).unwrap(),
+        b"target\r\nmiddle\ntail\r\n"
+    );
+}
+
 #[test]
 fn test_empty_file() {
     let (tmp, filename, path) = create_temp_file("");
@@ -8128,17 +8176,11 @@ fn test_swap_hint_silent_for_near_miss_replace_text() {
 
 #[test]
 fn test_generate_unified_diff_caps_at_2000_lines() {
-    // Bug #3 (docs/bug-reports/bug-report_xray-unbounded-work-hot-paths_2026-05-03.md):
-    // an edit that produces a diff far above UNIFIED_DIFF_MAX_LINES (2 000)
-    // must skip the line-Myers DP and return a short marker. Authoritative
-    // change counts (lines_added / lines_removed / new_line_count) must still
-    // be present and correct on the response.
     let original: String = (1..=5_000)
         .map(|i| format!("old line {}\n", i))
         .collect();
     let (tmp, filename, _) = create_temp_file(&original);
     let ctx = make_ctx(tmp.path());
-
     let new_body: String = (1..=5_000)
         .map(|i| format!("new line {}\n", i))
         .collect();
@@ -8155,23 +8197,58 @@ fn test_generate_unified_diff_caps_at_2000_lines() {
 
     assert!(!result.is_error, "edit must succeed: {}", &result.content[0].text);
     let text = &result.content[0].text;
-    // Diff body must be replaced by the marker, not by 5 000 lines of unified diff.
-    // Exact line-count is brittle (xray edit can shift by ±1 due to trailing-newline
-    // semantics), so anchor on the marker substrings instead.
-    assert!(
-        text.contains("diff omitted") && text.contains("exceeds UNIFIED_DIFF_MAX_LINES"),
-        "oversize diff must collapse to omission marker, got: {}",
-        &text[..text.len().min(400)]
-    );
-    // Authoritative line counts must still be on the response.
+    assert!(text.contains("diff bounded"), "missing bounded marker: {}", &text[..text.len().min(400)]);
+    assert!(text.contains("not patch-applicable"));
+    assert!(text.contains("-old line 1") && text.contains("+new line 1"),
+        "bounded diff must contain actual changes: {}", &text[..text.len().min(800)]);
+    assert!(!text.contains("diff omitted"), "large-file diff must not be fully omitted");
     assert!(text.contains("\"linesAdded\":") && text.contains("\"linesRemoved\":"),
         "line counts must remain on response, got: {}", &text[..text.len().min(400)]);
-    // The cap exists to bound wall-clock; even on a debug build under parallel
-    // test contention this path should be sub-second.
     assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "capped diff must be fast: took {:?}", elapsed
+        elapsed < std::time::Duration::from_secs(5),
+        "bounded diff must be fast: took {:?}", elapsed
     );
+}
+
+#[test]
+fn test_generate_unified_diff_keeps_sparse_large_file_hunks() {
+    let original: String = (1..=5_000).map(|i| format!("line {i}\n")).collect();
+    let modified: String = (1..=5_000)
+        .map(|i| match i {
+            10 => "changed near start\n".to_string(),
+            4_990 => "changed near end\n".to_string(),
+            _ => format!("line {i}\n"),
+        })
+        .collect();
+
+    let diff = generate_unified_diff("large.txt", &original, &modified);
+
+    assert!(diff.contains("diff bounded"));
+    assert!(diff.contains("-line 10\n+changed near start\n"));
+    assert!(diff.contains("-line 4990\n+changed near end\n"));
+    assert!(diff.contains("across 2 of 2 hunks; omitted 0 diff lines"));
+    assert!(!diff.contains("diff omitted"));
+    assert!(diff.len() <= UNIFIED_DIFF_MAX_BYTES);
+}
+
+#[test]
+fn test_generate_unified_diff_reports_large_file_hunk_cap() {
+    let original: String = (1..=5_000).map(|i| format!("line {i}\n")).collect();
+    let modified: String = (1..=5_000)
+        .map(|i| {
+            if i >= 100 && (i - 100) % 200 == 0 && i <= 3_900 {
+                format!("changed {i}\n")
+            } else {
+                format!("line {i}\n")
+            }
+        })
+        .collect();
+
+    let diff = generate_unified_diff("many-hunks.txt", &original, &modified);
+
+    assert!(diff.contains("across 16 of 20 hunks"), "{diff}");
+    assert!(diff.contains("omitted 32 diff lines"), "{diff}");
+    assert!(diff.len() <= UNIFIED_DIFF_MAX_BYTES);
 }
 
 #[test]
@@ -8190,6 +8267,13 @@ fn test_generate_unified_diff_truncates_oversize_byte_payload() {
     let wide_new: String = (1..=400)
         .map(|i| format!("NEW-{:04}-{}\n", i, "y".repeat(800)))
         .collect();
+
+    let direct_diff = generate_unified_diff("wide.txt", &wide_old, &wide_new);
+    assert!(
+        direct_diff.len() <= UNIFIED_DIFF_MAX_BYTES,
+        "diff plus footer must respect byte cap: {}",
+        direct_diff.len()
+    );
 
     let result = handle_xray_edit(&ctx, &json!({
         "path": filename,
