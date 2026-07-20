@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.2.11 (2026-07-20)
+
+- **`xray_grep`: stale phrase candidates now recover matches from current file content.** If indexed line numbers drift after insertions or deletions, phrase search rescans the already-loaded candidate file without extra disk I/O, returns current line numbers, and marks results `partial` with `stale_index` instead of returning a false `not_found`. Multi-phrase, count-only, punctuation, read-error, and worker-failure paths share the same machine-readable diagnostics.
 
 - **`xray_branch_status`: optional expected-revision preflight for remote reviews.** Responses now always include `actualHead` and `worktreeDirty`. Passing `expectedRef` resolves a local branch, remote-tracking branch, tag, or commit to `expectedHead` and returns `revisionMatches`, `revisionStatus` (`match`, `mismatch`, `unresolved_ref`, or `shallow_history`), and a separate `revisionWarning`. Omitted `expectedRef` uses `not_requested` and preserves existing branch/ahead/dirty behavior. Resolution uses only the local Git object database; Xray never fetches, checks out, or mutates the worktree. Fourteen handler/schema tests plus one classifier unit test cover match, mismatch, dirty state, missing and hex-like named refs, shallow ancestry/full-object ambiguity, malformed/range/reflog expressions, remote-only refs, annotated and lightweight tags, detached HEAD, option-injection rejection, backward compatibility, and schema advertisement.
 
