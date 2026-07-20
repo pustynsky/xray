@@ -419,10 +419,18 @@ pub(crate) fn validate_search_dir(requested_dir: &str, server_dir: &str) -> Resu
     let srv_trim = srv_norm.trim_end_matches('/');
 
     if req_trim == srv_trim {
-        Ok(None)
-    } else {
-        Ok(Some(logical_abs))
+        return Ok(None);
     }
+
+    let server_prefix = format!("{}/", srv_trim);
+    if req_norm.starts_with(&server_prefix) {
+        return Ok(Some(logical_abs));
+    }
+
+    let canonical = std::fs::canonicalize(&logical_abs)
+        .map(|path| crate::clean_path(&path.to_string_lossy()))
+        .unwrap_or(logical_abs);
+    Ok(Some(canonical))
 }
 
 /// Check if a file path is under the given directory prefix (case-insensitive, separator-normalized).
@@ -440,7 +448,7 @@ pub(crate) fn is_under_dir(file_path: &str, dir_prefix: &str) -> bool {
     if !dir_norm.ends_with('/') {
         dir_norm.push('/');
     }
-    file_norm.starts_with(&dir_norm) || code_xray::is_path_within(file_path, dir_prefix)
+    file_norm.starts_with(&dir_norm)
 }
 
 /// Heuristic: if path ends with a known source/config extension, it's likely a file path.

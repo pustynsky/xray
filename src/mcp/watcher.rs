@@ -711,8 +711,11 @@ fn update_content_index(
     // dropping its old postings would make search lose a still-known file and
     // break total_tokens == sum(file_token_counts). The watcher/rescan can retry
     // on a later event; until then the old index entry is safer than deletion.
+    let removed_keys: Vec<PathBuf> = removed_clean.iter()
+        .map(|path| content_path_key(path))
+        .collect();
     let tokenized_paths: HashSet<PathBuf> = tokenized.iter()
-        .map(|result| result.path.clone())
+        .map(|result| content_path_key(&result.path))
         .collect();
     // This drives sync-reindex response booleans and autosave scheduling. It is
     // deliberately the number of dirty files actually tokenized, not the number
@@ -725,8 +728,8 @@ fn update_content_index(
         Ok(idx) => {
             let mut ids = HashSet::new();
             if let Some(ref p2id) = idx.path_to_id {
-                for path in removed_clean {
-                    if let Some(&fid) = p2id.get(path) {
+                for path_key in &removed_keys {
+                    if let Some(fid) = content_file_id(p2id, path_key) {
                         ids.insert(fid);
                     }
                 }
@@ -734,7 +737,7 @@ fn update_content_index(
                 // here; see `tokenized_paths` above for the stale-but-consistent
                 // fallback contract.
                 for path in &tokenized_paths {
-                    if let Some(&fid) = p2id.get(path) {
+                    if let Some(fid) = content_file_id(p2id, path) {
                         ids.insert(fid);
                     }
                 }
@@ -766,13 +769,13 @@ fn update_content_index(
             if path_lookup_missing {
                 ensure_path_to_id(idx);
                 if let Some(ref p2id) = idx.path_to_id {
-                    for path in removed_clean {
-                        if let Some(&fid) = p2id.get(path) {
+                    for path_key in &removed_keys {
+                        if let Some(fid) = content_file_id(p2id, path_key) {
                             purge_ids.insert(fid);
                         }
                     }
                     for path in &tokenized_paths {
-                        if let Some(&fid) = p2id.get(path) {
+                        if let Some(fid) = content_file_id(p2id, path) {
                             purge_ids.insert(fid);
                         }
                     }
@@ -821,10 +824,10 @@ fn update_content_index(
             // stays in the Vec as an empty string — it’s no longer counted as
             // a live file (see ContentIndex::live_file_count) but file_id
             // assignments remain stable.
-            for path in removed_clean {
-                let fid = idx.path_to_id.as_ref()
-                    .and_then(|p2id| p2id.get(path).copied());
-                if let Some(fid) = fid {
+            for path_key in &removed_keys {
+                let entry = idx.path_to_id.as_ref()
+                    .and_then(|p2id| content_path_entry(p2id, path_key));
+                if let Some((stored_key, fid)) = entry {
                     if (fid as usize) < idx.file_token_counts.len() {
                         idx.file_token_counts[fid as usize] = 0;
                     }
@@ -832,7 +835,7 @@ fn update_content_index(
                         idx.files[fid as usize].clear();
                     }
                     if let Some(ref mut p2id) = idx.path_to_id {
-                        p2id.remove(path);
+                        p2id.remove(&stored_key);
                     }
                 }
             }
@@ -1033,14 +1036,19 @@ fn apply_tokenized_file(
     // In-place mutation requires a stable path lookup. If this helper is
     // accidentally called on a read-only index, do nothing rather than inventing
     // unstable file_ids.
+    let path_key = content_path_key(&result.path);
     let file_id = if let Some(ref mut p2id) = index.path_to_id {
-        if let Some(&fid) = p2id.get(&result.path) {
+        if let Some((stored_key, fid)) = content_path_entry(p2id, &result.path) {
+            if stored_key != path_key {
+                p2id.remove(&stored_key);
+                p2id.insert(path_key.clone(), fid);
+            }
             fid  // existing file (already purged via batch_purge)
         } else {
             // new file — assign new file_id
             let fid = index.files.len() as u32;
             index.files.push(result.path.to_string_lossy().to_string());
-            p2id.insert(result.path, fid);
+            p2id.insert(path_key, fid);
             index.file_token_counts.push(0); // will be updated below
             fid
         }
@@ -1338,19 +1346,79 @@ pub(crate) fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
         .is_some_and(|e| extensions.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
-fn ensure_path_to_id(index: &mut ContentIndex) {
-    if index.path_to_id.is_some() {
-        return;
-    }
+fn content_path_key(path: &Path) -> PathBuf {
+    let clean = clean_path(&path.to_string_lossy());
+    #[cfg(windows)]
+    let clean = clean.to_lowercase();
+    PathBuf::from(clean)
+}
 
+fn content_path_entry(
+    path_to_id: &HashMap<PathBuf, u32>,
+    path: &Path,
+) -> Option<(PathBuf, u32)> {
+    let path_key = content_path_key(path);
+    path_to_id.get(&path_key)
+        .copied()
+        .map(|file_id| (path_key.clone(), file_id))
+        .or_else(|| {
+            path_to_id.iter().find_map(|(candidate, &file_id)| {
+                (content_path_key(candidate) == path_key)
+                    .then(|| (candidate.clone(), file_id))
+            })
+        })
+}
+
+fn content_file_id(path_to_id: &HashMap<PathBuf, u32>, path: &Path) -> Option<u32> {
+    content_path_entry(path_to_id, path).map(|(_, file_id)| file_id)
+}
+
+fn content_files_by_key(
+    files: &HashMap<PathBuf, SystemTime>,
+) -> HashMap<PathBuf, (&PathBuf, SystemTime)> {
+    files.iter()
+        .map(|(path, modified)| (content_path_key(path), (path, *modified)))
+        .collect()
+}
+
+fn ensure_path_to_id(index: &mut ContentIndex) {
     let mut path_to_id = HashMap::with_capacity(index.files.len());
-    // Skip empty tombstone slots from files removed in previous sessions.
+    let mut duplicate_ids = HashSet::new();
     for (file_id, path) in index.files.iter().enumerate() {
         if path.is_empty() {
             continue;
         }
-        path_to_id.insert(PathBuf::from(path), file_id as u32);
+        if let Some(previous) = path_to_id.insert(
+            content_path_key(Path::new(path)),
+            file_id as u32,
+        ) {
+            duplicate_ids.insert(previous);
+        }
     }
+
+    if !duplicate_ids.is_empty() {
+        for &file_id in &duplicate_ids {
+            let slot = file_id as usize;
+            let old_count = index.file_token_counts.get(slot).copied().unwrap_or(0) as u64;
+            index.total_tokens = index.total_tokens.saturating_sub(old_count);
+            if let Some(count) = index.file_token_counts.get_mut(slot) {
+                *count = 0;
+            }
+            if let Some(path) = index.files.get_mut(slot) {
+                path.clear();
+            }
+            if let Some(tokens) = index.file_tokens.get_mut(slot) {
+                tokens.clear();
+            }
+        }
+        for postings in index.index.values_mut() {
+            postings.retain(|posting| !duplicate_ids.contains(&posting.file_id));
+        }
+        index.index.retain(|_, postings| !postings.is_empty());
+        index.trigram_dirty = true;
+        warn!(duplicates = duplicate_ids.len(), "Removed duplicate content-index path IDs");
+    }
+
     index.path_to_id = Some(path_to_id);
 }
 
@@ -1432,6 +1500,7 @@ pub fn schedule_rebuild_file_tokens(index: Arc<RwLock<ContentIndex>>) {
 #[cfg(test)]
 fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
     let path_str = path.to_string_lossy().to_string();
+    let path_key = content_path_key(path);
 
     // Read the file (lossy UTF-8 for non-UTF8 files like Windows-1252)
     let (content, _was_lossy) = match crate::read_file_lossy(path) {
@@ -1440,7 +1509,11 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
     };
 
     if let Some(ref mut path_to_id) = index.path_to_id {
-        if let Some(&file_id) = path_to_id.get(path) {
+        if let Some((stored_key, file_id)) = content_path_entry(path_to_id, path) {
+            if stored_key != path_key {
+                path_to_id.remove(&stored_key);
+                path_to_id.insert(path_key.clone(), file_id);
+            }
             // EXISTING FILE — remove old tokens, add new ones
             // Subtract old token count from total before re-tokenizing
             let old_count = if (file_id as usize) < index.file_token_counts.len() {
@@ -1482,7 +1555,7 @@ fn update_file_in_index(index: &mut ContentIndex, path: &Path) {
             // NEW FILE — assign new file_id
             let file_id = index.files.len() as u32;
             index.files.push(path_str.clone());
-            path_to_id.insert(path.to_path_buf(), file_id);
+            path_to_id.insert(path_key, file_id);
 
             let mut file_tokens: std::collections::HashMap<String, Vec<u32>> = std::collections::HashMap::new();
             let mut file_total: u32 = 0;
@@ -1622,7 +1695,7 @@ fn purge_file_from_inverted_index(
 #[cfg(test)]
 fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
     if let Some(ref mut path_to_id) = index.path_to_id
-        && let Some(&file_id) = path_to_id.get(path) {
+        && let Some((stored_key, file_id)) = content_path_entry(path_to_id, path) {
             // Subtract this file's token count from total
             let old_count = if (file_id as usize) < index.file_token_counts.len() {
                 index.file_token_counts[file_id as usize] as u64
@@ -1638,7 +1711,7 @@ fn remove_file_from_index(index: &mut ContentIndex, path: &Path) {
             // Remove all postings for this file from inverted index (brute-force scan)
             purge_file_from_inverted_index(&mut index.index, file_id);
 
-            path_to_id.remove(path);
+            path_to_id.remove(&stored_key);
             // Don't remove from files vec to preserve file_id stability
         }
 }
@@ -1769,11 +1842,12 @@ fn compute_content_drift(
         // will not be running in that mode anyway).
         return (0, 0, 0);
     };
+    let ext_matched_by_key = content_files_by_key(ext_matched);
     let threshold = UNIX_EPOCH + Duration::from_secs(idx.created_at.saturating_sub(2));
     let mut added = 0usize;
     let mut modified = 0usize;
-    for (path, mtime) in ext_matched {
-        if let Some(_fid) = p2id.get(path) {
+    for (path_key, (_, mtime)) in &ext_matched_by_key {
+        if let Some(_fid) = content_file_id(p2id, path_key) {
             if *mtime > threshold {
                 modified += 1;
             }
@@ -1782,8 +1856,8 @@ fn compute_content_drift(
         }
     }
     let mut removed = 0usize;
-    for path in p2id.keys() {
-        if !ext_matched.contains_key(path) {
+    for path_key in p2id.keys() {
+        if !ext_matched_by_key.contains_key(&content_path_key(path_key)) {
             removed += 1;
         }
     }
@@ -2164,6 +2238,7 @@ pub(crate) fn reconcile_content_index_with_disk_files(
 ) -> (usize, usize, usize) {
     let start = std::time::Instant::now();
     let disk_files = &disk_files;
+    let disk_files_by_key = content_files_by_key(disk_files);
 
     let scanned = disk_files.len();
 
@@ -2180,27 +2255,27 @@ pub(crate) fn reconcile_content_index_with_disk_files(
 
             if let Some(ref p2id) = idx.path_to_id {
                 // Check for new and modified files
-                for (path, mtime) in disk_files {
-                    if p2id.contains_key(path) {
+                for (path_key, (path, mtime)) in &disk_files_by_key {
+                    if content_file_id(p2id, path_key).is_some() {
                         // Existing file: decide whether it should be retokenized.
                         // Do not add its file_id to purge_ids here; purge is safe
                         // only after Phase 3 successfully produces replacement
                         // tokens for this path.
                         if *mtime > threshold {
-                            to_tokenize.push(path.clone());
+                            to_tokenize.push((*path).clone());
                             modified += 1;
                         }
                     } else {
                         // New file
-                        to_tokenize.push(path.clone());
+                        to_tokenize.push((*path).clone());
                         added += 1;
                     }
                 }
 
                 // Check for deleted files
-                for (path, &fid) in p2id.iter() {
-                    if !disk_files.contains_key(path) {
-                        to_remove.push(path.clone());
+                for (path_key, &fid) in p2id.iter() {
+                    if !disk_files_by_key.contains_key(&content_path_key(path_key)) {
+                        to_remove.push(path_key.clone());
                         purge_ids.insert(fid);
                     }
                 }
@@ -2255,7 +2330,7 @@ pub(crate) fn reconcile_content_index_with_disk_files(
                 // the index remains internally consistent and future rescans can
                 // retry without having hidden a known file from search.
                 for result in &tokenized {
-                    if let Some(&fid) = p2id.get(&result.path) {
+                    if let Some(fid) = content_file_id(p2id, &result.path) {
                         purge_ids.insert(fid);
                         applied_modified += 1;
                     } else {

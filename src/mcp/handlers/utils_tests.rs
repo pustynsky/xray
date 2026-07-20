@@ -2640,6 +2640,49 @@ fn test_validate_search_dir_relative_nonexistent_accepted_as_subdir() {
     assert!(result.unwrap().is_some(), "Should return Some(subdir_filter)");
 }
 
+#[cfg(windows)]
+#[test]
+fn test_validate_search_dir_8dot3_filter_matches_indexed_path() {
+    use std::os::windows::ffi::{OsStrExt, OsStringExt};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let long_dir = root.join("directory-with-a-long-name");
+    std::fs::create_dir_all(&long_dir).unwrap();
+    let indexed_file = long_dir.join("sample.rs");
+    std::fs::write(&indexed_file, "fn sample() {}\n").unwrap();
+
+    let wide: Vec<u16> = long_dir.as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let mut buffer = vec![0u16; 1024];
+    let length = unsafe {
+        unsafe extern "system" {
+            fn GetShortPathNameW(long: *const u16, short: *mut u16, capacity: u32) -> u32;
+        }
+        GetShortPathNameW(wide.as_ptr(), buffer.as_mut_ptr(), buffer.len() as u32)
+    };
+    if length == 0 || length as usize >= buffer.len() {
+        return;
+    }
+
+    let short_dir = std::ffi::OsString::from_wide(&buffer[..length as usize]);
+    let short_dir = crate::clean_path(&short_dir.to_string_lossy());
+    let long_dir = crate::clean_path(&long_dir.to_string_lossy());
+    if short_dir.eq_ignore_ascii_case(&long_dir) {
+        return;
+    }
+
+    let root = crate::clean_path(&root.to_string_lossy());
+    let filter = validate_search_dir(&short_dir, &root).unwrap().unwrap();
+    assert!(!filter.starts_with("//?/"));
+    assert!(is_under_dir(
+        &crate::clean_path(&indexed_file.to_string_lossy()),
+        &filter,
+    ));
+}
+
 // ─────────────────────────────────────────────────────────────────────
 // Symlink-aware regression test for `validate_search_dir`.
 //
