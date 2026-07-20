@@ -768,6 +768,11 @@ fn test_xray_info_response_structure() {
     // Validate top-level keys exist (from cli::info::cmd_info_json)
     assert!(output["directory"].is_string(), "Response should have 'directory' string");
     assert!(output["indexes"].is_array(), "Response should have 'indexes' array");
+    assert_eq!(output["trigram"]["status"], "ready");
+    assert_eq!(output["trigram"]["lastDirtyTrigger"], "unknown");
+    assert_eq!(output["trigram"]["lastBuildTrigger"], "unknown");
+    assert!(output["trigram"]["lastBuildMs"].is_null());
+    assert!(output["trigram"]["lastReadyAtMs"].is_null());
 
     // indexes is an array (may be empty if no indexes exist, which is fine for test)
     let indexes = output["indexes"].as_array().unwrap();
@@ -2258,4 +2263,21 @@ fn test_detect_macro_definition_markers_recognises_quickcheck() {
         "expected 'quickcheck!' in markers, got: {markers}");
     assert!(markers.contains("#[quickcheck]"),
         "expected '#[quickcheck]' attribute marker, got: {markers}");
+}
+
+#[test]
+fn test_xray_info_reports_trigram_runtime_state() {
+    let ctx = make_empty_ctx();
+    ctx.index.write().unwrap().trigram_dirty = true;
+    ctx.trigram_build_gate.mark_dirty(super::utils::TrigramDirtyTrigger::Watcher);
+
+    let dirty_result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    let dirty: Value = serde_json::from_str(&dirty_result.content[0].text).unwrap();
+    assert_eq!(dirty["trigram"]["status"], "dirty");
+    assert_eq!(dirty["trigram"]["lastDirtyTrigger"], "watcher");
+
+    *ctx.trigram_build_gate.building.lock().unwrap() = true;
+    let building_result = dispatch_tool(&ctx, "xray_info", &json!({}));
+    let building: Value = serde_json::from_str(&building_result.content[0].text).unwrap();
+    assert_eq!(building["trigram"]["status"], "building");
 }

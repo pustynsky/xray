@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **Trigram readiness and query timing are now observable without changing rebuild scheduling.** `xray_info` reports `ready`, `dirty`, or `building` plus the last dirty/build triggers, build duration, and ready timestamp. Wide trigram-dependent `xray_grep` substring and line-regex responses add directly measured `queryMs`, `waitForTrigramMs`, and `trigramBuildMs`; narrow and phrase paths continue to skip trigram timing.
+
 - **Index-backed responses now declare local-worktree provenance.** `xray_grep`, `xray_definitions`, `xray_callers`, and `xray_fast` return a top-level `analysisContext` (`schemaVersion: 1`) with canonical workspace root, workspace status/binding mode/binding generation, branch name/source, `targetKind: local_worktree`, and `revisionEvidence: not_verified`. The context survives error wrapping and response truncation, uses the existing branch TTL cache, and does not add a per-response Git probe. **Response contract migration:** these four tools no longer duplicate `serverDir`, `workspaceStatus`, `workspaceSource`, or `workspaceGeneration` in `summary`; consumers must read `analysisContext.source.workspaceRoot`, `workspaceStatus`, `workspaceBindingMode`, and `workspaceBindingGeneration`. Other tools retain their existing summary fields.
 
 ## 0.2.11 (2026-07-20)

@@ -282,6 +282,7 @@ pub fn cmd_serve(args: ServeArgs) {
             Arc::clone(&watcher_stats),
             effective_respect_git_exclude,
             Arc::clone(&autosave_dirty),
+            Arc::clone(&trigram_build_gate),
         ) {
             warn!(error = %e, "Failed to start file watcher");
         }
@@ -305,6 +306,7 @@ pub fn cmd_serve(args: ServeArgs) {
                 Arc::clone(&watcher_stats),
                 effective_respect_git_exclude,
                 Arc::clone(&autosave_dirty),
+                Arc::clone(&trigram_build_gate),
             );
         }
     }
