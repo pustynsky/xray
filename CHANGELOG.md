@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **`xray_edit` now preserves supported file metadata across atomic replacement.** Existing Unix files retain permission mode bits, including executable bits; Windows files retain ReadOnly, Hidden, System, Archive, and NotContentIndexed attributes in single-file, multi-file, and symlink-target edits. ReadOnly targets are temporarily prepared for replacement and restored on handled failures. Ownership, ACLs, xattrs, timestamps, compression, and encryption remain outside this guarantee.
+
 - **`xray_edit` now preserves file-symlink identity and guards hard links.** Existing file symlinks are edited through their canonical targets while responses and synchronous reindexing retain the logical workspace path; successful responses expose `symlinkFollowed: true`, while dangling symlinks are rejected without replacement. Files with multiple hard links are refused unless `allowBreakHardLinks: true` explicitly accepts breaking link identity and reports `hardLinkBroken: true`; multi-file edits reject aliases of the same physical file before writing.
 
 - **Trigram readiness and query timing are now observable without changing rebuild scheduling.** `xray_info` reports `ready`, `dirty`, or `building` plus the last dirty/build triggers, build duration, and ready timestamp. Wide trigram-dependent `xray_grep` substring and line-regex responses add directly measured `queryMs`, `waitForTrigramMs`, and `trigramBuildMs`; narrow and phrase paths continue to skip trigram timing.
