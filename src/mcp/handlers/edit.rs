@@ -28,6 +28,7 @@ struct EditRequestOptions {
     dry_run: bool,
     expected_line_count: Option<usize>,
     allow_break_hard_links: bool,
+    allow_git_internals: bool,
 }
 
 /// Maximum number of files for multi-file edit (protection against abuse).
@@ -184,6 +185,9 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let allow_break_hard_links = args.get("allowBreakHardLinks")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let allow_git_internals = args.get("allowGitInternals")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     // ── Validate mode and construct EditMode ──
     let mode = match (operations, edits) {
@@ -206,6 +210,7 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         dry_run,
         expected_line_count,
         allow_break_hard_links,
+        allow_git_internals,
     };
 
     // ── Dispatch single vs multi-file ──
@@ -240,6 +245,7 @@ const KNOWN_EDIT_PARAMS: &[&str] = &[
     "dryRun",
     "expectedLineCount",
     "allowBreakHardLinks",
+    "allowGitInternals",
     "expectedHash",
 ];
 
@@ -256,6 +262,7 @@ const KNOWN_EDIT_OBJECT_FIELDS: &[&str] = &[
     "startLine",
     "endLine",
     "expectedContext",
+    "expectedMatchCount",
     "skipIfNotFound",
 ];
 
@@ -300,6 +307,7 @@ const EDIT_FIELD_SYNONYMS: &[(&str, &str)] = &[
     // misc
     ("expected_context", "expectedContext"),
     ("context", "expectedContext"),
+    ("expected_match_count", "expectedMatchCount"),
     ("skip_if_not_found", "skipIfNotFound"),
     ("optional", "skipIfNotFound"),
     ("nth", "occurrence"),
@@ -313,7 +321,7 @@ const EDIT_FORM_MENU: &str = "Each edit item must use ONE of three forms: \
     (a) {\"search\": \"old\", \"replace\": \"new\"} — text replacement; \
     (b) {\"insertAfter\": \"anchor\", \"content\": \"...\"} — insert after anchor; \
     (c) {\"insertBefore\": \"anchor\", \"content\": \"...\"} — insert before anchor. \
-    Optional fields: occurrence, expectedContext, skipIfNotFound. \
+    Optional fields: occurrence, expectedContext, expectedMatchCount, skipIfNotFound. \
     For Mode A (line-range) use the top-level 'operations' parameter instead.";
 
 /// Canonical examples block, prefixed for inline appending into error messages.
@@ -403,6 +411,7 @@ fn check_unknown_edit_object_fields(
         "insertBefore",
         "content",
         "expectedContext",
+        "expectedMatchCount",
         "skipIfNotFound",
     ];
 
@@ -577,6 +586,11 @@ fn check_top_level_param_types(obj: &serde_json::Map<String, Value>) -> Option<S
         && !v.is_boolean()
     {
         return Some(err("allowBreakHardLinks", "a boolean (true/false)", v));
+    }
+    if let Some(v) = obj.get("allowGitInternals")
+        && !v.is_boolean()
+    {
+        return Some(err("allowGitInternals", "a boolean (true/false)", v));
     }
     if let Some(v) = obj.get("expectedHash")
         && !v.is_string()
@@ -1021,10 +1035,57 @@ fn missing_file_key(path: &Path) -> String {
 }
 
 /// Read a logical edit path while preserving the physical object that receives the write.
-fn read_and_validate_file(
+fn path_targets_git_internals(path: &Path) -> bool {
+    if crate::mcp::watcher::is_inside_git_dir(path) {
+        return true;
+    }
+    let mut existing_ancestor = path.to_path_buf();
+    let physical_path = loop {
+        match std::fs::canonicalize(&existing_ancestor) {
+            Ok(path) => break Some(path),
+            Err(_) if existing_ancestor.pop() => {}
+            Err(_) => break None,
+        }
+    };
+    physical_path
+        .as_deref()
+        .is_some_and(crate::mcp::watcher::is_inside_git_dir)
+}
+
+fn ensure_git_internal_edit_allowed(
+    logical_path: &Path,
+    path_str: &str,
+    allow_git_internals: bool,
+) -> Result<(), String> {
+    if !allow_git_internals && path_targets_git_internals(logical_path) {
+        return Err(format!(
+            "Refusing to edit Git internal path '{}'. Pass allowGitInternals=true to proceed explicitly.",
+            path_str
+        ));
+    }
+    Ok(())
+}
+
+
+fn read_and_validate_requested_file(
     server_dir: &str,
     path_str: &str,
     dry_run: bool,
+    allow_break_hard_links: bool,
+    allow_git_internals: bool,
+) -> Result<PreparedEditTarget, String> {
+    let logical_path = resolve_path(server_dir, path_str);
+    ensure_git_internal_edit_allowed(&logical_path, path_str, allow_git_internals)?;
+    let target = read_and_validate_file(server_dir, path_str, dry_run, allow_break_hard_links)?;
+    ensure_git_internal_edit_allowed(&target.write_path, path_str, allow_git_internals)?;
+    Ok(target)
+}
+
+
+fn read_and_validate_file(
+    server_dir: &str,
+    path_str: &str,
+    _dry_run: bool,
     allow_break_hard_links: bool,
 ) -> Result<PreparedEditTarget, String> {
     let logical_path = resolve_path(server_dir, path_str);
@@ -1035,12 +1096,6 @@ fn read_and_validate_file(
     };
 
     let Some(logical_metadata) = logical_metadata else {
-        if !dry_run
-            && let Some(parent) = logical_path.parent()
-        {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create directories for '{}': {}", path_str, e))?;
-        }
         return Ok(PreparedEditTarget {
             physical_key: missing_file_key(&logical_path),
             write_path: logical_path.clone(),
@@ -1124,8 +1179,8 @@ fn read_and_validate_file(
 ///
 /// Decision logic (mirrors what the FS watcher does):
 ///   1. Outside server `--dir` → skip (not in our index scope).
-///   2. Extension not in server `--ext` → skip (matches watcher filter).
-///   3. Inside any `.git/` directory → skip (matches watcher filter).
+///   2. Inside any `.git/` directory → skip (matches watcher filter).
+///   3. Extension not in server `--ext` → skip (matches watcher filter).
 ///   4. Excluded from every active index by standard ignore rules → skip.
 ///   5. Hidden paths remain eligible for the definition index only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1160,11 +1215,11 @@ fn classify_for_sync_reindex(
     if !crate::is_path_within(&resolved_str, canonical_server_dir) {
         return SyncReindexScope::Skip("outsideServerDir");
     }
+    if path_targets_git_internals(resolved) {
+        return SyncReindexScope::Skip("insideGitDir");
+    }
     if !crate::mcp::watcher::matches_extensions(resolved, server_extensions) {
         return SyncReindexScope::Skip("extensionNotIndexed");
-    }
-    if crate::mcp::watcher::is_inside_git_dir(resolved) {
-        return SyncReindexScope::Skip("insideGitDir");
     }
     if crate::mcp::watcher::is_included_by_index_rules(
         canonical_server_dir,
@@ -1343,6 +1398,28 @@ fn stage_file_with_endings(
         return Err(error);
     }
     Ok(())
+}
+
+
+fn create_missing_target_parent(target: &PreparedEditTarget) -> Result<(), String> {
+    if target.file_existed {
+        return Ok(());
+    }
+    if let Some(parent) = target.write_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|error| {
+            format!(
+                "Failed to create directories for '{}': {}",
+                target.logical_path.display(), error
+            )
+        })?;
+    }
+    Ok(())
+}
+
+fn refresh_missing_target_key(target: &mut PreparedEditTarget) {
+    if !target.file_existed {
+        target.physical_key = missing_file_key(&target.logical_path);
+    }
 }
 
 
@@ -1793,17 +1870,17 @@ fn handle_single_file_edit(
         dry_run,
         expected_line_count,
         allow_break_hard_links,
+        allow_git_internals,
     } = options;
     let edit_start = std::time::Instant::now();
     // Read and validate. `file_existed` is captured BEFORE the write so we can
     // accurately set `fileCreated` and `fileListInvalidated` in the response.
-    // Pass dry_run so a preview against a non-existent path doesn't create empty
-    // parent directories (EDIT-003).
-    let target = match read_and_validate_file(
+    let mut target = match read_and_validate_requested_file(
         &ctx.server_dir(),
         path_str,
         dry_run,
         allow_break_hard_links,
+        allow_git_internals,
     ) {
         Ok(target) => target,
         Err(error) => return ToolCallResult::error(error),
@@ -1831,6 +1908,16 @@ fn handle_single_file_edit(
         Ok(result) => result,
         Err(error) => return ToolCallResult::error(error),
     };
+
+    // Materialize parent directories only after the edit is valid in memory.
+    if !dry_run {
+        if let Err(error) = validate_source_unchanged(&target)
+            .and_then(|_| create_missing_target_parent(&target))
+        {
+            return ToolCallResult::error(error);
+        }
+        refresh_missing_target_key(&mut target);
+    }
 
     // Write file (unless dryRun)
     if !dry_run
@@ -2064,6 +2151,7 @@ fn handle_multi_file_edit(
         dry_run,
         expected_line_count,
         allow_break_hard_links,
+        allow_git_internals,
     } = options;
     let edit_start = std::time::Instant::now();
     // Validate paths array
@@ -2090,11 +2178,12 @@ fn handle_multi_file_edit(
     let mut file_data: Vec<(&str, PreparedEditTarget)> = Vec::with_capacity(path_strings.len());
     let mut seen_targets: HashMap<String, &str> = HashMap::with_capacity(path_strings.len());
     for path_str in &path_strings {
-        let target = match read_and_validate_file(
+        let target = match read_and_validate_requested_file(
             &ctx.server_dir(),
             path_str,
             dry_run,
             allow_break_hard_links,
+            allow_git_internals,
         ) {
             Ok(target) => target,
             Err(error) => return ToolCallResult::error(format!("File '{}': {}", path_str, error)),
@@ -2127,6 +2216,21 @@ fn handle_multi_file_edit(
 
     // Phase 3: Write all (only if !dry_run) — atomic multi-file via temp+rename
     if !dry_run {
+        // Validate the whole batch before creating any parent directories.
+        if let Err(error) = validate_targets_unchanged(
+            edit_results.iter().map(|(path, target, _)| (*path, target)),
+        ) {
+            return ToolCallResult::error(error);
+        }
+        for (_, target, _) in &edit_results {
+            if let Err(error) = create_missing_target_parent(target) {
+                return ToolCallResult::error(error);
+            }
+        }
+        for (_, target, _) in &mut edit_results {
+            refresh_missing_target_key(target);
+        }
+
         // Phase 3a: Write to temp files (validates I/O before touching originals)
         let mut temp_files: Vec<(usize, &str, PathBuf, PathBuf)> =
             Vec::with_capacity(edit_results.len());
@@ -2643,6 +2747,8 @@ struct TextEdit {
     content: Option<String>,
     /// Expected context near the search/anchor text (±5 lines). Safety check.
     expected_context: Option<String>,
+    /// Abort when the actual match count differs.
+    expected_match_count: Option<usize>,
     /// If true, skip this edit silently when search/anchor text is not found (instead of returning error).
     /// Useful with multi-file `paths` where not all files contain the target text.
     skip_if_not_found: bool,
@@ -2900,6 +3006,7 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
         let content = expect_string_field(obj, "content", i)?.map(|s| normalize_crlf(&s));
         let occurrence = expect_u64_field(obj, "occurrence", i)?.unwrap_or(0) as usize;
         let expected_context = expect_string_field(obj, "expectedContext", i)?.map(|s| normalize_crlf(&s));
+        let expected_match_count = expect_u64_field(obj, "expectedMatchCount", i)?.map(|value| value as usize);
         let skip_if_not_found = expect_bool_field(obj, "skipIfNotFound", i)?.unwrap_or(false);
 
         let has_search_replace = search.is_some() || replace.is_some();
@@ -2970,6 +3077,7 @@ fn parse_text_edits(edits_array: &[Value]) -> Result<Vec<TextEdit>, String> {
             insert_before,
             content,
             expected_context,
+            expected_match_count,
             skip_if_not_found,
         });
     }
@@ -3381,6 +3489,14 @@ fn apply_text_edits(content: &str, edits: &[TextEdit], is_regex: bool) -> Result
         } else {
             apply_literal_replace(&mut result, edit, edit_index)?
         };
+
+        if let Some(expected) = edit.expected_match_count
+            && reps != expected
+        {
+            return Err(format!(
+                "edits[{edit_index}]: expectedMatchCount is {expected}, but edit matched {reps}"
+            ));
+        }
 
         total_replacements += reps;
         per_edit_counts.push(reps);

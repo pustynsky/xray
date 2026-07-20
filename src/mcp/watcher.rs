@@ -1487,7 +1487,19 @@ fn periodic_autosave(
 /// Filters out git internal files that would otherwise match extension filters
 /// (e.g., `.git/config` matches "config" extension).
 pub(crate) fn is_inside_git_dir(path: &Path) -> bool {
-    path.components().any(|c| c.as_os_str() == ".git")
+    path.components().any(|component| {
+        #[cfg(windows)]
+        {
+            component
+                .as_os_str()
+                .to_string_lossy()
+                .eq_ignore_ascii_case(".git")
+        }
+        #[cfg(not(windows))]
+        {
+            component.as_os_str() == ".git"
+        }
+    })
 }
 
 pub(crate) fn matches_extensions(path: &Path, extensions: &[String]) -> bool {

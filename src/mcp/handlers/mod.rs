@@ -603,6 +603,11 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                                     "type": "string",
                                     "description": "Safety check: verify this text exists within ±5 lines of the match. Aborts if not found."
                                 },
+                                "expectedMatchCount": {
+                                    "type": "integer",
+                                    "minimum": 0,
+                                    "description": "Expected applied count."
+                                },
                                 "skipIfNotFound": {
                                     "type": "boolean",
                                     "description": "If true, silently skip this edit when search/anchor text is not found (default: false). Useful with multi-file 'paths' where not all files contain the target text."
@@ -624,7 +629,11 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                     },
                     "allowBreakHardLinks": {
                         "type": "boolean",
-                        "description": "Allow replacing a multiply-linked file, breaking hard-link identity (default: false)."
+                        "description": "Permit hard-link breakage (default false)."
+                    },
+                    "allowGitInternals": {
+                        "type": "boolean",
+                        "description": "Permit .git writes (default false)."
                     },
                     "expectedHash": {
                         "type": "string",
