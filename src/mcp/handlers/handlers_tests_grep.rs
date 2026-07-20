@@ -1082,6 +1082,26 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
     assert_eq!(output["summary"]["totalFiles"], 1);
 }
 
+#[test]
+fn test_token_regex_anchors_are_described_as_token_boundaries() {
+    let ctx = make_substring_ctx(
+        vec![("foo", 0, vec![1])],
+        vec!["C:\\test\\Program.cs"],
+    );
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["^foo$"],
+        "regex": true
+    }));
+    assert!(!result.is_error, "token regex should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(output["summary"]["totalFiles"], 1);
+    let note = output["summary"]["searchModeNote"].as_str().unwrap();
+    assert!(note.contains("indexed token"), "note should explain token boundaries: {note}");
+    assert!(note.contains("not source lines"), "note should distinguish line boundaries: {note}");
+    assert!(!note.contains("cannot match"), "anchors are valid for token regex: {note}");
+}
+
 #[test] fn test_phrase_auto_disables_substring() {
     let ctx = make_substring_ctx(
         vec![("new", 0, vec![5]), ("httpclient", 0, vec![5])],
@@ -1537,6 +1557,49 @@ fn test_xray_grep_phrase_search_with_show_lines() {
     assert!(!line_content.is_empty(), "lineContent should have entries");
 
     cleanup_tmp(&tmp_dir);
+}
+
+#[test]
+fn test_xray_grep_phrase_preserves_one_character_words() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::write(root.join("sample.md"), "Xray search\nПроверка в SampleClient\n").unwrap();
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "md".to_string(),
+        threads: 1,
+        ..Default::default()
+    }).unwrap();
+    let ctx = HandlerContextBuilder::new()
+        .with_content_index(content_index)
+        .with_server_dir(root.to_string_lossy().to_string())
+        .with_server_ext("md")
+        .with_index_base(root.join(".index"))
+        .build();
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["Xray z"],
+        "phrase": true,
+        "countOnly": true,
+        "file": ["sample.md"]
+    }));
+    assert!(!result.is_error, "phrase search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+
+    assert_eq!(output["summary"]["totalFiles"], 0);
+    assert_eq!(output["summary"]["totalOccurrences"], 0);
+
+    let result = dispatch_tool(&ctx, "xray_grep", &json!({
+        "terms": ["Проверка в SampleClient"],
+        "phrase": true,
+        "countOnly": true,
+        "file": ["sample.md"]
+    }));
+    assert!(!result.is_error, "phrase search should not error: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["totalFiles"], 1);
+    assert_eq!(output["summary"]["totalOccurrences"], 1);
 }
 /// T82 — xray_grep maxResults=0 semantics.
 #[test]

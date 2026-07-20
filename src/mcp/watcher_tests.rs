@@ -49,6 +49,37 @@ fn test_build_watch_index_populates_path_to_id() {
     assert_eq!(path_to_id.get(&PathBuf::from("file1.cs")), Some(&1));
 }
 
+#[cfg(windows)]
+#[test]
+fn test_build_watch_index_removes_case_duplicate_file_ids() {
+    let mut index = make_test_index();
+    index.files = vec![
+        "C:/Root/File.cs".to_string(),
+        "c:/root/file.cs".to_string(),
+    ];
+    index.file_token_counts = vec![1, 1];
+    index.total_tokens = 2;
+    index.index = HashMap::from([(
+        "duplicate".to_string(),
+        vec![
+            Posting { file_id: 0, lines: vec![1] },
+            Posting { file_id: 1, lines: vec![1] },
+        ],
+    )]);
+
+    let index = build_watch_index_from(index);
+    let path_to_id = index.path_to_id.as_ref().unwrap();
+
+    assert_eq!(path_to_id.len(), 1);
+    assert_eq!(path_to_id.get(&content_path_key(Path::new("C:/ROOT/FILE.CS"))), Some(&1));
+    assert!(index.files[0].is_empty());
+    assert_eq!(index.files[1], "c:/root/file.cs");
+    assert_eq!(index.file_token_counts, vec![0, 1]);
+    assert_eq!(index.total_tokens, 1);
+    assert_eq!(index.index["duplicate"].len(), 1);
+    assert_eq!(index.index["duplicate"][0].file_id, 1);
+}
+
 
 #[test]
 fn test_schedule_rebuild_file_tokens_warms_reverse_map() {
@@ -604,7 +635,8 @@ fn test_watch_update_lazily_rebuilds_file_tokens() {
 
     assert!(result.ok);
     let idx = index.read().unwrap();
-    let file_id = idx.path_to_id.as_ref().unwrap().get(&file_a).copied().unwrap();
+    let file_id = idx.path_to_id.as_ref().unwrap()
+        .get(&content_path_key(&file_a)).copied().unwrap();
     assert!(idx.file_tokens_authoritative);
     assert!(!idx.file_tokens.is_empty());
     assert!(idx.file_tokens[file_id as usize].contains(&"delta".to_string()));
@@ -820,6 +852,7 @@ fn make_batch_test_setup()
         ..Default::default()
     };
     index.rebuild_file_tokens();
+    let index = build_watch_index_from(index);
 
     (tmp, dir, Arc::new(RwLock::new(index)))
 }
@@ -905,6 +938,33 @@ fn test_process_batch_dirty_file() {
         trigram.last_dirty_trigger,
         crate::mcp::handlers::utils::TrigramDirtyTrigger::Watcher,
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn test_process_batch_case_variant_reuses_existing_file_id() {
+    let (_tmp, root, index) = make_batch_test_setup();
+    let initial_files = index.read().unwrap().files.len();
+    let case_variant = PathBuf::from(
+        root.join("a.cs").to_string_lossy().to_ascii_uppercase()
+    );
+    std::fs::write(&case_variant, "class AlphaUpdated { NewService service; }").unwrap();
+
+    let mut dirty = HashSet::from([case_variant]);
+    let mut removed = HashSet::new();
+    assert!(process_batch(
+        &index,
+        &None,
+        &mut dirty,
+        &mut removed,
+        &test_trigram_build_gate(),
+    ));
+
+    let index = index.read().unwrap();
+    assert_eq!(index.files.len(), initial_files);
+    assert_eq!(index.path_to_id.as_ref().unwrap().len(), initial_files);
+    assert!(!index.index.contains_key("httpclient"));
+    assert!(index.index.contains_key("alphaupdated"));
 }
 
 #[test]
@@ -996,8 +1056,8 @@ fn test_process_batch_new_file_in_dirty() {
     assert!(idx.index.contains_key("beta"),
         "old token 'beta' should remain");
     // New file should be in path_to_id
-    let clean_c = crate::clean_path(&tmp.path().join("c.cs").to_string_lossy());
-    assert!(idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_c)),
+    let clean_c = content_path_key(&tmp.path().join("c.cs"));
+    assert!(idx.path_to_id.as_ref().unwrap().contains_key(&clean_c),
         "new file should be in path_to_id");
     assert_eq!(idx.files.len(), 3, "should have 3 files after adding new one");
 }
@@ -2441,10 +2501,10 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
         "autosave_dirty must be set when content drift triggers reconcile");
 
     // Verify the reconciler actually inserted the file into path_to_id.
-    let clean_new = crate::clean_path(&new_file.to_string_lossy());
+    let clean_new = content_path_key(&new_file);
     let idx = index.read().unwrap();
     assert!(
-        idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_new)),
+        idx.path_to_id.as_ref().unwrap().contains_key(&clean_new),
         "reconcile_content_index must have indexed the new file"
     );
     drop(idx);
@@ -2529,7 +2589,7 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
         idx.file_token_counts.truncate(1);
         idx.total_tokens = idx.file_token_counts.iter().map(|&count| count as u64).sum();
         if let Some(ref mut p2id) = idx.path_to_id {
-            p2id.remove(&PathBuf::from(&clean_b));
+            p2id.remove(&content_path_key(Path::new(&clean_b)));
         }
         for postings in idx.index.values_mut() {
             postings.retain(|posting| posting.file_id == 0);
@@ -2575,7 +2635,8 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
         "failed content apply must not checkpoint the stale content snapshot");
 
     let idx = index.read().unwrap();
-    assert!(idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_a)));
+    assert!(idx.path_to_id.as_ref().unwrap()
+        .contains_key(&content_path_key(Path::new(&clean_a))));
     assert!(idx.index.contains_key("alpha"), "old postings stay searchable until a later successful retry");
     assert_eq!(idx.file_token_counts[0], 10);
     assert_eq!(idx.created_at, 0, "failed apply must leave the retry watermark untouched");
@@ -2606,7 +2667,7 @@ fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
         idx.file_token_counts.truncate(1);
         idx.total_tokens = idx.file_token_counts.iter().map(|&count| count as u64).sum();
         if let Some(ref mut p2id) = idx.path_to_id {
-            p2id.remove(&PathBuf::from(&clean_b));
+            p2id.remove(&content_path_key(Path::new(&clean_b)));
         }
         for postings in idx.index.values_mut() {
             postings.retain(|posting| posting.file_id == 0);
@@ -2720,7 +2781,8 @@ fn periodic_rescan_detects_removed_file_and_reconciles_content() {
     let clean_b = crate::clean_path(&root.join("b.cs").to_string_lossy());
     let idx = index.read().unwrap();
     assert!(
-        !idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_b)),
+        !idx.path_to_id.as_ref().unwrap()
+            .contains_key(&content_path_key(Path::new(&clean_b))),
         "reconcile_content_index must have purged the deleted file"
     );
 }

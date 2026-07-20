@@ -3191,28 +3191,21 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         search_mode, &index, ctx, &grep_params,
     );
 
-    // Warn when regex=true and pattern uses constructs incompatible with token-based regex.
-    // Token regex matches against individual index tokens (alphanumeric+underscore, no whitespace),
-    // so anchors `^`/`$` (anchored to token boundaries, not lines) and spaces never match.
+    // Explain regex constructs whose meaning differs between token and line search.
+    // Token regex has no whitespace; anchors apply to each indexed token.
     let pattern_has_spaces = parsed.terms.iter().any(|t| t.contains(' '));
     let pattern_has_anchors = parsed.terms.iter().any(|t| t.contains('^') || t.contains('$'));
     if parsed.use_regex && (pattern_has_spaces || pattern_has_anchors)
         && let Some(text) = result.content.first_mut().map(|c| &mut c.text)
             && let Ok(mut output) = serde_json::from_str::<serde_json::Value>(text) {
                 if let Some(summary) = output.get_mut("summary") {
-                    let reason = match (pattern_has_spaces, pattern_has_anchors) {
-                        (true, true) => "Pattern contains spaces and line anchors (`^`/`$`)",
-                        (true, false) => "Pattern contains spaces",
-                        (false, true) => "Pattern contains line anchors (`^`/`$`)",
+                    let note = match (pattern_has_spaces, pattern_has_anchors) {
+                        (true, true) => "Token regex matches individual alphanumeric+underscore tokens and cannot match whitespace between them. `^` and `$` apply to each indexed token, not source lines. Use lineRegex=true for source-line anchors and whitespace.",
+                        (true, false) => "Token regex matches individual alphanumeric+underscore tokens and cannot match whitespace between them. Use lineRegex=true for source-line regex matching, or phrase=true for a literal multi-word search.",
+                        (false, true) => "`^` and `$` apply to each indexed token, not source lines. Use lineRegex=true when anchors must refer to source-line boundaries.",
                         _ => unreachable!(),
                     };
-                    summary["searchModeNote"] = serde_json::Value::String(format!(
-                        "{} — token-based regex cannot match these (operates on alphanumeric+underscore tokens, not whole lines). \
-                         For line-based regex with anchor/whitespace support, set lineRegex=true (slower but accurate). \
-                         For multi-word substring search without regex, use phrase=true. \
-                         Example: terms='^## ' regex=true lineRegex=true file='X.md' — finds markdown headings.",
-                        reason
-                    ));
+                    summary["searchModeNote"] = serde_json::Value::String(note.to_string());
                 }
                 *text = json_to_string(&output);
             }
@@ -4055,15 +4048,6 @@ fn collect_phrase_matches(
         ));
     }
 
-    let phrase_regex_pattern = phrase_tokens.iter()
-        .map(|t| regex::escape(t))
-        .collect::<Vec<_>>()
-        .join(r"\s+");
-    let phrase_re = match regex::Regex::new(&format!("(?i){}", phrase_regex_pattern)) {
-        Ok(r) => r,
-        Err(e) => return Err(format!("Failed to build phrase regex: {}", e)),
-    };
-
     // PERF (tier-B): use per-token line lists from the inverted index to
     // intersect at the LINE level, not just the file level. The existing
     // `Posting { file_id, lines: Vec<u32> }` already records which lines a
@@ -4166,10 +4150,7 @@ fn collect_phrase_matches(
         }
     }
 
-    // Verify phrase match in raw file content.
-    // When phrase contains punctuation, use raw substring match to avoid
-    // false positives from tokenizer stripping non-alphanumeric characters.
-    let phrase_has_punctuation = phrase.chars().any(|c| !c.is_alphanumeric() && !c.is_whitespace());
+    // Index tokens select candidates; raw content decides phrase semantics.
     diag.intersection_ms = intersection_start.elapsed().as_secs_f64() * 1000.0;
     diag.candidates_after_intersection = candidates.len();
 
@@ -4190,7 +4171,6 @@ fn collect_phrase_matches(
     let worker_output = std::thread::scope(|scope| {
         let mut handles = Vec::new();
         for chunk in candidates.chunks(chunk_size) {
-            let phrase_re_ref = &phrase_re;
             let phrase_lower_ref = phrase_lower.as_str();
             let index_ref = index;
             let chunk_owned: Vec<(u32, Vec<u32>)> = chunk.to_vec();
@@ -4212,12 +4192,8 @@ fn collect_phrase_matches(
                     };
                     local_files_read += 1;
                     let candidate_set: HashSet<u32> = candidate_lines.into_iter().collect();
-                    let matches_phrase = |line: &str, line_lower: &str| {
-                        if phrase_has_punctuation {
-                            line_lower.contains(phrase_lower_ref)
-                        } else {
-                            phrase_re_ref.is_match(line)
-                        }
+                    let matches_phrase = |_line: &str, line_lower: &str| {
+                        line_lower.contains(phrase_lower_ref)
                     };
                     let mut matching_lines = Vec::new();
                     let mut had_stale_candidate = false;
