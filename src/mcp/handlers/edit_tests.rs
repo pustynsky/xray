@@ -5762,6 +5762,25 @@ fn test_edit003_real_run_still_creates_parent_dirs() {
     assert!(tmp.path().join("new/deeply/nested/file.rs").exists());
 }
 
+
+#[test]
+fn test_failed_real_edit_does_not_create_parent_dirs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "new/deeply/nested/file.rs",
+        "edits": [{ "search": "missing", "replace": "replacement" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("Text not found"));
+    assert!(
+        !tmp.path().join("new").exists(),
+        "failed edit must not leave parent directories",
+    );
+}
+
 #[test]
 fn test_edit004_invalid_utf8_file_is_rejected_not_corrupted() {
     // EDIT-004: a Latin-1 file containing byte 0xE9 (`é`) is invalid UTF-8.
@@ -7635,6 +7654,314 @@ fn test_edit_results_match_count_reflects_replace_all() {
     let payload: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
     let arr = payload["editResults"].as_array().unwrap();
     assert_eq!(arr[0]["matchCount"], 4, "replace-all matched 4 sites: {payload}");
+}
+
+#[test]
+fn test_expected_match_count_mismatch_aborts_before_write() {
+    let (tmp, filename, path) = create_temp_file("x x x\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{
+            "search": "x",
+            "replace": "y",
+            "occurrence": 0,
+            "expectedMatchCount": 2,
+        }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("expectedMatchCount is 2"));
+    assert!(result.content[0].text.contains("matched 3"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "x x x\n");
+}
+
+
+#[test]
+fn test_expected_match_count_accepts_all_edit_forms() {
+    let (tmp, filename, path) = create_temp_file("x x\nanchor\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [
+            {
+                "search": "x",
+                "replace": "y",
+                "occurrence": 0,
+                "expectedMatchCount": 2,
+            },
+            {
+                "insertAfter": "anchor",
+                "content": "tail",
+                "expectedMatchCount": 1,
+            },
+        ],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "y y\nanchor\ntail\n");
+
+    let (tmp, filename, path) = create_temp_file("item1 item2\n");
+    let ctx = make_ctx(tmp.path());
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "regex": true,
+        "edits": [{
+            "search": "item\\d",
+            "replace": "entry",
+            "occurrence": 0,
+            "expectedMatchCount": 2,
+        }],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "entry entry\n");
+}
+
+#[test]
+fn test_expected_match_count_accepts_zero_for_skipped_edit() {
+    let (tmp, filename, path) = create_temp_file("unchanged\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{
+            "search": "missing",
+            "replace": "replacement",
+            "skipIfNotFound": true,
+            "expectedMatchCount": 0,
+        }],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "unchanged\n");
+}
+
+#[test]
+fn test_expected_match_count_insert_mismatch_aborts_before_write() {
+    let (tmp, filename, path) = create_temp_file("anchor\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": filename,
+        "edits": [{
+            "insertAfter": "anchor",
+            "content": "tail",
+            "expectedMatchCount": 2,
+        }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("matched 1"));
+    assert_eq!(std::fs::read_to_string(path).unwrap(), "anchor\n");
+}
+
+#[test]
+fn test_expected_match_count_mismatch_keeps_multi_file_batch_unchanged() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::write(root.join("first.txt"), "x\n").unwrap();
+    std::fs::write(root.join("second.txt"), "x x\n").unwrap();
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["first.txt", "second.txt"],
+        "edits": [{
+            "search": "x",
+            "replace": "y",
+            "occurrence": 0,
+            "expectedMatchCount": 1,
+        }],
+    }));
+
+    assert!(result.is_error);
+    assert_eq!(std::fs::read_to_string(root.join("first.txt")).unwrap(), "x\n");
+    assert_eq!(std::fs::read_to_string(root.join("second.txt")).unwrap(), "x x\n");
+}
+
+#[test]
+fn test_expected_match_count_is_type_strict() {
+    let invalid_values = [json!(-1), json!(1.5), json!("1")];
+    for invalid_value in invalid_values {
+        let (tmp, filename, path) = create_temp_file("x\n");
+        let ctx = make_ctx(tmp.path());
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": filename,
+            "edits": [{
+                "search": "x",
+                "replace": "y",
+                "expectedMatchCount": invalid_value,
+            }],
+        }));
+
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains(
+            "'expectedMatchCount' must be a non-negative integer"
+        ));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), "x\n");
+    }
+}
+
+
+#[test]
+fn test_git_internal_edits_are_rejected_before_side_effects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(root.join(".git")).unwrap();
+    let config = root.join(".git/config");
+    std::fs::write(&config, "old\n").unwrap();
+    let ctx = make_ctx(&root);
+
+    for dry_run in [false, true] {
+        let result = handle_xray_edit(&ctx, &json!({
+            "path": ".git/config",
+            "dryRun": dry_run,
+            "edits": [{ "search": "old", "replace": "new" }],
+        }));
+
+        assert!(result.is_error);
+        assert!(result.content[0].text.contains("allowGitInternals=true"));
+        assert_eq!(std::fs::read_to_string(&config).unwrap(), "old\n");
+    }
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": ".git/hooks/pre-commit",
+        "operations": [{ "startLine": 1, "endLine": 0, "content": "hook\n" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(!root.join(".git/hooks").exists());
+}
+
+
+#[test]
+fn test_git_internal_edit_override_allows_write_and_skips_reindex() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(root.join(".git")).unwrap();
+    let config = root.join(".git/config");
+    std::fs::write(&config, "old\n").unwrap();
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": ".git/config",
+        "allowGitInternals": true,
+        "edits": [{ "search": "old", "replace": "new" }],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "new\n");
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["writeStatus"], "committed");
+    assert_eq!(response["reindexStatus"], "skipped");
+    assert_eq!(response["reindexSkipReason"], "insideGitDir");
+}
+
+#[test]
+fn test_git_internal_edit_override_is_type_strict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(root.join(".git")).unwrap();
+    let config = root.join(".git/config");
+    std::fs::write(&config, "old\n").unwrap();
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": ".git/config",
+        "allowGitInternals": "true",
+        "edits": [{ "search": "old", "replace": "new" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains(
+        "Parameter 'allowGitInternals' must be a boolean"
+    ));
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "old\n");
+}
+
+#[test]
+fn test_git_internal_edit_rejects_directory_symlink_alias() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let git_dir = root.join(".git");
+    std::fs::create_dir(&git_dir).unwrap();
+    let config = git_dir.join("config");
+    std::fs::write(&config, "old\n").unwrap();
+    if !create_test_dir_symlink(&git_dir, &root.join("metadata")) {
+        return;
+    }
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "metadata/config",
+        "edits": [{ "search": "old", "replace": "new" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("allowGitInternals=true"));
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "old\n");
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "metadata/config",
+        "allowGitInternals": true,
+        "edits": [{ "search": "old", "replace": "new" }],
+    }));
+
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let response: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(response["reindexSkipReason"], "insideGitDir");
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "new\n");
+}
+
+
+#[cfg(unix)]
+#[test]
+fn test_git_internal_edit_rejects_symlink_parent_dotdot_alias() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let git_dir = root.join(".git");
+    let child = git_dir.join("child");
+    std::fs::create_dir_all(&child).unwrap();
+    let config = git_dir.join("config");
+    std::fs::write(&config, "old\n").unwrap();
+    if !create_test_dir_symlink(&child, &root.join("metadata")) {
+        return;
+    }
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": "metadata/../config",
+        "edits": [{ "search": "old", "replace": "new" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(
+        result.content[0].text.contains("allowGitInternals=true"),
+        "{}",
+        result.content[0].text,
+    );
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "old\n");
+}
+
+#[cfg(windows)]
+#[test]
+fn test_git_internal_edit_rejects_case_variant_on_windows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::create_dir(root.join(".GIT")).unwrap();
+    let config = root.join(".GIT/config");
+    std::fs::write(&config, "old\n").unwrap();
+    let ctx = make_ctx(&root);
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": ".GIT/config",
+        "edits": [{ "search": "old", "replace": "new" }],
+    }));
+
+    assert!(result.is_error);
+    assert_eq!(std::fs::read_to_string(&config).unwrap(), "old\n");
 }
 
 

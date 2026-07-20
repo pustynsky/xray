@@ -399,6 +399,12 @@ fn test_xray_edit_schema_teaches_insert_and_append_idioms() {
     let edit_tool = tools.iter().find(|t| t.name == "xray_edit")
         .expect("xray_edit tool not found");
     let schema_str = edit_tool.input_schema.to_string();
+    let properties = &edit_tool.input_schema["properties"];
+    assert_eq!(properties["allowGitInternals"]["type"], "boolean");
+    assert_eq!(
+        properties["edits"]["items"]["properties"]["expectedMatchCount"]["type"],
+        "integer"
+    );
     assert!(
         schema_str.contains("INSERT before startLine"),
         "xray_edit endLine schema must document the insert-before idiom (endLine = startLine-1)"
@@ -1528,6 +1534,9 @@ fn test_tool_help_xray_edit_includes_canonical_examples() {
     let mode_b = examples.get("modeB_textMatch").and_then(|v| v.as_str()).unwrap();
     assert_eq!(mode_a, CANONICAL_MODE_A_EXAMPLE);
     assert_eq!(mode_b, CANONICAL_MODE_B_EXAMPLE);
+    let parameters = val.get("parameters").expect("should have parameters");
+    assert!(parameters.get("expectedMatchCount").is_some());
+    assert!(parameters.get("allowGitInternals").is_some());
 }
 
 #[test]
