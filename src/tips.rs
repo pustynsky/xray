@@ -736,6 +736,7 @@ pub fn parameter_examples(def_extensions: &[String]) -> Value {
             "regex": "true -> treat edit search strings as regex with $1, $2 capture groups (Mode B search/replace only)",
             "dryRun": "true -> preview unified diff without writing file. Works with both single and multi-file",
             "expectedLineCount": "Safety check: abort if file has different line count (prevents stale line numbers). Uses human/editor line count (matches xray_definitions/xray_grep numbers); reusable from previous response's newLineCount. Honored in both Mode A and Mode B.",
+            "expectedHash": "Single-file safety check: pass a prior sourceHash to abort when file bytes changed. Every result returns sourceHash (null for a new file) and resultHash; automatic commit checks also run without this parameter.",
             "errorDiagnostics": "When text/anchor/pattern is not found, the error includes a nearest-match hint showing the most similar line in the file with line number and similarity percentage (e.g., 'Nearest match at line 5 (similarity 92%): ...'). Helps diagnose Unicode quote mismatches, case differences, and whitespace issues"
         },
         "xray_help": {
