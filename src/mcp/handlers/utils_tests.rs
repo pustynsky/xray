@@ -3379,3 +3379,43 @@ fn test_response_provenance_error_does_not_probe_live_branch() {
     assert_eq!(branch["source"], "startup");
     assert!(ctx.current_branch_cache.read().unwrap().is_empty());
 }
+
+#[test]
+fn test_trigram_runtime_snapshot_status_precedence() {
+    let gate = TrigramRebuildGate::new();
+    let index = std::sync::RwLock::new(crate::ContentIndex::default());
+
+    assert_eq!(gate.snapshot(&index).status, TrigramReadiness::Ready);
+
+    index.write().unwrap().trigram_dirty = true;
+    assert_eq!(gate.snapshot(&index).status, TrigramReadiness::Dirty);
+
+    *gate.building.lock().unwrap() = true;
+    assert_eq!(gate.snapshot(&index).status, TrigramReadiness::Building);
+}
+
+#[test]
+fn test_trigram_runtime_snapshot_tracks_transition_metadata() {
+    let gate = TrigramRebuildGate::new();
+    let index = std::sync::RwLock::new(crate::ContentIndex::default());
+
+    let initial = gate.snapshot(&index);
+    assert_eq!(initial.last_dirty_trigger, TrigramDirtyTrigger::Unknown);
+    assert_eq!(initial.last_build_trigger, TrigramBuildTrigger::Unknown);
+    assert_eq!(initial.last_build_ms, None);
+    assert_eq!(initial.last_ready_at_ms, None);
+
+    gate.mark_dirty(TrigramDirtyTrigger::Watcher);
+    index.write().unwrap().trigram_dirty = true;
+    let dirty = gate.snapshot(&index);
+    assert_eq!(dirty.status, TrigramReadiness::Dirty);
+    assert_eq!(dirty.last_dirty_trigger, TrigramDirtyTrigger::Watcher);
+
+    gate.record_build_completed(TrigramBuildTrigger::Query, 12.5);
+    index.write().unwrap().trigram_dirty = false;
+    let ready = gate.snapshot(&index);
+    assert_eq!(ready.status, TrigramReadiness::Ready);
+    assert_eq!(ready.last_build_trigger, TrigramBuildTrigger::Query);
+    assert_eq!(ready.last_build_ms, Some(12.5));
+    assert!(ready.last_ready_at_ms.is_some_and(|timestamp| timestamp > 0));
+}

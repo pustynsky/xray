@@ -187,9 +187,22 @@ fn test_substring_search_trigram_dirty_triggers_rebuild() {
     assert!(!result.is_error);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
+    assert!(output["summary"]["queryMs"].is_number());
+    assert!(output["summary"]["waitForTrigramMs"].is_number());
+    assert!(output["summary"]["trigramBuildMs"].is_number());
+    assert!(
+        output["summary"]["queryMs"].as_f64().unwrap()
+            >= output["summary"]["trigramBuildMs"].as_f64().unwrap(),
+    );
     let idx = ctx.index.read().unwrap();
     assert!(!idx.trigram_dirty);
     assert!(!idx.trigram.tokens.is_empty());
+    drop(idx);
+
+    let trigram = ctx.trigram_build_gate.snapshot(&ctx.index);
+    assert_eq!(trigram.last_build_trigger, super::utils::TrigramBuildTrigger::Query);
+    assert!(trigram.last_build_ms.is_some());
+    assert!(trigram.last_ready_at_ms.is_some());
 }
 
 #[test]
@@ -216,6 +229,10 @@ fn test_trigram_rebuild_skipped_when_file_filter_narrows_scope() {
         "file": ["Program.cs"],
     }));
     assert!(!result.is_error, "grep should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("queryMs").is_none());
+    assert!(output["summary"].get("waitForTrigramMs").is_none());
+    assert!(output["summary"].get("trigramBuildMs").is_none());
     // trigram_dirty must still be true — rebuild was skipped
     assert!(ctx.index.read().unwrap().trigram_dirty,
         "trigram_dirty must remain true when file= narrows scope");
@@ -244,6 +261,10 @@ fn test_trigram_rebuild_skipped_when_auto_phrase_switch_predictable() {
         "terms": ["namespace Contoso.Test"],
     }));
     assert!(!result.is_error, "grep should succeed: {}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert!(output["summary"].get("queryMs").is_none());
+    assert!(output["summary"].get("waitForTrigramMs").is_none());
+    assert!(output["summary"].get("trigramBuildMs").is_none());
     // trigram_dirty must still be true — rebuild was skipped
     assert!(ctx.index.read().unwrap().trigram_dirty,
         "trigram_dirty must remain true when auto-phrase switch is predictable");
@@ -374,6 +395,9 @@ fn test_wide_substring_waits_for_inflight_trigram_rebuild() {
     assert!(!result.is_error, "grep should succeed: {}", result.content[0].text);
     let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
     assert_eq!(output["summary"]["totalFiles"], 1);
+    assert!(output["summary"]["queryMs"].as_f64().unwrap() > 0.0);
+    assert!(output["summary"]["waitForTrigramMs"].as_f64().unwrap() > 0.0);
+    assert_eq!(output["summary"]["trigramBuildMs"], 0.0);
 }
 
 #[test]
@@ -427,6 +451,10 @@ fn test_xray_edit_schedules_background_trigram_rebuild() {
     }
 
     assert!(rebuilt, "background rebuild should publish a clean trigram containing the edited token");
+    let trigram = ctx.trigram_build_gate.snapshot(&ctx.index);
+    assert_eq!(trigram.last_dirty_trigger, super::utils::TrigramDirtyTrigger::Edit);
+    assert_eq!(trigram.last_build_trigger, super::utils::TrigramBuildTrigger::Edit);
+    assert!(trigram.last_build_ms.is_some());
 }
 
 
@@ -902,6 +930,12 @@ fn make_e2e_substring_ctx() -> (HandlerContext, std::path::PathBuf) {
         idx.trigram.tokens.iter().any(|t| t == "startwarmupregressionmarkertoken"),
         "start_warm_trigram_index bg thread must rebuild the trigram with the new token",
     );
+    drop(idx);
+
+    let trigram = ctx.trigram_build_gate.snapshot(&ctx.index);
+    assert_eq!(trigram.last_build_trigger, super::utils::TrigramBuildTrigger::Startup);
+    assert!(trigram.last_build_ms.is_some());
+    assert!(trigram.last_ready_at_ms.is_some());
     cleanup_tmp(&tmp_dir);
 }
 

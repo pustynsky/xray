@@ -1712,17 +1712,55 @@ fn finalize_grep_results(
 
 /// Ensure the trigram index is up-to-date. Called before substring search.
 /// If `trigram_dirty` is set, rebuilds the trigram index with minimal write-lock time.
-fn ensure_trigram_index(ctx: &HandlerContext) {
-    rebuild_trigram_index_singleflight(&ctx.index, &ctx.trigram_build_gate, true);
+#[derive(Debug, Clone, Copy, Default)]
+struct TrigramEnsureOutcome {
+    wait_ms: f64,
+    build_ms: f64,
 }
+
+fn ensure_trigram_index(ctx: &HandlerContext) -> TrigramEnsureOutcome {
+    rebuild_trigram_index_singleflight(
+        &ctx.index,
+        &ctx.trigram_build_gate,
+        true,
+        utils::TrigramBuildTrigger::Query,
+    )
+}
+
+fn attach_trigram_query_timing(
+    result: &mut ToolCallResult,
+    query_elapsed: std::time::Duration,
+    timing: Option<TrigramEnsureOutcome>,
+) {
+    let Some(timing) = timing else { return; };
+    if result.is_error { return; }
+    let Some(content) = result.content.first_mut() else { return; };
+    let Ok(mut output) = serde_json::from_str::<Value>(&content.text) else { return; };
+    let Some(summary) = output.get_mut("summary").and_then(Value::as_object_mut) else {
+        return;
+    };
+    summary.insert("queryMs".to_string(), json!(query_elapsed.as_secs_f64() * 1000.0));
+    summary.insert("waitForTrigramMs".to_string(), json!(timing.wait_ms));
+    summary.insert("trigramBuildMs".to_string(), json!(timing.build_ms));
+    content.text = json_to_string(&output);
+}
+
 
 pub(crate) fn schedule_trigram_rebuild_after_edit(ctx: &HandlerContext) {
     let index = Arc::clone(&ctx.index);
     let gate = Arc::clone(&ctx.trigram_build_gate);
+    gate.mark_dirty(utils::TrigramDirtyTrigger::Edit);
 
     if let Err(error) = std::thread::Builder::new()
         .name("xray-trigram-rebuild".to_string())
-        .spawn(move || rebuild_trigram_index_singleflight(&index, &gate, false))
+        .spawn(move || {
+            rebuild_trigram_index_singleflight(
+                &index,
+                &gate,
+                false,
+                utils::TrigramBuildTrigger::Edit,
+            )
+        })
     {
         warn!(error = %error, "[grep-trace] failed to spawn background trigram rebuild");
     }
@@ -1753,7 +1791,13 @@ pub(crate) fn warm_trigram_index(
         Err(poisoned) => poisoned.into_inner().trigram_dirty,
     };
     if needs_rebuild {
-        rebuild_trigram_index_singleflight(index, gate, false);
+        gate.mark_dirty(utils::TrigramDirtyTrigger::Startup);
+        rebuild_trigram_index_singleflight(
+            index,
+            gate,
+            false,
+            utils::TrigramBuildTrigger::Startup,
+        );
     }
     // Always page-in: after a fresh rebuild the new trigram pages are hot,
     // but the surrounding inverted-index keys / postings still benefit from
@@ -1825,6 +1869,8 @@ pub(crate) fn start_warm_trigram_index(
         return;
     };
 
+    gate.mark_dirty(utils::TrigramDirtyTrigger::Startup);
+
     // Phase 2/3 (background): offline build + swap + re-loop on race + page-in.
     let bg_index = Arc::clone(index);
     let bg_gate = Arc::clone(gate);
@@ -1832,7 +1878,11 @@ pub(crate) fn start_warm_trigram_index(
         .name("xray-trigram-warmup".to_string())
         .spawn(move || {
             crate::index::log_phase("trigramWarmupStarted", &[]);
-            let _guard = TrigramBuildGuard { gate: bg_gate };
+            let mut guard = TrigramBuildGuard {
+                gate: Arc::clone(&bg_gate),
+                completed: None,
+            };
+            let build_start = Instant::now();
 
             let mut tokens = initial_tokens;
             loop {
@@ -1854,6 +1904,7 @@ pub(crate) fn start_warm_trigram_index(
                 }
                 info!("[grep-trace] trigram dirtied during warm-up rebuild; rebuilding again");
             }
+            let build_ms = build_start.elapsed().as_secs_f64() * 1000.0;
 
             // Page-in pass.
             let idx = bg_index.read().unwrap_or_else(|e| e.into_inner());
@@ -1864,6 +1915,7 @@ pub(crate) fn start_warm_trigram_index(
                 ("tokens", tkns.to_string()),
             ]);
             crate::index::log_memory("serve: trigram warm-up done");
+            guard.complete(utils::TrigramBuildTrigger::Startup, build_ms);
         });
 
     // If the bg thread failed to spawn, the closure was dropped: the
@@ -1908,21 +1960,29 @@ fn rebuild_trigram_index_singleflight(
     index: &Arc<RwLock<ContentIndex>>,
     gate: &Arc<utils::TrigramRebuildGate>,
     wait_for_inflight: bool,
-) {
+    trigger: utils::TrigramBuildTrigger,
+) -> TrigramEnsureOutcome {
     let wait_start = Instant::now();
+    let mut wait_ms = 0.0;
     let mut building = gate.building.lock().unwrap_or_else(|e| e.into_inner());
     while *building {
         if !wait_for_inflight {
             debug!("[grep-trace] trigram rebuild already in progress; background duplicate skipped");
-            return;
+            return TrigramEnsureOutcome::default();
         }
         info!("[grep-trace] waiting for in-flight trigram rebuild before wide trigram-dependent search");
+        let wait_iteration_start = Instant::now();
         building = gate.done.wait(building).unwrap_or_else(|e| e.into_inner());
+        wait_ms += wait_iteration_start.elapsed().as_secs_f64() * 1000.0;
     }
     *building = true;
     drop(building);
 
-    let _guard = TrigramBuildGuard { gate: Arc::clone(gate) };
+    let mut guard = TrigramBuildGuard {
+        gate: Arc::clone(gate),
+        completed: None,
+    };
+    let mut total_build_ms = 0.0;
 
     loop {
         let trigram_check_start = Instant::now();
@@ -1934,7 +1994,7 @@ fn rebuild_trigram_index_singleflight(
                 dirty_check_ms = format_args!("{:.3}", dirty_check_ms),
                 "[substring-trace] trigram dirty check clean"
             );
-            return;
+            return TrigramEnsureOutcome { wait_ms, build_ms: 0.0 };
         }
 
         let tokens: Vec<String> = idx.index.keys().cloned().collect();
@@ -1952,6 +2012,7 @@ fn rebuild_trigram_index_singleflight(
         let token_count = trigram.tokens.len();
         let trigram_count = trigram.trigram_map.len();
         let build_ms = rebuild_start.elapsed().as_secs_f64() * 1000.0;
+        total_build_ms += build_ms;
         let swap_start = Instant::now();
 
         let mut idx = index.write().unwrap_or_else(|e| e.into_inner());
@@ -1972,7 +2033,8 @@ fn rebuild_trigram_index_singleflight(
         );
 
         if !dirty_after_swap {
-            return;
+            guard.complete(trigger, total_build_ms);
+            return TrigramEnsureOutcome { wait_ms, build_ms: total_build_ms };
         }
         info!("[grep-trace] trigram dirtied during rebuild; rebuilding again before releasing gate");
     }
@@ -1980,11 +2042,22 @@ fn rebuild_trigram_index_singleflight(
 
 struct TrigramBuildGuard {
     gate: Arc<utils::TrigramRebuildGate>,
+    completed: Option<(utils::TrigramBuildTrigger, f64)>,
+}
+
+impl TrigramBuildGuard {
+    fn complete(&mut self, trigger: utils::TrigramBuildTrigger, build_ms: f64) {
+        self.completed = Some((trigger, build_ms));
+    }
 }
 
 impl Drop for TrigramBuildGuard {
     fn drop(&mut self) {
         let mut building = self.gate.building.lock().unwrap_or_else(|e| e.into_inner());
+        // Publish completion before releasing waiters.
+        if let Some((trigger, build_ms)) = self.completed.take() {
+            self.gate.record_build_completed(trigger, build_ms);
+        }
         *building = false;
         self.gate.done.notify_all();
     }
@@ -2960,7 +3033,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         return ToolCallResult::error(error);
     }
     let trigram_skipped = will_auto_switch_to_phrase || scope_already_narrow;
-    if (parsed.use_substring || parsed.use_line_regex)
+    let trigram_timing = if (parsed.use_substring || parsed.use_line_regex)
         && !will_auto_switch_to_phrase
         && !scope_already_narrow
     {
@@ -2970,8 +3043,10 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         // below — so the trigram index must be made clean *before* that read
         // lock is acquired (rebuilding from inside the read lock would need a
         // write lock and deadlock).
-        ensure_trigram_index(ctx);
-    }
+        Some(ensure_trigram_index(ctx))
+    } else {
+        None
+    };
 
     let lock_wait_start = Instant::now();
     let index = match ctx.index.read() {
@@ -3041,6 +3116,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
             result = apply_invert(result, &index, &grep_params);
         }
         apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
+        attach_trigram_query_timing(&mut result, search_start.elapsed(), trigram_timing);
         return result;
     }
 
@@ -3072,6 +3148,7 @@ pub(crate) fn handle_xray_grep(ctx: &HandlerContext, args: &Value) -> ToolCallRe
             result = apply_invert(result, &index, &grep_params);
         }
         apply_grep_scope_coverage(&mut result, scope_coverage.as_ref());
+        attach_trigram_query_timing(&mut result, search_start.elapsed(), trigram_timing);
         return result;
     }
 

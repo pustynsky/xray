@@ -768,6 +768,11 @@ fn test_watch_index_survives_save_load_roundtrip() {
 /// `root` (not `tmp.path()`) — on Windows CI runners `%TEMP%` is the 8.3
 /// short form (`RUNNER~1`) but the indexer canonicalises to the long form
 /// (`runneradmin`).
+fn test_trigram_build_gate() -> Arc<crate::mcp::handlers::utils::TrigramRebuildGate> {
+    Arc::new(crate::mcp::handlers::utils::TrigramRebuildGate::new())
+}
+
+
 fn make_batch_test_setup()
     -> (tempfile::TempDir, std::path::PathBuf, Arc<RwLock<ContentIndex>>)
 {
@@ -827,12 +832,26 @@ fn test_process_batch_empty() {
 
     let tokens_before = index.read().unwrap().total_tokens;
     let files_before = index.read().unwrap().files.len();
+    let trigram_build_gate = test_trigram_build_gate();
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(
+        &index,
+        &None,
+        &mut dirty,
+        &mut removed,
+        &trigram_build_gate,
+    );
 
     let idx = index.read().unwrap();
     assert_eq!(idx.total_tokens, tokens_before, "empty batch should not change total_tokens");
     assert_eq!(idx.files.len(), files_before, "empty batch should not change files");
+    drop(idx);
+
+    let trigram = trigram_build_gate.snapshot(&index);
+    assert_eq!(
+        trigram.last_dirty_trigger,
+        crate::mcp::handlers::utils::TrigramDirtyTrigger::Unknown,
+    );
 }
 
 #[test]
@@ -847,8 +866,15 @@ fn test_process_batch_dirty_file() {
     let mut dirty = HashSet::new();
     dirty.insert(file_a);
     let mut removed = HashSet::new();
+    let trigram_build_gate = test_trigram_build_gate();
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(
+        &index,
+        &None,
+        &mut dirty,
+        &mut removed,
+        &trigram_build_gate,
+    );
 
     let idx = index.read().unwrap();
     // Old token "httpclient" should be gone
@@ -872,6 +898,13 @@ fn test_process_batch_dirty_file() {
     assert!(idx.created_at > 0, "created_at should be updated after batch with changes");
     assert!(idx.created_at <= now, "created_at should not be in the future");
     assert!(now - idx.created_at < 10, "created_at should be within last 10 seconds");
+    drop(idx);
+
+    let trigram = trigram_build_gate.snapshot(&index);
+    assert_eq!(
+        trigram.last_dirty_trigger,
+        crate::mcp::handlers::utils::TrigramDirtyTrigger::Watcher,
+    );
 }
 
 #[test]
@@ -884,7 +917,7 @@ fn test_process_batch_removed_file() {
     let mut removed = HashSet::new();
     removed.insert(file_a);
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     // Tokens exclusive to file a should be gone
@@ -917,7 +950,7 @@ fn test_process_batch_mixed_dirty_and_removed() {
     let mut removed = HashSet::new();
     removed.insert(file_a);
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     // File a tokens gone
@@ -949,7 +982,7 @@ fn test_process_batch_new_file_in_dirty() {
     dirty.insert(file_c);
     let mut removed = HashSet::new();
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     // New tokens should be present
@@ -981,7 +1014,7 @@ fn test_process_batch_total_tokens_consistent() {
     dirty.insert(file_a);
     let mut removed = HashSet::new();
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     // Verify total_tokens == sum of file_token_counts
@@ -1114,7 +1147,7 @@ fn test_process_batch_returns_false_on_poisoned_content_lock() {
     let mut removed = HashSet::new();
 
     // process_batch should return false on poisoned lock
-    let result = process_batch(&index, &None, &mut dirty, &mut removed);
+    let result = process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
     assert!(!result, "process_batch should return false when content lock is poisoned");
 }
 
@@ -1148,7 +1181,7 @@ fn test_process_batch_returns_false_on_poisoned_def_lock() {
     dirty.insert(test_file);
     let mut removed = HashSet::new();
 
-    let result = process_batch(&index, &Some(def_index), &mut dirty, &mut removed);
+    let result = process_batch(&index, &Some(def_index), &mut dirty, &mut removed, &test_trigram_build_gate());
     assert!(!result, "process_batch should return false when def lock is poisoned");
 }
 
@@ -1162,7 +1195,7 @@ fn test_process_batch_returns_true_on_healthy_locks() {
     dirty.insert(test_file);
     let mut removed = HashSet::new();
 
-    let result = process_batch(&index, &None, &mut dirty, &mut removed);
+    let result = process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
     assert!(result, "process_batch should return true when locks are healthy");
 }
 
@@ -1538,7 +1571,7 @@ fn test_nonblocking_update_content_index_tokens_consistent() {
     dirty.insert(file_a);
     let mut removed = HashSet::new();
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     // Verify total_tokens == sum of file_token_counts (consistency invariant)
@@ -1567,7 +1600,7 @@ fn test_nonblocking_update_content_index_dirty_tokenize_failure_preserves_old_po
     dirty.insert(PathBuf::from(&clean_a));
     let mut removed = HashSet::new();
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     assert!(idx.index.contains_key("alpha"), "failed dirty retokenize must leave old postings intact");
@@ -1613,7 +1646,7 @@ fn test_nonblocking_update_content_index_new_file_tokens_consistent() {
     dirty.insert(file_c);
     let mut removed = HashSet::new();
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     let sum: u64 = idx.file_token_counts.iter().map(|&c| c as u64).sum();
@@ -1635,7 +1668,7 @@ fn test_nonblocking_update_content_index_remove_tokens_consistent() {
     let mut removed = HashSet::new();
     removed.insert(PathBuf::from(&clean_a));
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     let sum: u64 = idx.file_token_counts.iter().map(|&c| c as u64).sum();
@@ -2361,6 +2394,7 @@ fn periodic_rescan_no_drift_does_not_bump_counter() {
         &stats,
         false,
         &autosave_dirty,
+        &test_trigram_build_gate(),
     );
 
     assert!(!outcome.drift_detected, "no drift expected, got {:?}", outcome);
@@ -2386,6 +2420,7 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
     std::fs::write(&new_file, "class Gamma { Logger log; }").unwrap();
 
     let autosave_dirty = Arc::new(AtomicBool::new(false));
+    let trigram_build_gate = test_trigram_build_gate();
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
@@ -2394,6 +2429,7 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
         &stats,
         false,
         &autosave_dirty,
+        &trigram_build_gate,
     );
 
     assert!(outcome.drift_detected, "added file must trigger drift");
@@ -2410,6 +2446,12 @@ fn periodic_rescan_detects_added_file_and_reconciles_content() {
     assert!(
         idx.path_to_id.as_ref().unwrap().contains_key(&PathBuf::from(&clean_new)),
         "reconcile_content_index must have indexed the new file"
+    );
+    drop(idx);
+    let trigram = trigram_build_gate.snapshot(&index);
+    assert_eq!(
+        trigram.last_dirty_trigger,
+        crate::mcp::handlers::utils::TrigramDirtyTrigger::Watcher,
     );
 }
 
@@ -2448,6 +2490,7 @@ fn periodic_rescan_uses_definition_extensions_subset() {
         &stats,
         false,
         &autosave_dirty,
+        &test_trigram_build_gate(),
     );
 
     assert_eq!(outcome.content_added, 1, "content reconcile should see data.json");
@@ -2509,6 +2552,7 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
     let file_index_dirty = Arc::new(AtomicBool::new(false));
     let file_index = Arc::new(RwLock::new(None));
     let autosave_dirty = Arc::new(AtomicBool::new(false));
+    let trigram_build_gate = test_trigram_build_gate();
     let outcome = super::periodic_rescan_once(
         &index, &None, &file_index, &file_index_dirty,
         &root.to_string_lossy(),
@@ -2517,6 +2561,7 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
         &stats,
         false,
         &autosave_dirty,
+        &trigram_build_gate,
     );
 
     assert!(outcome.drift_detected, "oversized dirty file must still be detected as drift");
@@ -2535,6 +2580,12 @@ fn periodic_rescan_detected_dirty_tokenize_failure_does_not_set_autosave_dirty()
     assert_eq!(idx.file_token_counts[0], 10);
     assert_eq!(idx.created_at, 0, "failed apply must leave the retry watermark untouched");
     assert!(!idx.trigram_dirty, "failed apply must not mark derived trigram state dirty");
+    drop(idx);
+    let trigram = trigram_build_gate.snapshot(&index);
+    assert_eq!(
+        trigram.last_dirty_trigger,
+        crate::mcp::handlers::utils::TrigramDirtyTrigger::Unknown,
+    );
 }
 
 #[test]
@@ -2614,6 +2665,7 @@ fn periodic_rescan_definition_parse_failure_sets_autosave_dirty() {
         &stats,
         false,
         &autosave_dirty,
+        &test_trigram_build_gate(),
     );
 
     assert!(outcome.drift_detected);
@@ -2658,6 +2710,7 @@ fn periodic_rescan_detects_removed_file_and_reconciles_content() {
         &stats,
         false,
         &autosave_dirty,
+        &test_trigram_build_gate(),
     );
 
     assert!(outcome.drift_detected);
@@ -2708,6 +2761,7 @@ fn periodic_rescan_file_index_drift_sets_dirty_flag() {
         &stats,
         false,
         &autosave_dirty,
+        &test_trigram_build_gate(),
     );
 
     assert!(outcome.drift_detected, "file-list drift must be detected");
@@ -2754,6 +2808,7 @@ fn start_periodic_rescan_runs_at_least_one_tick_and_exits_on_generation_change()
         Arc::clone(&stats),
         false,
         autosave_dirty,
+        test_trigram_build_gate(),
     );
 
     // Wait for the first tick (interval + small slack for thread scheduling).
@@ -2831,6 +2886,7 @@ fn periodic_rescan_thread_recovers_lost_create_event() {
         Arc::clone(&stats),
         false,
         autosave_dirty,
+        test_trigram_build_gate(),
     );
 
     // Drop a new .cs file directly on disk *without* notifying any
@@ -2925,7 +2981,7 @@ fn live_file_count_matches_path_to_id_after_removal() {
     let mut removed = HashSet::new();
     removed.insert(PathBuf::from(&clean_a));
 
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     assert_eq!(idx.live_file_count(), 1,
@@ -2993,7 +3049,7 @@ fn content_index_meta_uses_live_count_after_removal() {
     let mut dirty = HashSet::new();
     let mut removed = HashSet::new();
     removed.insert(PathBuf::from(&clean_a));
-    process_batch(&index, &None, &mut dirty, &mut removed);
+    process_batch(&index, &None, &mut dirty, &mut removed, &test_trigram_build_gate());
 
     let idx = index.read().unwrap();
     let meta = crate::index::content_index_meta(&idx);

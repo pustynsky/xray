@@ -1504,10 +1504,18 @@ fn handle_xray_info(ctx: &HandlerContext, args: &Value) -> ToolCallResult {
         })
     };
 
+    let trigram = ctx.trigram_build_gate.snapshot(&ctx.index);
     let mut info = json!({
         "directory": ctx.index_base.display().to_string(),
         "workspace": workspace_state,
         "indexes": indexes,
+        "trigram": {
+            "status": trigram.status.as_str(),
+            "lastDirtyTrigger": trigram.last_dirty_trigger.as_str(),
+            "lastBuildTrigger": trigram.last_build_trigger.as_str(),
+            "lastBuildMs": trigram.last_build_ms,
+            "lastReadyAtMs": trigram.last_ready_at_ms,
+        },
     });
 
     // ── Watcher observability (Phase 0 of periodic-rescan rollout) ──
@@ -2242,6 +2250,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
         Arc::clone(&ctx.watcher_stats),
         ctx.respect_git_exclude,
         Arc::clone(&ctx.autosave_dirty),
+        Arc::clone(&ctx.trigram_build_gate),
     ) {
         warn!(error = %e, "Failed to restart file watcher for new workspace");
     } else {
@@ -2270,6 +2279,7 @@ fn restart_watcher_for_workspace(ctx: &HandlerContext, dir: &str) {
             Arc::clone(&ctx.watcher_stats),
             ctx.respect_git_exclude,
             Arc::clone(&ctx.autosave_dirty),
+            Arc::clone(&ctx.trigram_build_gate),
         );
     }
 }

@@ -728,10 +728,94 @@ impl Default for FileIndexBuildGate {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrigramReadiness {
+    Ready,
+    Dirty,
+    Building,
+}
+
+impl TrigramReadiness {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Dirty => "dirty",
+            Self::Building => "building",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrigramDirtyTrigger {
+    Startup,
+    Watcher,
+    Edit,
+    Unknown,
+}
+
+impl TrigramDirtyTrigger {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Watcher => "watcher",
+            Self::Edit => "edit",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TrigramBuildTrigger {
+    Startup,
+    Edit,
+    Query,
+    Unknown,
+}
+
+impl TrigramBuildTrigger {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Startup => "startup",
+            Self::Edit => "edit",
+            Self::Query => "query",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TrigramTelemetry {
+    last_dirty_trigger: TrigramDirtyTrigger,
+    last_build_trigger: TrigramBuildTrigger,
+    last_build_ms: Option<f64>,
+    last_ready_at_ms: Option<u64>,
+}
+
+impl Default for TrigramTelemetry {
+    fn default() -> Self {
+        Self {
+            last_dirty_trigger: TrigramDirtyTrigger::Unknown,
+            last_build_trigger: TrigramBuildTrigger::Unknown,
+            last_build_ms: None,
+            last_ready_at_ms: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct TrigramRuntimeSnapshot {
+    pub(crate) status: TrigramReadiness,
+    pub(crate) last_dirty_trigger: TrigramDirtyTrigger,
+    pub(crate) last_build_trigger: TrigramBuildTrigger,
+    pub(crate) last_build_ms: Option<f64>,
+    pub(crate) last_ready_at_ms: Option<u64>,
+}
+
 /// Single-flight gate for trigram rebuilds.
 pub struct TrigramRebuildGate {
     pub(crate) building: std::sync::Mutex<bool>,
     pub(crate) done: std::sync::Condvar,
+    telemetry: std::sync::Mutex<TrigramTelemetry>,
 }
 
 impl TrigramRebuildGate {
@@ -739,11 +823,53 @@ impl TrigramRebuildGate {
         Self {
             building: std::sync::Mutex::new(false),
             done: std::sync::Condvar::new(),
+            telemetry: std::sync::Mutex::new(TrigramTelemetry::default()),
         }
     }
 
     pub fn is_building(&self) -> bool {
         self.building.lock().map(|building| *building).unwrap_or(false)
+    }
+
+    pub(crate) fn snapshot(
+        &self,
+        index: &std::sync::RwLock<crate::ContentIndex>,
+    ) -> TrigramRuntimeSnapshot {
+        let index = index.read().unwrap_or_else(|error| error.into_inner());
+        let building = self.building.lock().unwrap_or_else(|error| error.into_inner());
+        let status = if *building {
+            TrigramReadiness::Building
+        } else if index.trigram_dirty {
+            TrigramReadiness::Dirty
+        } else {
+            TrigramReadiness::Ready
+        };
+        let telemetry = self.telemetry.lock().unwrap_or_else(|error| error.into_inner());
+        TrigramRuntimeSnapshot {
+            status,
+            last_dirty_trigger: telemetry.last_dirty_trigger,
+            last_build_trigger: telemetry.last_build_trigger,
+            last_build_ms: telemetry.last_build_ms,
+            last_ready_at_ms: telemetry.last_ready_at_ms,
+        }
+    }
+
+    pub(crate) fn mark_dirty(&self, trigger: TrigramDirtyTrigger) {
+        self.telemetry
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .last_dirty_trigger = trigger;
+    }
+
+    pub(crate) fn record_build_completed(&self, trigger: TrigramBuildTrigger, build_ms: f64) {
+        let ready_at_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|duration| u64::try_from(duration.as_millis()).ok());
+        let mut telemetry = self.telemetry.lock().unwrap_or_else(|error| error.into_inner());
+        telemetry.last_build_trigger = trigger;
+        telemetry.last_build_ms = Some(build_ms);
+        telemetry.last_ready_at_ms = ready_at_ms;
     }
 }
 

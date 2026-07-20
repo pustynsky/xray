@@ -141,6 +141,7 @@ pub fn start_watcher(
     stats: Arc<WatcherStats>,
     respect_git_exclude: bool,
     autosave_dirty: Arc<AtomicBool>,
+    trigram_build_gate: Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
 ) -> notify::Result<()> {
     let (tx, rx) = std::sync::mpsc::channel::<notify::Result<Event>>();
 
@@ -355,7 +356,10 @@ pub fn start_watcher(
                     // Force flush if accumulating too long (prevents debounce starvation)
                     if let Some(start) = batch_start
                         && start.elapsed() >= MAX_ACCUMULATE {
-                            if !process_batch(&index, &def_index, &mut dirty_files, &mut removed_files) {
+                            if !process_batch(
+                                &index, &def_index, &mut dirty_files, &mut removed_files,
+                                &trigram_build_gate,
+                            ) {
                                 error!("RwLock poisoned, watcher thread exiting");
                                 break;
                             }
@@ -399,7 +403,10 @@ pub fn start_watcher(
                         // workspace switch doesn't drop incremental updates
                         // already received from the FS.
                         if !dirty_files.is_empty() || !removed_files.is_empty() {
-                            let _ = process_batch(&index, &def_index, &mut dirty_files, &mut removed_files);
+                            let _ = process_batch(
+                                &index, &def_index, &mut dirty_files, &mut removed_files,
+                                &trigram_build_gate,
+                            );
                             have_unsaved = true;
                         }
                         // MCP-WCH-007: thread is about to exit — there is no
@@ -424,7 +431,10 @@ pub fn start_watcher(
                         }
                         continue;
                     }
-                    if !process_batch(&index, &def_index, &mut dirty_files, &mut removed_files) {
+                    if !process_batch(
+                                &index, &def_index, &mut dirty_files, &mut removed_files,
+                                &trigram_build_gate,
+                            ) {
                         error!("RwLock poisoned, watcher thread exiting to avoid infinite error loop");
                         break;
                     }
@@ -451,7 +461,10 @@ pub fn start_watcher(
                     // reported. `process_batch` is best-effort; if the lock
                     // is poisoned we simply give up (same as the live loop).
                     if !dirty_files.is_empty() || !removed_files.is_empty() {
-                        let _ = process_batch(&index, &def_index, &mut dirty_files, &mut removed_files);
+                        let _ = process_batch(
+                                &index, &def_index, &mut dirty_files, &mut removed_files,
+                                &trigram_build_gate,
+                            );
                         have_unsaved = true;
                     }
                     // MCP-WCH-007: thread is about to exit — see matching
@@ -504,6 +517,7 @@ struct ContentUpdateResult {
     lock_wait_ms: f64,
     update_ms: f64,
     applied_dirty: usize,
+    applied_changes: bool,
 }
 
 /// Result of a single `update_definition_index` call with lock-wait timing.
@@ -617,6 +631,7 @@ fn process_batch(
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     dirty_files: &mut HashSet<PathBuf>,
     removed_files: &mut HashSet<PathBuf>,
+    trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
 ) -> bool {
     let update_count = dirty_files.len();
     let remove_count = removed_files.len();
@@ -647,8 +662,14 @@ fn process_batch(
     let batch_start = std::time::Instant::now();
 
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
-    if !update_content_index(index, &removed_clean, &dirty_clean).ok {
+    let content_result = update_content_index(index, &removed_clean, &dirty_clean);
+    if !content_result.ok {
         return false;
+    }
+    if content_result.applied_changes {
+        trigram_build_gate.mark_dirty(
+            crate::mcp::handlers::utils::TrigramDirtyTrigger::Watcher,
+        );
     }
 
     // Update definition index (if available)
@@ -724,7 +745,13 @@ fn update_content_index(
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire content index read lock (poisoned)");
-            return ContentUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0 };
+            return ContentUpdateResult {
+                ok: false,
+                lock_wait_ms: 0.0,
+                update_ms: 0.0,
+                applied_dirty: 0,
+                applied_changes: false,
+            };
         }
     };
     // READ lock released here
@@ -848,11 +875,23 @@ fn update_content_index(
                     "[reindex-trace] update_content_index write lock breakdown"
                 );
             }
-            ContentUpdateResult { ok: true, lock_wait_ms, update_ms, applied_dirty: applied_dirty_count }
+            ContentUpdateResult {
+                ok: true,
+                lock_wait_ms,
+                update_ms,
+                applied_dirty: applied_dirty_count,
+                applied_changes,
+            }
         }
         Err(e) => {
             error!(error = %e, "Failed to acquire content index write lock (poisoned)");
-            ContentUpdateResult { ok: false, lock_wait_ms: 0.0, update_ms: 0.0, applied_dirty: 0 }
+            ContentUpdateResult {
+                ok: false,
+                lock_wait_ms: 0.0,
+                update_ms: 0.0,
+                applied_dirty: 0,
+                applied_changes: false,
+            }
         }
     }
 }
@@ -1858,6 +1897,7 @@ pub(crate) fn periodic_rescan_once(
     stats: &Arc<WatcherStats>,
     respect_git_exclude: bool,
     autosave_dirty: &Arc<AtomicBool>,
+    trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
 ) -> RescanOutcome {
     let start = Instant::now();
     stats.periodic_rescan_total.fetch_add(1, Ordering::Relaxed);
@@ -1943,7 +1983,13 @@ pub(crate) fn periodic_rescan_once(
         // new baseline. Definition reconcile is different: a dirty file that
         // fails to parse can still remove stale definitions and advance the def
         // watermark, so any reported def delta must also be persisted.
-        if applied_added + applied_modified + applied_removed > 0 || definition_changed {
+        let content_changed = applied_added + applied_modified + applied_removed > 0;
+        if content_changed {
+            trigram_build_gate.mark_dirty(
+                crate::mcp::handlers::utils::TrigramDirtyTrigger::Watcher,
+            );
+        }
+        if content_changed || definition_changed {
             autosave_dirty.store(true, Ordering::Relaxed);
         }
     }
@@ -2018,6 +2064,7 @@ pub fn start_periodic_rescan(
     stats: Arc<WatcherStats>,
     respect_git_exclude: bool,
     autosave_dirty: Arc<AtomicBool>,
+    trigram_build_gate: Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
 ) {
     let effective = interval_sec.max(MIN_RESCAN_INTERVAL_SEC);
     if effective != interval_sec {
@@ -2064,6 +2111,7 @@ pub fn start_periodic_rescan(
                 &stats,
                 respect_git_exclude,
                 &autosave_dirty,
+                &trigram_build_gate,
             );
         }
     });
