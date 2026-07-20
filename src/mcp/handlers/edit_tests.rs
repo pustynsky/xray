@@ -1019,10 +1019,14 @@ fn test_multi_file_dry_run() {
     assert_eq!(std::fs::read_to_string(&path1).unwrap(), "hello world\n");
     assert_eq!(std::fs::read_to_string(&path2).unwrap(), "hello there\n");
 
-    // Response should have dryRun = true
+    // Response should have dryRun = true and per-file source/result hashes.
     let text = &result.content[0].text;
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["summary"]["dryRun"], true);
+    for file in parsed["results"].as_array().unwrap() {
+        assert!(file["sourceHash"].as_str().unwrap().starts_with("sha256:"));
+        assert!(file["resultHash"].as_str().unwrap().starts_with("sha256:"));
+    }
 }
 
 #[test]
@@ -3166,6 +3170,8 @@ fn test_auto_create_file_via_mode_a_insert() {
     let text = &result.content[0].text;
     let parsed: serde_json::Value = serde_json::from_str(text).unwrap();
     assert_eq!(parsed["fileCreated"], true, "Response should have fileCreated: true");
+    assert_eq!(parsed["sourceHash"], serde_json::Value::Null);
+    assert!(parsed["resultHash"].as_str().unwrap().starts_with("sha256:"));
     assert_eq!(parsed["applied"], 1);
 
     // Verify file exists with correct content
@@ -3571,6 +3577,41 @@ mod audit_regression_tests {
         assert_eq!(restored & WINDOWS_PRESERVED_ATTRIBUTES, expected & WINDOWS_PRESERVED_ATTRIBUTES);
     }
 
+
+    #[cfg(windows)]
+    #[test]
+    fn test_commit_rejects_external_windows_attribute_change() {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_ATTRIBUTE_HIDDEN,
+            FILE_ATTRIBUTE_READONLY,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let path = root.join("attributes.txt");
+        std::fs::write(&path, "before\n").unwrap();
+        let original = get_windows_attributes(&path);
+        let target = read_and_validate_file(&root.to_string_lossy(), "attributes.txt", false, false).unwrap();
+        let staged = temp_path_for(&target.write_path);
+        stage_file_with_endings(
+            &staged,
+            "after\n",
+            target.line_ending,
+            target.metadata.as_ref(),
+        ).unwrap();
+        set_windows_attributes(&path, (original | FILE_ATTRIBUTE_HIDDEN) & !FILE_ATTRIBUTE_READONLY);
+
+        let result = commit_staged_file(&target, &staged);
+        let attributes_after = get_windows_attributes(&path);
+        set_windows_attributes(&path, original & !FILE_ATTRIBUTE_READONLY);
+        remove_file_best_effort(&staged);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("metadata changed"));
+        assert_ne!(attributes_after & FILE_ATTRIBUTE_HIDDEN, 0);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\n");
+    }
+
     #[cfg(windows)]
     #[test]
     fn test_multi_file_edit_preserves_windows_file_attributes() {
@@ -3629,6 +3670,35 @@ mod audit_regression_tests {
 
         assert!(!result.is_error, "edit should succeed: {}", result.content[0].text);
         assert_eq!(std::fs::metadata(&target).unwrap().mode() & 0o7777, 0o751);
+    }
+
+
+    #[cfg(unix)]
+    #[test]
+    fn test_commit_rejects_external_unix_mode_change() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let path = root.join("script.sh");
+        std::fs::write(&path, "before\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o750)).unwrap();
+        let target = read_and_validate_file(&root.to_string_lossy(), "script.sh", false, false).unwrap();
+        let staged = temp_path_for(&target.write_path);
+        stage_file_with_endings(
+            &staged,
+            "after\n",
+            target.line_ending,
+            target.metadata.as_ref(),
+        ).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let result = commit_staged_file(&target, &staged);
+
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("metadata changed"));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\n");
+        remove_file_best_effort(&staged);
     }
 
 
@@ -4944,6 +5014,319 @@ fn test_multi_file_resolves_symlinked_parent_for_missing_targets() {
 
 
 #[test]
+fn test_commit_rejects_same_line_count_external_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let path = root.join("file.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let target = read_and_validate_file(&root.to_string_lossy(), "file.txt", false, false).unwrap();
+    let staged = temp_path_for(&target.write_path);
+    stage_file_with_endings(
+        &staged,
+        "after!\n",
+        target.line_ending,
+        target.metadata.as_ref(),
+    ).unwrap();
+    std::fs::write(&path, "outside\n").unwrap();
+
+    let result = commit_staged_file(&target, &staged);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("Concurrent modification"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "outside\n");
+    remove_file_best_effort(&staged);
+}
+
+#[test]
+fn test_commit_rejects_identity_replacement_with_same_bytes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let path = root.join("file.txt");
+    std::fs::write(&path, "before\n").unwrap();
+    let target = read_and_validate_file(&root.to_string_lossy(), "file.txt", false, false).unwrap();
+    let staged = temp_path_for(&target.write_path);
+    stage_file_with_endings(
+        &staged,
+        "after\n",
+        target.line_ending,
+        target.metadata.as_ref(),
+    ).unwrap();
+    let replacement = root.join("replacement.txt");
+    std::fs::write(&replacement, "before\n").unwrap();
+    rename_replace(&replacement, &path, None).unwrap();
+
+    let result = commit_staged_file(&target, &staged);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("identity changed"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\n");
+    remove_file_best_effort(&staged);
+}
+
+
+#[test]
+fn test_commit_rejects_symlink_retarget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let first = root.join("first.txt");
+    let second = root.join("second.txt");
+    let link = root.join("alias.txt");
+    std::fs::write(&first, "first\n").unwrap();
+    std::fs::write(&second, "second\n").unwrap();
+    if !create_test_file_symlink(&first, &link) {
+        return;
+    }
+    let target = read_and_validate_file(&root.to_string_lossy(), "alias.txt", false, false).unwrap();
+    let staged = temp_path_for(&target.write_path);
+    stage_file_with_endings(
+        &staged,
+        "ours\n",
+        target.line_ending,
+        target.metadata.as_ref(),
+    ).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    assert!(create_test_file_symlink(&second, &link));
+
+    let result = commit_staged_file(&target, &staged);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("identity changed"));
+    assert_eq!(std::fs::read_to_string(&first).unwrap(), "first\n");
+    assert_eq!(std::fs::read_to_string(&second).unwrap(), "second\n");
+    remove_file_best_effort(&staged);
+}
+
+
+#[test]
+fn test_commit_rejects_symlink_replaced_by_hard_link_to_same_target() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let physical = root.join("physical.txt");
+    let link = root.join("alias.txt");
+    std::fs::write(&physical, "before\n").unwrap();
+    if !create_test_file_symlink(&physical, &link) {
+        return;
+    }
+    let target = read_and_validate_file(&root.to_string_lossy(), "alias.txt", false, false).unwrap();
+    let staged = temp_path_for(&target.write_path);
+    stage_file_with_endings(
+        &staged,
+        "after\n",
+        target.line_ending,
+        target.metadata.as_ref(),
+    ).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    std::fs::hard_link(&physical, &link).unwrap();
+
+    let result = commit_staged_file(&target, &staged);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("path kind changed"));
+    assert_eq!(std::fs::read_to_string(&physical).unwrap(), "before\n");
+    remove_file_best_effort(&staged);
+}
+
+#[test]
+fn test_multi_preflight_detects_conflict_before_any_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let first_path = root.join("first.txt");
+    let second_path = root.join("second.txt");
+    std::fs::write(&first_path, "first\n").unwrap();
+    std::fs::write(&second_path, "second\n").unwrap();
+    let first = read_and_validate_file(&root.to_string_lossy(), "first.txt", false, false).unwrap();
+    let second = read_and_validate_file(&root.to_string_lossy(), "second.txt", false, false).unwrap();
+    std::fs::write(&second_path, "external\n").unwrap();
+
+    let result = validate_targets_unchanged([
+        ("first.txt", &first),
+        ("second.txt", &second),
+    ]);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("second.txt"));
+    assert_eq!(std::fs::read_to_string(&first_path).unwrap(), "first\n");
+    assert_eq!(std::fs::read_to_string(&second_path).unwrap(), "external\n");
+}
+
+#[test]
+fn test_new_file_commit_does_not_clobber_external_creation() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let path = root.join("new.txt");
+    let target = read_and_validate_file(&root.to_string_lossy(), "new.txt", false, false).unwrap();
+    let staged = temp_path_for(&target.write_path);
+    stage_file_with_endings(&staged, "ours\n", "\n", None).unwrap();
+    std::fs::write(&path, "external\n").unwrap();
+
+    let result = commit_staged_file(&target, &staged);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("appeared after it was read"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "external\n");
+    remove_file_best_effort(&staged);
+}
+
+
+#[test]
+fn test_portable_new_file_fallback_copies_without_clobber() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let target = read_and_validate_file(&root.to_string_lossy(), "new.txt", false, false).unwrap();
+    let staged = temp_path_for(&target.write_path);
+    stage_file_with_endings(&staged, "portable\n", "\n", None).unwrap();
+    let unsupported = std::io::Error::new(std::io::ErrorKind::Unsupported, "hard links unsupported");
+
+    copy_staged_file_no_clobber(&target, &staged, &unsupported).unwrap();
+
+    assert_eq!(std::fs::read_to_string(root.join("new.txt")).unwrap(), "portable\n");
+    assert!(!staged.exists());
+}
+
+#[test]
+fn test_portable_new_file_fallback_rejects_existing_destination() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let target = read_and_validate_file(&root.to_string_lossy(), "new.txt", false, false).unwrap();
+    let staged = temp_path_for(&target.write_path);
+    stage_file_with_endings(&staged, "ours\n", "\n", None).unwrap();
+    std::fs::write(root.join("new.txt"), "external\n").unwrap();
+    let unsupported = std::io::Error::new(std::io::ErrorKind::Unsupported, "hard links unsupported");
+
+    let result = copy_staged_file_no_clobber(&target, &staged, &unsupported);
+
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("appeared after it was read"));
+    assert_eq!(std::fs::read_to_string(root.join("new.txt")).unwrap(), "external\n");
+    remove_file_best_effort(&staged);
+}
+
+
+#[test]
+fn test_reserved_cleanup_removes_only_matching_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("reserved.txt");
+    let file = std::fs::File::create(&path).unwrap();
+    let identity = file_handle_identity(&file).expect("supported identity");
+    drop(file);
+
+    remove_reserved_file_if_unchanged(&path, Some(&identity));
+
+    assert!(!path.exists());
+}
+
+#[test]
+fn test_reserved_cleanup_preserves_mismatched_identity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = tmp.path().join("replacement.txt");
+    std::fs::write(&path, "external\n").unwrap();
+
+    remove_reserved_file_if_unchanged(&path, Some("different-identity"));
+
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "external\n");
+}
+
+
+#[test]
+fn test_new_file_commit_rejects_symlinked_parent_retarget() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let first = root.join("first");
+    let second = root.join("second");
+    let alias = root.join("alias");
+    std::fs::create_dir_all(&first).unwrap();
+    std::fs::create_dir_all(&second).unwrap();
+    if !create_test_dir_symlink(&first, &alias) {
+        return;
+    }
+    let target = read_and_validate_file(
+        &root.to_string_lossy(),
+        "alias/new.txt",
+        false,
+        false,
+    ).unwrap();
+    let staged = temp_path_for(&target.write_path);
+    stage_file_with_endings(&staged, "ours\n", "\n", None).unwrap();
+    std::fs::remove_dir(&alias).or_else(|_| std::fs::remove_file(&alias)).unwrap();
+    assert!(create_test_dir_symlink(&second, &alias));
+    let current_key = missing_file_key(&target.logical_path);
+    assert_ne!(
+        target.physical_key,
+        current_key,
+        "retargeted parent must change identity: snapshot={}, current={}",
+        target.physical_key,
+        current_key,
+    );
+
+    let result = commit_staged_file(&target, &staged);
+
+    let error = result.expect_err("parent retarget must be rejected");
+    assert!(
+        error.contains("parent identity changed"),
+        "unexpected rejection: {}",
+        error,
+    );
+    assert!(!first.join("new.txt").exists());
+    assert!(!second.join("new.txt").exists());
+    remove_file_best_effort(&staged);
+}
+
+
+#[test]
+fn test_new_file_commit_rejects_parent_directory_replacement() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    let parent = root.join("parent");
+    let old_parent = root.join("old-parent");
+    std::fs::create_dir_all(&parent).unwrap();
+    let target = read_and_validate_file(
+        &root.to_string_lossy(),
+        "parent/new.txt",
+        false,
+        false,
+    ).unwrap();
+    let staged = root.join("staged.tmp");
+    stage_file_with_endings(&staged, "ours\n", "\n", None).unwrap();
+    std::fs::rename(&parent, &old_parent).unwrap();
+    std::fs::create_dir_all(&parent).unwrap();
+
+    let result = commit_staged_file(&target, &staged);
+
+    let error = result.expect_err("parent replacement must be rejected");
+    assert!(error.contains("parent identity changed"), "unexpected rejection: {}", error);
+    assert!(!parent.join("new.txt").exists());
+    assert!(!old_parent.join("new.txt").exists());
+    remove_file_best_effort(&staged);
+}
+
+#[test]
+fn test_result_hash_round_trips_as_next_expected_hash() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "zero\n");
+    let ctx = make_ctx(tmp.path());
+
+    let first = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "edits": [{ "search": "zero", "replace": "one" }],
+    }));
+    assert!(!first.is_error, "first edit should succeed: {}", first.content[0].text);
+    let first_payload: serde_json::Value = serde_json::from_str(&first.content[0].text).unwrap();
+    let result_hash = first_payload["resultHash"].as_str().unwrap();
+
+    let second = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "expectedHash": result_hash,
+        "edits": [{ "search": "one", "replace": "two" }],
+    }));
+
+    assert!(!second.is_error, "second edit should succeed: {}", second.content[0].text);
+    let second_payload: serde_json::Value = serde_json::from_str(&second.content[0].text).unwrap();
+    assert_eq!(second_payload["sourceHash"], result_hash);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "two\n");
+}
+
+
+#[test]
 fn test_lexical_normalize_preserves_stacked_leading_parent_components() {
     assert_eq!(
         lexical_normalize(std::path::Path::new("../../foo")),
@@ -5527,6 +5910,98 @@ fn test_top_level_allow_break_hard_links_wrong_type_rejected() {
     let msg = result.content.iter().map(|c| c.text.clone()).collect::<String>();
     assert!(msg.contains("'allowBreakHardLinks'"), "msg should name the key: {}", msg);
     assert!(msg.contains("boolean"), "msg should name the expected type: {}", msg);
+}
+
+
+#[test]
+fn test_dry_run_returns_source_and_result_hashes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "before\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "dryRun": true,
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(!result.is_error, "dryRun should succeed: {}", result.content[0].text);
+    let payload: serde_json::Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let source_hash = payload["sourceHash"].as_str().expect("sourceHash");
+    let result_hash = payload["resultHash"].as_str().expect("resultHash");
+    assert!(source_hash.starts_with("sha256:"));
+    assert!(result_hash.starts_with("sha256:"));
+    assert_ne!(source_hash, result_hash);
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\n");
+}
+
+
+#[test]
+fn test_hash_bytes_uses_standard_sha256_format() {
+    assert_eq!(
+        hash_bytes(b"abc"),
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+    );
+    assert_eq!(
+        normalize_source_hash(
+            "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+        ).unwrap(),
+        hash_bytes(b"abc"),
+    );
+}
+
+#[test]
+fn test_stale_expected_hash_rejects_without_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "before\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "expectedHash": format!("sha256:{}", "0".repeat(64)),
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("expectedHash"));
+    assert!(result.content[0].text.contains("does not match"));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "before\n");
+}
+
+#[test]
+fn test_top_level_expected_hash_wrong_type_rejected() {
+    let tmp = tempfile::tempdir().unwrap();
+    let path = create_named_temp_file(tmp.path(), "f.txt", "before\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "path": path.to_string_lossy(),
+        "expectedHash": 42,
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("'expectedHash'"));
+    assert!(result.content[0].text.contains("string"));
+}
+
+#[test]
+fn test_expected_hash_is_rejected_for_multi_file_edit() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_named_temp_file(tmp.path(), "a.txt", "before\n");
+    create_named_temp_file(tmp.path(), "b.txt", "before\n");
+    let ctx = make_ctx(tmp.path());
+
+    let result = handle_xray_edit(&ctx, &json!({
+        "paths": ["a.txt", "b.txt"],
+        "expectedHash": format!("sha256:{}", "0".repeat(64)),
+        "edits": [{ "search": "before", "replace": "after" }],
+    }));
+
+    assert!(result.is_error);
+    assert!(result.content[0].text.contains("only supported with 'path'"));
+    assert_eq!(std::fs::read_to_string(tmp.path().join("a.txt")).unwrap(), "before\n");
+    assert_eq!(std::fs::read_to_string(tmp.path().join("b.txt")).unwrap(), "before\n");
 }
 
 #[test]

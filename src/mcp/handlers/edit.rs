@@ -21,6 +21,15 @@ enum EditMode<'a> {
     Edits(&'a [Value]),
 }
 
+
+#[derive(Clone, Copy)]
+struct EditRequestOptions {
+    is_regex: bool,
+    dry_run: bool,
+    expected_line_count: Option<usize>,
+    allow_break_hard_links: bool,
+}
+
 /// Maximum number of files for multi-file edit (protection against abuse).
 const MAX_MULTI_FILE_PATHS: usize = 20;
 
@@ -159,6 +168,19 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
     let is_regex = args.get("regex").and_then(|v| v.as_bool()).unwrap_or(false);
     let dry_run = args.get("dryRun").and_then(|v| v.as_bool()).unwrap_or(false);
     let expected_line_count = args.get("expectedLineCount").and_then(|v| v.as_u64()).map(|v| v as usize);
+    let expected_hash = match args.get("expectedHash").and_then(Value::as_str) {
+        Some(value) => match normalize_source_hash(value) {
+            Ok(hash) => Some(hash),
+            Err(error) => return ToolCallResult::error(error),
+        },
+        None => None,
+    };
+    if expected_hash.is_some() && multi_paths.is_some() {
+        return ToolCallResult::error(
+            "Parameter 'expectedHash' is only supported with 'path'; multi-file edits use automatic per-file source checks."
+                .to_string(),
+        );
+    }
     let allow_break_hard_links = args.get("allowBreakHardLinks")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
@@ -179,16 +201,20 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
         (None, Some(eds)) => EditMode::Edits(eds),
     };
 
+    let options = EditRequestOptions {
+        is_regex,
+        dry_run,
+        expected_line_count,
+        allow_break_hard_links,
+    };
+
     // ── Dispatch single vs multi-file ──
     if let Some(paths_array) = multi_paths {
         handle_multi_file_edit(
             ctx,
             paths_array,
             &mode,
-            is_regex,
-            dry_run,
-            expected_line_count,
-            allow_break_hard_links,
+            options,
         )
     } else {
         let path_str = single_path.unwrap(); // validated above
@@ -196,10 +222,8 @@ pub(crate) fn handle_xray_edit(ctx: &HandlerContext, args: &Value) -> ToolCallRe
             ctx,
             path_str,
             &mode,
-            is_regex,
-            dry_run,
-            expected_line_count,
-            allow_break_hard_links,
+            options,
+            expected_hash.as_deref(),
         )
     }
 }
@@ -216,6 +240,7 @@ const KNOWN_EDIT_PARAMS: &[&str] = &[
     "dryRun",
     "expectedLineCount",
     "allowBreakHardLinks",
+    "expectedHash",
 ];
 
 /// Per-edit fields accepted inside `edits[]` / `operations[]` (used both for
@@ -553,6 +578,11 @@ fn check_top_level_param_types(obj: &serde_json::Map<String, Value>) -> Option<S
     {
         return Some(err("allowBreakHardLinks", "a boolean (true/false)", v));
     }
+    if let Some(v) = obj.get("expectedHash")
+        && !v.is_string()
+    {
+        return Some(err("expectedHash", "a string", v));
+    }
     if let Some(v) = obj.get("expectedLineCount")
         && v.as_u64().is_none()
     {
@@ -660,6 +690,30 @@ struct EditResult {
     brace_balance_warnings: Vec<String>,
 }
 
+fn hash_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    format!("sha256:{:x}", Sha256::digest(bytes))
+}
+
+fn normalize_source_hash(value: &str) -> Result<String, String> {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return Err("Parameter 'expectedHash' must use the format 'sha256:<64 hex chars>'.".to_string());
+    };
+    if hex.len() != 64 || !hex.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err("Parameter 'expectedHash' must use the format 'sha256:<64 hex chars>'.".to_string());
+    }
+    Ok(format!("sha256:{}", hex.to_ascii_lowercase()))
+}
+
+fn content_bytes(content: &str, line_ending: &str) -> Vec<u8> {
+    if line_ending == "\r\n" {
+        content.replace('\n', "\r\n").into_bytes()
+    } else {
+        content.as_bytes().to_vec()
+    }
+}
+
+
 #[derive(Debug)]
 struct FileMetadataSnapshot {
     #[cfg(unix)]
@@ -762,6 +816,33 @@ impl FileMetadataSnapshot {
         }
     }
 
+    fn matches_current(
+        &self,
+        path: &Path,
+        metadata: &std::fs::Metadata,
+    ) -> Result<bool, String> {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = path;
+            Ok(self.permissions.mode() == metadata.permissions().mode())
+        }
+        #[cfg(windows)]
+        {
+            let _ = metadata;
+            Ok(
+                self.file_attributes
+                    == get_windows_file_attributes(path)? & WINDOWS_PRESERVED_ATTRIBUTES,
+            )
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (self.unsupported, path, metadata);
+            Ok(true)
+        }
+    }
+
+
     fn prepare_destination_for_replace(&self, path: &Path) -> Result<bool, String> {
         #[cfg(windows)]
         {
@@ -793,6 +874,7 @@ struct PreparedEditTarget {
     hard_link_count: u64,
     physical_key: String,
     metadata: Option<FileMetadataSnapshot>,
+    source_hash: Option<String>,
 }
 
 impl PreparedEditTarget {
@@ -812,18 +894,13 @@ fn target_identity(
 }
 
 #[cfg(windows)]
-fn target_identity(
-    path: &Path,
-    _metadata: &std::fs::Metadata,
-) -> Result<(u64, String), String> {
+fn windows_file_identity(file: &std::fs::File) -> Result<(u64, String), String> {
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         BY_HANDLE_FILE_INFORMATION,
         GetFileInformationByHandle,
     };
 
-    let file = std::fs::File::open(path)
-        .map_err(|error| format!("cannot open target for identity check: {}", error))?;
     let mut info = std::mem::MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::zeroed();
     // SAFETY: `file` owns a valid handle and `info` is writable for the call.
     let succeeded = unsafe {
@@ -842,6 +919,17 @@ fn target_identity(
         info.nNumberOfLinks as u64,
         format!("windows:{}:{}", info.dwVolumeSerialNumber, file_index),
     ))
+}
+
+
+#[cfg(windows)]
+fn target_identity(
+    path: &Path,
+    _metadata: &std::fs::Metadata,
+) -> Result<(u64, String), String> {
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("cannot open target for identity check: {}", error))?;
+    windows_file_identity(&file)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -872,6 +960,38 @@ fn lexical_normalize(path: &Path) -> PathBuf {
 }
 
 
+#[cfg(unix)]
+fn directory_identity(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|metadata| {
+        format!("unix:{}:{}", metadata.dev(), metadata.ino())
+    })
+}
+
+#[cfg(windows)]
+fn directory_identity(path: &Path) -> Option<String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        FILE_FLAG_BACKUP_SEMANTICS,
+        FILE_SHARE_DELETE,
+        FILE_SHARE_READ,
+        FILE_SHARE_WRITE,
+    };
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    file_handle_identity(&file)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn directory_identity(_path: &Path) -> Option<String> {
+    None
+}
+
+
 fn missing_file_key(path: &Path) -> String {
     let normalized = lexical_normalize(path);
     let mut existing_ancestor = normalized.clone();
@@ -884,16 +1004,20 @@ fn missing_file_key(path: &Path) -> String {
             break;
         }
     }
-    let mut physical = std::fs::canonicalize(&existing_ancestor)
+    let physical_ancestor = std::fs::canonicalize(&existing_ancestor)
         .unwrap_or(existing_ancestor);
+    let ancestor_key = directory_identity(&physical_ancestor).unwrap_or_else(|| {
+        format!("path:{}", crate::clean_path(&physical_ancestor.to_string_lossy()))
+    });
+    let mut suffix = PathBuf::new();
     for component in missing_suffix.iter().rev() {
-        physical.push(component);
+        suffix.push(component);
     }
-    let value = crate::clean_path(&physical.to_string_lossy());
+    let suffix = crate::clean_path(&suffix.to_string_lossy());
     #[cfg(windows)]
-    return format!("path:{}", value.to_lowercase());
+    return format!("missing:{}:{}", ancestor_key.to_lowercase(), suffix.to_lowercase());
     #[cfg(not(windows))]
-    format!("path:{}", value)
+    format!("missing:{}:{}", ancestor_key, suffix)
 }
 
 /// Read a logical edit path while preserving the physical object that receives the write.
@@ -927,6 +1051,7 @@ fn read_and_validate_file(
             symlink_followed: false,
             hard_link_count: 0,
             metadata: None,
+            source_hash: None,
         });
     };
 
@@ -987,6 +1112,7 @@ fn read_and_validate_file(
         symlink_followed,
         hard_link_count,
         metadata: Some(metadata_snapshot),
+        source_hash: Some(hash_bytes(&raw_bytes)),
     })
 }
 
@@ -1187,21 +1313,251 @@ fn stage_file_with_endings(
 }
 
 
+fn concurrent_modification(path: &Path, detail: &str) -> String {
+    format!(
+        "Concurrent modification detected for '{}': {}. No overwrite was performed.",
+        path.display(), detail
+    )
+}
+
+fn validate_source_unchanged(target: &PreparedEditTarget) -> Result<(), String> {
+    if !target.file_existed {
+        match std::fs::symlink_metadata(&target.logical_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            _ => {
+                return Err(concurrent_modification(
+                    &target.logical_path,
+                    "the destination appeared after it was read",
+                ));
+            }
+        }
+        if missing_file_key(&target.logical_path) != target.physical_key {
+            return Err(concurrent_modification(
+                &target.logical_path,
+                "the destination parent identity changed after it was read",
+            ));
+        }
+        return Ok(());
+    }
+
+    let logical_metadata = std::fs::symlink_metadata(&target.logical_path).map_err(|error| {
+        concurrent_modification(
+            &target.logical_path,
+            &format!("the source can no longer be inspected ({})", error),
+        )
+    })?;
+    let current_is_symlink = logical_metadata.file_type().is_symlink();
+    if current_is_symlink != target.symlink_followed {
+        return Err(concurrent_modification(
+            &target.logical_path,
+            "the source path kind changed after it was read",
+        ));
+    }
+    let current_write_path = if current_is_symlink {
+        std::fs::canonicalize(&target.logical_path).map_err(|error| {
+            concurrent_modification(
+                &target.logical_path,
+                &format!("the symbolic-link target changed or disappeared ({})", error),
+            )
+        })?
+    } else {
+        target.logical_path.clone()
+    };
+    let metadata = std::fs::metadata(&current_write_path).map_err(|error| {
+        concurrent_modification(
+            &target.logical_path,
+            &format!("the source metadata changed or disappeared ({})", error),
+        )
+    })?;
+    let (hard_link_count, physical_key) = target_identity(&current_write_path, &metadata).map_err(|error| {
+        concurrent_modification(
+            &target.logical_path,
+            &format!("the source identity cannot be verified ({})", error),
+        )
+    })?;
+    if physical_key != target.physical_key {
+        return Err(concurrent_modification(
+            &target.logical_path,
+            "the source identity changed after it was read",
+        ));
+    }
+    if hard_link_count != target.hard_link_count {
+        return Err(concurrent_modification(
+            &target.logical_path,
+            "the source hard-link identity changed after it was read",
+        ));
+    }
+    if let Some(snapshot) = &target.metadata
+        && !snapshot.matches_current(&current_write_path, &metadata).map_err(|error| {
+            concurrent_modification(
+                &target.logical_path,
+                &format!("the source metadata cannot be verified ({})", error),
+            )
+        })?
+    {
+        return Err(concurrent_modification(
+            &target.logical_path,
+            "the supported source metadata changed after it was read",
+        ));
+    }
+
+    let current_bytes = std::fs::read(&current_write_path).map_err(|error| {
+        concurrent_modification(
+            &target.logical_path,
+            &format!("the source can no longer be read ({})", error),
+        )
+    })?;
+    let current_hash = hash_bytes(&current_bytes);
+    let source_hash = target.source_hash.as_deref().unwrap_or("missing");
+    if current_hash != source_hash {
+        return Err(concurrent_modification(
+            &target.logical_path,
+            &format!(
+                "the source content changed after it was read (expected {}, actual {})",
+                source_hash, current_hash
+            ),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_targets_unchanged<'a, I>(targets: I) -> Result<(), String>
+where
+    I: IntoIterator<Item = (&'a str, &'a PreparedEditTarget)>,
+{
+    for (path, target) in targets {
+        validate_source_unchanged(target).map_err(|error| format!("File '{}': {}", path, error))?;
+    }
+    Ok(())
+}
+
+
+#[cfg(unix)]
+fn file_handle_identity(file: &std::fs::File) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    file.metadata().ok().map(|metadata| {
+        format!("unix:{}:{}", metadata.dev(), metadata.ino())
+    })
+}
+
+#[cfg(windows)]
+fn file_handle_identity(file: &std::fs::File) -> Option<String> {
+    windows_file_identity(file).ok().map(|(_, identity)| identity)
+}
+
+#[cfg(not(any(unix, windows)))]
+fn file_handle_identity(_file: &std::fs::File) -> Option<String> {
+    None
+}
+
+fn remove_reserved_file_if_unchanged(path: &Path, reserved_identity: Option<&str>) {
+    let current_identity = std::fs::File::open(path)
+        .ok()
+        .and_then(|file| file_handle_identity(&file));
+    if current_identity.as_deref() == reserved_identity {
+        remove_file_best_effort(path);
+    }
+}
+
+
+fn copy_staged_file_no_clobber(
+    target: &PreparedEditTarget,
+    staged: &Path,
+    hard_link_error: &std::io::Error,
+) -> Result<(), String> {
+    let mut source = std::fs::File::open(staged).map_err(|error| {
+        format!(
+            "Cannot open staged content for new file '{}': {} (hard-link publish failed: {})",
+            target.logical_path.display(), error, hard_link_error
+        )
+    })?;
+    let mut destination = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&target.write_path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            return Err(concurrent_modification(
+                &target.logical_path,
+                "the destination appeared after it was read",
+            ));
+        }
+        Err(error) => {
+            return Err(format!(
+                "Cannot reserve new file '{}': {} (hard-link publish failed: {})",
+                target.logical_path.display(), error, hard_link_error
+            ));
+        }
+    };
+
+    let reserved_identity = file_handle_identity(&destination);
+    let copied = std::io::copy(&mut source, &mut destination)
+        .and_then(|_| destination.sync_all());
+    if let Err(error) = copied {
+        drop(destination);
+        remove_reserved_file_if_unchanged(
+            &target.write_path,
+            reserved_identity.as_deref(),
+        );
+        return Err(format!(
+            "Cannot copy staged content into new file '{}': {} (hard-link publish failed: {})",
+            target.logical_path.display(), error, hard_link_error
+        ));
+    }
+    drop(destination);
+    remove_file_best_effort(staged);
+    Ok(())
+}
+
+
+fn commit_new_file_no_clobber(target: &PreparedEditTarget, staged: &Path) -> Result<(), String> {
+    match std::fs::hard_link(staged, &target.write_path) {
+        Ok(()) => {
+            remove_file_best_effort(staged);
+            Ok(())
+        }
+        Err(error) => {
+            if std::fs::symlink_metadata(&target.logical_path).is_ok() {
+                Err(concurrent_modification(
+                    &target.logical_path,
+                    "the destination appeared after it was read",
+                ))
+            } else {
+                copy_staged_file_no_clobber(target, staged, &error)
+            }
+        }
+    }
+}
+
+fn commit_staged_file(target: &PreparedEditTarget, staged: &Path) -> Result<(), String> {
+    validate_source_unchanged(target)?;
+    if target.file_existed {
+        rename_replace(staged, &target.write_path, target.metadata.as_ref())
+    } else {
+        commit_new_file_no_clobber(target, staged)
+    }
+}
+
+
 /// Write modified content back to file, restoring original line endings.
 fn write_file_with_endings(
-    resolved: &Path,
+    target: &PreparedEditTarget,
     content: &str,
-    line_ending: &str,
-    metadata: Option<&FileMetadataSnapshot>,
 ) -> Result<(), String> {
     // Atomic write: stage into a sibling temp file, fsync, then rename over the target.
     // Plain `std::fs::write` does open(O_TRUNC) + write_all, leaving the file empty/partial
     // if the process is killed between those two steps. The rename below is atomic on POSIX
     // and best-effort-atomic on Windows (see `rename_replace` for the remove+rename fallback).
-    let tmp = temp_path_for(resolved);
-    stage_file_with_endings(&tmp, content, line_ending, metadata)?;
+    let tmp = temp_path_for(&target.write_path);
+    stage_file_with_endings(
+        &tmp,
+        content,
+        target.line_ending,
+        target.metadata.as_ref(),
+    )?;
 
-    if let Err(error) = rename_replace(&tmp, resolved, metadata) {
+    if let Err(error) = commit_staged_file(target, &tmp) {
         remove_file_best_effort(&tmp);
         return Err(error);
     }
@@ -1215,7 +1571,7 @@ fn write_file_with_endings(
     // does not invalidate the write itself, so we swallow the error.
     #[cfg(unix)]
     {
-        if let Some(parent) = resolved.parent()
+        if let Some(parent) = target.write_path.parent()
             && let Ok(dir) = std::fs::File::open(parent)
         {
             let _ = dir.sync_all();
@@ -1396,11 +1752,15 @@ fn handle_single_file_edit(
     ctx: &HandlerContext,
     path_str: &str,
     mode: &EditMode<'_>,
-    is_regex: bool,
-    dry_run: bool,
-    expected_line_count: Option<usize>,
-    allow_break_hard_links: bool,
+    options: EditRequestOptions,
+    expected_hash: Option<&str>,
 ) -> ToolCallResult {
+    let EditRequestOptions {
+        is_regex,
+        dry_run,
+        expected_line_count,
+        allow_break_hard_links,
+    } = options;
     let edit_start = std::time::Instant::now();
     // Read and validate. `file_existed` is captured BEFORE the write so we can
     // accurately set `fileCreated` and `fileListInvalidated` in the response.
@@ -1416,6 +1776,15 @@ fn handle_single_file_edit(
         Err(error) => return ToolCallResult::error(error),
     };
     let file_created = !target.file_existed;
+    if let Some(expected_hash) = expected_hash {
+        let actual_hash = target.source_hash.as_deref().unwrap_or("missing");
+        if expected_hash != actual_hash {
+            return ToolCallResult::error(format!(
+                "Parameter 'expectedHash' does not match the current source: expected {}, actual {}.",
+                expected_hash, actual_hash
+            ));
+        }
+    }
 
     // Apply edits
     let edit_result = match apply_edits_to_content(
@@ -1433,10 +1802,8 @@ fn handle_single_file_edit(
     // Write file (unless dryRun)
     if !dry_run
         && let Err(error) = write_file_with_endings(
-            &target.write_path,
+            &target,
             &edit_result.modified_content,
-            target.line_ending,
-            target.metadata.as_ref(),
         )
     {
         return ToolCallResult::error(error);
@@ -1452,6 +1819,11 @@ fn handle_single_file_edit(
     {
         return ToolCallResult::error(error);
     }
+
+    let result_hash = hash_bytes(&content_bytes(
+        &edit_result.modified_content,
+        target.line_ending,
+    ));
 
     // Build response
     let mut response = json!({
@@ -1471,6 +1843,9 @@ fn handle_single_file_edit(
             "endLine": edit_result.new_line_count,
         },
     });
+
+    response["sourceHash"] = json!(target.source_hash.as_deref());
+    response["resultHash"] = json!(result_hash);
 
     if edit_result.total_replacements > 0 {
         response["totalReplacements"] = json!(edit_result.total_replacements);
@@ -1621,11 +1996,14 @@ fn handle_multi_file_edit(
     ctx: &HandlerContext,
     paths_array: &[Value],
     mode: &EditMode<'_>,
-    is_regex: bool,
-    dry_run: bool,
-    expected_line_count: Option<usize>,
-    allow_break_hard_links: bool,
+    options: EditRequestOptions,
 ) -> ToolCallResult {
+    let EditRequestOptions {
+        is_regex,
+        dry_run,
+        expected_line_count,
+        allow_break_hard_links,
+    } = options;
     let edit_start = std::time::Instant::now();
     // Validate paths array
     if paths_array.is_empty() {
@@ -1708,10 +2086,21 @@ fn handle_multi_file_edit(
             temp_files.push((edit_index, path_str, target.write_path.clone(), temp));
         }
 
-        // Phase 3b: Rename temp files to targets (fast, unlikely to fail)
+        // Detect conflicts across the whole batch before the first commit.
+        if let Err(error) = validate_targets_unchanged(
+            edit_results.iter().map(|(path, target, _)| (*path, target)),
+        ) {
+            for (_, _, _, temp_path) in &temp_files {
+                remove_file_best_effort(temp_path);
+            }
+            return ToolCallResult::error(error);
+        }
+
+        // Phase 3b: Commit staged files; each target is checked again immediately before commit.
         for (renamed, (edit_index, path_str, resolved, temp)) in temp_files.iter().enumerate() {
-            let metadata = edit_results[*edit_index].1.metadata.as_ref();
-            if let Err(e) = rename_replace(temp, resolved, metadata) {
+            let target = &edit_results[*edit_index].1;
+            debug_assert_eq!(resolved, &target.write_path);
+            if let Err(e) = commit_staged_file(target, temp) {
                 // Best-effort cleanup of remaining temp files
                 for (_, _, _, temp_path) in &temp_files[renamed..] {
                     remove_file_best_effort(temp_path);
@@ -1809,6 +2198,10 @@ fn handle_multi_file_edit(
     let mut results_array = Vec::new();
     for (i, (path_str, target, result)) in edit_results.iter().enumerate() {
         total_applied += result.applied;
+        let result_hash = hash_bytes(&content_bytes(
+            &result.modified_content,
+            target.line_ending,
+        ));
         let mut file_result = json!({
             "path": path_str,
             "applied": result.applied,
@@ -1823,6 +2216,8 @@ fn handle_multi_file_edit(
                 "endLine": result.new_line_count,
             },
         });
+        file_result["sourceHash"] = json!(target.source_hash.as_deref());
+        file_result["resultHash"] = json!(result_hash);
         if result.total_replacements > 0 {
             file_result["totalReplacements"] = json!(result.total_replacements);
         }
