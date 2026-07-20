@@ -346,7 +346,11 @@ fn test_error_response_has_guidance() {
     let summary = &output["summary"];
     assert!(summary["totalTimeMs"].as_f64().is_some(), "totalTimeMs must be injected on error path");
     assert!(summary["policyReminder"].as_str().is_some(), "policyReminder must be injected on error path");
-    assert!(summary["serverDir"].as_str().is_some(), "workspace metadata must be injected on error path");
+    assert!(summary.get("serverDir").is_none(), "legacy summary.serverDir must be removed");
+    assert_eq!(
+        output["analysisContext"]["source"]["targetKind"],
+        "local_worktree"
+    );
 }
 
 #[test] fn test_metrics_injected_on_xray_edit_error() {
@@ -375,6 +379,10 @@ fn test_error_response_has_guidance() {
     assert!(output["error"].as_str().is_some());
     assert!(output["summary"]["totalTimeMs"].as_f64().is_some());
     assert!(output["summary"]["policyReminder"].as_str().is_some());
+    assert_eq!(
+        output["analysisContext"]["source"]["targetKind"],
+        "local_worktree"
+    );
 }
 
 #[test]
@@ -1739,6 +1747,7 @@ fn test_unresolved_gate_carries_pipeline_metadata() {
     // Phase 2 contract: workspace-unresolved error must carry policyReminder
     // and serverDir from finalize_response (previously bypassed the pipeline).
     let ws = WorkspaceBinding::unresolved(".".to_string());
+    let expected_workspace_root = ws.canonical_dir.clone();
     let ctx = HandlerContext {
         metrics: true,
         workspace: Arc::new(RwLock::new(ws)),
@@ -1754,8 +1763,20 @@ fn test_unresolved_gate_carries_pipeline_metadata() {
         "policyReminder must be injected on workspace-unresolved gate error");
     assert!(summary["totalTimeMs"].as_f64().is_some(),
         "totalTimeMs must be injected on workspace-unresolved gate error");
-    assert!(summary["serverDir"].as_str().is_some(),
-        "serverDir must be injected on workspace-unresolved gate error");
+    assert!(summary.get("serverDir").is_none(),
+        "index-backed errors must not retain legacy summary.serverDir");
+    assert_eq!(
+        output["analysisContext"]["source"]["workspaceRoot"],
+        expected_workspace_root
+    );
+    assert_eq!(
+        output["analysisContext"]["source"]["workspaceStatus"],
+        "unresolved"
+    );
+    assert_eq!(
+        output["analysisContext"]["source"]["revisionEvidence"],
+        "not_verified"
+    );
 }
 
 #[test]
@@ -1841,9 +1862,10 @@ fn test_unknown_tool_gate_carries_pipeline_metadata() {
 #[test]
 fn test_gate_errors_without_metrics_still_carry_guidance() {
     // Even when --metrics is NOT enabled, gate errors should still carry
-    // policyReminder and serverDir (guidance is unconditional, only
-    // totalTimeMs requires --metrics).
+    // policyReminder and analysisContext (guidance/provenance are unconditional,
+    // only totalTimeMs requires --metrics).
     let ws = WorkspaceBinding::unresolved(".".to_string());
+    let expected_workspace_root = ws.canonical_dir.clone();
     let ctx = HandlerContext {
         metrics: false,
         workspace: Arc::new(RwLock::new(ws)),
@@ -1856,8 +1878,16 @@ fn test_gate_errors_without_metrics_still_carry_guidance() {
     let summary = &output["summary"];
     assert!(summary["policyReminder"].as_str().is_some(),
         "policyReminder must be injected even without --metrics");
-    assert!(summary["serverDir"].as_str().is_some(),
-        "serverDir must be injected even without --metrics");
+    assert!(summary.get("serverDir").is_none(),
+        "legacy summary.serverDir must be absent");
+    assert_eq!(
+        output["analysisContext"]["source"]["workspaceStatus"],
+        "unresolved"
+    );
+    assert_eq!(
+        output["analysisContext"]["source"]["workspaceRoot"],
+        expected_workspace_root
+    );
     // totalTimeMs should NOT be present without --metrics
     assert!(summary.get("totalTimeMs").is_none(),
         "totalTimeMs must NOT be injected without --metrics flag");

@@ -811,7 +811,11 @@ fn test_guidance_prefix_uses_handler_specific_hint_after_guidance_injection() {
     let (prefix, output) = split_guidance_prefixed_text(text);
     assert!(prefix.contains("→ Handler-specific hint"));
     assert!(!prefix.contains("Next: use xray_definitions for AST structure"));
-    assert!(output["summary"].get("serverDir").is_some());
+    assert!(output["summary"].get("serverDir").is_none());
+    assert_eq!(
+        output["analysisContext"]["source"]["targetKind"],
+        "local_worktree"
+    );
 }
 
 #[test]
@@ -3125,3 +3129,253 @@ mod drift_guards {
     }
 }
 
+
+#[test]
+fn test_response_provenance_added_only_to_index_backed_data_tools() {
+    let ctx = make_ctx_with_branch(Some("feature/provenance"));
+    let long_workspace_root = format!("C:/{}repo", "nested/".repeat(35));
+    {
+        let mut workspace = ctx.workspace.write().unwrap();
+        workspace.dir = "repo-root".to_string();
+        workspace.canonical_dir = long_workspace_root.clone();
+        workspace.status = super::super::WorkspaceStatus::Resolved;
+        workspace.generation = 7;
+    }
+
+    for tool in ["xray_grep", "xray_definitions", "xray_callers", "xray_fast"] {
+        let result = ToolCallResult::success(json!({
+            "resultStatus": {"status": "partial", "reasons": ["max_results"]},
+            "summary": {"totalFiles": 1}
+        }).to_string());
+        let result = inject_response_guidance_with_args(
+            result,
+            tool,
+            &ctx.server_ext,
+            &ctx,
+            None,
+        );
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let source = &output["analysisContext"]["source"];
+        assert_eq!(output["analysisContext"]["schemaVersion"], 1, "{tool}");
+        assert!(
+            serde_json::to_vec(&output["analysisContext"]).unwrap().len() <= 1_024,
+            "{tool} analysisContext exceeds 1KB with a long workspace path: {}",
+            output["analysisContext"]
+        );
+        assert_eq!(source["targetKind"], "local_worktree", "{tool}");
+        assert_eq!(source["workspaceRoot"], long_workspace_root, "{tool}");
+        assert_eq!(source["workspaceStatus"], "resolved", "{tool}");
+        assert_eq!(source["workspaceBindingMode"], "pinned_cli", "{tool}");
+        assert_eq!(source["workspaceBindingGeneration"], 7, "{tool}");
+        assert_eq!(source["branch"]["name"], "feature/provenance", "{tool}");
+        assert_eq!(source["branch"]["source"], "startup", "{tool}");
+        assert_eq!(source["revisionEvidence"], "not_verified", "{tool}");
+        assert_eq!(output["resultStatus"]["status"], "partial", "{tool}");
+        assert_eq!(output["resultStatus"]["reasons"], json!(["max_results"]), "{tool}");
+        for legacy_field in [
+            "serverDir",
+            "workspaceStatus",
+            "workspaceSource",
+            "workspaceGeneration",
+        ] {
+            assert!(
+                output["summary"].get(legacy_field).is_none(),
+                "{tool} retained legacy summary field {legacy_field}: {}",
+                output["summary"]
+            );
+        }
+    }
+
+    for tool in ["xray_help", "xray_info", "xray_branch_status", "xray_git_history"] {
+        let result = ToolCallResult::success(json!({"summary": {}}).to_string());
+        let result = inject_response_guidance_with_args(
+            result,
+            tool,
+            &ctx.server_ext,
+            &ctx,
+            None,
+        );
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        assert!(output.get("analysisContext").is_none(), "{tool}: {output}");
+    }
+}
+
+#[test]
+fn test_response_provenance_added_to_plain_text_error_with_unknown_branch() {
+    let ctx = make_ctx_with_branch(None);
+    let result = inject_response_guidance_with_args(
+        ToolCallResult::error("synthetic failure".to_string()),
+        "xray_grep",
+        &ctx.server_ext,
+        &ctx,
+        None,
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["error"], "synthetic failure");
+    let branch = &output["analysisContext"]["source"]["branch"];
+    assert!(branch["name"].is_null());
+    assert_eq!(branch["source"], "unknown");
+    assert_eq!(
+        output["analysisContext"]["source"]["revisionEvidence"],
+        "not_verified"
+    );
+}
+
+#[test]
+fn test_response_provenance_survives_truncation() {
+    let ctx = make_ctx_with_branch(Some("feature/provenance"));
+    let files: Vec<Value> = (0..100)
+        .map(|index| json!({
+            "path": format!("src/file_{index}.rs"),
+            "occurrences": 1,
+            "lines": [index + 1],
+            "lineContent": [{
+                "startLine": index + 1,
+                "matchIndices": [0],
+                "lines": ["a deliberately long line used to force response truncation"]
+            }]
+        }))
+        .collect();
+    let result = ToolCallResult::success(json!({
+        "files": files,
+        "summary": {"totalFiles": 100, "totalOccurrences": 100}
+    }).to_string());
+    let result = inject_response_guidance_with_args(
+        result,
+        "xray_grep",
+        &ctx.server_ext,
+        &ctx,
+        None,
+    );
+    let result = truncate_response_if_needed(result, 700);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(output["summary"]["responseTruncated"], true);
+    assert_eq!(output["analysisContext"]["schemaVersion"], 1);
+    assert_eq!(
+        output["analysisContext"]["source"]["revisionEvidence"],
+        "not_verified"
+    );
+}
+
+#[test]
+fn test_response_provenance_uses_live_branch_cache() {
+    let mut ctx = make_ctx_with_branch(Some("startup-branch"));
+    ctx.live_branch_probe_enabled = true;
+    let workspace = ctx.server_dir();
+    ctx.current_branch_cache.write().unwrap().insert(
+        workspace,
+        (std::time::Instant::now(), Some("live-branch".to_string())),
+    );
+
+    let result = inject_response_guidance_with_args(
+        ToolCallResult::success(json!({"summary": {}}).to_string()),
+        "xray_grep",
+        &ctx.server_ext,
+        &ctx,
+        None,
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let branch = &output["analysisContext"]["source"]["branch"];
+    assert_eq!(branch["name"], "live-branch");
+    assert_eq!(branch["source"], "live_or_cached");
+    assert_eq!(ctx.current_branch_cache.read().unwrap().len(), 1);
+}
+
+#[test]
+fn test_response_provenance_reuses_branch_cache_without_refresh() {
+    let mut ctx = make_ctx_with_branch(Some("startup-branch"));
+    ctx.live_branch_probe_enabled = true;
+    let workspace = ctx.server_dir();
+    let cached_at = std::time::Instant::now();
+    ctx.current_branch_cache.write().unwrap().insert(
+        workspace,
+        (cached_at, Some("cached-branch".to_string())),
+    );
+    for _ in 0..1_000 {
+        let result = inject_response_guidance_with_args(
+            ToolCallResult::success(json!({"summary": {}}).to_string()),
+            "xray_grep",
+            &ctx.server_ext,
+            &ctx,
+            None,
+        );
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.content[0].text).unwrap()
+                ["analysisContext"]["source"]["branch"]["name"],
+            "cached-branch"
+        );
+    }
+    let cache = ctx.current_branch_cache.read().unwrap();
+    assert_eq!(cache.len(), 1);
+    assert_eq!(cache.values().next().unwrap().0, cached_at);
+}
+
+#[test]
+fn test_response_provenance_unresolved_success_does_not_probe_live_branch() {
+    let mut ctx = make_ctx_with_branch(Some("startup-branch"));
+    ctx.live_branch_probe_enabled = true;
+    ctx.workspace.write().unwrap().status = super::super::WorkspaceStatus::Unresolved;
+    assert!(ctx.current_branch_cache.read().unwrap().is_empty());
+
+    let result = inject_response_guidance_with_args(
+        ToolCallResult::success(json!({"summary": {}}).to_string()),
+        "xray_grep",
+        &ctx.server_ext,
+        &ctx,
+        None,
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    assert_eq!(
+        output["analysisContext"]["source"]["workspaceStatus"],
+        "unresolved"
+    );
+    assert_eq!(
+        output["analysisContext"]["source"]["branch"],
+        json!({"name": "startup-branch", "source": "startup"})
+    );
+    assert!(ctx.current_branch_cache.read().unwrap().is_empty());
+}
+
+
+#[test]
+fn test_response_provenance_cached_none_without_startup_is_unknown() {
+    let mut ctx = make_ctx_with_branch(None);
+    ctx.live_branch_probe_enabled = true;
+    let workspace = ctx.server_dir();
+    ctx.current_branch_cache.write().unwrap().insert(
+        workspace,
+        (std::time::Instant::now(), None),
+    );
+
+    let result = inject_response_guidance_with_args(
+        ToolCallResult::success(json!({"summary": {}}).to_string()),
+        "xray_grep",
+        &ctx.server_ext,
+        &ctx,
+        None,
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let branch = &output["analysisContext"]["source"]["branch"];
+    assert!(branch["name"].is_null());
+    assert_eq!(branch["source"], "unknown");
+}
+
+#[test]
+fn test_response_provenance_error_does_not_probe_live_branch() {
+    let mut ctx = make_ctx_with_branch(Some("startup-branch"));
+    ctx.live_branch_probe_enabled = true;
+    assert!(ctx.current_branch_cache.read().unwrap().is_empty());
+
+    let result = inject_response_guidance_with_args(
+        ToolCallResult::error("synthetic failure".to_string()),
+        "xray_grep",
+        &ctx.server_ext,
+        &ctx,
+        None,
+    );
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let branch = &output["analysisContext"]["source"]["branch"];
+    assert_eq!(branch["name"], "startup-branch");
+    assert_eq!(branch["source"], "startup");
+    assert!(ctx.current_branch_cache.read().unwrap().is_empty());
+}

@@ -80,7 +80,10 @@ pub(crate) fn current_branch_resolved(ctx: &HandlerContext) -> (Option<String>, 
     {
         return match val {
             Some(_) => (val.clone(), BranchSource::Live),
-            None => (ctx.current_branch.clone(), BranchSource::Startup),
+            None => (
+                ctx.current_branch.clone(),
+                if ctx.current_branch.is_some() { BranchSource::Startup } else { BranchSource::Unknown },
+            ),
         };
     }
 
@@ -1123,6 +1126,63 @@ pub(crate) fn inject_response_guidance(result: ToolCallResult, tool_name: &str, 
     inject_response_guidance_with_args(result, tool_name, indexed_ext, ctx, None)
 }
 
+fn is_index_backed_data_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "xray_grep" | "xray_definitions" | "xray_callers" | "xray_fast"
+    )
+}
+
+fn branch_source_name(source: BranchSource) -> &'static str {
+    match source {
+        BranchSource::Live => "live_or_cached",
+        BranchSource::Startup => "startup",
+        BranchSource::Unknown => "unknown",
+    }
+}
+
+fn build_analysis_context(ctx: &HandlerContext, allow_live_probe: bool) -> Value {
+    let (workspace_root, workspace_status, workspace_mode, workspace_generation, workspace_resolved) = {
+        let workspace = ctx.workspace.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+        (
+            if workspace.canonical_dir.is_empty() {
+                workspace.dir.clone()
+            } else {
+                workspace.canonical_dir.clone()
+            },
+            workspace.status.to_string(),
+            workspace.mode.to_string(),
+            workspace.generation,
+            workspace.status == super::WorkspaceStatus::Resolved,
+        )
+    };
+    // Error/unresolved paths use startup state instead of probing a possibly unrelated CWD.
+    let (branch, branch_source) = if allow_live_probe && workspace_resolved {
+        current_branch_resolved(ctx)
+    } else {
+        (
+            ctx.current_branch.clone(),
+            if ctx.current_branch.is_some() { BranchSource::Startup } else { BranchSource::Unknown },
+        )
+    };
+    json!({
+        "schemaVersion": 1,
+        "source": {
+            "targetKind": "local_worktree",
+            "workspaceRoot": workspace_root,
+            "workspaceStatus": workspace_status,
+            "workspaceBindingMode": workspace_mode,
+            "workspaceBindingGeneration": workspace_generation,
+            "branch": {
+                "name": branch,
+                "source": branch_source_name(branch_source),
+            },
+            "revisionEvidence": "not_verified",
+        }
+    })
+}
+
+
 pub(crate) fn inject_response_guidance_with_args(
     result: ToolCallResult,
     tool_name: &str,
@@ -1158,6 +1218,16 @@ pub(crate) fn inject_response_guidance_with_args(
         }
     }
 
+    let index_backed_data_tool = is_index_backed_data_tool(tool_name);
+    if index_backed_data_tool
+        && let Some(object) = output.as_object_mut()
+    {
+        object.insert(
+            "analysisContext".to_string(),
+            build_analysis_context(ctx, !was_error),
+        );
+    }
+
     let context_hint = if output.pointer("/summary/nextStepHint").is_none() {
         let guidance_context = ResponseGuidanceContext {
             tool_name,
@@ -1177,8 +1247,12 @@ pub(crate) fn inject_response_guidance_with_args(
             // guidance only when the response did not already provide one.
             summary.entry("nextStepHint".to_string()).or_insert(json!(hint));
         }
-        // Inject workspace metadata into every response
-        if let Ok(ws) = ctx.workspace.read() {
+        if index_backed_data_tool {
+            summary.remove("serverDir");
+            summary.remove("workspaceStatus");
+            summary.remove("workspaceSource");
+            summary.remove("workspaceGeneration");
+        } else if let Ok(ws) = ctx.workspace.read() {
             summary.insert("serverDir".to_string(), json!(ws.dir));
             summary.insert("workspaceStatus".to_string(), json!(ws.status.to_string()));
             summary.insert("workspaceSource".to_string(), json!(ws.mode.to_string()));
