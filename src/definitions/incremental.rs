@@ -166,7 +166,7 @@ pub fn apply_parsed_result(
     let path_str = path.to_string_lossy().to_string();
 
     // Get or assign file_id
-    let file_id = if let Some(&id) = index.path_to_id.get(path) {
+    let file_id = if let Some(&id) = index.path_to_id.get(&crate::path_identity_key(path)) {
         // Existing file — remove old definitions
         remove_file_definitions(index, id);
         id
@@ -174,7 +174,7 @@ pub fn apply_parsed_result(
         // New file
         let id = index.files.len() as u32;
         index.files.push(path_str);
-        index.path_to_id.insert(path.to_path_buf(), id);
+        index.path_to_id.insert(crate::path_identity_key(path), id);
         id
     };
 
@@ -207,7 +207,7 @@ pub fn update_file_definitions(index: &mut DefinitionIndex, path: &Path) {
             // File couldn't be read or extension not supported.
             // If the file was previously indexed, remove its old definitions
             // to avoid stale data (e.g., file became unreadable).
-            if let Some(&file_id) = index.path_to_id.get(path) {
+            if let Some(&file_id) = index.path_to_id.get(&crate::path_identity_key(path)) {
                 remove_file_definitions(index, file_id);
             }
         }
@@ -317,7 +317,7 @@ pub fn remove_file_definitions(index: &mut DefinitionIndex, file_id: u32) {
 
 /// Remove a file entirely from the definition index
 pub fn remove_file_from_def_index(index: &mut DefinitionIndex, path: &Path) {
-    if let Some(&file_id) = index.path_to_id.get(path) {
+    if let Some(&file_id) = index.path_to_id.get(&crate::path_identity_key(path)) {
         remove_file_definitions(index, file_id);
         // Tombstone the files[] slot. file_id is never reused, so the entry
         // stays in the Vec as an empty string — no longer counted as a live
@@ -325,7 +325,7 @@ pub fn remove_file_from_def_index(index: &mut DefinitionIndex, path: &Path) {
         if (file_id as usize) < index.files.len() {
             index.files[file_id as usize].clear();
         }
-        index.path_to_id.remove(path);
+        index.path_to_id.remove(&crate::path_identity_key(path));
     }
 }
 
@@ -459,6 +459,9 @@ pub fn reconcile_definition_index(
     }
 
     let scanned = disk_files.len();
+    let disk_file_keys: HashSet<PathBuf> = disk_files.keys()
+        .map(|path| crate::path_identity_key(path))
+        .collect();
 
     // Collect indexed paths for deletion check
     let indexed_paths: HashSet<PathBuf> = index.path_to_id.keys().cloned().collect();
@@ -469,7 +472,7 @@ pub fn reconcile_definition_index(
 
     // Check for new and modified files
     for (path, mtime) in &disk_files {
-        if !index.path_to_id.contains_key(path) {
+        if !index.path_to_id.contains_key(&crate::path_identity_key(path)) {
             // NEW file — not in index
             update_file_definitions(index, path);
             added += 1;
@@ -483,7 +486,7 @@ pub fn reconcile_definition_index(
 
     // Check for deleted files (in index but not on disk)
     for path in &indexed_paths {
-        if !disk_files.contains_key(path) {
+        if !disk_file_keys.contains(path) {
             remove_file_from_def_index(index, path);
             removed += 1;
         }
@@ -577,6 +580,9 @@ pub fn reconcile_definition_index_nonblocking(
     }
 
     let scanned = disk_files.len();
+    let disk_file_keys: HashSet<PathBuf> = disk_files.keys()
+        .map(|path| crate::path_identity_key(path))
+        .collect();
 
     // ── Phase 2: Determine changed files (READ lock — instant) ──
     let (_threshold, to_update, to_remove, added, modified) = {
@@ -595,7 +601,7 @@ pub fn reconcile_definition_index_nonblocking(
         let mut modified = 0usize;
 
         for (path, mtime) in &disk_files {
-            if !idx.path_to_id.contains_key(path) {
+            if !idx.path_to_id.contains_key(&crate::path_identity_key(path)) {
                 to_update.push(path.clone());
                 added += 1;
             } else if *mtime > threshold {
@@ -605,7 +611,7 @@ pub fn reconcile_definition_index_nonblocking(
         }
 
         for path in idx.path_to_id.keys() {
-            if !disk_files.contains_key(path) {
+            if !disk_file_keys.contains(path) {
                 to_remove.push(path.clone());
             }
         }
@@ -704,12 +710,12 @@ pub fn reconcile_definition_index_nonblocking(
         // (see DefinitionIndex::live_file_count) but file_id assignments
         // remain stable.
         for path in &to_remove {
-            if let Some(&file_id) = idx.path_to_id.get(path) {
+            if let Some(&file_id) = idx.path_to_id.get(&crate::path_identity_key(path)) {
                 remove_file_definitions(&mut idx, file_id);
                 if (file_id as usize) < idx.files.len() {
                     idx.files[file_id as usize].clear();
                 }
-                idx.path_to_id.remove(path);
+                idx.path_to_id.remove(&crate::path_identity_key(path));
             }
         }
 
@@ -724,7 +730,7 @@ pub fn reconcile_definition_index_nonblocking(
         // (e.g., read error). Without this, stale definitions remain for unreadable files.
         for path in &to_update_set {
             if !applied_paths.contains(path)
-                && let Some(&file_id) = idx.path_to_id.get(path) {
+                && let Some(&file_id) = idx.path_to_id.get(&crate::path_identity_key(path)) {
                     remove_file_definitions(&mut idx, file_id);
                 }
         }

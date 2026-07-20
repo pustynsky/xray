@@ -127,9 +127,9 @@ pub(crate) fn make_ctx_with_defs() -> HandlerContext {
         file_index.entry(def.file_id).or_default().push(idx);
     }
 
-    path_to_id.insert(PathBuf::from("C:\\src\\ResilientClient.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\ProxyClient.cs"), 1);
-    path_to_id.insert(PathBuf::from("C:\\src\\QueryService.cs"), 2);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\ResilientClient.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\ProxyClient.cs")), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\QueryService.cs")), 2);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(),

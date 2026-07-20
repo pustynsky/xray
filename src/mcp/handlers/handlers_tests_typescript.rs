@@ -198,9 +198,9 @@ fn make_ts_ctx_with_defs() -> HandlerContext {
         }
     }
 
-    path_to_id.insert(PathBuf::from("src/services/UserService.ts"), 0);
-    path_to_id.insert(PathBuf::from("src/processors/OrderProcessor.ts"), 1);
-    path_to_id.insert(PathBuf::from("src/utils/helpers.ts"), 2);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/services/UserService.ts")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/processors/OrderProcessor.ts")), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/utils/helpers.ts")), 2);
 
     // method_calls for "down" direction: handleOrder calls getUser
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
@@ -317,8 +317,8 @@ fn make_ts_ctx_with_real_files() -> (HandlerContext, std::path::PathBuf) {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(file0_path, 0);
-    path_to_id.insert(file1_path, 1);
+    path_to_id.insert(crate::path_identity_key(&file0_path), 0);
+    path_to_id.insert(crate::path_identity_key(&file1_path), 1);
 
     let def_index = DefinitionIndex {
         root: tmp_dir.to_string_lossy().to_string(), created_at: 0,
@@ -786,8 +786,8 @@ fn test_ts_xray_callers_inject_support() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("src/OrderComponent.ts"), 0);
-    path_to_id.insert(PathBuf::from("src/UserService.ts"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/OrderComponent.ts")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/UserService.ts")), 1);
 
     // processOrder (idx 1) calls getUser via injected UserService
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
@@ -912,8 +912,8 @@ fn test_mixed_cs_ts_definitions_query() {
             attribute_index.entry(attr.to_lowercase()).or_default().push(idx);
         }
     }
-    path_to_id.insert(PathBuf::from("src/UserService.cs"), 0);
-    path_to_id.insert(PathBuf::from("src/UserService.ts"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/UserService.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/UserService.ts")), 1);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -1032,8 +1032,8 @@ fn test_mixed_cs_ts_callers_ext_filter() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("src/Service.cs"), 0);
-    path_to_id.insert(PathBuf::from("src/Component.ts"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/Service.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/Component.ts")), 1);
 
     // Both DoWork (idx 1) and render (idx 3) call getUser
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
@@ -1147,7 +1147,7 @@ fn test_tsx_file_support_through_handler() {
             base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
         }
     }
-    path_to_id.insert(PathBuf::from("src/App.tsx"), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/App.tsx")), 0);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -1356,8 +1356,8 @@ fn test_ts_xray_definitions_exclude_dir() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("src/services/UserService.ts"), 0);
-    path_to_id.insert(PathBuf::from("src/__tests__/UserService.spec.ts"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/services/UserService.ts")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/__tests__/UserService.spec.ts")), 1);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -1525,8 +1525,8 @@ fn test_ts_direction_down_with_typed_local_variable() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("src/DataProcessor.ts"), 0);
-    path_to_id.insert(PathBuf::from("src/Orchestrator.ts"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/DataProcessor.ts")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("src/Orchestrator.ts")), 1);
 
     // Orchestrator.run() (idx 3) calls:
     //   - getProcessor() on Orchestrator (this call)

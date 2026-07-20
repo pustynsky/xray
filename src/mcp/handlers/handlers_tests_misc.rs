@@ -516,8 +516,8 @@ fn test_xray_definitions_file_filter_slash_normalization() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\Models\\User.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\Services\\UserService.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Models\\User.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Services\\UserService.cs")), 1);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,

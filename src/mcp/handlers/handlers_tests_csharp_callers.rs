@@ -157,8 +157,8 @@ fn test_xray_callers_field_prefix_m_underscore() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\OrderProcessor.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\CheckoutHandler.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\OrderProcessor.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\CheckoutHandler.cs")), 1);
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     method_calls.insert(3, vec![CallSite {
@@ -261,8 +261,8 @@ fn test_xray_callers_field_prefix_underscore() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\UserService.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\AccountController.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\UserService.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\AccountController.cs")), 1);
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     method_calls.insert(3, vec![CallSite {
@@ -463,8 +463,8 @@ fn test_xray_callers_down_class_filter() {
     method_calls.insert(4, vec![CallSite { method_name: "TraceInformation".to_string(), receiver_type: None, line: 333, receiver_is_generic: false }]);
 
     let mut path_to_id: HashMap<PathBuf, u32> = HashMap::new();
-    path_to_id.insert(PathBuf::from("C:\\src\\IndexSearchService.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\IndexedSearchQueryExecuter.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\IndexSearchService.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\IndexedSearchQueryExecuter.cs")), 1);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), extensions: vec!["cs".to_string()],
@@ -557,7 +557,7 @@ fn test_xray_callers_ambiguity_warning_truncated() {
         file_index.entry(def.file_id).or_default().push(idx);
     }
     for (i, f) in files.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
 
     let content_index = ContentIndex {
@@ -642,7 +642,7 @@ fn test_xray_callers_ambiguity_warning_few_classes() {
         file_index.entry(def.file_id).or_default().push(idx);
     }
     for (i, f) in files.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
 
     let content_index = ContentIndex {
@@ -744,7 +744,7 @@ fn test_xray_callers_batch_ambiguity_warning() {
         file_index.entry(def.file_id).or_default().push(idx);
     }
     for (i, f) in files.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
 
     let content_index = ContentIndex {
@@ -834,7 +834,7 @@ fn test_xray_callers_batch_truncated_flag() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from(&files[0]), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from(&files[0])), 0);
 
     let content_index = ContentIndex {
         root: ".".to_string(),
@@ -926,7 +926,7 @@ fn test_xray_callers_no_ambiguity_warning_with_class_param() {
         file_index.entry(def.file_id).or_default().push(idx);
     }
     for (i, f) in files.iter().enumerate() {
-        path_to_id.insert(PathBuf::from(f), i as u32);
+        path_to_id.insert(crate::path_identity_key(&PathBuf::from(f)), i as u32);
     }
 
     let content_index = ContentIndex {
@@ -1058,9 +1058,9 @@ fn test_xray_callers_exclude_dir_and_file() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\services\\ServiceA.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\controllers\\ControllerB.cs"), 1);
-    path_to_id.insert(PathBuf::from("C:\\src\\tests\\TestC.cs"), 2);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\services\\ServiceA.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\controllers\\ControllerB.cs")), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\tests\\TestC.cs")), 2);
 
     let def_index = DefinitionIndex {
         root: ".".to_string(), created_at: 0,
@@ -1157,8 +1157,8 @@ fn test_xray_callers_cycle_detection_down() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\ClassA.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\ClassB.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\ClassA.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\ClassB.cs")), 1);
 
     // MethodA (def index 1) calls MethodB; MethodB (def index 3) calls MethodA
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
@@ -1306,8 +1306,8 @@ fn test_xray_callers_cycle_detection() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\ServiceA.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\ServiceB.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\ServiceA.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\ServiceB.cs")), 1);
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     // MethodB (di=3) calls MethodA at line 20
@@ -1457,9 +1457,9 @@ fn test_xray_callers_ext_filter_comma_split() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\DataService.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\CsController.cs"), 1);
-    path_to_id.insert(PathBuf::from("C:\\src\\script.txt"), 2);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\DataService.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\CsController.cs")), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\script.txt")), 2);
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     // HandleRequest (di=3) calls ProcessData at line 15
@@ -1611,8 +1611,8 @@ fn test_xray_callers_overloads_not_collapsed_up() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\Validator.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\Processor.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Validator.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Processor.cs")), 1);
 
     // Process(int) at di=3 calls Validate at line 25; Process(string) at di=4 calls Validate at line 45
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
@@ -1718,8 +1718,8 @@ fn test_xray_callers_overloads_not_collapsed_down() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\Orchestrator.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\Executor.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Orchestrator.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Executor.cs")), 1);
 
     // RunAll (di=1) calls both Execute overloads
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
@@ -1939,11 +1939,11 @@ fn test_xray_callers_same_name_different_receiver_interface_resolution() {
             base_type_index.entry(bt.to_lowercase()).or_default().push(idx);
         }
     }
-    path_to_id.insert(PathBuf::from("C:\\src\\IServiceA.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\src\\IServiceB.cs"), 1);
-    path_to_id.insert(PathBuf::from("C:\\src\\ServiceA.cs"), 2);
-    path_to_id.insert(PathBuf::from("C:\\src\\ServiceB.cs"), 3);
-    path_to_id.insert(PathBuf::from("C:\\src\\Consumer.cs"), 4);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\IServiceA.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\IServiceB.cs")), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\ServiceA.cs")), 2);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\ServiceB.cs")), 3);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\src\\Consumer.cs")), 4);
 
     // Consumer.DoWork (di=9) calls Execute with receiver_type = IServiceB
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
@@ -2158,8 +2158,8 @@ fn make_callers_body_ctx() -> (HandlerContext, std::path::PathBuf) {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from(&file0_str), 0);
-    path_to_id.insert(PathBuf::from(&file1_str), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from(&file0_str)), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from(&file1_str)), 1);
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     method_calls.insert(3, vec![CallSite {
@@ -2374,8 +2374,8 @@ fn test_xray_callers_include_body_nonexistent_file() {
         kind_index.entry(def.kind).or_default().push(idx);
         file_index.entry(def.file_id).or_default().push(idx);
     }
-    path_to_id.insert(PathBuf::from("C:\\nonexistent\\Worker.cs"), 0);
-    path_to_id.insert(PathBuf::from("C:\\nonexistent\\Caller.cs"), 1);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\nonexistent\\Worker.cs")), 0);
+    path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:\\nonexistent\\Caller.cs")), 1);
 
     let mut method_calls: HashMap<u32, Vec<CallSite>> = HashMap::new();
     method_calls.insert(3, vec![CallSite {

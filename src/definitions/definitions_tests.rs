@@ -519,7 +519,7 @@ fn test_compact_auto_triggers_at_threshold() {
         std::fs::create_dir_all(tmp_dir_for_test()).ok();
         let file_path = tmp_dir_for_test().join("file0.cs");
         std::fs::write(&file_path, &content).unwrap();
-        index.path_to_id.insert(file_path.clone(), 0);
+        index.path_to_id.insert(crate::path_identity_key(&file_path), 0);
         update_file_definitions(&mut index, &file_path);
     }
 
@@ -1247,7 +1247,7 @@ fn test_apply_parsed_result_remaps_file_id_in_all_defs() {
     let mut index = DefinitionIndex::default();
     // Pre-populate with one file to ensure new file gets id=1
     index.files.push("existing.cs".to_string());
-    index.path_to_id.insert(PathBuf::from("existing.cs"), 0);
+    index.path_to_id.insert(crate::path_identity_key(&PathBuf::from("existing.cs")), 0);
 
     let result = ParsedFileResult {
         path: PathBuf::from("new.cs"),
@@ -1389,7 +1389,7 @@ fn test_reconcile_nonblocking_removes_deleted_files() {
         files: vec!["C:/nonexistent/DeletedFile.cs".to_string()],
         ..Default::default()
     };
-    index.path_to_id.insert(PathBuf::from("C:/nonexistent/DeletedFile.cs"), 0);
+    index.path_to_id.insert(crate::path_identity_key(&PathBuf::from("C:/nonexistent/DeletedFile.cs")), 0);
     // Add a definition for this file
     index.definitions.push(DefinitionEntry {
         file_id: 0, name: "DeletedClass".to_string(), kind: DefinitionKind::Class,
@@ -1413,7 +1413,7 @@ fn test_reconcile_nonblocking_removes_deleted_files() {
 
     let idx = arc_index.read().unwrap();
     assert!(!idx.name_index.contains_key("deletedclass"), "Deleted file's definitions should be removed");
-    assert!(!idx.path_to_id.contains_key(&PathBuf::from("C:/nonexistent/DeletedFile.cs")));
+    assert!(!idx.path_to_id.contains_key(&crate::path_identity_key(std::path::Path::new("C:/nonexistent/DeletedFile.cs"))));
 }
 
 #[test]
@@ -1742,8 +1742,8 @@ fn def_live_file_count_falls_back_to_path_to_id() {
     idx.files.push("a.rs".to_string());
     idx.files.push(String::new()); // tombstone
     idx.files.push("c.rs".to_string());
-    idx.path_to_id.insert(PathBuf::from("a.rs"), 0);
-    idx.path_to_id.insert(PathBuf::from("c.rs"), 2);
+    idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("a.rs")), 0);
+    idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("c.rs")), 2);
 
     assert_eq!(idx.live_file_count(), 2,
         "live_file_count == path_to_id.len(), tombstone slot must NOT be counted");

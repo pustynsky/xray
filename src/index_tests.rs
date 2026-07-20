@@ -1634,8 +1634,8 @@ fn estimate_definition_index_memory_uses_live_count_with_tombstones() {
     let mut idx = crate::definitions::DefinitionIndex::default();
     idx.root = ".".to_string();
     idx.files = vec!["alive_a.rs".to_string(), String::new(), "alive_b.rs".to_string()];
-    idx.path_to_id.insert(PathBuf::from("alive_a.rs"), 0);
-    idx.path_to_id.insert(PathBuf::from("alive_b.rs"), 2);
+    idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("alive_a.rs")), 0);
+    idx.path_to_id.insert(crate::path_identity_key(&PathBuf::from("alive_b.rs")), 2);
 
     let estimate = crate::index::estimate_definition_index_memory(&idx);
     assert_eq!(estimate["fileCount"], 2,

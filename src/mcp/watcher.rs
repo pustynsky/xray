@@ -50,6 +50,61 @@ impl WatcherStats {
     }
 }
 
+pub(crate) fn is_included_by_index_rules(
+    canonical_server_dir: &str,
+    path: &Path,
+    respect_git_exclude: bool,
+    include_hidden: bool,
+) -> bool {
+    let paths = [path.to_path_buf()];
+    included_paths_by_index_rules(
+        canonical_server_dir,
+        &paths,
+        respect_git_exclude,
+        include_hidden,
+    )
+    .contains(&crate::path_identity_key(path))
+}
+
+fn included_paths_by_index_rules(
+    canonical_server_dir: &str,
+    paths: &[PathBuf],
+    respect_git_exclude: bool,
+    include_hidden: bool,
+) -> HashSet<PathBuf> {
+    if paths.is_empty() {
+        return HashSet::new();
+    }
+    let target_keys: HashSet<PathBuf> = paths.iter()
+        .map(|path| crate::path_identity_key(path))
+        .collect();
+    let mut ancestor_keys = HashSet::new();
+    for target in &target_keys {
+        for ancestor in target.ancestors() {
+            ancestor_keys.insert(ancestor.to_path_buf());
+        }
+    }
+
+    let mut builder = WalkBuilder::new(canonical_server_dir);
+    // Restrict the walk to the union of target ancestor chains.
+    builder.filter_entry(move |entry| {
+        ancestor_keys.contains(&crate::path_identity_key(entry.path()))
+    });
+    builder.follow_links(true);
+    builder.hidden(!include_hidden);
+    builder.parents(true);
+    builder.ignore(true);
+    builder.git_ignore(true);
+    builder.git_global(true);
+    builder.git_exclude(respect_git_exclude);
+
+    builder.build().filter_map(Result::ok)
+        .map(|entry| crate::path_identity_key(entry.path()))
+        .filter(|path| target_keys.contains(path))
+        .collect()
+}
+
+
 /// Start a file watcher thread that incrementally updates the in-memory index
 /// Returns `true` if the given event kind should invalidate the file-list index.
 ///
@@ -263,6 +318,20 @@ pub fn start_watcher(
 
         let mut dirty_files: HashSet<PathBuf> = HashSet::new();
         let mut removed_files: HashSet<PathBuf> = HashSet::new();
+        let flush_batch = |dirty_files: &mut HashSet<PathBuf>,
+                           removed_files: &mut HashSet<PathBuf>| {
+            process_watcher_batch(
+                &index,
+                &def_index,
+                dirty_files,
+                removed_files,
+                &dir_str,
+                &content_extensions,
+                &definition_extensions,
+                respect_git_exclude,
+                &trigram_build_gate,
+            )
+        };
         let mut last_autosave = std::time::Instant::now();
         // MCP-WCH-007 (PR-B, Hole #2): tracks whether `process_batch` has
         // applied unsaved changes since the last save. When true, the autosave
@@ -332,7 +401,10 @@ pub fn start_watcher(
                         if should_invalidate_file_index(&event.kind) {
                             file_index_dirty.store(true, Ordering::Relaxed);
                         }
-                        if !matches_extensions(path, &content_extensions) {
+                        if !(matches_extensions(path, &content_extensions)
+                            || def_index.is_some()
+                                && matches_extensions(path, &definition_extensions))
+                        {
                             continue;
                         }
                         match event.kind {
@@ -356,10 +428,7 @@ pub fn start_watcher(
                     // Force flush if accumulating too long (prevents debounce starvation)
                     if let Some(start) = batch_start
                         && start.elapsed() >= MAX_ACCUMULATE {
-                            if !process_batch(
-                                &index, &def_index, &mut dirty_files, &mut removed_files,
-                                &trigram_build_gate,
-                            ) {
+                            if !flush_batch(&mut dirty_files, &mut removed_files) {
                                 error!("RwLock poisoned, watcher thread exiting");
                                 break;
                             }
@@ -403,10 +472,7 @@ pub fn start_watcher(
                         // workspace switch doesn't drop incremental updates
                         // already received from the FS.
                         if !dirty_files.is_empty() || !removed_files.is_empty() {
-                            let _ = process_batch(
-                                &index, &def_index, &mut dirty_files, &mut removed_files,
-                                &trigram_build_gate,
-                            );
+                            let _ = flush_batch(&mut dirty_files, &mut removed_files);
                             have_unsaved = true;
                         }
                         // MCP-WCH-007: thread is about to exit — there is no
@@ -431,10 +497,7 @@ pub fn start_watcher(
                         }
                         continue;
                     }
-                    if !process_batch(
-                                &index, &def_index, &mut dirty_files, &mut removed_files,
-                                &trigram_build_gate,
-                            ) {
+                    if !flush_batch(&mut dirty_files, &mut removed_files) {
                         error!("RwLock poisoned, watcher thread exiting to avoid infinite error loop");
                         break;
                     }
@@ -461,10 +524,7 @@ pub fn start_watcher(
                     // reported. `process_batch` is best-effort; if the lock
                     // is poisoned we simply give up (same as the live loop).
                     if !dirty_files.is_empty() || !removed_files.is_empty() {
-                        let _ = process_batch(
-                                &index, &def_index, &mut dirty_files, &mut removed_files,
-                                &trigram_build_gate,
-                            );
+                        let _ = flush_batch(&mut dirty_files, &mut removed_files);
                         have_unsaved = true;
                     }
                     // MCP-WCH-007: thread is about to exit — see matching
@@ -542,10 +602,23 @@ struct DefUpdateResult {
 ///
 /// Idempotent — safe to call concurrently with the watcher (which may pick up
 /// the FS event later); double-update produces an identical index state.
+#[cfg(test)]
 pub(crate) fn reindex_paths_sync(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
     dirty: &[PathBuf],
+    removed: &[PathBuf],
+    extensions: &[String],
+) -> ReindexStats {
+    reindex_paths_sync_scoped(index, def_index, dirty, dirty, removed, extensions)
+}
+
+
+pub(crate) fn reindex_paths_sync_scoped(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    content_dirty: &[PathBuf],
+    definition_dirty: &[PathBuf],
     removed: &[PathBuf],
     extensions: &[String],
 ) -> ReindexStats {
@@ -555,30 +628,32 @@ pub(crate) fn reindex_paths_sync(
     // Apply the SAME filters as the watcher event loop ([watcher.rs:91-103]):
     //   1. Skip paths inside .git/ (git operations generate massive event floods).
     //   2. Skip paths whose extension is not in `--ext`.
-    let mut dirty_clean: Vec<PathBuf> = Vec::with_capacity(dirty.len());
-    for path in dirty {
-        if is_inside_git_dir(path) || !matches_extensions(path, extensions) {
-            stats.skipped_filtered += 1;
-            continue;
-        }
-        dirty_clean.push(PathBuf::from(clean_path(&path.to_string_lossy())));
-    }
-    let mut removed_clean: Vec<PathBuf> = Vec::with_capacity(removed.len());
-    for path in removed {
-        if is_inside_git_dir(path) || !matches_extensions(path, extensions) {
-            stats.skipped_filtered += 1;
-            continue;
-        }
-        removed_clean.push(PathBuf::from(clean_path(&path.to_string_lossy())));
-    }
+    let mut skipped_paths = HashSet::new();
+    let mut clean_paths = |paths: &[PathBuf]| -> Vec<PathBuf> {
+        paths.iter().filter_map(|path| {
+            if is_inside_git_dir(path) || !matches_extensions(path, extensions) {
+                skipped_paths.insert(crate::path_identity_key(path));
+                None
+            } else {
+                Some(PathBuf::from(clean_path(&path.to_string_lossy())))
+            }
+        }).collect()
+    };
+    let content_dirty_clean = clean_paths(content_dirty);
+    let definition_dirty_clean = clean_paths(definition_dirty);
+    let removed_clean = clean_paths(removed);
+    stats.skipped_filtered = skipped_paths.len();
 
-    if dirty_clean.is_empty() && removed_clean.is_empty() {
+    if content_dirty_clean.is_empty()
+        && definition_dirty_clean.is_empty()
+        && removed_clean.is_empty()
+    {
         stats.elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
         return stats;
     }
 
     // Apply via the same non-blocking helpers used by the watcher.
-    let content_result = update_content_index(index, &removed_clean, &dirty_clean);
+    let content_result = update_content_index(index, &removed_clean, &content_dirty_clean);
     if !content_result.ok {
         stats.content_lock_poisoned = true;
     } else {
@@ -587,7 +662,7 @@ pub(crate) fn reindex_paths_sync(
     stats.content_lock_wait_ms = content_result.lock_wait_ms;
     stats.content_update_ms = content_result.update_ms;
 
-    let def_result = update_definition_index(def_index, &removed_clean, &dirty_clean);
+    let def_result = update_definition_index(def_index, &removed_clean, &definition_dirty_clean);
     if !def_result.ok {
         stats.def_lock_poisoned = true;
     } else if def_index.is_some() {
@@ -626,6 +701,57 @@ pub(crate) fn reindex_paths_sync(
 /// when many files change at once (e.g., git pull with 300+ files).
 ///
 /// Returns `false` if a poisoned RwLock is detected, signaling the caller to exit.
+#[allow(clippy::too_many_arguments)]
+fn process_watcher_batch(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    dirty_files: &mut HashSet<PathBuf>,
+    removed_files: &mut HashSet<PathBuf>,
+    canonical_server_dir: &str,
+    content_extensions: &[String],
+    definition_extensions: &[String],
+    respect_git_exclude: bool,
+    trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+) -> bool {
+    let dirty_paths: Vec<PathBuf> = dirty_files.drain().collect();
+    let content_candidates: Vec<PathBuf> = dirty_paths.iter()
+        .filter(|path| matches_extensions(path, content_extensions))
+        .cloned()
+        .collect();
+    let definition_candidates: Vec<PathBuf> = if def_index.is_some() {
+        dirty_paths.iter()
+            .filter(|path| matches_extensions(path, definition_extensions))
+            .cloned()
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    let mut content_dirty_files = included_paths_by_index_rules(
+        canonical_server_dir,
+        &content_candidates,
+        respect_git_exclude,
+        false,
+    );
+    let mut definition_dirty_files = included_paths_by_index_rules(
+        canonical_server_dir,
+        &definition_candidates,
+        respect_git_exclude,
+        true,
+    );
+
+    process_batch_scoped(
+        index,
+        def_index,
+        &mut content_dirty_files,
+        &mut definition_dirty_files,
+        removed_files,
+        trigram_build_gate,
+    )
+}
+
+
+#[cfg(test)]
 fn process_batch(
     index: &Arc<RwLock<ContentIndex>>,
     def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
@@ -633,15 +759,38 @@ fn process_batch(
     removed_files: &mut HashSet<PathBuf>,
     trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
 ) -> bool {
-    let update_count = dirty_files.len();
+    let mut definition_dirty_files = dirty_files.clone();
+    process_batch_scoped(
+        index,
+        def_index,
+        dirty_files,
+        &mut definition_dirty_files,
+        removed_files,
+        trigram_build_gate,
+    )
+}
+
+
+fn process_batch_scoped(
+    index: &Arc<RwLock<ContentIndex>>,
+    def_index: &Option<Arc<RwLock<DefinitionIndex>>>,
+    content_dirty_files: &mut HashSet<PathBuf>,
+    definition_dirty_files: &mut HashSet<PathBuf>,
+    removed_files: &mut HashSet<PathBuf>,
+    trigram_build_gate: &Arc<crate::mcp::handlers::utils::TrigramRebuildGate>,
+) -> bool {
+    let content_update_count = content_dirty_files.len();
+    let definition_update_count = definition_dirty_files.len();
     let remove_count = removed_files.len();
 
-    // Collect cleaned paths once for both indexes
     let removed_clean: Vec<PathBuf> = removed_files.drain()
-        .map(|p| PathBuf::from(clean_path(&p.to_string_lossy())))
+        .map(|path| PathBuf::from(clean_path(&path.to_string_lossy())))
         .collect();
-    let dirty_clean: Vec<PathBuf> = dirty_files.drain()
-        .map(|p| PathBuf::from(clean_path(&p.to_string_lossy())))
+    let content_dirty_clean: Vec<PathBuf> = content_dirty_files.drain()
+        .map(|path| PathBuf::from(clean_path(&path.to_string_lossy())))
+        .collect();
+    let definition_dirty_clean: Vec<PathBuf> = definition_dirty_files.drain()
+        .map(|path| PathBuf::from(clean_path(&path.to_string_lossy())))
         .collect();
 
     // MINOR-10: drain-before-apply is intentional and MUST stay in this order.
@@ -662,7 +811,7 @@ fn process_batch(
     let batch_start = std::time::Instant::now();
 
     // Update content index using batch_purge for O(total_postings) instead of O(N × total_postings)
-    let content_result = update_content_index(index, &removed_clean, &dirty_clean);
+    let content_result = update_content_index(index, &removed_clean, &content_dirty_clean);
     if !content_result.ok {
         return false;
     }
@@ -673,13 +822,14 @@ fn process_batch(
     }
 
     // Update definition index (if available)
-    if !update_definition_index(def_index, &removed_clean, &dirty_clean).ok {
+    if !update_definition_index(def_index, &removed_clean, &definition_dirty_clean).ok {
         return false;
     }
 
     let elapsed_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
     info!(
-        updated = update_count,
+        content_updated = content_update_count,
+        definitions_updated = definition_update_count,
         removed = remove_count,
         elapsed_ms = format_args!("{:.1}", elapsed_ms),
         "Incremental index update complete"
@@ -946,7 +1096,7 @@ fn update_definition_index(
             // (e.g., read error, unsupported extension). Remove stale definitions.
             for path in dirty_clean {
                 if !parsed_paths.contains(path)
-                    && let Some(&fid) = idx.path_to_id.get(path) {
+                    && let Some(&fid) = idx.path_to_id.get(&crate::path_identity_key(path)) {
                         definitions::remove_file_definitions(&mut idx, fid);
                     }
             }
@@ -1347,10 +1497,7 @@ pub(crate) fn matches_extensions(path: &Path, extensions: &[String]) -> bool {
 }
 
 fn content_path_key(path: &Path) -> PathBuf {
-    let clean = clean_path(&path.to_string_lossy());
-    #[cfg(windows)]
-    let clean = clean.to_lowercase();
-    PathBuf::from(clean)
+    crate::path_identity_key(path)
 }
 
 fn content_path_entry(
@@ -2364,7 +2511,7 @@ pub(crate) fn reconcile_content_index_with_disk_files(
             // tombstone the files[] slot (see comment in update_content_index).
             for path in &to_remove {
                 let fid = idx.path_to_id.as_ref()
-                    .and_then(|p2id| p2id.get(path).copied());
+                    .and_then(|p2id| p2id.get(&crate::path_identity_key(path)).copied());
                 if let Some(fid) = fid {
                     if (fid as usize) < idx.file_token_counts.len() {
                         idx.file_token_counts[fid as usize] = 0;
@@ -2373,7 +2520,7 @@ pub(crate) fn reconcile_content_index_with_disk_files(
                         idx.files[fid as usize].clear();
                     }
                     if let Some(ref mut p2id) = idx.path_to_id {
-                        p2id.remove(path);
+                        p2id.remove(&crate::path_identity_key(path));
                     }
                 }
             }

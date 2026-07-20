@@ -1188,7 +1188,7 @@ After a successful real write (NOT `dryRun`), `xray_edit` refreshes the inverted
 | `defIndexUpdated` | `bool` | Always (single-file) / per-file (multi-file) | `true` when the definition index was refreshed. Always `false` when the server is started without `--definitions`, or when the file was skipped |
 | `fileListInvalidated` | `bool` | Always (single-file) / per-file (multi-file) | `true` only when a NEW file is created — the `xray_fast` file-list cache is marked dirty (`ctx.file_index_dirty.store(true)`) and rebuilt lazily on the next `xray_fast` call. `false` for edits to existing files (the file-list cache is unaffected) |
 | `reindexElapsedMs` | `string` | Single-file / `summary` for multi-file | Wall-clock cost of the reindex, formatted with 2 decimals (e.g. `"0.42"`). Multi-file edits report this once at `summary.reindexElapsedMs` because all eligible files are reindexed in ONE batched call (write-lock held ~1ms total, not N times) |
-| `skippedReason` | `string` | Per-file, only when reindex was skipped | One of `"outsideServerDir"` / `"extensionNotIndexed"` / `"insideGitDir"`. The file is still **written to disk** — only the index update is skipped because the file is out of the server's indexing scope |
+| `skippedReason` | `string` | Per-file, only when reindex was skipped | One of `"outsideServerDir"` / `"extensionNotIndexed"` / `"insideGitDir"` / `"ignoredByIndexRules"`. The file is still **written to disk** — only the index update is skipped because the file is out of the server's indexing scope |
 | `reindexWarning` | `string` | Only on lock poisoning | Set when one of the index `RwLock`s is poisoned during reindex. Message reassures the caller that the FS watcher will reconcile within 500ms — the write itself always succeeds |
 | `fileCreated` | `true` | Only on new files | Per-file response sets this to `true` when the file did not exist before the edit |
 
@@ -1201,6 +1201,9 @@ After a successful real write (NOT `dryRun`), `xray_edit` refreshes the inverted
 | `"outsideServerDir"` | The resolved (canonicalized) path does not start with the server's canonical `--dir` | Indexing a file outside the configured scope would pollute results and inflate the index; cross-project edits remain explicitly out of scope |
 | `"extensionNotIndexed"` | The file's extension is not in `--ext` (case-insensitive) | The server only indexes the configured extensions; reindexing a `.txt` file when `--ext rs` is configured would create orphan tokens that no other tool would surface |
 | `"insideGitDir"` | The path contains a `.git/` segment | `.git/` internals are never indexed (git operations generate massive event floods that would overwhelm the watcher and the inverted index) |
+| `"ignoredByIndexRules"` | The path is excluded from every active index by hidden-file, `.ignore`, `.gitignore`, global gitignore, or enabled `.git/info/exclude` rules | The write succeeds, but the file is not added outside the normal filesystem-indexing scope |
+
+Hidden paths have split scope: content and file-list indexing exclude them, while definition indexing includes them. With `--definitions`, an edit to a hidden source file therefore returns `reindexStatus: "completed"`, `contentIndexUpdated: false`, and `defIndexUpdated: true` when parsing succeeds.
 
 **`dryRun: true` invariant:** when `dryRun: true`, the response contains NONE of the reindex fields above (no `contentIndexUpdated`, no `defIndexUpdated`, no `fileListInvalidated`, no `reindexElapsedMs`, no `skippedReason`, no `reindexWarning`, no `fileCreated`). This preserves the contract that `dryRun` has zero side effects, both on disk and on the in-memory indexes.
 
