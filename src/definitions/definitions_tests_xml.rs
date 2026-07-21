@@ -272,6 +272,22 @@ fn test_text_content_leaf() {
 }
 
 #[test]
+fn test_text_content_cdata_matches_plain_text() {
+    let xml = "<Root><Plain>marker</Plain><Cdata><![CDATA[marker]]></Cdata></Root>";
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    for element_name in ["Plain", "Cdata"] {
+        let element = result
+            .definitions
+            .iter()
+            .find(|definition| definition.entry.name == element_name)
+            .unwrap();
+        assert_eq!(element.text_content.as_deref(), Some("marker"));
+    }
+}
+
+#[test]
 fn test_text_content_block_none() {
     let xml = "<Items><Item>hello</Item></Items>";
     let defs = parse_xml_on_demand(xml, "test.xml").unwrap();
@@ -508,6 +524,36 @@ fn test_mismatched_tags_produce_warning() {
             .iter()
             .any(|warning| warning.contains("syntax errors")),
         "Malformed XML should report a parse warning: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn test_malformed_cdata_produces_warning() {
+    let xml = "<Root><Item><![CDATA[invalid</Item></Root>";
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("syntax errors")),
+        "Malformed CDATA should report a parse warning: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn test_unterminated_attribute_produces_warning() {
+    let xml = "<Root><Item Name=\"unterminated></Item></Root>";
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("syntax errors")),
+        "Malformed attribute should report a parse warning: {:?}",
         result.warnings
     );
 }

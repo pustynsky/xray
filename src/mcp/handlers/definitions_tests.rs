@@ -4300,6 +4300,50 @@ fn test_xml_on_demand_name_matches_text_content() {
 
 #[test]
 #[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_name_matches_cdata_text() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    std::fs::write(
+        root.join("cdata.xml"),
+        "<Root><Entry><Value><![CDATA[XRAY_CDATA_HANDLER]]></Value></Entry></Root>",
+    )
+    .unwrap();
+
+    let content_index = crate::ContentIndex {
+        root: root.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let context = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(
+            make_test_def_index(),
+        ))),
+        server_ext: "xml".to_string(),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(root.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["cdata.xml"],
+            "name": ["XRAY_CDATA_HANDLER"]
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let definitions = output["definitions"].as_array().unwrap();
+    assert_eq!(definitions.len(), 1, "{}", output);
+    assert_eq!(definitions[0]["name"].as_str(), Some("Entry"));
+    assert_eq!(definitions[0]["matchedBy"].as_str(), Some("textContent"));
+    assert_eq!(definitions[0]["matchedChild"].as_str(), Some("Value"));
+    assert_eq!(output["summary"]["parseWarnings"], json!([]));
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
 fn test_xml_on_demand_malformed_input_reports_warning() {
     let tmp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(tmp.path());

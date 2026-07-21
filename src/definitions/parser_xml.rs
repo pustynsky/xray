@@ -424,8 +424,8 @@ fn format_attribute(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
 ///
 /// WALKER-7: aborts as soon as the first element/EmptyElemTag child is found —
 /// we know a block element cannot have a text representation, so collecting
-/// `CharData` from other siblings would be wasted work. For large XML blocks
-/// with many CharData/comment/PI siblings this avoids a full content sweep.
+/// `CharData` or CDATA from other siblings would be wasted work. For large XML
+/// blocks with many text/comment/PI siblings this avoids a full content sweep.
 ///
 /// NOTE: XML entity escapes in CharData (`&amp;`, `&lt;`, numeric refs) are
 /// **not decoded**. They appear verbatim in the returned string.
@@ -451,6 +451,18 @@ fn extract_text_content(node: tree_sitter::Node, source: &[u8]) -> Option<String
                         if !trimmed.is_empty() {
                             text_parts.push(trimmed.to_string());
                         }
+                    }
+                }
+                "CDSect" => {
+                    let mut cdata_cursor = content_child.walk();
+                    for cdata_child in content_child.children(&mut cdata_cursor) {
+                        if cdata_child.kind() == "CData"
+                            && let Ok(text) = cdata_child.utf8_text(source) {
+                                let trimmed = text.trim();
+                                if !trimmed.is_empty() {
+                                    text_parts.push(trimmed.to_string());
+                                }
+                            }
                     }
                 }
                 _ => {}

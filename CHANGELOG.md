@@ -3,9 +3,11 @@
 ## 0.3.0 (2026-07-21)
 
 
-- **TypeScript call graphs now resolve inline constructor receivers.** Calls such as `new Service().run()` retain the receiver class, so `xray_callers` no longer loses class-scoped callers or expands a top-level call to unrelated same-named methods.
+- **C# and TypeScript call graphs now resolve inline constructor receivers.** Calls such as `new Service().Run()` retain the receiver class, so `xray_callers` no longer loses class-scoped callers or expands a call to unrelated same-named methods.
 
 - **Malformed XML now reports recovery warnings.** XML on-demand parsing still returns recoverable definitions, while `summary.parseWarnings` identifies syntax errors that may make results incomplete.
+
+- **XML text-content lookup now includes CDATA.** Searching `xray_definitions name` finds CDATA values with the same parent-promotion behavior as ordinary leaf text; `includeBody` still preserves the original CDATA markers.
 
 - **`xray_edit` now preserves result fidelity for large and mixed-ending files.** Files over 2,000 lines return bounded real diff hunks instead of an all-or-nothing omission marker, with explicit rendered/omitted line and hunk counts; these bounded previews are intentionally not patch-applicable. Any rendered diff over 256 KB is truncated within that byte cap, including its explanatory footer. Existing files that mix LF and CRLF are rejected before dry-run or write processing rather than silently normalizing untouched lines; pure LF and CRLF behavior is unchanged.
 
