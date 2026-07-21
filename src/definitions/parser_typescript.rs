@@ -1256,9 +1256,12 @@ fn extract_ts_call_sites(
         .or_else(|| find_child_by_kind(method_node, "arrow_function"))
         .unwrap_or(method_node);
 
-    // Extract local variable types and merge with field types
-    let local_vars = extract_ts_local_var_types(body, source);
     let mut combined_types = field_types.clone();
+    for (name, type_name) in extract_ts_parameter_types(method_node, source) {
+        combined_types.insert(name, type_name);
+    }
+
+    let local_vars = extract_ts_local_var_types(body, source);
     for (name, type_name) in local_vars {
         combined_types.entry(name).or_insert(type_name);
     }
@@ -1276,6 +1279,87 @@ fn extract_ts_call_sites(
     });
 
     calls
+}
+
+fn extract_ts_parameter_types(
+    method_node: tree_sitter::Node,
+    source: &str,
+) -> HashMap<String, String> {
+    let mut parameter_types = HashMap::new();
+    let Some(parameters) = find_child_by_field(method_node, "parameters")
+        .or_else(|| find_child_by_kind(method_node, "formal_parameters"))
+    else {
+        return parameter_types;
+    };
+
+    let mut cursor = parameters.walk();
+    for parameter in parameters.named_children(&mut cursor) {
+        if !matches!(parameter.kind(), "required_parameter" | "optional_parameter") {
+            continue;
+        }
+        let Some(pattern) = find_child_by_field(parameter, "pattern")
+            .or_else(|| find_child_by_field(parameter, "name"))
+        else {
+            continue;
+        };
+        if pattern.kind() != "identifier" {
+            continue;
+        }
+        let Some(type_node) = find_child_by_field(parameter, "type") else {
+            continue;
+        };
+        let name = node_text(pattern, source).trim();
+        if !name.is_empty()
+            && let Some(type_name) = extract_ts_declared_receiver_type(type_node, source)
+        {
+            parameter_types.insert(name.to_string(), type_name);
+        }
+    }
+
+    parameter_types
+}
+
+fn extract_ts_declared_receiver_type(
+    type_node: tree_sitter::Node,
+    source: &str,
+) -> Option<String> {
+    match type_node.kind() {
+        "type_annotation" | "parenthesized_type" => type_node
+            .named_child(0)
+            .and_then(|child| extract_ts_declared_receiver_type(child, source)),
+        "type_identifier" => normalize_ts_receiver_name(node_text(type_node, source)),
+        "nested_type_identifier" | "generic_type" => find_child_by_field(type_node, "name")
+            .and_then(|name| extract_ts_declared_receiver_type(name, source)),
+        "union_type" => {
+            let mut resolved_type: Option<String> = None;
+            let mut cursor = type_node.walk();
+            for member in type_node.named_children(&mut cursor) {
+                let member_text = node_text(member, source).trim();
+                if matches!(member_text, "null" | "undefined") {
+                    continue;
+                }
+                let member_type = extract_ts_declared_receiver_type(member, source)?;
+                if let Some(ref current_type) = resolved_type {
+                    if !current_type.eq_ignore_ascii_case(&member_type) {
+                        return None;
+                    }
+                } else {
+                    resolved_type = Some(member_type);
+                }
+            }
+            resolved_type
+        }
+        _ => None,
+    }
+}
+
+fn normalize_ts_receiver_name(type_name: &str) -> Option<String> {
+    let name = type_name.trim().rsplit('.').next().unwrap_or(type_name).trim();
+    if !name.is_empty() && name.chars().next().is_some_and(|character| character.is_uppercase()) {
+        Some(name.to_string())
+    } else {
+        None
+    }
 }
 
 /// Recursively walk AST looking for call_expression and new_expression nodes.
@@ -1374,6 +1458,39 @@ fn extract_ts_member_call(
     })
 }
 
+fn resolve_known_ts_receiver_type(
+    object_node: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+) -> Option<String> {
+    if object_node.kind() == "identifier" {
+        let name = node_text(object_node, source).trim();
+        return field_types.get(name).cloned();
+    }
+
+    resolve_ts_receiver_type(object_node, source, class_name, field_types)
+}
+
+fn resolve_matching_ts_receiver_types(
+    left: tree_sitter::Node,
+    right: tree_sitter::Node,
+    source: &str,
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+) -> Option<String> {
+    let left_type = resolve_known_ts_receiver_type(left, source, class_name, field_types)?;
+    let right_type = resolve_known_ts_receiver_type(right, source, class_name, field_types)?;
+    left_type
+        .eq_ignore_ascii_case(&right_type)
+        .then_some(left_type)
+}
+
+fn ts_has_direct_child_kind(node: tree_sitter::Node, kind: &str) -> bool {
+    (0..node.child_count())
+        .any(|index| node.child(index).is_some_and(|child| child.kind() == kind))
+}
+
 /// Resolve the type of a receiver expression.
 fn resolve_ts_receiver_type(
     object_node: tree_sitter::Node,
@@ -1400,6 +1517,31 @@ fn resolve_ts_receiver_type(
             }
         }
         "new_expression" => extract_type_from_new_expr(object_node, source),
+        "parenthesized_expression" => object_node.named_child(0).and_then(|inner| {
+            resolve_known_ts_receiver_type(inner, source, class_name, field_types)
+        }),
+        "ternary_expression" => {
+            let consequence = find_child_by_field(object_node, "consequence")?;
+            let alternative = find_child_by_field(object_node, "alternative")?;
+            resolve_matching_ts_receiver_types(
+                consequence,
+                alternative,
+                source,
+                class_name,
+                field_types,
+            )
+        }
+        "binary_expression" if ts_has_direct_child_kind(object_node, "??") => {
+            let left = find_child_by_field(object_node, "left")?;
+            let right = find_child_by_field(object_node, "right")?;
+            resolve_matching_ts_receiver_types(
+                left,
+                right,
+                source,
+                class_name,
+                field_types,
+            )
+        }
         "member_expression" => {
             // Handle this.service.method() — object is this.service
             let inner_object = find_child_by_field(object_node, "object")?;

@@ -507,6 +507,18 @@ fn test_resolve_call_site_scopes_by_caller_parent() {
         method_def(0, "doWork", "ClassA", 5, 15),
         class_def(1, "ClassB", vec![]),
         method_def(1, "doWork", "ClassB", 5, 15),
+        DefinitionEntry {
+            file_id: 0,
+            name: "doWork".to_string(),
+            kind: DefinitionKind::Function,
+            line_start: 20,
+            line_end: 25,
+            parent: None,
+            signature: None,
+            modifiers: vec![],
+            attributes: vec![],
+            base_types: vec![],
+        },
     ];
     let def_idx = make_def_index(definitions, HashMap::new());
     let call = CallSite {
@@ -524,8 +536,12 @@ fn test_resolve_call_site_scopes_by_caller_parent() {
     assert_eq!(resolved_b.len(), 1);
     assert_eq!(def_idx.definitions[resolved_b[0] as usize].parent.as_deref(), Some("ClassB"));
 
-    let resolved_all = resolve_call_site(&call, &def_idx, None);
-    assert_eq!(resolved_all.len(), 2);
+    let resolved_top_level = resolve_call_site(&call, &def_idx, None);
+    assert_eq!(resolved_top_level.len(), 1);
+    assert_eq!(
+        def_idx.definitions[resolved_top_level[0] as usize].kind,
+        DefinitionKind::Function
+    );
 }
 
 // ─── Test 11: build_callee_tree depth=2 no cross-class pollution ──

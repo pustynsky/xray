@@ -3011,8 +3011,9 @@ pub(crate) fn resolve_call_site(call: &CallSite, def_idx: &DefinitionIndex, call
                     && parent.eq_ignore_ascii_case(caller_cls) {
                         resolved.push(di);
                     }
-            } else {
-                // No caller class context -- accept all (backward-compatible)
+            } else if !matches!(def.kind, DefinitionKind::Method | DefinitionKind::Constructor) {
+                // Top-level calls can resolve to free functions and SQL routines, but an
+                // unresolved member receiver must not fan out to every same-named method.
                 resolved.push(di);
             }
         }

@@ -831,6 +831,62 @@ public sealed class ConditionalCaller {
 }
 
 #[test]
+fn test_csharp_conditional_receiver_requires_matching_branch_types() {
+    let source = r#"
+public sealed class TargetA {
+    public void Execute() { }
+}
+public sealed class TargetB {
+    public void Execute() { }
+}
+public sealed class Handler {
+    public void Execute() { }
+}
+public sealed class Holder {
+    public Handler Handler { get; }
+}
+public sealed class ConditionalCaller {
+    public void SameTernary(bool condition, TargetA first, TargetA second) =>
+        (condition ? first : second).Execute();
+    public void DifferentTernary(bool condition, TargetA first, TargetB second) =>
+        (condition ? first : second).Execute();
+    public void SameCoalescing(TargetA? first, TargetA fallback) =>
+        (first ?? fallback).Execute();
+    public void DifferentCoalescing(TargetA? first, TargetB fallback) =>
+        (first ?? fallback).Execute();
+    public void UnknownMemberTernary(bool condition, Holder first, Holder second) =>
+        (condition ? first.Handler : second.Handler).Execute();
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (definitions, call_sites, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    for (method_name, expected_receiver) in [
+        ("SameTernary", Some("TargetA")),
+        ("DifferentTernary", None),
+        ("SameCoalescing", Some("TargetA")),
+        ("DifferentCoalescing", None),
+        ("UnknownMemberTernary", None),
+    ] {
+        let method_index = definitions
+            .iter()
+            .position(|definition| definition.name == method_name)
+            .unwrap();
+        let calls = call_sites
+            .iter()
+            .find(|(index, _)| *index == method_index)
+            .unwrap();
+        let execute = calls
+            .1
+            .iter()
+            .find(|call| call.method_name == "Execute")
+            .unwrap();
+        assert_eq!(execute.receiver_type.as_deref(), expected_receiver);
+    }
+}
+
+#[test]
 fn test_csharp_local_var_var_without_new() {
     let source = r#"
 public class SomeService {
