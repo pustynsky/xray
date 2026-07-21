@@ -4300,6 +4300,52 @@ fn test_xml_on_demand_name_matches_text_content() {
 
 #[test]
 #[cfg(feature = "lang-xml")]
+fn test_xml_on_demand_malformed_input_reports_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(tmp.path());
+    std::fs::write(root.join("broken.props"), "<Root><Child></Root>").unwrap();
+
+    let content_index = crate::ContentIndex {
+        root: root.to_string_lossy().to_string(),
+        ..Default::default()
+    };
+    let ctx = HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(
+            make_test_def_index(),
+        ))),
+        server_ext: "props".to_string(),
+        workspace: std::sync::Arc::new(std::sync::RwLock::new(
+            WorkspaceBinding::pinned(root.to_string_lossy().to_string()),
+        )),
+        ..Default::default()
+    };
+
+    let result = handle_xray_definitions(
+        &ctx,
+        &json!({
+            "file": ["broken.props"],
+            "name": ["Root"]
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let warnings = output["summary"]["parseWarnings"].as_array().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .any(|warning| {
+                warning
+                    .as_str()
+                    .is_some_and(|text| text.contains("syntax errors"))
+            }),
+        "{}",
+        output
+    );
+}
+
+#[test]
+#[cfg(feature = "lang-xml")]
 fn test_xml_on_demand_name_matches_element_name_not_just_text() {
     // name="ServiceType" should still match by element name (existing behavior)
     use std::io::Write;

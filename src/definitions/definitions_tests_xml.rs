@@ -497,6 +497,21 @@ fn test_walker_malformed_recursion() {
     );
 }
 
+#[test]
+fn test_mismatched_tags_produce_warning() {
+    let xml = "<Root><Child></Root>";
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("syntax errors")),
+        "Malformed XML should report a parse warning: {:?}",
+        result.warnings
+    );
+}
+
 /// Well-formed input must yield an empty warnings list. This is a sanity
 /// check that the warnings surface does not spuriously fire.
 #[test]

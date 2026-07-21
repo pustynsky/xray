@@ -3,6 +3,10 @@
 ## 0.3.0 (2026-07-21)
 
 
+- **TypeScript call graphs now resolve inline constructor receivers.** Calls such as `new Service().run()` retain the receiver class, so `xray_callers` no longer loses class-scoped callers or expands a top-level call to unrelated same-named methods.
+
+- **Malformed XML now reports recovery warnings.** XML on-demand parsing still returns recoverable definitions, while `summary.parseWarnings` identifies syntax errors that may make results incomplete.
+
 - **`xray_edit` now preserves result fidelity for large and mixed-ending files.** Files over 2,000 lines return bounded real diff hunks instead of an all-or-nothing omission marker, with explicit rendered/omitted line and hunk counts; these bounded previews are intentionally not patch-applicable. Any rendered diff over 256 KB is truncated within that byte cap, including its explanatory footer. Existing files that mix LF and CRLF are rejected before dry-run or write processing rather than silently normalizing untouched lines; pure LF and CRLF behavior is unchanged.
 
 - **`xray_edit` now rejects invalid or dangerous writes before filesystem side effects.** Failed edits to missing files no longer create parent directories before content validation; per-edit `expectedMatchCount` enforces actual literal, regex, insert, or skipped match counts before staging; and logical or resolved paths inside `.git` are rejected by default, including dry runs and Windows case variants. `allowGitInternals: true` is an explicit override, while synchronous reindex remains skipped with `insideGitDir`.
