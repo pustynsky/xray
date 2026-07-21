@@ -430,7 +430,7 @@ fn format_attribute(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
 /// NOTE: XML entity escapes in CharData (`&amp;`, `&lt;`, numeric refs) are
 /// **not decoded**. They appear verbatim in the returned string.
 fn extract_text_content(node: tree_sitter::Node, source: &[u8]) -> Option<String> {
-    let mut text_parts: Vec<String> = Vec::new();
+    let mut text_content = String::new();
 
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
@@ -445,23 +445,17 @@ fn extract_text_content(node: tree_sitter::Node, source: &[u8]) -> Option<String
                     // report, abandon collection immediately.
                     return None;
                 }
-                "CharData" => {
-                    if let Ok(text) = content_child.utf8_text(source) {
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            text_parts.push(trimmed.to_string());
-                        }
+                "CharData" | "EntityRef" | "CharRef" => {
+                    if let Ok(segment) = content_child.utf8_text(source) {
+                        text_content.push_str(segment);
                     }
                 }
                 "CDSect" => {
                     let mut cdata_cursor = content_child.walk();
                     for cdata_child in content_child.children(&mut cdata_cursor) {
                         if cdata_child.kind() == "CData"
-                            && let Ok(text) = cdata_child.utf8_text(source) {
-                                let trimmed = text.trim();
-                                if !trimmed.is_empty() {
-                                    text_parts.push(trimmed.to_string());
-                                }
+                            && let Ok(segment) = cdata_child.utf8_text(source) {
+                                text_content.push_str(segment);
                             }
                     }
                 }
@@ -470,11 +464,10 @@ fn extract_text_content(node: tree_sitter::Node, source: &[u8]) -> Option<String
         }
     }
 
-    if text_parts.is_empty() {
+    let combined = text_content.trim();
+    if combined.is_empty() {
         return None;
     }
-
-    let combined = text_parts.join(" ");
     // Truncate by character count (not bytes) to avoid slicing in the middle of a
     // UTF-8 multi-byte sequence. Using byte index on non-ASCII text (Cyrillic, CJK,
     // emoji) would cause `byte index N is not a char boundary` panic.
@@ -482,7 +475,7 @@ fn extract_text_content(node: tree_sitter::Node, source: &[u8]) -> Option<String
         let truncated: String = combined.chars().take(TEXT_CONTENT_TRUNCATE_TO).collect();
         Some(format!("{}...", truncated))
     } else {
-        Some(combined)
+        Some(combined.to_string())
     }
 }
 

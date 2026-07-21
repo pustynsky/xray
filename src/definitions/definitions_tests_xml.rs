@@ -288,6 +288,36 @@ fn test_text_content_cdata_matches_plain_text() {
 }
 
 #[test]
+fn test_text_content_preserves_entity_references() {
+    let xml = "<Root><Named>alpha &amp; beta</Named><Numeric>left &#x26; right</Numeric></Root>";
+    let result = parse_xml_on_demand_with_warnings(xml, "test.xml").unwrap();
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    for (element_name, expected_text) in
+        [("Named", "alpha &amp; beta"), ("Numeric", "left &#x26; right")]
+    {
+        let element = result
+            .definitions
+            .iter()
+            .find(|definition| definition.entry.name == element_name)
+            .unwrap();
+        assert_eq!(element.text_content.as_deref(), Some(expected_text));
+    }
+}
+
+#[test]
+fn test_text_content_preserves_segment_boundaries() {
+    let xml = "<Mixed>ONE<![CDATA[TWO]]>&amp;THREE</Mixed>";
+    let definitions = parse_xml_on_demand(xml, "test.xml").unwrap();
+    let element = definitions
+        .iter()
+        .find(|definition| definition.entry.name == "Mixed")
+        .unwrap();
+
+    assert_eq!(element.text_content.as_deref(), Some("ONETWO&amp;THREE"));
+}
+
+#[test]
 fn test_text_content_block_none() {
     let xml = "<Items><Item>hello</Item></Items>";
     let defs = parse_xml_on_demand(xml, "test.xml").unwrap();

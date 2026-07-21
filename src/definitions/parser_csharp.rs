@@ -485,6 +485,37 @@ fn collect_constructor_assignments(
 
 // ─── Call site extraction ───────────────────────────────────────────
 
+fn extract_csharp_parameter_types(
+    method_node: tree_sitter::Node,
+    source: &[u8],
+) -> HashMap<String, String> {
+    let mut parameter_types = HashMap::new();
+    let Some(parameter_list) = find_child_by_kind(method_node, "parameter_list") else {
+        return parameter_types;
+    };
+
+    let mut cursor = parameter_list.walk();
+    for parameter in parameter_list.named_children(&mut cursor) {
+        if parameter.kind() != "parameter" {
+            continue;
+        }
+        let Some(name_node) = find_child_by_field(parameter, "name") else {
+            continue;
+        };
+        let Some(type_node) = find_child_by_field(parameter, "type") else {
+            continue;
+        };
+        let name = node_text(name_node, source).trim();
+        let type_text = node_text(type_node, source);
+        if !name.is_empty()
+            && let Some(type_name) = normalize_csharp_receiver_type(type_text) {
+                parameter_types.insert(name.to_string(), type_name);
+            }
+    }
+
+    parameter_types
+}
+
 fn extract_call_sites(
     method_node: tree_sitter::Node,
     source: &[u8],
@@ -499,9 +530,13 @@ fn extract_call_sites(
         .or_else(|| find_child_by_kind(method_node, "arrow_expression_clause"));
 
     if let Some(body_node) = body {
-        // Extract local variable types and merge with field types
-        let local_vars = extract_csharp_local_var_types(body_node, source, method_return_types);
+        // Method parameters shadow same-named fields for bare receiver lookup.
         let mut combined_types = field_types.clone();
+        for (name, type_name) in extract_csharp_parameter_types(method_node, source) {
+            combined_types.insert(name, type_name);
+        }
+
+        let local_vars = extract_csharp_local_var_types(body_node, source, method_return_types);
         for (name, type_name) in local_vars {
             combined_types.entry(name).or_insert(type_name);
         }
@@ -1237,6 +1272,27 @@ fn extract_csharp_var_declaration_types(
     }
 }
 
+/// Reduces a declared C# type to the class/interface name used by the call graph.
+fn normalize_csharp_receiver_type(type_text: &str) -> Option<String> {
+    let without_nullable = type_text.trim().trim_end_matches('?');
+    let without_generics = without_nullable
+        .split('<')
+        .next()
+        .unwrap_or(without_nullable)
+        .trim();
+    let base = without_generics
+        .rsplit('.')
+        .next()
+        .unwrap_or(without_generics)
+        .trim();
+
+    if !base.is_empty() && base.chars().next().is_some_and(|c| c.is_uppercase()) {
+        Some(base.to_string())
+    } else {
+        None
+    }
+}
+
 /// Extracts the type name from a C# object creation expression.
 /// Handles: `new Foo()`, `new Foo<T>()`, `new ns.Foo(args)`
 fn extract_csharp_type_from_new_expr(
@@ -1254,21 +1310,7 @@ fn extract_csharp_type_from_new_expr(
 
     // In C# tree-sitter, object_creation_expression: child(0) = "new", child(1) = type
     let type_node = new_expr.child(1)?;
-    let text = node_text(type_node, source).trim().to_string();
-
-    // Strip generic arguments before namespaces so dots inside `<Ns.Type>` are ignored.
-    let without_generics = text.split('<').next().unwrap_or(&text).trim();
-    let base = without_generics
-        .rsplit('.')
-        .next()
-        .unwrap_or(without_generics)
-        .to_string();
-
-    if !base.is_empty() && base.chars().next().is_some_and(|c| c.is_uppercase()) {
-        Some(base)
-    } else {
-        None
-    }
+    normalize_csharp_receiver_type(node_text(type_node, source))
 }
 
 /// Extract the method name from an invocation_expression, but only for simple
