@@ -615,7 +615,7 @@ fn test_ts_xray_callers_down_finds_callees() {
 }
 
 #[test]
-fn test_ts_xray_callers_inline_new_receiver() {
+fn test_ts_xray_callers_direct_receiver_types() {
     static COUNTER: std::sync::atomic::AtomicU64 =
         std::sync::atomic::AtomicU64::new(0);
     let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -639,6 +639,38 @@ class UnrelatedExecutor {
 }
 export function xrayEdgeDirectCall(): string {
     return new XrayEdgeDerived().execute("marker");
+}
+export function typedParameter(target: XrayEdgeDerived): string {
+    return target.execute("marker");
+}
+export function optionalParameter(target?: XrayEdgeDerived): string | undefined {
+    return target?.execute("marker");
+}
+export function sameTernary(
+    condition: boolean,
+    first: XrayEdgeDerived,
+    second: XrayEdgeDerived,
+): string {
+    return (condition ? first : second).execute("marker");
+}
+export function differentTernary(
+    condition: boolean,
+    first: XrayEdgeDerived,
+    second: UnrelatedExecutor,
+): string {
+    return (condition ? first : second).execute("marker");
+}
+export function sameCoalescing(
+    first: XrayEdgeDerived | undefined,
+    fallback: XrayEdgeDerived,
+): string {
+    return (first ?? fallback).execute("marker");
+}
+export function differentCoalescing(
+    first: XrayEdgeDerived | undefined,
+    fallback: UnrelatedExecutor,
+): string {
+    return (first ?? fallback).execute("marker");
 }
 "#,
     )
@@ -706,15 +738,65 @@ export function xrayEdgeDirectCall(): string {
     );
     assert!(!up_result.is_error, "{}", up_result.content[0].text);
     let up_output: Value = serde_json::from_str(&up_result.content[0].text).unwrap();
-    assert!(
-        up_output["callTree"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|node| node["method"].as_str() == Some("xrayEdgeDirectCall")),
+    let caller_methods: Vec<_> = up_output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["method"].as_str())
+        .collect();
+    assert_eq!(
+        caller_methods,
+        vec![
+            "xrayEdgeDirectCall",
+            "typedParameter",
+            "optionalParameter",
+            "sameTernary",
+            "sameCoalescing",
+        ],
         "{}",
         up_output
     );
+
+    for (method_name, expected_class) in [
+        ("typedParameter", Some("XrayEdgeDerived")),
+        ("optionalParameter", Some("XrayEdgeDerived")),
+        ("sameTernary", Some("XrayEdgeDerived")),
+        ("differentTernary", None),
+        ("sameCoalescing", Some("XrayEdgeDerived")),
+        ("differentCoalescing", None),
+    ] {
+        let result = dispatch_tool(
+            &ctx,
+            "xray_callers",
+            &json!({
+                "method": [method_name],
+                "direction": "down",
+                "depth": 1
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let execute_nodes: Vec<_> = output["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["method"].as_str() == Some("execute"))
+            .collect();
+        assert_eq!(
+            execute_nodes
+                .first()
+                .and_then(|node| node["class"].as_str()),
+            expected_class,
+            "{}",
+            output
+        );
+        assert_eq!(
+            execute_nodes.len(),
+            if expected_class.is_some() { 1 } else { 0 },
+            "{}",
+            output
+        );
+    }
 
     cleanup_tmp(&tmp_dir);
 }

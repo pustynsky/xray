@@ -722,6 +722,53 @@ fn extract_object_creation(
     })
 }
 
+fn resolve_known_receiver_type(
+    receiver: tree_sitter::Node,
+    source: &[u8],
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+    base_types: &[String],
+) -> Option<String> {
+    match receiver.kind() {
+        "identifier" => {
+            let name = node_text(receiver, source).trim();
+            if name != "this" && name != "base" {
+                return field_types.get(name).cloned();
+            }
+        }
+        "member_access_expression" => {
+            let name = find_child_by_field(receiver, "name")?;
+            return field_types.get(node_text(name, source).trim()).cloned();
+        }
+        _ => {}
+    }
+
+    resolve_receiver_type(receiver, source, class_name, field_types, base_types)
+}
+
+fn resolve_matching_receiver_types(
+    left: tree_sitter::Node,
+    right: tree_sitter::Node,
+    source: &[u8],
+    class_name: &str,
+    field_types: &HashMap<String, String>,
+    base_types: &[String],
+) -> Option<String> {
+    let left_type =
+        resolve_known_receiver_type(left, source, class_name, field_types, base_types)?;
+    let right_type =
+        resolve_known_receiver_type(right, source, class_name, field_types, base_types)?;
+
+    left_type
+        .eq_ignore_ascii_case(&right_type)
+        .then_some(left_type)
+}
+
+fn has_direct_child_kind(node: tree_sitter::Node, kind: &str) -> bool {
+    (0..node.child_count())
+        .any(|index| node.child(index).is_some_and(|child| child.kind() == kind))
+}
+
 fn resolve_receiver_type(
     receiver: tree_sitter::Node,
     source: &[u8],
@@ -749,6 +796,33 @@ fn resolve_receiver_type(
         "this_expression" => Some(class_name.to_string()),
         "base_expression" => base_types.first().map(|bt| bt.split('<').next().unwrap_or(bt).to_string()),
         "object_creation_expression" => extract_csharp_type_from_new_expr(receiver, source),
+        "parenthesized_expression" => receiver.named_child(0).and_then(|inner| {
+            resolve_known_receiver_type(inner, source, class_name, field_types, base_types)
+        }),
+        "conditional_expression" => {
+            let consequence = find_child_by_field(receiver, "consequence")?;
+            let alternative = find_child_by_field(receiver, "alternative")?;
+            resolve_matching_receiver_types(
+                consequence,
+                alternative,
+                source,
+                class_name,
+                field_types,
+                base_types,
+            )
+        }
+        "binary_expression" if has_direct_child_kind(receiver, "??") => {
+            let left = find_child_by_field(receiver, "left")?;
+            let right = find_child_by_field(receiver, "right")?;
+            resolve_matching_receiver_types(
+                left,
+                right,
+                source,
+                class_name,
+                field_types,
+                base_types,
+            )
+        }
         "member_access_expression" => {
             // Chained property access: _context.RuntimeContext.UtteranceIndexBuilder
             // Extract the LAST member name as the receiver type.

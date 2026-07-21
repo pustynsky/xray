@@ -5,7 +5,7 @@
 
 - **C# and TypeScript call graphs now resolve inline constructor receivers.** Calls such as `new Service().Run()` retain the receiver class, so `xray_callers` no longer loses class-scoped callers or expands a call to unrelated same-named methods.
 
-- **C# call graphs now resolve typed method parameters.** Calls through declared parameter types, including null-conditional receivers such as `service?.Run()`, now remain class-scoped instead of falling back to the parameter name.
+- **C# and TypeScript call graphs now resolve typed parameters and compatible conditional receivers.** Parameter calls (including null/optional chaining) remain class-scoped, while ternary and nullish-coalescing (`??`) receivers resolve only when both branches have the same known type. Incompatible top-level receivers no longer fan out to unrelated same-named class methods.
 
 - **Malformed XML now reports recovery warnings.** XML on-demand parsing still returns recoverable definitions, while `summary.parseWarnings` identifies syntax errors that may make results incomplete.
 

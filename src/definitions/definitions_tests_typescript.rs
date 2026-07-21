@@ -858,6 +858,94 @@ function xrayEdgeDirectCall(): string {
 }
 
 #[test]
+fn test_ts_method_parameter_receiver_type() {
+    let source = r#"namespace Models {
+    export class GenericTarget<T> { execute(): void {} }
+}
+class ParameterTarget { execute(): void {} }
+class WrongParameterTarget { execute(): void {} }
+class ParameterCaller {
+    private target: WrongParameterTarget;
+    typed(target: ParameterTarget): void { target.execute(); }
+    optional(target?: ParameterTarget): void { target?.execute(); }
+    generic(target: Models.GenericTarget<string>): void { target.execute(); }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .unwrap();
+    let (definitions, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    for (method_name, expected_receiver) in [
+        ("typed", "ParameterTarget"),
+        ("optional", "ParameterTarget"),
+        ("generic", "GenericTarget"),
+    ] {
+        let method_index = definitions
+            .iter()
+            .position(|definition| definition.name == method_name)
+            .unwrap();
+        let calls = call_sites
+            .iter()
+            .find(|(index, _)| *index == method_index)
+            .unwrap();
+        let execute = calls
+            .1
+            .iter()
+            .find(|call| call.method_name == "execute")
+            .unwrap();
+        assert_eq!(execute.receiver_type.as_deref(), Some(expected_receiver));
+    }
+}
+
+#[test]
+fn test_ts_conditional_receiver_requires_matching_branch_types() {
+    let source = r#"class TargetA { execute(): void {} }
+class TargetB { execute(): void {} }
+class ConditionalCaller {
+    sameTernary(condition: boolean, first: TargetA, second: TargetA): void {
+        (condition ? first : second).execute();
+    }
+    differentTernary(condition: boolean, first: TargetA, second: TargetB): void {
+        (condition ? first : second).execute();
+    }
+    sameCoalescing(first: TargetA | undefined, fallback: TargetA): void {
+        (first ?? fallback).execute();
+    }
+    differentCoalescing(first: TargetA | undefined, fallback: TargetB): void {
+        (first ?? fallback).execute();
+    }
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .unwrap();
+    let (definitions, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    for (method_name, expected_receiver) in [
+        ("sameTernary", Some("TargetA")),
+        ("differentTernary", None),
+        ("sameCoalescing", Some("TargetA")),
+        ("differentCoalescing", None),
+    ] {
+        let method_index = definitions
+            .iter()
+            .position(|definition| definition.name == method_name)
+            .unwrap();
+        let calls = call_sites
+            .iter()
+            .find(|(index, _)| *index == method_index)
+            .unwrap();
+        let execute = calls
+            .1
+            .iter()
+            .find(|call| call.method_name == "execute")
+            .unwrap();
+        assert_eq!(execute.receiver_type.as_deref(), expected_receiver);
+    }
+}
+
+#[test]
 fn test_ts_local_var_new_expression_with_generics() {
     let source = r#"class DataService {
     loadData(): void {

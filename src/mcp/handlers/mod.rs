@@ -430,8 +430,8 @@ pub fn tool_definitions_with_runtime(def_extensions: &[String], xml_on_demand_av
                      call tree with method signatures, file paths, and line numbers. Always specify the 'class' parameter \
                      to avoid mixing callers from unrelated classes. Requires server started with --definitions flag. \
                      Limitation: calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may not be \
-                     detected because the tool uses AST parsing without type inference. DI-injected fields, C# typed method \
-                     parameters, `this`/`base` calls, and direct receiver calls are fully supported. \
+                     detected because the tool uses AST parsing without type inference. DI-injected fields, C# and TypeScript typed \
+                     parameters, direct receivers, and compatible ternary/nullish-coalescing receivers are supported. \
                      ADVISORY HINTS (direction='up' only): the response may include an 'advisories' field (array of \
                      strings) flagging known AST blind spots: (a) when class= is passed and the class implements an \
                      interface, suggests re-running with class=IFoo to include interface-receiver call sites; \

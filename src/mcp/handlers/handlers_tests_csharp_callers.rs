@@ -420,7 +420,7 @@ fn test_resolve_call_site_with_class_scope() {
                 receiver_is_generic: false,
             };
     let resolved_none = resolve_call_site(&call_no_recv, &def_index, None);
-    assert_eq!(resolved_none.len(), 2);
+    assert!(resolved_none.is_empty());
 
     let call_iface = CallSite {
         method_name: "Execute".to_string(),
@@ -545,6 +545,14 @@ public sealed class InlineReceiverCaller {
     public void Generic() => new TestTypes.GenericTarget<System.String>().Execute();
     public void Parameter(ParameterTarget target) => target.Execute();
     public void NullConditional(ParameterTarget? target) => target?.Execute();
+    public void SameTernary(bool condition, ParameterTarget first, ParameterTarget second) =>
+        (condition ? first : second).Execute();
+    public void DifferentTernary(bool condition, ParameterTarget first, UnrelatedTarget second) =>
+        (condition ? first : second).Execute();
+    public void SameCoalescing(ParameterTarget? first, ParameterTarget fallback) =>
+        (first ?? fallback).Execute();
+    public void DifferentCoalescing(ParameterTarget? first, UnrelatedTarget fallback) =>
+        (first ?? fallback).Execute();
 }
 "#,
     )
@@ -618,7 +626,52 @@ public sealed class InlineReceiverCaller {
         .iter()
         .filter_map(|node| node["method"].as_str())
         .collect();
-    assert_eq!(caller_methods, vec!["Parameter", "NullConditional"], "{}", output);
+    assert_eq!(
+        caller_methods,
+        vec!["Parameter", "NullConditional", "SameTernary", "SameCoalescing"],
+        "{}",
+        output
+    );
+
+    for (method_name, expected_class) in [
+        ("SameTernary", Some("ParameterTarget")),
+        ("DifferentTernary", None),
+        ("SameCoalescing", Some("ParameterTarget")),
+        ("DifferentCoalescing", None),
+    ] {
+        let result = dispatch_tool(
+            &context,
+            "xray_callers",
+            &json!({
+                "method": [method_name],
+                "class": "InlineReceiverCaller",
+                "direction": "down",
+                "depth": 1
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let execute_nodes: Vec<_> = output["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["method"].as_str() == Some("Execute"))
+            .collect();
+        assert_eq!(
+            execute_nodes
+                .first()
+                .and_then(|node| node["class"].as_str()),
+            expected_class,
+            "{}",
+            output
+        );
+        assert_eq!(
+            execute_nodes.len(),
+            if expected_class.is_some() { 1 } else { 0 },
+            "{}",
+            output
+        );
+    }
 
     let result = dispatch_tool(
         &context,
