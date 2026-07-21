@@ -514,6 +514,115 @@ fn test_xray_callers_down_class_filter() {
 }
 
 #[test]
+fn test_xray_callers_inline_object_creation_receiver() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let source_file = root.join("InlineReceivers.cs");
+    std::fs::write(
+        &source_file,
+        r#"public sealed class NoArgTarget {
+    public void Execute() { }
+}
+public sealed class ArgTarget {
+    public ArgTarget(int first, int second) { }
+    public void Execute() { }
+}
+public sealed class UnrelatedTarget {
+    public void Execute() { }
+}
+namespace TestTypes {
+    public sealed class GenericTarget<T> {
+        public void Execute() { }
+    }
+}
+public sealed class InlineReceiverCaller {
+    public void NoArgs() => new NoArgTarget().Execute();
+    public void WithArgs(int first, int second) => new ArgTarget(first, second).Execute();
+    public void Generic() => new TestTypes.GenericTarget<System.String>().Execute();
+}
+"#,
+    )
+    .unwrap();
+
+    let mut definition_index = DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    crate::definitions::update_file_definitions(&mut definition_index, &source_file);
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let context = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(definition_index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            root.to_string_lossy().to_string(),
+        ))),
+        server_ext: "cs".to_string(),
+        ..Default::default()
+    };
+
+    for (class_name, caller_name) in
+        [
+            ("NoArgTarget", "NoArgs"),
+            ("ArgTarget", "WithArgs"),
+            ("GenericTarget", "Generic"),
+        ]
+    {
+        let result = dispatch_tool(
+            &context,
+            "xray_callers",
+            &json!({
+                "method": ["Execute"],
+                "class": class_name,
+                "depth": 1
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+        let call_tree = output["callTree"].as_array().unwrap();
+        assert_eq!(call_tree.len(), 1, "{}", output);
+        assert_eq!(
+            call_tree[0]["method"].as_str(),
+            Some(caller_name),
+            "{}",
+            output
+        );
+    }
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["WithArgs"],
+            "class": "InlineReceiverCaller",
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let execute_nodes: Vec<_> = output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["method"].as_str() == Some("Execute"))
+        .collect();
+    assert_eq!(execute_nodes.len(), 1, "{}", output);
+    assert_eq!(
+        execute_nodes[0]["class"].as_str(),
+        Some("ArgTarget"),
+        "{}",
+        output
+    );
+}
+
+#[test]
 fn test_xray_callers_ambiguity_warning_truncated() {
     // Create 15 classes each with a method named "OnInit" — exceeds MAX_LISTED (10)
     let num_classes = 15;

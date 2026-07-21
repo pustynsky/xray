@@ -949,7 +949,7 @@ When `xray_definitions` finds more results than `maxResults` and **no `name` fil
 **Limitations — read before relying on exact text content:**
 
 - **Entity escapes are NOT decoded.** `&lt;`, `&gt;`, `&amp;`, `&quot;`, `&apos;`, and numeric entities like `&#xD;` are returned verbatim in `textContent`. If you need the decoded form, post-process on the caller side. Rationale: XML entity decoding is non-trivial (custom DTDs, entity references inside attributes vs. content) and the on-demand path is optimized for structural navigation, not faithful text reconstruction.
-- **CDATA sections** are preserved as-is (including the `<![CDATA[ ... ]]>` markers when appearing in the `includeBody` slice).
+- **CDATA sections** participate in `textContent` matching through their inner text; the original `<![CDATA[ ... ]]>` markers remain intact in the `includeBody` slice.
 - **Namespaces** are kept as literal prefixes: `<ns:Element>` yields `name: "ns:Element"`. No URI resolution is performed.
 - **Malformed XML** (unterminated tags, junk before the document) still parses — tree-sitter-xml is error-tolerant. A `parseWarnings` entry describes each recovered error, but the surrounding well-formed elements are still reported.
 - **Extremely deep documents** (>1024 nested levels) are truncated at the tripwire with a warning; the rest of the file is parsed normally.

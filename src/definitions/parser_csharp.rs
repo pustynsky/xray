@@ -713,6 +713,7 @@ fn resolve_receiver_type(
         }
         "this_expression" => Some(class_name.to_string()),
         "base_expression" => base_types.first().map(|bt| bt.split('<').next().unwrap_or(bt).to_string()),
+        "object_creation_expression" => extract_csharp_type_from_new_expr(receiver, source),
         "member_access_expression" => {
             // Chained property access: _context.RuntimeContext.UtteranceIndexBuilder
             // Extract the LAST member name as the receiver type.
@@ -1255,9 +1256,13 @@ fn extract_csharp_type_from_new_expr(
     let type_node = new_expr.child(1)?;
     let text = node_text(type_node, source).trim().to_string();
 
-    // Strip namespaces (ns.Foo → Foo) and generics (Foo<T> → Foo)
-    let simple_name = text.rsplit('.').next().unwrap_or(&text);
-    let base = simple_name.split('<').next().unwrap_or(simple_name).trim().to_string();
+    // Strip generic arguments before namespaces so dots inside `<Ns.Type>` are ignored.
+    let without_generics = text.split('<').next().unwrap_or(&text).trim();
+    let base = without_generics
+        .rsplit('.')
+        .next()
+        .unwrap_or(without_generics)
+        .to_string();
 
     if !base.is_empty() && base.chars().next().is_some_and(|c| c.is_uppercase()) {
         Some(base)
