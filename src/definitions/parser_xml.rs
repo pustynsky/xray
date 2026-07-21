@@ -167,13 +167,18 @@ pub(crate) fn parse_xml_on_demand_with_warnings(
         .ok_or(XmlParseError::TreeSitterReturnedNone)?;
 
     let source_bytes = source.as_bytes();
+    let root = tree.root_node();
     let mut ctx = WalkCtx {
         defs: Vec::new(),
         ancestry: Vec::new(),
         warnings: Vec::new(),
     };
+    if root.has_error() {
+        ctx.warnings
+            .push("XML contains syntax errors; recovered results may be incomplete.".to_string());
+    }
 
-    walk_xml_node(tree.root_node(), source_bytes, None, 0, &mut ctx);
+    walk_xml_node(root, source_bytes, None, 0, &mut ctx);
 
     // Mark parents that actually have element children. Single-pass O(N) —
     // indices are distinct (no self-parenting possible in a tree) so we can

@@ -615,6 +615,111 @@ fn test_ts_xray_callers_down_finds_callees() {
 }
 
 #[test]
+fn test_ts_xray_callers_inline_new_receiver() {
+    static COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tmp_dir = std::env::temp_dir().join(format!(
+        "xray_ts_inline_receiver_{}_{}",
+        std::process::id(),
+        id
+    ));
+    let _ = std::fs::remove_dir_all(&tmp_dir);
+    std::fs::create_dir_all(&tmp_dir).unwrap();
+    let tmp_dir = crate::canonicalize_test_root(&tmp_dir);
+
+    let ts_file = tmp_dir.join("inline-receiver.ts");
+    std::fs::write(
+        &ts_file,
+        r#"class XrayEdgeDerived {
+    execute(value: string): string { return value; }
+}
+class UnrelatedExecutor {
+    execute(value: string): string { return value; }
+}
+export function xrayEdgeDirectCall(): string {
+    return new XrayEdgeDerived().execute("marker");
+}
+"#,
+    )
+    .unwrap();
+
+    let mut def_index = DefinitionIndex {
+        root: tmp_dir.to_string_lossy().to_string(),
+        extensions: vec!["ts".to_string()],
+        ..Default::default()
+    };
+    let clean_path = PathBuf::from(crate::clean_path(&ts_file.to_string_lossy()));
+    crate::definitions::update_file_definitions(&mut def_index, &clean_path);
+
+    let content_index = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: tmp_dir.to_string_lossy().to_string(),
+        ext: "ts".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let ctx = HandlerContext {
+        index: Arc::new(RwLock::new(content_index)),
+        def_index: Some(Arc::new(RwLock::new(def_index))),
+        workspace: Arc::new(RwLock::new(WorkspaceBinding::pinned(
+            tmp_dir.to_string_lossy().to_string(),
+        ))),
+        server_ext: "ts".to_string(),
+        ..Default::default()
+    };
+
+    let down_result = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["xrayEdgeDirectCall"],
+            "direction": "down",
+            "depth": 1
+        }),
+    );
+    assert!(!down_result.is_error, "{}", down_result.content[0].text);
+    let down_output: Value =
+        serde_json::from_str(&down_result.content[0].text).unwrap();
+    let execute_nodes: Vec<_> = down_output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["method"].as_str() == Some("execute"))
+        .collect();
+    assert_eq!(execute_nodes.len(), 1, "{}", down_output);
+    assert_eq!(
+        execute_nodes[0]["class"].as_str(),
+        Some("XrayEdgeDerived"),
+        "{}",
+        down_output
+    );
+
+    let up_result = dispatch_tool(
+        &ctx,
+        "xray_callers",
+        &json!({
+            "method": ["execute"],
+            "class": "XrayEdgeDerived",
+            "depth": 1
+        }),
+    );
+    assert!(!up_result.is_error, "{}", up_result.content[0].text);
+    let up_output: Value = serde_json::from_str(&up_result.content[0].text).unwrap();
+    assert!(
+        up_output["callTree"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["method"].as_str() == Some("xrayEdgeDirectCall")),
+        "{}",
+        up_output
+    );
+
+    cleanup_tmp(&tmp_dir);
+}
+
+#[test]
 fn test_ts_xray_callers_nonexistent_method() {
     let ctx = make_ts_ctx_with_defs();
     let result = dispatch_tool(&ctx, "xray_callers", &json!({

@@ -828,6 +828,36 @@ fn test_ts_local_var_new_expression() {
 }
 
 #[test]
+fn test_ts_inline_new_expression_receiver_type() {
+    let source = r#"class XrayEdgeDerived {
+    execute(value: string): string { return value; }
+}
+function xrayEdgeDirectCall(): string {
+    return new XrayEdgeDerived().execute("marker");
+}"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser
+        .set_language(&tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into())
+        .unwrap();
+    let (defs, call_sites, _) = parse_typescript_definitions(&mut parser, source, 0);
+
+    let function_index = defs
+        .iter()
+        .position(|definition| definition.name == "xrayEdgeDirectCall")
+        .unwrap();
+    let calls = call_sites
+        .iter()
+        .find(|(index, _)| *index == function_index)
+        .unwrap();
+    let execute = calls
+        .1
+        .iter()
+        .find(|call| call.method_name == "execute")
+        .unwrap();
+    assert_eq!(execute.receiver_type.as_deref(), Some("XrayEdgeDerived"));
+}
+
+#[test]
 fn test_ts_local_var_new_expression_with_generics() {
     let source = r#"class DataService {
     loadData(): void {

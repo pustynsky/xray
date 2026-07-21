@@ -1399,6 +1399,7 @@ fn resolve_ts_receiver_type(
                 Some(text.to_string())
             }
         }
+        "new_expression" => extract_type_from_new_expr(object_node, source),
         "member_expression" => {
             // Handle this.service.method() — object is this.service
             let inner_object = find_child_by_field(object_node, "object")?;
