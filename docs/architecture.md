@@ -578,7 +578,7 @@ Direction "down" uses the pre-computed call graph. Zero runtime file I/O. Call s
 - **Built-in type blocklist.** 60+ built-in receiver types (Promise, Array, Map, String, Object, etc.) are excluded from `direction=down` resolution. This prevents false positives like `Promise.resolve()` matching `Deferred.resolve()`.
 - **Fuzzy DI interface matching.** Finds callers through non-standard interface naming conventions (e.g., `IDataModelService` → `DataModelWebService`) using suffix-tolerant matching against the `base_type_index`.
 - **Type inference for local variables.** Cast expressions (`(Type)expr`), `as` expressions (`expr as Type`), method return types (`var x = GetStream()`), `await` / `Task<T>` unwrap (`var x = await GetStreamAsync()`), pattern matching (`if (obj is Type name)`, `case Type name:`), and extension method detection. Cross-class method return types are NOT resolved (only same-class methods).
-- **Local variable limitation.** Calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may go undetected when the return type cannot be inferred. DI-injected fields, `this` / `base` calls, and direct receiver calls are fully supported.
+- **Local variable limitation.** Calls through local variables (e.g., `var x = service.GetFoo(); x.Bar()`) may go undetected when the return type cannot be inferred. DI-injected fields, C# typed method parameters (including null-conditional calls), `this` / `base` calls, and direct receiver calls are fully supported.
 
 For the full canonical matrix of which DI patterns and which .NET DI containers are resolved automatically (and which aren't), see [DI Support](di-support.md).
 

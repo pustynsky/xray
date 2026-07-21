@@ -4300,12 +4300,12 @@ fn test_xml_on_demand_name_matches_text_content() {
 
 #[test]
 #[cfg(feature = "lang-xml")]
-fn test_xml_on_demand_name_matches_cdata_text() {
+fn test_xml_on_demand_name_matches_cdata_and_entity_text() {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(temp.path());
     std::fs::write(
         root.join("cdata.xml"),
-        "<Root><Entry><Value><![CDATA[XRAY_CDATA_HANDLER]]></Value></Entry></Root>",
+        "<Root><Entry><Value><![CDATA[XRAY_CDATA_HANDLER]]></Value><EntityValue>XRAY_ENTITY_HANDLER &amp; VALUE</EntityValue></Entry></Root>",
     )
     .unwrap();
 
@@ -4339,6 +4339,33 @@ fn test_xml_on_demand_name_matches_cdata_text() {
     assert_eq!(definitions[0]["name"].as_str(), Some("Entry"));
     assert_eq!(definitions[0]["matchedBy"].as_str(), Some("textContent"));
     assert_eq!(definitions[0]["matchedChild"].as_str(), Some("Value"));
+    let result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["cdata.xml"],
+            "name": ["XRAY_ENTITY_HANDLER &amp; VALUE"]
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let definitions = output["definitions"].as_array().unwrap();
+    assert_eq!(definitions.len(), 1, "{}", output);
+    assert_eq!(definitions[0]["name"].as_str(), Some("Entry"));
+    assert_eq!(definitions[0]["matchedBy"].as_str(), Some("textContent"));
+    assert_eq!(definitions[0]["matchedChild"].as_str(), Some("EntityValue"));
+
+    let decoded_result = handle_xray_definitions(
+        &context,
+        &json!({
+            "file": ["cdata.xml"],
+            "name": ["XRAY_ENTITY_HANDLER & VALUE"]
+        }),
+    );
+    assert!(!decoded_result.is_error, "{}", decoded_result.content[0].text);
+    let decoded_output: Value =
+        serde_json::from_str(&decoded_result.content[0].text).unwrap();
+    assert_eq!(decoded_output["definitions"], json!([]), "{}", decoded_output);
+
     assert_eq!(output["summary"]["parseWarnings"], json!([]));
 }
 

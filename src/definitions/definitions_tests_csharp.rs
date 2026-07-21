@@ -749,6 +749,88 @@ public sealed class InlineReceiverCaller {
 }
 
 #[test]
+fn test_csharp_method_parameter_receiver_type() {
+    let source = r#"
+namespace TestTypes {
+    public sealed class GenericTarget<T> {
+        public void Execute() { }
+    }
+}
+public sealed class ParameterTarget {
+    public void Execute() { }
+}
+public sealed class WrongParameterTarget {
+    public void Execute() { }
+}
+public sealed class ParameterCaller {
+    private readonly WrongParameterTarget target = new WrongParameterTarget();
+    public void Simple(ParameterTarget target) => target.Execute();
+    public void Generic(TestTypes.GenericTarget<System.String> target) => target.Execute();
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (definitions, call_sites, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    for (method_name, expected_receiver) in
+        [("Simple", "ParameterTarget"), ("Generic", "GenericTarget")]
+    {
+        let method_index = definitions
+            .iter()
+            .position(|definition| definition.name == method_name)
+            .unwrap();
+        let calls = call_sites
+            .iter()
+            .find(|(index, _)| *index == method_index)
+            .unwrap();
+        let execute = calls
+            .1
+            .iter()
+            .find(|call| call.method_name == "Execute")
+            .unwrap();
+        assert_eq!(execute.receiver_type.as_deref(), Some(expected_receiver));
+    }
+}
+
+#[test]
+fn test_csharp_null_conditional_receiver_type() {
+    let source = r#"
+public sealed class ConditionalTarget {
+    public void Execute() { }
+}
+public sealed class ConditionalCaller {
+    private readonly ConditionalTarget _field = new ConditionalTarget();
+    public void Field() => _field?.Execute();
+    public void Local() {
+        ConditionalTarget local = _field;
+        local?.Execute();
+    }
+    public void Parameter(ConditionalTarget? target) => target?.Execute();
+}
+"#;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&tree_sitter_c_sharp::LANGUAGE.into()).unwrap();
+    let (definitions, call_sites, _, _) = parse_csharp_definitions(&mut parser, source, 0);
+
+    for method_name in ["Field", "Local", "Parameter"] {
+        let method_index = definitions
+            .iter()
+            .position(|definition| definition.name == method_name)
+            .unwrap();
+        let calls = call_sites
+            .iter()
+            .find(|(index, _)| *index == method_index)
+            .unwrap();
+        let execute = calls
+            .1
+            .iter()
+            .find(|call| call.method_name == "Execute")
+            .unwrap();
+        assert_eq!(execute.receiver_type.as_deref(), Some("ConditionalTarget"));
+    }
+}
+
+#[test]
 fn test_csharp_local_var_var_without_new() {
     let source = r#"
 public class SomeService {

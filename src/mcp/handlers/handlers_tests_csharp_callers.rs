@@ -514,7 +514,7 @@ fn test_xray_callers_down_class_filter() {
 }
 
 #[test]
-fn test_xray_callers_inline_object_creation_receiver() {
+fn test_xray_callers_direct_receiver_types() {
     let temp = tempfile::tempdir().unwrap();
     let root = crate::canonicalize_test_root(temp.path());
     let source_file = root.join("InlineReceivers.cs");
@@ -527,6 +527,9 @@ public sealed class ArgTarget {
     public ArgTarget(int first, int second) { }
     public void Execute() { }
 }
+public sealed class ParameterTarget {
+    public void Execute() { }
+}
 public sealed class UnrelatedTarget {
     public void Execute() { }
 }
@@ -536,9 +539,12 @@ namespace TestTypes {
     }
 }
 public sealed class InlineReceiverCaller {
+    private readonly UnrelatedTarget target = new UnrelatedTarget();
     public void NoArgs() => new NoArgTarget().Execute();
     public void WithArgs(int first, int second) => new ArgTarget(first, second).Execute();
     public void Generic() => new TestTypes.GenericTarget<System.String>().Execute();
+    public void Parameter(ParameterTarget target) => target.Execute();
+    public void NullConditional(ParameterTarget? target) => target?.Execute();
 }
 "#,
     )
@@ -594,6 +600,25 @@ public sealed class InlineReceiverCaller {
             output
         );
     }
+
+    let result = dispatch_tool(
+        &context,
+        "xray_callers",
+        &json!({
+            "method": ["Execute"],
+            "class": "ParameterTarget",
+            "depth": 1
+        }),
+    );
+    assert!(!result.is_error, "{}", result.content[0].text);
+    let output: Value = serde_json::from_str(&result.content[0].text).unwrap();
+    let caller_methods: Vec<_> = output["callTree"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|node| node["method"].as_str())
+        .collect();
+    assert_eq!(caller_methods, vec!["Parameter", "NullConditional"], "{}", output);
 
     let result = dispatch_tool(
         &context,
