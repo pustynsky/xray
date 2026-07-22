@@ -88,11 +88,14 @@ fn build_callers_result_status(
     body_lines_available: usize,
     production_only: bool,
     template_navigation: bool,
+    semantic_incomplete: bool,
 ) -> Value {
     let body_complete = !include_body || body_lines_emitted >= body_lines_available;
     let graph_complete = !truncated && per_level_dropped == 0;
-    let complete = graph_complete && body_complete;
-    let status = if shown_nodes == 0 && graph_complete {
+    let complete = graph_complete && body_complete && !semantic_incomplete;
+    let status = if semantic_incomplete {
+        "partial"
+    } else if shown_nodes == 0 && graph_complete {
         "not_found"
     } else if complete {
         "complete"
@@ -115,6 +118,9 @@ fn build_callers_result_status(
     if production_only {
         reasons.push("production_only_scope".to_string());
     }
+    if semantic_incomplete {
+        reasons.push("sql_routine_call_graph_best_effort".to_string());
+    }
 
     let mut result_status = build_result_status(
         status,
@@ -135,7 +141,7 @@ fn build_callers_result_status(
         json!({ "nodes": total_nodes })
     };
     add_collection_accounting(&mut result_status, shown, total);
-    result_status["totalKnown"] = json!(graph_complete);
+    result_status["totalKnown"] = json!(graph_complete && !semantic_incomplete);
     result_status["scope"] = json!({
         "productionOnly": production_only,
         "includesTests": !production_only,
@@ -546,6 +552,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             0,
             production_only,
             true,
+            false,
         );
         let output = attach_result_status(output, result_status);
         return ToolCallResult::success(json_to_string(&output));
@@ -763,6 +770,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             body_lines_available,
             production_only,
             false,
+            is_sql_routine_query(&def_idx, &method_name, class_filter.as_deref()),
         );
         let output = attach_result_status(output, result_status);
         ToolCallResult::success(json_to_string(&output))
@@ -863,6 +871,7 @@ pub(crate) fn handle_xray_callers(ctx: &HandlerContext, args: &Value) -> ToolCal
             body_lines_available,
             production_only,
             false,
+            is_sql_routine_query(&def_idx, &method_name, class_filter.as_deref()),
         );
         let output = attach_result_status(output, result_status);
         ToolCallResult::success(json_to_string(&output))
@@ -1234,6 +1243,9 @@ fn handle_multi_method_callers(
         total_body_lines_available,
         production_only,
         false,
+        methods
+            .iter()
+            .any(|method| is_sql_routine_query(&def_idx, method, class_filter)),
     );
     let output = attach_result_status(output, result_status);
 
@@ -1943,12 +1955,6 @@ fn verify_call_site_target(
     // to keep their fixtures one-liners.
     extension_methods_lower: Option<&HashMap<String, Vec<String>>>,
 ) -> bool {
-    // If no target class specified, accept everything
-    let target_class = match target_class {
-        Some(tc) => tc,
-        None => return true,
-    };
-
     // Get call sites for the caller method from the definition index
     let call_sites = match def_idx.method_calls.get(&caller_di) {
         Some(cs) => cs,
@@ -1962,12 +1968,18 @@ fn verify_call_site_target(
         .filter(|cs| cs.line == call_line && cs.method_name.to_lowercase() == method_name_lower)
         .collect();
 
-    // If no call-site data found on this line:
-    // Method has call-site data but no call at this line →
-    // content index matched a comment or non-code text → filter out
+    // If no call-site data found on this line, the content index matched a
+    // declaration, comment, string, or another non-call occurrence.
     if matching_calls.is_empty() {
-        return call_sites.is_empty(); // true only if method has zero call data (shouldn't happen but safe)
+        return false;
     }
+
+    // Unscoped SQL caller queries still require exact AST evidence, but do not
+    // need receiver-type filtering after the method and line have matched.
+    let target_class = match target_class {
+        Some(target_class) => target_class,
+        None => return true,
+    };
 
     let target_lower = target_class.to_lowercase();
     // Also prepare interface variant: "IFoo" for "Foo"
@@ -2199,6 +2211,31 @@ fn find_target_line(
         }))
 }
 
+
+fn is_sql_routine_query(
+    def_idx: &DefinitionIndex,
+    method_name: &str,
+    parent_class: Option<&str>,
+) -> bool {
+    def_idx
+        .name_index
+        .get(&method_name.to_lowercase())
+        .into_iter()
+        .flatten()
+        .filter_map(|definition_idx| def_idx.definitions.get(*definition_idx as usize))
+        .any(|definition| {
+            matches!(
+                definition.kind,
+                DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction
+            ) && parent_class.is_none_or(|parent| {
+                definition
+                    .parent
+                    .as_deref()
+                    .is_some_and(|candidate| candidate.eq_ignore_ascii_case(parent))
+            })
+        })
+}
+
 /// Collect all (file_id, line_start) pairs for method definitions matching `method_lower`.
 /// These represent definition sites that should be excluded from caller results
 /// (a method's own definition line is not a call site).
@@ -2218,6 +2255,36 @@ fn collect_definition_locations(
     }
     locations
 }
+
+fn verify_unscoped_sql_call_site_resolution(
+    def_idx: &DefinitionIndex,
+    caller_di: u32,
+    call_line: u32,
+    method_name: &str,
+    caller_parent: Option<&str>,
+) -> bool {
+    def_idx
+        .method_calls
+        .get(&caller_di)
+        .into_iter()
+        .flatten()
+        .filter(|call| {
+            call.line == call_line && call.method_name.eq_ignore_ascii_case(method_name)
+        })
+        .flat_map(|call| resolve_call_site(call, def_idx, caller_parent))
+        .any(|definition_idx| {
+            def_idx
+                .definitions
+                .get(definition_idx as usize)
+                .is_some_and(|definition| {
+                    matches!(
+                        definition.kind,
+                        DefinitionKind::StoredProcedure | DefinitionKind::SqlFunction
+                    )
+                })
+        })
+}
+
 
 /// Build a JSON node for a single caller in the call tree.
 /// Includes method name, definition line, call site line(s), optional class, optional file name,
@@ -2357,9 +2424,35 @@ impl CallerTreeBuilder<'_> {
                     continue;
                 }
 
-                // Verify the call on this line actually targets the expected class
-                if parent_class.is_some()
-                    && !verify_call_site_target(self.ctx.def_idx, caller_di, line, &method_lower, parent_class, Some(&self.ctx.extension_methods_lower))
+                // SQL caller queries always require parser-emitted call-site evidence,
+                // including unscoped queries where textual definition hits would
+                // otherwise be mistaken for self-callers.
+                let is_sql = std::path::Path::new(file_path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("sql"));
+                let requires_call_site_validation = parent_class.is_some() || is_sql;
+                if requires_call_site_validation
+                    && !verify_call_site_target(
+                        self.ctx.def_idx,
+                        caller_di,
+                        line,
+                        &method_lower,
+                        parent_class,
+                        Some(&self.ctx.extension_methods_lower),
+                    )
+                {
+                    continue;
+                }
+                if is_sql
+                    && parent_class.is_none()
+                    && !verify_unscoped_sql_call_site_resolution(
+                        self.ctx.def_idx,
+                        caller_di,
+                        line,
+                        &method_lower,
+                        caller_parent.as_deref(),
+                    )
                 {
                     continue;
                 }

@@ -298,6 +298,99 @@ END
         "EXEC receiver_type should be schema 'Sales'");
 }
 
+
+#[test]
+fn test_sql_call_sites_include_scalar_function_invocation_without_definition_self_edge() {
+    let source = r#"
+CREATE FUNCTION [dbo].[ufn_WR_Value](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN @Id + 1
+END
+GO
+CREATE PROCEDURE [dbo].[usp_WR_Leaf]
+AS
+BEGIN
+    SELECT 1
+END
+GO
+CREATE PROCEDURE [dbo].[usp_WR_Root]
+    @Id INT
+AS
+BEGIN
+    EXEC [dbo].[usp_WR_Leaf]
+    SELECT [dbo].[ufn_WR_Value](@Id)
+END
+"#;
+
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+    assert_eq!(defs.len(), 3);
+
+    let function_idx = defs
+        .iter()
+        .position(|definition| definition.name == "ufn_WR_Value")
+        .unwrap();
+    let root_idx = defs
+        .iter()
+        .position(|definition| definition.name == "usp_WR_Root")
+        .unwrap();
+
+    assert!(
+        call_sites
+            .iter()
+            .all(|(definition_idx, calls)| *definition_idx != function_idx || calls.is_empty()),
+        "function definition must not produce a self-call"
+    );
+
+    let root_calls = call_sites
+        .iter()
+        .find(|(definition_idx, _)| *definition_idx == root_idx)
+        .map(|(_, calls)| calls)
+        .expect("root procedure call sites");
+    assert!(
+        root_calls.iter().any(|call| {
+            call.method_name == "usp_WR_Leaf" && call.receiver_type.as_deref() == Some("dbo")
+        }),
+        "EXEC edge must remain available"
+    );
+    assert!(
+        root_calls.iter().any(|call| {
+            call.method_name == "ufn_WR_Value"
+                && call.receiver_type.as_deref() == Some("dbo")
+        }),
+        "schema-qualified scalar function invocation must be emitted"
+    );
+}
+
+
+#[test]
+fn test_sql_scalar_function_calls_ignore_non_code_and_keep_real_recursion() {
+    let source = r#"
+CREATE FUNCTION [dbo].[ufn_Recurse](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    -- SELECT [dbo].[ufn_Commented](@Id)
+    DECLARE @Text NVARCHAR(100) = '[dbo].[ufn_InString](@Id)'
+    RETURN CASE WHEN @Id <= 0 THEN 0 ELSE [dbo].[ufn_Recurse](@Id - 1) END
+END
+"#;
+
+    let (defs, call_sites, _) = parse_sql_definitions(source, 0);
+    assert_eq!(defs.len(), 1);
+    let calls = &call_sites
+        .iter()
+        .find(|(definition_idx, _)| *definition_idx == 0)
+        .expect("recursive function call site")
+        .1;
+
+    assert_eq!(calls.len(), 1, "only executable recursion should be emitted: {calls:?}");
+    assert_eq!(calls[0].method_name, "ufn_Recurse");
+    assert_eq!(calls[0].receiver_type.as_deref(), Some("dbo"));
+    assert_eq!(calls[0].line, 8);
+}
+
 // ─── Test 11: Call sites — FROM/JOIN ───────────────────────────────
 
 #[test]
