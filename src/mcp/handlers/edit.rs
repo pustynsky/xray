@@ -1075,6 +1075,26 @@ fn ensure_git_internal_edit_allowed(
 }
 
 
+#[cfg(windows)]
+fn reject_ntfs_alternate_data_stream(path: &Path, path_str: &str) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let has_stream_separator = path.components().any(|component| {
+        let std::path::Component::Normal(name) = component else {
+            return false;
+        };
+        name.encode_wide().any(|unit| unit == b':' as u16)
+    });
+    if has_stream_separator {
+        return Err(format!(
+            "NTFS alternate data streams are not supported by xray_edit: {}",
+            path_str
+        ));
+    }
+    Ok(())
+}
+
+
 fn read_and_validate_requested_file(
     server_dir: &str,
     path_str: &str,
@@ -1083,6 +1103,8 @@ fn read_and_validate_requested_file(
     allow_git_internals: bool,
 ) -> Result<PreparedEditTarget, String> {
     let logical_path = resolve_path(server_dir, path_str);
+    #[cfg(windows)]
+    reject_ntfs_alternate_data_stream(&logical_path, path_str)?;
     ensure_git_internal_edit_allowed(&logical_path, path_str, allow_git_internals)?;
     let target = read_and_validate_file(server_dir, path_str, dry_run, allow_break_hard_links)?;
     ensure_git_internal_edit_allowed(&target.write_path, path_str, allow_git_internals)?;

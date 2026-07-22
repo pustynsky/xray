@@ -3517,6 +3517,54 @@ mod audit_regression_tests {
 
     #[cfg(windows)]
     #[test]
+    fn test_ntfs_alternate_data_stream_is_rejected_without_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = crate::canonicalize_test_root(tmp.path());
+        let target = root.join("base.txt");
+        let stream = std::path::PathBuf::from(format!("{}:xraystream", target.display()));
+        let artifact = root.join(".base.txt");
+        std::fs::write(&target, b"main\n").unwrap();
+        std::fs::write(&stream, b"stream\n").unwrap();
+        let ctx = make_ctx(&root);
+
+        for request in [
+            json!({
+                "path": "base.txt:xraystream",
+                "operations": [{ "startLine": 1, "endLine": 1, "content": "changed" }],
+            }),
+            json!({
+                "paths": ["base.txt", "base.txt:xraystream"],
+                "operations": [{ "startLine": 1, "endLine": 1, "content": "changed" }],
+            }),
+        ] {
+            let result = handle_xray_edit(&ctx, &request);
+            assert!(result.is_error, "ADS edit must be rejected");
+            assert!(
+                result.content[0]
+                    .text
+                    .contains("NTFS alternate data streams are not supported"),
+                "unexpected error: {}",
+                result.content[0].text
+            );
+            assert_eq!(std::fs::read(&target).unwrap(), b"main\n");
+            assert_eq!(std::fs::read(&stream).unwrap(), b"stream\n");
+            assert!(!artifact.exists(), "failed ADS edit leaked {}", artifact.display());
+            let leaked_staging_files: Vec<_> = std::fs::read_dir(&root)
+                .unwrap()
+                .filter_map(Result::ok)
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.contains(".xray_tmp") || name.contains(".xray_backup"))
+                .collect();
+            assert!(
+                leaked_staging_files.is_empty(),
+                "failed ADS edit leaked staging files: {leaked_staging_files:?}"
+            );
+        }
+    }
+
+
+    #[cfg(windows)]
+    #[test]
     fn test_symlink_edit_preserves_target_windows_attributes() {
         use windows_sys::Win32::Storage::FileSystem::{
             FILE_ATTRIBUTE_HIDDEN,
