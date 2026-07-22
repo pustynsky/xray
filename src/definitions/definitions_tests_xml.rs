@@ -552,10 +552,11 @@ fn test_mismatched_tags_produce_warning() {
         result
             .warnings
             .iter()
-            .any(|warning| warning.contains("syntax errors")),
-        "Malformed XML should report a parse warning: {:?}",
+            .any(|warning| warning.contains("expected `</Child>`")),
+        "Malformed XML should report the specific mismatch: {:?}",
         result.warnings
     );
+    assert!(!result.warnings.iter().any(|warning| warning.contains("syntax errors")));
 }
 
 #[test]
@@ -710,10 +711,11 @@ fn test_malformed_cdata_produces_warning() {
         result
             .warnings
             .iter()
-            .any(|warning| warning.contains("syntax errors")),
-        "Malformed CDATA should report a parse warning: {:?}",
+            .any(|warning| warning.contains("CDATA not closed")),
+        "Malformed CDATA should report the specific error: {:?}",
         result.warnings
     );
+    assert!(!result.warnings.iter().any(|warning| warning.contains("syntax errors")));
 }
 
 #[test]
@@ -725,9 +727,18 @@ fn test_unterminated_attribute_produces_warning() {
         result
             .warnings
             .iter()
-            .any(|warning| warning.contains("syntax errors")),
-        "Malformed attribute should report a parse warning: {:?}",
+            .any(|warning| warning.contains("namespace/well-formedness validation failed")),
+        "Malformed attribute should report a specific parse warning: {:?}",
         result.warnings
+    );
+    assert_eq!(
+        result
+            .warnings
+            .iter()
+            .filter(|warning| warning.contains("syntax errors"))
+            .count(),
+        0,
+        "specific strict-reader warning should suppress the generic syntax warning"
     );
 }
 
@@ -752,6 +763,163 @@ fn test_warnings_empty_on_wellformed() {
         !result.definitions.is_empty(),
         "Well-formed XML should produce definitions"
     );
+}
+
+
+#[test]
+fn test_duplicate_xml_attribute_produces_warning_and_recovered_definitions() {
+    let xml = r#"<Root A="1" A="2"><Child>value</Child></Root>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "duplicate.xml").unwrap();
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("duplicate attribute") && warning.contains("A")),
+        "duplicate attribute should be diagnosed: {:?}",
+        result.warnings
+    );
+    assert!(
+        result
+            .definitions
+            .iter()
+            .any(|definition| definition.entry.name == "Root"),
+        "recovery definitions should remain available"
+    );
+}
+
+#[test]
+fn test_duplicate_expanded_xml_attribute_produces_warning() {
+    let xml = r#"<Root xmlns:a="urn:same" xmlns:b="urn:same" a:Id="1" b:Id="2" />"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "expanded-duplicate.xml").unwrap();
+
+    assert!(
+        result.warnings.iter().any(|warning| {
+            warning.contains("duplicate attribute")
+                && warning.contains("urn:same")
+                && warning.contains("Id")
+        }),
+        "duplicate expanded attribute should be diagnosed: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn test_undeclared_xml_prefixes_produce_warnings_and_recovered_definitions() {
+    let xml = r#"<Root bad:Attr="1"><bad:Child>value</bad:Child></Root>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "prefix.xml").unwrap();
+
+    let prefix_warnings = result
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("undeclared prefix 'bad'"))
+        .count();
+    assert_eq!(prefix_warnings, 2, "element and attribute prefixes: {:?}", result.warnings);
+    assert!(
+        result
+            .definitions
+            .iter()
+            .any(|definition| definition.entry.name == "Root"),
+        "recovery definitions should remain available"
+    );
+}
+
+#[test]
+fn test_declared_and_reserved_xml_prefixes_do_not_warn() {
+    let xml = r#"<Root xmlns="urn:default" xmlns:p="urn:child" xml:lang="en">
+  <Container><p:Child p:Id="1" /></Container>
+</Root>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "namespaces.xml").unwrap();
+
+    assert!(
+        result.warnings.is_empty(),
+        "valid inherited/default/xml namespaces should not warn: {:?}",
+        result.warnings
+    );
+}
+
+
+#[test]
+fn test_legal_reserved_xml_prefix_self_binding_does_not_warn() {
+    let xml = r#"<Root xmlns:xml="http://www.w3.org/XML/1998/namespace" xml:lang="en" />"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "reserved-self-binding.xml").unwrap();
+
+    assert!(
+        result.warnings.is_empty(),
+        "legal xml prefix self-binding should not warn: {:?}",
+        result.warnings
+    );
+}
+
+
+#[test]
+fn test_distinct_expanded_xml_attributes_and_prefix_shadowing_do_not_warn() {
+    let xml = r#"<Root xmlns:a="urn:a" xmlns:b="urn:b" a:Id="1" b:Id="2" Id="3">
+  <Container xmlns:a="urn:shadow"><a:Child a:Id="4" /></Container>
+</Root>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "shadowing.xml").unwrap();
+
+    assert!(
+        result.warnings.is_empty(),
+        "distinct expanded names and legal shadowing should not warn: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn test_duplicate_namespace_declaration_produces_warning() {
+    let xml = r#"<Root xmlns:p="urn:first" xmlns:p="urn:second" />"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "duplicate-xmlns.xml").unwrap();
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("duplicate attribute") && warning.contains("xmlns:p")),
+        "duplicate namespace declaration should warn: {:?}",
+        result.warnings
+    );
+}
+
+#[test]
+fn test_invalid_reserved_xml_prefix_binding_produces_warning() {
+    let xml = r#"<Root xmlns:xml="urn:not-the-reserved-namespace"><Child /></Root>"#;
+    let result = parse_xml_on_demand_with_warnings(xml, "reserved-prefix.xml").unwrap();
+
+    assert!(
+        result
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("namespace/well-formedness validation failed")),
+        "invalid reserved binding should warn: {:?}",
+        result.warnings
+    );
+    assert!(
+        result
+            .definitions
+            .iter()
+            .any(|definition| definition.entry.name == "Root"),
+        "tree-sitter recovery definitions should remain available"
+    );
+}
+
+#[test]
+fn test_xml_structure_warnings_are_bounded() {
+    const EXPECTED_WARNING_LIMIT: usize = 16;
+
+    let mut xml = String::from("<Root");
+    for index in 0..32 {
+        xml.push_str(&format!(" p{index}:A{index}=\"1\""));
+    }
+    xml.push_str(" />");
+    let result = parse_xml_on_demand_with_warnings(&xml, "warning-cap.xml").unwrap();
+
+    let structure_warning_count = result
+        .warnings
+        .iter()
+        .filter(|warning| warning.contains("undeclared prefix"))
+        .count();
+    assert_eq!(structure_warning_count, EXPECTED_WARNING_LIMIT);
 }
 
 /// WALKER-3: deeply nested XML must NEVER stack-overflow, regardless of

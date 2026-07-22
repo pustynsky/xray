@@ -29,6 +29,9 @@
 //!   text that contains `foo &amp; bar` in the source. See `docs/mcp-guide.md`.
 
 use crate::definitions::types::{DefinitionEntry, DefinitionKind};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::name::ResolveResult;
+use quick_xml::reader::NsReader;
 use thiserror::Error;
 
 /// Maximum depth for the recursive walker. Elements deeper than this are skipped
@@ -42,6 +45,7 @@ const TEXT_CONTENT_TRUNCATE_TO: usize = 197;
 
 const XML_DECLARATION_SCAN_BYTES: usize = 1024;
 const MAX_XML_CHARACTER_WARNINGS: usize = 8;
+const MAX_XML_STRUCTURE_WARNINGS: usize = 16;
 
 /// Typed errors from the on-demand XML parser.
 ///
@@ -182,7 +186,7 @@ fn is_valid_xml_1_0_character(character: char) -> bool {
         || ('\u{10000}'..='\u{10ffff}').contains(&character)
 }
 
-fn prevalidate_xml_source(source: &str) -> Vec<String> {
+fn prevalidate_xml_source(source: &str) -> (Vec<String>, bool) {
     let mut warnings = Vec::new();
     if let Some(encoding) = xml_declaration_encoding(source)
         && !is_utf8_compatible_declaration(encoding, source)
@@ -236,7 +240,126 @@ fn prevalidate_xml_source(source: &str) -> Vec<String> {
             invalid_count - MAX_XML_CHARACTER_WARNINGS
         ));
     }
-    warnings
+    let strict_error = append_xml_structure_warnings(source, &mut warnings);
+    (warnings, strict_error)
+}
+
+fn append_xml_structure_warnings(source: &str, warnings: &mut Vec<String>) -> bool {
+    let mut reader = NsReader::from_str(source);
+    let warning_limit = warnings.len().saturating_add(MAX_XML_STRUCTURE_WARNINGS);
+    let mut previous_position = 0;
+    let mut line = 1;
+    let mut strict_error = false;
+    loop {
+        let event = match reader.read_event() {
+            Ok(event) => event,
+            Err(error) => {
+                strict_error = true;
+                if warnings.len() < warning_limit {
+                    let error_position = usize::try_from(reader.error_position())
+                        .unwrap_or(source.len())
+                        .min(source.len());
+                    let error_line = source.as_bytes()[..error_position]
+                        .iter()
+                        .filter(|byte| **byte == b'\n')
+                        .count()
+                        + 1;
+                    warnings.push(format!(
+                        "XML namespace/well-formedness validation failed at line {error_line}: {error}."
+                    ));
+                }
+                break;
+            }
+        };
+        let position = usize::try_from(reader.buffer_position())
+            .unwrap_or(source.len())
+            .min(source.len());
+        line += source.as_bytes()[previous_position..position]
+            .iter()
+            .filter(|byte| **byte == b'\n')
+            .count();
+        previous_position = position;
+
+        match event {
+            Event::Start(start) | Event::Empty(start) => {
+                validate_xml_start_event(&reader, &start, line, warnings, warning_limit);
+                if warnings.len() >= warning_limit {
+                    break;
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+    }
+    strict_error
+}
+
+fn validate_xml_start_event(
+    reader: &NsReader<&[u8]>,
+    start: &BytesStart<'_>,
+    line: usize,
+    warnings: &mut Vec<String>,
+    warning_limit: usize,
+) {
+    if let ResolveResult::Unknown(prefix) = reader.resolver().resolve_element(start.name()).0
+        && warnings.len() < warning_limit
+    {
+        warnings.push(format!(
+            "XML element uses undeclared prefix '{}' at line {line}; recovered results may be invalid.",
+            String::from_utf8_lossy(&prefix)
+        ));
+    }
+
+    let mut raw_names = std::collections::HashSet::new();
+    let mut expanded_names = std::collections::HashSet::new();
+    let mut attributes = start.attributes();
+    let _ = attributes.with_checks(false);
+    for attribute in attributes {
+        if warnings.len() >= warning_limit {
+            break;
+        }
+        let attribute = match attribute {
+            Ok(attribute) => attribute,
+            Err(error) => {
+                warnings.push(format!(
+                    "XML has invalid or duplicate attribute at line {line}: {error}."
+                ));
+                continue;
+            }
+        };
+        let raw_name = attribute.key.as_ref();
+        if !raw_names.insert(raw_name.to_vec()) {
+            warnings.push(format!(
+                "XML has duplicate attribute '{}' at line {line}.",
+                String::from_utf8_lossy(raw_name)
+            ));
+            continue;
+        }
+        if raw_name == b"xmlns" || raw_name.starts_with(b"xmlns:") {
+            continue;
+        }
+
+        let (namespace, local_name) = reader.resolver().resolve_attribute(attribute.key);
+        let namespace = match namespace {
+            ResolveResult::Unknown(prefix) => {
+                warnings.push(format!(
+                    "XML attribute uses undeclared prefix '{}' at line {line}; recovered results may be invalid.",
+                    String::from_utf8_lossy(&prefix)
+                ));
+                continue;
+            }
+            ResolveResult::Bound(namespace) => namespace.as_ref().to_vec(),
+            ResolveResult::Unbound => Vec::new(),
+        };
+        let expanded_name = (namespace.clone(), local_name.as_ref().to_vec());
+        if !expanded_names.insert(expanded_name) {
+            warnings.push(format!(
+                "XML has duplicate attribute '{{{}}}{}' at line {line}.",
+                String::from_utf8_lossy(&namespace),
+                String::from_utf8_lossy(local_name.as_ref())
+            ));
+        }
+    }
 }
 
 /// Parse an XML file on-demand and return structured definitions.
@@ -301,12 +424,13 @@ pub(crate) fn parse_xml_on_demand_with_warnings(
 
     let source_bytes = source.as_bytes();
     let root = tree.root_node();
+    let (warnings, strict_error) = prevalidate_xml_source(source);
     let mut ctx = WalkCtx {
         defs: Vec::new(),
         ancestry: Vec::new(),
-        warnings: prevalidate_xml_source(source),
+        warnings,
     };
-    if root.has_error() {
+    if root.has_error() && !strict_error {
         ctx.warnings
             .push("XML contains syntax errors; recovered results may be incomplete.".to_string());
     }
