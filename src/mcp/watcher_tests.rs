@@ -1387,6 +1387,393 @@ fn test_should_invalidate_file_index_remove() {
 }
 
 #[test]
+fn test_classify_event_paths_preserves_rename_roles() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, RenameMode};
+
+    let old_path = std::path::PathBuf::from("old.cs");
+    let new_path = std::path::PathBuf::from("new.cs");
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[old_path.clone(), new_path.clone()],
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert_eq!(dirty, HashSet::from([new_path.clone()]));
+    assert_eq!(removed, HashSet::from([old_path.clone()]));
+
+    dirty.clear();
+    removed.clear();
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::From)),
+        std::slice::from_ref(&old_path),
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert!(dirty.is_empty());
+    assert_eq!(removed, HashSet::from([old_path.clone()]));
+
+    dirty.clear();
+    removed.clear();
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::To)),
+        std::slice::from_ref(&new_path),
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert_eq!(dirty, HashSet::from([new_path]));
+    assert!(removed.is_empty());
+}
+
+#[test]
+fn test_classify_event_paths_rename_any_uses_disk_state() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, RenameMode};
+
+    let temp = tempfile::tempdir().unwrap();
+    let existing = temp.path().join("existing.cs");
+    let missing = temp.path().join("missing.cs");
+    std::fs::write(&existing, "class Existing {}\n").unwrap();
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::Any)),
+        &[missing.clone(), existing.clone()],
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert_eq!(dirty, HashSet::from([existing]));
+    assert_eq!(removed, HashSet::from([missing]));
+}
+
+#[test]
+fn test_classify_event_paths_preserves_roles_across_extension_filter() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, RenameMode};
+
+    let old_text = std::path::PathBuf::from("old.txt");
+    let new_code = std::path::PathBuf::from("new.cs");
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+    let cs_only = |path: &std::path::Path| matches_extensions(path, &["cs".to_string()]);
+
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[old_text, new_code.clone()],
+        cs_only,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert_eq!(dirty, HashSet::from([new_code]));
+    assert!(removed.is_empty());
+
+    let old_code = std::path::PathBuf::from("old.cs");
+    let new_text = std::path::PathBuf::from("new.txt");
+    dirty.clear();
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[old_code.clone(), new_text],
+        cs_only,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert!(dirty.is_empty());
+    assert_eq!(removed, HashSet::from([old_code]));
+}
+
+#[test]
+fn test_classify_event_paths_last_event_wins() {
+    use notify::EventKind;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+
+    let old_path = std::path::PathBuf::from("old.cs");
+    let new_path = std::path::PathBuf::from("new.cs");
+    let mut dirty = HashSet::from([old_path.clone()]);
+    let mut removed = HashSet::from([new_path.clone()]);
+
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[old_path.clone(), new_path.clone()],
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert_eq!(dirty, HashSet::from([new_path.clone()]));
+    assert_eq!(removed, HashSet::from([old_path.clone()]));
+
+    assert!(classify_event_paths(
+        &EventKind::Create(CreateKind::File),
+        std::slice::from_ref(&old_path),
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert!(dirty.contains(&old_path));
+    assert!(!removed.contains(&old_path));
+
+    assert!(classify_event_paths(
+        &EventKind::Remove(RemoveKind::File),
+        std::slice::from_ref(&new_path),
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert!(!dirty.contains(&new_path));
+    assert!(removed.contains(&new_path));
+}
+
+#[test]
+fn test_classify_event_paths_rename_delete_removes_both_paths() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, RemoveKind, RenameMode};
+
+    let old_path = std::path::PathBuf::from("old.cs");
+    let new_path = std::path::PathBuf::from("new.cs");
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Any),
+        std::slice::from_ref(&old_path),
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[old_path.clone(), new_path.clone()],
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert_eq!(dirty, HashSet::from([new_path.clone()]));
+    assert_eq!(removed, HashSet::from([old_path.clone()]));
+
+    assert!(classify_event_paths(
+        &EventKind::Remove(RemoveKind::File),
+        std::slice::from_ref(&new_path),
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+    assert!(dirty.is_empty());
+    assert_eq!(removed, HashSet::from([old_path, new_path]));
+}
+
+#[test]
+fn test_same_directory_rename_reconciles_content_definitions_and_calls() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, RenameMode};
+
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let old_path = root.join("RenameSource.cs");
+    let new_path = root.join("RenameTarget.cs");
+    std::fs::write(
+        &old_path,
+        r#"public sealed class RenameLifecycleMarker {
+    public void Execute() { }
+}
+public sealed class RenameLifecycleCaller {
+    public void Call() => new RenameLifecycleMarker().Execute();
+}
+"#,
+    )
+    .unwrap();
+
+    let content = crate::build_content_index(&crate::ContentIndexArgs {
+        dir: root.to_string_lossy().to_string(),
+        ext: "cs".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+    let content = Arc::new(RwLock::new(build_watch_index_from(content)));
+
+    let mut definitions = crate::definitions::DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    crate::definitions::update_file_definitions(&mut definitions, &old_path);
+    let old_definition_id = *definitions
+        .path_to_id
+        .get(&crate::path_identity_key(&old_path))
+        .expect("old definition path must be indexed");
+    let definitions = Arc::new(RwLock::new(definitions));
+
+    std::fs::rename(&old_path, &new_path).unwrap();
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[old_path.clone(), new_path.clone()],
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+
+    let extensions = vec!["cs".to_string()];
+    assert!(process_watcher_batch(
+        &content,
+        &Some(Arc::clone(&definitions)),
+        &mut dirty,
+        &mut removed,
+        &root.to_string_lossy(),
+        &extensions,
+        &extensions,
+        false,
+        &test_trigram_build_gate(),
+    ));
+    assert!(dirty.is_empty());
+    assert!(removed.is_empty());
+
+    let old_key = crate::path_identity_key(&old_path);
+    let new_key = crate::path_identity_key(&new_path);
+    let content = content.read().unwrap();
+    let paths = content.path_to_id.as_ref().unwrap();
+    assert!(!paths.contains_key(&old_key));
+    let new_content_id = *paths.get(&new_key).expect("new content path must be indexed");
+    assert_eq!(
+        crate::path_identity_key(std::path::Path::new(&content.files[new_content_id as usize])),
+        new_key
+    );
+    let marker_postings = content.index.get("renamelifecyclemarker").unwrap();
+    assert!(marker_postings.iter().all(|posting| posting.file_id == new_content_id));
+    drop(content);
+
+    let definitions = definitions.read().unwrap();
+    assert!(!definitions.path_to_id.contains_key(&old_key));
+    let new_definition_id = *definitions
+        .path_to_id
+        .get(&new_key)
+        .expect("new definition path must be indexed");
+    assert!(definitions.files[old_definition_id as usize].is_empty());
+    assert_eq!(
+        crate::path_identity_key(std::path::Path::new(
+            &definitions.files[new_definition_id as usize]
+        )),
+        new_key
+    );
+    let active = definitions.file_index.get(&new_definition_id).unwrap();
+    let active_names: HashSet<&str> = active
+        .iter()
+        .map(|index| definitions.definitions[*index as usize].name.as_str())
+        .collect();
+    assert!(active_names.contains("RenameLifecycleMarker"));
+    assert!(active_names.contains("RenameLifecycleCaller"));
+    assert!(active_names.contains("Call"));
+    assert!(active_names.contains("Execute"));
+
+    let call_index = *active
+        .iter()
+        .find(|index| definitions.definitions[**index as usize].name == "Call")
+        .expect("Call method must be indexed");
+    assert!(definitions.method_calls[&call_index]
+        .iter()
+        .any(|call| call.method_name == "Execute"));
+}
+
+
+#[cfg(windows)]
+#[test]
+fn test_case_only_rename_keeps_one_content_and_definition_identity() {
+    use notify::EventKind;
+    use notify::event::{ModifyKind, RenameMode};
+
+    let (_temp, root, content) = make_batch_test_setup();
+    let old_path = root.join("a.cs");
+    let new_path = root.join("A.CS");
+    let identity = crate::path_identity_key(&old_path);
+
+    let mut definitions = crate::definitions::DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    crate::definitions::update_file_definitions(&mut definitions, &old_path);
+    let old_definition_id = definitions.path_to_id[&identity];
+    let definitions = Arc::new(RwLock::new(definitions));
+
+    std::fs::rename(&old_path, &new_path).unwrap();
+    let mut dirty = HashSet::new();
+    let mut removed = HashSet::new();
+    assert!(classify_event_paths(
+        &EventKind::Modify(ModifyKind::Name(RenameMode::Both)),
+        &[old_path, new_path],
+        |_| true,
+        &mut dirty,
+        &mut removed,
+    ));
+
+    let extensions = vec!["cs".to_string()];
+    assert!(process_watcher_batch(
+        &content,
+        &Some(Arc::clone(&definitions)),
+        &mut dirty,
+        &mut removed,
+        &root.to_string_lossy(),
+        &extensions,
+        &extensions,
+        false,
+        &test_trigram_build_gate(),
+    ));
+
+    let content = content.read().unwrap();
+    assert_eq!(content.live_file_count(), 2);
+    assert_eq!(content.path_to_id.as_ref().unwrap().len(), 2);
+    assert!(content.path_to_id.as_ref().unwrap().contains_key(&identity));
+    assert_eq!(content.index["alpha"].len(), 1);
+    drop(content);
+
+    let definitions = definitions.read().unwrap();
+    assert_eq!(definitions.live_file_count(), 1);
+    assert_eq!(definitions.path_to_id.len(), 1);
+    let new_definition_id = definitions.path_to_id[&identity];
+    assert_ne!(new_definition_id, old_definition_id);
+    assert!(definitions.files[old_definition_id as usize].is_empty());
+    assert!(definitions.name_index.contains_key("alpha"));
+}
+
+#[test]
+fn test_definition_parse_failure_tombstones_path_metadata() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = crate::canonicalize_test_root(temp.path());
+    let path = root.join("Disappeared.cs");
+    std::fs::write(&path, "public sealed class DisappearedMarker {}\n").unwrap();
+
+    let mut index = crate::definitions::DefinitionIndex {
+        root: root.to_string_lossy().to_string(),
+        extensions: vec!["cs".to_string()],
+        ..Default::default()
+    };
+    crate::definitions::update_file_definitions(&mut index, &path);
+    let path_key = crate::path_identity_key(&path);
+    let file_id = *index.path_to_id.get(&path_key).unwrap();
+    let index = Some(Arc::new(RwLock::new(index)));
+
+    std::fs::remove_file(&path).unwrap();
+    let result = update_definition_index(&index, &[], std::slice::from_ref(&path));
+    assert!(result.ok);
+    assert_eq!(result.applied_dirty, 0);
+
+    let index = index.as_ref().unwrap().read().unwrap();
+    assert!(!index.path_to_id.contains_key(&path_key));
+    assert!(index.files[file_id as usize].is_empty());
+    assert!(!index.name_index.contains_key("disappearedmarker"));
+    assert!(!index.file_index.contains_key(&file_id));
+}
+
+
+#[test]
 fn test_should_invalidate_file_index_rename_triggers_rebuild() {
     use notify::EventKind;
     use notify::event::{ModifyKind, RenameMode};

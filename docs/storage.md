@@ -356,6 +356,8 @@ This scan reads and deserializes each `.word-search` file header — slow if man
 
 **Time complexity:** O(old_tokens + new_tokens + Σ posting_list_scans). The ~5ms per file figure is from watcher log output during development, not a formal benchmark.
 
+**Rename reconciliation:** watcher rename events preserve path roles instead of treating every `Modify(Name)` path as modified content. For paired rename events, the source path is removed and the destination path is updated in the same debounced batch; split `From`/`To` events follow the same rule. Ambiguous rename modes classify existing paths as updates and missing paths as removals. This keeps file-list, content, definition, and call-graph identities aligned without a full reindex, including renames across indexed-extension boundaries.
+
 ### Definition index update (single file)
 
 ```
@@ -369,6 +371,8 @@ This scan reads and deserializes each `.word-search` file header — slow if man
 **Note:** Removed definitions leave "holes" in the `definitions` Vec (indices are not reused). This is acceptable because the Vec is only accessed via the secondary indexes, and the memory overhead of a few hundred empty slots is negligible compared to the total index size.
 
 The `method_calls` entries for removed definitions are also cleaned up during `remove_file_definitions`.
+
+Path removal uses the path-aware definition cleanup, which also tombstones the `files[file_id]` slot and removes `path_to_id`. The same cleanup is applied when a dirty file disappears between watcher scope filtering and parsing.
 
 ### GitHistoryCache
 
