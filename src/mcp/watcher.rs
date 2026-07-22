@@ -120,6 +120,56 @@ pub(crate) fn should_invalidate_file_index(kind: &EventKind) -> bool {
     !matches!(kind, EventKind::Access(_))
 }
 
+fn classify_event_paths<F>(
+    kind: &EventKind,
+    paths: &[PathBuf],
+    mut should_track: F,
+    dirty_files: &mut HashSet<PathBuf>,
+    removed_files: &mut HashSet<PathBuf>,
+) -> bool
+where
+    F: FnMut(&Path) -> bool,
+{
+    let mut queued = false;
+    for (index, path) in paths.iter().enumerate() {
+        if !should_track(path) {
+            continue;
+        }
+
+        let queue_dirty = match kind {
+            EventKind::Create(_) => Some(true),
+            EventKind::Remove(_) => Some(false),
+            EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )) if paths.len() >= 2 => Some(index > 0),
+            EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::From,
+            )) => Some(false),
+            EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::To,
+            )) => Some(true),
+            EventKind::Modify(notify::event::ModifyKind::Name(_)) => Some(path.exists()),
+            EventKind::Modify(_) => Some(true),
+            _ => None,
+        };
+
+        match queue_dirty {
+            Some(true) => {
+                removed_files.remove(path);
+                dirty_files.insert(path.clone());
+                queued = true;
+            }
+            Some(false) => {
+                dirty_files.remove(path);
+                removed_files.insert(path.clone());
+                queued = true;
+            }
+            None => {}
+        }
+    }
+    queued
+}
+
 /// Outcome of [`wait_for_indexes_ready`]. Public to the crate so watcher
 /// thread and tests can share the same decision tree.
 #[derive(Debug, PartialEq, Eq)]
@@ -387,43 +437,28 @@ pub fn start_watcher(
                             "watcher: event received"
                         );
                     }
-                    // Collect changed files
-                    for path in &event.paths {
-                        // Skip .git directory — git operations generate massive event floods
-                        // and .git/config matches the "config" extension filter
-                        if is_inside_git_dir(path) {
-                            continue;
-                        }
-                        // Invalidate file-list index on ANY create/delete/rename,
-                        // BEFORE the extension filter. FileIndex indexes ALL files
-                        // (not just --ext), so changes to .json, .yaml, etc. must
-                        // also trigger a rebuild.
-                        if should_invalidate_file_index(&event.kind) {
-                            file_index_dirty.store(true, Ordering::Relaxed);
-                        }
-                        if !(matches_extensions(path, &content_extensions)
-                            || def_index.is_some()
-                                && matches_extensions(path, &definition_extensions))
-                        {
-                            continue;
-                        }
-                        match event.kind {
-                            EventKind::Create(_) | EventKind::Modify(_) => {
-                                removed_files.remove(path);
-                                dirty_files.insert(path.clone());
-                                if batch_start.is_none() {
-                                    batch_start = Some(Instant::now());
-                                }
-                            }
-                            EventKind::Remove(_) => {
-                                dirty_files.remove(path);
-                                removed_files.insert(path.clone());
-                                if batch_start.is_none() {
-                                    batch_start = Some(Instant::now());
-                                }
-                            }
-                            _ => {}
-                        }
+                    // Invalidate file-list index before extension filtering because it
+                    // covers every workspace file, not only content/definition extensions.
+                    if should_invalidate_file_index(&event.kind)
+                        && event.paths.iter().any(|path| !is_inside_git_dir(path))
+                    {
+                        file_index_dirty.store(true, Ordering::Relaxed);
+                    }
+
+                    let queued = classify_event_paths(
+                        &event.kind,
+                        &event.paths,
+                        |path| {
+                            !is_inside_git_dir(path)
+                                && (matches_extensions(path, &content_extensions)
+                                    || def_index.is_some()
+                                        && matches_extensions(path, &definition_extensions))
+                        },
+                        &mut dirty_files,
+                        &mut removed_files,
+                    );
+                    if queued && batch_start.is_none() {
+                        batch_start = Some(Instant::now());
                     }
                     // Force flush if accumulating too long (prevents debounce starvation)
                     if let Some(start) = batch_start
@@ -1093,12 +1128,12 @@ fn update_definition_index(
                 definitions::apply_parsed_result(&mut idx, result);
             }
             // Clean up dirty files that didn't produce a ParsedFileResult
-            // (e.g., read error, unsupported extension). Remove stale definitions.
+            // (e.g., a file disappeared between scope filtering and parsing).
+            // Use path-aware removal so file metadata is tombstoned with symbols/calls.
             for path in dirty_clean {
-                if !parsed_paths.contains(path)
-                    && let Some(&fid) = idx.path_to_id.get(&crate::path_identity_key(path)) {
-                        definitions::remove_file_definitions(&mut idx, fid);
-                    }
+                if !parsed_paths.contains(path) {
+                    definitions::remove_file_from_def_index(&mut idx, path);
+                }
             }
 
             // Update created_at — watcher detects subsequent changes via fsnotify, so now() is safe
