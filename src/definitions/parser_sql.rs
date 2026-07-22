@@ -115,6 +115,19 @@ static DELETE_RE: LazyLock<Regex> = LazyLock::new(|| {
     ).unwrap()
 });
 
+
+static SCALAR_FUNCTION_CALL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?im)(?:^|[^A-Za-z0-9_@\]#.])(?P<schema>\[?[A-Za-z_][\w]*\]?)\s*\.\s*(?P<name>\[?[A-Za-z_][\w]*\]?)\s*\("
+    ).unwrap()
+});
+
+static CREATE_FUNCTION_DECL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\bCREATE\s+(?:OR\s+ALTER\s+)?FUNCTION\s+(\[?[A-Za-z_][\w]*\]?)\s*\.\s*(\[?[A-Za-z_][\w]*\]?)\s*\("
+    ).unwrap()
+});
+
 #[allow(unused_imports)]
 use super::types::*;
 
@@ -930,7 +943,7 @@ fn parse_index(
 // ─── Call site extraction ───────────────────────────────────────────
 
 fn extract_call_sites_from_body(
-    _body_text: &str,
+    body_text: &str,
     batch: &Batch,
     _current_name: &str,
 ) -> Vec<CallSite> {
@@ -987,6 +1000,51 @@ fn extract_call_sites_from_body(
                     });
                 }
             }
+        }
+    }
+
+    let masked_body = mask_sql_comments_and_literals_preserve_offsets(body_text);
+    let declaration_ranges: Vec<_> = CREATE_FUNCTION_DECL_RE
+        .find_iter(&masked_body)
+        .map(|matched| matched.range())
+        .collect();
+
+    for captures in SCALAR_FUNCTION_CALL_RE.captures_iter(&masked_body) {
+        let schema_match = captures.name("schema").expect("function schema");
+        if declaration_ranges
+            .iter()
+            .any(|range| range.contains(&schema_match.start()))
+        {
+            continue;
+        }
+
+        let raw_schema = schema_match.as_str();
+        let raw_method_name = captures.name("name").expect("function name").as_str();
+        let schema = strip_brackets(raw_schema);
+        let method_name = strip_brackets(raw_method_name);
+        if skip_names.contains(schema.as_str()) || skip_names.contains(method_name.as_str()) {
+            continue;
+        }
+        let method_name_lower = method_name.to_ascii_lowercase();
+        let has_explicit_function_name = raw_method_name.starts_with('[')
+            || method_name_lower.starts_with("fn_")
+            || method_name_lower.starts_with("ufn_");
+        if !has_explicit_function_name {
+            continue;
+        }
+
+        let key = (schema.to_lowercase(), method_name.to_lowercase());
+        if seen.insert(key) {
+            let line_offset = masked_body[..schema_match.start()]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count();
+            calls.push(CallSite {
+                method_name,
+                receiver_type: Some(schema),
+                line: (batch.start_line_offset + line_offset + 1) as u32,
+                receiver_is_generic: false,
+            });
         }
     }
 

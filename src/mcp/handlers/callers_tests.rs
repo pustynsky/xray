@@ -2188,6 +2188,363 @@ fn test_sql_caller_tree_who_calls_sp() {
     assert_eq!(callers[0]["file"].as_str().unwrap(), "usp_ProcessBatch.sql");
 }
 
+
+#[test]
+fn test_sql_function_definition_is_not_reported_as_unscoped_self_caller() {
+    use crate::{ContentIndex, Posting};
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    let definitions = vec![sqlfn_def(0, "ufn_WR_Value", Some("dbo"), 1, 6)];
+    let mut name_index = HashMap::new();
+    name_index.insert("ufn_wr_value".to_string(), vec![0]);
+    let mut kind_index = HashMap::new();
+    kind_index.insert(DefinitionKind::SqlFunction, vec![0]);
+    let mut file_index = HashMap::new();
+    file_index.insert(0, vec![0]);
+    let mut path_to_id = HashMap::new();
+    path_to_id.insert(
+        crate::path_identity_key(&PathBuf::from("sql/functions.sql")),
+        0,
+    );
+    let mut method_calls = HashMap::new();
+    method_calls.insert(0, Vec::new());
+
+    let def_idx = DefinitionIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        extensions: vec!["sql".to_string()],
+        files: vec!["sql/functions.sql".to_string()],
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        path_to_id,
+        method_calls,
+        ..Default::default()
+    };
+
+    let mut index = HashMap::new();
+    index.insert(
+        "ufn_wr_value".to_string(),
+        vec![Posting {
+            file_id: 0,
+            lines: vec![2],
+        }],
+    );
+    let content_index = ContentIndex {
+        root: ".".to_string(),
+        files: vec!["sql/functions.sql".to_string()],
+        index,
+        total_tokens: 1,
+        extensions: vec!["sql".to_string()],
+        file_token_counts: vec![1],
+        ..Default::default()
+    };
+
+    let limits = CallerLimits {
+        max_callers_per_level: 50,
+        max_total_nodes: 200,
+    };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        ext_filter: "sql",
+        resolve_interfaces: false,
+        ext_filter_list: super::utils::prepare_ext_filter("sql"),
+        ..CallerTreeContext::test_default(
+            &content_index,
+            &def_idx,
+            &limits,
+            &node_count,
+            &impact_truncated,
+        )
+    };
+    let mut builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+
+    let callers = builder.build("ufn_WR_Value", None, 0, &[]);
+    assert!(callers.is_empty(), "definition must not be a self-caller: {callers:?}");
+}
+
+
+#[test]
+fn test_sql_routine_result_status_is_truthfully_non_exhaustive() {
+    let definitions = vec![
+        sp_def(0, "usp_WR_Root", Some("dbo"), 1, 10),
+        sqlfn_def(0, "ufn_WR_Value", Some("dbo"), 12, 20),
+    ];
+    let mut name_index = HashMap::new();
+    name_index.insert("usp_wr_root".to_string(), vec![0]);
+    name_index.insert("ufn_wr_value".to_string(), vec![1]);
+    let mut kind_index = HashMap::new();
+    kind_index.insert(DefinitionKind::StoredProcedure, vec![0]);
+    kind_index.insert(DefinitionKind::SqlFunction, vec![1]);
+    let mut file_index = HashMap::new();
+    file_index.insert(0, vec![0, 1]);
+
+    let def_idx = DefinitionIndex {
+        root: ".".to_string(),
+        created_at: 0,
+        extensions: vec!["sql".to_string()],
+        files: vec!["sql/routines.sql".to_string()],
+        definitions,
+        name_index,
+        kind_index,
+        file_index,
+        ..Default::default()
+    };
+    let content_index = crate::ContentIndex {
+        root: ".".to_string(),
+        files: vec!["sql/routines.sql".to_string()],
+        extensions: vec!["sql".to_string()],
+        file_token_counts: vec![0],
+        ..Default::default()
+    };
+    let ctx = super::HandlerContext {
+        index: std::sync::Arc::new(std::sync::RwLock::new(content_index)),
+        def_index: Some(std::sync::Arc::new(std::sync::RwLock::new(def_idx))),
+        ..Default::default()
+    };
+
+    for methods in [
+        serde_json::json!(["usp_WR_Root"]),
+        serde_json::json!(["usp_WR_Root", "ufn_WR_Value"]),
+    ] {
+        let result = handle_xray_callers(
+            &ctx,
+            &serde_json::json!({
+                "method": methods,
+                "class": "dbo",
+                "direction": "down",
+                "ext": ["sql"],
+                "depth": 1
+            }),
+        );
+        assert!(!result.is_error, "{}", result.content[0].text);
+        let output: serde_json::Value =
+            serde_json::from_str(&result.content[0].text).unwrap();
+        let status = &output["resultStatus"];
+        assert_eq!(status["status"], "partial", "{output:#}");
+        assert_eq!(status["complete"], false, "{output:#}");
+        assert_eq!(status["safeForExhaustiveClaims"], false, "{output:#}");
+        assert_eq!(status["totalKnown"], false, "{output:#}");
+        assert!(
+            status["reasons"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|reason| reason == "sql_routine_call_graph_best_effort"),
+            "{output:#}"
+        );
+    }
+}
+
+
+#[test]
+fn test_sql_function_call_graph_uses_parser_emitted_edges_end_to_end() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize};
+
+    let temp = tempfile::tempdir().unwrap();
+    let source = r#"
+CREATE FUNCTION [dbo].[ufn_WR_Value](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN @Id + 1
+END
+GO
+CREATE FUNCTION [dbo].[ufn_WR_Recurse](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN CASE WHEN @Id <= 0 THEN 0 ELSE [dbo].[ufn_WR_Recurse](@Id - 1) END
+END
+GO
+CREATE FUNCTION [Payload].[value](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN @Id
+END
+GO
+CREATE FUNCTION [Geom].[STDistance](@Id INT)
+RETURNS INT
+AS
+BEGIN
+    RETURN @Id
+END
+GO
+CREATE PROCEDURE [dbo].[usp_WR_Xml]
+AS
+BEGIN
+    DECLARE @Payload XML = '<root id="1" />'
+    SELECT @Payload.value('(/root/@id)[1]', 'int')
+    SELECT Payload.value('(/root/@id)[1]', 'int')
+    SELECT XmlColumn.value('(/root/@id)[1]', 'int') FROM [dbo].[XmlDocs]
+    SELECT Geom.STDistance(OtherGeom)
+END
+GO
+CREATE PROCEDURE [dbo].[usp_WR_Leaf]
+AS
+BEGIN
+    SELECT 1
+END
+GO
+CREATE PROCEDURE [dbo].[usp_WR_Root]
+    @Id INT
+AS
+BEGIN
+    EXEC [dbo].[usp_WR_Leaf]
+    SELECT [dbo].[ufn_WR_Value](@Id)
+    SELECT [Payload].[value](@Id)
+END
+"#;
+    std::fs::write(temp.path().join("call_graph.sql"), source).unwrap();
+    let root = temp.path().to_string_lossy().to_string();
+
+    let def_idx = crate::definitions::build_definition_index(
+        &crate::definitions::DefIndexArgs {
+            dir: root.clone(),
+            ext: "sql".to_string(),
+            threads: 1,
+            respect_git_exclude: false,
+        },
+    );
+    let content_index = crate::index::build_content_index(&crate::ContentIndexArgs {
+        dir: root,
+        ext: "sql".to_string(),
+        threads: 1,
+        ..Default::default()
+    })
+    .unwrap();
+
+    let limits = CallerLimits {
+        max_callers_per_level: 50,
+        max_total_nodes: 200,
+    };
+    let node_count = AtomicUsize::new(0);
+    let impact_truncated = AtomicBool::new(false);
+    let caller_ctx = CallerTreeContext {
+        ext_filter: "sql",
+        resolve_interfaces: false,
+        ext_filter_list: super::utils::prepare_ext_filter("sql"),
+        ..CallerTreeContext::test_default(
+            &content_index,
+            &def_idx,
+            &limits,
+            &node_count,
+            &impact_truncated,
+        )
+    };
+
+    let mut caller_builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let callers = caller_builder.build("ufn_WR_Value", None, 0, &[]);
+    assert_eq!(callers.len(), 1, "expected only the real caller: {callers:?}");
+    assert_eq!(callers[0]["method"], "usp_WR_Root");
+
+    let mut recursive_caller_builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let recursive_callers =
+        recursive_caller_builder.build("ufn_WR_Recurse", None, 0, &[]);
+    assert_eq!(
+        recursive_callers.len(),
+        1,
+        "real SQL recursion must remain a self-edge: {recursive_callers:?}"
+    );
+    assert_eq!(recursive_callers[0]["method"], "ufn_WR_Recurse");
+
+    let mut collision_builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let collision_callers = collision_builder.build("value", None, 0, &[]);
+    assert_eq!(
+        collision_callers.len(),
+        1,
+        "only the explicitly bracketed UDF call should resolve: {collision_callers:?}"
+    );
+    assert_eq!(collision_callers[0]["method"], "usp_WR_Root");
+
+    let mut spatial_collision_builder = CallerTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        root_accounted_callers: HashSet::new(),
+        total_limit_hit: false,
+        tests_found: Vec::new(),
+        per_level_dropped: 0,
+        interface_lookup_cache: HashMap::new(),
+    };
+    let spatial_collision_callers =
+        spatial_collision_builder.build("STDistance", None, 0, &[]);
+    assert!(
+        spatial_collision_callers.is_empty(),
+        "spatial member calls must not resolve as UDF callers: {spatial_collision_callers:?}"
+    );
+
+    let mut callee_builder = CalleeTreeBuilder {
+        ctx: &caller_ctx,
+        max_depth: 3,
+        visited: HashSet::new(),
+        file_cache: HashMap::new(),
+        total_body_lines_emitted: 0,
+        total_limit_hit: false,
+        per_level_dropped: 0,
+    };
+    let callees = callee_builder.build("usp_WR_Root", Some("dbo"), 0);
+    let callee_names: HashSet<_> = callees
+        .iter()
+        .filter_map(|callee| callee["method"].as_str())
+        .collect();
+    assert_eq!(
+        callee_names,
+        HashSet::from(["usp_WR_Leaf", "ufn_WR_Value", "value"]),
+        "down graph must contain procedure and explicit scalar function edges"
+    );
+}
+
 // ─── SQL Test 6: SqlFunction included in callee tree ──
 
 #[test]
